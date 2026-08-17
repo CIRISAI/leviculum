@@ -22,6 +22,10 @@ answers on a fixed USB ID, and publishes what it is in a text file.
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
 `leviculum-nrf/src/usb.rs:102`. Heltec stock firmware uses `239a:8071`.
+Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
+"XIAO-BOOT" while doing so. Nothing stops an application from naming
+itself after a bootloader, which is the sharpest available argument for
+the rule above: the product string is application data, not evidence.
 
 **Bootloader (UF2/DFU).** A different USB ID entirely, which is why an
 application-ID match can never be true while a board sits in DFU
@@ -31,6 +35,11 @@ application-ID match can never be true while a board sits in DFU
 | --- | --- | --- |
 | T114 | `239a:0071` "Adafruit HT-n5262" | `HT-n5262` |
 | RAK4631 | `239a:0029` "Adafruit WisBlock RAK4631" | `RAK4631` |
+| XIAO nRF52840 | `2886:0044` "Seeed XIAO nRF52840" | `XIAO-BOOT` |
+
+The last row is the Solar Node, measured 2026-08-17. Note that its
+bootloader is the one row whose product string does **not** contain the
+word BOOT, while its application's does.
 
 **Dark.** Crashed firmware never enumerates at all. No touch reaches it;
 only a physical double-tap does.
@@ -363,14 +372,32 @@ firmware back, at the cost of one file copy before writing. The
 SoftDevice portion of the dump is not needed for restore and is filtered
 out; keeping it would only re-write identical bytes.
 
+**It also identifies what is installed, without running it.** The dump is
+the application region, so the strings in it are the application's. Read
+off the Solar Node on 2026-08-17 it gave Meshtastic 2.7.15, build
+`567b8ea`, build target `seeed_solar_node`, and an occupancy of 92.4 per
+cent that distinguishes a programmed board from a blank one. Two uses
+follow. A tool can name what it is about to overwrite instead of
+reporting that it found "a board", and where the `Board-ID` is ambiguous
+the foreign firmware's own build target often names the carrier that the
+bootloader does not. The second use is inference from a third party's
+build strings and belongs in a prompt to the user, never in a silent
+decision to write.
+
 ## Practical details that bite
 
-**The USB serial number changes between modes.** The T114 reports
-`183004F712B4A7FE` as an application and `12B4A7FE183004F7` in the
-bootloader: the two 32-bit words are swapped. Anything correlating a
-device across app to bootloader to app must know both forms. The
-existing runner is unaffected because it only compares serials in
-application mode (`leviculum-nrf/tools/uf2-runner.sh:340`).
+**The USB serial number may change between modes, and whether it does is
+board-specific.** The T114 reports `183004F712B4A7FE` as an application
+and `12B4A7FE183004F7` in the bootloader: the two 32-bit words are
+swapped. The Solar Node reports `40E37463CA8A59DF` in both, unchanged
+(measured 2026-08-17). Anything correlating a device across app to
+bootloader to app must therefore accept both forms rather than assume
+either. That is what `same_serial` (`lnflash/src/usb.rs:140`) does: it
+tests equality first and the swap only as an alternative, so a board
+that keeps its serial is matched as readily as one that swaps
+it. The older runner is unaffected because it
+only compares serials in application mode
+(`leviculum-nrf/tools/uf2-runner.sh:340`).
 
 **Writing needs root.** The mass-storage device appears as `/dev/sdX`
 owned `root:disk`. Automounting assumes a desktop stack that a headless
@@ -421,6 +448,52 @@ changes all four:
 `Board-ID` in `INFO_UF2.TXT`; for ESP32 it is the chip identity the ROM
 bootloader reports. Never the USB ID of the running application, which
 belongs to whatever firmware happens to be installed.
+
+That truth is authoritative but not always sufficient, and the condition
+under which it is sufficient can be stated exactly:
+
+> **A `Board-ID` carries a write decision only where it is bound to the
+> same physical unit as the radio wiring. Where the two are bound to
+> different units, a match is a hint.**
+
+Three real bindings, all measured in 2026-08:
+
+- **Coupled.** On the RAK4630 the SX1262 wiring and the bootloader both
+  belong to the module. Twelve different carriers report
+  `WisBlock-RAK4631-Board` and share seven identical pin numbers. The key
+  is exact, and one image serves all of them.
+- **Decoupled by the vendor.** Heltec records the same bootloader product
+  string `HT-n5262` for the Mesh Node T114, for MeshSolar and for the
+  Mesh Pocket. The first two share our wiring; the Mesh Pocket puts CS on
+  `P0.26` and BUSY on `P0.15`. The identifier belongs to a bootloader
+  shared across models while the wiring belongs to the model.
+- **Decoupled by construction.** The Seeed XIAO is an MCU module with the
+  radio outside it, so a SenseCAP Solar Node and a DIY XIAO with
+  different radio wiring both report `nRF52840-SeeedXiao-v1`.
+
+In both decoupled cases a manifest entry keyed on `info_uf2_board_id`
+alone is not a decision. Such a board needs a second discriminator or an
+explicit question naming the model, and the honest failure is to stop and
+ask rather than to write the more likely of two images. The cost of
+getting this wrong is not a failed flash but a board driving the wrong
+pins, which on hardware carrying a power amplifier is a repair rather
+than a retry.
+
+The cheaper answer, where it is available, is to make the ambiguity stop
+mattering. The RAK4631 looks like the same problem, since the bare
+module and the Pocket V2 share a `Board-ID` and have separate builds,
+but the baseboard build degrades cleanly on a bare module: the display
+is found by an I2C probe and its task exits when nothing answers
+(`leviculum-nrf/src/display.rs:158-164`), the button pin is pulled up so
+it never reads as pressed (`leviculum-nrf/src/button.rs:36`), the GNSS
+task waits on a UART that stays silent, and the battery task publishes
+into a watch channel whose only subscriber is the display that is not
+running. One image therefore covers both, at 47.6 KiB of flash and
+2.5 KiB of RAM that the bare module does not use, and the RAM cost is
+already proven affordable because the same image runs on a Pocket V2
+with the same chip and the same memory. Prefer that over asking a
+question, and reserve the discriminator for boards whose peripherals
+genuinely cannot be probed.
 
 **Enter** — how does it reach a programmable state? 1200-baud touch,
 physical double-tap, a DTR/RTS sequence on ESP32, BOOTSEL on RP2040.

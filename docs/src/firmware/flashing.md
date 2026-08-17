@@ -1,7 +1,18 @@
 # LNode Firmware: Building and Flashing
 
-This page covers the prerequisites, the build, and every `just flash*`
-recipe — what each one does and when to reach for it.
+There are two ways to put our firmware on a board, and they exist for
+different people.
+
+| | `lnflash` | `just flash*` |
+| --- | --- | --- |
+| for | anyone with a board | developers and CI |
+| needs | the bundle, and root | this checkout and the embedded toolchain |
+| builds firmware | no, it carries it | yes, from the working tree |
+| identifies the board | from its bootloader | from the USB id you configure |
+| boards today | T114 | T114, RAK4631 |
+
+If you just want our firmware on a board, use `lnflash`. If you are
+changing the firmware and want your build on a board, use `just flash`.
 
 > **Physical-device steps.** The author of this page cannot flash a
 > board, so any step that writes to or resets real hardware is marked
@@ -10,7 +21,109 @@ recipe — what each one does and when to reach for it.
 > `leviculum-nrf/README.md`; only the *outcome* on hardware is
 > un-verified here.
 
-## Prerequisites
+## `lnflash`, the distributable flasher
+
+`lnflash` is a single static binary with the firmware beside it. It
+needs no toolchain, no Python, no network, and nothing installed: the
+point of the bundle is that a stranger can unpack it and run it.
+
+```sh
+tar xzf lnflash-<version>.tar.gz
+cd lnflash-<version>
+sudo ./lnflash
+```
+
+(`Justfile:50-51`)
+
+**It works out what the board is, rather than being told.** That matters
+because a board arrives carrying whatever its last owner put on it:
+stock firmware, Meshtastic, MeshCore, RNode firmware, ours, or a build
+that crashes before it reaches USB. Each of those picks its own USB
+identity, so the running firmware cannot be trusted to say what the
+hardware is. `lnflash` therefore finds candidates on the USB bus, brings
+each into its bootloader, and only there asks what the board actually
+is, from the bootloader's own `INFO_UF2.TXT`. The identity that a write
+rests on can only come from that reading, which is enforced in the type
+system rather than by convention (`lnflash/src/lib.rs:15-21`). Then it
+checks the SoftDevice precondition, installs a matching SoftDevice first
+if needed, writes the firmware, and reads the board's debug port back to
+confirm what is now running.
+
+Nothing is written before all of that has been shown and confirmed.
+
+**Root is required.** The bootloader's drive is a `root:disk` block
+device, and `lnflash` mounts it itself rather than assuming a desktop
+automounter that a headless host does not have. Without root it will
+identify the attached boards and then stop.
+(`lnflash/src/main.rs:31-32`)
+
+**One key press is sometimes unavoidable.** Getting into the bootloader
+by software has to be implemented by whatever firmware is currently
+running. Ours implements it, so every re-flash is touch-free. Stock
+Meshtastic does not, so a first flash away from it needs a physical
+double-tap of RESET, the second press within about half a second of the
+first. `lnflash` detects that case and asks for it in plain words.
+There is no universal software trigger, and a tool that claimed
+otherwise would be lying.
+
+### Options
+
+`--dry-run` reports what is attached and what would happen, changing
+nothing at all, not even rebooting a board into its bootloader.
+`--check-bundle` verifies the bundle's own checksums and exits.
+`--board NAME` refuses to write if what is attached is a different
+board. `--yes` skips confirmation for automation and fails rather than
+waits when a board needs the manual double-tap. Radio settings can be
+given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
+the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
+and `--radio-txpower` flags; `--no-radio` leaves the board's stored
+configuration alone. (`lnflash/src/main.rs:36-95`. The board keeps what
+it is given across resets and across the next flash, so this is part of
+the flash rather than a later configuration step.)
+
+The bundle is looked for in this order: `--bundle PATH`, then
+`$LNFLASH_BUNDLE`, then the directory holding the binary, then
+`/usr/share/lnflash`. (`lnflash/src/main.rs:36-39`)
+
+The full user-facing text ships inside the bundle as its `README`
+(`lnflash/payload/README-bundle.md`), including what the alarming but
+harmless "the drive went away mid-flush" message means.
+
+### Building a bundle
+
+```sh
+just lnflash-bundle
+```
+
+Cross-compiles the firmware, converts it to UF2, builds the musl-static
+binary, stages Nordic's SoftDevice next to Nordic's own licence file,
+generates a manifest with checksums, and verifies the result. Output
+lands under `target/lnflash/`. The first run takes minutes because of
+the firmware build; `SKIP_FIRMWARE=1` reuses an existing ELF while
+iterating on the bundle itself. (`Justfile:52-60`)
+
+Everything in the bundle comes from this checkout. A bundle built out of
+a foreign tree would be exactly the hidden dependency our
+clone-and-deploy policy forbids. (`Justfile:54-56`)
+
+### Which boards the bundle carries
+
+**Today: the T114 only.** Boards are data rather than code, so a new
+board is a manifest entry plus a firmware build, not a new binary. But
+an entry without a firmware build is an empty promise, so the shipped
+bundle carries what we actually build. The RAK4631 has firmware and is
+flashed through `just flash-rak4631` below, but has no bundle entry yet.
+
+The design behind all of this, including why the bootloader rather than
+the application is the board's identity, is in
+[Flashing an LNode](../concepts/lnode-flashing.md).
+
+## The developer path: building from this checkout
+
+The rest of this page covers building the firmware here and flashing it
+with the `just flash*` recipes.
+
+### Prerequisites
 
 Install the Rust embedded toolchain, the ARM cross-compiler (needed by
 `nrf-sdc` for C-header bindgen), flip-link, and add your user to the
@@ -32,7 +145,7 @@ cost.
 
 (`leviculum-nrf/README.md:12-19`)
 
-## `--release` is mandatory
+### `--release` is mandatory
 
 Always build and flash with `--release`. The debug profile does not fit
 the nRF52840 flash — the image overflows FLASH by several hundred KB at
@@ -41,7 +154,7 @@ link time.
 > The debug profile does not fit the nRF52840 flash (the image overflows
 > FLASH by several hundred KB at link time) — always build and flash with
 > `--release`; all `just flash-*` recipes already do.
-> (`leviculum-nrf/README.md:64-67`)
+> (`leviculum-nrf/README.md:65-67`)
 
 Every `just flash*` recipe already passes `--release`, so following the
 recipes below keeps you safe. The release profile is size-optimized
@@ -49,13 +162,13 @@ recipes below keeps you safe. The release profile is size-optimized
 is kept in the `.elf` (`strip = "none"`, `debug = true`) for HardFault
 post-mortem analysis, but the UF2 only carries loadable sections, so the
 debug info does not bloat what lands on the device.
-(`leviculum-nrf/Cargo.toml:123-133`)
+(`leviculum-nrf/Cargo.toml:146-156`)
 
-## The build/flash workflow
+### The build/flash workflow
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:274-278`)
+therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:534-535`)
 
 A plain build (no flash) is:
 
@@ -75,7 +188,7 @@ UF2 conversion and copy happen inside the `cargo run` step — a bare
 > t114`.
 > (`leviculum-nrf/README.md:23`)
 
-## Touch-free vs. manual double-tap
+### Touch-free vs. manual double-tap
 
 For the **T114**, flashing is touch-free in the common case: the host
 opens the board's transport CDC port at 1200 baud, the firmware
@@ -95,7 +208,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:287-289`, `Justfile:306-311`. See
+automatically. (`Justfile:551-553`, `Justfile:570-578`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -115,7 +228,7 @@ against mixed firmware versions. Use this as your default for T114s.
 cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:277-278`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:536-538`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -133,7 +246,7 @@ Expands to:
 cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:280-285`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:544-549`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -146,7 +259,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:291-292`)
+(`Justfile:554-556`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -165,7 +278,7 @@ cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:294-298`)
+(`Justfile:558-562`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -179,8 +292,8 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:303-304`; `rak-baseboard` aggregate
-`leviculum-nrf/Cargo.toml:121`)
+(`Justfile:564-568`; `rak-baseboard` aggregate
+`leviculum-nrf/Cargo.toml:144`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
 
@@ -202,7 +315,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:306-314`)
+(`Justfile:570-578`)
 
 ## A note on disconnecting consumers
 
@@ -226,7 +339,7 @@ just lint-nrf
 ```
 
 (Builds both BSP feature sets under clippy with `-D warnings`:
-`Justfile:38-40`.)
+`Justfile:68-70`.)
 
 Next: [Serial ports](serial-ports.md) for wiring the flashed board into
 `lnsd`.

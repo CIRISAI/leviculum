@@ -9,6 +9,7 @@
 - [The core lock budget](concepts/core-lock-budget.md)
 - [The self-deadlock tripwire](concepts/self-deadlock-tripwire.md)
 - [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
+- [How far one firmware build reaches](concepts/board-support-scope.md)
 - [Flashing an LNode](concepts/lnode-flashing.md)
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Client tools](concepts/client-tools.md)
