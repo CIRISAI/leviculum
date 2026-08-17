@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.19.0+ciris.1] — CIRIS fork
+
+Catch-up to upstream master @ `752baa42` (+11). **The seventh and last of our
+code offers was absorbed**: explicit-hash listen (upstream PR #254 — carried
+in this fork since v0.10.1) is upstream code now, with two review
+hardenings we inherit:
+
+- a path request for an explicit-hash destination is **silently skipped**
+  instead of driving the announce-refusal warn path on every poll (it was a
+  log flood for any deployment using caller-supplied hashes);
+- `register_destination` **warns when a registration displaces a different
+  destination under the same hash** — caller-supplied hashes make that
+  collision reachable, and last-wins is now the documented semantic on
+  `with_explicit_hash`.
+
+Both matter to consumers using federation-rooted addressing
+(`sha256(fed_pubkey)[..16]`). Upstream also added announce-leak mvr cells and
+rnsd interop coverage for the explicit-hash path, so the guarantee that such
+destinations never announce is now enforced against the reference too.
+
+Also new upstream: self-hosted-infrastructure and hardware-coverage docs, and
+a pre-push hook layer (ref guard + Claude-file guard).
+
+### Fork note — do NOT install upstream's pre-push hook as-is
+
+`.githooks/pre-push` refuses any non-`master` branch pushed to a remote
+**named `origin`** or whose URL contains `codeberg.org`. That policy fits
+upstream's topology and breaks ours three ways: our `origin` is the fork's own
+GitHub repo (feature branches there are intentional — CI runs on them), our
+default branch is `main` (so even `git push origin main` would be refused),
+and our `fork` remote is on codeberg.org (where every upstream-offer `up/*`
+branch legitimately goes). The hook ships as a template only and is **not
+installed** (`.git/hooks/pre-push` absent), so nothing is broken today. Its
+Claude-file guard is worth adapting for this fork separately — tracked as
+leviculum#53.
+
+Fork carry after the rebase: scoped transit, the bench suite (modes 1-8 +
+publishing), the pipe-bridge hermetic test fix (upstream PR #259, open), fork
+infra, release history. No fork feature offers remain unoffered.
+
 ## [0.18.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `9071f41a` (+38). The absorb cycle closed six
