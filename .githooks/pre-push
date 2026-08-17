@@ -9,10 +9,19 @@ set -e
 # multi-minute lint+fast below.
 #
 # git passes the remote name as $1 and its URL as $2, and one line per ref on
-# stdin: <local ref> <local sha> <remote ref> <remote sha>.
+# stdin: <local ref> <local sha> <remote ref> <remote sha>. stdin can be read
+# exactly once and both guards below need those lines, so slurp them here and
+# feed each guard from the variable (a here-string, not a pipe: a `while` on
+# the right of a pipe runs in a subshell, where `exit 1` refuses nothing).
+prepush_refs="$(cat)"
 ref_guard_remote="${1:-}"
 ref_guard_url="${2:-}"
+prepush_public=false
 if [ "$ref_guard_remote" = "origin" ] || printf '%s' "$ref_guard_url" | grep -qi 'codeberg\.org'; then
+    prepush_public=true
+fi
+
+if [ "$prepush_public" = true ]; then
     while read -r _local_ref local_sha remote_ref _remote_sha; do
         [ -z "$remote_ref" ] && continue
         # An all-zero local sha is a branch DELETION — removing a stray branch
@@ -31,13 +40,55 @@ if [ "$ref_guard_remote" = "origin" ] || printf '%s' "$ref_guard_url" | grep -qi
                 exit 1
                 ;;
         esac
-    done
+    done <<< "$prepush_refs"
 fi
 
-# Testability affordance: the ref guard above is the only part of this hook a
+# --- Claude guard: Claude-specific files never reach a public remote ---------
+# Second, independent layer under the same rule as `.gitignore`'s `.claude/`
+# entry, because an ignore rule is advisory: `git add -f` defeats it, and by
+# then the file is a committed object that only this hook still sees. What is
+# published cannot be retracted, so this runs BEFORE the expensive gates too.
+#
+# The commits being pushed are judged, not the working tree: a file staged
+# weeks ago is exactly the case an ignore rule already failed to stop.
+#
+# Public remote only. Host-to-host pushes between hamster and schneckenschreck
+# are how these files are legitimately moved between machines, so they pass —
+# same carve-out the ref guard makes.
+if [ "$prepush_public" = true ]; then
+    while read -r _local_ref local_sha remote_ref remote_sha; do
+        [ -z "$remote_ref" ] && continue
+        # Deletion: no content is being published, nothing to inspect.
+        case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+        # An all-zero remote sha is a ref the forge does not have yet, so there
+        # is no base to diff against — take the commits that no remote-tracking
+        # ref contains, which is what this push actually adds.
+        case "$remote_sha" in
+            *[!0]*) claude_range=("$remote_sha..$local_sha") ;;
+            *)      claude_range=("$local_sha" --not --remotes) ;;
+        esac
+        # --no-renames so a rename lists both names: renaming CLAUDE.md into
+        # place must trip the guard just as adding it does.
+        claude_hits="$(git -c core.quotepath=false log --format= --name-only \
+            --no-renames "${claude_range[@]}" -- \
+            | grep -Ei '(^|/)(CLAUDE\.md|\.mcp\.json)$|(^|/)\.claude/' \
+            | sort -u || true)"
+        if [ -n "$claude_hits" ]; then
+            echo "pre-push: REFUSED — '$remote_ref' carries Claude-specific files:" >&2
+            printf '%s\n' "$claude_hits" | sed 's|^|pre-push:   |' >&2
+            echo "pre-push: these never go to $ref_guard_remote (public forge)." >&2
+            echo "pre-push: they move host-to-host instead, e.g." >&2
+            echo "pre-push:   git -C <other-host-tree> fetch ssh://<host>/<path> <branch>:<branch>" >&2
+            echo "pre-push: if one is already committed, rewrite it out of the range first." >&2
+            exit 1
+        fi
+    done <<< "$prepush_refs"
+fi
+
+# Testability affordance: the guards above are the only part of this hook a
 # selftest can exercise cheaply — everything below costs minutes. With
 # LEV_PREPUSH_GUARD_ONLY=1 the hook stops here, so `lev-selftest` can assert
-# all six guard outcomes (refuse / master / tag / delete / other-remote /
+# all six ref-guard outcomes (refuse / master / tag / delete / other-remote /
 # multi-ref) in under a second. It is a test hook, never set in normal use.
 [ "${LEV_PREPUSH_GUARD_ONLY:-0}" = "1" ] && exit 0
 
