@@ -1,6 +1,37 @@
 #!/bin/bash
 set -e
 
+# --- ref guard: only master and tags reach a public remote -------------------
+# "Only master goes to Codeberg; feature branches move host-to-host over SSH"
+# was model memory until 2026-08-17 (review PROC-0006). A stray branch on a
+# public forge is published the moment it lands and cannot be retracted, so
+# the rule belongs in a mechanism. Runs FIRST: a refusal must not cost the
+# multi-minute lint+fast below.
+#
+# git passes the remote name as $1 and its URL as $2, and one line per ref on
+# stdin: <local ref> <local sha> <remote ref> <remote sha>.
+ref_guard_remote="${1:-}"
+ref_guard_url="${2:-}"
+if [ "$ref_guard_remote" = "origin" ] || printf '%s' "$ref_guard_url" | grep -qi 'codeberg\.org'; then
+    while read -r _local_ref local_sha remote_ref _remote_sha; do
+        [ -z "$remote_ref" ] && continue
+        # An all-zero local sha is a branch DELETION — removing a stray branch
+        # from the forge must stay possible, that is the remedy, not the harm.
+        case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+        case "$remote_ref" in
+            refs/heads/master) ;;
+            refs/tags/*) ;;
+            refs/heads/*)
+                echo "pre-push: REFUSED — '$remote_ref' is not master." >&2
+                echo "pre-push: only master and tags go to $ref_guard_remote (public forge)." >&2
+                echo "pre-push: move feature branches host-to-host instead, e.g." >&2
+                echo "pre-push:   git -C <other-host-tree> fetch ssh://<host>/<path> <branch>:<branch>" >&2
+                exit 1
+                ;;
+        esac
+    done
+fi
+
 # git runs hooks with the login shell's PATH, not an interactive one, so
 # ~/.local/bin — where woodpecker-cli is installed — is absent and the bare
 # name resolved to nothing. Prepend it, then resolve the name explicitly:
