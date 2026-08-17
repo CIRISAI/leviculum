@@ -69,9 +69,21 @@ if [ "$prepush_public" = true ]; then
         esac
         # --no-renames so a rename lists both names: renaming CLAUDE.md into
         # place must trip the guard just as adding it does.
+        #
+        # CLAUDE.md is matched by BASENAME PREFIX, not exact name: an editor
+        # swap file (CLAUDE.md~), a merge leftover (CLAUDE.md.orig) or a copy
+        # (CLAUDE.md.bak-mirror) holds the same policy text, and the exact-name
+        # test let such a commit through to the public remote with exit 0
+        # (measured 2026-08-17). The `(^|/)` prefix anchor is what keeps the
+        # widening honest: only a path COMPONENT that begins with the name
+        # matches, so an ordinary file that merely mentions it later in a
+        # component — docs/how-we-use-CLAUDE.md-files.txt, src/claude_adapter.rs
+        # — still passes. A file truly named `CLAUDE.md<suffix>` is refused;
+        # that spelling is far more often a leaked copy than a wanted source
+        # file, and the remedy for the rare exception is a rename.
         claude_hits="$(git -c core.quotepath=false log --format= --name-only \
             --no-renames "${claude_range[@]}" -- \
-            | grep -Ei '(^|/)(CLAUDE\.md|\.mcp\.json)$|(^|/)\.claude/' \
+            | grep -Ei '(^|/)CLAUDE\.md|(^|/)\.mcp\.json$|(^|/)\.claude/' \
             | sort -u || true)"
         if [ -n "$claude_hits" ]; then
             echo "pre-push: REFUSED — '$remote_ref' carries Claude-specific files:" >&2

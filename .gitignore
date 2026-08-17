@@ -25,7 +25,11 @@ leviculum-nrf/Cargo.lock
 
 # Markdown files
 IMPLEMENTATION_PLAN.md
-CLAUDE.md
+# CLAUDE.md plus its offspring: an editor swap file (CLAUDE.md~), a merge
+# leftover (CLAUDE.md.orig) or an ad-hoc copy (CLAUDE.md.bak-mirror) holds
+# the same policy text as the original, so the rule covers the whole family
+# instead of the one spelling somebody thought of first.
+CLAUDE.md*
 HOWTO.md
 
 # Generated docs (mdbook output)
