@@ -156,18 +156,32 @@ lxmf-embedded-gate:
 # embedded triples are not in it — the download is forced on every checkout
 # instead of on whoever runs the gate. The `rustup target add` below is how
 # m0-build-gate and lxmf-embedded-gate already handle it, so a pin bump
-# self-heals here. Measured on schneckenschreck 2026-08-18: 7.2 s wall warm
-# (4.4 s debug execution + 0.6 s release); cold, with the target already
-# fetched, ~53 s for the two i686 builds of the crate and its deps — once
-# per host per toolchain.
+# self-heals here.
+#
+# `--all-features`, not the default set. `compression` is not a default
+# feature of leviculum-core, so a bare `-p leviculum-core --lib` compiles
+# `#[cfg(feature = "compression")] pub mod compression` out and runs 1643 of
+# the crate's 1673 lib tests. The 30 it drops are the whole compression
+# module — including `resource::compression::tests::decompress_hint_is_
+# clamped`, a clamp over a wire-supplied decompressed size, which is the
+# defect class this gate exists for. `check-all-targets` and the workspace
+# lib run do not show the gap: cargo unifies features across a workspace
+# build, so another crate turns `compression` on there and the count comes
+# out at 1673 either way. Prefer `--all-features` over naming `compression`
+# so the next feature-gated module cannot escape the gate the same way.
+# Measured on schneckenschreck 2026-08-18: 15.7 s wall warm (14.6 s debug,
+# 1.1 s release — the debug arm is dominated by unoptimised bz2 roundtrips,
+# 3.7 s of it the rest of the suite); cold, with the target already fetched,
+# ~80 s for the two i686 builds of the crate and its deps — once per host
+# per toolchain.
 i686-usize-gate:
     rustup target add i686-unknown-linux-musl
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=yes" \
-    {{manifest}} i686-usize-debug -- cargo test -p leviculum-core --target i686-unknown-linux-musl --lib
+    {{manifest}} i686-usize-debug -- cargo test -p leviculum-core --target i686-unknown-linux-musl --all-features --lib
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=yes" \
-    {{manifest}} i686-usize-release -- cargo test -p leviculum-core --target i686-unknown-linux-musl --release --lib
+    {{manifest}} i686-usize-release -- cargo test -p leviculum-core --target i686-unknown-linux-musl --all-features --release --lib
 
 # Guarantee C step 1 (docs/src/concepts/checks-and-citations.md): the four
 # vendored references must sit at the commit their gitlink names. One wrong
