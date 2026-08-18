@@ -180,13 +180,7 @@ fn parse_listening_hash(line: &str) -> Option<String> {
     line.split_whitespace()
         .next_back()
         .map(String::from)
-        .and_then(|s| {
-            if s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                Some(s)
-            } else {
-                None
-            }
-        })
+        .filter(|s| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn structured_event<K: AsRef<str>>(name: &str, t0: Instant, pairs: &[(K, String)]) -> String {

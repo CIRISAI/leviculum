@@ -225,7 +225,7 @@ fn test_destination_hash_known_vector() {
 
     assert_eq!(dest_hash, expected);
     println!("  Identity hash: {:02x?}", &identity_hash[..4]);
-    println!("  Name hash: {:02x?}", &name_hash);
+    println!("  Name hash: {:02x?}", name_hash);
     println!("  Destination hash: {:02x?}", &dest_hash[..4]);
     println!("Destination hash pipeline verified");
 }

@@ -237,20 +237,19 @@ fast: check-submodules check-trailers check-supervised-spawns check-processor-se
 # drifts from the gate developers run, and the drift is found the same way.
 #
 # Measured cold (fresh rust:bookworm, empty target dir and cargo registry,
-# 4 cores) on 2026-08-18: 2m12s for the four lines below, 3051 tests executed
-# across 10 units. The step's provisioning — musl-tools, the rustfmt and clippy
-# components, `cargo install just`, one shallow submodule — costs 1m11s on top,
-# so the pipeline pays 3m23s to stop shipping untested .debs.
+# 4 cores) on 2026-08-18: 2m12s for the four lines it had then, 3051 tests
+# executed across 10 units. The step's provisioning — musl-tools, the rustfmt
+# and clippy components, `cargo install just`, one shallow submodule — costs
+# 1m11s on top, so the pipeline pays 3m23s to stop shipping untested .debs.
+# Re-measured after the widening below, on schneckenschreck with an empty
+# target dir but a warm cargo registry: 1m58s, 3057 tests across 10 units.
 #
-# `clippy --workspace` and not `--all-targets`: the latter reaches test code,
-# where three `useless_borrows_in_formatting` findings are waiting (rust 1.97,
-# which is what `channel = "stable"` resolves to in a fresh container while
-# this host is on 1.95). Worth fixing, then worth widening — as a red gate on
-# day one it would only teach people to skip the gate.
+# `clippy --all-targets` and no separate `cargo check`: clippy compiles what
+# check compiles, so the check line was a second pass over the same targets.
+# The lint findings that kept clippy off test code until 2026-08-18 are fixed.
 ci-gate:
     cargo fmt --all -- --check
-    cargo clippy --workspace -- -D warnings
-    cargo check --workspace --all-targets
+    cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this

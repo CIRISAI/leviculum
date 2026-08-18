@@ -2117,7 +2117,7 @@ mod tests {
                 "retry {} should be Retransmit with tries={}, got {:?}",
                 i + 1,
                 i + 2,
-                &actions[0]
+                actions[0]
             );
         }
 
@@ -2128,7 +2128,7 @@ mod tests {
         assert!(
             matches!(&actions[0], ChannelAction::TearDownLink),
             "8th timeout should tear down link, got {:?}",
-            &actions[0]
+            actions[0]
         );
     }
 
