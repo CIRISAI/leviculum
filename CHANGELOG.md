@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased] — CIRIS fork
+
+### Added
+
+**`ReticulumNode::unregister_destination` — retiring an address is now
+possible from the driver (leviculum#54).** `leviculum-core` has had the verb
+since forever; `leviculum-std` forwarded `register_destination` but never its
+inverse, so a consumer holding an `Arc<ReticulumNode>` could add destinations
+and never remove one. That blocked rotation-with-retirement: a superseded
+address kept answering forever, which re-confirms the node to anyone still
+probing it — the disclosure a rotating address exists to remove — and grew the
+routing table by one stale entry per rotation.
+
+Both semantics the caller has to reason about are contract, pinned by
+`leviculum-std/tests/destination_lifecycle.rs` (written before the verb
+existed, kept as its proof):
+
+- **idempotent** — retiring an already-retired hash, or one never registered
+  here, is a no-op rather than a panic or an error, so a timing-driven
+  retirement may fire twice;
+- **established links are left running** — a link is keyed by `LinkId`, not by
+  the destination it was dialled through, so retirement refuses *new* link
+  requests while traffic already flowing keeps flowing. Non-disruptive by
+  design; close links explicitly if the intent is to cut them.
+
+Requested by CIRISEdge#499 (scope-native destination hashes derived per MLS
+`(group, epoch)`, rotated make-before-break — the seal phase needs this).
+
 ## [0.19.0+ciris.1] — CIRIS fork
 
 Catch-up to upstream master @ `752baa42` (+11). **The seventh and last of our

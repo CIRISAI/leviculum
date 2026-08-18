@@ -1896,6 +1896,32 @@ impl ReticulumNode {
         inner.register_destination(destination);
     }
 
+    /// Retire a destination. Inverse of
+    /// [`register_destination`](Self::register_destination) (leviculum#54).
+    ///
+    /// After this returns, the hash is no longer one of ours: packets
+    /// addressed to it are not accepted as local, so a peer that still holds
+    /// a path and dials it finds nobody home. That is what makes a rotated
+    /// address retirable — without it a superseded address keeps answering
+    /// forever, which re-confirms the node to anyone still probing it.
+    ///
+    /// Two contract points, both pinned by
+    /// `leviculum-std/tests/destination_lifecycle.rs`:
+    ///
+    /// - **Idempotent.** Retiring a hash that is already gone — or one that
+    ///   was never registered here — is a no-op, not a panic or an error. A
+    ///   caller whose retirement is timing-driven may fire it twice.
+    /// - **Established links are left running.** A link is keyed by its
+    ///   `LinkId`, not by the destination it was dialled through, so traffic
+    ///   already flowing keeps flowing; only *new* link requests are refused.
+    ///   Retiring an address is therefore non-disruptive by design — close
+    ///   the links explicitly with [`close_link`](Self::close_link) if the
+    ///   intent is to cut them.
+    pub fn unregister_destination(&self, hash: &DestinationHash) {
+        let mut inner = self.inner.lock_recover();
+        inner.unregister_destination(hash);
+    }
+
     /// Install (or clear, with `None`) the per-destination announce-suppression
     /// policy. Suppressed destinations stay routable but are never gossiped.
     /// See [`AnnounceControl`].
