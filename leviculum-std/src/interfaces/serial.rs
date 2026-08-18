@@ -242,7 +242,7 @@ async fn send_radio_config(
         }
 
         // Wait for ACK
-        let mut deframer = Deframer::new();
+        let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
         let mut buf = [0u8; 64];
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
 
@@ -396,7 +396,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     super::log_direct_ingress_filter_armed(drop_direct_ingress, &name);
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
@@ -429,28 +429,27 @@ where
                         last_read_at = Instant::now();
                         let results = deframer.process(&read_buf[..n]);
                         for r in results {
-                            if let DeframeResult::Frame(data) = r {
-                                // TEST-ONLY range emulation: an out-of-range
-                                // frame was never heard, so it is dropped
-                                // before any counter or the transport sees it.
-                                if super::test_drop_direct_ingress_frame(
-                                    drop_direct_ingress, &name, &data, &counters,
-                                ) {
-                                    continue;
+                            match r {
+                                DeframeResult::Frame(data) => {
+                                    // TEST-ONLY range emulation: an out-of-range
+                                    // frame was never heard, so it is dropped
+                                    // before any counter or the transport sees it.
+                                    if super::test_drop_direct_ingress_frame(
+                                        drop_direct_ingress, &name, &data, &counters,
+                                    ) {
+                                        continue;
+                                    }
+                                    counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                    if incoming_tx.send(IncomingPacket { data }).await.is_err() {
+                                        return outgoing_rx;
+                                    }
                                 }
-                                counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                                if incoming_tx.send(IncomingPacket { data }).await.is_err() {
-                                    return outgoing_rx;
-                                }
+                                // HW_MTU enforcement lives in the deframer now.
+                                DeframeResult::Oversized => tracing::trace!(
+                                    "Serial {}: frame exceeds HW_MTU, discarded", name
+                                ),
+                                _ => {}
                             }
-                        }
-                        // HW_MTU enforcement: reset if buffer grew beyond limit
-                        if deframer.buffer_len() > SERIAL_HW_MTU as usize {
-                            tracing::trace!(
-                                "Serial {}: frame exceeds HW_MTU ({}), discarding",
-                                name, deframer.buffer_len()
-                            );
-                            deframer.reset();
                         }
                     }
                     Err(e) => {

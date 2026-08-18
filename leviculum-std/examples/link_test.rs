@@ -176,6 +176,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DeframeResult::TooShort => {
                             println!("Received frame too short (empty)");
                         }
+                        DeframeResult::Oversized => {
+                            println!("Received frame exceeds HW_MTU, discarded");
+                        }
                         DeframeResult::NeedMore => {
                             // Continue receiving
                         }

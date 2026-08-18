@@ -481,7 +481,7 @@ async fn i2p_stream_task(
 ) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
 
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(I2P_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut keepalive = tokio::time::interval(I2P_KEEPALIVE);
@@ -503,6 +503,12 @@ async fn i2p_stream_task(
                                 Ok(n) => {
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
                                     for r in deframer.process(&read_buf[..n]) {
+                                        // HW_MTU enforcement lives in the deframer now.
+                                        if matches!(r, DeframeResult::Oversized) {
+                                            tracing::trace!(
+                                                "I2P {}: frame exceeds HW_MTU, discarded", name);
+                                            continue;
+                                        }
                                         if let DeframeResult::Frame(data) = r {
                                             if incoming_tx.send(IncomingPacket { data }).await.is_err() {
                                                 return outgoing_rx;

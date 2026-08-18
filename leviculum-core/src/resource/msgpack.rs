@@ -113,6 +113,31 @@ pub(crate) fn write_bool(buf: &mut Vec<u8>, val: bool) {
 }
 
 // Decoding helpers
+/// Take `n` bytes at `*pos`, advancing `*pos` past them.
+///
+/// Returns `None` if `n` runs past the end of `data` — or if `*pos + n` would
+/// wrap `usize`, which is the same condition on a target where it can happen.
+///
+/// Codeberg #267: the guards this replaces were spelled `*pos + len >
+/// data.len()` with `len` a full `u32` read off the wire. `usize` is 32 bits on
+/// the firmware target `thumbv7em-none-eabihf`, so a wire-supplied `len` near
+/// `u32::MAX` wrapped the sum below `data.len()`, the guard passed, and the
+/// slice behind it panicked — a remote panic reachable with one packet after a
+/// link handshake. `checked_add` is the guard the wire actually needs; on a
+/// 64-bit host it is a no-op, which is why no test had ever seen the defect.
+fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
+    let end = (*pos).checked_add(n)?;
+    let taken = data.get(*pos..end)?;
+    *pos = end;
+    Some(taken)
+}
+
+/// [`take`] without the bytes: advance `*pos` by `n`, rejecting an advance that
+/// runs past the end of `data` or wraps `usize`. Used by the skip path.
+fn advance(data: &[u8], pos: &mut usize, n: usize) -> Option<()> {
+    take(data, pos, n).map(|_| ())
+}
+
 /// Read one byte, advancing position.
 pub(crate) fn read_byte(data: &[u8], pos: &mut usize) -> Option<u8> {
     let b = *data.get(*pos)?;
@@ -252,12 +277,7 @@ pub(crate) fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'
         return None;
     };
 
-    if *pos + len > data.len() {
-        return None;
-    }
-    let b = &data[*pos..*pos + len];
-    *pos += len;
-    Some(b)
+    take(data, pos, len)
 }
 
 /// Read a msgpack unsigned integer (fixint, uint8, uint16, uint32, uint64).
@@ -356,120 +376,49 @@ fn skip_msgpack_value_depth(data: &[u8], pos: &mut usize, depth: usize) -> Optio
         // negative fixint
         0xe0..=0xff => Some(()),
         // uint8 / int8
-        0xcc | 0xd0 => {
-            *pos += 1;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
-        }
+        0xcc | 0xd0 => advance(data, pos, 1),
         // uint16 / int16
-        0xcd | 0xd1 => {
-            *pos += 2;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
-        }
+        0xcd | 0xd1 => advance(data, pos, 2),
         // uint32 / int32 / float32
-        0xce | 0xd2 | 0xca => {
-            *pos += 4;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
-        }
+        0xce | 0xd2 | 0xca => advance(data, pos, 4),
         // uint64 / int64 / float64
-        0xcf | 0xd3 | 0xcb => {
-            *pos += 8;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
-        }
+        0xcf | 0xd3 | 0xcb => advance(data, pos, 8),
         // fixstr
-        tag if tag & 0xe0 == 0xa0 => {
-            let len = (tag & 0x1f) as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
-        }
+        tag if tag & 0xe0 == 0xa0 => advance(data, pos, (tag & 0x1f) as usize),
         // str8
         0xd9 => {
             let len = read_byte(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // str16
         0xda => {
             let len = read_be_u16(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // str32
         0xdb => {
             let len = read_be_u32(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // bin8
         0xc4 => {
             let len = read_byte(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // bin16
         0xc5 => {
             let len = read_be_u16(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // bin32
         0xc6 => {
             let len = read_be_u32(data, pos)? as usize;
-            *pos += len;
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, len)
         }
         // fixext1 / fixext2 / fixext4 / fixext8 / fixext16: 1 type byte + N data bytes
         0xd4..=0xd8 => {
             let n = 1usize << (tag - 0xd4); // 1, 2, 4, 8, 16
-            *pos += 1 + n; // type byte + payload
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            advance(data, pos, 1 + n) // type byte + payload
         }
         // ext8 / ext16 / ext32: length prefix + 1 type byte + data
         0xc7..=0xc9 => {
@@ -478,12 +427,10 @@ fn skip_msgpack_value_depth(data: &[u8], pos: &mut usize, depth: usize) -> Optio
                 0xc8 => read_be_u16(data, pos)? as usize,
                 _ => read_be_u32(data, pos)? as usize,
             };
-            *pos += 1 + len; // type byte + payload
-            if *pos > data.len() {
-                None
-            } else {
-                Some(())
-            }
+            // Two steps, not `1 + len`: that sum wraps on its own for a
+            // wire-supplied `len` of `u32::MAX` on a 32-bit target.
+            advance(data, pos, 1)?; // type byte
+            advance(data, pos, len) // payload
         }
         // fixarray
         tag if tag & 0xf0 == 0x90 => {
@@ -614,6 +561,64 @@ mod tests {
         skip_msgpack_value(&buf, &mut pos).expect("skip str32");
         skip_msgpack_value(&buf, &mut pos).expect("skip fixext4");
         assert_eq!(pos, buf.len());
+    }
+
+    /// Regression (Codeberg #267): a wire-supplied bin32 length must be
+    /// rejected, not added to `*pos` first.
+    ///
+    /// The check used to be `*pos + len > data.len()` with `len` a full `u32`
+    /// off the wire. On the firmware target `thumbv7em-none-eabihf` `usize` is
+    /// 32 bits, so `len = u32::MAX` wraps the sum below `data.len()`, the guard
+    /// passes, and `&data[*pos..*pos + len]` is a slice whose start exceeds its
+    /// end: a panic on a link-reachable path (`handle_resource_adv` feeds
+    /// decrypted RESOURCE-ADV plaintext straight to `unpack`).
+    ///
+    /// The assertion is width-independent — `None` is the right answer on both
+    /// 32 and 64 bit — but it only goes red on a 32-bit `usize`. Verified red
+    /// against pre-fix code by running this module for
+    /// `i686-unknown-linux-musl`.
+    #[test]
+    fn bin32_length_near_usize_max_is_rejected() {
+        // bin32 header claiming u32::MAX payload bytes, with nothing behind it.
+        let mut buf = alloc::vec![0xc6u8];
+        buf.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        let mut pos = 0;
+        assert_eq!(read_msgpack_bin(&buf, &mut pos), None);
+
+        // Same via the skip path (bin32 arm of skip_msgpack_value_depth).
+        let mut pos = 0;
+        assert_eq!(skip_msgpack_value(&buf, &mut pos), None);
+
+        // str32 and ext32 take the same u32 off the wire in the skip path.
+        // ext32 is the worse one: it advances by `1 + len`, which wraps to 0.
+        for tag in [0xdbu8, 0xc9u8] {
+            let mut buf = alloc::vec![tag];
+            buf.extend_from_slice(&u32::MAX.to_be_bytes());
+            let mut pos = 0;
+            assert_eq!(
+                skip_msgpack_value(&buf, &mut pos),
+                None,
+                "tag {tag:#04x} accepted a u32::MAX length"
+            );
+        }
+    }
+
+    /// The same lengths, but with a non-empty buffer, so a wrapped sum lands
+    /// *inside* the slice rather than at zero. `*pos = 5`, `len = u32::MAX - 4`
+    /// wraps to exactly `1` on a 32-bit `usize`: below `data.len()`, so the
+    /// guard passes and `&data[5..1]` panics.
+    #[test]
+    fn bin32_length_wrapping_into_the_buffer_is_rejected() {
+        let mut buf = alloc::vec![0xc6u8];
+        buf.extend_from_slice(&(u32::MAX - 4).to_be_bytes());
+        buf.extend_from_slice(b"payload");
+
+        let mut pos = 0;
+        assert_eq!(read_msgpack_bin(&buf, &mut pos), None);
+
+        let mut pos = 0;
+        assert_eq!(skip_msgpack_value(&buf, &mut pos), None);
     }
 
     #[test]

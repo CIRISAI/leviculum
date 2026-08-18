@@ -356,12 +356,10 @@ where
                                 }
                             }
                         }
-                        // HW_MTU enforcement: reset a runaway partial frame.
-                        if deframer.buffer_len() > max_frame {
-                            tracing::trace!(
-                                "KISS interface {}: frame exceeds HW_MTU, discarding", name);
-                            deframer.reset();
-                        }
+                        // No HW_MTU check here: `KissDeframer::with_max_payload`
+                        // already refuses to buffer past `max_frame`, so this
+                        // condition was unreachable. One mechanism, not two
+                        // (Codeberg #271).
                     }
                     Err(e) => {
                         tracing::debug!("KISS interface {} read error: {}", name, e);

@@ -339,7 +339,7 @@ async fn pipe_io_task(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
 ) -> mpsc::Receiver<OutgoingPacket> {
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(PIPE_HW_MTU as usize);
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
 
@@ -354,21 +354,19 @@ async fn pipe_io_task(
                     }
                     Ok(n) => {
                         for r in deframer.process(&read_buf[..n]) {
-                            if let DeframeResult::Frame(data) = r {
-                                counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                                if incoming_tx.send(IncomingPacket { data }).await.is_err() {
-                                    return outgoing_rx;
+                            match r {
+                                DeframeResult::Frame(data) => {
+                                    counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                    if incoming_tx.send(IncomingPacket { data }).await.is_err() {
+                                        return outgoing_rx;
+                                    }
                                 }
+                                // HW_MTU enforcement lives in the deframer now.
+                                DeframeResult::Oversized => tracing::trace!(
+                                    "Pipe {}: frame exceeds HW_MTU, discarded", name
+                                ),
+                                _ => {}
                             }
-                        }
-                        // HW_MTU enforcement: reset if a runaway frame exceeds
-                        // the limit (Python bounds the buffer inline).
-                        if deframer.buffer_len() > PIPE_HW_MTU as usize {
-                            tracing::trace!(
-                                "Pipe {}: frame exceeds HW_MTU ({}), discarding",
-                                name, deframer.buffer_len()
-                            );
-                            deframer.reset();
                         }
                     }
                     Err(e) => {

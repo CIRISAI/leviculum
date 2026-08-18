@@ -30,6 +30,16 @@ use super::InterfaceHandle;
 /// bitrate a TCP interface reports when the config sets none.
 pub(crate) const TCP_BITRATE_GUESS: i64 = 10_000_000;
 
+/// Python `TCPInterface.HW_MTU` (TCPInterface.py:42), the ceiling handed to the
+/// deframer so one peer cannot grow our buffer without limit (Codeberg #271).
+///
+/// The reference does not bound its own HDLC read path — its `len(data_buffer)
+/// < self.HW_MTU` check is in the KISS branch (TCPInterface.py:362) — so this
+/// is a deviation, not parity. It preserves wire and semantic compatibility:
+/// 262144 is the value Python already negotiates as this interface's hardware
+/// MTU, so no frame a Python peer legitimately sends is affected.
+pub(crate) const TCP_HW_MTU: u32 = 262_144;
+
 /// Default channel buffer size for TCP interfaces.
 /// Used for both incoming and outgoing channels.
 /// Must be large enough to absorb short bursts during reconnection.
@@ -940,7 +950,7 @@ async fn tcp_interface_task(
 ) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
 
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(TCP_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut corrupt_rng = Xorshift64::from_entropy();
@@ -962,6 +972,12 @@ async fn tcp_interface_task(
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
                                     let results = deframer.process(&read_buf[..n]);
                                     for r in results {
+                                        // HW_MTU enforcement lives in the deframer now.
+                                        if matches!(r, DeframeResult::Oversized) {
+                                            tracing::trace!(
+                                                "TCP {}: frame exceeds HW_MTU, discarded", name);
+                                            continue;
+                                        }
                                         if let DeframeResult::Frame(data) = r {
                                             if incoming_tx.send(IncomingPacket { data }).await.is_err() {
                                                 // Event loop dropped its receiver

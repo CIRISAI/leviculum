@@ -30,8 +30,9 @@ async fn wait_shutdown(shutdown: &mut Option<oneshot::Receiver<()>>) {
 /// Read path:  stream → HDLC deframe → incoming channel
 /// Write path: outgoing channel → HDLC frame → stream → flush
 ///
-/// Enforces `HW_MTU`: a deframer buffer growing past the limit is reset,
-/// bounding memory on a misbehaving peer (matching the pipe interface).
+/// Enforces `HW_MTU` by handing it to the deframer, which discards a frame
+/// growing past the limit — bounding memory on a misbehaving peer (matching
+/// the pipe interface).
 pub(super) async fn run<R, W>(
     name: String,
     mut read: R,
@@ -44,7 +45,7 @@ pub(super) async fn run<R, W>(
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(BYTE_CHANNEL_HW_MTU as usize);
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
 
@@ -63,19 +64,19 @@ pub(super) async fn run<R, W>(
                     }
                     Ok(n) => {
                         for r in deframer.process(&read_buf[..n]) {
-                            if let DeframeResult::Frame(data) = r {
-                                counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                                if incoming_tx.send(IncomingPacket { data }).await.is_err() {
-                                    return;
+                            match r {
+                                DeframeResult::Frame(data) => {
+                                    counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                    if incoming_tx.send(IncomingPacket { data }).await.is_err() {
+                                        return;
+                                    }
                                 }
+                                // HW_MTU enforcement lives in the deframer now.
+                                DeframeResult::Oversized => tracing::trace!(
+                                    "Byte-channel {}: frame exceeds HW_MTU, discarded", name
+                                ),
+                                _ => {}
                             }
-                        }
-                        if deframer.buffer_len() > BYTE_CHANNEL_HW_MTU as usize {
-                            tracing::trace!(
-                                "Byte-channel {}: frame exceeds HW_MTU ({}), discarding",
-                                name, deframer.buffer_len()
-                            );
-                            deframer.reset();
                         }
                     }
                     Err(e) => {

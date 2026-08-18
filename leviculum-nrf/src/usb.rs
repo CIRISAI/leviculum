@@ -316,7 +316,7 @@ async fn retic_serial_task(
     outgoing_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
     config_tx: Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
 ) {
-    let mut deframer = Deframer::new();
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU);
     let mut read_buf = [0u8; 64];
     let mut frame_buf = Vec::with_capacity(1200);
 
@@ -409,12 +409,10 @@ async fn retic_serial_task(
                                 log_u32("SER: frame complete", data.len() as u32);
                                 incoming_tx.send(data.clone()).await;
                             }
+                        } else if matches!(r, DeframeResult::Oversized) {
+                            // HW_MTU enforcement lives in the deframer now.
+                            log("SER: HW_MTU exceeded, frame discarded");
                         }
-                    }
-                    // HW_MTU enforcement
-                    if deframer.buffer_len() > SERIAL_HW_MTU {
-                        log("SER: HW_MTU exceeded, reset");
-                        deframer.reset();
                     }
                 }
                 // USB disconnect

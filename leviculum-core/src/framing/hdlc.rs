@@ -178,7 +178,41 @@ pub enum DeframeResult {
     Frame(Vec<u8>),
     /// Frame too short (empty)
     TooShort,
+    /// The frame grew past the deframer's per-frame ceiling and was discarded.
+    ///
+    /// The partial payload is dropped rather than delivered truncated — half a
+    /// packet is not a packet — and the deframer resynchronises on the next
+    /// FLAG. See [`DEFAULT_MAX_FRAME`].
+    Oversized,
 }
+
+/// Bytes a fresh [`Deframer`] reserves up front. Frames on every interface we
+/// speak are far smaller than any of our HW_MTUs, so the buffer starts small
+/// and grows, rather than reserving the ceiling per connection.
+const INITIAL_BUFFER_CAPACITY: usize = 600;
+
+/// Default ceiling on the unescaped payload a [`Deframer`] will accumulate for
+/// one frame, in bytes.
+///
+/// Codeberg #271: `process_byte` used to push every non-FLAG byte with no
+/// bound of its own, which made the cap each caller's job — and three of the
+/// callers (`tcp.rs`, `local.rs`, `i2p/mod.rs`) did not do it, while four
+/// others did. A peer streaming bytes that never contain a FLAG octet grew the
+/// `Vec` until the process was out of memory; on the Local interface anything
+/// that can reach the shared-instance socket could do the same. The bound now
+/// lives here, so a caller cannot forget it; callers that know a tighter
+/// HW_MTU pass it to [`Deframer::with_max_frame`].
+///
+/// 262144 is the largest HW_MTU we speak (Python's `TCPInterface.HW_MTU` and
+/// `LocalInterface.HW_MTU`), so the default never discards a frame a Python
+/// peer may legitimately send.
+///
+/// Note the reference does *not* bound its own HDLC path: `TCPInterface.py`'s
+/// `len(data_buffer) < self.HW_MTU` check sits in the KISS branch
+/// (TCPInterface.py:362), not the HDLC branch (:380-397). The justification for
+/// capping is our own — four of our interfaces already treated this as a bound
+/// worth enforcing, and nothing made the other three agree.
+pub const DEFAULT_MAX_FRAME: usize = 262_144;
 
 /// HDLC deframer state machine
 ///
@@ -206,15 +240,28 @@ pub struct Deframer {
     buffer: Vec<u8>,
     in_frame: bool,
     escape_next: bool,
+    max_frame: usize,
 }
 
 impl Deframer {
-    /// Create a new deframer
+    /// Create a new deframer bounded at [`DEFAULT_MAX_FRAME`].
     pub fn new() -> Self {
+        Self::with_max_frame(DEFAULT_MAX_FRAME)
+    }
+
+    /// Create a deframer that discards any frame whose unescaped payload grows
+    /// past `max_frame` bytes.
+    ///
+    /// Interfaces pass their own HW_MTU here. That is the only mechanism
+    /// bounding the buffer — an interface must not also poll
+    /// [`buffer_len`](Self::buffer_len) and [`reset`](Self::reset) itself
+    /// (Codeberg #271).
+    pub fn with_max_frame(max_frame: usize) -> Self {
         Self {
-            buffer: Vec::with_capacity(600),
+            buffer: Vec::with_capacity(INITIAL_BUFFER_CAPACITY.min(max_frame)),
             in_frame: false,
             escape_next: false,
+            max_frame,
         }
     }
 
@@ -234,9 +281,12 @@ impl Deframer {
         self.in_frame
     }
 
-    /// Current accumulated buffer length. Used by serial interfaces to enforce
-    /// HW_MTU: if the buffer exceeds the maximum frame size, the partial frame
-    /// is corrupted and should be discarded via `reset()`.
+    /// Current accumulated buffer length, for diagnostics and tests.
+    ///
+    /// Not a bound an interface has to enforce: the deframer caps itself at
+    /// `max_frame` (Codeberg #271). Interfaces used to poll this and call
+    /// `reset()` past their HW_MTU; they now pass the HW_MTU to
+    /// [`with_max_frame`](Self::with_max_frame) instead.
     pub fn buffer_len(&self) -> usize {
         self.buffer.len()
     }
@@ -270,16 +320,35 @@ impl Deframer {
             }
         } else if self.in_frame {
             if self.escape_next {
-                self.buffer.push(byte ^ ESCAPE_XOR);
                 self.escape_next = false;
+                return self.push(byte ^ ESCAPE_XOR);
             } else if byte == ESCAPE {
                 self.escape_next = true;
             } else {
-                self.buffer.push(byte);
+                return self.push(byte);
             }
         }
         // Bytes outside of frame are ignored
 
+        None
+    }
+
+    /// Buffer one unescaped payload byte, discarding the whole frame if it
+    /// would grow past `max_frame` (Codeberg #271).
+    ///
+    /// Discarding leaves the deframer outside a frame, so the rest of the
+    /// runaway bytes are ignored for free and the next FLAG opens a fresh
+    /// frame — the same resynchronisation the interface-side `reset()` gave,
+    /// but exact rather than one read-chunk late.
+    fn push(&mut self, byte: u8) -> Option<DeframeResult> {
+        if self.buffer.len() >= self.max_frame {
+            self.reset();
+            // Do not hold the ceiling's worth of capacity for the rest of the
+            // connection's life just because a peer once sent garbage.
+            self.buffer.shrink_to(INITIAL_BUFFER_CAPACITY);
+            return Some(DeframeResult::Oversized);
+        }
+        self.buffer.push(byte);
         None
     }
 
@@ -302,6 +371,79 @@ impl Default for Deframer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (Codeberg #271): a peer that opens a frame and then streams
+    /// bytes containing no FLAG octet must not grow the buffer without limit.
+    ///
+    /// Before the cap moved into the deframer this held every byte fed to it —
+    /// verified red at 266240 bytes buffered — because the bound was the
+    /// caller's job and `tcp.rs`, `local.rs` and `i2p/mod.rs` never did it.
+    #[test]
+    fn runaway_frame_is_bounded_by_default() {
+        let mut deframer = Deframer::new();
+        let mut stream = alloc::vec![FLAG];
+        stream.resize(1 + DEFAULT_MAX_FRAME + 4096, 0xAA);
+
+        let results = deframer.process(&stream);
+
+        assert!(
+            deframer.buffer_len() <= DEFAULT_MAX_FRAME,
+            "deframer buffered {} bytes for one unterminated frame",
+            deframer.buffer_len()
+        );
+        assert_eq!(
+            results,
+            alloc::vec![DeframeResult::Oversized],
+            "the discard is reported once, not per excess byte"
+        );
+    }
+
+    /// The cap is the interface's HW_MTU when it passes one, and the discard is
+    /// exact: `max_frame` bytes are accepted, the next one drops the frame.
+    #[test]
+    fn with_max_frame_discards_at_the_ceiling_and_resyncs() {
+        let mut deframer = Deframer::with_max_frame(8);
+
+        // A frame of exactly max_frame bytes still arrives.
+        let mut framed = Vec::new();
+        frame(b"12345678", &mut framed);
+        assert_eq!(
+            deframer.process(&framed),
+            alloc::vec![DeframeResult::Frame(b"12345678".to_vec())]
+        );
+
+        // One byte more and the frame is discarded, not truncated.
+        let mut framed = Vec::new();
+        frame(b"123456789", &mut framed);
+        assert_eq!(
+            deframer.process(&framed),
+            alloc::vec![DeframeResult::Oversized]
+        );
+        assert_eq!(deframer.buffer_len(), 0);
+
+        // ...and the next good frame still comes through.
+        let mut framed = Vec::new();
+        frame(b"ok", &mut framed);
+        assert_eq!(
+            deframer.process(&framed),
+            alloc::vec![DeframeResult::Frame(b"ok".to_vec())]
+        );
+    }
+
+    /// Escaped bytes count against the ceiling too — a peer must not be able to
+    /// buy extra buffer by escaping every octet.
+    #[test]
+    fn escaped_bytes_count_against_the_ceiling() {
+        let mut deframer = Deframer::with_max_frame(4);
+        let mut stream = alloc::vec![FLAG];
+        for _ in 0..64 {
+            stream.push(ESCAPE);
+            stream.push(FLAG ^ ESCAPE_XOR);
+        }
+        let results = deframer.process(&stream);
+        assert_eq!(results, alloc::vec![DeframeResult::Oversized]);
+        assert!(deframer.buffer_len() <= 4);
+    }
 
     #[test]
     fn test_crc16() {

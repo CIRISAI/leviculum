@@ -1250,6 +1250,24 @@ fn msgpack_parse_ratchet_array(data: &[u8]) -> Option<Vec<&[u8]>> {
 }
 
 // Low-level msgpack readers
+/// Take `n` bytes at `*pos`, advancing `*pos` past them.
+///
+/// Same guard, and the same reason, as `resource::msgpack::take` (Codeberg
+/// #267): `read_msgpack_bin` below takes a full `u32` off a bin32 header, and
+/// on the 32-bit firmware target the old `*pos + len > data.len()` wrapped
+/// below `data.len()`, so the guard passed and the slice behind it panicked.
+///
+/// This decoder is fed from local storage rather than the wire
+/// (`load_ratchets_signed`, via `NodeCore` at destination registration), and
+/// the outer map is parsed *before* the Ed25519 signature is verified — so a
+/// corrupt or hostile ratchet store reaches it unauthenticated.
+fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
+    let end = (*pos).checked_add(n)?;
+    let taken = data.get(*pos..end)?;
+    *pos = end;
+    Some(taken)
+}
+
 fn read_byte(data: &[u8], pos: &mut usize) -> Option<u8> {
     let b = *data.get(*pos)?;
     *pos += 1;
@@ -1312,12 +1330,7 @@ fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
         return None;
     };
 
-    if *pos + len > data.len() {
-        return None;
-    }
-    let b = &data[*pos..*pos + len];
-    *pos += len;
-    Some(b)
+    take(data, pos, len)
 }
 
 fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Option<usize> {
@@ -2561,6 +2574,39 @@ mod tests {
 
         // Loaded ratchets preserve keys (no timestamps in Python format)
         assert_eq!(dest2.ratchets.len(), original_keys.len());
+    }
+
+    /// Regression (Codeberg #267, second instance found by the audit the issue
+    /// asked for): this module carries its own copy of the msgpack readers, and
+    /// its `read_msgpack_bin` had the same wrapping `*pos + len > data.len()`
+    /// guard on the bin32 arm.
+    ///
+    /// The store is local rather than wire-borne, but the outer map is parsed
+    /// before the signature is verified, so a corrupt ratchet file panicked a
+    /// 32-bit node at destination registration. Width-independent assertion:
+    /// `Err`, not a panic, on both widths.
+    #[test]
+    fn ratchet_store_bin32_length_near_usize_max_is_rejected() {
+        let identity = Identity::generate(&mut OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["bin32"],
+        )
+        .unwrap();
+
+        // fixmap(2) + fixstr "signature" + bin32 claiming u32::MAX bytes.
+        let mut store = alloc::vec![0x82u8, 0xa9];
+        store.extend_from_slice(b"signature");
+        store.push(0xc6);
+        store.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        assert_eq!(
+            dest.load_ratchets_signed(&store),
+            Err(DestinationError::InvalidRatchetData)
+        );
     }
 
     #[test]
