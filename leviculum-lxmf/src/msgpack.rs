@@ -13,6 +13,8 @@ pub enum Error {
     Type,
     Overflow,
     Trailing,
+    /// Container nesting deeper than `MAX_SKIP_DEPTH`.
+    Depth,
 }
 
 impl core::fmt::Display for Error {
@@ -22,6 +24,7 @@ impl core::fmt::Display for Error {
             Self::Type => write!(f, "unexpected msgpack type"),
             Self::Overflow => write!(f, "msgpack value does not fit its target type"),
             Self::Trailing => write!(f, "trailing bytes after the msgpack value"),
+            Self::Depth => write!(f, "msgpack container nesting is too deep"),
         }
     }
 }
@@ -245,22 +248,50 @@ pub fn raw<'a>(d: &'a [u8], p: &mut usize) -> Result<&'a [u8], Error> {
     skip(d, p)?;
     Ok(&d[s..*p])
 }
+/// Maximum msgpack container nesting depth accepted by [`skip`].
+///
+/// Bounds the recursion so a maliciously deep nested container in untrusted
+/// wire bytes cannot overflow the stack (an abort, not a catchable panic).
+/// `skip` runs on unauthenticated input: `Message::unpack` skips unknown
+/// field values before the Ed25519 signature is checked, and the propagation
+/// decoder skips values straight off the wire. LXMF's own field/metadata
+/// payloads nest only a couple of levels, so 64 is far above any legitimate
+/// use.
+///
+/// Same value as `leviculum-core`'s `resource::msgpack::MAX_SKIP_DEPTH`, which
+/// bounds the identical operation for resource advertisements. Keeping the two
+/// identical means one number to reason about rather than two nearly-equal ones.
+const MAX_SKIP_DEPTH: usize = 64;
+
+/// Skip a single msgpack value at the current position.
+///
+/// Nesting is capped at `MAX_SKIP_DEPTH`: a container nested deeper returns
+/// [`Error::Depth`] rather than recursing until the stack overflows.
 pub fn skip(d: &[u8], p: &mut usize) -> Result<(), Error> {
+    skip_depth(d, p, MAX_SKIP_DEPTH)
+}
+
+/// Depth-limited body of [`skip`]. `depth` is the remaining nesting budget;
+/// each container level recurses with `depth - 1`, and a container found at
+/// `depth == 0` is rejected.
+fn skip_depth(d: &[u8], p: &mut usize, depth: usize) -> Result<(), Error> {
     let marker = Marker::from_u8(take(d, p, 1)?[0]);
     match marker {
         Marker::FixPos(_) | Marker::FixNeg(_) | Marker::Null | Marker::False | Marker::True => {
             Ok(())
         }
         Marker::FixMap(n) => {
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?;
-                skip(d, p)?
+                skip_depth(d, p, inner)?;
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
         Marker::FixArray(n) => {
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
@@ -301,31 +332,35 @@ pub fn skip(d: &[u8], p: &mut usize) -> Result<(), Error> {
         }
         Marker::Array16 => {
             let n = take_u16(d, p)?;
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
         Marker::Array32 => {
             let n = take_u32(d, p)?;
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
         Marker::Map16 => {
             let n = take_u16(d, p)?;
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?;
-                skip(d, p)?
+                skip_depth(d, p, inner)?;
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
         Marker::Map32 => {
             let n = take_u32(d, p)?;
+            let inner = depth.checked_sub(1).ok_or(Error::Depth)?;
             for _ in 0..n {
-                skip(d, p)?;
-                skip(d, p)?
+                skip_depth(d, p, inner)?;
+                skip_depth(d, p, inner)?
             }
             Ok(())
         }
@@ -353,4 +388,76 @@ pub fn skip(d: &[u8], p: &mut usize) -> Result<(), Error> {
 fn skip_ext(d: &[u8], p: &mut usize, payload_len: usize) -> Result<(), Error> {
     take(d, p, payload_len.checked_add(1).ok_or(Error::Overflow)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (Codeberg #263, item 1): a deeply nested container must NOT
+    /// recurse until the stack overflows. `skip` reads unauthenticated wire
+    /// bytes — `Message::unpack` skips unknown field values before the Ed25519
+    /// signature check, and the propagation decoder skips straight off the
+    /// wire — so a chain of fixarray-len-1 tags (`0x91 0x91 ...`) bought one
+    /// stack frame per input byte and aborted the process (a remote DoS).
+    ///
+    /// The assertion is on the typed error, never on the abort: a test that
+    /// actually overflows takes the whole test binary with it.
+    #[test]
+    fn skip_rejects_deeply_nested_container() {
+        let mut buf = alloc::vec![0x91u8; 100_000];
+        buf.push(0x90); // innermost: empty array
+        let mut pos = 0;
+        assert_eq!(skip(&buf, &mut pos), Err(Error::Depth));
+    }
+
+    /// The cap fires on the first level past the limit. Cheap counterpart to
+    /// the 100k-deep case above: this one is red on unbounded code by
+    /// returning `Ok`, rather than by aborting, so it can be run against the
+    /// pre-fix behaviour safely.
+    #[test]
+    fn skip_rejects_nesting_one_past_the_limit() {
+        let mut buf = alloc::vec![0x91u8; MAX_SKIP_DEPTH + 1];
+        buf.push(0xc0); // innermost value: nil
+        let mut pos = 0;
+        assert_eq!(skip(&buf, &mut pos), Err(Error::Depth));
+    }
+
+    /// A container nested exactly at the depth limit is still accepted, so the
+    /// cap does not reject legitimate (shallow) payloads.
+    #[test]
+    fn skip_accepts_nesting_at_depth_limit() {
+        let mut buf = alloc::vec![0x91u8; MAX_SKIP_DEPTH];
+        buf.push(0xc0); // innermost value: nil
+        let mut pos = 0;
+        skip(&buf, &mut pos).expect("nesting at the limit is accepted");
+        assert_eq!(pos, buf.len(), "fully consumed");
+    }
+
+    /// The budget is per nesting level, not per skipped value: a wide map of
+    /// shallow values must not exhaust it.
+    #[test]
+    fn skip_budget_is_per_level_not_per_value() {
+        let mut buf = alloc::vec![0x8fu8]; // fixmap, 15 entries
+        for i in 0..15u8 {
+            buf.push(0xa1); // fixstr len 1 (key)
+            buf.push(b'k');
+            buf.push(0x91); // fixarray len 1 (value)
+            buf.push(i); // positive fixint
+        }
+        let mut pos = 0;
+        skip(&buf, &mut pos).expect("a wide but shallow container is accepted");
+        assert_eq!(pos, buf.len(), "fully consumed");
+    }
+
+    /// `raw` shares `skip`'s bound, so the depth cap also covers the
+    /// field-collecting decode paths (`Message::decode_payload`,
+    /// `propagation` metadata) that use it.
+    #[test]
+    fn raw_inherits_the_depth_bound() {
+        let mut buf = alloc::vec![0x91u8; 100_000];
+        buf.push(0x90);
+        let mut pos = 0;
+        assert_eq!(raw(&buf, &mut pos).err(), Some(Error::Depth));
+    }
 }

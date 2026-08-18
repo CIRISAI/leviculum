@@ -16,8 +16,9 @@ use crate::resource::window::{RateSample, WindowPolicy, WindowState};
 use crate::resource::{
     ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus, HASHMAP_IS_EXHAUSTED,
     HASHMAP_IS_NOT_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
-    PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, RESOURCE_MAX_RETRIES,
-    RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY, RETRY_GRACE_TIME_MS,
+    PART_TIMEOUT_FACTOR_INITIAL, PER_RETRY_DELAY_MS, RESOURCE_MAX_EFFICIENT_SIZE,
+    RESOURCE_MAX_RETRIES, RESOURCE_RANDOM_HASH_SIZE, RESOURCE_WINDOW_FLEXIBILITY,
+    RETRY_GRACE_TIME_MS,
 };
 
 use super::outgoing::ResourcePollResult;
@@ -98,16 +99,44 @@ impl IncomingResource {
             return Err(ResourceError::ResourceTooLarge);
         }
 
-        let num_parts = adv.num_parts;
+        // `d` is the total uncompressed size of the whole transfer, summed
+        // over all segments (Resource.py:1282 `self.d = resource.total_size`),
+        // so it is NOT bounded by the per-advertisement `max_size`. The
+        // reference does bound it against the segment count it advertises:
+        // `total_segments = ((total_size-1)//MAX_EFFICIENT_SIZE)+1`
+        // (Resource.py:296), i.e. `total_size <= l * MAX_EFFICIENT_SIZE`.
+        // Reject anything outside that. `l == 0` is treated as one segment,
+        // the way Python's `if adv.l > 1` treats it (Resource.py:203).
+        //
+        // This is a self-consistency check, not a security boundary: `l` is
+        // itself an unvalidated `u32` off the wire, so a hostile sender picks
+        // it large enough to saturate the product and make the comparison
+        // vacuous. It costs nothing, because nothing sizes an allocation from
+        // `l` either; the gate that actually bounds decompression is the
+        // unconditional `MAX_DECOMPRESS_HINT` clamp in `bz2_decompress`.
+        let advertised_segments = adv.total_segments.max(1) as u64;
+        let max_data_size = advertised_segments.saturating_mul(RESOURCE_MAX_EFFICIENT_SIZE as u64);
+        if adv.data_size > max_data_size {
+            return Err(ResourceError::InvalidAdvertisement);
+        }
 
-        // Validate num_parts consistency: can't have more parts than
-        // ceil(transfer_size / sdu). Prevents num_parts-based OOM with
-        // small transfer_size (two vec![None; num_parts] allocations).
-        if sdu > 0 {
-            let max_parts = (adv.transfer_size as usize).div_ceil(sdu).max(1);
-            if num_parts as usize > max_parts {
-                return Err(ResourceError::InvalidAdvertisement);
-            }
+        // A link whose SDU is zero cannot carry resource parts at all, and
+        // deriving a part count from it would divide by zero.
+        if sdu == 0 {
+            return Err(ResourceError::InvalidRequest);
+        }
+
+        // Derive the part count from the size we just bounded, exactly as the
+        // reference does: `total_parts = ceil(size / sdu)` (Resource.py:187,
+        // computed from `adv.t`). Python never reads the advertisement's `n`
+        // at all, so a peer cannot size our allocations with it.
+        let num_parts = u32::try_from((adv.transfer_size as usize).div_ceil(sdu))
+            .map_err(|_| ResourceError::InvalidAdvertisement)?;
+
+        // `n` is still read off the wire, but only to reject an advertisement
+        // that contradicts itself. It never sizes an allocation.
+        if adv.num_parts > num_parts {
+            return Err(ResourceError::InvalidAdvertisement);
         }
 
         // Initialize hashmap from advertisement's hashmap_data
@@ -1249,6 +1278,108 @@ mod tests {
             Err(e) => panic!("expected InvalidAdvertisement, got {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
         }
+    }
+
+    /// Codeberg #263 item 2: the part count that sizes `parts` and `hashmap`
+    /// must be *derived* from the accepted transfer size, never taken from the
+    /// peer's `n` field. The reference does not read `n` at all
+    /// (Resource.py:187, `total_parts = ceil(size / sdu)`), so a truthful `t`
+    /// with a nonsense `n` still yields the correct part count.
+    #[test]
+    fn num_parts_is_derived_from_transfer_size_not_from_the_wire_field() {
+        let mut adv = make_test_adv(0, vec![0x11, 0x22, 0x33, 0x44]);
+        adv.transfer_size = 5 * 464; // five full SDUs
+
+        let (incoming, _) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .expect("a truthful transfer size is accepted");
+
+        assert_eq!(
+            incoming.num_parts, 5,
+            "part count follows ceil(transfer_size / sdu), not the advertised n"
+        );
+        assert_eq!(incoming.parts.len(), 5, "parts allocation follows it too");
+        assert_eq!(incoming.hashmap.len(), 5, "so does the hashmap allocation");
+    }
+
+    /// Codeberg #263 item 2: with the default ceiling in place, an
+    /// advertisement claiming a multi-gigabyte transfer is refused before any
+    /// allocation. Before `RESOURCE_MAX_INCOMING_SIZE` had a real value it was
+    /// `usize::MAX`, so this check never fired for any input.
+    #[test]
+    fn oversized_transfer_size_rejected_by_the_default_limit() {
+        use crate::resource::RESOURCE_MAX_INCOMING_SIZE;
+
+        let mut adv = make_test_adv(1, vec![0x11, 0x22, 0x33, 0x44]);
+        adv.transfer_size = u32::MAX as u64; // ~4 GiB claimed by the peer
+
+        let result = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            RESOURCE_MAX_INCOMING_SIZE,
+            WindowPolicy::Current,
+        );
+        match result {
+            Err(ResourceError::ResourceTooLarge) => {}
+            Err(e) => panic!("expected ResourceTooLarge, got {e}"),
+            Ok(_) => panic!("expected Err, got Ok"),
+        }
+    }
+
+    /// Codeberg #263 item 3: `data_size` (`d`) is the only advertisement field
+    /// that had no validation at all. It is the total across every segment, so
+    /// the reference's own segmentation arithmetic bounds it:
+    /// `total_segments = ((total_size-1)//MAX_EFFICIENT_SIZE)+1`
+    /// (Resource.py:296) means `d <= l * MAX_EFFICIENT_SIZE`.
+    #[test]
+    fn data_size_beyond_the_advertised_segment_count_rejected() {
+        let mut adv = make_test_adv(1, vec![0x11, 0x22, 0x33, 0x44]);
+        adv.total_segments = 1;
+        adv.data_size = RESOURCE_MAX_EFFICIENT_SIZE as u64 + 1;
+
+        let result = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            crate::resource::RESOURCE_MAX_INCOMING_SIZE,
+            WindowPolicy::Current,
+        );
+        match result {
+            Err(ResourceError::InvalidAdvertisement) => {}
+            Err(e) => panic!("expected InvalidAdvertisement, got {e}"),
+            Ok(_) => panic!("expected Err, got Ok"),
+        }
+    }
+
+    /// The counterpart: a split transfer legitimately advertises a `d` far
+    /// above one segment's worth, and every one of its advertisements must
+    /// still be accepted. The bound is per-transfer-total, not per-segment.
+    #[test]
+    fn data_size_of_a_legitimate_split_transfer_accepted() {
+        // Ten segments of a 10 MiB transfer: `d` is the full total in each.
+        let mut adv = make_test_adv(1, vec![0x11, 0x22, 0x33, 0x44]);
+        adv.total_segments = 10;
+        adv.segment_index = 4;
+        adv.data_size = 10 * RESOURCE_MAX_EFFICIENT_SIZE as u64;
+
+        IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            crate::resource::RESOURCE_MAX_INCOMING_SIZE,
+            WindowPolicy::Current,
+        )
+        .expect("a split transfer's total data size is not an oversized resource");
     }
 
     /// #159 tranche 2: pin the exhausted RESOURCE_REQ we generate as a

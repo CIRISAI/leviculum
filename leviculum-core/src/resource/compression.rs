@@ -43,15 +43,33 @@ pub(crate) fn bz2_compress(input: &[u8]) -> Result<Vec<u8>, ResourceError> {
     Ok(output)
 }
 
+/// Largest first-attempt output buffer `bz2_decompress` will size from its
+/// caller-supplied hint.
+///
+/// The hint comes from the advertisement's `data_size` field, which a peer
+/// chooses freely and which is the total across *all* segments of a split
+/// transfer, so it is neither trustworthy nor per-segment accurate. One
+/// segment's plaintext never exceeds `MAX_EFFICIENT_SIZE` (Resource.py:116,
+/// :296-313), so clamping here only ever shrinks an over-estimate; an
+/// under-estimate is absorbed by the retry-doubling loop below (Codeberg
+/// #263, item 3).
+#[cfg(feature = "compression")]
+const MAX_DECOMPRESS_HINT: usize = super::RESOURCE_MAX_EFFICIENT_SIZE;
+
 /// Decompress bzip2 data (matching Python's `bz2.decompress(data)`).
 ///
-/// `expected_size` is used as a hint for the output buffer size
-/// (from the advertisement's `data_size` field).
+/// `expected_size` is only a hint for the output buffer size (from the
+/// advertisement's `data_size` field). It is clamped to
+/// [`MAX_DECOMPRESS_HINT`] so an untrusted field can never size the
+/// allocation directly; the retry loop grows the buffer when the real output
+/// is larger.
 #[cfg(feature = "compression")]
 pub(crate) fn bz2_decompress(input: &[u8], expected_size: usize) -> Result<Vec<u8>, ResourceError> {
     use core::ffi::{c_char, c_int, c_uint};
 
-    // Start with expected size + margin, retry with larger buffer if needed
+    // Start with the (clamped) expected size + margin, retry with a larger
+    // buffer if needed.
+    let expected_size = expected_size.min(MAX_DECOMPRESS_HINT);
     let mut buf_size = expected_size.saturating_add(expected_size / 10).max(1024);
 
     for _ in 0..4 {
@@ -108,6 +126,39 @@ mod tests {
             compressed.len(),
             data.len()
         );
+    }
+
+    /// Codeberg #263 item 3: a hostile `data_size` must not size the output
+    /// buffer. The hint is clamped, so a peer claiming a 4 GiB decompressed
+    /// size gets a bounded first allocation (and, since the payload is not
+    /// really that large, a plain error rather than an out-of-memory abort).
+    #[test]
+    fn decompress_hint_is_clamped() {
+        let data = vec![0x42u8; 4096];
+        let compressed = bz2_compress(&data).unwrap();
+
+        // The hint the peer would have chosen for us, pre-fix, was used raw.
+        let decompressed = bz2_decompress(&compressed, usize::MAX).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    /// Verifies the claim the clamp rests on: the retry-doubling loop absorbs
+    /// an under-estimated hint, so a resource whose real decompressed size
+    /// exceeds the clamp still transfers correctly.
+    #[test]
+    fn decompress_output_larger_than_the_clamp_still_succeeds() {
+        // Compressible payload well past MAX_DECOMPRESS_HINT.
+        let mut data = vec![0u8; 3 * MAX_DECOMPRESS_HINT];
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+        let compressed = bz2_compress(&data).unwrap();
+
+        // Both the hostile over-estimate and a truthful hint end up clamped to
+        // the same starting buffer, which is smaller than the real output.
+        let decompressed = bz2_decompress(&compressed, usize::MAX).unwrap();
+        assert_eq!(decompressed.len(), data.len());
+        assert_eq!(decompressed, data);
     }
 
     #[test]

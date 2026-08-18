@@ -58,11 +58,35 @@ pub const RESOURCE_RANDOM_HASH_SIZE: usize = 4;
 /// Maximum efficient resource size: fits in 3-byte length encoding (0xFFFFFF).
 pub const RESOURCE_MAX_EFFICIENT_SIZE: usize = 1_048_575;
 
-/// Maximum incoming resource size in bytes. Resources larger than this
-/// are rejected at advertisement time, before any allocation.
-/// Default: usize::MAX (no limit, preserves Python-parity behavior).
-/// Set lower on embedded via NodeCoreBuilder::max_incoming_resource_size().
-pub const RESOURCE_MAX_INCOMING_SIZE: usize = usize::MAX;
+/// Maximum encrypted transfer size (advertisement `t` field) accepted from a
+/// peer, in bytes. Checked before any allocation, in
+/// `IncomingResource::from_advertisement`.
+///
+/// This is a **per-advertisement** ceiling, not a per-transfer one. Derived
+/// from the reference rather than picked for roundness:
+///
+/// - `Resource.__init__` segments *before* compression at `MAX_EFFICIENT_SIZE`
+///   (Resource.py:116, 1 MiB - 1). A bytes payload above it is spilled to a
+///   temporary file (:274-279) and read back one `MAX_EFFICIENT_SIZE` slice
+///   per segment (:296-313), so a single segment's plaintext never exceeds
+///   that ceiling. A larger transfer arrives as more segments, each with its
+///   own advertisement.
+/// - The sender prepends a 4-byte random hash (:405-412) and token-encrypts
+///   the segment (:427), adding `TOKEN_OVERHEAD` (IV + HMAC) plus at most one
+///   full AES padding block (`Link::encrypted_size`).
+///
+/// A stock Python sender therefore cannot emit a `t` above this sum
+/// (1_048_643); anything larger is malformed or hostile. Before this had a
+/// real value, `usize::MAX` meant the size check never fired and a peer chose
+/// our allocation sizes (Codeberg #263).
+///
+/// Callers who talk to a peer that segments more coarsely can raise it — and
+/// embedded targets lower it — via
+/// `NodeCoreBuilder::max_incoming_resource_size()`.
+pub const RESOURCE_MAX_INCOMING_SIZE: usize = RESOURCE_MAX_EFFICIENT_SIZE
+    + RESOURCE_RANDOM_HASH_SIZE
+    + crate::constants::TOKEN_OVERHEAD
+    + crate::constants::AES_BLOCK_SIZE;
 
 /// Maximum metadata size (16 MiB - 1).
 pub const RESOURCE_METADATA_MAX_SIZE: usize = 16 * 1024 * 1024 - 1;
@@ -863,5 +887,30 @@ mod tests {
     fn test_collision_guard_size_constant() {
         // 2 * 75 + 74 = 224
         assert_eq!(COLLISION_GUARD_SIZE, 2 * RESOURCE_WINDOW_MAX_FAST + 74);
+    }
+
+    /// Codeberg #263 item 2: the default incoming-size ceiling must not refuse
+    /// anything a stock Python sender can emit. The largest single
+    /// advertisement it can produce carries one full segment's plaintext
+    /// (`MAX_EFFICIENT_SIZE`, Resource.py:116 and the `MAX_EFFICIENT_SIZE`
+    /// slice read at :296-313) plus the 4-byte random hash (:405-412), token-
+    /// encrypted (:427). Anything below that sum would be an interop break
+    /// traded for a denial of service, which is not a fix.
+    #[test]
+    fn default_incoming_limit_admits_the_largest_python_advertisement() {
+        let largest_plaintext = RESOURCE_MAX_EFFICIENT_SIZE + RESOURCE_RANDOM_HASH_SIZE;
+        let largest_on_the_wire = crate::link::Link::encrypted_size(largest_plaintext);
+
+        assert!(
+            largest_on_the_wire <= RESOURCE_MAX_INCOMING_SIZE,
+            "default ceiling {RESOURCE_MAX_INCOMING_SIZE} refuses a stock Python \
+             segment of {largest_on_the_wire} wire bytes"
+        );
+        const {
+            assert!(
+                RESOURCE_MAX_INCOMING_SIZE < usize::MAX,
+                "an unbounded ceiling lets a peer choose our allocation size"
+            )
+        };
     }
 }

@@ -195,6 +195,7 @@ impl From<msgpack::Error> for PropagationError {
             msgpack::Error::Type => Self::InvalidType,
             msgpack::Error::Overflow => Self::Overflow,
             msgpack::Error::Trailing => Self::TrailingData,
+            msgpack::Error::Depth => Self::InvalidType,
         }
     }
 }
