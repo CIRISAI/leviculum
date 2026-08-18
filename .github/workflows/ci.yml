@@ -59,6 +59,13 @@ jobs:
         with:
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-musl
+      # See the note on the embedded lane: rust-toolchain.toml pins the
+      # compiler, so the action's `components:` land on `stable` while
+      # cargo runs the pinned toolchain — which arrives with a minimal
+      # profile and no cargo-fmt/cargo-clippy. Add them from inside the
+      # repo so they land where the gate actually runs.
+      - name: rustup component add clippy rustfmt (on the pinned toolchain)
+        run: rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -166,6 +173,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins the compiler (upstream f00e4bbf), and rustup
+      # honours that pin for every cargo/rustup call made inside the repo — so
+      # the toolchain action's `targets:` installs into `stable` while the
+      # build then runs on the pinned toolchain, which carries only the musl
+      # target the pin lists. Add the target explicitly, from inside the repo,
+      # so it lands on the toolchain that actually compiles.
+      - name: rustup target add ${{ matrix.target }} (on the pinned toolchain)
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: embedded-${{ matrix.target }}
@@ -192,6 +207,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins the compiler (upstream f00e4bbf), and rustup
+      # honours that pin for every cargo/rustup call made inside the repo — so
+      # the toolchain action's `targets:` installs into `stable` while the
+      # build then runs on the pinned toolchain, which carries only the musl
+      # target the pin lists. Add the target explicitly, from inside the repo,
+      # so it lands on the toolchain that actually compiles.
+      - name: rustup target add ${{ matrix.target }} (on the pinned toolchain)
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: cross-check-${{ matrix.target }}
