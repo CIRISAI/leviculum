@@ -367,20 +367,53 @@ fn resolve_lt_alock(airtime_limit_long: Option<f64>, frequency: u32) -> Option<u
     }
 }
 
+/// The IFAC size an interface type falls back to when the config names no
+/// `ifac_size`, mirroring each Python class's `DEFAULT_IFAC_SIZE`.
+///
+/// This is not a stylistic preference: the size fixes the length of the access
+/// code on every packet, so two peers that disagree reject each other's frames
+/// outright — a silent, un-diagnosable dead link rather than a degraded one
+/// (Codeberg #293). The grouping is therefore pinned type-by-type against the
+/// reference in `test_default_ifac_size_matches_python_reference`, not inferred
+/// from the transport medium.
+///
+/// Byte-serial family (8): `AX25KISSInterface.py:70`, `KISSInterface.py:63`,
+/// `PipeInterface.py:57`, `RNodeInterface.py:110`,
+/// `RNodeMultiInterface.py:137`, `SerialInterface.py:53`.
+/// Network family (16): `AutoInterface.py:50`, `I2PInterface.py:839`,
+/// `TCPInterface.py:77` (client) and `:454` (server), `UDPInterface.py:42`.
+/// `BackboneInterface` / `BackboneClientInterface` need no arm: `ini_config`
+/// rewrites them to `TCPServerInterface` / `TCPClientInterface` before the
+/// driver sees them, and upstream all four are 16 (`BackboneInterface.py:54`,
+/// `:508`), so the rewrite cannot change the answer.
+fn default_ifac_size(interface_type: &str) -> usize {
+    match interface_type {
+        "AX25KISSInterface"
+        | "KISSInterface"
+        | "PipeInterface"
+        | "RNodeInterface"
+        | "RNodeMultiInterface"
+        | "SerialInterface" => leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL,
+        "AutoInterface" | "I2PInterface" | "TCPClientInterface" | "TCPServerInterface"
+        | "UDPInterface" => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+        // Deliberate default, not a fall-through: an unrecognised type is one
+        // we do not build (`interface_build::build` warns and self-manages), or
+        // a future addition. 16 is the safer of the two — it matches every
+        // network-family class upstream, and the byte-serial exception is a
+        // closed, hand-maintained list. A new type landing here silently takes
+        // 16; the pinning test is what forces it to be classified on purpose.
+        _ => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+    }
+}
+
 /// Build an IfacConfig from interface configuration, if IFAC params are present.
 fn build_ifac_config(config: &InterfaceConfig) -> Option<leviculum_core::ifac::IfacConfig> {
     if config.networkname.is_none() && config.passphrase.is_none() {
         return None;
     }
-    let default_size = match config.interface_type.as_str() {
-        // Serial-family interfaces (incl. Pipe) default to the 8-byte IFAC
-        // size upstream (PipeInterface.DEFAULT_IFAC_SIZE = 8).
-        "RNodeInterface" | "PipeInterface" | "KISSInterface" | "AX25KISSInterface" => {
-            leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL
-        }
-        _ => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
-    };
-    let size = config.ifac_size.unwrap_or(default_size);
+    let size = config
+        .ifac_size
+        .unwrap_or_else(|| default_ifac_size(&config.interface_type));
     match leviculum_core::ifac::IfacConfig::new(
         config.networkname.as_deref(),
         config.passphrase.as_deref(),
@@ -5128,6 +5161,75 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codeberg #293: pin `DEFAULT_IFAC_SIZE` for **every** interface type we
+    /// build, so a newly supported type has to be classified deliberately
+    /// instead of inheriting 16 from the fall-through arm.
+    ///
+    /// Why a whole-table pin and not two added names: an IFAC size mismatch is
+    /// not a degradation, it is total rejection of the peer's frames in both
+    /// directions, with no error naming the cause. The failure is
+    /// indistinguishable from "the link never came up". Every entry below is
+    /// quoted from `reference/Reticulum` (RNS 1.3.5) at the cited line.
+    #[test]
+    fn test_default_ifac_size_matches_python_reference() {
+        // Every interface type `interface_build::build` dispatches on, plus the
+        // Backbone aliases and the unrecognised case, with the reference line
+        // each expectation is quoted from.
+        //
+        // Backbone never actually reaches `default_ifac_size` — `ini_config::
+        // normalize_backbone_interface` rewrites it to the TCP types first —
+        // but upstream all four classes are 16, so the rewrite is lossless for
+        // IFAC purposes and asserting it keeps that true.
+        //
+        // WeaveInterface we do not build; it is here because upstream's value
+        // is 16, so if it is ever added the fall-through happens to be right —
+        // a fact worth recording rather than rediscovering.
+        let table: &[(&str, usize, &str)] = &[
+            ("AX25KISSInterface", 8, "AX25KISSInterface.py:70"),
+            ("KISSInterface", 8, "KISSInterface.py:63"),
+            ("PipeInterface", 8, "PipeInterface.py:57"),
+            ("RNodeInterface", 8, "RNodeInterface.py:110"),
+            ("RNodeMultiInterface", 8, "RNodeMultiInterface.py:137"),
+            ("SerialInterface", 8, "SerialInterface.py:53"),
+            ("AutoInterface", 16, "AutoInterface.py:50"),
+            ("I2PInterface", 16, "I2PInterface.py:839"),
+            ("TCPClientInterface", 16, "TCPInterface.py:77"),
+            ("TCPServerInterface", 16, "TCPInterface.py:454"),
+            ("UDPInterface", 16, "UDPInterface.py:42"),
+            ("BackboneInterface", 16, "BackboneInterface.py:54"),
+            ("BackboneClientInterface", 16, "BackboneInterface.py:508"),
+            ("WeaveInterface", 16, "WeaveInterface.py:838"),
+            (
+                "SomeInterfaceInventedTomorrow",
+                16,
+                "deliberate `_` default",
+            ),
+        ];
+
+        // Collected rather than asserted per row: a whole-table pin is only
+        // useful if one wrong entry does not hide the rest.
+        let wrong: Vec<String> = table
+            .iter()
+            .filter(|(iface, expected, _)| default_ifac_size(iface) != *expected)
+            .map(|(iface, expected, cited)| {
+                format!(
+                    "{iface}: got {}, want {expected} per {cited}",
+                    default_ifac_size(iface)
+                )
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "IFAC default size diverges from the Python reference:\n  {}",
+            wrong.join("\n  ")
+        );
+
+        // Guard the constants themselves, so the table above cannot be
+        // satisfied by both families collapsing onto one value.
+        assert_eq!(leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL, 8);
+        assert_eq!(leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK, 16);
+    }
 
     /// Codeberg #55: the EU lawful-by-default derives `lt_alock` from the TX
     /// frequency only when `airtime_limit_long` is absent; an explicit value
