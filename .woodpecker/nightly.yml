@@ -101,6 +101,40 @@ clone:
       submodules: false
 
 steps:
+  # Codeberg #266: this pipeline published .debs to strangers without ever
+  # running a test. It is first because that is the whole point — steps run
+  # serially in file order, and a non-zero exit here terminates the workflow,
+  # so build, package and publish are never reached with a red commit. The two
+  # cron-only steps below do NOT escape that: their `when:` sets no `status:`,
+  # and the default is success-only (Woodpecker 3.17 workflow syntax, the
+  # version ci.codeberg.org runs: "By default, steps only run when the workflow
+  # has succeeded up to that point, which is equivalent to status: [success]").
+  #
+  # The gate itself is `just ci-gate`, defined in the Justfile — see the note
+  # in build-amd64 below on why the commands are not spelled out here. What is
+  # left in this step is provisioning, every line of it forced rather than
+  # chosen:
+  #   musl-tools — .cargo/config.toml builds everything for
+  #     x86_64-unknown-linux-musl, and ring's build script (rustls, via the
+  #     lblogd/lnomad dependency graph) needs a musl C compiler. Without it the
+  #     gate dies in cc-rs long before it lints anything.
+  #   rustfmt + clippy — rust:bookworm ships neither component.
+  #   just — not packaged in Debian bookworm; `cargo install` is how this file
+  #     already gets cargo-deb and flip-link. ~45 s.
+  #   reference/Reticulum — the clone above skips submodules, but lnomad's
+  #     renderer tests include_str! its README.mu (lnomad/src/render.rs:1496),
+  #     so without it lnomad's lib tests do not compile and the crate this
+  #     pipeline publishes contributes zero tests to its own gate. --depth 1,
+  #     one submodule of four, ~5 s.
+  gate:
+    image: rust:bookworm
+    commands:
+      - apt-get update && apt-get install -y musl-tools
+      - rustup component add rustfmt clippy
+      - cargo install --locked just
+      - git submodule update --init --depth 1 reference/Reticulum
+      - just ci-gate
+
   build-amd64:
     image: rust:bookworm
     commands:

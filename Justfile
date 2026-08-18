@@ -212,6 +212,47 @@ fast: check-submodules check-trailers check-supervised-spawns check-processor-se
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
 
+# The gate .woodpecker/nightly.yml runs before it builds anything it publishes
+# (Codeberg #266). Until it existed, nothing between a commit landing on master
+# and a .deb appearing on the public releases page executed a single test: the
+# pre-push hook is per-clone local config, and `--no-verify` skips it.
+#
+# NOT an alias for `fast`, because `fast` cannot run in that pipeline's
+# container, and not for want of a package:
+#   check-submodules      — the pipeline clones with `submodules: false`
+#                           (nightly.yml:96-101), so every pin is "missing".
+#   lint-nrf              — leviculum-nrf is its own workspace, needs the
+#                           thumbv7em target plus flip-link as its linker.
+#   nrf-stack-frames      — reads a linked firmware ELF that is never built here.
+#   m0-build-gate,
+#   lxmf-embedded-gate    — thumbv6m / thumbv7em cross-compiles.
+# Those keep running on the push path, which has the targets and the submodules.
+# What is left is what a submodule-less host-target container can actually
+# prove, and it is the majority of the suite: fmt, clippy, a compile check of
+# every workspace target (#220 — `--lib` gates were green on a tree where eight
+# integration-test targets did not build), and the ~3050 workspace lib tests.
+#
+# It is a recipe rather than four lines of YAML for the reason nightly.yml
+# records at :157-160 for the .deb build: a second copy in the pipeline file
+# drifts from the gate developers run, and the drift is found the same way.
+#
+# Measured cold (fresh rust:bookworm, empty target dir and cargo registry,
+# 4 cores) on 2026-08-18: 2m12s for the four lines below, 3051 tests executed
+# across 10 units. The step's provisioning — musl-tools, the rustfmt and clippy
+# components, `cargo install just`, one shallow submodule — costs 1m11s on top,
+# so the pipeline pays 3m23s to stop shipping untested .debs.
+#
+# `clippy --workspace` and not `--all-targets`: the latter reaches test code,
+# where three `useless_borrows_in_formatting` findings are waiting (rust 1.97,
+# which is what `channel = "stable"` resolves to in a fresh container while
+# this host is on 1.95). Worth fixing, then worth widening — as a red gate on
+# day one it would only teach people to skip the gate.
+ci-gate:
+    cargo fmt --all -- --check
+    cargo clippy --workspace -- -D warnings
+    cargo check --workspace --all-targets
+    {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
+
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this
 # automatically: it is typed once per batch. A post-commit hook detached it
 # after every commit until 2026-08-07 — a commit is not a unit anyone wants
