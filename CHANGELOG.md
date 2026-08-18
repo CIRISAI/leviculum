@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
-## [Unreleased] — CIRIS fork
+## [0.20.0+ciris.1] — CIRIS fork
 
 ### Added
 
@@ -36,6 +36,43 @@ existed, kept as its proof):
 
 Requested by CIRISEdge#499 (scope-native destination hashes derived per MLS
 `(group, epoch)`, rotated make-before-break — the seal phase needs this).
+
+### Security
+
+**h2 bumped 0.4.15 → 0.4.16 for RUSTSEC-2026-0258** (unbounded empty DATA
+frames — a remote resource-exhaustion vector). Lockfile-only. h2 reaches this
+workspace solely through `lblogd` → axum → hyper; **`leviculum-core` and
+`leviculum-std` do not depend on it**, so nothing a downstream consumer of the
+mesh crates links against was exposed. Caught by the fork's `cargo deny` lane.
+
+### Changed — catch-up to upstream master @ `f00e4bbf` (+4)
+
+Two of the four are hardening this fork inherits directly:
+
+- **peers no longer size our allocations** (`resource`, `lxmf`): a
+  wire-supplied length can no longer drive a reservation, which is the
+  allocation-exhaustion vector a relay is most exposed to — it carries
+  strangers' framing by definition. Relevant to the relay safety envelope
+  tracked in leviculum#48;
+- **wire-supplied lengths are bounded on 32-bit hosts, and the HDLC frame
+  with them** — the same class one layer down, across the serial/pipe/TCP/
+  local interfaces.
+
+Upstream also **pinned the compiler** (`rust-toolchain.toml`, `1.97.1`) because
+embedded frame sizes move with codegen and an unattributable move is worse
+than a scheduled bump.
+
+**Fork CI fix required by that pin.** `rust-toolchain.toml` governs every
+cargo/rustup call made inside the repo, so `dtolnay/rust-toolchain@stable`'s
+`targets:` input was installing targets into `stable` while the build then ran
+on the pinned toolchain — which carries only the musl target the pin lists.
+Reproduced locally as `can't find crate for core / the thumbv6m-none-eabi
+target may not be installed`, and on CI one layer over as `'cargo-fmt' is not
+installed for the toolchain '1.97.1'` — the pinned toolchain arrives with a
+minimal profile, so the action's `components:` were landing on `stable` too.
+The embedded, cross-check and lint lanes now run an explicit `rustup target
+add` / `rustup component add` from inside the repo, so what the gate needs
+lands on the toolchain that actually runs. Whole gate re-verified on 1.97.1.
 
 ## [0.19.0+ciris.1] — CIRIS fork
 
