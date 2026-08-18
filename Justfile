@@ -122,6 +122,53 @@ lxmf-embedded-gate:
     rustup target add thumbv7em-none-eabihf
     cargo build -p leviculum-lxmf --target thumbv7em-none-eabihf --no-default-features
 
+# Codeberg #303: run the leviculum-core lib suite on a 32-bit `usize`.
+#
+# NOT a firmware test. The target is i686 x86 Linux with std and an
+# allocator; the ONE property it shares with thumbv7em-none-eabihf is
+# `usize == u32`. Alignment, endianness-independent layout, the absent
+# allocator, no_std and the SoftDevice are all different, and a green run
+# here says nothing about any of them. What it does cover is the class of
+# defect where a wire-supplied length is added to an offset: on 64-bit that
+# arithmetic cannot wrap, so every host gate is blind to it, and #267 was
+# invisible for the project's lifetime for exactly that reason — a
+# `*pos + len > data.len()` guard in resource/msgpack.rs that a peer could
+# wrap below `data.len()` with one packet after a link handshake.
+#
+# Both profiles, because they fail on different inputs:
+#   debug   — overflow-checks on, so the ADDITION traps. Catches a wrap even
+#             when the wrapped sum would land harmlessly inside the buffer
+#             and never reach a bad slice.
+#   release — overflow-checks off (see [profile.release] in Cargo.toml: it
+#             does not set them), so the wrap happens and the SLICE panics.
+#             That is the shipped failure mode, and it is also the only arm
+#             that sees a truncation the debug trap cannot — `len as usize`
+#             from a u64, or a deliberate `wrapping_add`, do not trap.
+# Injecting the pre-#267 guard back into `take` on 2026-08-18 confirmed both
+# arms fail on it and the x86_64 run stays green: debug panicked "attempt to
+# add with overflow" at the addition, release "slice index starts at 5 but
+# ends at 0" at the slice.
+#
+# Env vars rather than a `[target.i686-unknown-linux-musl]` section in
+# .cargo/config.toml: a section there also changes what a bare `cargo build
+# --target i686-...` does for everyone, and this gate should not own that.
+# rust-toolchain.toml's `targets` stays as it is for the same reason the
+# embedded triples are not in it — the download is forced on every checkout
+# instead of on whoever runs the gate. The `rustup target add` below is how
+# m0-build-gate and lxmf-embedded-gate already handle it, so a pin bump
+# self-heals here. Measured on schneckenschreck 2026-08-18: 7.2 s wall warm
+# (4.4 s debug execution + 0.6 s release); cold, with the target already
+# fetched, ~53 s for the two i686 builds of the crate and its deps — once
+# per host per toolchain.
+i686-usize-gate:
+    rustup target add i686-unknown-linux-musl
+    CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+    CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=yes" \
+    {{manifest}} i686-usize-debug -- cargo test -p leviculum-core --target i686-unknown-linux-musl --lib
+    CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+    CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-self-contained=yes" \
+    {{manifest}} i686-usize-release -- cargo test -p leviculum-core --target i686-unknown-linux-musl --release --lib
+
 # Guarantee C step 1 (docs/src/concepts/checks-and-citations.md): the four
 # vendored references must sit at the commit their gitlink names. One wrong
 # fact — `reference/LXMF` twelve commits behind for five weeks — silently
@@ -205,9 +252,10 @@ check-all-targets:
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
 # gates + a compile check of every workspace target (#220) + workspace lib
-# tests + the citation guard + the process-supervision pair (census over the
-# sources, proof against the kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate check-all-targets citation-guard
+# tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
+# the process-supervision pair (census over the sources, proof against the
+# kernel).
+fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
