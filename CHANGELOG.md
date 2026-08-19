@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.21.0+ciris.1] — CIRIS fork
+
+### Documented — the request/response contract (leviculum#55)
+
+leviculum#55 asked for `send_response` to be forwarded onto the std driver.
+**It already is**: `ReticulumNode::send_response`, next to
+`send_response_resource` and `send_file_response`, public on the same `impl`
+as `register_request_handler` and present at the tag the issue cites. A crate
+holding an `Arc<ReticulumNode>` compiles a call to it. Nothing was blocked —
+but a careful consumer searched for it and concluded it was missing, and had
+no stated contract to build a serve path against. Both halves of that are
+now fixed:
+
+- **Findability.** `NodeEvent::RequestReceived`'s doc said "call
+  `send_response()`" without saying *where* it lives; it now names both
+  `NodeCore::send_response` and the async `ReticulumNode::send_response`,
+  plus `send_response_resource` for bodies past the link MDU.
+- **Contract.** The two questions #55 raised are answered by measurement, on
+  the method's own doc and pinned by
+  `leviculum-std/tests/request_response_contract.rs`:
+  - **`Ok(())` means handed to the link, not delivered.** If the peer has
+    vanished but the node has not yet processed the link's death, the reply
+    is accepted and goes nowhere — no layer here can promise otherwise.
+  - **Once the link is known dead, a reply is refused** with
+    `RequestError::LinkNotFound` rather than silently accepted, so a serve
+    loop that outlives its peers gets a typed signal as soon as one exists.
+  - **Replying twice for one `request_id` is accepted**, so a retrying
+    responder needs no bookkeeping to stay safe (the requester may then see
+    the response more than once).
+
+### Changed — catch-up to upstream master @ `352c6a62` (+3)
+
+**Per-interface IFAC size defaults** (upstream Codeberg #293): two peers that
+disagree on the access-code length reject each other's frames in both
+directions with nothing in either log naming the cause — an IFAC-protected
+link that "never came up". Upstream replaced a medium-inferred grouping with
+per-interface-type defaults checked against the reference. The fork's
+scoped-transit paths pass an explicit `ifac_size`, so the conformance harness
+is unaffected (6/6) — but deployments relying on the default should re-read
+it after this bump. Also: the 32-bit `usize` gate now covers the core suite,
+and no longer compiles out the compression module.
+
+### Security
+
+**h2 0.4.15 → 0.4.16 for RUSTSEC-2026-0258** re-applied — the rebase takes
+upstream's lockfile, which reverts it. Lockfile only; h2 enters solely via
+`lblogd` → axum → hyper, not `leviculum-core`/`leviculum-std`. Worth a
+standing check each sync until upstream's own tree carries the bump.
+
 ## [0.20.0+ciris.1] — CIRIS fork
 
 ### Added
