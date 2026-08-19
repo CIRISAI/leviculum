@@ -2978,9 +2978,32 @@ impl ReticulumNode {
         Ok(request_id)
     }
 
-    /// Send a response to a received request.
+    /// Answer a [`NodeEvent::RequestReceived`] — the reply half of
+    /// [`register_request_handler`](Self::register_request_handler). Pass the
+    /// `link_id` and `request_id` the event carried.
     ///
-    /// `response_data` must be exactly one valid msgpack-encoded value.
+    /// `response_data` must be exactly one valid msgpack-encoded value. If it
+    /// does not fit the link MDU this returns
+    /// [`RequestError::PayloadTooLarge`](leviculum_core::RequestError); answer
+    /// oversized bodies with
+    /// [`send_response_resource`](Self::send_response_resource).
+    ///
+    /// # What the outcome means (leviculum#55, pinned by
+    /// `tests/request_response_contract.rs`)
+    ///
+    /// - **`Ok(())` means handed to the link, NOT delivered.** If the peer
+    ///   has vanished but this node has not yet processed the link's death,
+    ///   the reply is accepted here and goes nowhere. A responder must not
+    ///   read `Ok` as proof the requester got the bytes — nothing at this
+    ///   layer can promise that.
+    /// - **Once the link is known dead** (closed here, or a `LinkClosed`
+    ///   processed) a reply is refused with
+    ///   [`RequestError::LinkNotFound`](leviculum_core::RequestError) rather
+    ///   than silently accepted — so a serve loop that outlives its peers
+    ///   gets a typed signal as soon as one is available.
+    /// - **Replying twice for one `request_id` is accepted**, not an error:
+    ///   a retrying responder needs no bookkeeping to stay safe, though the
+    ///   requester may then see the response more than once.
     pub async fn send_response(
         &self,
         link_id: &LinkId,
