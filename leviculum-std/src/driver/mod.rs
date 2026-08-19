@@ -200,6 +200,14 @@ struct EventSink {
     /// was delivered. Surfaced (and reset) by `flush_overflow` once the
     /// control channel has room.
     control_dropped: u64,
+    /// Next `control_dropped` value at which a per-drop warn is emitted —
+    /// a doubling ladder (leviculum#60). One WARN per dropped event buried
+    /// the aggregate `CONTROL_PLANE_OVERFLOW` marker 30:1 in the field
+    /// (1014 near-identical lines in 2000), which is the opposite of what a
+    /// saturating node needs from its logs. The count itself is never lost:
+    /// every drop still increments `control_dropped`, and the marker carries
+    /// the total.
+    control_warn_at: u64,
 }
 
 impl EventSink {
@@ -222,14 +230,23 @@ impl EventSink {
             Ok(()) => self.flush_overflow(),
             Err(TrySendError::Full(ev)) => {
                 self.control_dropped += 1;
-                // BUG-1 sibling: structured fields only, no trailing prose
-                // (the spaces would corrupt the canonical event-log line).
-                tracing::warn!(
-                    event = "EVENT_CHANNEL_FULL",
-                    queue_capacity = self.control_capacity,
-                    dropped_event_type = ev.variant_name(),
-                    pending_dropped = self.control_dropped,
-                );
+                // Log on a doubling ladder, not per drop (leviculum#60): the
+                // first drop is the signal an operator must not miss, and
+                // 1, 2, 4, 8 … keeps sustained loss visible without burying
+                // the aggregate marker. `pending_dropped` still carries the
+                // true total on every line that does survive.
+                if self.control_dropped >= self.control_warn_at {
+                    // BUG-1 sibling: structured fields only, no trailing prose
+                    // (the spaces would corrupt the canonical event-log line).
+                    tracing::warn!(
+                        event = "EVENT_CHANNEL_FULL",
+                        queue_capacity = self.control_capacity,
+                        dropped_event_type = ev.variant_name(),
+                        pending_dropped = self.control_dropped,
+                        next_report_at = self.control_warn_at.saturating_mul(2),
+                    );
+                    self.control_warn_at = self.control_warn_at.saturating_mul(2);
+                }
             }
             Err(TrySendError::Closed(ev)) => {
                 tracing::warn!(
@@ -256,6 +273,7 @@ impl EventSink {
             Ok(()) => {
                 tracing::warn!(event = "CONTROL_PLANE_OVERFLOW", dropped_count);
                 self.control_dropped = 0;
+                self.control_warn_at = 1;
             }
             // Still full: keep the count and try again on the next emit.
             Err(TrySendError::Full(_)) => {}
@@ -1502,6 +1520,7 @@ impl ReticulumNode {
                 data_tx,
                 control_capacity: self.control_channel_capacity,
                 control_dropped: 0,
+                control_warn_at: 1,
             }),
             // `without_events()` leaves both senders None.
             _ => None,
@@ -6197,6 +6216,7 @@ mod tests {
                 data_tx,
                 control_capacity: control_cap,
                 control_dropped: 0,
+                control_warn_at: 1,
             },
             EventReceiver {
                 control: control_rx,
