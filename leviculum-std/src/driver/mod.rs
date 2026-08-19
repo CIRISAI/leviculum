@@ -219,6 +219,12 @@ struct EventSink {
     /// order. Retried ahead of every later data event so a channel's sequence
     /// order is preserved (#280).
     reliable_pending: VecDeque<NodeEvent>,
+    /// Next drop count at which a per-drop warn is emitted — a doubling
+    /// ladder (leviculum#60). One WARN per dropped event buried the aggregate
+    /// `CONTROL_PLANE_OVERFLOW` marker 30:1 in the field (1014 near-identical
+    /// lines in 2000). The count itself is never lost: every drop still
+    /// increments `control_dropped`, and the marker carries the total.
+    control_warn_at: u64,
 }
 
 /// How soon the event loop comes back when the sink still holds a reliable
@@ -251,14 +257,28 @@ impl EventSink {
             Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
                 let pending = self.control_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                // BUG-1 sibling: structured fields only, no trailing prose
-                // (the spaces would corrupt the canonical event-log line).
-                tracing::warn!(
-                    event = "EVENT_CHANNEL_FULL",
-                    queue_capacity = self.control_capacity,
-                    dropped_event_type = ev.variant_name(),
-                    pending_dropped = pending,
-                );
+                // The receiver swaps the count to zero when it mints the
+                // overflow marker, so a count of one opens a new episode.
+                if pending == 1 {
+                    self.control_warn_at = 1;
+                }
+                // Log on a doubling ladder, not per drop (leviculum#60): the
+                // first drop is the signal an operator must not miss, and
+                // 1, 2, 4, 8 … keeps sustained loss visible without burying
+                // the aggregate marker. `pending_dropped` still carries the
+                // true total on every line that does survive.
+                if pending >= self.control_warn_at {
+                    // BUG-1 sibling: structured fields only, no trailing prose
+                    // (the spaces would corrupt the canonical event-log line).
+                    tracing::warn!(
+                        event = "EVENT_CHANNEL_FULL",
+                        queue_capacity = self.control_capacity,
+                        dropped_event_type = ev.variant_name(),
+                        pending_dropped = pending,
+                        next_report_at = self.control_warn_at.saturating_mul(2),
+                    );
+                    self.control_warn_at = self.control_warn_at.saturating_mul(2);
+                }
             }
             Err(TrySendError::Closed(ev)) => {
                 tracing::warn!(
@@ -1963,6 +1983,7 @@ impl ReticulumNode {
                 control_capacity: self.control_channel_capacity,
                 control_dropped: Arc::clone(&self.control_dropped),
                 reliable_pending: VecDeque::new(),
+                control_warn_at: 1,
             }),
             // `without_events()` leaves both senders None.
             _ => None,
@@ -7305,6 +7326,7 @@ mod tests {
                 control_capacity: control_cap,
                 control_dropped: Arc::clone(&control_dropped),
                 reliable_pending: VecDeque::new(),
+                control_warn_at: 1,
             },
             EventReceiver {
                 control: control_rx,
