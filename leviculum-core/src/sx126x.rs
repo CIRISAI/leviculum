@@ -278,6 +278,32 @@ pub fn pa_profile_dbm(requested_dbm: i8) -> i8 {
     chosen
 }
 
+/// Decode a LoRa `GetPacketStatus` (opcode 0x14) response into
+/// `(rssi_dbm, snr_db)`.
+///
+/// Datasheet §13.5.3, Table 13-77: byte 0 is `RssiPkt` in -0.5 dB steps,
+/// byte 1 is `SnrPkt` as a signed value in 0.25 dB steps. Byte 2
+/// (`SignalRssiPkt`, the RSSI of the despread signal) is not decoded here —
+/// no caller reads it yet.
+///
+/// Both results are rounded to whole dB. The rounding is the driver's
+/// historical one and is deliberately kept: `snr` adds 2 before dividing by 4,
+/// i.e. rounds half away from zero for positive values and towards zero for
+/// negative ones. Every SNR ever logged by an LNode used this, so changing it
+/// would put a step in the middle of the archived measurements.
+///
+/// Here rather than in the driver because the driver cross-compiles to
+/// `thumbv7em-none-eabihf` and has no host test target (see the module docs);
+/// this is arithmetic on three bytes and wants to be checked without a board.
+/// It is decoded on both the CRC-pass and the CRC-fail path, so a drift
+/// between the two would silently make the failing population look different
+/// from the passing one — which is exactly the comparison it exists for.
+pub fn packet_status_dbm(buf: [u8; 3]) -> (i16, i16) {
+    let rssi = -(buf[0] as i16) / 2;
+    let snr = ((buf[1] as i8) as i16 + 2) / 4;
+    (rssi, snr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +665,46 @@ mod tests {
         assert_eq!(pa_profile_dbm(0), 14);
         assert_eq!(pa_profile_dbm(-9), 14);
         assert_eq!(pa_profile_dbm(i8::MIN), 14);
+    }
+
+    /// A real `GetPacketStatus` response off the rig: `rssi=-21 snr=10` is a
+    /// line the T114 logged on 2026-08-19, and the two raw bytes that produce
+    /// it are what the driver used to decode inline.
+    #[test]
+    fn packet_status_decodes_a_reception_from_the_rig() {
+        // RssiPkt 42 = -21 dBm, SnrPkt 40 = +10.0 dB.
+        assert_eq!(packet_status_dbm([42, 40, 42]), (-21, 10));
+    }
+
+    /// A frame at the sensitivity limit — the population the CRC-error line
+    /// exists to characterise — is below the noise floor, so SnrPkt is
+    /// negative and must stay negative through the decode. An unsigned read
+    /// of that byte would report +54 dB.
+    #[test]
+    fn a_negative_snr_stays_negative() {
+        // SnrPkt 0xE0 = raw -32 = -8.0 dB; the +2 rounding reports -7.
+        assert_eq!(packet_status_dbm([250, 0xE0, 250]), (-125, -7));
+        // The extremes of the byte, so the sign handling is pinned at both
+        // ends: raw -128 is -32.0 dB and raw 127 is +31.75 dB.
+        assert_eq!(packet_status_dbm([0, 0x80, 0]).1, -31);
+        assert_eq!(packet_status_dbm([0, 0x7F, 0]).1, 32);
+    }
+
+    /// RSSI is reported in -0.5 dB steps, so the decode is monotonically
+    /// non-increasing in the raw byte and never positive. `SignalRssiPkt`
+    /// (byte 2) must not leak into either result.
+    #[test]
+    fn rssi_is_never_positive_and_ignores_the_third_byte() {
+        let mut prev = i16::MAX;
+        for raw in 0u8..=255 {
+            let (rssi, _) = packet_status_dbm([raw, 0, 0]);
+            assert!(rssi <= 0, "raw {raw} decoded to a positive RSSI {rssi}");
+            assert!(rssi <= prev, "raw {raw} is not monotonic");
+            prev = rssi;
+        }
+        assert_eq!(
+            packet_status_dbm([42, 40, 0]),
+            packet_status_dbm([42, 40, 255])
+        );
     }
 }

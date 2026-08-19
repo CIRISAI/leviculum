@@ -548,7 +548,26 @@ async fn rx_once(
                 "[T114_LORA_LOOP] ",
                 format_args!("op=rx_err duration_ms={}", rx_ms),
             );
-            crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e));
+            // A payload-CRC failure is the only RX error that carries a
+            // measurement, and it is the one we need numbers on: the frames
+            // that fail are exactly the frames a lossy link is made of
+            // (Codeberg #258). `len` comes out of the explicit header, which
+            // passed its own CRC, so it is the length the transmitter meant.
+            //
+            // There is no frequency-error field: the SX1262 exposes no FEI
+            // readout (see `sx1262::CrcErrFrame`), unlike the SX127x, so this
+            // line carries what the chip actually reports and nothing shaped
+            // to look like more.
+            match &e {
+                crate::sx1262::Error::Crc(frame) => crate::log::log_fmt(
+                    "[LORA] ",
+                    format_args!(
+                        "RX err: Crc len={} rssi={} snr={}",
+                        frame.len, frame.rssi, frame.snr
+                    ),
+                ),
+                _ => crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e)),
+            }
             // Radio error, treat as no reception.
             false
         }

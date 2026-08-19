@@ -61,13 +61,62 @@ pub struct RxStatus {
     pub snr: i16,
 }
 
+/// What a frame that failed its payload CRC looked like on the air.
+///
+/// The payload is discarded — it is corrupt by definition — but the reception
+/// itself is a measurement, and it is the measurement of the population we
+/// cannot otherwise see: a link that loses 60-100 % of its frames (Codeberg
+/// #258) is characterised entirely by the frames that fail, and until this
+/// existed they logged the word `Crc` and nothing else.
+///
+/// `len` is the payload length out of the explicit header. It is trustworthy
+/// on this path precisely because the header carries its own CRC: a frame
+/// whose header failed raises `HeaderErr`, never `RxDone`, so a `RxDone` with
+/// `CrcErr` means the header was decoded cleanly and only the payload is bad.
+///
+/// **No frequency error.** The obvious fourth field is the one #258 wants,
+/// and the SX1262 does not have it. Its packet-status readout
+/// (`GetPacketStatus`, opcode 0x14, datasheet Table 13-77) returns RssiPkt,
+/// SnrPkt and SignalRssiPkt, and there is no FEI command or register beside
+/// them — the SX127x's `RegFei` triplet has no counterpart on this part. The
+/// reference RNode firmware reaches the same conclusion in the open:
+/// `reference/RNode_Firmware/sx127x.cpp:258` computes the frequency error
+/// from those registers, while `reference/RNode_Firmware/sx126x.cpp:575` is a
+/// stub returning 0.0 with the comment "TODO: Implement this, no idea how to
+/// check it on the sx1262". A substitute quantity
+/// under the name `fei` would be worse than the gap.
+#[derive(Clone, Copy)]
+pub struct CrcErrFrame {
+    pub len: u8,
+    pub rssi: i16,
+    pub snr: i16,
+}
+
 /// SX1262 error type
-#[derive(Debug)]
 pub enum Error {
     Spi,
     Busy,
     Timeout,
-    Crc,
+    Crc(CrcErrFrame),
+}
+
+/// Hand-written so `Crc` keeps printing as the bare word it always did.
+///
+/// Several log lines interpolate this error with `{:?}` — `[T114_SX_ERR]
+/// error={:?}` is grepped out of rig captures — and a derive would have
+/// widened all of them into `Crc(CrcErrFrame { .. })` the day the variant
+/// grew a payload. The numbers belong in the one line that is meant to carry
+/// them (`[LORA] RX err: Crc len=..`), not in every line that mentions the
+/// error.
+impl core::fmt::Debug for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Error::Spi => "Spi",
+            Error::Busy => "Busy",
+            Error::Timeout => "Timeout",
+            Error::Crc(_) => "Crc",
+        })
+    }
 }
 
 /// Parsed SX1262 status byte
@@ -542,10 +591,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         let _status = self
             .read_command(opcode::GET_PACKET_STATUS, &mut buf)
             .await?;
-        Ok(RxStatus {
-            rssi: -(buf[0] as i16) / 2,
-            snr: ((buf[1] as i8) as i16 + 2) / 4,
-        })
+        let (rssi, snr) = irq::packet_status_dbm(buf);
+        Ok(RxStatus { rssi, snr })
     }
 
     /// Apply workaround 15.3: stop RTC after Rx with timeout (datasheet §15.3).
@@ -625,7 +672,25 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
         if flags & irq::IRQ_RX_DONE != 0 {
             if flags & irq::IRQ_CRC_ERR != 0 {
-                return Err(Error::Crc);
+                // Characterise the frame before dropping it (Codeberg #258).
+                // These are the same two commands the success path issues five
+                // lines below, at the same point in the sequence, so this costs
+                // one SPI transaction less than a good reception does: the
+                // corrupt payload is deliberately NOT read out of the buffer.
+                // Both are status reads of values the chip latched when the
+                // reception ended; neither waits on the air.
+                //
+                // `?` rather than a fallback value: if the SPI read itself
+                // fails, `Spi` is the honest error, and inventing an rssi to
+                // keep the CRC classification would put a fabricated number in
+                // the population this exists to measure.
+                let (len, _ptr) = self.get_rx_buffer_status().await?;
+                let status = self.get_packet_status().await?;
+                return Err(Error::Crc(CrcErrFrame {
+                    len,
+                    rssi: status.rssi,
+                    snr: status.snr,
+                }));
             }
             let (len, ptr) = self.get_rx_buffer_status().await?;
             let read_len = (len as usize).min(buf.len());
