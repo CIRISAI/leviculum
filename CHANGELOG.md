@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.22.0+ciris.1] — CIRIS fork
+
+First fixes from the live-canonical incident (CIRISEdge#508, filed here as
+leviculum#56–#60). Two land; one is answered with analysis; two are scoped.
+
+### Fixed
+
+**The completion mirror no longer evicts a live link (leviculum#56).**
+`ESTABLISHED_MIRROR_CAP` evicted FIFO over *live* entries, so the **oldest**
+link lost its completion first — and the oldest links are the long-lived
+canonical peers whose completions matter most. Observed in the field: 130
+live evictions, each silently degrading an `await_link_established` to
+"resolves only at `LinkClosed` or node stop". The comment justifying the cap
+("well above the realistic concurrent-link envelope") was falsified by
+production, and the trade was bad anyway: the mirror self-cleans on
+`LinkClosed`, so occupancy *is* the live set, and a `LinkId` is 16 bytes.
+
+The cap is now an **alarm, not an evictor**: 80% warns, the envelope logs an
+error, further growth reports on a doubling ladder, and nothing is ever
+dropped. Removing the FIFO `VecDeque` also deleted an O(n) scan taken under
+the registry lock on **every** link close — contention leviculum#58 measures
+was partly paying for eviction bookkeeping that should not have existed.
+
+**Control-plane drops log on a ladder, not per event (leviculum#60,
+property 1).** One WARN per dropped event produced 1014 near-identical lines
+in 2000, burying the `CONTROL_PLANE_OVERFLOW` marker — the one carrying the
+aggregate `dropped_count` — 30:1. Drops now log at 1, 2, 4, 8 … each line
+carrying the running total and naming the next report point; the ladder
+resets when the marker flushes, so a fresh episode warns from its first drop.
+No drop goes uncounted; only the repetition is gone.
+
+**Resource events are classified by what they carry, not by variant
+(leviculum#59).** `ResourceTransferStarted` + `ResourceCompleted` were **86%
+of everything dropped** from the 256-deep lossless plane on the saturating
+canonical (556 + 630), crowding out the link- and path-liveness events that
+plane exists for. Both were `Control` on the reasoning that "a dropped
+completion loses the outcome" — true for some of them:
+
+- **receiver-side `ResourceCompleted` stays `Control` at every segment** — its
+  `data` field *is* the delivered payload, so dropping one is silent data
+  loss, strictly worse than the flood it would relieve;
+- **sender-side final-segment `ResourceCompleted` stays `Control`** — the
+  transfer outcome, and what a consumer's completion await is waiting on;
+- **sender-side intermediate segments become `Data`** — progress on our own
+  upload, already covered by `ResourceProgress` and superseded by the final
+  completion;
+- **`ResourceTransferStarted` becomes `Data`** — acceptance was decided at
+  `ResourceAdvertised` (still `Control`) and the outcome arrives regardless.
+
+Completion futures are unaffected: the driver's registry observes events at
+dispatch, *before* the sink, so this changes what reaches a consumer's
+receiver and never what resolves an await.
+
+### Changed — catch-up to upstream master @ `3b52f66a` (+2)
+
+nRF/LoRa CRC-failure counters, and a tier-3 CI gate that keeps the integ
+binary list single-sourced. Neither touches the fork carry.
+
 ## [0.21.0+ciris.1] — CIRIS fork
 
 ### Documented — the request/response contract (leviculum#55)
