@@ -540,15 +540,49 @@ impl NodeEvent {
                 EventClass::Control
             }
 
-            // Resource transfers — advertise/started gate the transfer,
-            // completed/failed carry the outcome. One per transfer (or
-            // per segment) and control-critical: a dropped completion loses
-            // the outcome. The high-volume per-chunk progress tick is DATA
-            // (classified above).
-            NodeEvent::ResourceAdvertised { .. }
-            | NodeEvent::ResourceTransferStarted { .. }
-            | NodeEvent::ResourceCompleted { .. }
-            | NodeEvent::ResourceFailed { .. } => EventClass::Control,
+            // Resource transfers. `Advertised` gates acceptance and `Failed`
+            // carries an outcome no other event repeats, so both stay CONTROL.
+            NodeEvent::ResourceAdvertised { .. } | NodeEvent::ResourceFailed { .. } => {
+                EventClass::Control
+            }
+
+            // `TransferStarted` is informational: acceptance was already
+            // decided at `Advertised`, and the transfer's outcome arrives as
+            // `Completed`/`Failed` regardless. On a segmented stream it is
+            // per-segment volume, and on a saturating node it was crowding
+            // the link- and path-liveness events the lossless plane exists
+            // for (leviculum#59: `TransferStarted` + `Completed` were 86% of
+            // all control-plane drops). DATA.
+            NodeEvent::ResourceTransferStarted { .. } => EventClass::Data,
+
+            // `Completed` splits by what the event actually carries
+            // (leviculum#59):
+            //
+            //   * receiver side — `data` IS the delivered payload, so losing
+            //     one is silent data loss, which is strictly worse than the
+            //     flood it would relieve. CONTROL, always, every segment.
+            //   * sender side, final segment — the transfer's outcome, and
+            //     what a consumer's completion await is waiting on. CONTROL.
+            //   * sender side, intermediate segment — progress on our own
+            //     upload, already covered by `ResourceProgress` (DATA) and
+            //     superseded by the final completion. DATA.
+            //
+            // Note the driver's completion registry observes events at
+            // dispatch, BEFORE the sink, so this classification changes what
+            // reaches a consumer's receiver and never what resolves a
+            // completion future.
+            NodeEvent::ResourceCompleted {
+                is_sender,
+                segment_index,
+                total_segments,
+                ..
+            } => {
+                if !*is_sender || segment_index == total_segments {
+                    EventClass::Control
+                } else {
+                    EventClass::Data
+                }
+            }
 
             // Request/response — RequestReceived needs a reply, the rest carry
             // correlation state. One per request. CONTROL.
@@ -645,6 +679,46 @@ impl core::fmt::Display for DeliveryError {
 
 #[cfg(test)]
 mod tests {
+    /// leviculum#59 — resource-event classification splits by what the event
+    /// carries, not by its variant. Pinned because the wrong split here is
+    /// either silent data loss (dropping a receiver payload) or a control
+    /// plane flooded by our own upload progress.
+    #[test]
+    fn resource_completed_is_classified_by_what_it_carries() {
+        let completed = |is_sender: bool, seg: u32, total: u32| NodeEvent::ResourceCompleted {
+            link_id: LinkId::new([7u8; 16]),
+            resource_hash: [0u8; 32],
+            data: Vec::new(),
+            metadata: None,
+            is_sender,
+            segment_index: seg,
+            total_segments: total,
+        };
+
+        // Receiver side carries the delivered payload — never droppable, at
+        // any segment position.
+        assert_eq!(completed(false, 1, 4).event_class(), EventClass::Control);
+        assert_eq!(completed(false, 4, 4).event_class(), EventClass::Control);
+        // Sender side: the final segment is the transfer outcome...
+        assert_eq!(completed(true, 4, 4).event_class(), EventClass::Control);
+        assert_eq!(completed(true, 1, 1).event_class(), EventClass::Control);
+        // ...intermediate segments are progress on our own upload.
+        assert_eq!(completed(true, 1, 4).event_class(), EventClass::Data);
+        assert_eq!(completed(true, 3, 4).event_class(), EventClass::Data);
+    }
+
+    /// `TransferStarted` is informational; acceptance was decided at
+    /// `Advertised`, which stays lossless.
+    #[test]
+    fn transfer_started_is_data_and_advertised_stays_control() {
+        let started = NodeEvent::ResourceTransferStarted {
+            link_id: LinkId::new([8u8; 16]),
+            resource_hash: [0u8; 32],
+            is_sender: true,
+        };
+        assert_eq!(started.event_class(), EventClass::Data);
+    }
+
     use super::*;
 
     #[test]
