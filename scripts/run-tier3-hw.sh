@@ -143,21 +143,23 @@ fi
 # only the top-level binary does NOT work: cargo re-hardlinks it from
 # target/release/deps without relinking, preserving the old mtime —
 # verified 2026-06-13.) periculum's own force-rebuild does not do this, so the
-# touch stays here. Then PRE-FLIGHT with the EXACT same check each scenario's
-# setup runs (`periculum check-freshness`, one source of truth) and abort the
-# whole run on a single clear failure rather than letting N scenarios die one
-# by one.
+# touch has to happen on the way in — it lives in `build-integ-bins`
+# (Justfile), together with the list of binaries, which is why this script
+# calls the recipe instead of carrying a cargo line of its own: two lists
+# drift, and this one had (the recipe grew --bin lxmf-node, the script did
+# not, and every run after a source change died in the preflight below
+# pointing at lxmf-node — 2026-08-19). Then PRE-FLIGHT with the EXACT same
+# check each scenario's setup runs (`periculum check-freshness`, one source
+# of truth) and abort the whole run on a single clear failure rather than
+# letting N scenarios die one by one.
 #
 # The whole build + freshness preflight is skipped in selftest mode
 # (LEVICULUM_SELFTEST=1), which exercises only the watchdog/verdict logic with
 # a stubbed periculum and needs no binaries and no rig.
 CACHE_TARGET=~/.cache/leviculum-ci-target
 if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
-log "[CI_HW] building node binaries (lnsd / lnstest / lncp / lnstatus / lora-proxy)"
-find "$REPO_DIR/leviculum-cli/src" "$REPO_DIR/leviculum-proxy/src" \
-  -name '*.rs' -exec touch {} +
-CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 \
-  cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy
+log "[CI_HW] building node binaries (just build-integ-bins)"
+( cd "$REPO_DIR" && CARGO_TARGET_DIR="$CACHE_TARGET" CARGO_INCREMENTAL=0 just build-integ-bins )
 
 # regression/c_api_restart_recovery mounts c-lnsd, which is a C build, not a
 # cargo bin, so periculum's force-rebuild cannot produce it.
@@ -172,6 +174,19 @@ fi
 # The preflight resolves the same binaries via the same paths:: code each
 # scenario's setup uses, so it cannot drift from the per-scenario assertion.
 if ! CARGO_TARGET_DIR="$CACHE_TARGET" "$PERICULUM_BIN" check-freshness; then
+    # periculum names WHICH binary is stale but cannot say WHY, and the two
+    # causes want opposite responses: either the build step built it and it is
+    # genuinely older than the last source change (a cargo/mtime problem), or
+    # the build step never built it at all (a list problem — the binary is in
+    # periculum's freshness list and not in the recipe's). periculum cannot
+    # tell them apart because it does not know what its caller builds. This
+    # script is the only party that knows both, so it prints the recipe body
+    # beside the failure and names the missing-from-the-recipe case first —
+    # that is the one that has actually happened (lxmf-node, 2026-08-19).
+    log "[CI_HW] the build step above ran this recipe:"
+    ( cd "$REPO_DIR" && just --show build-integ-bins ) || true
+    log "[CI_HW] SUSPECT: a binary the preflight checks but that recipe does not"
+    log "[CI_HW]          build was never built by this run — compare the two lists."
     log "[CI_HW] FATAL: node binaries still stale after forced rebuild — aborting run"
     echo "$(date -Iseconds) tier3 RED stale-binaries-preflight $LOG" >> "$RESULTS"
     exit 1

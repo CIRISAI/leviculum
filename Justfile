@@ -228,6 +228,15 @@ citation-guard:
 check-trailers:
     @bash scripts/check-commit-trailers.sh
 
+# Codeberg #310: exactly one list of the binaries periculum mounts, and it is
+# `build-integ-bins` below. A caller that writes its own `cargo build --bin`
+# line has copied that list, and the copy drifts unseen until a hardware
+# nightly aborts in its freshness preflight naming a binary nothing built.
+# ~30 ms, reads two files, and self-tests its classifier on seven fixtures
+# first. Same family, same reasons, as check-submodules above.
+check-integ-bin-list:
+    @bash scripts/check-integ-bin-list.sh
+
 # Every long-lived process spawn goes through
 # `leviculum_std::process::spawn_supervised`, so the kernel takes the child down
 # with its parent however the parent dies. ~200 ms, no build: it reads the
@@ -264,12 +273,13 @@ check-all-targets:
     {{manifest}} check-all-targets --no-tests -- cargo check --workspace --all-targets
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
-# trailers + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
+# trailers + the single-integ-bin-list guard (#310)
+# + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
 # gates + a compile check of every workspace target (#220) + workspace lib
 # tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
 # the process-supervision pair (census over the sources, proof against the
 # kernel).
-fast: check-submodules check-trailers check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
