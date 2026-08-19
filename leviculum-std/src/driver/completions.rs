@@ -45,12 +45,28 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::sync_ext::MutexRecover;
 
-/// Established-links mirror ceiling. The mirror is self-cleaning (removed on
-/// `LinkClosed`), so the cap is a defensive bound well above the realistic
-/// concurrent-link envelope; hitting it evicts FIFO with a warn. A waiter for
-/// an evicted-but-live link degrades to resolving at `LinkClosed` or node
-/// stop, bounded by the caller's own timeout.
+/// Expected concurrent-live-link envelope for the established mirror — an
+/// **alarm threshold, not an evictor** (leviculum#56).
+///
+/// The mirror self-cleans on `LinkClosed`, so its occupancy is exactly the
+/// live-link set; a `LinkId` is 16 bytes, so even a pathological set costs
+/// little. The original design evicted FIFO at this cap, which meant the
+/// OLDEST live link lost its completion first — and the oldest links are the
+/// long-lived canonical peers whose completions matter most. That traded
+/// correctness for a few kilobytes and was observed in the field (130 live
+/// evictions on a 2-vCPU canonical, CIRISEdge#508).
+///
+/// Crossing this number now logs, loudly and on a doubling ladder so it
+/// cannot flood, and drops nothing: sustained growth past it means links are
+/// being established faster than they close (leviculum#57), which is a
+/// lifecycle question for the operator, not a reason to break completions.
 pub(crate) const ESTABLISHED_MIRROR_CAP: usize = 1024;
+
+/// Fraction of [`ESTABLISHED_MIRROR_CAP`] at which the first (pre-threshold)
+/// warning fires, so saturation is visible BEFORE the envelope is passed
+/// rather than only after (leviculum#60).
+const MIRROR_WATERMARK_NUM: usize = 8;
+const MIRROR_WATERMARK_DEN: usize = 10;
 
 /// Recent-terminal-outcomes ring capacity. Entries are markers, never
 /// payloads, so memory is bounded by entry count, not by response size.
@@ -239,10 +255,17 @@ enum RecentOutcome {
 struct RegistryInner {
     /// Bounded by live futures: `Completion::drop` unregisters.
     waiters: HashMap<CompletionKey, Vec<Waiter>>,
-    /// Established-links mirror; capped at [`ESTABLISHED_MIRROR_CAP`].
+    /// Established-links mirror. Occupancy IS the live-link set: entries are
+    /// added on `LinkEstablished` and removed on `LinkClosed`, and nothing
+    /// else removes one — see [`ESTABLISHED_MIRROR_CAP`] for why there is no
+    /// evictor. (Dropping the former FIFO `VecDeque` also removed an O(n)
+    /// scan taken under this lock on *every* close, which the contention in
+    /// leviculum#58 was paying for.)
     established: HashSet<LinkId>,
-    /// FIFO eviction order for the mirror.
-    established_order: VecDeque<LinkId>,
+    /// Next occupancy at which mirror growth is logged — the watermark, then
+    /// the cap, then doublings. Keeps a growing live set visible without a
+    /// per-link flood (leviculum#60).
+    mirror_alarm_at: usize,
     /// Recent terminal outcomes; capped at [`RECENT_OUTCOMES_CAP`].
     recent: VecDeque<(CompletionKey, RecentOutcome)>,
     /// Lazily-created event-tap fan-out. Kept across a zero-subscriber lull
@@ -346,7 +369,8 @@ impl CompletionRegistry {
             inner: Mutex::new(RegistryInner {
                 waiters: HashMap::new(),
                 established: HashSet::new(),
-                established_order: VecDeque::new(),
+                mirror_alarm_at: ESTABLISHED_MIRROR_CAP * MIRROR_WATERMARK_NUM
+                    / MIRROR_WATERMARK_DEN,
                 recent: VecDeque::new(),
                 pending_sends: HashMap::new(),
                 tap: None,
@@ -421,17 +445,34 @@ impl CompletionRegistry {
             let mut inner = self.inner.lock_recover();
             let ws = inner.take_waiters(CompletionKey::LinkEstablished { link_id });
             if inner.established.insert(link_id) {
-                inner.established_order.push_back(link_id);
-                if inner.established.len() > ESTABLISHED_MIRROR_CAP {
-                    if let Some(evicted) = inner.established_order.pop_front() {
-                        inner.established.remove(&evicted);
+                // leviculum#56: no eviction. A live link keeps its mirror
+                // entry until it closes, so its completion always resolves.
+                let live = inner.established.len();
+                if live >= inner.mirror_alarm_at {
+                    if live >= ESTABLISHED_MIRROR_CAP {
+                        tracing::error!(
+                            event = "COMPLETION_MIRROR_OVER_ENVELOPE",
+                            live_links = live,
+                            envelope = ESTABLISHED_MIRROR_CAP,
+                            "completion mirror holds {live} live links, past the expected \
+                             envelope of {} — nothing is dropped, but links are being \
+                             established faster than they close; check the link lifecycle \
+                             (leviculum#57). Next report at {}.",
+                            ESTABLISHED_MIRROR_CAP,
+                            live.saturating_mul(2),
+                        );
+                        inner.mirror_alarm_at = live.saturating_mul(2);
+                    } else {
                         tracing::warn!(
-                            "completion mirror evicted live link {:?} at cap {} — an \
-                             await_link_established for it now resolves only at LinkClosed \
-                             or node stop",
-                            evicted,
+                            event = "COMPLETION_MIRROR_WATERMARK",
+                            live_links = live,
+                            envelope = ESTABLISHED_MIRROR_CAP,
+                            "completion mirror at {live} live links, {}% of the expected \
+                             envelope of {}",
+                            live * 100 / ESTABLISHED_MIRROR_CAP,
                             ESTABLISHED_MIRROR_CAP,
                         );
+                        inner.mirror_alarm_at = ESTABLISHED_MIRROR_CAP;
                     }
                 }
             }
@@ -445,9 +486,7 @@ impl CompletionRegistry {
     fn on_link_closed(&self, link_id: LinkId, reason: LinkCloseReason) {
         let swept = {
             let mut inner = self.inner.lock_recover();
-            if inner.established.remove(&link_id) {
-                inner.established_order.retain(|l| *l != link_id);
-            }
+            inner.established.remove(&link_id);
             inner.push_recent(
                 CompletionKey::LinkEstablished { link_id },
                 RecentOutcome::LinkClosed { reason },
@@ -922,6 +961,73 @@ mod tests {
         LinkId::new([id; 16])
     }
 
+    /// Distinct link ids beyond the 256 that a single byte can spell — the
+    /// mirror-cap tests need thousands.
+    fn link_n(n: usize) -> LinkId {
+        let mut raw = [0u8; 16];
+        raw[..8].copy_from_slice(&(n as u64 + 1).to_le_bytes());
+        LinkId::new(raw)
+    }
+
+    /// leviculum#56 — the mirror must never evict a LIVE link. The incident:
+    /// eviction was FIFO over live entries, so the OLDEST link went first,
+    /// and the oldest links are the long-lived canonical peers whose
+    /// completions matter most. 130 live evictions were observed in the
+    /// field. Memory was never the constraint (a LinkId is 16 bytes); the
+    /// mirror is bounded by the live-link set because it self-cleans on
+    /// close, so a cap that evicts live entries trades correctness for
+    /// nothing.
+    #[test]
+    fn a_live_link_is_never_evicted_from_the_mirror() {
+        let reg = CompletionRegistry::new();
+        let over = ESTABLISHED_MIRROR_CAP + 64;
+        for i in 0..over {
+            reg.observe(&established(link_n(i)));
+        }
+        // The first link established — the canonical peer in the incident —
+        // must still resolve immediately from the mirror.
+        let mut oldest = reg.register_link_established(link_n(0));
+        assert_eq!(
+            poll_now(&mut oldest),
+            Poll::Ready(Ok(())),
+            "the oldest live link must still complete after the cap is passed"
+        );
+        // And so must one established after the cap was crossed.
+        let mut newest = reg.register_link_established(link_n(over - 1));
+        assert_eq!(poll_now(&mut newest), Poll::Ready(Ok(())));
+        assert_eq!(
+            reg.established_len(),
+            over,
+            "every live link stays mirrored; the cap is an alarm, not an evictor"
+        );
+    }
+
+    /// The mirror is self-cleaning: that is *why* it needs no evictor. A
+    /// closed link leaves, so occupancy tracks the live set exactly.
+    #[test]
+    fn closing_a_link_removes_it_from_the_mirror() {
+        let reg = CompletionRegistry::new();
+        for i in 0..8 {
+            reg.observe(&established(link_n(i)));
+        }
+        assert_eq!(reg.established_len(), 8);
+        for i in 0..5 {
+            reg.observe(&closed(link_n(i), LinkCloseReason::Timeout));
+        }
+        assert_eq!(
+            reg.established_len(),
+            3,
+            "occupancy must track the live set, not high-water"
+        );
+        // A closed link no longer resolves from the mirror — it resolves as
+        // closed, which is the correct terminal answer.
+        let mut fut = reg.register_link_established(link_n(0));
+        assert!(matches!(
+            poll_now(&mut fut),
+            Poll::Ready(Err(CompletionError::LinkClosed { .. }))
+        ));
+    }
+
     fn established(link_id: LinkId) -> NodeEvent {
         NodeEvent::LinkEstablished {
             link_id,
@@ -1261,25 +1367,28 @@ mod tests {
         );
     }
 
-    /// Mirror overflow evicts FIFO; a waiter for the evicted (still-live)
-    /// link degrades to resolving at close() / LinkClosed — never to a hang.
+    /// SUPERSEDED BEHAVIOUR (leviculum#56). This test used to assert that
+    /// mirror overflow evicted FIFO and that a waiter for the evicted — but
+    /// still LIVE — link merely "degraded" to resolving at close. The field
+    /// showed what that degradation costs: the evicted link is always the
+    /// oldest, i.e. the long-lived canonical peer, and 130 of them lost
+    /// their completions on one host. The eviction is gone; what survives
+    /// from the old test is the property that still matters, that a waiter
+    /// for a link the node never reports on is resolved by `close()` rather
+    /// than left hanging.
     #[test]
-    fn established_mirror_evicts_at_cap_and_waiter_still_resolves_on_close() {
+    fn a_waiter_for_a_never_reported_link_is_resolved_by_close() {
         let reg = CompletionRegistry::new();
         for i in 0..(ESTABLISHED_MIRROR_CAP + 1) {
-            let mut id = [0u8; 16];
-            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            reg.observe(&established(LinkId::new(id)));
+            reg.observe(&established(link_n(i)));
         }
-        assert_eq!(reg.established_len(), ESTABLISHED_MIRROR_CAP);
+        // Nothing was evicted: occupancy is the whole live set.
+        assert_eq!(reg.established_len(), ESTABLISHED_MIRROR_CAP + 1);
 
-        // Link 0 was evicted: a late await parks (immediate-resolve lost)...
-        let mut evicted = [0u8; 16];
-        evicted[..8].copy_from_slice(&0u64.to_le_bytes());
-        let mut fut = reg.register_link_established(LinkId::new(evicted));
+        // A link the node has never mentioned has nothing to resolve against,
+        // so it parks — and node stop is what ends the wait.
+        let mut fut = reg.register_link_established(link_n(ESTABLISHED_MIRROR_CAP + 5000));
         assert!(poll_now(&mut fut).is_pending());
-
-        // ...but close() still resolves it with the typed stop error.
         reg.close();
         assert_eq!(
             poll_now(&mut fut),
