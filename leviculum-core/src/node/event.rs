@@ -316,7 +316,12 @@ pub enum NodeEvent {
 
     // Request/Response Events
     /// Request received on a link for a registered handler.
-    /// Call `send_response()` with the request_id to reply.
+    ///
+    /// Reply by passing this event's `link_id` and `request_id` to
+    /// `send_response()` — `NodeCore::send_response` here, or
+    /// `ReticulumNode::send_response` when driving the node through
+    /// `leviculum-std` (both are `async` there, alongside
+    /// `send_response_resource` for bodies past the link MDU).
     RequestReceived {
         /// The link that received the request
         link_id: LinkId,
