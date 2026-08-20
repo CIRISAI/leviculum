@@ -251,3 +251,46 @@ async fn an_established_link_survives_deregistration() {
         "an established link is keyed by LinkId and must survive its destination's retirement"
     );
 }
+
+/// leviculum#60 — every bounded structure must be readable at runtime, not
+/// only discoverable by exceeding it. Pins that the gauges report the
+/// configured limits and that live-link occupancy tracks the real lifecycle
+/// (which is also the mirror invariant from leviculum#56, observed from the
+/// outside).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plane_stats_report_limits_and_track_the_live_set() {
+    let port = next_port();
+    let srv = server(port).await;
+    let mut cli = client(port).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let idle = srv.node.plane_stats();
+    assert!(
+        idle.control_capacity > 0 && idle.data_capacity > 0,
+        "capacities must be readable, got {idle:?}"
+    );
+    assert_eq!(idle.live_links, 0, "no links yet");
+    assert_eq!(idle.control_dropped_total, 0, "a quiet node drops nothing");
+    assert_eq!(idle.live_link_envelope, 1024);
+    assert!(idle.control_utilization() < 0.5);
+
+    let (dest, sk, hash) = make_destination("stats");
+    publish_and_learn(&srv, &mut cli, dest, hash).await;
+    let handle = cli.node.connect(&hash, &sk).await.expect("dial");
+    cli.node
+        .await_link_established(handle.link_id())
+        .await
+        .expect("establish");
+
+    // Both sides now see exactly one live link.
+    assert_eq!(srv.node.plane_stats().live_links, 1, "serve side");
+    assert_eq!(cli.node.plane_stats().live_links, 1, "client side");
+
+    cli.node.close_link(handle.link_id()).await.expect("close");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        cli.node.plane_stats().live_links,
+        0,
+        "occupancy must fall back to the live set on close"
+    );
+}
