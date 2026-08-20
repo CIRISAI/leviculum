@@ -63,7 +63,7 @@ pub fn generate_identity() -> Identity {
 pub use config::Config;
 pub use driver::{
     Completion, CompletionError, EventReceiver, EventTap, FilteredEventTap,
-    InterfaceStatusSnapshot, LinkEstablishedFuture, LinkHandle, PacketSender,
+    InterfaceStatusSnapshot, LinkEstablishedFuture, LinkHandle, PacketSender, PlaneStats,
     RequestResponseFuture, ResourceSentFuture, ResourceSentInfo, ResponseInfo, ReticulumNode,
     ReticulumNodeBuilder, TapEvent, DEFAULT_EVENT_TAP_CAPACITY,
 };
