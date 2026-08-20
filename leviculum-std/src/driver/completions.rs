@@ -836,13 +836,16 @@ impl CompletionRegistry {
             .sum()
     }
 
-    #[cfg(test)]
-    fn recent_len(&self) -> usize {
+    /// Recent-terminal-outcomes ring occupancy (leviculum#60 — a limit an
+    /// operator can read before it wraps, not only after).
+    pub(crate) fn recent_len(&self) -> usize {
         self.inner.lock_recover().recent.len()
     }
 
-    #[cfg(test)]
-    fn established_len(&self) -> usize {
+    /// Live links currently mirrored. This IS the live-link count: entries
+    /// arrive on `LinkEstablished` and leave on `LinkClosed`, and nothing
+    /// evicts (leviculum#56).
+    pub(crate) fn established_len(&self) -> usize {
         self.inner.lock_recover().established.len()
     }
 }
