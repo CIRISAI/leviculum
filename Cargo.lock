@@ -1976,6 +1976,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lnmsg"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "leviculum-core",
+ "leviculum-lxmf",
+ "leviculum-std",
+ "rand_core 0.6.4",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lnomad"
 version = "0.1.1"
 dependencies = [

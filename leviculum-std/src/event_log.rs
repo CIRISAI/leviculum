@@ -301,6 +301,32 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "total",
         ],
     },
+    // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
+    // rather than in this workspace member: the catalogue is one global list by
+    // design (the layer looks a name up here whatever crate raised it), and a
+    // second per-crate catalogue would mean two places to keep a name's required
+    // keys. Every entry below has a live emitter, as this file's "How to add an
+    // event" rule requires.
+    EventSchema {
+        name: "LNMSG_ATTACHED",
+        required_keys: &["instance", "address"],
+    },
+    EventSchema {
+        name: "LNMSG_RESOLVED",
+        required_keys: &["dst", "waited_ms"],
+    },
+    EventSchema {
+        name: "LNMSG_ENQUEUED",
+        required_keys: &["id", "dst", "bytes", "via"],
+    },
+    EventSchema {
+        name: "LNMSG_STATE",
+        required_keys: &["id", "state"],
+    },
+    EventSchema {
+        name: "LNMSG_DONE",
+        required_keys: &["id", "outcome", "code"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.
