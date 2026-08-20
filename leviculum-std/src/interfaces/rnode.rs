@@ -361,6 +361,15 @@ where
     S: AsyncWrite + Unpin,
 {
     let mut config_bytes = Vec::with_capacity(64);
+    // Idle the radio before touching modulation parameters. The firmware's
+    // setters are no-ops while the modem is offline (`Utilities.h`
+    // `setBandwidth`/`setFrequency`/`setSpreadingFactor`/... all guard on
+    // `radio_online`); they only store `lora_*`, and `startRadio()` applies
+    // the whole stored set in one go. Reconfiguring a *running* modem instead
+    // pokes registers underneath an active receive, which most boards shrug
+    // off and at least one does not — it comes up mute while every readback
+    // still reports a healthy modem.
+    config_bytes.extend_from_slice(&rnode::build_set_radio_state(rnode::RADIO_STATE_OFF));
     config_bytes.extend_from_slice(&rnode::build_set_frequency(radio.frequency));
     config_bytes.extend_from_slice(&rnode::build_set_bandwidth(radio.bandwidth));
     config_bytes.extend_from_slice(&rnode::build_set_txpower(radio.tx_power));
@@ -3597,5 +3606,49 @@ mod tests {
             "a board answering above the request must fail startup, got {result:?}"
         );
         stub.abort();
+    }
+
+    /// The config block idles the radio before it configures it.
+    ///
+    /// Asserted on the literal byte sequence rather than on "a radio-state
+    /// frame is present somewhere": the defect this pins down is that the
+    /// trailing `RADIO_STATE_ON` was there all along and the leading
+    /// `RADIO_STATE_OFF` was not, so any containment check passes on the
+    /// broken block too. Position is the whole assertion.
+    #[tokio::test]
+    async fn test_radio_config_block_idles_the_radio_first() {
+        let radio = RadioParams {
+            frequency: 867_200_000,
+            bandwidth: 125_000,
+            tx_power: 17,
+            tx_power_derived: false,
+            sf: 9,
+            cr: 5,
+            st_alock: Some(250),
+            lt_alock: Some(1000),
+        };
+
+        let mut sink: Vec<u8> = Vec::new();
+        send_radio_config(&mut sink, &radio)
+            .await
+            .expect("writing to a Vec cannot fail");
+
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            0xC0, 0x06, 0x00, 0xC0,                         // radio state OFF
+            0xC0, 0x01, 0x33, 0xB0, 0x6C, 0x00, 0xC0,       // frequency 867.2 MHz
+            0xC0, 0x02, 0x00, 0x01, 0xE8, 0x48, 0xC0,       // bandwidth 125 kHz
+            0xC0, 0x03, 0x11, 0xC0,                         // tx power 17 dBm
+            0xC0, 0x04, 0x09, 0xC0,                         // spreading factor 9
+            0xC0, 0x05, 0x05, 0xC0,                         // coding rate 4/5
+            0xC0, 0x0B, 0x00, 0xFA, 0xC0,                   // short-term airtime lock
+            0xC0, 0x0C, 0x03, 0xE8, 0xC0,                   // long-term airtime lock
+            0xC0, 0x06, 0x01, 0xC0,                         // radio state ON
+        ];
+
+        assert_eq!(
+            sink, expected,
+            "config block must be: radio off, parameters, radio on"
+        );
     }
 }
