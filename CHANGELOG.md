@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.23.0+ciris.1] — CIRIS fork
+
+### Added — saturation is readable before it bites (leviculum#60, properties 2–3)
+
+Property 1 (the per-drop WARN flood) shipped in v0.22.0. Three bounded
+structures shared one failure shape: invisible until exceeded, so "healthy"
+and "one event from lossy" looked identical.
+
+- **Pre-threshold signal.** The control plane warns at **80% occupancy**, once
+  per saturation episode, re-arming only after it drains below half. Before
+  this the first signal an operator got was the first *drop* — after the loss.
+- **Readable at runtime.** `ReticulumNode::plane_stats()` returns
+  [`PlaneStats`]: depth, capacity and cumulative drops for both planes, plus
+  live-link and recent-outcome occupancy against their limits, so a dashboard
+  plots headroom instead of waiting for the cliff. Cheap enough to poll — two
+  atomic loads, two channel-permit reads, one brief registry lock. The node
+  already held the channel senders, so occupancy needed no new plumbing; only
+  the cumulative drop counters are new.
+- **Declared policy in one place.** `PlaneStats`' doc carries the table of
+  what each limit *does* at saturation — control drops-newest-and-counts, data
+  drops-newest-silently, the live-link envelope drops nothing and only alarms
+  (leviculum#56), the outcomes ring wraps oldest-first and a late `await_*`
+  for an aged-out outcome parks rather than resolving. Previously scattered
+  across four comments in three files.
+
+`PlaneStats` is re-exported at the crate root alongside its siblings.
+
 ## [0.22.0+ciris.1] — CIRIS fork
 
 First fixes from the live-canonical incident (CIRISEdge#508, filed here as
