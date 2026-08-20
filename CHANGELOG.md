@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through a running `lnsd`/`rnsd` shared instance and prints its id. Exit 0
   means queued, never delivered.
 
+### Removed
+
+- The host-side airtime gate on the RNode interface (#121). Duty-cycle
+  enforcement is the firmware's; the host no longer holds packets back
+  when it sees the firmware's lock in `CMD_STAT_CHTM`.
+
 ## [0.8.1] - 2026-08-16
 
 ### Added

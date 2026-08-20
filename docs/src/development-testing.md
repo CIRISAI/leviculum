@@ -176,9 +176,10 @@ The harness writes `airtime_limit_long = 0` into every generated
 radio interface (single RNode, multi-vport RNode, serial LNode), so
 the firmware duty-cycle airtime lock never engages mid-run. Without
 this, the driver's lawful-by-default ETSI cap (#55) silently stops a
-saturating sender once its rolling-hour airtime hits 10 %, which
-reads as an intermittent resource stall (#121). A test that itself
-exercises the duty-cycle lock opts back in explicitly:
+saturating sender once its rolling-hour airtime hits 10 %: the modem
+stops radiating while still accepting frames, which reads from above
+as an intermittent resource stall. A test that itself exercises the
+duty-cycle lock opts back in explicitly:
 
 ```toml
 [radio]
