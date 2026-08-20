@@ -74,7 +74,7 @@ use crate::counter64::Counter64;
 use crate::sync_ext::MutexRecover;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -174,6 +174,67 @@ const AUTOCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// finishes, so a clean teardown costs only a few milliseconds.
 const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 
+/// Saturation state of every bounded structure the driver owns
+/// (leviculum#60). Read it with [`ReticulumNode::plane_stats`].
+///
+/// Each limit here had the same failure shape before this existed: invisible
+/// until exceeded, so "healthy" and "one event from lossy" looked identical.
+/// The policy at saturation differs per structure and is stated once, here,
+/// rather than in scattered comments:
+///
+/// | structure | limit | at saturation |
+/// |---|---|---|
+/// | control plane | `control_capacity` | **drop newest**, count it, and deliver a `ControlPlaneOverflow` marker carrying the total |
+/// | data plane | `data_capacity` | **drop newest, silently** — backpressure is the point; lower layers own reliability |
+/// | live-link mirror | `live_link_envelope` | **nothing is dropped**; the envelope is an alarm threshold only (leviculum#56) |
+/// | recent-outcomes ring | `recent_outcomes_capacity` | **wrap**, oldest first: a late `await_*` for an aged-out outcome parks instead of resolving immediately, bounded by the caller's timeout |
+///
+/// Queue depths are sampled, not latched: they are the instantaneous
+/// occupancy at the moment of the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PlaneStats {
+    /// Configured control-plane capacity.
+    pub control_capacity: usize,
+    /// Control events currently queued for the consumer.
+    pub control_queued: usize,
+    /// Control events dropped since the node started.
+    pub control_dropped_total: u64,
+    /// Configured data-plane capacity.
+    pub data_capacity: usize,
+    /// Data events currently queued for the consumer.
+    pub data_queued: usize,
+    /// Data events dropped since the node started (normal backpressure).
+    pub data_dropped_total: u64,
+    /// Links currently established (the mirror's occupancy).
+    pub live_links: usize,
+    /// Expected live-link envelope — an alarm threshold, never an evictor.
+    pub live_link_envelope: usize,
+    /// Recent-terminal-outcomes ring occupancy.
+    pub recent_outcomes: usize,
+    /// Recent-terminal-outcomes ring capacity.
+    pub recent_outcomes_capacity: usize,
+}
+
+impl PlaneStats {
+    /// Fraction of the control plane currently occupied, 0.0–1.0. The number
+    /// a dashboard plots to see saturation coming.
+    pub fn control_utilization(&self) -> f64 {
+        if self.control_capacity == 0 {
+            return 0.0;
+        }
+        self.control_queued as f64 / self.control_capacity as f64
+    }
+}
+
+/// Cumulative drop counters, shared between the node handle and the event
+/// sink that lives in the runner task.
+#[derive(Debug, Default)]
+pub(crate) struct PlaneCounters {
+    control_dropped: AtomicU64,
+    data_dropped: AtomicU64,
+}
+
 /// Sender half of the split control/data node-event channels (Codeberg #71).
 ///
 /// Lives in the event loop only (single owner). [`emit`](EventSink::emit)
@@ -225,6 +286,12 @@ struct EventSink {
     /// lines in 2000). The count itself is never lost: every drop still
     /// increments `control_dropped`, and the marker carries the total.
     control_warn_at: u64,
+    /// Cumulative drop counters shared with the node handle (leviculum#60).
+    counters: Arc<PlaneCounters>,
+    /// True once the control plane has crossed its high watermark and not
+    /// yet recovered — so the pre-threshold warning fires on the way up,
+    /// once per episode, instead of on every event near the line.
+    control_watermarked: bool,
 }
 
 /// How soon the event loop comes back when the sink still holds a reliable
@@ -254,8 +321,11 @@ impl EventSink {
     /// marker (Codeberg #419).
     fn emit_control(&mut self, event: NodeEvent) {
         match self.control_tx.try_send(event) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.check_control_watermark();
+            }
             Err(TrySendError::Full(ev)) => {
+                self.counters.control_dropped.fetch_add(1, Ordering::Relaxed);
                 let pending = self.control_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 // The receiver swaps the count to zero when it mints the
                 // overflow marker, so a count of one opens a new episode.
@@ -300,6 +370,32 @@ impl EventSink {
             .saturating_sub(self.reliable_pending.len())
     }
 
+    /// Pre-threshold signal for the control plane (leviculum#60): warn while
+    /// there is still headroom, once per saturation episode, and re-arm only
+    /// after the queue drains back below half. Without this the first signal
+    /// an operator gets is the first *drop* — by which point the loss has
+    /// already happened.
+    fn check_control_watermark(&mut self) {
+        let cap = self.control_tx.max_capacity();
+        if cap == 0 {
+            return;
+        }
+        let queued = cap.saturating_sub(self.control_tx.capacity());
+        let high = cap * 8 / 10;
+        if !self.control_watermarked && queued >= high {
+            self.control_watermarked = true;
+            tracing::warn!(
+                event = "CONTROL_PLANE_WATERMARK",
+                queued,
+                queue_capacity = cap,
+                "control plane at {}% — the consumer is falling behind; drops begin at {cap}",
+                queued * 100 / cap,
+            );
+        } else if self.control_watermarked && queued * 2 <= cap {
+            self.control_watermarked = false;
+        }
+    }
+
     /// Deliver a data-plane event, dropping silently when full (backpressure).
     ///
     /// Exception (#280): a reliable channel delivery is never dropped here.
@@ -332,6 +428,9 @@ impl EventSink {
         match self.data_tx.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
+                self.counters
+                    .data_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Silent by design: data-plane drops are normal backpressure.
                 tracing::trace!(
                     dropped_event_type = ev.variant_name(),
@@ -1364,6 +1463,9 @@ pub struct ReticulumNode {
     /// `EventSink` (which counts) and the `EventReceiver` (which reports).
     /// Kept here so `start()` can hand the runner a clone (Codeberg #419).
     control_dropped: Arc<Counter64>,
+    /// Cumulative plane drop counters, shared with the runner's `EventSink`
+    /// so [`plane_stats`](Self::plane_stats) can report them (leviculum#60).
+    plane_counters: Arc<PlaneCounters>,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1575,6 +1677,7 @@ impl ReticulumNode {
             data_tx,
             control_channel_capacity,
             control_dropped,
+            plane_counters: Arc::new(PlaneCounters::default()),
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -1984,6 +2087,8 @@ impl ReticulumNode {
                 control_dropped: Arc::clone(&self.control_dropped),
                 reliable_pending: VecDeque::new(),
                 control_warn_at: 1,
+                counters: Arc::clone(&self.plane_counters),
+                control_watermarked: false,
             }),
             // `without_events()` leaves both senders None.
             _ => None,
@@ -2438,6 +2543,48 @@ impl ReticulumNode {
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+    }
+
+    /// Current saturation of every bounded structure the driver owns —
+    /// depths, capacities, cumulative drops (leviculum#60). See
+    /// [`PlaneStats`] for what each limit does when it saturates.
+    ///
+    /// Cheap enough to poll on a dashboard interval: two atomic loads, two
+    /// channel-permit reads, and one brief registry lock for the two
+    /// completion-side counts.
+    pub fn plane_stats(&self) -> PlaneStats {
+        let (control_capacity, control_queued) = match &self.control_tx {
+            Some(tx) => {
+                let cap = tx.max_capacity();
+                (cap, cap.saturating_sub(tx.capacity()))
+            }
+            None => (0, 0),
+        };
+        let (data_capacity, data_queued) = match &self.data_tx {
+            Some(tx) => {
+                let cap = tx.max_capacity();
+                (cap, cap.saturating_sub(tx.capacity()))
+            }
+            None => (0, 0),
+        };
+        PlaneStats {
+            control_capacity,
+            control_queued,
+            control_dropped_total: self
+                .plane_counters
+                .control_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            data_capacity,
+            data_queued,
+            data_dropped_total: self
+                .plane_counters
+                .data_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            live_links: self.completions.established_len(),
+            live_link_envelope: completions::ESTABLISHED_MIRROR_CAP,
+            recent_outcomes: self.completions.recent_len(),
+            recent_outcomes_capacity: completions::RECENT_OUTCOMES_CAP,
+        }
     }
 
     /// Register a destination for incoming links
@@ -7327,6 +7474,8 @@ mod tests {
                 control_dropped: Arc::clone(&control_dropped),
                 reliable_pending: VecDeque::new(),
                 control_warn_at: 1,
+                counters: Arc::new(PlaneCounters::default()),
+                control_watermarked: false,
             },
             EventReceiver {
                 control: control_rx,
