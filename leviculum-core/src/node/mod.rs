@@ -106,6 +106,8 @@ mod mvr_send_segmentation;
 #[cfg(test)]
 mod mvr_shared_client_1hop;
 #[cfg(test)]
+mod mvr_single_decrypt_drop;
+#[cfg(test)]
 mod mvr_teardown_resource_fail;
 pub mod request;
 mod send;
@@ -2908,6 +2910,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 match dest.decrypt(packet.data.as_slice()) {
                                     Ok(data) => data,
                                     Err(_) => {
+                                        // A packet addressed to us that no
+                                        // retained ratchet and not the identity
+                                        // key could decrypt. Count + journey-log
+                                        // it: this drop used to be invisible to
+                                        // every diagnostic, which let a
+                                        // post-ratchet-rotation loss hide in
+                                        // two full rig runs (2026-08-21).
+                                        self.transport.record_node_layer_drop(
+                                            raw_hash.as_ref(),
+                                            &packet,
+                                            interface_index,
+                                            crate::transport::DropReason::SingleDecryptFail,
+                                        );
                                         crate::tracing::trace!(
                                             dest = %HexShort(destination_hash.as_ref()),
                                             "Dropped packet, decryption failed"

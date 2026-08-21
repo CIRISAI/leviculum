@@ -944,6 +944,7 @@ pub struct TransportStats {
     pub(crate) drops_link_repeat_echo: u64,
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
+    pub(crate) drops_single_decrypt_fail: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1004,6 +1005,14 @@ pub enum DropReason {
     /// mirrors the drop in Python's `Identity.validate_announce`, which tests
     /// `blackholed_identities` (Identity.py:574-577).
     BlackholedAnnounce,
+    /// Single-destination Data packet that reached its registered destination
+    /// but decrypted under neither a retained ratchet nor the identity key.
+    /// The drop happens at the node's destination layer, above transport, and
+    /// used to be invisible to every diagnostic — no counter, no event — which
+    /// is how a post-ratchet-rotation loss survived two full rig corpus runs
+    /// undetected (2026-08-21). Python drops this silently too
+    /// (`Identity.decrypt` returns None, Destination.py:520 just logs debug).
+    SingleDecryptFail,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -1063,11 +1072,12 @@ impl DropReason {
             DropReason::LinkRepeatEcho => "link-repeat-echo",
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
+            DropReason::SingleDecryptFail => "single-decrypt-fail",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 14] = [
+    pub const ALL: [DropReason; 15] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1082,6 +1092,7 @@ impl DropReason {
         DropReason::LinkRepeatEcho,
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
+        DropReason::SingleDecryptFail,
     ];
 }
 
@@ -1188,6 +1199,12 @@ impl TransportStats {
         self.drops_blackholed_announce
     }
 
+    /// Single-destination packets that reached their destination but failed
+    /// to decrypt under every retained ratchet and the identity key.
+    pub fn drops_single_decrypt_fail(&self) -> u64 {
+        self.drops_single_decrypt_fail
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -1205,6 +1222,7 @@ impl TransportStats {
             + self.drops_link_repeat_echo
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
+            + self.drops_single_decrypt_fail
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -1230,6 +1248,7 @@ impl TransportStats {
             DropReason::LinkRepeatEcho => self.drops_link_repeat_echo += 1,
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
+            DropReason::SingleDecryptFail => self.drops_single_decrypt_fail += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -2383,6 +2402,37 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         );
     }
 
+    /// Record a drop decided ABOVE transport, at the node's destination layer,
+    /// after this transport already delivered the packet (e.g. a
+    /// Single-destination decrypt miss). Routing it through here keeps
+    /// `packets_dropped == sum(per-reason counters)` and gives the drop the
+    /// same per-packet PKT_DROP journey event and PKT_DROP_SUMMARY visibility
+    /// as every in-transport drop site. `raw_hash` is the wire hash when the
+    /// delivering path carried it; locally-delivered packets have none, and
+    /// the journey event then says so instead of being skipped.
+    pub(crate) fn record_node_layer_drop(
+        &mut self,
+        raw_hash: Option<&[u8; 32]>,
+        packet: &Packet,
+        iface_in: usize,
+        reason: DropReason,
+    ) {
+        self.stats.record_drop(reason);
+        match raw_hash {
+            Some(h) => self.pkt_drop_event(h, packet, iface_in, reason),
+            None => crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = "local",
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name(iface_in),
+                reason = reason.kebab(),
+            ),
+        }
+    }
+
     /// Push a SendPacket action and emit the PKT_TX journey event for it.
     ///
     /// `ph` is the journey correlator when the caller already holds the
@@ -2689,6 +2739,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 link_repeat_echo = self.stats.drops_link_repeat_echo,
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
+                single_decrypt_fail = self.stats.drops_single_decrypt_fail,
                 total = self.stats.packets_dropped,
             );
         }

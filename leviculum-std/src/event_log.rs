@@ -298,6 +298,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "link_repeat_echo",
             "forward_max_hops",
             "blackholed_announce",
+            "single_decrypt_fail",
             "total",
         ],
     },

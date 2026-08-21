@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Single-destination decrypt misses are now counted (`single-decrypt-fail`
+  in `PKT_DROP_SUMMARY`) and journey-logged instead of dropped silently.
+
 - `Destination::with_explicit_hash`: a Single destination indexed by a
   caller-supplied 16-byte hash; never announced, reachable by direct link
   only (#254).

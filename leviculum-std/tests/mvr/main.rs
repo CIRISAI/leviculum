@@ -24,6 +24,7 @@ mod core_lock_reentrancy;
 mod core_processor_seam;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
+mod ratchet_rotation_single_packet;
 mod responder_close_delivery;
 mod rust_client_path_install_from_python;
 mod rust_client_path_install_loop_race;
