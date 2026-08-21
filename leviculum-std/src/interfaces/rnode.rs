@@ -189,6 +189,42 @@ const TX_GATED_EVENT_AFTER: Duration = Duration::from_secs(2);
 /// event-loop iteration.
 const TX_GATED_EVENT_REPEAT: Duration = Duration::from_secs(10);
 
+/// The CMD_READY queue-state query. The firmware dispatches its
+/// `command == CMD_READY` branch only on a byte *following* the command
+/// byte (`serial_callback`, `RNode_Firmware.ino:765ff`: the first in-frame
+/// byte just latches `command`), so the query must carry one payload byte;
+/// its value is ignored. The response echoes CMD_READY with 0x01 (queue
+/// not full) or 0x00 (queue full) — `RNode_Firmware.ino:1003-1008`,
+/// `Utilities.h:1157,1164`. Those two indicate functions have no other
+/// call sites: CMD_READY is strictly a query/response exchange, never a
+/// spontaneous signal (the flowval leg-B deadlock, 2026-08-21, came from
+/// waiting for one).
+const READY_QUERY_FRAME: [u8; 4] = [kiss::FEND, rnode::CMD_READY, 0x00, kiss::FEND];
+
+/// Ceiling for the CMD_READY re-query backoff while the gate is closed.
+/// Under a duty lock the firmware queue stays full for minutes, and the
+/// poll shares the serial line the modem also uses to deliver RX frames —
+/// so the cadence must flatten out. 2 s (one CHTM stat cadence) bounds the
+/// chatter to a 4-byte frame every 2 s while capping worst-case
+/// gate-release latency at the same interval the firmware already uses
+/// for its own periodic reporting.
+const READY_POLL_MAX: Duration = Duration::from_secs(2);
+
+/// First re-query delay after a TX or an unanswered/negative CMD_READY
+/// query: one full-size packet airtime at the configured PHY. The queue
+/// state can only change when a TX completes, and completing a queued
+/// full-size frame takes at least this long — polling faster cannot
+/// observe a transition, it only spends serial bandwidth. Subsequent
+/// re-queries double the delay up to [`READY_POLL_MAX`].
+fn ready_poll_initial(sf: u8, cr: u8, bandwidth_hz: u32) -> Duration {
+    let bitrate = rnode::compute_bitrate(sf, cr, bandwidth_hz);
+    if bitrate == 0 {
+        return READY_POLL_MAX;
+    }
+    let airtime_ms = (rnode::HW_MTU as u64 * 8 * 1000) / bitrate as u64;
+    Duration::from_millis(airtime_ms.max(1)).min(READY_POLL_MAX)
+}
+
 // ---------------------------------------------------------------------------
 // Configuration (includes detection)
 // ---------------------------------------------------------------------------
@@ -618,9 +654,9 @@ async fn rnode_io_task<S>(
     counters: Arc<InterfaceCounters>,
     flow_control: bool,
     jitter_max_ms: u64,
-    _bandwidth_hz: u32,
-    _sf: u8,
-    _cr: u8,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
     drop_direct_ingress: bool,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
@@ -629,19 +665,32 @@ where
     super::log_direct_ingress_filter_armed(drop_direct_ingress, &name);
     let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
     let mut buf = [0u8; IO_READ_BUF];
-    // The RNode firmware emits CMD_READY only *after* a TX as a "next frame
-    // welcome" signal — never spontaneously after init. Starting at false
-    // when flow_control is on would deadlock: no TX ⇒ no CMD_READY ⇒ no
-    // TX, ever. Mirrors Python RNodeInterface.py:459 which sets
-    // interface_ready = True directly after validateRadioState() succeeds.
+    // The gate starts open: before the first TX there is no queue state
+    // worth asking about, and the firmware never volunteers CMD_READY
+    // (RNode_Firmware.ino:1003-1008 answers only a host query), so a
+    // closed initial gate could never open.
     let mut interface_ready = true;
     let mut send_queue: VecDeque<QueuedFrame> = VecDeque::new();
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut timer_ready = false;
 
+    // Gate 2 reopen state: CMD_READY is a query protocol, not a courtesy.
+    // After every TX (flow_control on) the gate closes and we ask the
+    // firmware whether its queue has room; a 0x01 response reopens it. A
+    // 0x00 response — or a response that never comes, e.g. lost on a noisy
+    // line — leads to a re-query when `ready_query_timer` fires: the timer
+    // is armed at query time, so a lost response degrades into the same
+    // bounded re-poll instead of a stuck gate. The delay starts at one
+    // packet airtime and doubles up to READY_POLL_MAX (see the constants
+    // above for the justification).
+    let ready_poll_start = ready_poll_initial(sf, cr, bandwidth_hz);
+    let mut ready_poll = ready_poll_start;
+    let mut ready_query_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
     // Duty-lock visibility: when the CMD_READY gate (Gate 2 below)
     // holds queued frames, say so. The firmware's duty lock produces exactly
-    // this shape — no TX completion ⇒ no READY ⇒ gate closed — and it used
+    // this shape — the queue stays full, every poll answers 0x00, the gate
+    // stays closed — and it used
     // to be invisible from the host. `gate_blocked_since` starts when frames
     // are held and the gate is closed; `gate_event_timer` fires
     // RNODE_TX_GATED after TX_GATED_EVENT_AFTER, then every
@@ -707,9 +756,24 @@ where
                                         }
                                     }
                                     rnode::CMD_READY => {
-                                        tracing::debug!("{}: CMD_READY received", name);
-                                        if flow_control {
+                                        // Response to our post-TX/re-poll query — the
+                                        // firmware never sends CMD_READY unsolicited.
+                                        // 0x01: queue not full, the gate reopens.
+                                        // 0x00: still full; the timer armed with the
+                                        // query re-asks on its bounded backoff.
+                                        if flow_control && payload.first() == Some(&0x01) {
+                                            tracing::debug!(
+                                                "{}: CMD_READY answer: queue not full",
+                                                name
+                                            );
                                             interface_ready = true;
+                                            ready_query_timer = None;
+                                            ready_poll = ready_poll_start;
+                                        } else if flow_control {
+                                            tracing::debug!(
+                                                "{}: CMD_READY answer: queue full",
+                                                name
+                                            );
                                         }
                                     }
                                     rnode::CMD_DETECT => {
@@ -946,6 +1010,25 @@ where
                 gate_event_timer = Some(Box::pin(tokio::time::sleep(TX_GATED_EVENT_REPEAT)));
             }
 
+            // Branch 3c: no queue-not-full answer within the backoff window
+            // — ask again, with the next window doubled up to READY_POLL_MAX.
+            _ = async {
+                if let Some(ref mut timer) = ready_query_timer {
+                    timer.await;
+                }
+            }, if ready_query_timer.is_some() => {
+                if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
+                    tracing::warn!("{}: ready query write error: {}", name, e);
+                    return outgoing_rx;
+                }
+                if let Err(e) = port.flush().await {
+                    tracing::warn!("{}: ready query flush error: {}", name, e);
+                    return outgoing_rx;
+                }
+                ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
+                ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
+            }
+
             // Branch 4: Periodic heartbeat. CMD_DETECT ping to verify firmware
             _ = &mut heartbeat_timer => {
                 let detect_frame = [kiss::FEND, rnode::CMD_DETECT, rnode::DETECT_REQ, kiss::FEND];
@@ -965,7 +1048,8 @@ where
         // the send block has already dispatched the first of them).
         // "Holding" means frames are queued and only the READY gate keeps
         // them there. Every TX re-enters this state on the next iteration
-        // (READY is retrospective); events fire only if it persists past
+        // (the gate closes at TX and stays closed until a query answers
+        // 0x01); events fire only if it persists past
         // TX_GATED_EVENT_AFTER, so ordinary airtime waits stay silent. The
         // queue cannot drain while the gate is closed, so leaving the hold
         // state means the gate reopened — if the hold was announced,
@@ -1026,7 +1110,21 @@ where
 
                 timer_ready = false;
                 if flow_control {
+                    // Ask, don't wait: close the gate and query the queue
+                    // state. The firmware answers 0x01/0x00 to this query;
+                    // it never volunteers a READY.
                     interface_ready = false;
+                    if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
+                        tracing::warn!("{}: ready query write error: {}", name, e);
+                        return outgoing_rx;
+                    }
+                    if let Err(e) = port.flush().await {
+                        tracing::warn!("{}: ready query flush error: {}", name, e);
+                        return outgoing_rx;
+                    }
+                    ready_poll = ready_poll_start;
+                    ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
+                    ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
                 }
 
                 // Schedule spacing timer after every TX. The flush() above
@@ -1764,6 +1862,19 @@ async fn rnode_multi_io_task<S>(
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut timer_ready = true;
 
+    // CMD_READY reopen state, same query protocol as the single-radio io
+    // task (the firmware only ever answers a host query). The vports share
+    // one firmware queue, so one gate and one poll cadence: seeded from the
+    // slowest vport's packet airtime — the conservative bound on how fast
+    // the shared queue can drain.
+    let ready_poll_start = vports
+        .iter()
+        .map(|v| ready_poll_initial(v.radio.sf, v.radio.cr, v.radio.bandwidth))
+        .max()
+        .unwrap_or(READY_POLL_MAX);
+    let mut ready_poll = ready_poll_start;
+    let mut ready_query_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
     loop {
         tokio::select! {
             result = port.read(&mut buf) => {
@@ -1811,7 +1922,13 @@ async fn rnode_multi_io_task<S>(
                                     }
                                 }
                                 rnode::CMD_READY if flow_control => {
-                                    interface_ready = true;
+                                    // Answer to our queue-state query: 0x01 reopens
+                                    // the gate, 0x00 leaves the armed timer polling.
+                                    if payload.first() == Some(&0x01) {
+                                        interface_ready = true;
+                                        ready_query_timer = None;
+                                        ready_poll = ready_poll_start;
+                                    }
                                 }
                                 rnode::CMD_ERROR => {
                                     match payload.first().copied() {
@@ -1879,6 +1996,24 @@ async fn rnode_multi_io_task<S>(
                 send_timer = None;
                 timer_ready = true;
             }
+
+            // No queue-not-full answer within the backoff window — re-query.
+            _ = async {
+                if let Some(ref mut timer) = ready_query_timer {
+                    timer.await;
+                }
+            }, if ready_query_timer.is_some() => {
+                if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
+                    tracing::warn!("{}: ready query write error: {}", name, e);
+                    return;
+                }
+                if let Err(e) = port.flush().await {
+                    tracing::warn!("{}: ready query flush error: {}", name, e);
+                    return;
+                }
+                ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
+                ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
+            }
         }
 
         // Send if the spacing gate and the flow-control gate are both open.
@@ -1906,7 +2041,20 @@ async fn rnode_multi_io_task<S>(
                 );
                 timer_ready = false;
                 if flow_control {
+                    // Same query protocol as the single-radio task: close
+                    // the gate, ask the shared queue for room.
                     interface_ready = false;
+                    if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
+                        tracing::warn!("{}: ready query write error: {}", name, e);
+                        return;
+                    }
+                    if let Err(e) = port.flush().await {
+                        tracing::warn!("{}: ready query flush error: {}", name, e);
+                        return;
+                    }
+                    ready_poll = ready_poll_start;
+                    ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
+                    ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
                 }
                 send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
                     rnode::MIN_SPACING_MS,
@@ -2888,92 +3036,13 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
     }
 
-    /// Steady-state throughput when the firmware DOES emit CMD_READY after
-    /// every TX (the contract `flow_control = true` was designed for):
-    /// each TX is followed by a `CMD_READY` (0x0F) on the peer side, which
-    /// re-arms `interface_ready` and lets the next queued packet ship.
-    /// Documents the intended `flow_control = true` round-trip. If a future
-    /// firmware delivers CMD_READY reliably and we want to flip the default
-    /// back, this test guards the wire-side handshake.
-    #[tokio::test]
-    async fn test_flow_control_with_cmd_ready_multi_frame_throughput() {
-        let (port, mut peer) = tokio::io::duplex(8192);
-        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
-        let counters = Arc::new(InterfaceCounters::new());
-
-        let task_counters = Arc::clone(&counters);
-        let task = tokio::spawn(async move {
-            rnode_io_task(
-                "test_rnode".to_string(),
-                port,
-                incoming_tx,
-                outgoing_rx,
-                task_counters,
-                /* flow_control = */ true,
-                /* jitter_max_ms = */ 1,
-                125_000,
-                7,
-                5,
-                /* drop_direct_ingress = */ false,
-            )
-            .await;
-        });
-
-        let payloads: [&[u8]; 3] = [b"alpha", b"bravo", b"charlie"];
-
-        // Push frame, read it, write CMD_READY, repeat. Sequencing one at
-        // a time keeps the queue depth at 1 and guarantees each frame is
-        // gated on its own CMD_READY (no race between enqueue and the
-        // ready-flag flip).
-        let cmd_ready_frame = [kiss::FEND, rnode::CMD_READY, kiss::FEND];
-        for (i, p) in payloads.iter().enumerate() {
-            outgoing_tx
-                .send(OutgoingPacket {
-                    data: p.to_vec(),
-                    high_priority: false,
-                })
-                .await
-                .expect("send to io task");
-
-            let frames = drain_kiss_frames(&mut peer, Duration::from_millis(500)).await;
-            let data_frames: Vec<&Vec<u8>> = frames
-                .iter()
-                .filter(|(c, _)| *c == rnode::CMD_DATA)
-                .map(|(_, p)| p)
-                .collect();
-            assert_eq!(
-                data_frames.len(),
-                1,
-                "iteration {}: expected exactly one TX frame on the wire, got {}",
-                i,
-                data_frames.len()
-            );
-            assert_eq!(
-                data_frames[0].as_slice(),
-                *p,
-                "iteration {} payload mismatch",
-                i
-            );
-
-            // Re-arm the io task by feeding CMD_READY back over the duplex.
-            // Without this, iteration i+1 would stall (proven by the next
-            // test below).
-            peer.write_all(&cmd_ready_frame)
-                .await
-                .expect("write CMD_READY");
-        }
-
-        let tx_bytes = counters.tx_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        let total_payload: usize = payloads.iter().map(|p| p.len()).sum();
-        assert_eq!(
-            tx_bytes, total_payload as u64,
-            "tx_bytes counter must reflect all three payloads"
-        );
-
-        drop(outgoing_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
-    }
+    // The former `test_flow_control_with_cmd_ready_multi_frame_throughput`
+    // encoded the refuted protocol model — an unsolicited CMD_READY after
+    // every TX. The firmware never sends one (`RNode_Firmware.ino:1003-1008`
+    // answers only a host query; `kiss_indicate_ready`, `Utilities.h:1157`,
+    // has no other call site), so the round-trip it guarded cannot occur on
+    // hardware. The corrected query/response round-trip is covered by the
+    // scripted-stub suite below.
 
     // -----------------------------------------------------------------------
     // Multi-vport (RNodeMultiInterface) tests
@@ -3297,16 +3366,13 @@ mod tests {
         stub.abort();
     }
 
-    /// Document the per-frame stall that hits `flow_control = true` against
-    /// firmware that does not emit CMD_READY after TX (observed on RNode
-    /// FW 1.85, miauhaus 2026-04-30): the io task ships exactly one frame,
-    /// then waits forever for a re-arming CMD_READY that never arrives.
-    ///
-    /// This test pins the current behaviour as a documented contract.
-    /// If someone later adds a recovery mechanism (timeout-based re-arm,
-    /// auto-disable of flow_control on CMD_READY-silence, or removing the
-    /// flow_control gate altogether), this test must be updated to reflect
-    /// the new contract — its existence forces a deliberate decision.
+    /// A modem that answers nothing keeps the gate closed: with
+    /// `flow_control = true` against a peer that never responds to the
+    /// CMD_READY queries (dead serial, wedged firmware), the io task ships
+    /// exactly one frame and then holds the rest host-side. That is the
+    /// safe contract — a silent modem must not be flooded on hope; the
+    /// re-query poll keeps asking at a bounded cadence and the reconnect
+    /// path owns recovery from a truly dead device.
     #[tokio::test]
     async fn test_flow_control_without_cmd_ready_stalls_after_first_frame() {
         let (port, mut peer) = tokio::io::duplex(8192);
@@ -3343,8 +3409,10 @@ mod tests {
                 .expect("send to io task");
         }
 
-        // Generous read window. The first frame must arrive; any later frames
-        // would only show up if the stall bug were silently fixed.
+        // Generous read window. The first frame must arrive; any later
+        // frame would mean the gate opened without a queue-not-full answer.
+        // The CMD_READY queries the io task sends land in `frames` too and
+        // are filtered out below — only CMD_DATA counts.
         let frames = drain_kiss_frames(&mut peer, Duration::from_millis(500)).await;
         let data_frames: Vec<&Vec<u8>> = frames
             .iter()
@@ -3381,35 +3449,40 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Scripted firmware stub at the io-task boundary for the duty-lock
-    /// flow-control tests, resurrecting the `rnode_firmware_stub_scripted`
-    /// pattern from the deleted airtime-gate tests (`b4a984d^`).
+    /// flow-control tests.
     ///
-    /// Reads KISS frames from its half of the duplex, records every
-    /// `CMD_DATA` payload on `data_tx`, and answers `CMD_READY` after each
-    /// recorded frame while `ready_budget` lasts. Once the budget is
-    /// exhausted the stub keeps reading but stays silent — the duty-lock
-    /// shape: the firmware still drains serial into its queue, but no TX
-    /// completes, so no READY is emitted (`RNode_Firmware.ino:1624`).
-    /// Sending a budget increment on `resume_rx` models the lock releasing:
-    /// frames the firmware queued during the lock finally air, so the stub
-    /// first pays the READYs it owes for them, then answers new frames
-    /// against the refreshed budget.
+    /// Reads KISS frames from its half of the duplex and records every
+    /// `CMD_DATA` payload on `data_tx`. TX model: a one-deep firmware queue
+    /// behind a scripted airtime budget — a frame received while
+    /// `air_budget > 0` airs at once (budget decrements), a frame received
+    /// at budget zero stays in the queue, which is the duty-lock shape
+    /// (serial still drains into the queue, but no TX completes,
+    /// `RNode_Firmware.ino:1624`). A budget increment on `resume_rx` models
+    /// the lock releasing: queued frames air against the refreshed budget —
+    /// silently.
+    ///
+    /// The stub speaks `CMD_READY` **only as the response to a host
+    /// CMD_READY query**, exactly like the firmware
+    /// (`RNode_Firmware.ino:1003-1008`): 0x01 while its queue has room,
+    /// 0x00 while it is full. `kiss_indicate_ready`/`_not_ready`
+    /// (`Utilities.h:1157,1164`) have no other call sites, so a spontaneous
+    /// READY — after a TX, on queue drain, ever — would be dishonest. The
+    /// previous stub's READY-follows-each-TX script was exactly the wrong
+    /// protocol model that let six green tests hide the flowval leg-B
+    /// deadlock (2026-08-21): an implementation that waits for an
+    /// unsolicited READY starves against this stub, which is the point.
     async fn rnode_firmware_stub_scripted(
         mut peer: tokio::io::DuplexStream,
-        mut ready_budget: usize,
+        mut air_budget: usize,
         mut resume_rx: mpsc::Receiver<usize>,
         data_tx: mpsc::Sender<Vec<u8>>,
+        ready_queries: Arc<std::sync::atomic::AtomicUsize>,
     ) {
         let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
         let mut buf = [0u8; 1024];
-        // Frames received while the lock held READY back; each owes one
-        // READY once the lock releases.
-        let mut unacked: usize = 0;
-        let ready_frame = {
-            let mut f = Vec::new();
-            kiss::frame(rnode::CMD_READY, &[0x01], &mut f);
-            f
-        };
+        // Frames sitting in the firmware queue while the lock holds TX.
+        // One-deep model: any held frame means the queue is full.
+        let mut queued: usize = 0;
         loop {
             tokio::select! {
                 read = peer.read(&mut buf) => {
@@ -3419,18 +3492,35 @@ mod tests {
                     };
                     for f in deframer.process(&buf[..n]) {
                         if let KissDeframeResult::Frame { command, payload } = f {
-                            if command == rnode::CMD_DATA {
-                                if data_tx.send(payload.to_vec()).await.is_err() {
-                                    return;
-                                }
-                                if ready_budget > 0 {
-                                    ready_budget -= 1;
-                                    if peer.write_all(&ready_frame).await.is_err() {
+                            match command {
+                                rnode::CMD_DATA => {
+                                    if data_tx.send(payload.to_vec()).await.is_err() {
                                         return;
                                     }
-                                } else {
-                                    unacked += 1;
+                                    if air_budget > 0 {
+                                        air_budget -= 1;
+                                    } else {
+                                        queued += 1;
+                                    }
+                                    // No READY here: the firmware does not
+                                    // announce TX completion.
                                 }
+                                rnode::CMD_READY => {
+                                    ready_queries.fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    let mut resp = Vec::new();
+                                    kiss::frame(
+                                        rnode::CMD_READY,
+                                        &[if queued > 0 { 0x00 } else { 0x01 }],
+                                        &mut resp,
+                                    );
+                                    if peer.write_all(&resp).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -3438,13 +3528,13 @@ mod tests {
                 resumed = resume_rx.recv() => {
                     match resumed {
                         Some(n) => {
-                            ready_budget += n;
-                            while unacked > 0 && ready_budget > 0 {
-                                unacked -= 1;
-                                ready_budget -= 1;
-                                if peer.write_all(&ready_frame).await.is_err() {
-                                    return;
-                                }
+                            // Lock released: the queue drains against the
+                            // refreshed budget. Nothing is announced — only
+                            // the next query learns about the room.
+                            air_budget += n;
+                            while queued > 0 && air_budget > 0 {
+                                queued -= 1;
+                                air_budget -= 1;
                             }
                         }
                         None => return,
@@ -3463,23 +3553,27 @@ mod tests {
         counters: Arc<InterfaceCounters>,
         resume_tx: mpsc::Sender<usize>,
         data_rx: mpsc::Receiver<Vec<u8>>,
+        /// CMD_READY queries the stub has answered — proves the host asks.
+        ready_queries: Arc<std::sync::atomic::AtomicUsize>,
         /// Held so the io task's `incoming_tx.send` never fails mid-test.
         _incoming_rx: mpsc::Receiver<IncomingPacket>,
     }
 
-    fn spawn_duty_lock_harness(flow_control: bool, ready_budget: usize) -> DutyLockHarness {
+    fn spawn_duty_lock_harness(flow_control: bool, air_budget: usize) -> DutyLockHarness {
         let (port, peer) = tokio::io::duplex(64 * 1024);
         let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(16);
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
         let (resume_tx, resume_rx) = mpsc::channel::<usize>(16);
         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(256);
         let counters = Arc::new(InterfaceCounters::new());
+        let ready_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         tokio::spawn(rnode_firmware_stub_scripted(
             peer,
-            ready_budget,
+            air_budget,
             resume_rx,
             data_tx,
+            Arc::clone(&ready_queries),
         ));
         let task_counters = Arc::clone(&counters);
         tokio::spawn(async move {
@@ -3504,6 +3598,7 @@ mod tests {
             counters,
             resume_tx,
             data_rx,
+            ready_queries,
             _incoming_rx: incoming_rx,
         }
     }
@@ -3541,14 +3636,12 @@ mod tests {
         logs.lines().filter(|l| l.contains(&needle)).count()
     }
 
-    /// Behaviour 1, lock semantics: the stub answers READY after
-    /// each of the first three frames, then goes silent — the duty-lock
-    /// shape (no TX completion ⇒ no READY, `RNode_Firmware.ino:1624`). With
-    /// `flow_control = true` the host must hold every further frame on its
-    /// side. READY is retrospective (it follows a TX), so exactly one
-    /// in-flight frame — the fourth, opened by the third frame's READY —
-    /// still reaches the stub after the last READY; frames five and six
-    /// must never appear.
+    /// Behaviour 1, lock semantics: the stub airs the first three frames
+    /// (each post-TX query answers 0x01), then the duty lock holds TX
+    /// (no completion, `RNode_Firmware.ino:1624`). The fourth frame still
+    /// ships — it is what fills the firmware queue — and its query answers
+    /// 0x00, so with `flow_control = true` the host must hold frames five
+    /// and six on its side; they must never appear at the stub.
     #[tokio::test(start_paused = true)]
     async fn test_flow_control_duty_lock_holds_frames_host_side() {
         let mut h = spawn_duty_lock_harness(true, 3);
@@ -3557,23 +3650,24 @@ mod tests {
             h.push(p).await;
         }
         for p in &payloads[..4] {
-            h.expect_frame(p, "frames up to one past the last READY flow")
+            h.expect_frame(p, "frames up to the one that fills the firmware queue flow")
                 .await;
         }
         h.expect_silence(
             Duration::from_secs(5),
-            "after the last READY plus its one in-flight frame, \
-             the remaining frames are held host-side",
+            "once the queue is full every poll answers 0x00, \
+             so the remaining frames are held host-side",
         )
         .await;
     }
 
-    /// Behaviour 2, bootstrap: the firmware emits CMD_READY only
-    /// *after* a TX — never spontaneously after init. From a cold start with
-    /// `flow_control = true`, the first frame must go out without waiting
-    /// for a READY that cannot yet exist (mirrors Python
-    /// `RNodeInterface.py:459`, `interface_ready = True` after radio
-    /// validation), and the second frame must then wait for the first READY.
+    /// Behaviour 2, bootstrap: the firmware never speaks CMD_READY
+    /// unsolicited, so from a cold start with `flow_control = true` the
+    /// first frame must go out without asking anything (the gate starts
+    /// open; there is no queue state worth asking about before the first
+    /// TX). Here the duty lock already holds TX, so that frame jams the
+    /// one-deep firmware queue, the post-TX query answers 0x00, and the
+    /// second frame waits host-side until a poll learns the queue drained.
     #[tokio::test(start_paused = true)]
     async fn test_flow_control_bootstrap_first_frame_needs_no_ready() {
         let mut h = spawn_duty_lock_harness(true, 0);
@@ -3581,16 +3675,16 @@ mod tests {
         h.push(b"second").await;
         h.expect_frame(
             b"first",
-            "cold start: the first frame must not wait for a READY that cannot exist yet",
+            "cold start: the first frame must ship without any READY exchange",
         )
         .await;
         h.expect_silence(
             Duration::from_secs(3),
-            "the second frame must wait for the first READY",
+            "the second frame must wait while every poll answers 0x00",
         )
         .await;
         h.resume_tx.send(1).await.expect("stub alive");
-        h.expect_frame(b"second", "the first READY re-opens the gate")
+        h.expect_frame(b"second", "the next poll after the drain re-opens the gate")
             .await;
     }
 
@@ -3607,8 +3701,8 @@ mod tests {
         h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
             .await;
 
-        // The gate is now closed for good (the stub never READYs). Overfill
-        // the host-side queue past its cap.
+        // The gate is now closed for good (every poll answers 0x00).
+        // Overfill the host-side queue past its cap.
         const EXCESS: usize = 5;
         for i in 0..(FLOW_CONTROL_QUEUE_LIMIT + EXCESS) {
             h.push(format!("q{i:03}").as_bytes()).await;
@@ -3686,11 +3780,11 @@ mod tests {
         }
     }
 
-    /// Behaviour 5, release: the stub resumes READY, the held
-    /// frames drain in order, and one `RNODE_TX_RELEASED` closes the pair
-    /// opened by `RNODE_TX_GATED`. The post-release drain re-closes the gate
-    /// only for sub-threshold moments, so no further gated/release events
-    /// may fire.
+    /// Behaviour 5, release: the duty lock lifts, the queue drains, the
+    /// next poll answers 0x01, the held frames drain in order, and one
+    /// `RNODE_TX_RELEASED` closes the pair opened by `RNODE_TX_GATED`. The
+    /// post-release drain re-closes the gate only for sub-threshold
+    /// moments, so no further gated/release events may fire.
     #[tokio::test(start_paused = true)]
     async fn test_flow_control_release_drains_in_order_and_pairs_events() {
         let (logs, guard) = capture_logs();
@@ -3699,8 +3793,8 @@ mod tests {
         for p in payloads {
             h.push(p).await;
         }
-        // Budget 2: r1/r2 are READYed, r3 rides r2's READY and is the
-        // firmware-held frame; r4/r5 are held host-side.
+        // Budget 2: r1/r2 air, r3 ships into the locked firmware and jams
+        // its queue; r4/r5 are held host-side by the 0x00 poll answers.
         for p in &payloads[..3] {
             h.expect_frame(p, "pre-lock frames flow").await;
         }
@@ -3740,9 +3834,10 @@ mod tests {
     }
 
     /// Behaviour 6, off means off: with `flow_control = false`
-    /// (the default) every frame ships without any READY, in order, and none
-    /// of the duty-lock machinery speaks — no gated, release, or queue-drop
-    /// events. The default does not change in this batch.
+    /// (the default) every frame ships without any READY exchange, in
+    /// order, and none of the duty-lock machinery speaks — no gated,
+    /// release, or queue-drop events, and no CMD_READY queries on the
+    /// serial line either. The default does not change in this batch.
     #[tokio::test(start_paused = true)]
     async fn test_flow_control_off_never_gates_and_stays_silent() {
         let (logs, guard) = capture_logs();
@@ -3768,6 +3863,43 @@ mod tests {
                 "{event} must be absent with flow_control off\n--- logs ---\n{logs}"
             );
         }
+        assert_eq!(
+            h.ready_queries.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "flow_control off must put no CMD_READY queries on the serial line"
+        );
+    }
+
+    /// The regression net for the flowval leg-B deadlock (2026-08-21):
+    /// the firmware answers CMD_READY only when queried
+    /// (`RNode_Firmware.ino:1003-1008`) — never spontaneously, not after a
+    /// TX, not on queue drain (`kiss_indicate_ready`/`_not_ready`,
+    /// `Utilities.h:1157,1164`, have no other call sites). An
+    /// implementation that waits for an unsolicited READY starves here:
+    /// the stub's queue drains after `resume`, but only a query can learn
+    /// that, so `expect_frame(second)` times out against a
+    /// wait-for-spontaneous-READY host. The query counter additionally
+    /// pins that the reopen was learned by asking.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_reopen_is_learned_by_query_never_spontaneous() {
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"first").await;
+        h.expect_frame(b"first", "cold-start frame ships ungated")
+            .await;
+        // The frame sits in the firmware queue under the lock; the host
+        // gate is closed. Lift the lock: the queue drains, and the
+        // firmware says nothing on its own.
+        h.resume_tx.send(1).await.expect("stub alive");
+        h.push(b"second").await;
+        h.expect_frame(
+            b"second",
+            "the gate must reopen via a CMD_READY query — the firmware never volunteers READY",
+        )
+        .await;
+        assert!(
+            h.ready_queries.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the reopen must have been learned through a CMD_READY query"
+        );
     }
 
     // -----------------------------------------------------------------------
