@@ -213,6 +213,85 @@ mod tests {
         assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
     }
 
+    /// Every `warn!` message emitted while the returned guard lives.
+    fn warn_tap() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl tracing::Subscriber + Send + Sync,
+    ) {
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl Visit for Sink {
+            fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" {
+                    if let Ok(mut seen) = self.0.lock() {
+                        seen.push(format!("{v:?}"));
+                    }
+                }
+            }
+        }
+
+        struct Layer(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Layer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    event.record(&mut Sink(std::sync::Arc::clone(&self.0)));
+                }
+            }
+        }
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            std::sync::Arc::clone(&seen),
+            tracing_subscriber::registry().with(Layer(seen)),
+        )
+    }
+
+    /// The #315 ceiling warning reaches the daemon log, and only for the block
+    /// that crosses it. The pure decision is tested in `interfaces::serial`;
+    /// what this adds is the wiring — a warning nothing calls encodes nothing.
+    ///
+    /// Both halves are the control for each other: same builder, same PHY,
+    /// same port, one differing key.
+    #[tokio::test]
+    async fn a_preamble_pin_over_the_ceiling_is_warned_at_build_time() {
+        let lora_block = |preamble: u16| InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/nonexistent-test-port".to_string()),
+            frequency: Some(869_525_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(10),
+            coding_rate: Some(8),
+            preamble_symbols: Some(preamble),
+            ..Default::default()
+        };
+
+        let owner = CtxOwner::new();
+        let (seen, subscriber) = warn_tap();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            serial::build(0, &lora_block(24), &owner.ctx()).expect("24 builds, it only warns");
+            serial::build(1, &lora_block(18), &owner.ctx()).expect("18 builds silently");
+        }
+
+        let warnings = seen.lock().expect("warn tap");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the pinned-24 block warns: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("#315") && warnings[0].contains("serial_0"),
+            "the warning names the issue and the interface: {}",
+            warnings[0]
+        );
+    }
+
     /// TEST-ONLY `test_drop_direct_ingress` is refused together with IFAC:
     /// IFAC prepends material before the flags byte, so the wire hops byte
     /// the filter reads is no longer at `raw[1]`. The refusal is a config

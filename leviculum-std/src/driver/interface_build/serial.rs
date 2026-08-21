@@ -43,6 +43,14 @@ pub(super) fn build(
         }
     }
 
+    // A `preamble_symbols` pin above the measured SX127x RX ceiling keys a
+    // preamble no SX127x peer can receive (Codeberg #315). Warn, never
+    // refuse: an SX126x-only mesh may do this legitimately.
+    if let Some(warning) = crate::interfaces::serial::preamble_ceiling_warning(&iface_name, config)
+    {
+        tracing::warn!("{warning}");
+    }
+
     let radio_config = crate::interfaces::serial::serial_radio_config(config);
 
     let mut handle = crate::interfaces::serial::spawn_serial_interface(

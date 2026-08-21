@@ -103,6 +103,80 @@ pub(crate) fn serial_radio_config(
     })
 }
 
+/// Symbol count above which an SX127x receiver stopped decoding on the rig
+/// (Codeberg #315). Measured 2026-08-21 at SF10/BW125, T114 transmitting,
+/// t-beam-1 receiving in raw KISS with our stack out of the RX path, ~20
+/// forced path requests per rung: 18 symbols (147 ms) decoded 36 frames, 20
+/// (164 ms) decoded 2, and 22 / 24 / 28 decoded none while the carrier was
+/// present at up to -6 dBm on every rung.
+const SX127X_RX_PREAMBLE_CEILING_SYMBOLS: u16 = 20;
+
+/// On-air preamble duration at the same ceiling — 20 symbols at SF10/BW125,
+/// the last rung that still decoded anything.
+///
+/// The symbol count alone does not explain the measurement, and a warning on
+/// the count alone would be wrong: `lora_path_discovery_fast_mixed` keys 24
+/// symbols at SF7/BW125 (24.6 ms) into the same SX1276 and is green. What
+/// separates the two is time on air, which is why both terms are required
+/// below — the warning fires only inside the region where a receiver was
+/// actually measured going deaf.
+const SX127X_RX_PREAMBLE_CEILING_MS: u64 = 164;
+
+/// The config-time warning for a `preamble_symbols` pin that SX127x peers
+/// cannot receive (Codeberg #315), or `None` for a block that is safe, has no
+/// pin, or is not a LoRa block at all.
+///
+/// The pin bypasses [`derive_preamble_symbols`] (see `serial_radio_config`
+/// above), so it is the one path in either stack that can put a preamble on
+/// the air longer than the RNode firmware would ever key. Above the measured
+/// ceiling an SX1276 peer decodes nothing from this interface while its own
+/// frames still arrive here — silent, one-way loss that looks like a range or
+/// routing problem from both ends.
+///
+/// This warns and does not refuse. An SX126x-only mesh may key long preambles
+/// legitimately (the SX1262 copes), the peer population is not knowable from a
+/// config file, and the pin is also how the corner gets re-measured.
+pub(crate) fn preamble_ceiling_warning(
+    name: &str,
+    cfg: &crate::config::InterfaceConfig,
+) -> Option<String> {
+    // No frequency means a plain serial pipe: `serial_radio_config` returns
+    // `None` and the pin never reaches a modem.
+    let _frequency = cfg.frequency?;
+    let pinned = cfg.preamble_symbols?;
+    let bandwidth = cfg.bandwidth.unwrap_or(125_000);
+    let spreading_factor = cfg.spreading_factor.unwrap_or(8);
+    let coding_rate = cfg.coding_rate.unwrap_or(5);
+
+    if pinned <= SX127X_RX_PREAMBLE_CEILING_SYMBOLS {
+        return None;
+    }
+    let preamble_ms = preamble_airtime_ms(pinned, spreading_factor, bandwidth)?;
+    if preamble_ms < SX127X_RX_PREAMBLE_CEILING_MS {
+        return None;
+    }
+
+    let derived = derive_preamble_symbols(spreading_factor, coding_rate, bandwidth);
+    Some(format!(
+        "{name}: preamble_symbols = {pinned} is pinned, {preamble_ms} ms on air at SF{spreading_factor}/BW{bandwidth}. \
+         Measured on the rig, SX127x receivers stop decoding above ~{SX127X_RX_PREAMBLE_CEILING_SYMBOLS} symbols \
+         (~{SX127X_RX_PREAMBLE_CEILING_MS} ms) at this bandwidth (Codeberg #315): every RNode and any other SX127x peer \
+         will lose all frames from this interface silently and one-way, while their own frames still arrive here. \
+         Keep the pin only for a mesh of SX126x receivers; removing it derives {derived} symbols, which every peer receives."
+    ))
+}
+
+/// On-air duration of `symbols` preamble symbols, in whole milliseconds.
+///
+/// Symbol time is `2^sf / bandwidth`; `None` for a PHY no modem offers, where
+/// the shift would be meaningless rather than merely large.
+fn preamble_airtime_ms(symbols: u16, sf: u8, bandwidth_hz: u32) -> Option<u64> {
+    if sf == 0 || sf > 12 || bandwidth_hz == 0 {
+        return None;
+    }
+    Some(symbols as u64 * (1u64 << sf) * 1000 / bandwidth_hz as u64)
+}
+
 /// Configuration for a serial interface.
 pub(crate) struct SerialInterfaceConfig {
     pub id: InterfaceId,
@@ -669,6 +743,107 @@ mod tests {
         // And a value below the reference's own floor, which the derivation
         // would never produce.
         assert_eq!(pinned(10, 8), 8);
+    }
+
+    /// A LoRa `SerialInterface` block, SF and preamble to taste.
+    fn preamble_cfg(sf: u8, preamble: Option<u16>) -> crate::config::InterfaceConfig {
+        crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            frequency: Some(869_525_000),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(sf),
+            coding_rate: Some(8),
+            preamble_symbols: preamble,
+            ..Default::default()
+        }
+    }
+
+    /// The measured ceiling of Codeberg #315, encoded where a config file can
+    /// still cross it: above ~20 symbols an SX127x receiver decodes nothing,
+    /// and the only way to key that is a pin.
+    ///
+    /// The rung either side of the ceiling is the whole test — 21 warns, 20 is
+    /// silent — and the positive control is that this same function stays
+    /// quiet on every configuration the corpus runs green.
+    #[test]
+    fn a_preamble_pin_above_the_sx127x_ceiling_warns() {
+        let warning = preamble_ceiling_warning("serial_0", &preamble_cfg(10, Some(21)))
+            .expect("21 symbols at SF10 is above the measured ceiling");
+        assert!(
+            warning.contains("#315"),
+            "the warning names the issue: {warning}"
+        );
+        assert!(
+            warning.contains("20 symbols"),
+            "the warning names the measured ceiling: {warning}"
+        );
+        assert!(
+            warning.contains("SX127x"),
+            "the warning names who goes deaf: {warning}"
+        );
+        assert!(
+            warning.contains("serial_0"),
+            "the warning names the interface: {warning}"
+        );
+
+        // The pin the preamble24 cell keys, one rung further out.
+        let at_24 = preamble_ceiling_warning("serial_0", &preamble_cfg(10, Some(24)))
+            .expect("24 symbols at SF10 warns");
+        assert!(at_24.contains("196 ms"), "names the airtime: {at_24}");
+    }
+
+    /// Positive control for the silence: the same function on the same PHY one
+    /// symbol lower, on the derived value, and on a block with no pin at all.
+    /// Without this, a function that returned `None` unconditionally would
+    /// pass the test above's negative half.
+    #[test]
+    fn a_preamble_at_or_below_the_ceiling_is_silent() {
+        assert_eq!(
+            preamble_ceiling_warning("serial_0", &preamble_cfg(10, Some(20))),
+            None,
+            "20 symbols is the last rung that decoded — marginal, not warned"
+        );
+        assert_eq!(
+            preamble_ceiling_warning("serial_0", &preamble_cfg(10, Some(18))),
+            None,
+            "the derived value must never warn"
+        );
+        assert_eq!(
+            preamble_ceiling_warning("serial_0", &preamble_cfg(10, None)),
+            None,
+            "no pin, no warning"
+        );
+    }
+
+    /// The measurement is a duration, not a symbol count, so the warning is
+    /// too: `lora_path_discovery_fast_mixed` keys 24 symbols at SF7/BW125 —
+    /// 24.6 ms — into the same SX1276 and is green in every corpus run. A
+    /// warning that fired on the count alone would call that config broken.
+    #[test]
+    fn a_long_preamble_at_a_fast_spreading_factor_is_silent() {
+        assert_eq!(
+            preamble_ceiling_warning("serial_0", &preamble_cfg(7, Some(24))),
+            None,
+            "24 symbols at SF7 is 24.6 ms on air, far under the ceiling"
+        );
+        // Same count, slow SF: the duration is what moved, and so is the verdict.
+        assert!(preamble_ceiling_warning("serial_0", &preamble_cfg(10, Some(24))).is_some());
+    }
+
+    /// A block with no `frequency` is a plain serial pipe: `serial_radio_config`
+    /// returns `None` for it, no radio config is sent, and an inert key must
+    /// not produce a warning about the air.
+    #[test]
+    fn a_pin_on_a_non_lora_serial_block_is_silent() {
+        let cfg = crate::config::InterfaceConfig {
+            interface_type: "SerialInterface".to_string(),
+            port: Some("/dev/ttyACM0".to_string()),
+            preamble_symbols: Some(64),
+            ..Default::default()
+        };
+        assert!(serial_radio_config(&cfg).is_none());
+        assert_eq!(preamble_ceiling_warning("serial_0", &cfg), None);
     }
 
     /// An LNode whose block names no `txpower` is programmed to the board

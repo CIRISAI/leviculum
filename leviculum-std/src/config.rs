@@ -461,7 +461,10 @@ pub struct InterfaceConfig {
     /// RNode peer expects to hear: 24 symbols at SF7/BW125, the 18-symbol
     /// floor from SF8 down. Setting it pins a value instead, which is how
     /// the corner gets re-measured and how a node with a non-conforming peer
-    /// copes.
+    /// copes. A pin past the measured SX127x RX ceiling is warned about at
+    /// interface build (`interfaces::serial::preamble_ceiling_warning`,
+    /// Codeberg #315) and never refused — the peer population is not knowable
+    /// from a config file.
     ///
     /// Distinct from [`preamble`](Self::preamble), which is the KISS TNC
     /// TX delay in milliseconds (`CMD_TXDELAY`) and does not reach a LoRa
