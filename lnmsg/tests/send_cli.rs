@@ -3,9 +3,10 @@
 //!
 //! The unit tests in `src/` assert on the parsers and on the send loop against
 //! a fake outbox. This asserts what a script sees — the exit code, and that
-//! stdout stays clean of everything but a message id — because that contract
-//! is the whole point of a non-interactive subcommand and no in-process test
-//! can check the process's exit status.
+//! stdout stays empty — because that contract is the whole point of a
+//! non-interactive subcommand and no in-process test can check the process's
+//! exit status. Since 2026-08-21 stdout is empty on success too; that half
+//! needs a daemon to reach and lives in `python_interop.rs`.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

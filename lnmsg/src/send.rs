@@ -9,13 +9,16 @@
 //!
 //! # What exit 0 is allowed to mean
 //!
-//! Decision 7 (2026-08-10) says `send` returns immediately with the message id
-//! and that exit 0 means "queued cleanly" and claims nothing more. The first
-//! half of that does not survive contact with the process model decided two
-//! days earlier: in option A there is no daemon, so the process that holds the
-//! outbound queue is the process that is about to exit. A literal immediate
-//! return would print an id and then destroy the queue the id refers to,
-//! which is a worse lie than the one the decision was written to prevent.
+//! Decision 7 says exit 0 means "queued cleanly" and claims nothing more; that
+//! half is untouched and is what this module exists to keep true. Its other
+//! half — return immediately, with the message id on stdout — is gone: the id
+//! came off stdout on 2026-08-21 (a success now prints nothing), and the
+//! immediate return did not survive contact with the process model decided two
+//! days before the decision. In option A there is no daemon, so the process
+//! that holds the outbound queue is the process that is about to exit. A
+//! literal immediate return would report success and then destroy the queue
+//! that success referred to, which is a worse lie than the one the decision
+//! was written to prevent.
 //!
 //! So this waits — bounded, and for the earliest thing that makes the claim
 //! true rather than for a delivery proof. The message is *handed on* when the
@@ -30,7 +33,6 @@
 //! (`lnmsg-architecture.md` §2, trap 3), so no word this program prints is
 //! ever "delivered to" a person.
 
-use std::io::Write;
 use std::time::Duration;
 
 // `tokio::time::Instant`, not `std::time::Instant`: the budget has to be
@@ -197,15 +199,15 @@ enum Phase {
 
 /// Run one `lnmsg send`.
 ///
-/// `id_sink` receives the message id and a newline the moment the router
-/// accepts the message, and nothing else ever — the brief's
-/// `$(lnmsg send …)` contract. It is flushed there rather than at exit, so a
-/// caller reading the pipe live sees the id before the wait for the network.
-pub async fn run_send<O: Outbox, W: Write>(
+/// It writes to no stream at all, which is how the "a success prints nothing"
+/// rule is held: there is no sink here to print an id to, so no future edit
+/// can quietly reintroduce one. The id reaches whoever wants it through
+/// `LNMSG_ENQUEUED id=…` in the structured event log, and through the returned
+/// [`Queued`].
+pub async fn run_send<O: Outbox>(
     outbox: &mut O,
     request: SendRequest,
     options: &SendOptions,
-    id_sink: &mut W,
 ) -> Result<Queued, SendError> {
     let start = Instant::now();
     let destination = request.destination;
@@ -246,9 +248,6 @@ pub async fn run_send<O: Outbox, W: Write>(
                 OutboxEvent::Queued { message_id: id } => {
                     message_id = Some(id);
                     events::enqueued(&id, &destination, body_len, via.as_str());
-                    writeln!(id_sink, "{}", crate::address::to_hex(&id))
-                        .and_then(|()| id_sink.flush())
-                        .map_err(|_| SendError::NoAnswer { message_id: id })?;
                     phase = Phase::HandedOn;
                 }
                 OutboxEvent::Refused { detail } => return Err(SendError::Refused(detail)),
@@ -348,10 +347,12 @@ mod tests {
         }
     }
 
-    /// The happy path, and the stdout contract with it: exactly the id and a
-    /// newline, nothing else on that stream.
+    /// The happy path: the id comes back to the caller, and nowhere else. The
+    /// "prints nothing" half of the contract is held by the signature — there
+    /// is no stream here to print to — so what is left to assert is that the
+    /// id still reaches the one caller that needs it.
     #[tokio::test(start_paused = true)]
-    async fn a_handed_on_message_returns_its_id_and_prints_only_that() {
+    async fn a_handed_on_message_returns_its_id() {
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::Ready { address: [1; 16] },
             OutboxEvent::Resolved { destination: DST },
@@ -361,19 +362,13 @@ mod tests {
                 state: MessageState::Sent,
             },
         ]);
-        let mut out = Vec::new();
 
-        let queued = run_send(&mut outbox, request(), &options(), &mut out)
+        let queued = run_send(&mut outbox, request(), &options())
             .await
             .expect("a handed-on message is a success");
 
         assert_eq!(queued.message_id, ID);
         assert_eq!(queued.state, MessageState::Sent);
-        assert_eq!(
-            String::from_utf8(out).expect("hex is utf-8"),
-            format!("{}\n", crate::address::to_hex(&ID)),
-            "stdout carries the id and nothing else"
-        );
         let commands = outbox.commands.borrow();
         assert_eq!(commands.len(), 2, "one resolve then one send: {commands:?}");
         assert!(matches!(commands[0], Command::Resolve { .. }));
@@ -397,20 +392,19 @@ mod tests {
                 state: MessageState::Delivered,
             },
         ]);
-        let queued = run_send(&mut outbox, request(), &options(), &mut Vec::new())
+        let queued = run_send(&mut outbox, request(), &options())
             .await
             .expect("delivered is handed on");
         assert_eq!(queued.state, MessageState::Delivered);
     }
 
     /// The negative case the brief names: a destination that does not exist
-    /// must not produce a success, and must not print an id.
+    /// must not produce a success, and must not queue anything.
     #[tokio::test(start_paused = true)]
-    async fn an_unreachable_destination_fails_without_printing_an_id() {
+    async fn an_unreachable_destination_fails_without_queueing_anything() {
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::Ready { address: [1; 16] }]);
-        let mut out = Vec::new();
 
-        let error = run_send(&mut outbox, request(), &options(), &mut out)
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("an unresolvable destination is a failure");
 
@@ -418,7 +412,6 @@ mod tests {
             matches!(error, SendError::Unreachable { destination, .. } if destination == DST),
             "{error:?}"
         );
-        assert!(out.is_empty(), "no id may be printed for a failed send");
         assert_eq!(
             outbox.commands.borrow().len(),
             1,
@@ -427,7 +420,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_refused_message_is_an_error_and_prints_nothing() {
+    async fn a_refused_message_is_an_error() {
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::Ready { address: [1; 16] },
             OutboxEvent::Resolved { destination: DST },
@@ -435,17 +428,15 @@ mod tests {
                 detail: "QueueFull".to_string(),
             },
         ]);
-        let mut out = Vec::new();
-        let error = run_send(&mut outbox, request(), &options(), &mut out)
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("a refusal is a failure");
         assert!(matches!(error, SendError::Refused(_)), "{error:?}");
-        assert!(out.is_empty());
     }
 
-    /// The router giving up must not be reported as success just because an id
-    /// was printed. The id is on stdout by then, which is correct: it names the
-    /// message the error is about.
+    /// The router giving up must not be reported as success just because the
+    /// message got as far as being queued. The error names the id, which is
+    /// what lets an operator find the message in the event log.
     #[tokio::test(start_paused = true)]
     async fn a_terminal_failure_after_queueing_is_still_a_failure() {
         let mut outbox = FakeOutbox::new(vec![
@@ -457,8 +448,7 @@ mod tests {
                 state: MessageState::Failed,
             },
         ]);
-        let mut out = Vec::new();
-        let error = run_send(&mut outbox, request(), &options(), &mut out)
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("the router giving up is a failure");
         assert!(
@@ -471,7 +461,10 @@ mod tests {
             ),
             "{error:?}"
         );
-        assert!(!out.is_empty(), "the id names the message that failed");
+        assert!(
+            error.to_string().contains(&crate::address::to_hex(&ID)),
+            "the error must name the message that failed: {error}"
+        );
     }
 
     /// The case the single-process model makes possible and a daemon would
@@ -487,7 +480,7 @@ mod tests {
                 state: MessageState::Outbound,
             },
         ]);
-        let error = run_send(&mut outbox, request(), &options(), &mut Vec::new())
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("a stranded message is not a success");
         assert!(
@@ -507,7 +500,7 @@ mod tests {
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::Broken {
             detail: "register delivery destination".to_string(),
         }]);
-        let error = run_send(&mut outbox, request(), &options(), &mut Vec::new())
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("a broken engine is a failure");
         assert!(matches!(error, SendError::Broken(_)), "{error:?}");
@@ -516,7 +509,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_engine_that_never_comes_up_fails_before_queueing_anything() {
         let mut outbox = FakeOutbox::new(Vec::new());
-        let error = run_send(&mut outbox, request(), &options(), &mut Vec::new())
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("no readiness is a failure");
         assert_eq!(error, SendError::NeverReady);
@@ -527,7 +520,7 @@ mod tests {
     async fn a_dead_engine_is_reported_rather_than_waited_out() {
         let mut outbox = FakeOutbox::new(Vec::new());
         outbox.gone = true;
-        let error = run_send(&mut outbox, request(), &options(), &mut Vec::new())
+        let error = run_send(&mut outbox, request(), &options())
             .await
             .expect_err("a dead engine is a failure");
         assert_eq!(error, SendError::Gone);

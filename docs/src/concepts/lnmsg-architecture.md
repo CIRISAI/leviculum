@@ -654,6 +654,21 @@ is a script that must not hang, and enqueueing is the only operation whose
 success is knowable immediately; everything after it is a history, not a
 result.
 
+**Amended (2026-08-21): the message ID comes off stdout.** A successful
+`lnmsg send` now prints nothing at all and exits 0; errors keep going to
+stderr. The ID is not interesting to the person running the command, and
+saying nothing on success is the ordinary Unix contract — a cron job that
+mails its output should mail nothing when the send worked. The rest of this
+decision is untouched: **exit 0 still means "queued cleanly" and claims
+nothing about delivery**, and that is now the entire success signal, which is
+why the exit code is what the tests assert. The ID does not become
+unobtainable, because `lnmsg status <id>` needs it: `LNMSG_ENQUEUED … id=…`
+carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
+turns on and which is written by an unfiltered layer, so the line arrives even
+at the `warn` default (`leviculum-std/src/event_log.rs:513-520`). No
+`--print-id` flag was added: nothing consumes the ID today, and an option
+added against a hypothetical user is an option nobody tests.
+
 **Decision (2026-08-21): the sender's name.** The delivery announce carried
 the literal `lnmsg`, which names the tool rather than the person, so every
 recipient saw the same sender for every operator on every host. The default

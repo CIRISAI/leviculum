@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `send_request_awaited`) and a bounded multi-consumer event tap, replacing
   consumer poll loops (#253).
 - `lnmsg`, a new LXMF messenger: `lnmsg send <address>` queues one message
-  through a running `lnsd`/`rnsd` shared instance and prints its id. Exit 0
+  through a running `lnsd`/`rnsd` shared instance and says nothing. Exit 0
   means queued, never delivered.
 
 ### Removed

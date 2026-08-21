@@ -6,9 +6,9 @@
 //! ```
 //!
 //! It attaches to a running `lnsd` or `rnsd` shared instance the way `lnomad`
-//! does, queues one message through its own LXMF router, prints the message id
-//! on stdout and exits. It never starts a Reticulum stack of its own, and it
-//! never claims a message was delivered.
+//! does, queues one message through its own LXMF router and exits. A success
+//! says nothing at all; errors go to stderr. It never starts a Reticulum stack
+//! of its own, and it never claims a message was delivered.
 //!
 //! Exit codes follow `lnomad`'s convention (`lnomad/src/main.rs:174`, `:188`,
 //! `:222`): 0 success, 1 operational failure, 2 argument error.
@@ -40,7 +40,12 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
     long_about = "Send LXMF messages over a running Reticulum shared instance.\n\n\
                   lnmsg attaches to a daemon that is already running (lnsd, or \
                   Python's rnsd) the same way lnomad does. It does not start a \
-                  Reticulum stack of its own, so a daemon has to be running."
+                  Reticulum stack of its own, so a daemon has to be running.\n\n\
+                  A send that worked prints nothing and exits 0, which means \
+                  the message was queued cleanly -- not that it was delivered. \
+                  Failures explain themselves on stderr. Set \
+                  LEVICULUM_EVENT_LOG=<path> for the full run as structured \
+                  events, including the message id."
 )]
 struct Args {
     #[command(subcommand)]
@@ -149,8 +154,10 @@ async fn main() -> ExitCode {
     // `LEVICULUM_EVENT_LOG=<path>` turns the structured events into an
     // append-only file in the documented format; without it this is the plain
     // fmt subscriber and the events cost a filtered-out call. `warn` rather
-    // than `info` as the default: a program whose stdout contract is "the
-    // message id and nothing else" should not chatter on stderr either.
+    // than `info` as the default: a successful run says nothing on any stream,
+    // so an `info`-level line on stderr would be the only thing a cron job
+    // ever saw from a send that worked. Whoever wants the detail asks for the
+    // event log, which is where the message id lives.
     leviculum_std::event_log::install_global_subscriber("warn");
 
     match args.command {
@@ -218,9 +225,7 @@ async fn run(args: SendArgs) -> ExitCode {
         body,
         via,
     };
-    let mut stdout = std::io::stdout().lock();
-    let outcome = run_send(&mut attached.outbox, request, &options, &mut stdout).await;
-    drop(stdout);
+    let outcome = run_send(&mut attached.outbox, request, &options).await;
 
     let code = match outcome {
         Ok(queued) => {

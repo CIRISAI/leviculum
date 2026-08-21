@@ -4,7 +4,12 @@
 //! Python, positive and negative, before it merges. This is that test for the
 //! send path, and it drives the shipped binary rather than the library, so
 //! what is asserted is exactly what a cron job would get: an exit code, a
-//! message id on stdout, and a message in someone else's inbox.
+//! silent stdout, and a message in someone else's inbox.
+//!
+//! The interop claim rests on one identity: the id our `LNMSG_ENQUEUED` line
+//! carries is the `message_hash` **Python** computed over the message it
+//! received. Both sides derive it independently from the LXMF wire bytes, so
+//! the match is agreement between two stacks and not a value we handed over.
 //!
 //! ```text
 //!   lnmsg (subprocess)                    python3 scripts/test_daemon.py
@@ -257,6 +262,33 @@ struct Sent {
     log: String,
 }
 
+impl Sent {
+    /// The message id, from the `id=` field of this run's `LNMSG_ENQUEUED`
+    /// line. Since 2026-08-21 the id is not on stdout, and this is the
+    /// documented way to get it back out of a run.
+    fn enqueued_id(&self) -> String {
+        let line = self
+            .log
+            .lines()
+            .find(|line| line.starts_with("LNMSG_ENQUEUED "))
+            .unwrap_or_else(|| panic!("no LNMSG_ENQUEUED line in this run: {self}"));
+        let id = line
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("id="))
+            .unwrap_or_else(|| panic!("no id= field in {line}"));
+        assert_eq!(
+            id.len(),
+            64,
+            "an LXMF message id is 32 bytes of hex: {id:?}"
+        );
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "the id must be hex: {id:?}"
+        );
+        id.to_string()
+    }
+}
+
 impl std::fmt::Display for Sent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -323,23 +355,17 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
         .await;
 
     assert_eq!(sent.code, Some(0), "{sent}");
-    let id = sent.stdout.trim_end_matches('\n');
+    // Byte-exact, not "contains no hex blob": an assertion that merely failed
+    // to find an id would pass for any other thing we started printing.
     assert_eq!(
-        sent.stdout,
-        format!("{id}\n"),
-        "stdout carries the message id and nothing else"
-    );
-    assert_eq!(
-        id.len(),
-        64,
-        "an LXMF message id is 32 bytes of hex: {id:?}"
-    );
-    assert!(
-        id.chars().all(|c| c.is_ascii_hexdigit()),
-        "the id must be hex: {id:?}"
+        sent.stdout, "",
+        "a successful send says nothing on stdout: {sent}"
     );
 
-    let message = wait_for_python(&peer, id, Duration::from_secs(40)).await;
+    // The id from our own event log; `wait_for_python` accepts it only if it
+    // equals the `message_hash` Python computed over what it received.
+    let id = sent.enqueued_id();
+    let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
     assert_eq!(
         String::from_utf8(hex_bytes(&message, "content")).expect("the body round-trips as UTF-8"),
         body,
@@ -397,8 +423,12 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
         )
         .await;
     assert_eq!(overridden.code, Some(0), "{overridden}");
-    let overridden_id = overridden.stdout.trim_end_matches('\n');
-    let message = wait_for_python(&peer, overridden_id, Duration::from_secs(40)).await;
+    assert_eq!(
+        overridden.stdout, "",
+        "a successful send says nothing on stdout: {overridden}"
+    );
+    let overridden_id = overridden.enqueued_id();
+    let message = wait_for_python(&peer, &overridden_id, Duration::from_secs(40)).await;
     assert_eq!(
         message.get("source_display_name").and_then(|v| v.as_str()),
         Some("lew@schneckenschreck"),
@@ -409,8 +439,9 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
 }
 
 /// Negative: an address that exists nowhere in the mesh must not produce a
-/// success exit, and must not print an id — a script that trusted exit 0 here
-/// would report a status line nobody ever received.
+/// success exit — a script that trusted exit 0 here would report a status line
+/// nobody ever received. Silence alone means nothing now that a success is
+/// silent too; the exit code is the whole signal, so this asserts it exactly.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_destination_that_does_not_exist_is_not_a_success() {
     let peer = PythonPeer::start();
@@ -439,10 +470,7 @@ async fn a_destination_that_does_not_exist_is_not_a_success() {
         "an unreachable address is not a success"
     );
     assert_eq!(sent.code, Some(1), "{sent}");
-    assert!(
-        sent.stdout.is_empty(),
-        "no message id may be printed: {sent}"
-    );
+    assert_eq!(sent.stdout, "", "stdout stays empty on failure too: {sent}");
     assert!(
         sent.stderr.contains(nowhere),
         "the error must name the address it could not reach: {sent}"

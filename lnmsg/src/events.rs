@@ -70,7 +70,9 @@ pub fn resolved(destination: &[u8; 16], waited_ms: u64) {
 }
 
 /// The router accepted the message. This is the event the brief asks for as a
-/// minimum, and `id` is the message id printed on stdout.
+/// minimum, and since 2026-08-21 its `id` field is the only place the message
+/// id appears: a successful run prints nothing, so `lnmsg status <id>` is
+/// reachable only for someone who ran with `LEVICULUM_EVENT_LOG` set.
 pub fn enqueued(message_id: &[u8; 32], destination: &[u8; 16], bytes: usize, via: &str) {
     tracing::debug!(
         event = "LNMSG_ENQUEUED",
