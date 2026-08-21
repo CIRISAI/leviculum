@@ -55,7 +55,11 @@ echo "baseline boots=$BASE_BOOTS (initial boot, ignored)" >> "$OUT"
 cd "$REPO"
 for n in $(seq 1 "$RUNS"); do
   docker container prune -f >/dev/null 2>&1; docker network prune -f >/dev/null 2>&1
-  rm -f "$HOME/.local/state/leviculum-ci/test.lock"
+  # rig.lock is the current name; test.lock lingers only for pinned
+  # snapshot binaries that predate the rename. Removal is cosmetic
+  # either way — flock state is kernel-held, not file-held.
+  rm -f "$HOME/.local/state/leviculum-ci/rig.lock" \
+        "$HOME/.local/state/leviculum-ci/test.lock"
   ts=$(date +%s)
   timeout 200 "$PERICULUM_BIN" run "$PERICULUM_ROOT/hardware/lora_lnode_lncp_bidir.toml" \
     >/dev/null 2>&1
