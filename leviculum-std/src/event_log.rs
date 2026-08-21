@@ -308,6 +308,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // keys. Every entry below has a live emitter, as this file's "How to add an
     // event" rule requires.
     EventSchema {
+        name: "LNMSG_SENDER",
+        required_keys: &["from", "source"],
+    },
+    EventSchema {
         name: "LNMSG_ATTACHED",
         required_keys: &["instance", "address"],
     },

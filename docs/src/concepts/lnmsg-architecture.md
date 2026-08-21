@@ -631,7 +631,7 @@ non-tty detection (`lnomad/src/main.rs:167-168`) and its exit-code
 convention (0, 1, 2):
 
 ```
-lnmsg send <address> [--title T] [--attach F] [--via direct|propagated] [-]
+lnmsg send <address> [--title T] [--from NAME] [--attach F] [--via direct|propagated] [-]
 lnmsg read [--conversation A] [--since T] [--unread] [--json]
 lnmsg sync [--json]
 lnmsg contacts [--json]
@@ -653,6 +653,27 @@ a failure, because the message may still arrive. Rationale: the common case
 is a script that must not hang, and enqueueing is the only operation whose
 success is knowable immediately; everything after it is a history, not a
 result.
+
+**Decision (2026-08-21): the sender's name.** The delivery announce carried
+the literal `lnmsg`, which names the tool rather than the person, so every
+recipient saw the same sender for every operator on every host. The default
+is now the account name, resolved in this order: `getpwuid(getuid())` first,
+then `$USER`, then `$LOGNAME`, then `lnmsg` as a last resort. The password
+database comes first deliberately — the first real consumer is a health
+monitor started from cron, whose environment has no `$USER` at all, and a
+name that is right interactively and wrong from cron would be discovered
+late and by a machine. Resolution never fails: a status line that does not
+go out is worse than one from an oddly-named sender.
+
+`--from NAME`, and `LNMSG_DISPLAY_NAME` for the cron case, override it,
+with the flag winning. They exist because a bare account name is ambiguous
+when the same user runs the monitor on several machines — but what goes in
+them is the operator's choice, not a policy of ours: no automatic hostname
+suffix and no templating. An empty or whitespace-only override is exit 2,
+not a silent fall back to the default, since it was set on purpose.
+`lnmsg/src/display_name.rs` holds the order; `LNMSG_SENDER from=… source=…`
+records which step answered, which is what separates a cron run that fell
+through to the last resort from an interactive one that read `$USER`.
 
 ## 7. Structured event log
 

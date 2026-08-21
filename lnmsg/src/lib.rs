@@ -52,6 +52,7 @@
 
 pub mod address;
 pub mod body;
+pub mod display_name;
 pub mod engine;
 pub mod events;
 pub mod identity;

@@ -574,8 +574,10 @@ pub struct AttachConfig {
     pub storage_dir: PathBuf,
     /// The persistent identity whose delivery destination is our address.
     pub identity: Identity,
-    /// Carried in a delivery announce. Not announced in this slice, but the
-    /// router keeps it and the reading half will.
+    /// The name recipients see as the sender: it goes out in the delivery
+    /// announce `Engine::announce` sends, and a reference client shows it
+    /// next to every message from us. Resolved by
+    /// [`crate::display_name::from_process`], which never yields an empty one.
     pub display_name: Vec<u8>,
 }
 
@@ -718,12 +720,16 @@ mod tests {
     use leviculum_std::driver::{StdClock, StdStorage};
 
     fn engine() -> (Engine, Receiver<OutboxEvent>, Sender<Command>) {
+        engine_named(b"lnmsg-test")
+    }
+
+    fn engine_named(display_name: &[u8]) -> (Engine, Receiver<OutboxEvent>, Sender<Command>) {
         let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
         let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
         let (stamps_tx, _stamps_rx) = std::sync::mpsc::channel::<DeliveryStampRequest>();
         let (_answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
         let engine = Engine {
-            display_name: b"lnmsg-test".to_vec(),
+            display_name: display_name.to_vec(),
             events: events_tx,
             commands: commands_rx,
             stamps: stamps_tx,
@@ -765,6 +771,56 @@ mod tests {
         assert!(
             out.next_deadline_ms.is_some(),
             "on_tick always asks the driver back for the command queue"
+        );
+    }
+
+    /// The configured display name has to reach the wire, not just the struct.
+    ///
+    /// This is the assertion that would have caught the bug it was written for:
+    /// `main.rs` passed the literal `lnmsg` into [`AttachConfig`], so a test of
+    /// the config field alone would have been green while every recipient saw a
+    /// message from a tool rather than from a person. What matters is the
+    /// `app_data` of the announce that leaves here, so the announce is taken
+    /// out of the tick's actions and unpacked.
+    #[test]
+    fn the_display_name_reaches_the_announce_that_goes_out() {
+        use leviculum_core::packet::{Packet, PacketType};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events, _commands) = engine_named(b"an-operator");
+
+        let now_ms = core.now_ms();
+        let out = engine.on_tick(&mut core, now_ms);
+
+        let announces: Vec<Packet> = out
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                leviculum_core::transport::Action::Broadcast { data, .. } => {
+                    Packet::unpack(data).ok()
+                }
+                _ => None,
+            })
+            .filter(|packet| packet.flags.packet_type == PacketType::Announce)
+            .collect();
+        assert_eq!(
+            announces.len(),
+            1,
+            "the first tick announces our delivery destination exactly once"
+        );
+
+        // `app_data` is the tail of an announce payload, so a payload ending in
+        // the encoding of this name is that name having been announced.
+        let payload = announces[0].data.as_slice();
+        let expected = announce::delivery(Some(b"an-operator"), None);
+        assert!(
+            payload.ends_with(&expected),
+            "the announce must carry the configured display name: {payload:02x?}"
+        );
+        assert!(
+            !payload.ends_with(&announce::delivery(Some(b"lnmsg"), None)),
+            "the tool's own name must not be what recipients see"
         );
     }
 

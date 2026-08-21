@@ -362,6 +362,49 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
         "Python must be able to validate our signature: {message}"
     );
 
+    // The name a recipient actually sees. Python resolves it out of the
+    // announce app_data the way its clients do, so this is the only check that
+    // covers the whole path: resolution, announce, wire, reference decoder.
+    // The expected value is resolved here by the same code the child ran,
+    // rather than hardcoded, because the account name differs per host.
+    let expected_name = lnmsg::display_name::from_process(None)
+        .expect("no override is set for the test process")
+        .name;
+    assert_eq!(
+        message.get("source_display_name").and_then(|v| v.as_str()),
+        Some(expected_name.as_str()),
+        "Python must see the operator's name, not the tool's: {message}"
+    );
+    assert_ne!(
+        message.get("source_display_name").and_then(|v| v.as_str()),
+        Some("lnmsg"),
+        "'lnmsg' names the program, not the person it sends for"
+    );
+
+    // And `--from` is what an operator uses when the bare account name is
+    // ambiguous — three hosts, one user. Same identity, so this run's announce
+    // replaces the name Python holds for us.
+    let overridden = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--from".to_string(),
+                "lew@schneckenschreck".to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            b"second line\n".to_vec(),
+        )
+        .await;
+    assert_eq!(overridden.code, Some(0), "{overridden}");
+    let overridden_id = overridden.stdout.trim_end_matches('\n');
+    let message = wait_for_python(&peer, overridden_id, Duration::from_secs(40)).await;
+    assert_eq!(
+        message.get("source_display_name").and_then(|v| v.as_str()),
+        Some("lew@schneckenschreck"),
+        "--from must reach the receiver verbatim: {message}"
+    );
+
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 

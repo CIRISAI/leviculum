@@ -2079,9 +2079,19 @@ class TestDaemon:
     def _on_lxmf_delivery(self, message):
         """LXMRouter delivery callback: record every asserted LXMessage field."""
         try:
+            import LXMF
             from RNS.vendor import umsgpack
             methods = {0x01: "opportunistic", 0x02: "direct", 0x03: "propagated"}
+            # What a client shows next to the message: the display name from
+            # the last announce heard from this sender, the way Sideband and
+            # Nomadnet resolve it. None until an announce has been heard --
+            # which, for a message whose signature validated, it has been,
+            # since validation recalls the same known_destinations entry.
+            source_display_name = LXMF.display_name_from_app_data(
+                RNS.Identity.recall_app_data(message.source_hash)
+            )
             self.lxmf_received.append({
+                "source_display_name": source_display_name,
                 "message_hash": message.hash.hex(),
                 "content": message.content.hex(),
                 "title": message.title.hex(),

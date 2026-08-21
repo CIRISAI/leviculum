@@ -145,6 +145,168 @@ fn with_no_daemon_running_the_error_names_the_daemon() {
     );
 }
 
+/// An empty `--from` is refused rather than silently replaced by the account
+/// name: an operator who set the name explicitly has to hear that the value
+/// cannot be used, not discover weeks later that the announces went out under
+/// something else.
+#[test]
+fn an_empty_from_is_a_usage_error() {
+    let run = run(&["send", NOWHERE, "--from", "", "body"], b"");
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("--from") && run.stderr.contains("indistinguishable"),
+        "the error must name the flag and say why: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn a_whitespace_only_from_is_the_same_error() {
+    let run = run(&["send", NOWHERE, "--from", "   ", "body"], b"");
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+}
+
+/// An empty `LNMSG_DISPLAY_NAME` is refused for the same reason. The env var
+/// exists for the cron case, which is exactly where a silent fallback would go
+/// unnoticed longest.
+#[test]
+fn an_empty_display_name_variable_is_a_usage_error() {
+    let home = tempfile::tempdir().expect("state dir");
+    let output = Command::new(LNMSG)
+        .args(["send", NOWHERE, "body"])
+        .env("LNMSG_HOME", home.path())
+        .env("LNMSG_DISPLAY_NAME", "")
+        .env_remove("LEVICULUM_EVENT_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lnmsg");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LNMSG_DISPLAY_NAME"), "{stderr}");
+}
+
+/// Read the `from=` and `source=` fields of the run's `LNMSG_SENDER` line.
+fn sender_line(log: &std::path::Path) -> (String, String) {
+    let text = std::fs::read_to_string(log).expect("the event log file must exist");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("LNMSG_SENDER "))
+        .unwrap_or_else(|| panic!("no LNMSG_SENDER line in:\n{text}"));
+    let field = |key: &str| {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix(key))
+            .unwrap_or_else(|| panic!("no {key} field in {line}"))
+            .to_string()
+    };
+    assert!(
+        !text.contains("EVENT_SCHEMA_VIOLATION") && !text.contains("EVENT_FIELD_VIOLATION"),
+        "the emitted events must satisfy their catalogue entries:\n{text}"
+    );
+    (field("from="), field("source="))
+}
+
+/// The cron case, at the level a cron job actually meets it: **no environment
+/// at all**. `$USER` and `$LOGNAME` are gone, and the name still has to be the
+/// account's — resolved from the password database — rather than the tool's.
+///
+/// `env_clear` is `env -i`: the child gets only what is set after it. The run
+/// itself fails (there is no daemon), which is irrelevant here — the name is
+/// resolved and logged before anything can be attached to.
+#[test]
+fn with_no_environment_at_all_the_name_still_comes_from_the_password_database() {
+    let Some(expected) = leviculum_std::user::passwd_name() else {
+        // No passwd entry for this uid: the fallback chain is what is left,
+        // and it is covered by the unit tests. Nothing to prove here.
+        return;
+    };
+    let home = tempfile::tempdir().expect("state dir");
+    let log = home.path().join("events.log");
+
+    let output = Command::new(LNMSG)
+        .args([
+            "send",
+            NOWHERE,
+            "body",
+            "--instance",
+            "lnmsg-no-such-daemon",
+        ])
+        .env_clear()
+        // Only the two paths the program cannot invent: where its identity
+        // lives, and where to write the log this test reads. Neither carries a
+        // user name.
+        .env("LNMSG_HOME", home.path())
+        .env("LEVICULUM_EVENT_LOG", &log)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lnmsg");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "with no daemon this fails after resolving the name: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (from, source) = sender_line(&log);
+    assert_eq!(
+        from, expected,
+        "an empty environment must not change who we are"
+    );
+    assert_eq!(
+        source, "passwd",
+        "with USER and LOGNAME gone, only the password database can have answered"
+    );
+    assert_ne!(from, "lnmsg", "the tool's name is not the sender's name");
+}
+
+/// `--from` beats `LNMSG_DISPLAY_NAME`, through the real binary.
+#[test]
+fn the_flag_beats_the_environment_variable_in_the_shipped_binary() {
+    let home = tempfile::tempdir().expect("state dir");
+    let log = home.path().join("events.log");
+
+    let output = Command::new(LNMSG)
+        .args(["send", NOWHERE, "body", "--from", "hamster"])
+        // A daemon may well be running on a developer's host; naming one that
+        // is not keeps the run short and its exit code predictable.
+        .args(["--instance", "lnmsg-no-such-daemon"])
+        .env("LNMSG_HOME", home.path())
+        .env("LNMSG_DISPLAY_NAME", "from-the-env")
+        .env("LEVICULUM_EVENT_LOG", &log)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lnmsg");
+    assert_eq!(output.status.code(), Some(1));
+
+    assert_eq!(
+        sender_line(&log),
+        ("hamster".to_string(), "flag".to_string())
+    );
+}
+
+/// …and the variable beats the resolved account name.
+#[test]
+fn the_environment_variable_beats_the_account_name_in_the_shipped_binary() {
+    let home = tempfile::tempdir().expect("state dir");
+    let log = home.path().join("events.log");
+
+    let output = Command::new(LNMSG)
+        .args(["send", NOWHERE, "body"])
+        .args(["--instance", "lnmsg-no-such-daemon"])
+        .env("LNMSG_HOME", home.path())
+        .env("LNMSG_DISPLAY_NAME", "lew_at_schneckenschreck")
+        .env("LEVICULUM_EVENT_LOG", &log)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run lnmsg");
+    assert_eq!(output.status.code(), Some(1));
+
+    assert_eq!(
+        sender_line(&log),
+        ("lew_at_schneckenschreck".to_string(), "env".to_string())
+    );
+}
+
 /// A corrupt identity file is the user's address. It must stop the program
 /// rather than quietly become a different address.
 #[test]

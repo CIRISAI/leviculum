@@ -18,10 +18,11 @@ use crate::address::to_hex;
 /// Make a value safe for the whitespace-tokenised parser the log format
 /// assumes: no space, no `=`, nothing non-printable.
 ///
-/// Only two fields can carry text a user chose — the instance name and an
-/// outcome word — and an instance name comes from a config file we do not
-/// control. Substituting rather than dropping keeps the field present, which
-/// is what the schema check wants to see.
+/// The fields that can carry text a user chose are the instance name, an
+/// outcome word and the sender's display name — and an instance name comes
+/// from a config file we do not control, while a display name is whatever an
+/// operator typed after `--from`. Substituting rather than dropping keeps the
+/// field present, which is what the schema check wants to see.
 fn scalar(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -32,6 +33,21 @@ fn scalar(text: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The name this run will announce itself under, and which resolution step
+/// produced it.
+///
+/// Emitted before anything can fail, because "the recipient saw the wrong
+/// sender" is a complaint that arrives long after the run: the source word
+/// separates a cron job that fell through to the last resort from an
+/// interactive run that read `$USER`, which the message itself cannot.
+pub fn sender(name: &str, source: &str) {
+    tracing::debug!(
+        event = "LNMSG_SENDER",
+        from = %scalar(name),
+        source = %scalar(source),
+    );
 }
 
 /// Attached to a shared instance and registered an LXMF delivery destination.

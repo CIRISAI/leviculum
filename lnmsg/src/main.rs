@@ -24,7 +24,7 @@ use leviculum_std::config::Config;
 use lnmsg::engine::{attach, AttachConfig};
 use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::send::{run_send, SendOptions};
-use lnmsg::{address, body, events, identity};
+use lnmsg::{address, body, display_name, events, identity};
 
 /// Everything after attaching gets this many seconds by default: becoming
 /// ready, learning a route to the destination, queueing, and getting the
@@ -67,6 +67,12 @@ struct SendArgs {
     /// Message title (LXMF carries one; it may be empty).
     #[arg(long)]
     title: Option<String>,
+
+    /// The name recipients see as the sender. Defaults to the account name of
+    /// the user running lnmsg; `LNMSG_DISPLAY_NAME` sets it where there is no
+    /// command line to edit, and this flag wins over it.
+    #[arg(long, value_name = "NAME")]
+    from: Option<String>,
 
     /// How the message travels. `propagated` (through a mailbox node) is not
     /// built yet and is refused rather than quietly turned into something else.
@@ -167,6 +173,14 @@ async fn run(args: SendArgs) -> ExitCode {
              Leave --via at direct, or wait for the mailbox slice.",
         );
     }
+    // Before the body is read: an unusable name is an argument error, and a
+    // script piping into us should hear about it without first having its
+    // stdin consumed.
+    let display_name = match display_name::from_process(args.from.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(error) => return usage(error),
+    };
+    events::sender(&display_name.name, display_name.source.as_str());
     let body = match body::resolve(args.body.as_deref(), &mut std::io::stdin().lock()) {
         Ok(body) => body,
         Err(error) => return usage(error),
@@ -189,7 +203,7 @@ async fn run(args: SendArgs) -> ExitCode {
         instance: instance.clone(),
         storage_dir: home.join("storage"),
         identity,
-        display_name: b"lnmsg".to_vec(),
+        display_name: display_name.name.into_bytes(),
     })
     .await
     {
