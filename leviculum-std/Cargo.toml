@@ -68,6 +68,10 @@ thiserror.workspace = true
 ignored = ["md-5"]
 
 [dev-dependencies]
+# `test-util` enables `#[tokio::test(start_paused = true)]`: the duty-lock
+# flow-control tests drive multi-second gate thresholds on virtual time
+# instead of sleeping through them.
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 hex = "0.4"
 regex = "1"

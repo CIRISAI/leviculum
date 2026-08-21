@@ -171,8 +171,23 @@ pub(crate) const RNODE_DEFAULT_BUFFER_SIZE: usize = 64;
 
 /// Maximum queued TX packets when flow control is active and device is busy.
 /// Python uses an unbounded queue. Bounded to 64 here because at LoRa bitrates,
-/// a full unbounded queue contains minutes-old stale packets. Drop oldest with warn!.
+/// a full unbounded queue contains minutes-old stale packets. Drop oldest,
+/// counted and named by `RNODE_TX_QUEUE_DROP` (drops are loud).
 const FLOW_CONTROL_QUEUE_LIMIT: usize = 64;
+
+/// How long the CMD_READY flow-control gate may hold queued frames before the
+/// io task reports it. One firmware channel-stat cadence: the
+/// RNode emits CMD_STAT_CHTM every ~2 s, while a READY normally follows a TX
+/// within one packet airtime — sub-second at every supported rate. A gate
+/// still closed after a full stat cadence is no longer ordinary airtime wait;
+/// it is the duty-lock shape (no TX completion ⇒ no READY,
+/// `RNode_Firmware.ino:1624`).
+const TX_GATED_EVENT_AFTER: Duration = Duration::from_secs(2);
+
+/// Repeat cadence for `RNODE_TX_GATED` while the gate stays closed. Bounded
+/// so an hour-long duty lock produces hundreds of log lines, not one per
+/// event-loop iteration.
+const TX_GATED_EVENT_REPEAT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Configuration (includes detection)
@@ -624,6 +639,18 @@ where
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut timer_ready = false;
 
+    // Duty-lock visibility: when the CMD_READY gate (Gate 2 below)
+    // holds queued frames, say so. The firmware's duty lock produces exactly
+    // this shape — no TX completion ⇒ no READY ⇒ gate closed — and it used
+    // to be invisible from the host. `gate_blocked_since` starts when frames
+    // are held and the gate is closed; `gate_event_timer` fires
+    // RNODE_TX_GATED after TX_GATED_EVENT_AFTER, then every
+    // TX_GATED_EVENT_REPEAT; `gate_announced` pairs the eventual
+    // RNODE_TX_RELEASED with it.
+    let mut gate_blocked_since: Option<tokio::time::Instant> = None;
+    let mut gate_event_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    let mut gate_announced = false;
+
     // Periodic heartbeat: send CMD_DETECT every 5 minutes to keep the
     // serial link alive and verify the RNode firmware is responsive.
     // This does NOT transmit over LoRa, it's a serial-only ping.
@@ -818,8 +845,21 @@ where
                         let frame = rnode::build_data_frame(&pkt.data);
                         let high_priority = pkt.high_priority;
                         if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
-                            tracing::warn!("{}: send queue full, dropping oldest", name);
-                            send_queue.pop_front();
+                            if let Some(dropped) = send_queue.pop_front() {
+                                // A dropped frame must be loud —
+                                // counted and catalogued, never only a log
+                                // line. A silent drop is how lora_window_ab's
+                                // third transfer vanished for six minutes.
+                                counters
+                                    .tx_queue_drops
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(
+                                    event = "RNODE_TX_QUEUE_DROP",
+                                    iface = %name,
+                                    len = dropped.payload_len,
+                                    depth = send_queue.len(),
+                                );
+                            }
                         }
                         let queued = QueuedFrame {
                             data: frame,
@@ -885,6 +925,27 @@ where
                 timer_ready = true;
             }
 
+            // Branch 3b: flow-control gate held past the reporting threshold
+            // Warn level: an engaged duty lock is an operational
+            // condition the operator must be able to see.
+            _ = async {
+                if let Some(ref mut timer) = gate_event_timer {
+                    timer.await;
+                }
+            }, if gate_event_timer.is_some() => {
+                let held_ms = gate_blocked_since
+                    .map(|s| s.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                tracing::warn!(
+                    event = "RNODE_TX_GATED",
+                    iface = %name,
+                    held_ms = held_ms,
+                    depth = send_queue.len(),
+                );
+                gate_announced = true;
+                gate_event_timer = Some(Box::pin(tokio::time::sleep(TX_GATED_EVENT_REPEAT)));
+            }
+
             // Branch 4: Periodic heartbeat. CMD_DETECT ping to verify firmware
             _ = &mut heartbeat_timer => {
                 let detect_frame = [kiss::FEND, rnode::CMD_DETECT, rnode::DETECT_REQ, kiss::FEND];
@@ -896,6 +957,39 @@ where
                 tracing::debug!("{}: heartbeat sent", name);
                 heartbeat_timer = Box::pin(tokio::time::sleep(HEARTBEAT_INTERVAL));
             }
+        }
+
+        // Track the flow-control gate's hold state after every
+        // iteration, before the send attempt below (a reopening gate must
+        // emit its RNODE_TX_RELEASED with the frames still held, not after
+        // the send block has already dispatched the first of them).
+        // "Holding" means frames are queued and only the READY gate keeps
+        // them there. Every TX re-enters this state on the next iteration
+        // (READY is retrospective); events fire only if it persists past
+        // TX_GATED_EVENT_AFTER, so ordinary airtime waits stay silent. The
+        // queue cannot drain while the gate is closed, so leaving the hold
+        // state means the gate reopened — if the hold was announced,
+        // RNODE_TX_RELEASED closes the pair opened by RNODE_TX_GATED.
+        let gate_holding = flow_control && !interface_ready && !send_queue.is_empty();
+        match (gate_holding, gate_blocked_since) {
+            (true, None) => {
+                gate_blocked_since = Some(tokio::time::Instant::now());
+                gate_event_timer = Some(Box::pin(tokio::time::sleep(TX_GATED_EVENT_AFTER)));
+            }
+            (false, Some(since)) => {
+                if gate_announced {
+                    tracing::warn!(
+                        event = "RNODE_TX_RELEASED",
+                        iface = %name,
+                        held_ms = since.elapsed().as_millis() as u64,
+                        depth = send_queue.len(),
+                    );
+                }
+                gate_blocked_since = None;
+                gate_event_timer = None;
+                gate_announced = false;
+            }
+            _ => {}
         }
 
         // After any branch: try to send if all gates are open
@@ -3280,6 +3374,400 @@ mod tests {
 
         drop(outgoing_tx);
         let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // CMD_READY flow control under a firmware duty lock
+    // -----------------------------------------------------------------------
+
+    /// Scripted firmware stub at the io-task boundary for the duty-lock
+    /// flow-control tests, resurrecting the `rnode_firmware_stub_scripted`
+    /// pattern from the deleted airtime-gate tests (`b4a984d^`).
+    ///
+    /// Reads KISS frames from its half of the duplex, records every
+    /// `CMD_DATA` payload on `data_tx`, and answers `CMD_READY` after each
+    /// recorded frame while `ready_budget` lasts. Once the budget is
+    /// exhausted the stub keeps reading but stays silent — the duty-lock
+    /// shape: the firmware still drains serial into its queue, but no TX
+    /// completes, so no READY is emitted (`RNode_Firmware.ino:1624`).
+    /// Sending a budget increment on `resume_rx` models the lock releasing:
+    /// frames the firmware queued during the lock finally air, so the stub
+    /// first pays the READYs it owes for them, then answers new frames
+    /// against the refreshed budget.
+    async fn rnode_firmware_stub_scripted(
+        mut peer: tokio::io::DuplexStream,
+        mut ready_budget: usize,
+        mut resume_rx: mpsc::Receiver<usize>,
+        data_tx: mpsc::Sender<Vec<u8>>,
+    ) {
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut buf = [0u8; 1024];
+        // Frames received while the lock held READY back; each owes one
+        // READY once the lock releases.
+        let mut unacked: usize = 0;
+        let ready_frame = {
+            let mut f = Vec::new();
+            kiss::frame(rnode::CMD_READY, &[0x01], &mut f);
+            f
+        };
+        loop {
+            tokio::select! {
+                read = peer.read(&mut buf) => {
+                    let n = match read {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => n,
+                    };
+                    for f in deframer.process(&buf[..n]) {
+                        if let KissDeframeResult::Frame { command, payload } = f {
+                            if command == rnode::CMD_DATA {
+                                if data_tx.send(payload.to_vec()).await.is_err() {
+                                    return;
+                                }
+                                if ready_budget > 0 {
+                                    ready_budget -= 1;
+                                    if peer.write_all(&ready_frame).await.is_err() {
+                                        return;
+                                    }
+                                } else {
+                                    unacked += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                resumed = resume_rx.recv() => {
+                    match resumed {
+                        Some(n) => {
+                            ready_budget += n;
+                            while unacked > 0 && ready_budget > 0 {
+                                unacked -= 1;
+                                ready_budget -= 1;
+                                if peer.write_all(&ready_frame).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        None => return,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Everything a duty-lock test needs: `rnode_io_task` under test, wired
+    /// to [`rnode_firmware_stub_scripted`] over an in-memory duplex. All
+    /// timing is driven by `start_paused` tokio time, so the 2 s gated
+    /// threshold and multi-second hold windows cost no wall clock.
+    struct DutyLockHarness {
+        outgoing_tx: mpsc::Sender<OutgoingPacket>,
+        counters: Arc<InterfaceCounters>,
+        resume_tx: mpsc::Sender<usize>,
+        data_rx: mpsc::Receiver<Vec<u8>>,
+        /// Held so the io task's `incoming_tx.send` never fails mid-test.
+        _incoming_rx: mpsc::Receiver<IncomingPacket>,
+    }
+
+    fn spawn_duty_lock_harness(flow_control: bool, ready_budget: usize) -> DutyLockHarness {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let (resume_tx, resume_rx) = mpsc::channel::<usize>(16);
+        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(256);
+        let counters = Arc::new(InterfaceCounters::new());
+
+        tokio::spawn(rnode_firmware_stub_scripted(
+            peer,
+            ready_budget,
+            resume_rx,
+            data_tx,
+        ));
+        let task_counters = Arc::clone(&counters);
+        tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_duty".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                task_counters,
+                flow_control,
+                /* jitter_max_ms = */ 1,
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        DutyLockHarness {
+            outgoing_tx,
+            counters,
+            resume_tx,
+            data_rx,
+            _incoming_rx: incoming_rx,
+        }
+    }
+
+    impl DutyLockHarness {
+        async fn push(&self, payload: &[u8]) {
+            self.outgoing_tx
+                .send(OutgoingPacket {
+                    data: payload.to_vec(),
+                    high_priority: false,
+                })
+                .await
+                .expect("io task alive");
+        }
+
+        async fn expect_frame(&mut self, want: &[u8], ctx: &str) {
+            let got = tokio::time::timeout(Duration::from_secs(2), self.data_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{ctx}: expected frame {want:?}, stub saw nothing"))
+                .expect("stub data channel open");
+            assert_eq!(got, want, "{ctx}");
+        }
+
+        /// Assert the stub sees no `CMD_DATA` for `window`. The serial-only
+        /// `CMD_DETECT` heartbeat is not TX data and is exempt by design.
+        async fn expect_silence(&mut self, window: Duration, ctx: &str) {
+            if let Ok(Some(got)) = tokio::time::timeout(window, self.data_rx.recv()).await {
+                panic!("{ctx}: stub must see no CMD_DATA, saw {got:?}");
+            }
+        }
+    }
+
+    fn count_event(logs: &str, event: &str) -> usize {
+        let needle = format!("event=\"{event}\"");
+        logs.lines().filter(|l| l.contains(&needle)).count()
+    }
+
+    /// Behaviour 1, lock semantics: the stub answers READY after
+    /// each of the first three frames, then goes silent — the duty-lock
+    /// shape (no TX completion ⇒ no READY, `RNode_Firmware.ino:1624`). With
+    /// `flow_control = true` the host must hold every further frame on its
+    /// side. READY is retrospective (it follows a TX), so exactly one
+    /// in-flight frame — the fourth, opened by the third frame's READY —
+    /// still reaches the stub after the last READY; frames five and six
+    /// must never appear.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_duty_lock_holds_frames_host_side() {
+        let mut h = spawn_duty_lock_harness(true, 3);
+        let payloads: [&[u8]; 6] = [b"f1", b"f2", b"f3", b"f4", b"f5", b"f6"];
+        for p in payloads {
+            h.push(p).await;
+        }
+        for p in &payloads[..4] {
+            h.expect_frame(p, "frames up to one past the last READY flow")
+                .await;
+        }
+        h.expect_silence(
+            Duration::from_secs(5),
+            "after the last READY plus its one in-flight frame, \
+             the remaining frames are held host-side",
+        )
+        .await;
+    }
+
+    /// Behaviour 2, bootstrap: the firmware emits CMD_READY only
+    /// *after* a TX — never spontaneously after init. From a cold start with
+    /// `flow_control = true`, the first frame must go out without waiting
+    /// for a READY that cannot yet exist (mirrors Python
+    /// `RNodeInterface.py:459`, `interface_ready = True` after radio
+    /// validation), and the second frame must then wait for the first READY.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_bootstrap_first_frame_needs_no_ready() {
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"first").await;
+        h.push(b"second").await;
+        h.expect_frame(
+            b"first",
+            "cold start: the first frame must not wait for a READY that cannot exist yet",
+        )
+        .await;
+        h.expect_silence(
+            Duration::from_secs(3),
+            "the second frame must wait for the first READY",
+        )
+        .await;
+        h.resume_tx.send(1).await.expect("stub alive");
+        h.expect_frame(b"second", "the first READY re-opens the gate")
+            .await;
+    }
+
+    /// Behaviour 3, host-queue overflow is loud: with the gate
+    /// closed, frames past `FLOW_CONTROL_QUEUE_LIMIT` are dropped oldest-
+    /// first. Required: every drop is counted on the interface counters and
+    /// named by a structured `RNODE_TX_QUEUE_DROP` event — a silent drop is
+    /// exactly the black-hole failure this batch exists to prevent.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_host_queue_overflow_is_loud() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"bootstrap").await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+
+        // The gate is now closed for good (the stub never READYs). Overfill
+        // the host-side queue past its cap.
+        const EXCESS: usize = 5;
+        for i in 0..(FLOW_CONTROL_QUEUE_LIMIT + EXCESS) {
+            h.push(format!("q{i:03}").as_bytes()).await;
+        }
+        // Let the io task drain the channel into its send queue.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            EXCESS as u64,
+            "every dropped frame must be counted on the interface counters"
+        );
+        h.expect_silence(
+            Duration::from_millis(500),
+            "nothing may leak to the stub while gated",
+        )
+        .await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_QUEUE_DROP"),
+            EXCESS,
+            "each drop must be named by a structured event\n--- logs ---\n{logs}"
+        );
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_QUEUE_DROP\""))
+            .expect("checked non-zero above");
+        for key in ["iface=test_rnode_duty", "len=", "depth="] {
+            assert!(
+                line.contains(key),
+                "drop event must carry {key}; line: {line}"
+            );
+        }
+    }
+
+    /// Behaviour 4, gated-too-long visibility: while the gate
+    /// holds queued frames beyond `TX_GATED_EVENT_AFTER` (one CHTM cadence,
+    /// 2 s — a READY normally follows a TX within one packet airtime, and a
+    /// gate still closed after a full firmware stat cadence is the duty-lock
+    /// shape, not airtime wait), the io task emits `RNODE_TX_GATED` with the
+    /// held duration and queue depth, repeated every `TX_GATED_EVENT_REPEAT`
+    /// (10 s) — bounded, not per loop iteration. Held 25 s ⇒ exactly three
+    /// events (t = 2, 12, 22 s), deterministic under paused time.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_gated_too_long_emits_bounded_events() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"bootstrap").await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+        h.push(b"held").await;
+
+        tokio::time::sleep(Duration::from_secs(25)).await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_GATED"),
+            3,
+            "held 25 s ⇒ events at 2/12/22 s, repeated at a bounded rate\n--- logs ---\n{logs}"
+        );
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_GATED\""))
+            .expect("checked non-zero above");
+        for key in ["iface=test_rnode_duty", "held_ms=", "depth=1"] {
+            assert!(
+                line.contains(key),
+                "gated event must carry {key}; line: {line}"
+            );
+        }
+    }
+
+    /// Behaviour 5, release: the stub resumes READY, the held
+    /// frames drain in order, and one `RNODE_TX_RELEASED` closes the pair
+    /// opened by `RNODE_TX_GATED`. The post-release drain re-closes the gate
+    /// only for sub-threshold moments, so no further gated/release events
+    /// may fire.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_release_drains_in_order_and_pairs_events() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 2);
+        let payloads: [&[u8]; 5] = [b"r1", b"r2", b"r3", b"r4", b"r5"];
+        for p in payloads {
+            h.push(p).await;
+        }
+        // Budget 2: r1/r2 are READYed, r3 rides r2's READY and is the
+        // firmware-held frame; r4/r5 are held host-side.
+        for p in &payloads[..3] {
+            h.expect_frame(p, "pre-lock frames flow").await;
+        }
+        // 5 s > the 2 s threshold: the gated event must have fired before
+        // the release below closes the pair.
+        h.expect_silence(Duration::from_secs(5), "r4/r5 held under the lock")
+            .await;
+
+        h.resume_tx.send(1000).await.expect("stub alive");
+        h.expect_frame(b"r4", "held frames drain in order after release")
+            .await;
+        h.expect_frame(b"r5", "held frames drain in order after release")
+            .await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_GATED"),
+            1,
+            "one gated event during the 5 s hold\n--- logs ---\n{logs}"
+        );
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_RELEASED"),
+            1,
+            "exactly one release event closes the pair\n--- logs ---\n{logs}"
+        );
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_RELEASED\""))
+            .expect("checked non-zero above");
+        for key in ["iface=test_rnode_duty", "held_ms=", "depth=2"] {
+            assert!(
+                line.contains(key),
+                "release event must carry {key}; line: {line}"
+            );
+        }
+    }
+
+    /// Behaviour 6, off means off: with `flow_control = false`
+    /// (the default) every frame ships without any READY, in order, and none
+    /// of the duty-lock machinery speaks — no gated, release, or queue-drop
+    /// events. The default does not change in this batch.
+    #[tokio::test(start_paused = true)]
+    async fn test_flow_control_off_never_gates_and_stays_silent() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(false, 0);
+        let payloads: [&[u8]; 4] = [b"n1", b"n2", b"n3", b"n4"];
+        for p in payloads {
+            h.push(p).await;
+        }
+        for p in &payloads {
+            h.expect_frame(p, "flow_control=false ships every frame without READY")
+                .await;
+        }
+        // Give a wrongly-armed gate timer ample time to fire before reading
+        // the captured logs.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        for event in ["RNODE_TX_GATED", "RNODE_TX_RELEASED", "RNODE_TX_QUEUE_DROP"] {
+            assert_eq!(
+                count_event(&logs, event),
+                0,
+                "{event} must be absent with flow_control off\n--- logs ---\n{logs}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

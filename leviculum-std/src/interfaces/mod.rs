@@ -139,6 +139,10 @@ pub(crate) struct InterfaceCounters {
     /// Frames dropped by the TEST-ONLY `test_drop_direct_ingress` filter
     /// (see [`test_drop_direct_ingress_frame`]). Always 0 in production.
     pub test_direct_ingress_drops: AtomicU64,
+    /// Outgoing frames dropped from the RNode host-side send queue because
+    /// it exceeded its cap while TX was held (a dropped frame must be
+    /// counted, never silent).
+    pub tx_queue_drops: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
 }
@@ -149,6 +153,7 @@ impl InterfaceCounters {
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
             test_direct_ingress_drops: AtomicU64::new(0),
+            tx_queue_drops: AtomicU64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,

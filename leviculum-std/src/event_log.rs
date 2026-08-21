@@ -302,6 +302,23 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "total",
         ],
     },
+    // RNode CMD_READY flow control under the firmware duty lock.
+    // Emitted by `interfaces/rnode.rs::rnode_io_task`. GATED fires once the
+    // gate has held queued frames past one CHTM cadence and repeats at a
+    // bounded rate; RELEASED closes the pair when the gate reopens;
+    // QUEUE_DROP names every frame the bounded host-side queue sheds.
+    EventSchema {
+        name: "RNODE_TX_GATED",
+        required_keys: &["iface", "held_ms", "depth"],
+    },
+    EventSchema {
+        name: "RNODE_TX_RELEASED",
+        required_keys: &["iface", "held_ms", "depth"],
+    },
+    EventSchema {
+        name: "RNODE_TX_QUEUE_DROP",
+        required_keys: &["iface", "len", "depth"],
+    },
     // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
     // design (the layer looks a name up here whatever crate raised it), and a
