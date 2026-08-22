@@ -2113,8 +2113,25 @@ async fn rnode_multi_io_task<S>(
                             continue;
                         }
                         if send_queue.len() >= FLOW_CONTROL_QUEUE_LIMIT {
-                            tracing::warn!("{}: send queue full, dropping oldest", name);
-                            send_queue.pop_front();
+                            if let Some((shed_subint, shed)) = send_queue.pop_front() {
+                                // A dropped frame must be loud, same as the
+                                // single-radio twin. The count lands on the
+                                // vport that owned the shed frame; the event
+                                // names the physical interface — the port
+                                // that dropped is a property of the shared
+                                // line, not of any one vport.
+                                vports[shed_subint]
+                                    .counters
+                                    .tx_queue_drops
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(
+                                    event = "RNODE_TX_QUEUE_DROP",
+                                    iface = %name,
+                                    len = shed.len(),
+                                    depth = send_queue.len(),
+                                    reason = "queue_full",
+                                );
+                            }
                         }
                         send_queue.push_back((tagged.subint, tagged.packet.data));
                     }
@@ -3524,6 +3541,186 @@ mod tests {
             got.is_err(),
             "outgoing=false subinterface must not transmit, but firmware saw data"
         );
+
+        hub.abort();
+        stub.abort();
+    }
+
+    /// The multi-vport twin of behaviour 3 (Codeberg #319): the shared
+    /// hub's host-side queue overflow must be exactly as loud as the
+    /// single-radio one — every shed frame counted, and counted on the
+    /// vport that OWNED the frame (the queue is vport-tagged), while the
+    /// `RNODE_TX_QUEUE_DROP` event names the physical interface, because
+    /// the port that dropped is a property of the shared line. The gate
+    /// closes after the first TX and stays closed because the stub never
+    /// answers a CMD_READY query; the queue is then filled past the cap
+    /// with vport-1 frames and overflowed by vport-0 pushes, so the shed
+    /// oldest frames all belong to vport 1 — pinning the attribution.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_host_queue_overflow_is_loud() {
+        let (logs, guard) = capture_logs();
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (freq_tx, mut freq_rx) = tokio::sync::mpsc::channel::<(u8, u32)>(8);
+        let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(256);
+        let stub = tokio::spawn(rnode_multi_firmware_stub(
+            peer,
+            vec![rnode::CHIP_SX127X, rnode::CHIP_SX128X],
+            freq_tx,
+            data_tx,
+        ));
+
+        // Keep both incoming receivers alive: the stub echoes CMD_DATA, and
+        // a dropped receiver would end the io task via `incoming_closed`.
+        let (in0_tx, _in0_rx) = mpsc::channel::<IncomingPacket>(256);
+        let (in1_tx, _in1_rx) = mpsc::channel::<IncomingPacket>(256);
+        let counters0 = Arc::new(InterfaceCounters::new());
+        let counters1 = Arc::new(InterfaceCounters::new());
+        let vports = vec![
+            VportRuntime {
+                id: InterfaceId(30),
+                name: "multi[low]".to_string(),
+                vport: 0,
+                radio: RadioParams {
+                    frequency: 865_600_000,
+                    bandwidth: 125_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in0_tx,
+                counters: Arc::clone(&counters0),
+            },
+            VportRuntime {
+                id: InterfaceId(31),
+                name: "multi[high]".to_string(),
+                vport: 1,
+                radio: RadioParams {
+                    frequency: 2_400_000_000,
+                    bandwidth: 500_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 5,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in1_tx,
+                counters: Arc::clone(&counters1),
+            },
+        ];
+
+        let port_holder = std::sync::Mutex::new(Some(port));
+        let connect = move || {
+            let taken = port_holder.lock().unwrap().take();
+            async move { taken.ok_or(RNodeError::NotDetected) }
+        };
+        let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(16);
+        let hub = tokio::spawn(async move {
+            rnode_multi_reconnect_task(
+                "multi".to_string(),
+                connect,
+                vports,
+                merged_rx,
+                /* flow_control = */ true,
+                None,
+            )
+            .await;
+        });
+
+        // Wait until both vports are configured so the io loop is running.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), freq_rx.recv())
+                .await
+                .expect("frequency config must be pushed within 5s")
+                .expect("freq channel open");
+        }
+
+        // The bootstrap frame ships (the gate starts open); its post-TX
+        // CMD_READY query goes unanswered, so the gate stays closed for good.
+        merged_tx
+            .send(TaggedOutgoing {
+                subint: 0,
+                packet: OutgoingPacket {
+                    data: b"bootstrap".to_vec(),
+                    high_priority: false,
+                },
+            })
+            .await
+            .expect("send to hub");
+        let (_, boot) = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("bootstrap frame ships ungated")
+            .expect("data channel open");
+        assert_eq!(boot, b"bootstrap");
+
+        // Fill the held queue to the cap with vport-1 frames, then overflow
+        // it with vport-0 pushes: each sheds the oldest held frame, all of
+        // which are vport 1's.
+        const EXCESS: usize = 5;
+        for i in 0..FLOW_CONTROL_QUEUE_LIMIT {
+            merged_tx
+                .send(TaggedOutgoing {
+                    subint: 1,
+                    packet: OutgoingPacket {
+                        data: format!("v1-{i:03}").into_bytes(),
+                        high_priority: false,
+                    },
+                })
+                .await
+                .expect("send to hub");
+        }
+        for i in 0..EXCESS {
+            merged_tx
+                .send(TaggedOutgoing {
+                    subint: 0,
+                    packet: OutgoingPacket {
+                        data: format!("v0-{i:03}").into_bytes(),
+                        high_priority: false,
+                    },
+                })
+                .await
+                .expect("send to hub");
+        }
+        // Let the hub drain the merged channel into its send queue.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            counters1
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            EXCESS as u64,
+            "every shed frame must be counted on the vport that owned it"
+        );
+        assert_eq!(
+            counters0
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the vport whose push caused the shed lost nothing of its own"
+        );
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_QUEUE_DROP"),
+            EXCESS,
+            "each shed frame must be named by a structured event\n--- logs ---\n{logs}"
+        );
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_QUEUE_DROP\""))
+            .expect("checked non-zero above");
+        for key in ["iface=multi", "len=", "depth=", "reason=\"queue_full\""] {
+            assert!(
+                line.contains(key),
+                "drop event must carry {key}; line: {line}"
+            );
+        }
 
         hub.abort();
         stub.abort();
