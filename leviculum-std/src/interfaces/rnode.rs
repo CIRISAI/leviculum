@@ -636,6 +636,73 @@ fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -
 // I/O task
 // ---------------------------------------------------------------------------
 
+/// Count and name the frames a return path leaves behind (Codeberg #316).
+///
+/// The io task's send queue is task-local: whatever it still holds when the
+/// task returns is gone, while frames still sitting in the mpsc channel are
+/// inherited by the reconnected task. Losing the held ones is a legitimate
+/// deviation from Python's keep-across-reconnect `packet_queue`; losing them
+/// *silently* is a black hole — under a long duty lock the queue is full
+/// precisely when a port bounce is most likely.
+///
+/// One summary event per return path, never one per frame: a reconnect must
+/// not be able to produce 64 log lines in one moment. `depth` is therefore
+/// always 0 — nothing survives this call.
+fn abandon_send_queue<T>(
+    name: &str,
+    counters: &InterfaceCounters,
+    send_queue: &mut VecDeque<T>,
+    reason: &'static str,
+) {
+    let abandoned = send_queue.len();
+    if abandoned == 0 {
+        return;
+    }
+    send_queue.clear();
+    counters
+        .tx_queue_drops
+        .fetch_add(abandoned as u64, std::sync::atomic::Ordering::Relaxed);
+    tracing::warn!(
+        event = "RNODE_TX_QUEUE_DROP",
+        iface = %name,
+        len = abandoned,
+        depth = 0,
+        reason = reason,
+    );
+}
+
+/// [`abandon_send_queue`] for the multi-vport loop, whose shared queue is
+/// just as task-local.
+///
+/// The frames are vport-tagged, so each abandoned frame is counted on its
+/// owning vport's counters, while the single summary event names the
+/// physical interface: the port that dropped is a property of the shared
+/// line, not of any one vport.
+fn abandon_multi_send_queue(
+    name: &str,
+    vports: &[VportRuntime],
+    send_queue: &mut VecDeque<(usize, Vec<u8>)>,
+    reason: &'static str,
+) {
+    let abandoned = send_queue.len();
+    if abandoned == 0 {
+        return;
+    }
+    for (subint, _) in send_queue.drain(..) {
+        vports[subint]
+            .counters
+            .tx_queue_drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    tracing::warn!(
+        event = "RNODE_TX_QUEUE_DROP",
+        iface = %name,
+        len = abandoned,
+        depth = 0,
+        reason = reason,
+    );
+}
+
 /// Bidirectional I/O loop for a configured RNode.
 ///
 /// Returns the `outgoing_rx` on disconnect so the reconnect wrapper can
@@ -714,6 +781,7 @@ where
                 match result {
                     Ok(0) => {
                         tracing::warn!("{}: serial port EOF", name);
+                        abandon_send_queue(&name, &counters, &mut send_queue, "serial_eof");
                         return outgoing_rx;
                     }
                     Ok(n) => {
@@ -752,6 +820,10 @@ where
                                         if incoming_tx.send(pkt).await.is_err() {
                                             // Event loop shut down
                                             send_goodbye(&mut port, &name).await;
+                                            abandon_send_queue(
+                                                &name, &counters, &mut send_queue,
+                                                "incoming_closed",
+                                            );
                                             return outgoing_rx;
                                         }
                                     }
@@ -787,6 +859,10 @@ where
                                     rnode::CMD_RESET => {
                                         if payload.first() == Some(&DEVICE_RESET_MARKER) {
                                             tracing::warn!("{}: device reset (0xF8)", name);
+                                            abandon_send_queue(
+                                                &name, &counters, &mut send_queue,
+                                                "device_reset",
+                                            );
                                             return outgoing_rx;
                                         }
                                     }
@@ -798,10 +874,18 @@ where
                                         match code {
                                             rnode::ERROR_INITRADIO => {
                                                 tracing::error!("{}: radio init failed", name);
+                                                abandon_send_queue(
+                                                    &name, &counters, &mut send_queue,
+                                                    "error_initradio",
+                                                );
                                                 return outgoing_rx;
                                             }
                                             rnode::ERROR_TXFAILED => {
                                                 tracing::error!("{}: TX failed", name);
+                                                abandon_send_queue(
+                                                    &name, &counters, &mut send_queue,
+                                                    "error_txfailed",
+                                                );
                                                 return outgoing_rx;
                                             }
                                             rnode::ERROR_EEPROM_LOCKED => {
@@ -815,6 +899,10 @@ where
                                             }
                                             rnode::ERROR_MODEM_TIMEOUT => {
                                                 tracing::error!("{}: modem timeout", name);
+                                                abandon_send_queue(
+                                                    &name, &counters, &mut send_queue,
+                                                    "error_modem_timeout",
+                                                );
                                                 return outgoing_rx;
                                             }
                                             _ => {
@@ -897,6 +985,7 @@ where
                     }
                     Err(e) => {
                         tracing::warn!("{}: serial read error: {}", name, e);
+                        abandon_send_queue(&name, &counters, &mut send_queue, "serial_read_error");
                         return outgoing_rx;
                     }
                 }
@@ -922,6 +1011,7 @@ where
                                     iface = %name,
                                     len = dropped.payload_len,
                                     depth = send_queue.len(),
+                                    reason = "queue_full",
                                 );
                             }
                         }
@@ -974,6 +1064,7 @@ where
                     None => {
                         // Event loop shut down
                         send_goodbye(&mut port, &name).await;
+                        abandon_send_queue(&name, &counters, &mut send_queue, "outgoing_closed");
                         return outgoing_rx;
                     }
                 }
@@ -1019,10 +1110,16 @@ where
             }, if ready_query_timer.is_some() => {
                 if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
                     tracing::warn!("{}: ready query write error: {}", name, e);
+                    abandon_send_queue(
+                        &name, &counters, &mut send_queue, "ready_query_write_error",
+                    );
                     return outgoing_rx;
                 }
                 if let Err(e) = port.flush().await {
                     tracing::warn!("{}: ready query flush error: {}", name, e);
+                    abandon_send_queue(
+                        &name, &counters, &mut send_queue, "ready_query_flush_error",
+                    );
                     return outgoing_rx;
                 }
                 ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
@@ -1034,6 +1131,9 @@ where
                 let detect_frame = [kiss::FEND, rnode::CMD_DETECT, rnode::DETECT_REQ, kiss::FEND];
                 if let Err(e) = port.write_all(&detect_frame).await {
                     tracing::warn!("{}: heartbeat write error: {}", name, e);
+                    abandon_send_queue(
+                        &name, &counters, &mut send_queue, "heartbeat_write_error",
+                    );
                     return outgoing_rx;
                 }
                 heartbeat_pending = true;
@@ -1083,6 +1183,10 @@ where
             if let Some(queued) = send_queue.pop_front() {
                 if let Err(e) = port.write_all(&queued.data).await {
                     tracing::warn!("{}: write error: {}", name, e);
+                    // The frame in hand never made it out either — put it
+                    // back so the count names every frame that is lost.
+                    send_queue.push_front(queued);
+                    abandon_send_queue(&name, &counters, &mut send_queue, "serial_write_error");
                     return outgoing_rx;
                 }
                 // tcdrain: block until firmware has received all bytes.
@@ -1092,6 +1196,10 @@ where
                 // burst without CSMA between them.
                 if let Err(e) = port.flush().await {
                     tracing::warn!("{}: flush error: {}", name, e);
+                    // Bytes may have reached the OS buffer but not the
+                    // firmware; count the frame as lost rather than as sent.
+                    send_queue.push_front(queued);
+                    abandon_send_queue(&name, &counters, &mut send_queue, "serial_flush_error");
                     return outgoing_rx;
                 }
                 counters
@@ -1116,10 +1224,22 @@ where
                     interface_ready = false;
                     if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
                         tracing::warn!("{}: ready query write error: {}", name, e);
+                        abandon_send_queue(
+                            &name,
+                            &counters,
+                            &mut send_queue,
+                            "ready_query_write_error",
+                        );
                         return outgoing_rx;
                     }
                     if let Err(e) = port.flush().await {
                         tracing::warn!("{}: ready query flush error: {}", name, e);
+                        abandon_send_queue(
+                            &name,
+                            &counters,
+                            &mut send_queue,
+                            "ready_query_flush_error",
+                        );
                         return outgoing_rx;
                     }
                     ready_poll = ready_poll_start;
@@ -1881,6 +2001,7 @@ async fn rnode_multi_io_task<S>(
                 match result {
                     Ok(0) => {
                         tracing::warn!("{}: serial port EOF", name);
+                        abandon_multi_send_queue(name, vports, &mut send_queue, "serial_eof");
                         return;
                     }
                     Ok(n) => {
@@ -1910,6 +2031,10 @@ async fn rnode_multi_io_task<S>(
                                                 .is_err()
                                             {
                                                 // Event loop shut down for this vport.
+                                                abandon_multi_send_queue(
+                                                    name, vports, &mut send_queue,
+                                                    "incoming_closed",
+                                                );
                                                 return;
                                             }
                                         }
@@ -1934,10 +2059,16 @@ async fn rnode_multi_io_task<S>(
                                     match payload.first().copied() {
                                         Some(rnode::ERROR_INITRADIO) => {
                                             tracing::error!("{}: radio init failed", name);
+                                            abandon_multi_send_queue(
+                                                name, vports, &mut send_queue, "error_initradio",
+                                            );
                                             return;
                                         }
                                         Some(rnode::ERROR_TXFAILED) => {
                                             tracing::error!("{}: TX failed", name);
+                                            abandon_multi_send_queue(
+                                                name, vports, &mut send_queue, "error_txfailed",
+                                            );
                                             return;
                                         }
                                         Some(code) => {
@@ -1950,6 +2081,9 @@ async fn rnode_multi_io_task<S>(
                                     if payload.first() == Some(&DEVICE_RESET_MARKER) =>
                                 {
                                     tracing::warn!("{}: device reset (0xF8)", name);
+                                    abandon_multi_send_queue(
+                                        name, vports, &mut send_queue, "device_reset",
+                                    );
                                     return;
                                 }
                                 _ => {}
@@ -1958,6 +2092,9 @@ async fn rnode_multi_io_task<S>(
                     }
                     Err(e) => {
                         tracing::warn!("{}: serial read error: {}", name, e);
+                        abandon_multi_send_queue(
+                            name, vports, &mut send_queue, "serial_read_error",
+                        );
                         return;
                     }
                 }
@@ -1983,6 +2120,9 @@ async fn rnode_multi_io_task<S>(
                     }
                     None => {
                         // All vport senders dropped: interface tearing down.
+                        abandon_multi_send_queue(
+                            name, vports, &mut send_queue, "outgoing_closed",
+                        );
                         return;
                     }
                 }
@@ -2005,10 +2145,16 @@ async fn rnode_multi_io_task<S>(
             }, if ready_query_timer.is_some() => {
                 if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
                     tracing::warn!("{}: ready query write error: {}", name, e);
+                    abandon_multi_send_queue(
+                        name, vports, &mut send_queue, "ready_query_write_error",
+                    );
                     return;
                 }
                 if let Err(e) = port.flush().await {
                     tracing::warn!("{}: ready query flush error: {}", name, e);
+                    abandon_multi_send_queue(
+                        name, vports, &mut send_queue, "ready_query_flush_error",
+                    );
                     return;
                 }
                 ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
@@ -2023,10 +2169,15 @@ async fn rnode_multi_io_task<S>(
                 let frame = rnode::build_vport_data_frame(v.vport, &data);
                 if let Err(e) = port.write_all(&frame).await {
                     tracing::warn!("{}: write error: {}", name, e);
+                    // The frame in hand is lost with the rest; count it.
+                    send_queue.push_front((subint, data));
+                    abandon_multi_send_queue(name, vports, &mut send_queue, "serial_write_error");
                     return;
                 }
                 if let Err(e) = port.flush().await {
                     tracing::warn!("{}: flush error: {}", name, e);
+                    send_queue.push_front((subint, data));
+                    abandon_multi_send_queue(name, vports, &mut send_queue, "serial_flush_error");
                     return;
                 }
                 v.counters
@@ -2046,10 +2197,22 @@ async fn rnode_multi_io_task<S>(
                     interface_ready = false;
                     if let Err(e) = port.write_all(&READY_QUERY_FRAME).await {
                         tracing::warn!("{}: ready query write error: {}", name, e);
+                        abandon_multi_send_queue(
+                            name,
+                            vports,
+                            &mut send_queue,
+                            "ready_query_write_error",
+                        );
                         return;
                     }
                     if let Err(e) = port.flush().await {
                         tracing::warn!("{}: ready query flush error: {}", name, e);
+                        abandon_multi_send_queue(
+                            name,
+                            vports,
+                            &mut send_queue,
+                            "ready_query_flush_error",
+                        );
                         return;
                     }
                     ready_poll = ready_poll_start;
@@ -3471,10 +3634,16 @@ mod tests {
     /// protocol model that let six green tests hide the flowval leg-B
     /// deadlock (2026-08-21): an implementation that waits for an
     /// unsolicited READY starves against this stub, which is the point.
+    ///
+    /// `end_rx` scripts the disconnect: the stub either drops its half of
+    /// the duplex (the io task reads `Ok(0)`, a port that went away) or
+    /// announces a firmware reset — the two return paths the held-frame
+    /// tests drive (Codeberg #316).
     async fn rnode_firmware_stub_scripted(
         mut peer: tokio::io::DuplexStream,
         mut air_budget: usize,
         mut resume_rx: mpsc::Receiver<usize>,
+        mut end_rx: mpsc::Receiver<StubEnd>,
         data_tx: mpsc::Sender<Vec<u8>>,
         ready_queries: Arc<std::sync::atomic::AtomicUsize>,
     ) {
@@ -3540,6 +3709,20 @@ mod tests {
                         None => return,
                     }
                 }
+                end = end_rx.recv() => {
+                    match end {
+                        // Returning drops `peer`, so the io task's next read
+                        // yields `Ok(0)` — the port went away mid-gate.
+                        Some(StubEnd::Eof) | None => return,
+                        Some(StubEnd::DeviceReset) => {
+                            let mut resp = Vec::new();
+                            kiss::frame(rnode::CMD_RESET, &[DEVICE_RESET_MARKER], &mut resp);
+                            if peer.write_all(&resp).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -3548,10 +3731,23 @@ mod tests {
     /// to [`rnode_firmware_stub_scripted`] over an in-memory duplex. All
     /// timing is driven by `start_paused` tokio time, so the 2 s gated
     /// threshold and multi-second hold windows cost no wall clock.
+    /// How a test ends the scripted stub's session.
+    #[derive(Clone, Copy, Debug)]
+    enum StubEnd {
+        /// The port goes away: the stub drops the duplex, the io task reads
+        /// `Ok(0)`.
+        Eof,
+        /// The firmware announces a reset (`CMD_RESET` 0xF8) on an otherwise
+        /// healthy port.
+        DeviceReset,
+    }
+
     struct DutyLockHarness {
         outgoing_tx: mpsc::Sender<OutgoingPacket>,
         counters: Arc<InterfaceCounters>,
         resume_tx: mpsc::Sender<usize>,
+        /// Scripts the disconnect (see [`StubEnd`]).
+        end_tx: mpsc::Sender<StubEnd>,
         data_rx: mpsc::Receiver<Vec<u8>>,
         /// CMD_READY queries the stub has answered — proves the host asks.
         ready_queries: Arc<std::sync::atomic::AtomicUsize>,
@@ -3564,6 +3760,7 @@ mod tests {
         let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingPacket>(16);
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
         let (resume_tx, resume_rx) = mpsc::channel::<usize>(16);
+        let (end_tx, end_rx) = mpsc::channel::<StubEnd>(4);
         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(256);
         let counters = Arc::new(InterfaceCounters::new());
         let ready_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3572,6 +3769,7 @@ mod tests {
             peer,
             air_budget,
             resume_rx,
+            end_rx,
             data_tx,
             Arc::clone(&ready_queries),
         ));
@@ -3597,6 +3795,7 @@ mod tests {
             outgoing_tx,
             counters,
             resume_tx,
+            end_tx,
             data_rx,
             ready_queries,
             _incoming_rx: incoming_rx,
@@ -3620,6 +3819,22 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{ctx}: expected frame {want:?}, stub saw nothing"))
                 .expect("stub data channel open");
             assert_eq!(got, want, "{ctx}");
+        }
+
+        /// Push `count` frames while the gate is closed, then let the io task
+        /// pull them out of the channel into its task-local send queue —
+        /// which is exactly the queue a disconnect abandons.
+        async fn hold_frames(&self, count: usize) {
+            for i in 0..count {
+                self.push(format!("h{i:03}").as_bytes()).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        /// Script the stub's disconnect and give the io task time to see it.
+        async fn end_session(&self, end: StubEnd) {
+            self.end_tx.send(end).await.expect("stub alive");
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         /// Assert the stub sees no `CMD_DATA` for `window`. The serial-only
@@ -3867,6 +4082,131 @@ mod tests {
             h.ready_queries.load(std::sync::atomic::Ordering::Relaxed),
             0,
             "flow_control off must put no CMD_READY queries on the serial line"
+        );
+    }
+
+    /// Find the single `RNODE_TX_QUEUE_DROP` line in `logs` and assert it
+    /// carries exactly the abandon shape for `reason`, with `len` frames.
+    fn assert_single_abandon_event(logs: &str, reason: &str, len: usize) {
+        assert_eq!(
+            count_event(logs, "RNODE_TX_QUEUE_DROP"),
+            1,
+            "one summary event per return path, never one per frame\
+             \n--- logs ---\n{logs}"
+        );
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_QUEUE_DROP\""))
+            .expect("checked non-zero above");
+        for key in [
+            "iface=test_rnode_duty".to_string(),
+            format!("len={len}"),
+            format!("reason=\"{reason}\""),
+        ] {
+            assert!(
+                line.contains(&key),
+                "abandon event must carry {key}; line: {line}"
+            );
+        }
+    }
+
+    /// Behaviour 7, a port drop must not swallow held frames
+    /// (Codeberg #316): the gate is closed, frames are held host-side, and
+    /// then the port goes away. `rnode_io_task`'s send queue is task-local,
+    /// so those frames are gone — the reconnected task only inherits what is
+    /// still in the mpsc channel. That loss is legitimate; keeping it silent
+    /// is not. Every abandoned frame must land on `tx_queue_drops` and the
+    /// return path must name itself once.
+    #[tokio::test(start_paused = true)]
+    async fn test_held_frames_are_counted_when_the_port_drops() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"bootstrap").await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+
+        // The bootstrap frame jammed the stub's one-deep queue, so every
+        // poll now answers 0x00 and these stay held on our side.
+        const HELD: usize = 3;
+        h.hold_frames(HELD).await;
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "nothing is dropped while the frames are merely held"
+        );
+
+        h.end_session(StubEnd::Eof).await;
+
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            HELD as u64,
+            "every frame the dying io task abandons must be counted"
+        );
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_single_abandon_event(&logs, "serial_eof", HELD);
+    }
+
+    /// Behaviour 7b, the same shape through a second return path: the
+    /// firmware announces a reset (`CMD_RESET` 0xF8) on a port that is
+    /// otherwise fine. The io task returns just as abruptly, so the held
+    /// frames are just as gone — and must be just as loud, with the reason
+    /// naming this path rather than the EOF one.
+    #[tokio::test(start_paused = true)]
+    async fn test_held_frames_are_counted_on_device_reset() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push(b"bootstrap").await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+
+        const HELD: usize = 4;
+        h.hold_frames(HELD).await;
+        h.end_session(StubEnd::DeviceReset).await;
+
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            HELD as u64,
+            "a device reset abandons the queue exactly like an EOF does"
+        );
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_single_abandon_event(&logs, "device_reset", HELD);
+    }
+
+    /// Behaviour 7c, silence stays honest: a disconnect with an empty send
+    /// queue abandons nothing, so it must say nothing. An unconditional
+    /// event at every return path would make `RNODE_TX_QUEUE_DROP` fire on
+    /// every ordinary reconnect and train the operator to ignore it.
+    #[tokio::test(start_paused = true)]
+    async fn test_empty_queue_at_disconnect_stays_silent() {
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 1);
+        h.push(b"only").await;
+        h.expect_frame(b"only", "the single frame airs, leaving the queue empty")
+            .await;
+
+        h.end_session(StubEnd::Eof).await;
+
+        assert_eq!(
+            h.counters
+                .tx_queue_drops
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "an empty queue at disconnect drops nothing"
+        );
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        assert_eq!(
+            count_event(&logs, "RNODE_TX_QUEUE_DROP"),
+            0,
+            "no frames abandoned means no event\n--- logs ---\n{logs}"
         );
     }
 

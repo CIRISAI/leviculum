@@ -306,7 +306,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // Emitted by `interfaces/rnode.rs::rnode_io_task`. GATED fires once the
     // gate has held queued frames past one CHTM cadence and repeats at a
     // bounded rate; RELEASED closes the pair when the gate reopens;
-    // QUEUE_DROP names every frame the bounded host-side queue sheds.
+    // QUEUE_DROP names frames the host-side queue loses, and `reason` says
+    // how:
+    //   reason=queue_full  — the bounded queue shed its oldest frame;
+    //                        `len` = that frame's payload bytes, `depth` =
+    //                        what stays queued. One event per frame.
+    //   any other reason   — a return path of the io task abandoned its
+    //                        task-local queue on disconnect (serial_eof,
+    //                        device_reset, error_*, …); `len` = frames
+    //                        abandoned, `depth` = 0. One event per return
+    //                        path, so a reconnect cannot emit 64 lines at
+    //                        once.
     EventSchema {
         name: "RNODE_TX_GATED",
         required_keys: &["iface", "held_ms", "depth"],
@@ -317,7 +327,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     EventSchema {
         name: "RNODE_TX_QUEUE_DROP",
-        required_keys: &["iface", "len", "depth"],
+        required_keys: &["iface", "len", "depth", "reason"],
     },
     // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
