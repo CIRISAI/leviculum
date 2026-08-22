@@ -53,10 +53,13 @@
 //!
 //! ## Schema validation (per-handle)
 //!
-//! [`EVENT_CATALOG`] declares required keys per event name.  Per
-//! consumed event, the layer iterates each active handle's catalogue
-//! (production + the handle's `extra_schemas`).  If the event is
-//! catalogued and required keys are missing, a synthetic line is
+//! [`EVENT_CATALOG`] declares required keys per event name.  A name
+//! may appear under several entries when its emitters use per-reason
+//! shapes (Codeberg #320); a record passes if any declared shape is
+//! fully present.  Per consumed event, the layer iterates each active
+//! handle's catalogue (production + the handle's `extra_schemas`).
+//! If the event is catalogued and no declared shape is satisfied, a
+//! synthetic line naming the nearest shape's missing keys is
 //! appended to that handle's buffer:
 //!
 //! ```text
@@ -325,9 +328,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RNODE_TX_RELEASED",
         required_keys: &["iface", "held_ms", "depth"],
     },
+    // RNODE_TX_QUEUE_DROP carries two shapes keyed by `reason`
+    // (Codeberg #320): `queue_full` sheds one frame and reports its
+    // payload size as `len` bytes, while the abandon reasons (a dying
+    // io task, #316) report how many whole frames were lost as
+    // `frames`. Both entries share the name; a record passes if either
+    // shape is fully present (see the any-shape rule in `on_event`).
     EventSchema {
         name: "RNODE_TX_QUEUE_DROP",
         required_keys: &["iface", "len", "depth", "reason"],
+    },
+    EventSchema {
+        name: "RNODE_TX_QUEUE_DROP",
+        required_keys: &["iface", "frames", "depth", "reason"],
     },
     // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
@@ -648,18 +661,36 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
                 buf.push(v.clone());
             }
 
-            let schema = EVENT_CATALOG
+            // A name may be catalogued under several shapes (e.g. the
+            // per-reason field split of RNODE_TX_QUEUE_DROP, Codeberg
+            // #320): the record passes if ANY declared shape is fully
+            // present. The violation reports the nearest shape — the
+            // one with the fewest missing keys — which for the common
+            // single-shape event is just that shape's missing list.
+            let mut satisfied = false;
+            let mut nearest_missing: Option<Vec<&str>> = None;
+            for s in EVENT_CATALOG
                 .iter()
                 .chain(handle.extra_schemas.iter())
-                .find(|s| s.name == event_name);
-            if let Some(s) = schema {
+                .filter(|s| s.name == event_name)
+            {
                 let missing: Vec<&str> = s
                     .required_keys
                     .iter()
                     .filter(|k| !visitor.fields.contains_key(**k))
                     .copied()
                     .collect();
-                if !missing.is_empty() {
+                if missing.is_empty() {
+                    satisfied = true;
+                    break;
+                }
+                match &nearest_missing {
+                    Some(prev) if prev.len() <= missing.len() => {}
+                    _ => nearest_missing = Some(missing),
+                }
+            }
+            if !satisfied {
+                if let Some(missing) = nearest_missing {
                     let v = format!(
                         "EVENT_SCHEMA_VIOLATION event={} missing=[{}] caller={} t={}",
                         event_name,

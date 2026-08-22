@@ -665,7 +665,7 @@ fn abandon_send_queue<T>(
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
         iface = %name,
-        len = abandoned,
+        frames = abandoned,
         depth = 0,
         reason = reason,
     );
@@ -697,7 +697,7 @@ fn abandon_multi_send_queue(
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
         iface = %name,
-        len = abandoned,
+        frames = abandoned,
         depth = 0,
         reason = reason,
     );
@@ -4283,8 +4283,8 @@ mod tests {
     }
 
     /// Find the single `RNODE_TX_QUEUE_DROP` line in `logs` and assert it
-    /// carries exactly the abandon shape for `reason`, with `len` frames.
-    fn assert_single_abandon_event(logs: &str, reason: &str, len: usize) {
+    /// carries exactly the abandon shape for `reason`, with `frames` frames.
+    fn assert_single_abandon_event(logs: &str, reason: &str, frames: usize) {
         assert_eq!(
             count_event(logs, "RNODE_TX_QUEUE_DROP"),
             1,
@@ -4297,7 +4297,7 @@ mod tests {
             .expect("checked non-zero above");
         for key in [
             "iface=test_rnode_duty".to_string(),
-            format!("len={len}"),
+            format!("frames={frames}"),
             format!("reason=\"{reason}\""),
         ] {
             assert!(

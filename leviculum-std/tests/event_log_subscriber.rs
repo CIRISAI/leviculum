@@ -271,6 +271,77 @@ fn test_assert_no_schema_violations_macro_red() {
     );
 }
 
+/// Catalogue extension with one event name declared under TWO shapes
+/// (the `RNODE_TX_QUEUE_DROP` situation, Codeberg #320: `len` bytes on
+/// `queue_full`, `frames` on the abandon reasons).  Per-handle via
+/// extra_schemas so the production catalogue stays untouched.
+const TWO_SHAPE_SCHEMAS: &[EventSchema] = &[
+    EventSchema {
+        name: "EV_TWO_SHAPE",
+        required_keys: &["iface", "len", "reason"],
+    },
+    EventSchema {
+        name: "EV_TWO_SHAPE",
+        required_keys: &["iface", "frames", "reason"],
+    },
+];
+
+/// Test 5b — an event name catalogued under several shapes passes when
+/// ANY declared shape is fully present, and still violates when none
+/// is.  The violation reports the nearest shape (fewest missing keys),
+/// so the message stays actionable.
+#[test]
+fn test_multi_shape_catalogue_accepts_either_shape() {
+    let _lock = lock_event_log();
+    let handle = init_event_log_with_extra_schemas(TWO_SHAPE_SCHEMAS, None);
+
+    // Shape 1 (len) — no violation may fire.
+    tracing::debug!(
+        event = "EV_TWO_SHAPE",
+        iface = "if0",
+        len = 42u64,
+        reason = "queue_full"
+    );
+    // Shape 2 (frames) — no violation may fire either; under a
+    // first-entry-only lookup this one would be flagged for a
+    // missing `len`.
+    tracing::debug!(
+        event = "EV_TWO_SHAPE",
+        iface = "if0",
+        frames = 3u64,
+        reason = "serial_eof"
+    );
+
+    let lines = lines_for(&handle, "EV_TWO_SHAPE");
+    let violations: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("EVENT_SCHEMA_VIOLATION"))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "either declared shape must satisfy the check, got: {violations:?}"
+    );
+
+    // Neither shape — exactly one violation, naming the nearest miss
+    // (both shapes lack one key here, so the first declared wins).
+    tracing::debug!(event = "EV_TWO_SHAPE", iface = "if0", reason = "queue_full");
+    let lines = lines_for(&handle, "EV_TWO_SHAPE");
+    let violations: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("EVENT_SCHEMA_VIOLATION"))
+        .collect();
+    assert_eq!(
+        violations.len(),
+        1,
+        "a record matching no declared shape must still violate: {violations:?}"
+    );
+    assert!(
+        violations[0].contains("missing=[len]"),
+        "the violation should name the nearest shape's missing keys: {}",
+        violations[0]
+    );
+}
+
 /// Test 6 — field-value violations.  Field values containing
 /// whitespace, `=`, or non-printable characters trigger an
 /// `EVENT_FIELD_VIOLATION` line in addition to the original event.
