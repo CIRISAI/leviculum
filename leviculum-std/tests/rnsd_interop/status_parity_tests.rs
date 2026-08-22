@@ -2444,14 +2444,33 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // reported by lnsd but only LAZILY by Python: the key appears once the
     // interface's announce-cap queue has ever held an entry, which depends
     // on rebroadcast timing under the burst load. Both shapes are pinned.
+    //
+    // `tx_queue_drops` (Codeberg #318) is an additive lnsd-only key with no
+    // reference equivalent, emitted unconditionally next to rxb/txb. The
+    // reference reader tolerates it: rnstatus looks every field up by name
+    // (text path gated with `"key" in ifstat`) and its --json path enumerates
+    // keys only to hex-encode bytes values, so an unknown int key passes
+    // through unread. Same shape as the in-repo precedent `tx_jitter_max`
+    // (#190) — see the note above `row_fields` in rpc/handlers.rs; that one
+    // stays out of this set only because it is emitted per medium and the
+    // TCP interface this test samples has none.
+    //
+    // Operational lesson: any batch that adds an interface_stats key MUST run
+    // the status-parity step (`bash scripts/run-status-parity.sh`, the recipe
+    // in `just standard`). This suite is `#[ignore]`d, so the normal test
+    // lanes — `cargo test --workspace` included — skip it, and the key-set
+    // drift only surfaces here.
     let (kl, kr) = (keys(&tl), keys(&tr));
     let ours_only: BTreeSet<String> = kl.difference(&kr).cloned().collect();
     let python_only: BTreeSet<String> = kr.difference(&kl).cloned().collect();
-    let ours_only_full: BTreeSet<String> = ["announce_queue", "peers"]
+    let ours_only_full: BTreeSet<String> = ["announce_queue", "peers", "tx_queue_drops"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let ours_only_queued: BTreeSet<String> = ["peers"].iter().map(|s| s.to_string()).collect();
+    let ours_only_queued: BTreeSet<String> = ["peers", "tx_queue_drops"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     assert!(
         ours_only == ours_only_full || ours_only == ours_only_queued,
         "unexpected lnsd-only interface_stats keys: {ours_only:?}"
