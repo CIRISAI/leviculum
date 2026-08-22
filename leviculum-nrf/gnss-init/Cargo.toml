@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-gnss-init"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Pure one-shot u-blox M8 UBX boot init (factory clear, cold start, full power) for leviculum-nrf, host-testable"
+
+[dependencies]

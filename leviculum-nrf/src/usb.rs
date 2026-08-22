@@ -432,7 +432,12 @@ async fn retic_serial_task(
                                         format_args!("[RESET] host-requested reboot"),
                                     );
                                     let acked = if action == ControlAction::LegacyReset {
-                                        write_framed(&mut cdc, &crate::lora::RESET_ACK, &mut frame_buf).await
+                                        write_framed(
+                                            &mut cdc,
+                                            &crate::lora::RESET_ACK,
+                                            &mut frame_buf,
+                                        )
+                                        .await
                                     } else {
                                         let ack = envelope::encode_ack(envelope::TYPE_RESET);
                                         write_framed(&mut cdc, &ack, &mut frame_buf).await
@@ -489,8 +494,7 @@ async fn retic_serial_task(
                                             envelope::TYPE_WALL_TIME,
                                             envelope::REFUSE_BUSY,
                                         );
-                                        if !write_framed(&mut cdc, &refusal, &mut frame_buf).await
-                                        {
+                                        if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
                                             log("SER: wall-time refusal write failed");
                                         }
                                     }
@@ -506,7 +510,10 @@ async fn retic_serial_task(
                                     refused_type,
                                     reason,
                                 } => {
-                                    log_u32("SER: control frame refused, type", refused_type as u32);
+                                    log_u32(
+                                        "SER: control frame refused, type",
+                                        refused_type as u32,
+                                    );
                                     let refusal = envelope::encode_refusal(refused_type, reason);
                                     if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
                                         log("SER: refusal write failed");

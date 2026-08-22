@@ -233,16 +233,18 @@ fn duplicate_no_hardware_is_suppressed() {
     assert_eq!(m.published(), Some(Presence::NoHardware));
 }
 
-// Once locked, the baud sticks: windows keep expiring without any
-// further SetBaud, even through long silence.
+// Once locked, the baud sticks through silence shorter than the starve
+// threshold: no window expiry, no SetBaud. (Silence past the threshold
+// re-sweeps — the "Locked starve re-sweep" section below.)
 #[test]
 fn locked_baud_sticks() {
     let mut m = PresenceMachine::new(0);
     poll(&mut m, DETECT_WINDOW_MS); // → 38400
-    feed(&mut m, &void_rmc(), DETECT_WINDOW_MS + 500);
+    let lock_t = DETECT_WINDOW_MS + 500;
+    feed(&mut m, &void_rmc(), lock_t);
     assert_eq!(m.current_baud(), 38_400);
 
-    let out = poll(&mut m, 50 * DETECT_WINDOW_MS);
+    let out = poll(&mut m, lock_t + LOCK_STARVE_RESWEEP_MS - 1);
     assert_eq!(set_bauds(&out), Vec::<u32>::new());
     assert_eq!(m.current_baud(), 38_400);
 }
@@ -369,6 +371,123 @@ fn repromotes_after_demotion() {
     assert_eq!(transitions(&out), vec![(Presence::Fix, 9600)]);
 }
 
+// ---- Locked starve re-sweep (#324) ----
+
+// A locked line that stops producing sentences entirely (module
+// rebooted by UBX-CFG-RST, unplugged, or reconfigured away) re-enters
+// the sweep from the default baud instead of staying deaf forever.
+#[test]
+fn locked_resweeps_after_sentence_starvation_on_silence() {
+    let mut m = PresenceMachine::new(0);
+    poll(&mut m, DETECT_WINDOW_MS); // → 38400
+    let lock_t = DETECT_WINDOW_MS + 500;
+    feed(&mut m, &void_rmc(), lock_t);
+    assert_eq!(m.current_baud(), 38_400);
+
+    // Just inside the starve threshold: still locked, no baud change.
+    let out = poll(&mut m, lock_t + LOCK_STARVE_RESWEEP_MS - 1);
+    assert_eq!(set_bauds(&out), Vec::<u32>::new(), "starve must run full");
+
+    // At the threshold: re-sweep from the sweep's first baud.
+    let out = poll(&mut m, lock_t + LOCK_STARVE_RESWEEP_MS);
+    assert_eq!(set_bauds(&out), vec![9_600]);
+    assert_eq!(m.current_baud(), 9_600);
+}
+
+// Post-RST at a fallen-back module baud the line is not silent but
+// garbage (wrong-baud mangling): starvation is keyed to parsed
+// sentences, not to line activity, so garbage must also re-sweep.
+#[test]
+fn locked_resweeps_after_sentence_starvation_on_garbage() {
+    let mut m = PresenceMachine::new(0);
+    poll(&mut m, DETECT_WINDOW_MS); // → 38400
+    let lock_t = DETECT_WINDOW_MS + 500;
+    feed(&mut m, &void_rmc(), lock_t);
+
+    // Garbage keeps arriving every second — activity, but no sentence.
+    let mut out = Vec::new();
+    let mut t = lock_t;
+    while t < lock_t + LOCK_STARVE_RESWEEP_MS {
+        t += 1_000;
+        out.extend(feed(&mut m, GARBAGE, t));
+    }
+    assert_eq!(set_bauds(&out), vec![9_600]);
+    assert_eq!(m.current_baud(), 9_600);
+}
+
+// Positive control: a healthy receiver without a fix (void RMC every
+// second, the indoor cold-start stream) must never trigger the starve
+// re-sweep — sentence flow is the health signal.
+#[test]
+fn sentence_flow_prevents_starve_resweep() {
+    let mut m = PresenceMachine::new(0);
+    let mut out = feed(&mut m, &void_rmc(), 1_000);
+    for i in 1..(3 * LOCK_STARVE_RESWEEP_MS / 1_000) {
+        out.extend(feed(&mut m, &void_rmc(), 1_000 + i * 1_000));
+    }
+    assert_eq!(set_bauds(&out), Vec::<u32>::new());
+    assert_eq!(m.current_baud(), 9_600);
+}
+
+// Starvation while Fix: the hold demotes to NoFix first (10 s), the
+// re-sweep follows later (15 s) — the constants keep that order, so a
+// consumer never sees a re-sweep under a published Fix.
+#[test]
+fn fix_demotes_before_starve_resweep() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &valid_rmc(), 1_000);
+    assert_eq!(m.published(), Some(Presence::Fix));
+
+    let out = poll(&mut m, 1_000 + FIX_HOLD_MS);
+    assert_eq!(transitions(&out), vec![(Presence::NoFix, 9600)]);
+    assert_eq!(
+        set_bauds(&out),
+        Vec::<u32>::new(),
+        "no re-sweep at the hold"
+    );
+
+    let out = poll(&mut m, 1_000 + LOCK_STARVE_RESWEEP_MS);
+    assert_eq!(set_bauds(&out), vec![9_600]);
+    assert_eq!(m.published(), Some(Presence::NoFix));
+}
+
+// After the starve re-sweep the machine is a full citizen again: a
+// sentence at the new baud re-locks (no duplicate NoFix event — dedup),
+// and a valid RMC promotes to Fix at the re-locked baud.
+#[test]
+fn relocks_and_promotes_after_starve_resweep() {
+    let mut m = PresenceMachine::new(0);
+    poll(&mut m, DETECT_WINDOW_MS); // → 38400
+    let lock_t = DETECT_WINDOW_MS + 500;
+    feed(&mut m, &void_rmc(), lock_t);
+    poll(&mut m, lock_t + LOCK_STARVE_RESWEEP_MS);
+    assert_eq!(m.current_baud(), 9_600);
+
+    let t = lock_t + LOCK_STARVE_RESWEEP_MS + 1_000;
+    let out = feed(&mut m, &void_rmc(), t);
+    assert_eq!(
+        transitions(&out),
+        vec![],
+        "NoFix re-settle must not re-emit"
+    );
+    let out = feed(&mut m, &valid_rmc(), t + 1_000);
+    assert_eq!(transitions(&out), vec![(Presence::Fix, 9_600)]);
+}
+
+// A starve re-sweep over a truly dead line ends where any silent sweep
+// ends: NoHardware. The unplugged-mid-run module is fully reported.
+#[test]
+fn starve_resweep_to_silence_settles_no_hardware() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &void_rmc(), 1_000);
+    let resweep_t = 1_000 + LOCK_STARVE_RESWEEP_MS;
+    poll(&mut m, resweep_t); // → sweep idx 0
+    poll(&mut m, resweep_t + DETECT_WINDOW_MS);
+    poll(&mut m, resweep_t + 2 * DETECT_WINDOW_MS);
+    let out = poll(&mut m, resweep_t + 3 * DETECT_WINDOW_MS);
+    assert_eq!(transitions(&out), vec![(Presence::NoHardware, 0)]);
+}
+
 // ---- Event tokens ----
 
 // The exact debug-channel tokens periculum replays grep for.
@@ -391,5 +510,9 @@ fn constants_hold_their_justifications() {
     assert!(
         FIX_HOLD_MS >= 5_000,
         "hold must ride out multi-sentence flaps"
+    );
+    assert!(
+        LOCK_STARVE_RESWEEP_MS > FIX_HOLD_MS,
+        "Fix must demote before the starve re-sweep can fire"
     );
 }

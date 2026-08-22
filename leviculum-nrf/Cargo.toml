@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -85,6 +85,7 @@ leviculum-gnss-time = { path = "gnss-time", optional = true }
 # Pure GNSS presence tri-state: baud sweep + fix hysteresis, same
 # host-testable pattern (#240).
 leviculum-gnss-presence = { path = "gnss-presence", optional = true }
+leviculum-gnss-init = { path = "gnss-init", optional = true }
 
 # BLE stack — Nordic S140 SoftDevice via nrf-softdevice (Embassy-async
 # bindings by Dirbaio). Both boards run BLE through the SoftDevice's
@@ -145,7 +146,12 @@ bsp-rak4631 = ["softdevice"]
 bsp-t114 = ["softdevice", "dep:leviculum-screen"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
-gnss = ["dep:nmea0183", "dep:leviculum-gnss-time", "dep:leviculum-gnss-presence"]
+gnss = [
+    "dep:nmea0183",
+    "dep:leviculum-gnss-time",
+    "dep:leviculum-gnss-presence",
+    "dep:leviculum-gnss-init",
+]
 battery = []
 rak-baseboard = ["display", "gnss", "battery"]
 

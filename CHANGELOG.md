@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Pocket V2 wakes its GNSS module at boot with a minimal UBX init
+  (factory clear, cold start, full power), so a persisted module
+  configuration from earlier firmware cannot suppress acquisition (#324).
+
 - One framed control envelope on the LNode USB channel (type, length,
   named refusals, capability report); radio config and reset migrated,
   legacy magics stay accepted for a transition window (#238).

@@ -23,10 +23,20 @@
 //! window lengths, sweep order, hysteresis hold — lives host-tested in
 //! the pure crate.
 //!
-//! No UBX-CFG init in this commit. The Meshtastic firmware's full
-//! `_message_NAVX5 / _message_PMS / _message_CFG_PM2` chain
-//! (`meshtastic/src/gps/ubx.h:38-321`) can be added later if power-save
-//! or fix-quality tuning becomes necessary.
+//! One-shot UBX module init (#324): after the first baud lock the task
+//! walks the [`leviculum_gnss_init::UbxInit`] sequence — factory clear
+//! (UBX-CFG-CFG), cold start (UBX-CFG-RST), full power (UBX-CFG-PMS) —
+//! so a persisted Meshtastic-era module configuration cannot survive
+//! into our runtime, and acquisition never depends on a field module's
+//! factory defaults. The byte sequences, gates and ACK discipline are
+//! derived from the Meshtastic reference (`meshtastic/src/gps/ubx.h`,
+//! `GPS.cpp`) and live host-tested in the pure crate; this task only
+//! writes the frames and logs `[GNSS_INIT]` lines. After the CFG-RST
+//! reboot the module may fall back to its default baud — the presence
+//! machine's sentence-starvation re-sweep recovers the line, no
+//! special-casing here. The rest of the Meshtastic chain
+//! (`_message_NAVX5` tuning, rate and constellation config,
+//! `ubx.h:38-321`) stays deliberately unsent.
 //!
 //! The PPS pin (P0.17) is configured as a pull-down input but not used —
 //! reserved for a future timestamp-capture iteration.
@@ -38,9 +48,43 @@ use embassy_nrf::uarte::{self, Uarte};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
+use leviculum_gnss_init::UbxInit;
 use leviculum_gnss_presence::{Output, PresenceMachine};
 
 use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
+
+/// Act on the init sequencer's outputs: stage the frame into RAM (UBX
+/// frames are flash consts, EasyDMA reads RAM only) and write it, then
+/// log the banner-class `[GNSS_INIT]` line the board smoke check greps
+/// for. TX errors are logged, never retried — the sequencer's ACK
+/// handling makes a lost frame visible as `ack=timeout`.
+async fn apply_init_output(output: leviculum_gnss_init::Output, uart_tx: &mut uarte::UarteTx<'_>) {
+    match output {
+        leviculum_gnss_init::Output::Send { step, frame } => {
+            let mut staged = [0u8; leviculum_gnss_init::MAX_FRAME];
+            staged[..frame.len()].copy_from_slice(frame);
+            let verb = if uart_tx.write(&staged[..frame.len()]).await.is_ok() {
+                "sent"
+            } else {
+                "tx-error"
+            };
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!("[GNSS_INIT] step={} {}", step.as_str(), verb),
+            );
+        }
+        leviculum_gnss_init::Output::AckResult { step, outcome } => {
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[GNSS_INIT] step={} ack={}",
+                    step.as_str(),
+                    outcome.as_str()
+                ),
+            );
+        }
+    }
+}
 
 /// Convert nmea0183's positive-magnitude `Latitude` to signed decimal
 /// degrees (negative south).
@@ -149,6 +193,10 @@ pub async fn gnss_task(
 
     let mut machine = PresenceMachine::new(Instant::now().as_millis());
 
+    // One-shot module init (#324): constructed once per boot, silent
+    // until the machine locks a baud, silent again forever once done.
+    let mut init = UbxInit::new();
+
     // Rolling GnssFix snapshot across sentences. RMC owns "is the
     // receiver happy" (mode is_valid()); GGA owns "how many sats".
     let mut latest = GnssFix::empty();
@@ -178,7 +226,7 @@ pub async fn gnss_task(
             GnssIrqs,
             config,
         );
-        let (_uart_tx, mut uart_rx) =
+        let (mut uart_tx, mut uart_rx) =
             uart.split_with_idle(timer1.reborrow(), ppi_a.reborrow(), ppi_b.reborrow());
 
         // 256-byte chunk: a full 1 Hz NMEA burst (RMC+GGA+GSA — the
@@ -191,9 +239,11 @@ pub async fn gnss_task(
         let mut buf = [0u8; 256];
         let new_baud = loop {
             let now_ms = Instant::now().as_millis();
+            let mut chunk_len = 0usize;
             match with_timeout(Duration::from_secs(1), uart_rx.read_until_idle(&mut buf)).await {
                 Ok(Ok(n)) => {
                     bytes_total = bytes_total.saturating_add(n as u32);
+                    chunk_len = n;
                     machine.on_bytes(&buf[..n], now_ms, &mut |o| {
                         apply_output(o, &mut latest, &mut pending_baud)
                     });
@@ -237,6 +287,36 @@ pub async fn gnss_task(
             if let Some(b) = pending_baud.take() {
                 if b != configured_baud {
                     break b;
+                }
+            }
+
+            // Init runs strictly after the baud decision above, so a
+            // frame is only ever written at the rate the machine locked
+            // (a UBX frame at the wrong baud is garbage into the
+            // module). The emit callback cannot await, so outputs are
+            // staged and applied afterwards; the sequencer emits at
+            // most one Send and one AckResult per iteration.
+            let mut staged: [Option<leviculum_gnss_init::Output>; 4] = [None; 4];
+            let mut staged_n = 0usize;
+            {
+                let mut emit = |o: leviculum_gnss_init::Output| {
+                    if staged_n < staged.len() {
+                        staged[staged_n] = Some(o);
+                        staged_n += 1;
+                    }
+                };
+                let init_now = Instant::now().as_millis();
+                init.on_bytes(&buf[..chunk_len], init_now, &mut emit);
+                init.poll(
+                    machine.locked(),
+                    machine.sentences_seen(),
+                    init_now,
+                    &mut emit,
+                );
+            }
+            for slot in staged.iter_mut().take(staged_n) {
+                if let Some(o) = slot.take() {
+                    apply_init_output(o, &mut uart_tx).await;
                 }
             }
         };

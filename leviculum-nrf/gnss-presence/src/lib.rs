@@ -27,7 +27,8 @@ use nmea0183::{ParseResult, Parser, GGA, RMC};
 /// the WisMesh Pocket V2 and the most common NMEA default overall — then
 /// the two rates preconfigured modules commonly ship with (38400: u-blox
 /// M9/M10 default, 115200: frequent vendor preset). A baud that produces
-/// a parsed sentence sticks for the rest of the boot.
+/// a parsed sentence sticks while sentences keep arriving; a lock that
+/// starves ([`LOCK_STARVE_RESWEEP_MS`]) re-enters the sweep.
 pub const BAUD_SWEEP: [u32; 3] = [9600, 38_400, 115_200];
 
 /// Per-baud detection window in milliseconds.
@@ -53,6 +54,20 @@ pub const DETECT_WINDOW_MS: u64 = 3_000;
 /// — a valid RMC is a positive, checksummed claim of a solution, and
 /// the calendar seed (#166) wants it as soon as it exists.
 pub const FIX_HOLD_MS: u64 = 10_000;
+
+/// Locked-line sentence-starvation threshold in milliseconds: a locked
+/// baud is only kept while checksum-clean sentences keep arriving.
+///
+/// A healthy receiver emits a burst every second even without a fix, so
+/// sentence flow — not line activity — is the liveness signal: a module
+/// that rebooted onto a different baud (UBX-CFG-RST, #324) produces
+/// *garbage*, not silence, and an unplugged one produces silence; both
+/// starve this timer and re-enter the sweep from [`BAUD_SWEEP[0]`].
+/// 15 s is deliberately longer than [`FIX_HOLD_MS`] so a published Fix
+/// always demotes through NoFix before a re-sweep can begin, and long
+/// enough that a slow reboot (~1 s) or a dropped burst never triggers
+/// a spurious re-sweep.
+pub const LOCK_STARVE_RESWEEP_MS: u64 = 15_000;
 
 /// The runtime presence answer. See the crate doc for the semantics of
 /// each state and the operator action it implies.
@@ -107,12 +122,15 @@ enum Phase {
     /// `BAUD_SWEEP[0]` listening. Published state: NoHardware. Any
     /// later activity restarts the sweep.
     Silent,
-    /// A parsed sentence locked `BAUD_SWEEP[idx]` for the rest of the
-    /// boot. `last_valid_rmc_ms` drives the Fix hold; `None` until the
-    /// first valid RMC.
+    /// A parsed sentence locked `BAUD_SWEEP[idx]`. The lock holds while
+    /// sentences keep arriving; `last_sentence_ms` drives the
+    /// starvation re-sweep ([`LOCK_STARVE_RESWEEP_MS`]), and
+    /// `last_valid_rmc_ms` drives the Fix hold (`None` until the first
+    /// valid RMC).
     Locked {
         idx: usize,
         last_valid_rmc_ms: Option<u64>,
+        last_sentence_ms: u64,
     },
 }
 
@@ -159,6 +177,14 @@ impl PresenceMachine {
         self.published
     }
 
+    /// Whether a baud is currently locked (a checksum-clean sentence
+    /// arrived at the configured rate and the lock has not starved).
+    /// The one-shot UBX init (#324) gates every TX step on this: a UBX
+    /// frame sent at an unlocked baud is garbage into the module.
+    pub fn locked(&self) -> bool {
+        matches!(self.phase, Phase::Locked { .. })
+    }
+
     /// Feed a chunk of UART bytes.
     pub fn on_bytes(&mut self, bytes: &[u8], now_ms: u64, emit: &mut dyn FnMut(Output)) {
         if !bytes.is_empty() {
@@ -184,9 +210,10 @@ impl PresenceMachine {
         self.poll(now_ms, emit);
     }
 
-    /// Drive time forward: window expiry during the sweep, the Fix hold
-    /// once locked. The driver calls this on read timeouts; `on_bytes`
-    /// calls it internally after every chunk.
+    /// Drive time forward: window expiry during the sweep; the Fix hold
+    /// and the sentence-starvation re-sweep once locked. The driver
+    /// calls this on read timeouts; `on_bytes` calls it internally
+    /// after every chunk.
     pub fn poll(&mut self, now_ms: u64, emit: &mut dyn FnMut(Output)) {
         match self.phase {
             Phase::Sweep {
@@ -199,14 +226,31 @@ impl PresenceMachine {
                 }
             }
             Phase::Locked {
-                last_valid_rmc_ms: Some(t),
                 idx,
-            } if self.published == Some(Presence::Fix)
-                && now_ms.saturating_sub(t) >= FIX_HOLD_MS =>
-            {
-                self.set_state(Presence::NoFix, BAUD_SWEEP[idx], emit);
+                last_valid_rmc_ms,
+                last_sentence_ms,
+            } => {
+                if self.published == Some(Presence::Fix) {
+                    if let Some(t) = last_valid_rmc_ms {
+                        if now_ms.saturating_sub(t) >= FIX_HOLD_MS {
+                            self.set_state(Presence::NoFix, BAUD_SWEEP[idx], emit);
+                        }
+                    }
+                }
+                // Starvation strictly outlasts the Fix hold (constants
+                // assert it), so a Fix has always demoted through NoFix
+                // by the time the lock is abandoned.
+                if now_ms.saturating_sub(last_sentence_ms) >= LOCK_STARVE_RESWEEP_MS {
+                    self.parser = Parser::new();
+                    self.phase = Phase::Sweep {
+                        idx: 0,
+                        window_start_ms: now_ms,
+                        activity: false,
+                    };
+                    emit(Output::SetBaud(BAUD_SWEEP[0]));
+                }
             }
-            _ => {}
+            Phase::Silent => {}
         }
     }
 
@@ -234,8 +278,15 @@ impl PresenceMachine {
             self.phase = Phase::Locked {
                 idx,
                 last_valid_rmc_ms: None,
+                last_sentence_ms: now_ms,
             };
             self.set_state(Presence::NoFix, BAUD_SWEEP[idx], emit);
+        }
+        if let Phase::Locked {
+            last_sentence_ms, ..
+        } = &mut self.phase
+        {
+            *last_sentence_ms = now_ms;
         }
         match sentence {
             ParseResult::RMC(Some(rmc)) => {
@@ -247,6 +298,7 @@ impl PresenceMachine {
                     if let Phase::Locked {
                         idx,
                         last_valid_rmc_ms,
+                        ..
                     } = &mut self.phase
                     {
                         *last_valid_rmc_ms = Some(now_ms);
