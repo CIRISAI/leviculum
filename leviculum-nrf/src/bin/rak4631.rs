@@ -85,6 +85,13 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_DIRTY")
     );
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    // GNSS presence banner (#240): the settled states are emitted as
+    // `state=<no-hardware|no-fix|fix>` transitions by the GNSS task;
+    // this boot line marks "machinery armed, answer pending" so a log
+    // tail always carries a [GNSS_PRESENCE] anchor. A replay keyed on
+    // the three settled states treats it like no line at all.
+    #[cfg(feature = "gnss")]
+    log_critical!("[GNSS_PRESENCE] state=detecting baud=9600");
     leviculum_nrf::log_stack("boot");
     leviculum_nrf::log_panic_count();
     leviculum_nrf::log_irq_priorities();
@@ -313,6 +320,9 @@ async fn main(spawner: Spawner) {
         leviculum_nrf::gnss::init(
             &spawner,
             p.UARTE0,
+            p.TIMER1,       // idle-line detection for read_until_idle
+            p.PPI_CH0,      // RXDRDY → timer clear/start
+            p.PPI_CH1,      // timer compare → RX stop
             p.P0_15.into(), // RX from ZOE-M8Q TX
             p.P0_16.into(), // TX to ZOE-M8Q RX
             p.P0_17.into(), // PPS (configured but unused)

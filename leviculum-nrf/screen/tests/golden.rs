@@ -99,6 +99,47 @@ fn golden_v2_no_data_frame() {
 }
 
 #[test]
+fn golden_v2_no_hardware_frame() {
+    // V2 with the GNSS presence machinery settled on NoHardware
+    // (Codeberg #240): "GPS: no receiver" / "(check wiring)" — the
+    // operator action (check wiring) must be distinguishable from the
+    // NoData "init" and the Data "search" states.
+    let model = StatusModel {
+        title: "leviculum RAK4631",
+        id_short: "fc06c10642",
+        rx: 3,
+        tx: 1,
+        battery: BatteryStatus::NoData,
+        gnss: GnssStatus::NoHardware,
+        heartbeat: false,
+    };
+    let mut fb = V2Fb::new();
+    model.paint(&mut fb, 128).unwrap();
+    check_golden("v2_no_hardware", &render_ascii(&fb));
+}
+
+#[test]
+fn frame_key_distinguishes_gnss_states() {
+    // NoData and NoHardware carry identical field values (0 sats, no
+    // coords) but render different text — the key must differ or the
+    // NoData→NoHardware settle would never repaint.
+    let base = StatusModel {
+        title: "leviculum RAK4631",
+        id_short: "fc06c10642",
+        rx: 0,
+        tx: 0,
+        battery: BatteryStatus::NoData,
+        gnss: GnssStatus::NoData,
+        heartbeat: false,
+    };
+    let no_hw = StatusModel {
+        gnss: GnssStatus::NoHardware,
+        ..base
+    };
+    assert_ne!(base.key(), no_hw.key());
+}
+
+#[test]
 fn golden_long_name_truncation() {
     // 20 chars of FONT_6X10 fill the 120-px T114 buffer exactly; the
     // title below is 32 chars. Chars 21+ must clip at the right edge

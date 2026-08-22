@@ -172,6 +172,20 @@ pub async fn display_task(
     let mut gnss_rx = crate::baseboard::GNSS_FIX
         .receiver()
         .expect("gnss watch capacity");
+    // Presence consumer (#240). A `None` receiver means the capacity
+    // accounting in baseboard.rs is wrong — surface it, render as
+    // "init" forever rather than panicking the display task.
+    #[cfg(feature = "gnss")]
+    let mut presence_rx = {
+        let rx = crate::baseboard::GNSS_PRESENCE.receiver();
+        if rx.is_none() {
+            crate::log::log_fmt(
+                "[DISP] ",
+                format_args!("GNSS_PRESENCE watch capacity exhausted"),
+            );
+        }
+        rx
+    };
     #[cfg(feature = "battery")]
     let mut bat_rx = crate::baseboard::BATTERY_STATE
         .receiver()
@@ -239,13 +253,28 @@ pub async fn display_task(
         #[cfg(not(feature = "battery"))]
         let battery = BatteryStatus::FeatureOff;
 
+        // The presence tri-state (#240) drives the GPS line: NoHardware
+        // renders "check wiring", and the fix/search label follows the
+        // hysteresis-held policy state rather than the raw per-sentence
+        // receiver flag, so the display agrees with what consumers of
+        // GNSS_PRESENCE act on. Sats/coords still come from the
+        // GNSS_FIX snapshot. Before the first settle (watch empty) the
+        // line stays in the historical "init" state.
         #[cfg(feature = "gnss")]
-        let gnss = match gnss_rx.try_get() {
-            Some(f) => GnssStatus::Data {
-                sats: f.sat_in_use,
-                valid: f.valid,
-                coords: f.latitude.zip(f.longitude),
-            },
+        let gnss = match presence_rx.as_mut().and_then(|rx| rx.try_get()) {
+            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
+                GnssStatus::NoHardware
+            }
+            Some(p) => {
+                let f = gnss_rx
+                    .try_get()
+                    .unwrap_or(crate::baseboard::GnssFix::empty());
+                GnssStatus::Data {
+                    sats: f.sat_in_use,
+                    valid: p.state == crate::baseboard::GnssPresence::Fix,
+                    coords: f.latitude.zip(f.longitude),
+                }
+            }
             None => GnssStatus::NoData,
         };
         #[cfg(not(feature = "gnss"))]

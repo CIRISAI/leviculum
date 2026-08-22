@@ -60,6 +60,32 @@ impl GnssFix {
 #[cfg(feature = "gnss")]
 pub static GNSS_FIX: Watch<CriticalSectionRawMutex, GnssFix, 3> = Watch::new();
 
+/// The runtime GNSS presence answer (Codeberg #240), re-exported from
+/// the pure crate that owns the sweep/hysteresis policy.
+#[cfg(feature = "gnss")]
+pub use leviculum_gnss_presence::Presence as GnssPresence;
+
+/// Settled GNSS presence snapshot, published by `gnss::gnss_task` on
+/// every state transition. The watch starts empty — "no value yet" IS
+/// the detection phase, exactly like `GNSS_FIX` before the first
+/// sentence.
+///
+/// Only [`GnssPresence::Fix`] may feed a position or a timebase;
+/// [`GnssPresence::NoFix`] and [`GnssPresence::NoHardware`] are
+/// operator-facing diagnoses (wait, versus check the wiring).
+#[cfg(feature = "gnss")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GnssPresenceState {
+    pub state: GnssPresence,
+    /// The locked baud rate; 0 while `NoHardware` (no baud found).
+    pub baud: u32,
+}
+
+/// Latest presence snapshot. Capacity-3 watch, same shape as
+/// `GNSS_FIX`: display consumer, the #236 position tracker, one spare.
+#[cfg(feature = "gnss")]
+pub static GNSS_PRESENCE: Watch<CriticalSectionRawMutex, GnssPresenceState, 3> = Watch::new();
+
 /// Battery snapshot published by the SAADC task and consumed by the display.
 ///
 /// `voltage_mv` is the pack voltage in millivolts at the battery terminal

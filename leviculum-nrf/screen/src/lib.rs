@@ -37,13 +37,17 @@ pub enum BatteryStatus {
 }
 
 /// GNSS line source. `NoData` is the "receiver not heard from yet"
-/// state ("GPS: 0 sat init"); an invalid fix still carries whatever
+/// state ("GPS: 0 sat init"); `NoHardware` is the settled runtime
+/// answer that no receiver is wired to the UART (Codeberg #240) — the
+/// operator action differs (check wiring versus wait), so the two must
+/// render distinguishably. An invalid fix still carries whatever
 /// coordinates the receiver reported (matching the historical V2 loop,
 /// which zipped latitude/longitude independently of fix validity).
 #[derive(Clone, Copy, Debug)]
 pub enum GnssStatus {
     FeatureOff,
     NoData,
+    NoHardware,
     Data {
         sats: u8,
         valid: bool,
@@ -86,6 +90,10 @@ pub struct FrameKey {
     // Pack voltage rounded to 100 mV so noise on the LSDigit doesn't
     // wake the renderer.
     bat_dv: Option<u16>,
+    // GnssStatus discriminant — NoData and NoHardware render different
+    // text with otherwise identical field values, so the variant itself
+    // must key the frame.
+    gnss_kind: u8,
     heartbeat: bool,
 }
 
@@ -112,6 +120,12 @@ impl StatusModel<'_> {
             } => (sats, valid, coords),
             _ => (0, false, None),
         };
+        let gnss_kind = match self.gnss {
+            GnssStatus::FeatureOff => 0,
+            GnssStatus::NoData => 1,
+            GnssStatus::NoHardware => 2,
+            GnssStatus::Data { .. } => 3,
+        };
         FrameKey {
             rx: self.rx,
             tx: self.tx,
@@ -126,6 +140,7 @@ impl StatusModel<'_> {
             lon_e5: coords.map(|(_, lon)| (lon * 1e5) as i64),
             bat_pct,
             bat_dv,
+            gnss_kind,
             heartbeat: self.heartbeat,
         }
     }
@@ -175,6 +190,10 @@ impl StatusModel<'_> {
             GnssStatus::NoData => {
                 let _ = write!(line5, "GPS: 0 sat init");
                 let _ = write!(line6, "(no fix)");
+            }
+            GnssStatus::NoHardware => {
+                let _ = write!(line5, "GPS: no receiver");
+                let _ = write!(line6, "(check wiring)");
             }
             GnssStatus::Data {
                 sats,
