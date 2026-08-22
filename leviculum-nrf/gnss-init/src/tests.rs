@@ -16,11 +16,16 @@ const FIXTURE_RST: [u8; 12] = [
 const FIXTURE_PMS: [u8; 16] = [
     0xB5, 0x62, 0x06, 0x86, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x94, 0x5A,
 ];
+const FIXTURE_ANT: [u8; 12] = [
+    0xB5, 0x62, 0x06, 0x13, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0xD1,
+];
 
 // Module→host ACK/NAK frames, same independent computation.
 const ACK_CFG: [u8; 10] = [0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, 0x06, 0x09, 0x17, 0x40];
 const ACK_PMS: [u8; 10] = [0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, 0x06, 0x86, 0x94, 0xBD];
 const NAK_PMS: [u8; 10] = [0xB5, 0x62, 0x05, 0x00, 0x02, 0x00, 0x06, 0x86, 0x93, 0xB8];
+const ACK_ANT: [u8; 10] = [0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, 0x06, 0x13, 0x21, 0x4A];
+const NAK_ANT: [u8; 10] = [0xB5, 0x62, 0x05, 0x00, 0x02, 0x00, 0x06, 0x13, 0x20, 0x45];
 
 fn on_bytes(m: &mut UbxInit, bytes: &[u8], now_ms: u64) -> Vec<Output> {
     let mut out = Vec::new();
@@ -64,6 +69,7 @@ fn frames_match_independent_fixtures() {
     assert_eq!(FACTORY_CLEAR_FRAME, FIXTURE_CFG);
     assert_eq!(COLD_START_FRAME, FIXTURE_RST);
     assert_eq!(FULL_POWER_FRAME, FIXTURE_PMS);
+    assert_eq!(ANTENNA_SUPPLY_FRAME, FIXTURE_ANT);
 }
 
 // The documented payload semantics, pinned independently of the raw
@@ -80,6 +86,11 @@ fn payload_semantics_hold() {
     assert_eq!(COLD_START_FRAME[8], 0x01);
     // CFG-PMS: powerSetupValue 0x00 = full power.
     assert_eq!(FULL_POWER_FRAME[7], 0x00);
+    // CFG-ANT: flags = svcs alone (supply control on, scd/ocd/
+    // pdwnOnSCD/recovery off — no automatic power-down path); pins
+    // all-zero with reconfig (bit 15) clear, current routing kept.
+    assert_eq!(&ANTENNA_SUPPLY_FRAME[6..8], &[0x01, 0x00]);
+    assert_eq!(&ANTENNA_SUPPLY_FRAME[8..10], &[0x00, 0x00]);
 }
 
 // ---- Ordering: nothing before lock ----
@@ -106,7 +117,8 @@ fn no_tx_before_lock() {
 
 // lock → CFG-CFG → ACK → (settle + fresh sentence) → CFG-RST →
 // (settle + fresh sentence, no ACK wait for RST) → CFG-PMS → ACK →
-// done, and one-shot: silent forever after.
+// (settle + fresh sentence) → CFG-ANT → ACK → done, and one-shot:
+// silent forever after.
 #[test]
 fn full_happy_path() {
     let mut m = UbxInit::new();
@@ -151,11 +163,29 @@ fn full_happy_path() {
     let out = on_bytes(&mut m, &ACK_PMS, pms_t + 100);
     assert_eq!(acks(&out), vec![(Step::FullPower, AckOutcome::Ack)]);
 
+    // Settle after PMS, snapshot, then a fresh sentence releases
+    // CFG-ANT.
+    let out = poll(&mut m, true, 8, pms_t + 600);
+    assert_eq!(out.len(), 0, "settle after PMS must hold");
+    let out = poll(&mut m, true, 9, pms_t + 100 + POST_PMS_SETTLE_MS);
+    assert_eq!(out.len(), 0, "snapshot poll must not send");
+    let out = poll(&mut m, true, 10, pms_t + 200 + POST_PMS_SETTLE_MS);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+    );
+    let ant_t = pms_t + 200 + POST_PMS_SETTLE_MS;
+
+    // Module ACKs CFG-ANT.
+    let out = on_bytes(&mut m, &ACK_ANT, ant_t + 100);
+    assert_eq!(acks(&out), vec![(Step::AntennaSupply, AckOutcome::Ack)]);
+
     // One-shot: nothing ever again, whatever flows.
     for i in 0..30u64 {
-        let t = pms_t + 1_000 + i * 1_000;
+        let t = ant_t + 1_000 + i * 1_000;
         assert_eq!(poll(&mut m, true, 100 + i as u32, t).len(), 0);
         assert_eq!(on_bytes(&mut m, &ACK_PMS, t).len(), 0);
+        assert_eq!(on_bytes(&mut m, &ACK_ANT, t).len(), 0);
     }
 }
 
@@ -188,9 +218,10 @@ fn ack_timeout_reports_and_continues() {
     assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Timeout)]);
 }
 
-// The PMS NAK path ends the sequence too (no retry).
+// A NAK'd CFG-PMS does not end the sequence: CFG-ANT still follows
+// (reference behaviour: warn and move on).
 #[test]
-fn pms_nak_ends_sequence() {
+fn pms_nak_continues_to_ant() {
     let mut m = UbxInit::new();
     poll(&mut m, true, 3, 1_000);
     on_bytes(&mut m, &ACK_CFG, 1_100);
@@ -200,9 +231,40 @@ fn pms_nak_ends_sequence() {
     assert_eq!(sends(&out).len(), 1);
     poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
     poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
-    let out = on_bytes(&mut m, &NAK_PMS, rst_t + POST_RST_SETTLE_MS + 600);
+    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    let out = on_bytes(&mut m, &NAK_PMS, pms_t + 100);
     assert_eq!(acks(&out), vec![(Step::FullPower, AckOutcome::Nak)]);
-    assert_eq!(poll(&mut m, true, 50, rst_t + 60_000).len(), 0);
+
+    poll(&mut m, true, 7, pms_t + 100 + POST_PMS_SETTLE_MS);
+    let out = poll(&mut m, true, 8, pms_t + 200 + POST_PMS_SETTLE_MS);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+    );
+}
+
+// The ANT NAK path ends the sequence (no retry, nothing after the
+// final step).
+#[test]
+fn ant_nak_ends_sequence() {
+    let mut m = UbxInit::new();
+    poll(&mut m, true, 3, 1_000);
+    on_bytes(&mut m, &ACK_CFG, 1_100);
+    poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
+    poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
+    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
+    poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
+    poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
+    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    on_bytes(&mut m, &ACK_PMS, pms_t + 100);
+    poll(&mut m, true, 7, pms_t + 100 + POST_PMS_SETTLE_MS);
+    let out = poll(&mut m, true, 8, pms_t + 200 + POST_PMS_SETTLE_MS);
+    let ant_t = pms_t + 200 + POST_PMS_SETTLE_MS;
+    assert_eq!(sends(&out).len(), 1);
+    let out = on_bytes(&mut m, &NAK_ANT, ant_t + 100);
+    assert_eq!(acks(&out), vec![(Step::AntennaSupply, AckOutcome::Nak)]);
+    assert_eq!(poll(&mut m, true, 50, ant_t + 60_000).len(), 0);
+    assert_eq!(poll(&mut m, true, 51, ant_t + 61_000).len(), 0);
 }
 
 // ---- Post-RST gate: the reboot race ----
@@ -241,6 +303,52 @@ fn pms_gate_needs_settle_and_fresh_sentence_and_lock() {
     // Locked again with a fresh sentence: released.
     let out = poll(&mut m, true, 11, rst_t + POST_RST_SETTLE_MS + 12_000);
     assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+}
+
+// ---- Post-PMS gate: same rules for CFG-ANT ----
+
+// CFG-ANT obeys the same settle + fresh-sentence + lock gate as the
+// steps before it: neither time alone nor a frozen counter releases
+// it, and a lost lock holds it even with the counter moving.
+#[test]
+fn ant_gate_needs_settle_and_fresh_sentence_and_lock() {
+    let mut m = UbxInit::new();
+    poll(&mut m, true, 3, 1_000);
+    on_bytes(&mut m, &ACK_CFG, 1_100);
+    poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
+    poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
+    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
+    poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
+    poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
+    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    on_bytes(&mut m, &ACK_PMS, pms_t + 100);
+
+    // Sentences flowing BEFORE the settle: no send.
+    let out = poll(&mut m, true, 9, pms_t + 500);
+    assert_eq!(out.len(), 0, "pre-settle sentences must not release ANT");
+
+    // Settle passed, snapshot taken — counter frozen: no send.
+    poll(&mut m, true, 9, pms_t + 100 + POST_PMS_SETTLE_MS);
+    for i in 1..10u64 {
+        let out = poll(
+            &mut m,
+            true,
+            9,
+            pms_t + 100 + POST_PMS_SETTLE_MS + i * 1_000,
+        );
+        assert_eq!(out.len(), 0, "frozen counter must not release ANT");
+    }
+
+    // Counter moves but the lock is gone: still held.
+    let out = poll(&mut m, false, 10, pms_t + 100 + POST_PMS_SETTLE_MS + 11_000);
+    assert_eq!(out.len(), 0, "unlocked line must not release ANT");
+
+    // Locked again with a fresh sentence: released.
+    let out = poll(&mut m, true, 11, pms_t + 100 + POST_PMS_SETTLE_MS + 12_000);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+    );
 }
 
 // ---- ACK scanner robustness ----
@@ -296,6 +404,7 @@ fn constants_hold_their_justifications() {
     assert!(MAX_FRAME >= FACTORY_CLEAR_FRAME.len());
     assert!(MAX_FRAME >= COLD_START_FRAME.len());
     assert!(MAX_FRAME >= FULL_POWER_FRAME.len());
+    assert!(MAX_FRAME >= ANTENNA_SUPPLY_FRAME.len());
     assert!(
         POST_RST_SETTLE_MS >= POST_CFG_SETTLE_MS,
         "a full reboot outlasts a GNSS restart"

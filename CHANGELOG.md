@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The GNSS wake ends with an explicit UBX-CFG-ANT step: antenna supply
+  on, every automatic power-down path off, so the init no longer
+  depends on what the factory clear left behind (#324).
+
 - The GNSS heartbeat reports satellites in view and best C/N0 (`sv=`,
   `cno=`) from GSV, so a receiver that hears the sky but never fixes is
   distinguishable from a deaf antenna (#324).

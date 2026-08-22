@@ -29,6 +29,27 @@
 //!    module; Meshtastic drives the same message with 0x03
 //!    (aggressive 1 Hz, `ubx.h:315-321`, sent at `GPS.cpp:741`) — we
 //!    send the inverse.
+//! 4. **UBX-CFG-ANT** (`flags=svcs` only, `pins` untouched): drive the
+//!    antenna supply control signal, with every automatic power-down
+//!    path off. The wake depends on the antenna being powered, so it
+//!    configures that explicitly instead of trusting whatever the clear
+//!    left behind. The M8 SPG default (spec appendix C.1) is
+//!    `svcs=1 scd=1 pdwnOnSCD=1 recovery=1 ocd=0` — supply on, but
+//!    with short-circuit detection armed to CUT the supply, on default
+//!    detection pins whose board-level wiring we cannot verify. A false
+//!    short on an unverifiable pin powering down the antenna is exactly
+//!    the deaf-module failure #324 chases, so each bit is deliberate:
+//!    `svcs=1` (the one bit the wake needs), `scd=0`/`ocd=0` (status
+//!    detection we never read — the driver polls no UBX-MON-HW — on
+//!    wiring we cannot verify), `pdwnOnSCD=0` (no automatic supply
+//!    cut), `recovery=0` (meaningless without a short state). `pins`
+//!    is all-zero with `reconfig=0`: the pin fields only apply when
+//!    `reconfig` is set, so the module keeps its current routing — the
+//!    spec recommends the default pins and we have no RAK wiring data
+//!    that would justify rerouting. Meshtastic has no CFG-ANT
+//!    precedent to compare against (verified: no `0x06, 0x13` send in
+//!    `meshtastic/src/gps/`); the M8 spec (UBX-13003221 R28,
+//!    §UBX-CFG-ANT and appendix C.1) is the sole source here.
 //!
 //! Nothing else — no NAVX5 tuning, no rate changes, no constellation
 //! config. Frame bytes are computed, never hardcoded: [`ubx_frame`] is a
@@ -125,6 +146,13 @@ const COLD_START_PAYLOAD: [u8; 4] = [0xFF, 0xFF, 0x01, 0x00];
 /// power), `period`/`onTime` zero (only valid for Interval mode).
 const FULL_POWER_PAYLOAD: [u8; 8] = [0x00; 8];
 
+/// UBX-CFG-ANT payload: `flags=0x0001` (`svcs` alone — supply control
+/// on, every detection/power-down bit off; the module docs above walk
+/// through each bit against the M8 SPG default), `pins=0x0000` with
+/// `reconfig=0` (bit 15 clear: pin fields are not applied, current
+/// routing kept).
+const ANTENNA_SUPPLY_PAYLOAD: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+
 /// UBX-CFG-CFG frame reverting the persisted configuration to defaults.
 pub const FACTORY_CLEAR_FRAME: [u8; 21] = ubx_frame(0x06, 0x09, &FACTORY_CLEAR_PAYLOAD);
 
@@ -133,6 +161,9 @@ pub const COLD_START_FRAME: [u8; 12] = ubx_frame(0x06, 0x04, &COLD_START_PAYLOAD
 
 /// UBX-CFG-PMS full-power frame.
 pub const FULL_POWER_FRAME: [u8; 16] = ubx_frame(0x06, 0x86, &FULL_POWER_PAYLOAD);
+
+/// UBX-CFG-ANT antenna-supply frame.
+pub const ANTENNA_SUPPLY_FRAME: [u8; 12] = ubx_frame(0x06, 0x13, &ANTENNA_SUPPLY_PAYLOAD);
 
 /// ACK wait for UBX-CFG-CFG, in ms. The reference waits 2000 ms for
 /// exactly this message (`meshtastic/src/gps/GPS.cpp:756`).
@@ -143,6 +174,11 @@ pub const CFG_ACK_TIMEOUT_MS: u64 = 2_000;
 /// burst-aligned ~1 s chunks, so a sub-second deadline would routinely
 /// mis-log an ACK that is already on the wire as a timeout.
 pub const PMS_ACK_TIMEOUT_MS: u64 = 1_500;
+
+/// ACK wait for UBX-CFG-ANT, in ms. No reference cadence exists
+/// (Meshtastic never sends CFG-ANT); same burst-aligned reasoning as
+/// [`PMS_ACK_TIMEOUT_MS`].
+pub const ANT_ACK_TIMEOUT_MS: u64 = 1_500;
 
 /// Settle after CFG-CFG before the next TX, in ms. The reference holds
 /// 1 s after a config message that restarts the GNSS subsystem
@@ -157,6 +193,13 @@ pub const POST_CFG_SETTLE_MS: u64 = 1_000;
 /// first, which this settle does not try to model).
 pub const POST_RST_SETTLE_MS: u64 = 2_000;
 
+/// Settle after CFG-PMS before CFG-ANT, in ms. CFG-PMS switches the
+/// power regime without a reboot, so the CFG-side hold suffices (the
+/// reference's 1 s after a reconfiguring message, `GPS.cpp:711-713`);
+/// the fresh-sentence-under-lock gate carries the real weight here as
+/// everywhere else.
+pub const POST_PMS_SETTLE_MS: u64 = 1_000;
+
 /// One init step. `as_str` is the stable `[GNSS_INIT] step=<...>` log
 /// token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +210,8 @@ pub enum Step {
     ColdStart,
     /// UBX-CFG-PMS: force full-power operation.
     FullPower,
+    /// UBX-CFG-ANT: drive the antenna supply, auto-power-down off.
+    AntennaSupply,
 }
 
 impl Step {
@@ -175,6 +220,7 @@ impl Step {
             Step::FactoryClear => "cfg",
             Step::ColdStart => "rst",
             Step::FullPower => "pms",
+            Step::AntennaSupply => "ant",
         }
     }
 
@@ -186,6 +232,7 @@ impl Step {
             Step::FactoryClear => &FACTORY_CLEAR_FRAME,
             Step::ColdStart => &COLD_START_FRAME,
             Step::FullPower => &FULL_POWER_FRAME,
+            Step::AntennaSupply => &ANTENNA_SUPPLY_FRAME,
         }
     }
 
@@ -195,6 +242,7 @@ impl Step {
             Step::FactoryClear => (0x06, 0x09),
             Step::ColdStart => (0x06, 0x04),
             Step::FullPower => (0x06, 0x86),
+            Step::AntennaSupply => (0x06, 0x13),
         }
     }
 }
@@ -418,6 +466,10 @@ impl UbxInit {
                 step,
                 deadline_ms: now_ms + PMS_ACK_TIMEOUT_MS,
             },
+            Step::AntennaSupply => State::AwaitAck {
+                step,
+                deadline_ms: now_ms + ANT_ACK_TIMEOUT_MS,
+            },
         };
     }
 
@@ -428,6 +480,11 @@ impl UbxInit {
             Step::FactoryClear => State::Gate {
                 step: Step::ColdStart,
                 earliest_ms: now_ms + POST_CFG_SETTLE_MS,
+                snap: None,
+            },
+            Step::FullPower => State::Gate {
+                step: Step::AntennaSupply,
+                earliest_ms: now_ms + POST_PMS_SETTLE_MS,
                 snap: None,
             },
             _ => State::Done,
