@@ -14,6 +14,14 @@
 //! - and forwards parsed RMC/GGA content, which this task folds into
 //!   the [`GNSS_FIX`] snapshot exactly as before.
 //!
+//! The machine also aggregates GSV groups into satellites-in-view and
+//! best C/N0 (#324); this task only prints them in the heartbeat as
+//! `sv=` / `cno=`. They are the instrument for config-versus-antenna:
+//! `sat=` is GGA satellites-in-USE and is 0 until a fix exists, so an
+//! open-sky session that stays at `valid=false sv=0 cno=0` indicts the
+//! RF path, while many SVs at 35-45 dBHz without a fix indicts
+//! configuration instead.
+//!
 //! This task is deliberately a thin driver: reads via
 //! `read_until_idle` (TIMER1 + PPI ch0/ch1 detect the line going quiet
 //! between 1 Hz NMEA bursts, so chunks align with sentence boundaries
@@ -268,16 +276,24 @@ pub async fn gnss_task(
 
             // Heartbeat log every 5 s with cumulative counters. Keeps
             // the debug log readable but proves the GNSS pipe is alive.
+            // `sat=` is GGA satellites-in-USE and stays 0 without a fix;
+            // `sv=`/`cno=` are the GSV in-VIEW count and best C/N0 in
+            // dBHz (#324) and move as soon as the antenna hears anything
+            // — that is what separates a config problem from a weak RF
+            // path while `valid=false`. `cno=0` means "no C/N0 reported
+            // yet", which a tracked satellite never is.
             if last_health_log.elapsed().as_secs() >= 5 {
                 crate::log::log_fmt(
                     "[GNSS] ",
                     format_args!(
-                        "bytes={} sentences={} errs={} valid={} sat={} baud={}",
+                        "bytes={} sentences={} errs={} valid={} sat={} sv={} cno={} baud={}",
                         bytes_total,
                         machine.sentences_seen(),
                         uart_errors,
                         latest.valid,
                         latest.sat_in_use,
+                        machine.sv_in_view(),
+                        machine.cno_best().unwrap_or(0),
                         configured_baud,
                     ),
                 );

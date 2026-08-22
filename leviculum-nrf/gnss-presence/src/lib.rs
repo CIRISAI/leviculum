@@ -11,6 +11,13 @@
 //! - **Fix** — a valid RMC with position and UTC. Only this state may
 //!   feed a position or a timebase.
 //!
+//! On top of the tri-state it aggregates GSV — satellites in view and
+//! best C/N0 (Codeberg #324). Those two numbers are the instrument that
+//! separates "the module is misconfigured" from "the antenna is deaf"
+//! while presence still reads NoFix: `sat=` in the heartbeat is GGA
+//! satellites-in-USE and is legitimately 0 without a fix, so it says
+//! nothing about the RF path. In-view plus C/N0 does.
+//!
 //! This crate is the pure part — sweep state machine, fix hysteresis,
 //! transition events — free of peripherals so the host can unit-test it,
 //! next to `leviculum-screen`, `leviculum-sd-policy` and
@@ -21,7 +28,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
-use nmea0183::{ParseResult, Parser, GGA, RMC};
+use nmea0183::{ParseResult, Parser, Source, GGA, GSV, RMC};
 
 /// Baud sweep order. 9600 first — the u-blox ZOE-M8Q factory default on
 /// the WisMesh Pocket V2 and the most common NMEA default overall — then
@@ -68,6 +75,125 @@ pub const FIX_HOLD_MS: u64 = 10_000;
 /// enough that a slow reboot (~1 s) or a dropped burst never triggers
 /// a spurious re-sweep.
 pub const LOCK_STARVE_RESWEEP_MS: u64 = 15_000;
+
+/// Number of NMEA talkers tracked separately for GSV.
+///
+/// A receiver running several constellations concurrently emits one GSV
+/// group per talker (`GPGSV`, `GLGSV`, …), each announcing its own
+/// in-view count. They must be aggregated apart and summed: a single
+/// shared slot would let GLONASS overwrite GPS every second and report
+/// a fraction of the sky.
+const TALKERS: usize = 5;
+
+/// Slot index for a talker. `nmea0183`'s `Source` is matched
+/// exhaustively on purpose — a new constellation must be given a slot,
+/// not silently folded into another one.
+fn talker_slot(source: Source) -> usize {
+    match source {
+        Source::GPS => 0,
+        Source::GLONASS => 1,
+        Source::Gallileo => 2,
+        Source::Beidou => 3,
+        Source::GNSS => 4,
+    }
+}
+
+/// One talker's GSV group assembly plus its last completed result.
+///
+/// GSV is a *group*: `total_messages_number` sentences that together
+/// describe the in-view set, each carrying up to four SVs. Only a
+/// complete group is a measurement — a half-received group carries a
+/// truthful in-view count but only part of the C/N0 set, so committing
+/// it would under-report signal strength exactly when the numbers are
+/// being used to judge the antenna.
+#[derive(Clone, Copy, Default)]
+struct TalkerGsv {
+    /// Message number expected next in the group being assembled;
+    /// 0 means no group is in progress.
+    expect_msg: u8,
+    /// `total_messages_number` announced by the group in progress.
+    total_msgs: u8,
+    /// In-view count announced by the group in progress.
+    pending_sv: u8,
+    /// Best C/N0 across the sentences of the group so far.
+    pending_cno: Option<u8>,
+    /// Last *complete* group's in-view count.
+    sv_in_view: u8,
+    /// Last *complete* group's best C/N0 in dBHz.
+    cno_best: Option<u8>,
+}
+
+impl TalkerGsv {
+    fn on_gsv(&mut self, gsv: &GSV) {
+        let msg = gsv.message_number;
+        if msg == 1 {
+            // A group always restarts here, whatever was in progress:
+            // an abandoned predecessor is exactly the truncated-tail
+            // case and must be dropped, not merged.
+            self.expect_msg = 1;
+            self.total_msgs = gsv.total_messages_number;
+            self.pending_sv = gsv.sat_in_view;
+            self.pending_cno = None;
+        } else if self.expect_msg == 0
+            || msg != self.expect_msg
+            || gsv.total_messages_number != self.total_msgs
+        {
+            // A lost or reordered predecessor: the group can no longer
+            // be completed honestly. Drop it and wait for the next
+            // `message_number == 1`.
+            self.expect_msg = 0;
+            return;
+        }
+
+        for sat in gsv.get_in_view_satellites() {
+            // A null C/N0 means "in view but not tracked" — it carries
+            // no signal-strength claim and must not read as 0 dBHz.
+            if let Some(snr) = sat.snr {
+                self.pending_cno = Some(match self.pending_cno {
+                    Some(best) if best >= snr => best,
+                    _ => snr,
+                });
+            }
+        }
+
+        if self.total_msgs > 0 && msg >= self.total_msgs {
+            self.sv_in_view = self.pending_sv;
+            self.cno_best = self.pending_cno;
+            self.expect_msg = 0;
+        } else {
+            self.expect_msg = msg.saturating_add(1);
+        }
+    }
+}
+
+/// GSV aggregation across all talkers: the `sv=` / `cno=` heartbeat
+/// fields of Codeberg #324.
+///
+/// This is pure instrumentation — it never influences presence, the fix
+/// snapshot or the timebase. Its job is to make "config problem versus
+/// antenna problem" decidable from the log while the receiver still
+/// reports no fix: satellites in view says the receiver hears the sky at
+/// all, best C/N0 says how well.
+#[derive(Clone, Copy, Default)]
+struct GsvView {
+    talkers: [TalkerGsv; TALKERS],
+}
+
+impl GsvView {
+    fn on_gsv(&mut self, gsv: &GSV) {
+        self.talkers[talker_slot(gsv.source)].on_gsv(gsv);
+    }
+
+    fn sv_in_view(&self) -> u8 {
+        self.talkers
+            .iter()
+            .fold(0u8, |acc, t| acc.saturating_add(t.sv_in_view))
+    }
+
+    fn cno_best(&self) -> Option<u8> {
+        self.talkers.iter().filter_map(|t| t.cno_best).max()
+    }
+}
 
 /// The runtime presence answer. See the crate doc for the semantics of
 /// each state and the operator action it implies.
@@ -142,6 +268,7 @@ pub struct PresenceMachine {
     phase: Phase,
     published: Option<Presence>,
     sentences: u32,
+    gsv: GsvView,
 }
 
 impl PresenceMachine {
@@ -155,6 +282,7 @@ impl PresenceMachine {
             },
             published: None,
             sentences: 0,
+            gsv: GsvView::default(),
         }
     }
 
@@ -162,6 +290,23 @@ impl PresenceMachine {
     /// the driver no longer sees parse results directly).
     pub fn sentences_seen(&self) -> u32 {
         self.sentences
+    }
+
+    /// Satellites in view summed over all talkers, from the last
+    /// *complete* GSV group of each (#324 instrumentation). 0 until a
+    /// group completes; a group whose tail was lost never contributes.
+    ///
+    /// This is in-view, not in-use: it counts what the receiver hears,
+    /// so it is non-zero long before a fix — which is what makes it a
+    /// discriminator while presence still reads `no-fix`.
+    pub fn sv_in_view(&self) -> u8 {
+        self.gsv.sv_in_view()
+    }
+
+    /// Best C/N0 in dBHz across the last complete GSV group of every
+    /// talker; `None` until one completes with a tracked satellite.
+    pub fn cno_best(&self) -> Option<u8> {
+        self.gsv.cno_best()
     }
 
     /// The baud rate the driver should have the UART configured to.
@@ -241,7 +386,7 @@ impl PresenceMachine {
                 // assert it), so a Fix has always demoted through NoFix
                 // by the time the lock is abandoned.
                 if now_ms.saturating_sub(last_sentence_ms) >= LOCK_STARVE_RESWEEP_MS {
-                    self.parser = Parser::new();
+                    self.reset_line_state();
                     self.phase = Phase::Sweep {
                         idx: 0,
                         window_start_ms: now_ms,
@@ -254,13 +399,23 @@ impl PresenceMachine {
         }
     }
 
+    /// Drop everything derived from the stream we were reading: the
+    /// half-parsed sentence in the parser and the GSV measurement. Both
+    /// belong to a line we have just stopped believing — a stale
+    /// `sv=`/`cno=` reading would report a healthy antenna long after
+    /// the module went quiet or changed baud.
+    fn reset_line_state(&mut self) {
+        self.parser = Parser::new();
+        self.gsv = GsvView::default();
+    }
+
     /// Line activity: marks the sweep pass, and wakes the machine out of
     /// Silent parking back into a fresh sweep.
     fn note_activity(&mut self, now_ms: u64) {
         match &mut self.phase {
             Phase::Sweep { activity, .. } => *activity = true,
             Phase::Silent => {
-                self.parser = Parser::new();
+                self.reset_line_state();
                 self.phase = Phase::Sweep {
                     idx: 0,
                     window_start_ms: now_ms,
@@ -309,6 +464,11 @@ impl PresenceMachine {
                 emit(Output::Rmc(rmc));
             }
             ParseResult::GGA(Some(gga)) => emit(Output::Gga(gga)),
+            // GSV is instrumentation only (#324): it feeds the in-view
+            // and C/N0 counters and emits nothing, so presence, the fix
+            // snapshot and the timebase stay keyed to RMC/GGA exactly as
+            // before.
+            ParseResult::GSV(Some(gsv)) => self.gsv.on_gsv(&gsv),
             // Void RMC/GGA (cold start) and other sentence types carry
             // no foldable content; they already served as lock evidence.
             _ => {}
@@ -325,7 +485,7 @@ impl PresenceMachine {
     ) {
         // Garbage half-sentences must not leak parser state across a
         // baud change.
-        self.parser = Parser::new();
+        self.reset_line_state();
         let next = idx + 1;
         if next < BAUD_SWEEP.len() {
             self.phase = Phase::Sweep {

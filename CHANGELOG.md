@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The GNSS heartbeat reports satellites in view and best C/N0 (`sv=`,
+  `cno=`) from GSV, so a receiver that hears the sky but never fixes is
+  distinguishable from a deaf antenna (#324).
+
 - The Pocket V2 wakes its GNSS module at boot with a minimal UBX init
   (factory clear, cold start, full power), so a persisted module
   configuration from earlier firmware cannot suppress acquisition (#324).

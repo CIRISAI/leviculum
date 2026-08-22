@@ -488,6 +488,176 @@ fn starve_resweep_to_silence_settles_no_hardware() {
     assert_eq!(transitions(&out), vec![(Presence::NoHardware, 0)]);
 }
 
+// ---- GSV: satellites in view and C/N0 (#324 instrumentation) ----
+
+/// A real u-blox GPS GSV group: three sentences, 11 satellites in view,
+/// C/N0 fields as a receiver reports them while acquiring (mostly 00 for
+/// untracked SVs, a handful in the 39-43 dBHz band). Best C/N0 = 43.
+fn gp_gsv_group() -> Vec<Vec<u8>> {
+    vec![
+        nmea("GPGSV,3,1,11,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,00"),
+        nmea("GPGSV,3,2,11,14,25,170,00,16,57,208,39,18,67,296,40,19,40,246,00"),
+        nmea("GPGSV,3,3,11,22,42,067,42,24,14,311,43,27,05,244,00"),
+    ]
+}
+
+/// A real u-blox GLONASS GSV group: two sentences, 7 in view, empty C/N0
+/// fields for untracked SVs (the null the spec allows). Best C/N0 = 36.
+fn gl_gsv_group() -> Vec<Vec<u8>> {
+    vec![
+        nmea("GLGSV,2,1,07,65,08,041,,66,49,092,31,67,42,180,36,68,03,228,"),
+        nmea("GLGSV,2,2,07,73,15,321,,74,60,330,28,75,12,027,"),
+    ]
+}
+
+fn feed_all(m: &mut PresenceMachine, group: &[Vec<u8>], now_ms: u64) -> Vec<Output> {
+    let mut out = Vec::new();
+    for s in group {
+        out.extend(feed(m, s, now_ms));
+    }
+    out
+}
+
+/// A full GSV group yields the in-view count and the best C/N0 of the
+/// whole group — the discriminator between "antenna sees sky" and
+/// "antenna is deaf" while presence still reads no-fix.
+#[test]
+fn gsv_group_reports_sv_in_view_and_best_cno() {
+    let mut m = PresenceMachine::new(0);
+    feed_all(&mut m, &gp_gsv_group(), 1_000);
+    assert_eq!(m.sv_in_view(), 11);
+    assert_eq!(m.cno_best(), Some(43));
+}
+
+/// The first sentence of a group must not publish a count on its own:
+/// the group is only meaningful once complete (the driver doc warns the
+/// GSV tail can split across reads).
+#[test]
+fn partial_gsv_group_publishes_nothing() {
+    let mut m = PresenceMachine::new(0);
+    let group = gp_gsv_group();
+    feed_all(&mut m, &group[..2], 1_000);
+    assert_eq!(m.sv_in_view(), 0, "incomplete group must not publish");
+    assert_eq!(m.cno_best(), None);
+
+    feed_all(&mut m, &group[2..], 1_100);
+    assert_eq!(m.sv_in_view(), 11);
+    assert_eq!(m.cno_best(), Some(43));
+}
+
+/// A group split at arbitrary byte boundaries across UART reads — the
+/// real driver case, chunks aligned to idle detection, not to sentences.
+#[test]
+fn gsv_group_split_across_chunks_reports_same_counts() {
+    let mut m = PresenceMachine::new(0);
+    let stream: Vec<u8> = gp_gsv_group().concat();
+    // Split mid-sentence in two places, including inside a C/N0 field.
+    for chunk in [&stream[..30], &stream[30..97], &stream[97..]] {
+        feed(&mut m, chunk, 1_000);
+    }
+    assert_eq!(m.sv_in_view(), 11);
+    assert_eq!(m.cno_best(), Some(43));
+}
+
+/// A truncated tail — the last sentence of the group cut off mid-field,
+/// so it never checksums — must leave the previously committed counts
+/// untouched rather than publish half a group.
+#[test]
+fn truncated_gsv_tail_leaves_counts_untouched() {
+    let mut m = PresenceMachine::new(0);
+    feed_all(&mut m, &gp_gsv_group(), 1_000);
+    assert_eq!(m.sv_in_view(), 11);
+
+    // Next cycle: 8 in view, but the group's tail is lost.
+    feed(
+        &mut m,
+        &nmea("GPGSV,2,1,08,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,00"),
+        2_000,
+    );
+    feed(&mut m, b"$GPGSV,2,2,08,14,25,170,00,16,5", 2_000);
+    assert_eq!(m.sv_in_view(), 11, "truncated tail must not poison sv");
+    assert_eq!(m.cno_best(), Some(43), "truncated tail must not poison cno");
+}
+
+/// A truncated tail before any complete group leaves the counts at their
+/// "nothing measured yet" values — never a partial-group number.
+#[test]
+fn truncated_gsv_tail_before_any_group_publishes_nothing() {
+    let mut m = PresenceMachine::new(0);
+    feed(
+        &mut m,
+        &nmea("GPGSV,2,1,08,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,42"),
+        1_000,
+    );
+    feed(&mut m, b"$GPGSV,2,2,08,14,25,170,00,16,5", 1_000);
+    assert_eq!(m.sv_in_view(), 0);
+    assert_eq!(m.cno_best(), None);
+}
+
+/// A dropped middle sentence breaks the group: the tail arrives but the
+/// group is incomplete, so nothing is committed.
+#[test]
+fn gsv_group_with_dropped_middle_publishes_nothing() {
+    let mut m = PresenceMachine::new(0);
+    let group = gp_gsv_group();
+    feed(&mut m, &group[0], 1_000);
+    feed(&mut m, &group[2], 1_000);
+    assert_eq!(m.sv_in_view(), 0);
+    assert_eq!(m.cno_best(), None);
+}
+
+/// Concurrent constellations report separate groups: in-view sums across
+/// talkers, best C/N0 is the maximum over all of them.
+#[test]
+fn gsv_counts_sum_across_constellations() {
+    let mut m = PresenceMachine::new(0);
+    feed_all(&mut m, &gp_gsv_group(), 1_000);
+    feed_all(&mut m, &gl_gsv_group(), 1_000);
+    assert_eq!(m.sv_in_view(), 18, "11 GPS + 7 GLONASS");
+    assert_eq!(m.cno_best(), Some(43), "max over GPS 43 and GLONASS 36");
+}
+
+/// A later cycle replaces the previous one per talker — the counts track
+/// the receiver's current view, they do not accumulate.
+#[test]
+fn gsv_cycle_replaces_previous_counts() {
+    let mut m = PresenceMachine::new(0);
+    feed_all(&mut m, &gp_gsv_group(), 1_000);
+    assert_eq!(m.sv_in_view(), 11);
+
+    feed(&mut m, &nmea("GPGSV,1,1,04,03,03,111,21"), 2_000);
+    assert_eq!(m.sv_in_view(), 4);
+    assert_eq!(m.cno_best(), Some(21));
+}
+
+/// A re-sweep abandons the line, so the measurement it produced goes
+/// with it: stale counts from a module that is no longer talking to us
+/// would read as a healthy antenna.
+#[test]
+fn gsv_counts_clear_on_starve_resweep() {
+    let mut m = PresenceMachine::new(0);
+    feed_all(&mut m, &gp_gsv_group(), 1_000);
+    assert_eq!(m.sv_in_view(), 11);
+
+    poll(&mut m, 1_000 + LOCK_STARVE_RESWEEP_MS);
+    assert_eq!(m.sv_in_view(), 0);
+    assert_eq!(m.cno_best(), None);
+}
+
+/// Instrumentation only (#324 scope): GSV locks a baud like any other
+/// checksum-clean sentence, but publishes no fold content and never
+/// promotes presence — position and timebase stay keyed to valid RMC.
+#[test]
+fn gsv_is_instrumentation_only() {
+    let mut m = PresenceMachine::new(0);
+    let out = feed_all(&mut m, &gp_gsv_group(), 1_000);
+    assert_eq!(transitions(&out), vec![(Presence::NoFix, 9600)]);
+    assert_eq!(rmc_count(&out), 0);
+    assert_eq!(gga_count(&out), 0);
+    assert_eq!(m.published(), Some(Presence::NoFix));
+    assert_eq!(m.sentences_seen(), 3);
+}
+
 // ---- Event tokens ----
 
 // The exact debug-channel tokens periculum replays grep for.
