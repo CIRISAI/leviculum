@@ -21,6 +21,7 @@
 //! rule was absent.
 
 pub mod entry;
+pub mod envelope;
 pub mod flow;
 pub mod ihex;
 pub mod infouf2;

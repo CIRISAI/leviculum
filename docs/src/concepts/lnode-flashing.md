@@ -571,9 +571,12 @@ after the `[FW_BUILD]` banner confirms the write, it asks "Flash
 default radio settings? [Y/n]". Enter takes the eu868 preset; "n"
 opens a preset menu — eu868, us915, au915, custom — where custom is
 the five-number field-by-field path. The choice goes to the board's
-transport CDC as the same magic-prefixed control frame `lnsd` uses
-(`leviculum_core::rnode::build_radio_config_frame`, HDLC-framed), then
-`lnflash` waits for `RADIO_CONFIG_ACK`. Non-interactively,
+transport CDC; since #238 `lnflash` opens with a capability probe and
+sends the configuration inside the control envelope
+(`docs/src/firmware/usb-control-envelope.md`), falling back to the
+legacy magic-prefixed frame `lnsd` still uses
+(`leviculum_core::rnode::build_radio_config_frame`, HDLC-framed,
+answered by `RADIO_CONFIG_ACK`) when the probe goes unanswered. Non-interactively,
 `--radio-preset <eu868|us915|au915>` names a preset outright; it
 cannot be combined with the `--radio-*` value flags (two ways to state
 one configuration).

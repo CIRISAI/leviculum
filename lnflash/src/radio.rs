@@ -32,9 +32,9 @@
 
 use std::io;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_core::framing::hdlc::frame;
 use leviculum_core::rnode::{
     build_radio_config_frame, derive_preamble_symbols, firmware_default_lt_alock, RadioConfigWire,
     RADIO_CONFIG_ACK,
@@ -56,9 +56,6 @@ pub const ATTEMPTS: u8 = 3;
 /// How long one attempt waits for the ACK. Three of these is the ~10 s
 /// budget the whole step is allowed.
 pub const ACK_WITHIN: Duration = Duration::from_millis(3500);
-
-/// How long the frame itself gets to reach the port.
-const WRITE_WITHIN: Duration = Duration::from_secs(2);
 
 /// The bandwidths the SX1262 has a register code for (datasheet table
 /// 14-47). Anything else is refused here rather than by a board that answers
@@ -502,36 +499,32 @@ pub enum RadioPlan {
 pub fn send(port: &Path, settings: &RadioSettings) -> io::Result<bool> {
     let fd = Fd::open_serial(port)?;
     fd.set_transport_port()?;
-    let framed = settings.framed();
-    // One deframer across all attempts: a late ACK from the previous attempt
-    // is still an ACK, and resetting would drop a frame mid-arrival.
-    let mut deframer = Deframer::new();
-    for _ in 0..ATTEMPTS {
-        fd.write_all(&framed, Instant::now() + WRITE_WITHIN)?;
-        if wait_for_ack(&fd, Instant::now() + ACK_WITHIN, &mut deframer)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    send_configured(&fd, settings)
 }
 
-fn wait_for_ack(fd: &Fd, deadline: Instant, deframer: &mut Deframer) -> io::Result<bool> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-        // End of file is the board going away — rebooting, unplugged — and
-        // waiting the rest of the window out would only be a spin.
-        let Some(chunk) = fd.read_available(remaining)? else {
-            return Ok(false);
-        };
-        for result in deframer.process(&chunk) {
-            if let DeframeResult::Frame(data) = result {
-                if data == RADIO_CONFIG_ACK {
-                    return Ok(true);
-                }
-            }
+/// The dialect decision on an already-opened port (#238): one capability
+/// probe picks between the envelope config frame (firmware that answers
+/// the probe) and the legacy magic (firmware from before the envelope).
+/// Split from [`send`] so the scripted-pty tests drive the same code the
+/// flash flow runs.
+pub fn send_configured(fd: &Fd, settings: &RadioSettings) -> io::Result<bool> {
+    use crate::envelope::{self, ControlOutcome};
+    match envelope::probe_capabilities(fd)? {
+        Some(caps) if caps.accepts(leviculum_core::envelope::TYPE_RADIO_CONFIG) => Ok(matches!(
+            envelope::send_radio_config(fd, &settings.to_wire())?,
+            ControlOutcome::Acked
+        )),
+        // No capability report (firmware older than the envelope), or a
+        // report without the config type: the legacy magic frame, accepted
+        // through the transition window.
+        _ => {
+            let acked = envelope::transact(
+                fd,
+                &build_radio_config_frame(&settings.to_wire()),
+                envelope::CONTROL_TIMING,
+                |data| (data == RADIO_CONFIG_ACK).then_some(()),
+            )?;
+            Ok(acked.is_some())
         }
     }
 }
@@ -539,6 +532,7 @@ fn wait_for_ack(fd: &Fd, deadline: Instant, deframer: &mut Deframer) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
     use leviculum_core::rnode::parse_radio_config;
 
     /// Take the bytes apart the way the firmware does: deframe, check the
@@ -929,6 +923,78 @@ mod tests {
         assert!(
             format!("{err}").contains("/dev/ttyNoSuchTransport"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn the_config_rides_the_envelope_when_the_firmware_answers_the_probe() {
+        use crate::sys::testpty::{spawn_stub, Pty};
+        use leviculum_core::envelope::{self, classify_control_frame, ControlAction};
+        use std::sync::{Arc, Mutex};
+
+        let accepted: &[u8] = &[envelope::TYPE_RADIO_CONFIG, envelope::TYPE_CAPABILITIES];
+        let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let pty = Pty::open();
+        spawn_stub(&pty, move |frame_bytes| {
+            record.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, accepted) {
+                ControlAction::CapabilityQuery => {
+                    Some(envelope::encode_capability_report(accepted))
+                }
+                ControlAction::RadioConfig(_) => {
+                    Some(envelope::encode_ack(envelope::TYPE_RADIO_CONFIG))
+                }
+                _ => None,
+            }
+        });
+
+        let settings = EU868;
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        assert!(send_configured(&fd, &settings).unwrap());
+
+        // Migration equivalence, host side: what went over the wire is an
+        // envelope config frame that parses to exactly the configuration a
+        // legacy magic frame would have carried.
+        let seen = seen.lock().unwrap();
+        let sent_config = seen
+            .iter()
+            .find_map(|data| match classify_control_frame(data, accepted) {
+                ControlAction::RadioConfig(wire) => Some(wire),
+                _ => None,
+            })
+            .expect("an envelope config frame was sent");
+        assert_eq!(sent_config, settings.to_wire());
+    }
+
+    #[test]
+    fn the_config_falls_back_to_the_legacy_magic_for_old_firmware() {
+        use crate::sys::testpty::{spawn_stub, Pty};
+        use leviculum_core::envelope::{classify_control_frame, ControlAction};
+        use leviculum_core::rnode::RADIO_CONFIG_MAGIC;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let pty = Pty::open();
+        // Firmware from before the envelope: the legacy magic is the only
+        // control frame it answers; the probe runs into scripted silence.
+        spawn_stub(&pty, move |frame_bytes| {
+            record.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, &[]) {
+                ControlAction::LegacyRadioConfig(_) => Some(RADIO_CONFIG_ACK.to_vec()),
+                _ => None,
+            }
+        });
+
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        assert!(send_configured(&fd, &EU868).unwrap());
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|data| data.len() == 21 && data[..2] == RADIO_CONFIG_MAGIC),
+            "the legacy magic frame was sent after the probe went unanswered"
         );
     }
 }

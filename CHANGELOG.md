@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- One framed control envelope on the LNode USB channel (type, length,
+  named refusals, capability report); radio config and reset migrated,
+  legacy magics stay accepted for a transition window (#238).
+- `lnflash --set-time` teaches a running LNode wall time over the
+  envelope; the banner then reports `[TIME_SOURCE] source=host` (#166).
 - The Pocket V2 firmware seeds its calendar from the GNSS receiver's RMC
   UTC, and every LNode states its time source (`[TIME_SOURCE]` beside
   `[FW_BUILD]`) (#166).

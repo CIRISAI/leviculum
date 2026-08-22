@@ -49,6 +49,7 @@
 - [Supported boards](firmware/boards.md)
 - [Building and flashing](firmware/flashing.md)
 - [Serial ports and udev](firmware/serial-ports.md)
+- [The USB control envelope](firmware/usb-control-envelope.md)
 - [Recovery and troubleshooting](firmware/recovery.md)
 - [Debugging with the Debug Probe (SWD)](firmware/probe-debugging.md)
 

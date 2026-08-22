@@ -354,9 +354,12 @@ serial channel (the radio-config envelope of
   (`transport.rs:17438`) and
   `test_absurd_wall_time_injection_is_refused`
   (`transport.rs:17653`).
-- **Status:** the core API exists and is pinned by tests; no
-  production caller wires it to the LNode control channel yet — a
-  separate issue tracks that.
+- **Status:** wired (#238): the control envelope's wall-time frame
+  (`docs/src/firmware/usb-control-envelope.md`) carries a u64 of unix
+  seconds from the host to the seam; the seam's bool picks the
+  enveloped ack or the named `value refused` answer, an accepted seed
+  logs `[TIME_SEED] source=host`, and `lnflash --set-time` is the
+  speaker.
 
 ### Arm 3: Platform clock passing sanity
 

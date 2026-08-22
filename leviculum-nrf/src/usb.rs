@@ -21,6 +21,7 @@ use embassy_time::with_timeout;
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass, State};
 use embassy_usb::control::{OutResponse, Recipient, Request, RequestType};
 use embassy_usb::{Builder, Config, Handler, UsbDevice};
+use leviculum_core::envelope::{self, ControlAction};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use static_cell::StaticCell;
 
@@ -41,6 +42,22 @@ static BAUD_TOUCH: StaticCell<BaudTouchHandler> = StaticCell::new();
 /// Channels for serial interface: NodeCore ↔ USB CDC-ACM
 static INCOMING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
 static OUTGOING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel::new();
+
+/// Wall-time injections from the host (#238 envelope, `TYPE_WALL_TIME`).
+/// The node core owns the calendar, so the serial task hands the value to
+/// the main loop; the main loop answers with the enveloped ack or refusal
+/// through the ordinary outgoing channel once the seam has spoken.
+static WALL_TIME_CHANNEL: Channel<CriticalSectionRawMutex, u64, 1> = Channel::new();
+
+/// The control-frame types this firmware accepts — what the capability
+/// report advertises. `TYPE_TELEMETRY_TARGET` is allocated but joins only
+/// with its #236 consumer.
+pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
+    envelope::TYPE_RADIO_CONFIG,
+    envelope::TYPE_RESET,
+    envelope::TYPE_WALL_TIME,
+    envelope::TYPE_CAPABILITIES,
+];
 
 /// nRF52840 FICR base address
 const FICR_BASE: u32 = 0x1000_0000;
@@ -81,6 +98,9 @@ pub struct SerialChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
     /// Send packets to USB (serial task frames and writes)
     pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
+    /// Receive host wall-time injections (#238 `TYPE_WALL_TIME`); the main
+    /// loop calls the calendar seam and answers via `outgoing_tx`.
+    pub wall_time_rx: Receiver<'static, CriticalSectionRawMutex, u64, 1>,
 }
 
 /// Initialize USB composite device and spawn driver tasks.
@@ -147,6 +167,7 @@ pub fn init(
     SerialChannels {
         incoming_rx: INCOMING_CHANNEL.receiver(),
         outgoing_tx: OUTGOING_CHANNEL.sender(),
+        wall_time_rx: WALL_TIME_CHANNEL.receiver(),
     }
 }
 
@@ -300,6 +321,55 @@ fn log_u32(msg: &str, val: u32) {
 /// Serial HW_MTU (matches Python SerialInterface)
 const SERIAL_HW_MTU: usize = 564;
 
+/// HDLC-frame `payload` into `frame_buf` and write it out in 64-byte
+/// chunks, with a ZLP when the framed length lands exactly on the packet
+/// size. Returns `false` on a USB write error.
+async fn write_framed(
+    cdc: &mut CdcAcmClass<'static, UsbDriver>,
+    payload: &[u8],
+    frame_buf: &mut Vec<u8>,
+) -> bool {
+    frame(payload, frame_buf);
+    for chunk in frame_buf.chunks(64) {
+        if cdc.write_packet(chunk).await.is_err() {
+            return false;
+        }
+    }
+    if !frame_buf.is_empty()
+        && frame_buf.len().is_multiple_of(64)
+        && cdc.write_packet(&[]).await.is_err()
+    {
+        return false;
+    }
+    true
+}
+
+/// Hand a parsed radio configuration to the LoRa task and persist it.
+/// Returns whether the driver could take it — `false` is a config whose
+/// bandwidth or coding rate has no SX1262 register code.
+async fn apply_radio_config(
+    config_tx: &Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
+    wire: leviculum_core::rnode::RadioConfigWire,
+) -> bool {
+    match crate::lora::RadioConfig::from_wire_config(wire) {
+        Some(cfg) => {
+            log("SER: radio config received");
+            config_tx.send(cfg).await;
+            // Persist what we just applied, so a reset comes back on the
+            // host's frequency instead of the compiled default.
+            // Non-blocking: the store task does the read-compare-write and
+            // skips flash entirely if nothing changed (lnsd re-sends this
+            // frame on every connect).
+            crate::radio_store::request_save(&wire);
+            true
+        }
+        None => {
+            log("SER: invalid config frame");
+            false
+        }
+    }
+}
+
 /// Incomplete frame timeout. Python uses 100ms but also sets low_latency mode
 /// so frames arrive as bulk USB packets. Without low_latency, byte-by-byte USB
 /// delivery needs more time. 500ms gives 33x margin for a 167-byte frame at 115200.
@@ -346,68 +416,102 @@ async fn retic_serial_task(
                     let results = deframer.process(&read_buf[..n]);
                     for r in results {
                         if let DeframeResult::Frame(ref data) = r {
-                            // Host-requested reboot (test infrastructure): ACK,
-                            // let the ACK drain, then full system reset. The
-                            // duty-cycle histogram, radio config and queues all
-                            // restart from scratch on the next boot.
-                            if data.as_slice() == crate::lora::RESET_FRAME {
-                                crate::log::log_fmt_critical(
-                                    "[INFO!] ",
-                                    format_args!("[RESET] host-requested reboot"),
-                                );
-                                frame(&crate::lora::RESET_ACK[..], &mut frame_buf);
-                                for chunk in frame_buf.chunks(64) {
-                                    if cdc.write_packet(chunk).await.is_err() {
+                            match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
+                                ControlAction::NotControl => {
+                                    log_u32("SER: frame complete", data.len() as u32);
+                                    incoming_tx.send(data.clone()).await;
+                                }
+                                // Host-requested reboot: ACK, let the ACK
+                                // drain, then full system reset. The
+                                // duty-cycle histogram, radio config and
+                                // queues all restart from scratch on the
+                                // next boot.
+                                action @ (ControlAction::LegacyReset | ControlAction::Reset) => {
+                                    crate::log::log_fmt_critical(
+                                        "[INFO!] ",
+                                        format_args!("[RESET] host-requested reboot"),
+                                    );
+                                    let acked = if action == ControlAction::LegacyReset {
+                                        write_framed(&mut cdc, &crate::lora::RESET_ACK, &mut frame_buf).await
+                                    } else {
+                                        let ack = envelope::encode_ack(envelope::TYPE_RESET);
+                                        write_framed(&mut cdc, &ack, &mut frame_buf).await
+                                    };
+                                    if !acked {
                                         log("SER: reset ACK write failed");
-                                        break;
+                                    }
+                                    // Give the host time to read the ACK off
+                                    // the wire before the USB device
+                                    // disappears.
+                                    embassy_time::Timer::after(Duration::from_millis(100)).await;
+                                    cortex_m::peripheral::SCB::sys_reset();
+                                }
+                                ControlAction::LegacyRadioConfig(wire) => {
+                                    // The legacy contract: ACK on success,
+                                    // silence on a config the driver cannot
+                                    // take. Audible refusals begin with the
+                                    // envelope.
+                                    if apply_radio_config(&config_tx, wire).await
+                                        && !write_framed(
+                                            &mut cdc,
+                                            &crate::lora::CONFIG_ACK,
+                                            &mut frame_buf,
+                                        )
+                                        .await
+                                    {
+                                        log("SER: config ACK write failed");
                                     }
                                 }
-                                // Give the host time to read the ACK off the
-                                // wire before the USB device disappears.
-                                embassy_time::Timer::after(Duration::from_millis(100)).await;
-                                cortex_m::peripheral::SCB::sys_reset();
-                            }
-                            // Check for radio config frame (test infrastructure)
-                            if data.len() == crate::lora::CONFIG_FRAME_LEN
-                                && data[0] == crate::lora::CONFIG_MAGIC[0]
-                                && data[1] == crate::lora::CONFIG_MAGIC[1]
-                            {
-                                if let Some(cfg) = crate::lora::RadioConfig::from_wire(&data[2..]) {
-                                    log("SER: radio config received");
-                                    config_tx.send(cfg).await;
-                                    // Persist what we just applied, so a reset
-                                    // comes back on the host's frequency instead
-                                    // of the compiled default. Non-blocking: the
-                                    // store task does the read-compare-write and
-                                    // skips flash entirely if nothing changed
-                                    // (lnsd re-sends this frame on every
-                                    // connect). The parse cannot fail here — the
-                                    // same bytes just parsed above.
-                                    if let Some(wire) =
-                                        leviculum_core::rnode::parse_radio_config(&data[2..])
-                                    {
-                                        crate::radio_store::request_save(&wire);
+                                ControlAction::RadioConfig(wire) => {
+                                    let answer = if apply_radio_config(&config_tx, wire).await {
+                                        envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_RADIO_CONFIG,
+                                            envelope::REFUSE_VALUE,
+                                        )
+                                    };
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: config answer write failed");
                                     }
-                                    // Send ACK back over serial
-                                    frame(&crate::lora::CONFIG_ACK[..], &mut frame_buf);
-                                    let mut ack_ok = true;
-                                    for chunk in frame_buf.chunks(64) {
-                                        if cdc.write_packet(chunk).await.is_err() {
-                                            log("SER: config ACK write failed");
-                                            ack_ok = false;
-                                            break;
-                                        }
-                                    }
-                                    if ack_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0
-                                    {
-                                        let _ = cdc.write_packet(&[]).await;
-                                    }
-                                } else {
+                                }
+                                ControlAction::LegacyRadioConfigInvalid => {
                                     log("SER: invalid config frame");
                                 }
-                            } else {
-                                log_u32("SER: frame complete", data.len() as u32);
-                                incoming_tx.send(data.clone()).await;
+                                ControlAction::WallTime(unix_secs) => {
+                                    // The node core owns the calendar: the
+                                    // main loop runs the seam and answers via
+                                    // the outgoing channel. A full channel
+                                    // means an injection is already pending —
+                                    // refuse audibly, the host retries.
+                                    if WALL_TIME_CHANNEL.try_send(unix_secs).is_err() {
+                                        let refusal = envelope::encode_refusal(
+                                            envelope::TYPE_WALL_TIME,
+                                            envelope::REFUSE_BUSY,
+                                        );
+                                        if !write_framed(&mut cdc, &refusal, &mut frame_buf).await
+                                        {
+                                            log("SER: wall-time refusal write failed");
+                                        }
+                                    }
+                                }
+                                ControlAction::CapabilityQuery => {
+                                    let report =
+                                        envelope::encode_capability_report(ACCEPTED_CONTROL_TYPES);
+                                    if !write_framed(&mut cdc, &report, &mut frame_buf).await {
+                                        log("SER: capability report write failed");
+                                    }
+                                }
+                                ControlAction::Refuse {
+                                    refused_type,
+                                    reason,
+                                } => {
+                                    log_u32("SER: control frame refused, type", refused_type as u32);
+                                    let refusal = envelope::encode_refusal(refused_type, reason);
+                                    if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
+                                        log("SER: refusal write failed");
+                                    }
+                                }
                             }
                         } else if matches!(r, DeframeResult::Oversized) {
                             // HW_MTU enforcement lives in the deframer now.

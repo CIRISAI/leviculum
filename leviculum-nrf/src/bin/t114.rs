@@ -14,7 +14,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_nrf::gpio::Level;
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -301,6 +301,7 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::log_stack("post-init");
 
     // Interface adapters
+    let serial_ctl_tx = serial.outgoing_tx;
     let mut serial_iface = EmbeddedInterface::new(serial.outgoing_tx);
     let mut lora_iface = LoRaInterface::new(lora_channels.outgoing_tx);
     let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
@@ -314,26 +315,50 @@ async fn main(spawner: Spawner) {
     led.set_level(Level::High);
 
     log_critical!("[STG] main-loop");
-    // Event-driven main loop, four event sources:
+    // Event-driven main loop, five event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
     // 3. BLE incoming (defragmented Reticulum packets from phone)
     // 4. Timer deadline (protocol maintenance, announces)
+    // 5. Host wall-time injection (#238 control envelope)
     loop {
         let deadline = node
             .next_deadline()
             .map(Instant::from_millis)
             .unwrap_or(Instant::MAX);
 
-        match select4(
-            serial.incoming_rx.receive(),
-            lora_channels.incoming_rx.receive(),
-            ble_channels.incoming_rx.receive(),
-            Timer::at(deadline),
+        match select(
+            select4(
+                serial.incoming_rx.receive(),
+                lora_channels.incoming_rx.receive(),
+                ble_channels.incoming_rx.receive(),
+                Timer::at(deadline),
+            ),
+            serial.wall_time_rx.receive(),
         )
         .await
         {
-            Either4::First(data) => {
+            Either::Second(unix_secs) => {
+                // A host that knows wall time (#238 TYPE_WALL_TIME). The
+                // seam applies the same sanity window as every other time
+                // source; the bool picks the enveloped ack or the named
+                // refusal — mirror of the GNSS path.
+                use leviculum_core::envelope;
+                use leviculum_core::transport::TimeSource;
+                let answer = if node.set_wall_time_unix_secs(unix_secs, TimeSource::Host) {
+                    leviculum_nrf::set_time_source(TimeSource::Host);
+                    log_critical!("[TIME_SEED] source=host unix={}", unix_secs);
+                    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    envelope::encode_ack(envelope::TYPE_WALL_TIME)
+                } else {
+                    log_critical!("[TIME_SEED_REFUSED] source=host unix={}", unix_secs);
+                    envelope::encode_refusal(envelope::TYPE_WALL_TIME, envelope::REFUSE_VALUE)
+                };
+                // Best effort: a full outgoing channel means a busy link;
+                // the host's retry covers it.
+                let _ = serial_ctl_tx.try_send(answer);
+            }
+            Either::First(Either4::First(data)) => {
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
@@ -341,7 +366,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Second(data) => {
+            Either::First(Either4::Second(data)) => {
                 let output = node.handle_packet(InterfaceId(1), &data);
                 if !output.actions.is_empty() {
                     info!("LORA RX -> {} actions", output.actions.len());
@@ -350,7 +375,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Third(data) => {
+            Either::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(2), &data);
                 if !output.actions.is_empty() {
@@ -360,7 +385,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Fourth(()) => {
+            Either::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());

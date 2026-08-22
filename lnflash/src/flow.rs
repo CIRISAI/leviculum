@@ -482,6 +482,119 @@ pub fn run(
     Ok(outcomes)
 }
 
+/// What one board answered to `--set-time`.
+enum TimeOutcome {
+    Acked,
+    Refused(u8),
+    NoAnswer,
+    /// No capability report: firmware from before the #238 envelope.
+    NoEnvelope,
+    /// A capability report that does not list the wall-time type.
+    NotAccepted,
+}
+
+/// The `--set-time` session (#238, #166 item 2): no flash, no bootloader
+/// entry — find the boards already running, tell each what time it is
+/// through the control envelope, report what each answered. `Ok(true)`
+/// means every board that was found took the time.
+pub fn set_time(
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    unix_secs: u64,
+) -> Result<bool, Error> {
+    let candidates = find_candidates(manifest, sysfs)?;
+    let running: Vec<&Candidate> = candidates.iter().filter(|c| !c.in_bootloader).collect();
+    if running.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-time talks to flashed boards; a board in its \
+             bootloader has no clock to set.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = true;
+    for candidate in running {
+        let port = candidate.device.name.as_str();
+        let Some(tty) = entry::wait_for_interface_tty(
+            sysfs,
+            &candidate.device,
+            radio::TRANSPORT_INTERFACE,
+            Duration::from_secs(2),
+        )?
+        else {
+            ui.say(&format!(
+                "{port}: the transport port (if{:02}) never appeared, so nothing was sent.",
+                radio::TRANSPORT_INTERFACE
+            ));
+            all_took_it = false;
+            continue;
+        };
+        let outcome = match send_time_to(&tty, unix_secs) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        match outcome {
+            TimeOutcome::Acked => {
+                ui.say(&format!(
+                    "{port}: time set — the board stamps from unix {unix_secs} now \
+                     (source=host)."
+                ));
+            }
+            TimeOutcome::Refused(reason) => {
+                ui.say(&format!(
+                    "{port}: the board refused the time — {}.",
+                    crate::envelope::reason_str(reason)
+                ));
+                all_took_it = false;
+            }
+            TimeOutcome::NoAnswer => {
+                ui.say(&format!(
+                    "{port}: the board did not answer the wall-time frame."
+                ));
+                all_took_it = false;
+            }
+            TimeOutcome::NoEnvelope => {
+                ui.say(&format!(
+                    "{port}: this firmware predates the control envelope and cannot take a \
+                     wall time. Flash the current bundle first."
+                ));
+                all_took_it = false;
+            }
+            TimeOutcome::NotAccepted => {
+                ui.say(&format!(
+                    "{port}: this firmware speaks the envelope but does not accept the \
+                     wall-time frame."
+                ));
+                all_took_it = false;
+            }
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<TimeOutcome> {
+    use crate::envelope::{self, ControlOutcome};
+    let fd = crate::sys::Fd::open_serial(tty)?;
+    fd.set_transport_port()?;
+    let Some(caps) = envelope::probe_capabilities(&fd)? else {
+        return Ok(TimeOutcome::NoEnvelope);
+    };
+    if !caps.accepts(leviculum_core::envelope::TYPE_WALL_TIME) {
+        return Ok(TimeOutcome::NotAccepted);
+    }
+    Ok(match envelope::send_wall_time(&fd, unix_secs)? {
+        ControlOutcome::Acked => TimeOutcome::Acked,
+        ControlOutcome::Refused { reason } => TimeOutcome::Refused(reason),
+        ControlOutcome::NoAnswer => TimeOutcome::NoAnswer,
+    })
+}
+
 fn resolve(
     manifest: &Manifest,
     sysfs: &Sysfs,

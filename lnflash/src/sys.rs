@@ -321,6 +321,98 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// A scripted serial device for tests: a pseudo-terminal whose slave path
+/// the code under test opens like a board's transport CDC, while a stub
+/// thread plays the device on the master end. Lives here because the pty
+/// setup is this crate's only other `unsafe`.
+#[cfg(test)]
+pub(crate) mod testpty {
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::PathBuf;
+
+    use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+
+    pub struct Pty {
+        master: File,
+        pub slave_path: PathBuf,
+        /// Keeps the slave side open so the master never reads EIO between
+        /// the test's own opens of the slave path.
+        _holder: File,
+    }
+
+    impl Pty {
+        pub fn open() -> Self {
+            // SAFETY: plain pty setup; the master fd ends up in an owned
+            // File, the name buffer outlives every read of it.
+            let (master, slave_path) = unsafe {
+                let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+                assert!(master >= 0, "posix_openpt failed");
+                assert_eq!(libc::grantpt(master), 0, "grantpt failed");
+                assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
+                let mut name = [0 as libc::c_char; 128];
+                assert_eq!(
+                    libc::ptsname_r(master, name.as_mut_ptr(), name.len()),
+                    0,
+                    "ptsname_r failed"
+                );
+                let path = std::ffi::CStr::from_ptr(name.as_ptr())
+                    .to_str()
+                    .expect("pty path is ASCII")
+                    .to_owned();
+                // Raw line discipline for the pair: no echo, no canonical
+                // buffering — this carries bytes, not a terminal session.
+                let mut tio: libc::termios = std::mem::zeroed();
+                assert_eq!(libc::tcgetattr(master, &mut tio), 0);
+                libc::cfmakeraw(&mut tio);
+                assert_eq!(libc::tcsetattr(master, libc::TCSANOW, &tio), 0);
+                (File::from_raw_fd(master), PathBuf::from(path))
+            };
+            let holder = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOCTTY)
+                .open(&slave_path)
+                .expect("opening the pty slave");
+            Pty {
+                master,
+                slave_path,
+                _holder: holder,
+            }
+        }
+    }
+
+    /// Run `script` as the device: for every deframed HDLC frame the host
+    /// writes, `Some(answer)` is HDLC-framed back, `None` is scripted
+    /// silence. The thread ends when the pty goes away with the test.
+    pub fn spawn_stub(pty: &Pty, script: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + 'static) {
+        let mut master = pty.master.try_clone().expect("cloning the pty master");
+        std::thread::spawn(move || {
+            let mut deframer = Deframer::new();
+            let mut buf = [0u8; 512];
+            loop {
+                let n = match master.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                for result in deframer.process(&buf[..n]) {
+                    if let DeframeResult::Frame(data) = result {
+                        if let Some(answer) = script(&data) {
+                            let mut framed = Vec::new();
+                            frame(&answer, &mut framed);
+                            if master.write_all(&framed).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

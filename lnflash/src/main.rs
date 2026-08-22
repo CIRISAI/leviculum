@@ -60,6 +60,12 @@ struct Cli {
     #[arg(long)]
     check_bundle: bool,
 
+    /// Tell every running LNode what time it is, then exit. No flashing:
+    /// uses the control envelope on the transport port; firmware from
+    /// before the envelope reports itself as such.
+    #[arg(long)]
+    set_time: bool,
+
     /// Frequency in Hz for the radio settings written after the flash.
     /// Giving any --radio-* value skips the prompt; the ones not given keep
     /// their EU868 default.
@@ -194,6 +200,23 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         manifest.verify_all()?;
         ui.say("Every image in this bundle matches its recorded checksum.");
         return Ok(ExitCode::SUCCESS);
+    }
+
+    if cli.set_time {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the host clock is before 1970; refusing to teach a board that")?
+            .as_secs();
+        let all_took_it = flow::set_time(&manifest, &sysfs, ui, now)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
     }
 
     // Say this before enumerating rather than after a failed mount: a user
