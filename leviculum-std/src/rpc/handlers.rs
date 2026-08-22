@@ -320,6 +320,10 @@ struct StatRow {
     txb: u64,
     rxs: f64,
     txs: f64,
+    /// Outgoing frames the interface's host-side send queue shed or
+    /// abandoned (Codeberg #318). Reads 0 on a medium that holds no
+    /// host-side queue.
+    tx_queue_drops: u64,
     status: bool,
     mode: u8,
     bitrate: i64,
@@ -359,6 +363,20 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         (pickle_str_key("txb"), pickle_int(row.txb as i64)),
         (pickle_str_key("rxs"), pickle_float(row.rxs)),
         (pickle_str_key("txs"), pickle_float(row.txs)),
+        // Codeberg #318: frames shed from the host-side send queue, the
+        // counter behind RNODE_TX_QUEUE_DROP. No reference equivalent —
+        // like `tx_jitter_max` below, an additive key the reference
+        // reader tolerates: rnstatus looks every field up by name (text
+        // path gated with `"key" in ifstat`, rnstatus.py:390-540) and
+        // its --json path enumerates keys only to hex-encode bytes
+        // values (rnstatus.py:345-357), so an unknown int key passes
+        // through unread. Unconditional like rxb/txb — it reads from
+        // the same per-interface counters struct, and 0 is the honest
+        // value for a medium that cannot shed.
+        (
+            pickle_str_key("tx_queue_drops"),
+            pickle_int(row.tx_queue_drops as i64),
+        ),
         // status: real `Interface::is_online()` (Codeberg #56). Source of
         // truth is `iface_online_map`, populated by the driver on register
         // and cleared on disconnect. Missing entry → fall back to `true`
@@ -573,7 +591,7 @@ pub(crate) fn build_interface_stats(
             .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
 
         // Read byte counters and compute speeds from the shared counters
-        let (rxb, txb, rxs, txs) = counters_map
+        let (rxb, txb, rxs, txs, tx_queue_drops) = counters_map
             .get(&entry.id)
             .map(|c| {
                 let (rxs, txs) = c.speeds();
@@ -582,9 +600,10 @@ pub(crate) fn build_interface_stats(
                     c.tx_bytes.load(Ordering::Relaxed),
                     rxs,
                     txs,
+                    c.tx_queue_drops.load(Ordering::Relaxed),
                 )
             })
-            .unwrap_or((0, 0, 0.0, 0.0));
+            .unwrap_or((0, 0, 0.0, 0.0, 0));
 
         // Totals stay what they were: the traffic-bearing, non-local
         // interfaces. Local IPC clients and (below) listeners are excluded, so
@@ -644,6 +663,7 @@ pub(crate) fn build_interface_stats(
             txb,
             rxs,
             txs,
+            tx_queue_drops,
             status: online_map.get(&entry.id).copied().unwrap_or(true),
             mode: entry.mode.as_u8(),
             bitrate,
@@ -689,6 +709,9 @@ pub(crate) fn build_interface_stats(
             txb: listener.departed_txb + agg.txb,
             rxs: agg.rxs,
             txs: agg.txs,
+            // A listener carries no packets, so it holds no send queue
+            // that could shed one.
+            tx_queue_drops: 0,
             status: true,
             mode: listener.mode.as_u8(),
             bitrate: listener.bitrate,

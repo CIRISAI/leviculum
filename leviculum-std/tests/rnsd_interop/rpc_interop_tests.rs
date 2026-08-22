@@ -273,6 +273,26 @@ async fn test_rnstatus_json_against_rust_daemon() {
         .expect("uptime should be float");
     assert!(uptime >= 0.0, "uptime should be non-negative");
 
+    // Codeberg #318: every interface entry carries the tx_queue_drops
+    // counter, and it reaches the Python side intact — the reference
+    // reader looks fields up by name and never enumerates an entry, so
+    // the additive key must ride through rnstatus --json unchanged
+    // (this same run also proves rnstatus still parses our dict with
+    // the key present).
+    let interfaces = json["interfaces"]
+        .as_array()
+        .expect("interfaces should be a list");
+    assert!(!interfaces.is_empty(), "daemon should report interfaces");
+    for entry in interfaces {
+        let drops = entry.get("tx_queue_drops").unwrap_or_else(|| {
+            panic!("every interface entry must carry tx_queue_drops, missing on: {entry}")
+        });
+        assert!(
+            drops.as_u64().is_some(),
+            "tx_queue_drops must be a non-negative integer, got {drops} on: {entry}"
+        );
+    }
+
     cleanup_config_dir(&config_dir);
 }
 

@@ -799,6 +799,18 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         }
     }
 
+    // TX drops (Codeberg #318): frames shed from the host-side send queue,
+    // served by lnsd as `tx_queue_drops`. This line is OURS — rnstatus
+    // never reads the key — and it stays silent at zero like the
+    // Queued/Held counters above, so a healthy interface renders
+    // byte-identical to rnstatus against either daemon.
+    if let Some(drops) = ji(ifstat, "tx_queue_drops") {
+        if not_null(ifstat, "tx_queue_drops") && drops > 0 {
+            let word = if drops == 1 { "frame" } else { "frames" };
+            pln(out, &format!("    TX drops  : {drops} {word}"));
+        }
+    }
+
     render_traffic_block(out, ifstat, opts, name, clients);
 }
 

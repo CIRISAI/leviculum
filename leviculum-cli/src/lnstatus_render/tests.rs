@@ -312,6 +312,47 @@ fn last_rssi_snr_render_when_present_and_omit_when_absent() {
     assert!(ifs[1].get("last_snr").is_none());
 }
 
+#[test]
+fn tx_queue_drops_render_when_positive_and_stay_silent_at_zero() {
+    // Codeberg #318: `tx_queue_drops` is served unconditionally by lnsd,
+    // but the labelled line renders only for a non-zero count — the same
+    // stay-silent-at-zero contract as the Queued/Held announce counters,
+    // so a healthy plain run stays byte-identical to rnstatus (and rnsd,
+    // which never emits the key, renders no line either way). `-j`
+    // passes the key through untouched.
+    let mut dropping = iface("RNodeInterface[/dev/ttyUSB0]", 292, 0, 0);
+    dropping["tx_queue_drops"] = serde_json::json!(7);
+    let mut clean = iface("RNodeInterface[/dev/ttyUSB1]", 292, 0, 0);
+    clean["tx_queue_drops"] = serde_json::json!(0);
+    let rnsd_shaped = iface("RNodeInterface[/dev/ttyUSB2]", 292, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [dropping, clean, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("RNodeInterface[").collect();
+    assert_eq!(blocks.len(), 4, "all three interfaces render:\n{text}");
+    assert!(
+        blocks[1].contains("    TX drops  : 7 frames\n"),
+        "a shedding interface names its loss:\n{text}"
+    );
+    assert!(
+        !blocks[2].contains("TX drops"),
+        "zero stays silent:\n{text}"
+    );
+    assert!(
+        !blocks[3].contains("TX drops"),
+        "an rnsd entry without the key renders no line:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["tx_queue_drops"], serde_json::json!(7));
+    assert_eq!(ifs[1]["tx_queue_drops"], serde_json::json!(0));
+    assert!(ifs[2].get("tx_queue_drops").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // -d / -D discovered interfaces (Codeberg #32)
 // ---------------------------------------------------------------------------
