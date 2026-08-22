@@ -916,6 +916,44 @@ pub struct LinkTableExport {
     pub interface_index: Option<usize>,
 }
 
+/// Where the emission timebase anchor came from (Codeberg #166 item 3).
+///
+/// Owned next to `emission_floor` because that is the state it describes:
+/// the seeded calendar anchor of a clockless platform. Platforms whose
+/// `Clock::wall_unix_secs` answers (std hosts) never consult the floor,
+/// and this value stays at its default there. The durable model behind
+/// the four states is `docs/src/concepts/time-and-clocks.md`
+/// ("Record the source").
+///
+/// All four variants exist from day one so the reporting shape never
+/// changes again; which sites update the value grows per batch: GNSS and
+/// the uptime-only default land with #166 items 1+3, host injection with
+/// the #238 control frame, overheard with the announce-learning path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeSource {
+    /// Seeded from a GNSS fix (NMEA RMC UTC).
+    Gnss,
+    /// Injected by an attached host over the control channel.
+    Host,
+    /// Learned from a validated announce's emission timestamp.
+    Overheard,
+    /// No anchor seated: stamps derive from uptime alone.
+    UptimeOnly,
+}
+
+impl TimeSource {
+    /// Stable scalar token for structured event-log fields
+    /// (`key=value`, no whitespace).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeSource::Gnss => "gnss",
+            TimeSource::Host => "host",
+            TimeSource::Overheard => "overheard",
+            TimeSource::UptimeOnly => "uptime-only",
+        }
+    }
+}
+
 /// Transport statistics
 #[derive(Debug, Default, Clone)]
 pub struct TransportStats {
@@ -1427,6 +1465,10 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `Clock::wall_unix_secs` provides real wall time.
     emission_floor: Option<(u64, u64)>,
 
+    /// Which source seated `emission_floor` (Codeberg #166 item 3).
+    /// Stays [`TimeSource::UptimeOnly`] while no anchor is seated.
+    time_source: TimeSource,
+
     /// Whether the once-per-process operator warning about an implausible
     /// own wall clock has fired (Codeberg #161).
     own_wall_clock_warned: bool,
@@ -1677,6 +1719,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             last_path_snapshot_ms: 0,
             last_path_entries_dump_ms: 0,
             emission_floor: None,
+            time_source: TimeSource::UptimeOnly,
             own_wall_clock_warned: false,
             path_request_hash,
             tunnel_synthesize_hash,
@@ -3003,25 +3046,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.emission_secs(now_ms)
     }
 
-    /// Inject wall-clock unix time from the host (Codeberg #155).
+    /// Seed wall-clock unix time from a source that claims to know it
+    /// (Codeberg #155, #166): a host injection or a GNSS fix. On
+    /// platforms whose `Clock::wall_unix_secs` already returns real wall
+    /// time the seeded floor is never consulted.
     ///
-    /// For deployments where a clockless node (no RTC) has a host that
-    /// does know wall time, e.g. over the LNode serial config channel. A
-    /// no-op in effect on platforms whose `Clock::wall_unix_secs` already
-    /// returns real wall time, which always takes precedence.
-    pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
+    /// Every source passes the same plausibility window — GNSS gets no
+    /// bypass (`docs/src/concepts/time-and-clocks.md`, "The sanity
+    /// window"). Returns whether the anchor was seated: `false` means
+    /// the value was refused, so the caller can surface the refusal
+    /// loudly instead of inheriting a silent no-op (#166 item 1).
+    pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64, source: TimeSource) -> bool {
         // Same plausibility window as learned adoption (Codeberg #160,
         // #161): above the ceiling no real clock can sit and the floor
         // would wedge there; below the minimum (a boot script racing NTP,
-        // a controller with its own dead clock) the injection would seed
-        // the implausibly-low floor of #161 §1 through the front door —
-        // and unlike a learned announce, an injection CLAIMS to know wall
-        // time, so a value no real clock can hold is self-refuting.
+        // a controller with its own dead clock, a GNSS fix without a real
+        // date) the injection would seed the implausibly-low floor of
+        // #161 §1 through the front door — and unlike a learned announce,
+        // an injection CLAIMS to know wall time, so a value no real clock
+        // can hold is self-refuting.
         if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
             crate::tracing::warn!(unix_secs, "Refused implausible wall-time injection");
-            return;
+            return false;
         }
         self.emission_floor = Some((unix_secs, self.clock.now_ms()));
+        self.time_source = source;
+        true
+    }
+
+    /// Which source seated the current emission timebase anchor
+    /// (Codeberg #166 item 3). [`TimeSource::UptimeOnly`] while none is.
+    pub fn time_source(&self) -> TimeSource {
+        self.time_source
     }
 
     /// Learn the emission timebase from a validated announce's emission
@@ -17166,7 +17222,7 @@ mod tests {
         fn test_wall_time_injection_seeds_emission_timebase() {
             let mut transport = make_transport_enabled();
 
-            transport.set_wall_time_unix_secs(1_790_000_000);
+            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
             transport.clock.advance(3_000);
             let now = transport.clock.now_ms();
             assert_eq!(
@@ -17383,7 +17439,7 @@ mod tests {
             let mut transport = make_transport_enabled();
 
             // Clock near unix epoch: pre-NTP boot value.
-            transport.set_wall_time_unix_secs(1_000_000);
+            assert!(!transport.set_wall_time_unix_secs(1_000_000, TimeSource::Host));
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
@@ -17392,14 +17448,55 @@ mod tests {
             );
 
             // Even a merely stale value below the bound (2017) is refused.
-            transport.set_wall_time_unix_secs(1_500_000_000);
+            assert!(!transport.set_wall_time_unix_secs(1_500_000_000, TimeSource::Host));
             let now = transport.clock.now_ms();
             assert_eq!(transport.emission_secs(now), now / 1000);
 
             // A sane injection afterwards still works.
-            transport.set_wall_time_unix_secs(1_790_000_000);
+            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
             let now = transport.clock.now_ms();
             assert_eq!(transport.emission_secs(now), 1_790_000_000);
+        }
+
+        // Codeberg #166 item 3: the node states its time source. Before
+        // any anchor is seated the source is uptime-only; a GNSS seed
+        // through the shared seam both anchors the timebase and records
+        // gnss as the source.
+        #[test]
+        fn test_gnss_seed_anchors_timebase_and_records_source() {
+            let mut transport = make_transport_enabled();
+            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+
+            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Gnss));
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+            assert_eq!(transport.time_source(), TimeSource::Gnss);
+        }
+
+        // Codeberg #166 item 1: a refused seed must be visible to the
+        // caller — the firmware turns the `false` into a structured
+        // refusal event, which a silent `()` seam made impossible — and
+        // must leave both the timebase and the recorded source untouched.
+        // GNSS passes the SAME window as every other source (the arm-1
+        // no-bypass cell of the concept's testing matrix): this calls the
+        // same seam the host-injection refusal tests above exercise.
+        #[test]
+        fn test_refused_gnss_seed_reports_false_and_keeps_source() {
+            let mut transport = make_transport_enabled();
+
+            // Below the plausibility floor: a receiver emitting a
+            // default date instead of a real one.
+            assert!(!transport.set_wall_time_unix_secs(1_000_000, TimeSource::Gnss));
+            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), now / 1000);
+
+            // Above the learn ceiling: no real clock can sit there.
+            assert!(!transport
+                .set_wall_time_unix_secs(EMISSION_LEARN_CEILING_SECS + 1, TimeSource::Gnss));
+            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), now / 1000);
         }
 
         // Codeberg #161 review (B1): what the bounded advance (#160)
@@ -17556,7 +17653,7 @@ mod tests {
         fn test_absurd_wall_time_injection_is_refused() {
             let mut transport = make_transport_enabled();
 
-            transport.set_wall_time_unix_secs(1u64 << 50);
+            assert!(!transport.set_wall_time_unix_secs(1u64 << 50, TimeSource::Host));
             let now = transport.clock.now_ms();
             let e = transport.emission_secs(now);
             assert_eq!(
@@ -17567,7 +17664,7 @@ mod tests {
             assert!(e <= crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
 
             // A sane injection afterwards still works.
-            transport.set_wall_time_unix_secs(1_790_000_000);
+            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
             let now = transport.clock.now_ms();
             assert_eq!(transport.emission_secs(now), 1_790_000_000);
         }
@@ -17627,7 +17724,7 @@ mod tests {
             // clock. The seconds arm truncates the elapsed time; the micros
             // arm keeps it to the millisecond the timer actually has, and they
             // still agree on the second.
-            transport.set_wall_time_unix_secs(1_800_000_000);
+            assert!(transport.set_wall_time_unix_secs(1_800_000_000, TimeSource::Host));
             for step in [0u64, 1, 499, 500, 999, 1_000, 1_001, 7_777] {
                 let now = transport.clock.now_ms() + step;
                 assert_eq!(
@@ -17675,7 +17772,7 @@ mod tests {
         #[test]
         fn test_emission_micros_distinguishes_instants_inside_one_second() {
             let mut transport = make_transport_enabled();
-            transport.set_wall_time_unix_secs(1_800_000_000);
+            assert!(transport.set_wall_time_unix_secs(1_800_000_000, TimeSource::Host));
             let base = transport.clock.now_ms();
 
             let first = transport.emission_micros(base);

@@ -721,14 +721,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.announce_destination_impl(dest_hash, app_data, Some(interface_index))
     }
 
-    /// Inject wall-clock unix time from the host (Codeberg #155).
+    /// Seed wall-clock unix time from a source that claims to know it
+    /// (Codeberg #155, #166): a host injection or a GNSS fix.
     ///
     /// On platforms whose [`crate::traits::Clock`] has no wall clock
     /// (LNode: no RTC), this seeds the emission timebase that announce
-    /// emission timestamps are derived from, e.g. from a host over the
-    /// serial config channel. Platforms with a real wall clock ignore it.
-    pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64) {
-        self.transport.set_wall_time_unix_secs(unix_secs);
+    /// emission timestamps are derived from. Platforms with a real wall
+    /// clock ignore it. Returns whether the value was accepted; `false`
+    /// means the plausibility window refused it and the caller should
+    /// report that loudly (see `Transport::set_wall_time_unix_secs`).
+    pub fn set_wall_time_unix_secs(
+        &mut self,
+        unix_secs: u64,
+        source: crate::transport::TimeSource,
+    ) -> bool {
+        self.transport.set_wall_time_unix_secs(unix_secs, source)
+    }
+
+    /// Which source seated the current emission timebase anchor
+    /// (Codeberg #166 item 3).
+    pub fn time_source(&self) -> crate::transport::TimeSource {
+        self.transport.time_source()
     }
 
     fn announce_destination_impl(

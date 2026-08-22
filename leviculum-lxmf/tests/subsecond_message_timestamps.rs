@@ -29,6 +29,7 @@
 use core::cell::Cell;
 use std::rc::Rc;
 
+use leviculum_core::transport::TimeSource;
 use leviculum_core::{Clock, DestinationHash, Identity, MemoryStorage, NodeCore, NodeCoreBuilder};
 use leviculum_lxmf::router::{
     LxmfRouter, MessageState, PropagationClientConfig, RouterConfig, RouterError,
@@ -88,7 +89,7 @@ fn seeded_router(seed: u8) -> (LxmfRouter, TestNode, Rc<Cell<u64>>) {
     let destination = LxmfNode::delivery_destination(identity).expect("delivery destination");
     let node = LxmfNode::register(&mut core, destination, LxmfNodeConfig::default())
         .expect("register delivery destination");
-    core.set_wall_time_unix_secs(INJECTED_UNIX);
+    assert!(core.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
     (
         LxmfRouter::new(node, identity_hash, RouterConfig::default()),
         core,

@@ -33,6 +33,12 @@ pub struct GnssFix {
     pub latitude: Option<f64>,
     /// Longitude in decimal degrees (signed). Same convention as latitude.
     pub longitude: Option<f64>,
+    /// RMC UTC date+time as unix seconds (Codeberg #166 item 1), set on
+    /// every valid RMC and — unlike position — CLEARED on an invalid one:
+    /// a stale time claim would seed the calendar wrong, while stale
+    /// position only mis-renders. Consumers must treat it as "time as of
+    /// this snapshot's publication", good to ~1 s (one RMC cadence).
+    pub unix_secs: Option<u64>,
 }
 
 #[cfg(feature = "gnss")]
@@ -43,14 +49,16 @@ impl GnssFix {
             sat_in_use: 0,
             latitude: None,
             longitude: None,
+            unix_secs: None,
         }
     }
 }
 
-/// Latest GNSS fix snapshot. Capacity-2 watch: one slot for the producer,
-/// one for the display consumer.
+/// Latest GNSS fix snapshot. Capacity-3 watch: one slot for the producer,
+/// one for the display consumer, one for the main loop's calendar
+/// seeding (#166).
 #[cfg(feature = "gnss")]
-pub static GNSS_FIX: Watch<CriticalSectionRawMutex, GnssFix, 2> = Watch::new();
+pub static GNSS_FIX: Watch<CriticalSectionRawMutex, GnssFix, 3> = Watch::new();
 
 /// Battery snapshot published by the SAADC task and consumed by the display.
 ///

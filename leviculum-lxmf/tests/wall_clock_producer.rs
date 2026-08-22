@@ -22,6 +22,7 @@
 
 use core::cell::Cell;
 
+use leviculum_core::transport::TimeSource;
 use leviculum_core::{Clock, DestinationHash, Identity, MemoryStorage, NodeCore, NodeCoreBuilder};
 use leviculum_lxmf::constants::{FIELD_TICKET, TICKET_EXPIRY};
 use leviculum_lxmf::router::{LxmfRouter, PropagationClientConfig, RouterConfig, RouterError};
@@ -249,7 +250,7 @@ fn clockless_node_refuses_to_issue_a_ticket_a_peer_would_discard() {
 
     // The same call succeeds once the node has a timebase, and the ticket it
     // then issues satisfies the peer's own acceptance rule.
-    node.set_wall_time_unix_secs(INJECTED_UNIX);
+    assert!(node.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
     assert!(node.has_plausible_wall_clock());
     let (field, _) = router
         .issue_ticket_field(&node, remote, &mut OsRng)
@@ -273,7 +274,7 @@ fn clockless_node_refuses_to_issue_a_ticket_a_peer_would_discard() {
 #[test]
 fn issued_ticket_expiry_is_the_node_timebase_plus_the_reference_expiry() {
     let (mut router, mut node) = clockless_router();
-    node.set_wall_time_unix_secs(INJECTED_UNIX);
+    assert!(node.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
 
     let (field, _) = router
         .issue_ticket_field(&node, [0x62; 16], &mut OsRng)
@@ -329,7 +330,7 @@ fn created_message_timestamp_is_the_node_timebase_and_is_never_withheld() {
         (BOOT_MS / 1000) as f64
     );
 
-    node.set_wall_time_unix_secs(INJECTED_UNIX);
+    assert!(node.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
     let message = router
         .create_message(
             &node,
@@ -363,7 +364,7 @@ fn created_message_timestamp_is_the_node_timebase_and_is_never_withheld() {
 #[test]
 fn prepared_propagation_upload_timebase_is_the_node_timebase() {
     let (mut router, mut node) = clockless_router();
-    node.set_wall_time_unix_secs(INJECTED_UNIX);
+    assert!(node.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
 
     // The propagation client shares the router's delivery identity.
     let delivery_identity = {

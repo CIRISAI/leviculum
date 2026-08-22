@@ -488,7 +488,9 @@ fn request_wire_pins_reference_request_semantics() {
 
     // Seed the #155 wall timebase (the MockClock itself is clockless).
     const WALL_SECS: u64 = 1_700_000_000;
-    initiator.transport.set_wall_time_unix_secs(WALL_SECS);
+    assert!(initiator
+        .transport
+        .set_wall_time_unix_secs(WALL_SECS, crate::transport::TimeSource::Host));
 
     // One msgpack bin value as request data.
     let mut req_data = Vec::new();
@@ -585,7 +587,9 @@ fn request_resource_timestamp_carries_epoch_seconds() {
     );
 
     const WALL_SECS: u64 = 1_700_000_000;
-    initiator.transport.set_wall_time_unix_secs(WALL_SECS);
+    assert!(initiator
+        .transport
+        .set_wall_time_unix_secs(WALL_SECS, crate::transport::TimeSource::Host));
 
     // One msgpack bin value, larger than the link MDU.
     let mut req_data = Vec::new();

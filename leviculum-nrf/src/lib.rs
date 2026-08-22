@@ -499,6 +499,43 @@ pub fn set_panic_led(port: u8, pin: u8, active_low: bool) {
     PANIC_LED_ARMED.store(true, Ordering::Relaxed);
 }
 
+/// Current time source of the emission timebase (Codeberg #166 item 3),
+/// mirrored out of the main loop so the periodic banner task can state it
+/// beside `[FW_BUILD]` without owning the node. Encodes
+/// `leviculum_core::transport::TimeSource`; starts at uptime-only, the
+/// birth state of every boot.
+static TIME_SOURCE_STATE: AtomicU8 = AtomicU8::new(TIME_SOURCE_UPTIME_ONLY);
+
+const TIME_SOURCE_GNSS: u8 = 0;
+const TIME_SOURCE_HOST: u8 = 1;
+const TIME_SOURCE_OVERHEARD: u8 = 2;
+const TIME_SOURCE_UPTIME_ONLY: u8 = 3;
+
+/// Record the seeded time source for the status banner. Called by the
+/// main loop at each seeding site.
+pub fn set_time_source(source: leviculum_core::transport::TimeSource) {
+    use leviculum_core::transport::TimeSource;
+    let v = match source {
+        TimeSource::Gnss => TIME_SOURCE_GNSS,
+        TimeSource::Host => TIME_SOURCE_HOST,
+        TimeSource::Overheard => TIME_SOURCE_OVERHEARD,
+        TimeSource::UptimeOnly => TIME_SOURCE_UPTIME_ONLY,
+    };
+    TIME_SOURCE_STATE.store(v, Ordering::Relaxed);
+}
+
+/// The recorded time source as its stable event-log token
+/// (`TimeSource::as_str`).
+pub fn time_source_str() -> &'static str {
+    use leviculum_core::transport::TimeSource;
+    match TIME_SOURCE_STATE.load(Ordering::Relaxed) {
+        TIME_SOURCE_GNSS => TimeSource::Gnss.as_str(),
+        TIME_SOURCE_HOST => TimeSource::Host.as_str(),
+        TIME_SOURCE_OVERHEARD => TimeSource::Overheard.as_str(),
+        _ => TimeSource::UptimeOnly.as_str(),
+    }
+}
+
 static HARDFAULT_LED_ARMED: AtomicBool = AtomicBool::new(false);
 static HARDFAULT_LED_PORT: AtomicU8 = AtomicU8::new(0);
 static HARDFAULT_LED_PIN: AtomicU8 = AtomicU8::new(0);

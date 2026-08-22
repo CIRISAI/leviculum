@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -84,6 +84,7 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_SHA"),
         env!("LEVICULUM_GIT_DIRTY")
     );
+    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     leviculum_nrf::log_stack("boot");
     leviculum_nrf::log_panic_count();
     leviculum_nrf::log_irq_priorities();
@@ -344,26 +345,89 @@ async fn main(spawner: Spawner) {
     #[cfg(not(feature = "display"))]
     spawner.must_spawn(led_heartbeat(led));
 
-    // Event-driven main loop, four event sources:
+    // Calendar seeding from GNSS (Codeberg #166 item 1): the main loop
+    // owns the node, so it is the one place a fix can reach the
+    // wall-time seam. One accepted fix seeds; the monotonic clock
+    // carries the calendar from there — the receiver keeps running for
+    // position only, never as a clock.
+    #[cfg(feature = "gnss")]
+    let mut gnss_rx = {
+        let rx = leviculum_nrf::baseboard::GNSS_FIX.receiver();
+        if rx.is_none() {
+            log_critical!("[TIME_SEED_REFUSED] source=gnss reason=watch_capacity");
+        }
+        rx
+    };
+    #[cfg(feature = "gnss")]
+    let mut time_seed_gate = leviculum_gnss_time::SeedGate::new();
+
+    // Event-driven main loop, five event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
     // 3. BLE incoming (defragmented Reticulum packets from phone)
     // 4. Timer deadline (protocol maintenance, announces)
+    // 5. GNSS time candidate (until the calendar is seeded once)
     loop {
         let deadline = node
             .next_deadline()
             .map(Instant::from_millis)
             .unwrap_or(Instant::MAX);
 
-        match select4(
-            serial.incoming_rx.receive(),
-            lora_channels.incoming_rx.receive(),
-            ble_channels.incoming_rx.receive(),
-            Timer::at(deadline),
+        let gnss_time_candidate = async {
+            #[cfg(feature = "gnss")]
+            {
+                if time_seed_gate.is_seeded() {
+                    // Seeded for this boot: nothing left to wait for.
+                    core::future::pending::<u64>().await
+                } else {
+                    match gnss_rx.as_mut() {
+                        Some(rx) => loop {
+                            let fix = rx.changed().await;
+                            if let Some(unix) = time_seed_gate.offer(fix.unix_secs) {
+                                break unix;
+                            }
+                        },
+                        None => core::future::pending::<u64>().await,
+                    }
+                }
+            }
+            #[cfg(not(feature = "gnss"))]
+            {
+                core::future::pending::<u64>().await
+            }
+        };
+
+        match select(
+            select4(
+                serial.incoming_rx.receive(),
+                lora_channels.incoming_rx.receive(),
+                ble_channels.incoming_rx.receive(),
+                Timer::at(deadline),
+            ),
+            gnss_time_candidate,
         )
         .await
         {
-            Either4::First(data) => {
+            Either::Second(unix) => {
+                // A GNSS fix carrying UTC. The seam applies the same
+                // sanity window as every other time source; a refusal is
+                // surfaced as a structured event, never swallowed.
+                #[cfg(feature = "gnss")]
+                {
+                    use leviculum_core::transport::TimeSource;
+                    if node.set_wall_time_unix_secs(unix, TimeSource::Gnss) {
+                        time_seed_gate.mark_seeded();
+                        leviculum_nrf::set_time_source(TimeSource::Gnss);
+                        log_critical!("[TIME_SEED] source=gnss unix={}", unix);
+                        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    } else {
+                        log_critical!("[TIME_SEED_REFUSED] source=gnss unix={}", unix);
+                    }
+                }
+                #[cfg(not(feature = "gnss"))]
+                let _ = unix;
+            }
+            Either::First(Either4::First(data)) => {
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
@@ -371,7 +435,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Second(data) => {
+            Either::First(Either4::Second(data)) => {
                 let output = node.handle_packet(InterfaceId(1), &data);
                 if !output.actions.is_empty() {
                     info!("LORA RX -> {} actions", output.actions.len());
@@ -380,7 +444,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Third(data) => {
+            Either::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(2), &data);
                 if !output.actions.is_empty() {
@@ -390,7 +454,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
             }
-            Either4::Fourth(()) => {
+            Either::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());
@@ -444,6 +508,7 @@ async fn fw_build_banner() {
             env!("LEVICULUM_GIT_SHA"),
             env!("LEVICULUM_GIT_DIRTY")
         );
+        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     }
 }
 

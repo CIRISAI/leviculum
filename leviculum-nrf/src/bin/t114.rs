@@ -74,6 +74,7 @@ async fn main(spawner: Spawner) {
         env!("LEVICULUM_GIT_SHA"),
         env!("LEVICULUM_GIT_DIRTY")
     );
+    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     leviculum_nrf::log_stack("boot");
     leviculum_nrf::log_panic_count();
     // Boot-loop instrumentation: what kind of reset got us here? Must
@@ -394,5 +395,6 @@ async fn fw_build_banner() {
             env!("LEVICULUM_GIT_SHA"),
             env!("LEVICULUM_GIT_DIRTY")
         );
+        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     }
 }

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Pocket V2 firmware seeds its calendar from the GNSS receiver's RMC
+  UTC, and every LNode states its time source (`[TIME_SOURCE]` beside
+  `[FW_BUILD]`) (#166).
 - Single-destination decrypt misses are now counted (`single-decrypt-fail`
   in `PKT_DROP_SUMMARY`) and journey-logged instead of dropped silently.
 

@@ -92,6 +92,16 @@ pub async fn gnss_task(
                                 if latest.valid {
                                     latest.latitude = Some(lat_to_f64(&rmc.latitude));
                                     latest.longitude = Some(lon_to_f64(&rmc.longitude));
+                                    // RMC UTC is already leap-second-corrected by
+                                    // the receiver — converted as-is, never via
+                                    // raw GPS time (#166, time-and-clocks.md).
+                                    latest.unix_secs =
+                                        leviculum_gnss_time::unix_secs_from_rmc_utc(&rmc.datetime);
+                                } else {
+                                    // A stale time claim must not outlive the fix
+                                    // that made it: position keeps last-good for
+                                    // the display, time does not.
+                                    latest.unix_secs = None;
                                 }
                                 sender.send(latest);
                             }
