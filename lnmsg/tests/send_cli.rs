@@ -42,12 +42,19 @@ fn run(args: &[&str], stdin: &[u8]) -> Run {
     // Supervised: a child that outlives a killed test run would hold the state
     // directory the tempdir is about to remove.
     let mut child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
-        .write_all(stdin)
-        .expect("write stdin");
+    // A run whose arguments are rejected exits before it ever reads stdin, so
+    // this write races the child's exit and legitimately loses under load with
+    // EPIPE. Losing that race IS the behaviour under test, not a failure: the
+    // body was never going to be consumed. Every assertion in these tests reads
+    // the exit code and stderr, neither of which depends on the write landing,
+    // so a broken pipe is dropped and any other write error still panics.
+    // Without this the suite went red only when the machine was busy -- which
+    // is to say, only in a full workspace run.
+    match child.stdin.take().expect("stdin is piped").write_all(stdin) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("write stdin: {e}"),
+    }
     let output = child.wait_with_output().expect("wait for lnmsg");
     Run {
         code: output.status.code(),
