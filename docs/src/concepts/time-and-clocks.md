@@ -93,7 +93,7 @@ construction:
 
 The clockless arm of the implementation already has this shape: a
 learned floor advanced by the monotonic clock, inside
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2959`).
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2982`).
 On std platforms the same estimate answers from the OS: the
 `SystemClock` implementation of `wall_unix_secs`
 (`leviculum-std/src/clock.rs:49`) reads `SystemTime`, with the
@@ -101,7 +101,7 @@ anchor-keeping delegated to the OS and its NTP discipline.
 
 ## One value, one producer
 
-`Transport::emission_secs` (`leviculum-core/src/transport.rs:2959`)
+`Transport::emission_secs` (`leviculum-core/src/transport.rs:2982`)
 is the single point that turns the calendar estimate into the
 unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps, built by
@@ -263,9 +263,9 @@ moment arm 5 is plumbed. Two predicates in the tree then misfire if
 they stay keyed on the value:
 
 - **Unbounded first adoption.** `learn_emission_timebase`
-  (`leviculum-core/src/transport.rs:3103`) selects the unbounded
+  (`leviculum-core/src/transport.rs:3126`) selects the unbounded
   branch today by `current < EMISSION_PLAUSIBLE_MIN_SECS`
-  (`transport.rs:2995`). A birth-anchored cold node clears that
+  (`transport.rs:3018`). A birth-anchored cold node clears that
   test, so its first credible announce would fall into the *bounded*
   branch and the node would crawl to real time at one day per
   announce — the exact #161 §1 regression this page forbids —
@@ -307,7 +307,7 @@ costs, when it is unavailable, what it guarantees.
 > order and must be updated by the issue that implements this
 > ranking: the rustdoc of `set_wall_time_unix_secs`
 > (`leviculum-core/src/node/mod.rs:672`, and on the transport at
-> `transport.rs:2941`) says a platform wall clock always takes
+> `transport.rs:2964`) says a platform wall clock always takes
 > precedence over an injection — the reverse of arms 2 and 3 — and
 > the rustdoc of `NodeCore::emission_secs`
 > (`leviculum-core/src/node/mod.rs:2451`) lists the chain as
@@ -337,7 +337,7 @@ carries UTC date and time in every fix.
 ### Arm 2: Host injection
 
 `Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:728`
-→ `transport.rs:2941`), for deployments where a clockless node has a
+→ `transport.rs:2964`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
 `leviculum-core/src/rnode.rs`).
@@ -347,13 +347,13 @@ serial channel (the radio-config envelope of
 - **Unavailable:** standalone nodes with no host attached.
 - **Guarantees:** host-clock quality, sanity-gated: values outside
   `[EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_LEARN_CEILING_SECS]`
-  are refused (`transport.rs:2949`), because an injection *claims*
+  are refused (`transport.rs:2972`), because an injection *claims*
   to know wall time, so a value no real clock can hold is
   self-refuting. Pinned at
   `test_implausibly_low_wall_time_injection_is_refused`
-  (`transport.rs:17438`) and
+  (`transport.rs:17461`) and
   `test_absurd_wall_time_injection_is_refused`
-  (`transport.rs:17653`).
+  (`transport.rs:17676`).
 - **Status:** wired (#238): the control envelope's wall-time frame
   (`docs/src/firmware/usb-control-envelope.md`) carries a u64 of unix
   seconds from the host to the seam; the seam's bool picks the
@@ -383,7 +383,7 @@ also carries anchors *back*: see
   contract: this is *not* a timer source; all timeout and deadline
   arithmetic stays on the monotonic `now_ms` (`traits.rs:319`).
 - **Status:** the implementation consults this arm first when it
-  answers (`transport.rs:2846`). No current platform offers both a
+  answers (`transport.rs:2869`). No current platform offers both a
   platform clock and GNSS or injection, so the difference in order
   has no behavioural effect today; a port that has both follows this
   ranking.
@@ -391,15 +391,15 @@ also carries anchors *back*: see
 ### Arm 4: Network-learned
 
 The sourceless fallback: `learn_emission_timebase`
-(`transport.rs:3103`) adopts the highest emission timestamp seen in
+(`transport.rs:3126`) adopts the highest emission timestamp seen in
 any signature-valid announce as the calendar anchor, then advances it
-with the monotonic clock (`transport.rs:2851`). This includes the
+with the monotonic clock (`transport.rs:2874`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
 learning deliberately runs before the own-destination echo drop, so a
 rebooted node re-seeds past exactly the value its next announce must
 exceed — pinned at
 `test_own_announce_echo_reseeds_timebase_before_echo_drop`
-(`transport.rs:17245`).
+(`transport.rs:17268`).
 
 - **Cost:** nothing — no hardware, no host.
 - **Unavailable:** on a mesh where no participant has a clock, or
@@ -436,7 +436,7 @@ never caps adoption
   value that is always in the past, and a floor the sanity window
   can trust.
 - **Status:** spec. Today an instance with no source emits raw
-  uptime seconds (`transport.rs:2853`), which every cross-restart
+  uptime seconds (`transport.rs:2876`), which every cross-restart
   comparison loses (#155) and which the old doctrine treated as a
   defect to declare. Plumbing the build timestamp into each port
   retires that state entirely.
@@ -510,7 +510,7 @@ a viewer on this node can still show what the sender claimed.
 
 **Local plausible-now, defined.** The basis is the local calendar
 estimate at receive time — `Transport::emission_secs`
-(`leviculum-core/src/transport.rs:2959`) — plus a bounded forward
+(`leviculum-core/src/transport.rs:2982`) — plus a bounded forward
 tolerance for honest clock skew between sender and receiver. A stamp
 at or below basis-plus-tolerance passes as-is; above it, it is
 clamped to receive time. The tolerance is a practice parameter (see
@@ -567,27 +567,27 @@ silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
 (`leviculum-core/src/constants.rs:498`) caps it, enforced at the
-point of resolution (`transport.rs:2861`) and again at the wire
+point of resolution (`transport.rs:2884`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
 #160. Pinned at `test_emission_secs_saturates_at_wire_field_max`
-(`transport.rs:17677`).
+(`transport.rs:17700`).
 
 ### The timebase never moves backwards, and adoption is windowed
 
 Within arm 4, an older emission never regresses the anchor
-(`emitted_secs <= current`, `transport.rs:2984`), and adoption is
+(`emitted_secs <= current`, `transport.rs:3007`), and adoption is
 bounded by the sanity window: values above
 `EMISSION_LEARN_CEILING_SECS` (`constants.rs:507`, 2200-01-01) cannot
 come from a real clock and are refused outright
-(`transport.rs:2980`); the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
+(`transport.rs:3003`); the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
 (`constants.rs:525`, 2020) separates real wall clocks from
 uptime-derived values, which sit orders of magnitude apart.
 Incidents: #160, #161. Pinned at
 `test_clockless_node_learns_emission_timebase_from_announce`
-(`transport.rs:17148`) and
+(`transport.rs:17171`) and
 `test_timebase_floor_cannot_pass_learn_ceiling`
-(`transport.rs:17593`).
+(`transport.rs:17616`).
 The per-announce no-backwards guard is not contradicted by the
 healing loop: a backwards re-anchor is a deliberate event that
 requires arms-1–2 evidence and respects the emitted high-water mark
@@ -598,7 +598,7 @@ dragging the anchor down.
 
 While the calendar is still on its birth anchor — rank 5, or one of
 today's stand-in states below the value floor — adoption is
-deliberately unbounded (`transport.rs:2995`): a node starting at the
+deliberately unbounded (`transport.rs:3018`): a node starting at the
 build floor, or one that adopted a rebooting peer's uptime seconds
 as its first anchor, must climb to real unix time in one step.
 First-plausible-wins is correct *here*, and only here: a birth
@@ -616,9 +616,9 @@ recover the node instantly. Do not re-introduce that cap. The
 no-backwards guard above keeps the unbounded branch from being
 abused downwards. Pinned at
 `test_clockless_first_timebase_adoption_is_unbounded`
-(`transport.rs:17335`) and
+(`transport.rs:17358`) and
 `test_clockless_timebase_advance_is_bounded_after_first_adoption`
-(`transport.rs:17286`).
+(`transport.rs:17309`).
 
 ### Advance past rank 5 is bounded — per announce, not per peer
 
@@ -633,9 +633,9 @@ regardless of how many identities or destinations they came from.
 The real cap on the walk rate is announces-per-second on the air —
 nothing identity-shaped. This measured reality is pinned at
 `test_timebase_walk_is_capped_per_announce_not_per_identity`
-(`transport.rs:17519`); the walk terminates at the learn ceiling,
+(`transport.rs:17542`); the walk terminates at the learn ceiling,
 pinned at `test_timebase_floor_cannot_pass_learn_ceiling`
-(`transport.rs:17593`). No durable defence is claimed from the
+(`transport.rs:17616`). No durable defence is claimed from the
 [healing loop](#the-healing-loop)'s median: a median over free
 identities resists a broken peer, not an attacker. What actually
 bounds a hostile forward walk is the ceiling and the airtime it
@@ -657,13 +657,13 @@ into the path table:
   Under the anchor model an "implausible own clock" collapses to "no
   anchor better than the build floor" — and that state emits too,
   per the stamping rule. The once-per-process operator warning in
-  `Transport::announce_emission_secs` (`transport.rs:3032`) remains
+  `Transport::announce_emission_secs` (`transport.rs:3055`) remains
   the only reaction to an implausible value — never an altered
   emission. Pinned at
   `test_own_wall_clock_is_not_plausibility_bounded_on_emission`
-  (`transport.rs:17838`) and
+  (`transport.rs:17861`) and
   `test_implausible_own_wall_clock_warns_once_and_leaves_emission_unchanged`
-  (`transport.rs:17886`).
+  (`transport.rs:17909`).
 - **Incoming emission timestamps are not plausibility-checked on
   path acceptance.** Ordering is per-destination comparison only,
   exactly `announce_emitted > path_timebase`
@@ -675,7 +675,7 @@ into the path table:
   filtering would only desynchronise our path tables from every
   other node's view of the same announces. Pinned at
   `test_incoming_emission_not_plausibility_checked_on_acceptance`
-  (`transport.rs:17957`). The
+  (`transport.rs:17980`). The
   [ingress clamp](#ingress-clamp-for-semantics-keep-for-display)
   operates strictly above this layer — on what we index and serve,
   never on what we route.
@@ -729,7 +729,7 @@ claiming one. The loop, binding as spec:
      the node's *own* pre-restart announces echo back and re-seeds
      past them, pinned at
      `test_own_announce_echo_reseeds_timebase_before_echo_drop`
-     (`transport.rs:17245`).
+     (`transport.rs:17268`).
 3. **Write back to the RTC.** Every better anchor is also written
    into a present RTC, so the hardware clock itself heals and the
    next boot starts from the healed value instead of the build
@@ -766,7 +766,7 @@ arms-1–2 evidence. No operator action at any step — switch on and it
 works, with the residuals stated.
 
 **Implementation status.** Arm 4's single-announce learning
-(`learn_emission_timebase`, `transport.rs:2976`) implements the
+(`learn_emission_timebase`, `transport.rs:2999`) implements the
 rank-5 re-anchor today. The median re-anchor, the collection of
 LXMF-stamp evidence, the high-water persistence, and the RTC
 write-back are spec, tracked as implementation issues per platform.
@@ -810,7 +810,7 @@ attributed to a dead RTC, a lying neighbour, or a boot-order race.
 The healing loop raises the stakes: a re-anchor is a calendar jump,
 and an unattributed jump is indistinguishable from a bug. Today the
 only breadcrumb is the once-per-process implausible-own-clock warning
-(`transport.rs:2923`); exposing the current source and its origin
+(`transport.rs:2946`); exposing the current source and its origin
 (status RPC, control-channel query) is part of implementing this
 concept on each platform.
 
@@ -913,11 +913,11 @@ source arm: a below-build-floor value is refused (the 1999-RTC
 dead-cell shape), an above-margin value is refused (a 2500-RTC),
 an in-window value is accepted. Arm 2 is pinned today at
 `test_implausibly_low_wall_time_injection_is_refused`
-(`transport.rs:17438`) and
+(`transport.rs:17461`) and
 `test_absurd_wall_time_injection_is_refused`
-(`transport.rs:17653`); arm 4's ceiling at
+(`transport.rs:17676`); arm 4's ceiling at
 `test_timebase_floor_cannot_pass_learn_ceiling`
-(`transport.rs:17593`). The arm-1 trio lands with GNSS seeding and
+(`transport.rs:17616`). The arm-1 trio lands with GNSS seeding and
 carries the no-bypass assertion: GNSS passes the SAME filter, and
 the cell is written against the shared filter path so that it
 would go red if a GNSS special case were ever introduced — an
@@ -934,9 +934,9 @@ the build-floor value alone never satisfies the plausibility
 predicate, even though it clears the sanity window. The value-test
 stand-ins are pinned today at
 `test_clockless_first_timebase_adoption_is_unbounded`
-(`transport.rs:17335`) and
+(`transport.rs:17358`) and
 `test_clockless_timebase_advance_is_bounded_after_first_adoption`
-(`transport.rs:17286`); the rank-keyed cells replace their
+(`transport.rs:17309`); the rank-keyed cells replace their
 predicates without loosening their assertions. Integration:
 `leviculum-lxmf/tests/wall_clock_producer.rs` remains the
 structural pin that no router entry point takes a caller-supplied
@@ -951,7 +951,7 @@ sequence of anchor changes — adoption, re-anchor, saturation —
 asserting after every step that the stamp never runs ahead of the
 estimate and never repeats. Wire saturation is already pinned at
 `test_emission_secs_saturates_at_wire_field_max`
-(`transport.rs:17677`).
+(`transport.rs:17700`).
 
 **5. Emitted high-water** ([healing loop](#the-healing-loop)).
 Unit: no re-anchor — including an arms-1–2-quality backwards
@@ -961,7 +961,7 @@ identity has emitted; the correction floors at the high-water mark
 persistence of the mark across a restart where storage exists; the
 RTC-less mitigation is pinned at
 `test_own_announce_echo_reseeds_timebase_before_echo_drop`
-(`transport.rs:17245`). The announce-timebase consequence — a peer
+(`transport.rs:17268`). The announce-timebase consequence — a peer
 keeps the newest path — is shown against a Python-shaped peer:
 conformance `time_high_water_path_retention`, where a re-anchored
 `lnsd` keeps its announces ordered above its own high-water and
@@ -977,7 +977,7 @@ traffic median (negative). The Sybil-style bound —
 N identities from one neighbour advance the calendar no further
 than the documented N × cap — is pinned at
 `test_timebase_walk_is_capped_per_announce_not_per_identity`
-(`transport.rs:17519`) and stays a negative cell: the assertion is
+(`transport.rs:17542`) and stays a negative cell: the assertion is
 the bound, not a defence the model does not claim. RTC write-back
 on re-anchor is a unit cell against a mock RTC; the real
 peripheral is rule 10.

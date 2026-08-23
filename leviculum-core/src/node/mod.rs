@@ -109,6 +109,8 @@ mod mvr_shared_client_1hop;
 mod mvr_single_decrypt_drop;
 #[cfg(test)]
 mod mvr_teardown_resource_fail;
+#[cfg(test)]
+mod mvr_unknown_context_relay;
 pub mod request;
 mod send;
 
@@ -2859,6 +2861,34 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     packet.context,
                     interface_index,
                 );
+                // Local-interpretation gate for the context byte (#332).
+                //
+                // Transport delivered this packet here because it is addressed
+                // to one of OUR destinations or links, so from here on the
+                // question is semantic: what does the payload mean? A context
+                // byte we assign no meaning to has no answer — every handler
+                // below would have to guess, and `handle_plain_data_packet`
+                // would guess "plain link data". Abstain instead, once, at the
+                // boundary, with a named and counted drop.
+                //
+                // This is the ONLY place the unknown context stops anything:
+                // the same packet arriving for someone else is relayed
+                // untouched, and dedup, hop accounting, rate limiting and IFAC
+                // all ran before this point exactly as for a known context.
+                if !packet.context.is_known() {
+                    self.transport.record_node_layer_drop(
+                        raw_hash.as_ref(),
+                        &packet,
+                        interface_index,
+                        crate::transport::DropReason::UnknownContext,
+                    );
+                    crate::tracing::debug!(
+                        dest = %HexShort(&destination_hash),
+                        ctx = packet.context.to_byte(),
+                        "Dropped locally-addressed packet, unrecognised context byte"
+                    );
+                    return;
+                }
                 // Check if this is a link-related packet
                 if packet.flags.packet_type == crate::packet::PacketType::LinkRequest
                     || packet.flags.packet_type == crate::packet::PacketType::Proof

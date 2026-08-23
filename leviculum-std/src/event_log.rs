@@ -63,7 +63,7 @@
 //! appended to that handle's buffer:
 //!
 //! ```text
-//! EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1049 t=<rel-ms>
+//! EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1050 t=<rel-ms>
 //! ```
 //!
 //! ## Field-value validation (per-event, per-handle)
@@ -75,7 +75,7 @@
 //! into every active buffer:
 //!
 //! ```text
-//! EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1049 t=<rel-ms>
+//! EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1050 t=<rel-ms>
 //! ```
 //!
 //! `value_problem` ∈ {`whitespace`, `equals`, `non_printable`}.
@@ -302,6 +302,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "forward_max_hops",
             "blackholed_announce",
             "single_decrypt_fail",
+            "unknown_context",
             "total",
         ],
     },

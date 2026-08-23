@@ -983,6 +983,7 @@ pub struct TransportStats {
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
     pub(crate) drops_single_decrypt_fail: u64,
+    pub(crate) drops_unknown_context: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1051,6 +1052,16 @@ pub enum DropReason {
     /// undetected (2026-08-21). Python drops this silently too
     /// (`Identity.decrypt` returns None, Destination.py:520 just logs debug).
     SingleDecryptFail,
+    /// A packet addressed to us (a registered destination or one of our own
+    /// links) whose context byte this implementation assigns no meaning to.
+    ///
+    /// Relaying such a packet is unaffected — the context byte is semantic,
+    /// not routing information (Codeberg #332) — so this counter only ever
+    /// covers the LOCAL abstention. Python reaches the same end state on the
+    /// link path by falling off the `elif packet.context == ...` chain in
+    /// `Link.receive` (Link.py:972-1100) without a counter; we name and count
+    /// it so "a peer speaks a dialect we do not" is visible instead of silent.
+    UnknownContext,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -1111,11 +1122,12 @@ impl DropReason {
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
             DropReason::SingleDecryptFail => "single-decrypt-fail",
+            DropReason::UnknownContext => "unknown-context",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 15] = [
+    pub const ALL: [DropReason; 16] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1131,6 +1143,7 @@ impl DropReason {
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
         DropReason::SingleDecryptFail,
+        DropReason::UnknownContext,
     ];
 }
 
@@ -1243,6 +1256,13 @@ impl TransportStats {
         self.drops_single_decrypt_fail
     }
 
+    /// Packets addressed to us that carry a context byte we assign no meaning
+    /// to, and were therefore not interpreted locally (Codeberg #332).
+    /// Relaying of such packets is unaffected and not counted here.
+    pub fn drops_unknown_context(&self) -> u64 {
+        self.drops_unknown_context
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -1261,6 +1281,7 @@ impl TransportStats {
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
             + self.drops_single_decrypt_fail
+            + self.drops_unknown_context
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -1287,6 +1308,7 @@ impl TransportStats {
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
             DropReason::SingleDecryptFail => self.drops_single_decrypt_fail += 1,
+            DropReason::UnknownContext => self.drops_unknown_context += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -2783,6 +2805,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
                 single_decrypt_fail = self.stats.drops_single_decrypt_fail,
+                unknown_context = self.stats.drops_unknown_context,
                 total = self.stats.packets_dropped,
             );
         }
@@ -3331,7 +3354,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2749. A destination with no cached
+    /// link-request path uses at transport.rs:2771. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -4049,7 +4072,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1068 ran in the
+        // Gate on the already-incremented hops (transport.rs:1079 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7695,7 +7718,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1620`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1642`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -12187,7 +12210,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // transport.rs:3914-3924, a deliberate anti-replay extension — so
+            // transport.rs:3937-3947, a deliberate anti-replay extension — so
             // the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -17026,7 +17049,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1068) before
+        // The inbound path increments hops once (transport.rs:1079) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

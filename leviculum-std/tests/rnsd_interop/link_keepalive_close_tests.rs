@@ -353,7 +353,7 @@ async fn establish_rust_to_rust_link(daemon: &TestDaemon) -> Result<RustToRustLi
     rtt_raw.push(0x0C);
     rtt_raw.push(0x00);
     rtt_raw.extend_from_slice(link_id_a.as_bytes());
-    rtt_raw.push(PacketContext::Lrrtt as u8);
+    rtt_raw.push(PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     let output = node_a.handle_packet(InterfaceId(0), &rtt_raw);
@@ -1019,7 +1019,7 @@ async fn test_python_initiator_sends_keepalive_rust_echoes() {
     rtt_raw.push(0x0C);
     rtt_raw.push(0x00);
     rtt_raw.extend_from_slice(link_id.as_bytes());
-    rtt_raw.push(PacketContext::Lrrtt as u8);
+    rtt_raw.push(PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     let output = node.handle_packet(InterfaceId(0), &rtt_raw);

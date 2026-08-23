@@ -543,7 +543,7 @@ async fn test_link_request_with_mtu_signaling() {
     packet.push(flags.to_byte());
     packet.push(0); // hops
     packet.extend_from_slice(&dest_hash);
-    packet.push(PacketContext::None as u8);
+    packet.push(PacketContext::None.to_byte());
     packet.extend_from_slice(&request_data);
 
     // Calculate and set link ID (signaling bytes stripped per calculate_link_id)

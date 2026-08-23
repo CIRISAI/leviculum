@@ -2252,7 +2252,7 @@ mod tests {
         let packets = res.handle_request(&req, &link, &mut rng, 2_000).unwrap();
         let hmu_wire = packets
             .iter()
-            .find(|p| p.len() > 18 && p[18] == crate::packet::PacketContext::ResourceHmu as u8)
+            .find(|p| p.len() > 18 && p[18] == crate::packet::PacketContext::ResourceHmu.to_byte())
             .expect("an exhausted REQ must be answered with an HMU packet");
 
         let mut buf = vec![0u8; hmu_wire.len()];

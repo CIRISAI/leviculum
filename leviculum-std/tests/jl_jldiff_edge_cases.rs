@@ -150,8 +150,8 @@ fn test_jl_value_contains_brackets_and_punctuation() {
     // Values like `missing=[hops,len]` (synthetic violation lines) must
     // round-trip and match prefix filters correctly.
     let input = "\
-EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1049 t=100
-EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1049 t=120
+EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1050 t=100
+EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1050 t=120
 ";
     let (out, _err, rc) = pipe_through(jl().args(["--filter", "missing=[*"]), input);
     assert_eq!(rc, 0);

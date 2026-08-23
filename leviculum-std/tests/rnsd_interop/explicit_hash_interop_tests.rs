@@ -71,7 +71,7 @@ fn build_link_request_raw(link: &mut Link, dest_hash: &[u8; TRUNCATED_HASHBYTES]
     raw.push(flags.to_byte());
     raw.push(0); // hops
     raw.extend_from_slice(dest_hash);
-    raw.push(PacketContext::None as u8);
+    raw.push(PacketContext::None.to_byte());
     raw.extend_from_slice(&request_data);
     let link_id = Link::calculate_link_id(&raw);
     link.set_link_id(link_id);

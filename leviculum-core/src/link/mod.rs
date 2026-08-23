@@ -754,7 +754,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes()); // destination = link_id
-        packet.push(PacketContext::Lrproof as u8);
+        packet.push(PacketContext::Lrproof.to_byte());
         packet.extend_from_slice(&proof_data);
 
         // Transition to Handshake state (waiting for RTT from initiator)
@@ -1870,7 +1870,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.destination_hash.as_bytes());
-        packet.push(PacketContext::None as u8);
+        packet.push(PacketContext::None.to_byte());
         packet.extend_from_slice(&request_data);
 
         // Calculate and set link ID from the complete packet
@@ -1958,7 +1958,7 @@ impl Link {
         packet.push(0); // hops = 0 (we're originating)
         packet.extend_from_slice(&transport_id);
         packet.extend_from_slice(self.destination_hash.as_bytes());
-        packet.push(PacketContext::None as u8);
+        packet.push(PacketContext::None.to_byte());
         packet.extend_from_slice(&request_data);
 
         // Calculate and set link ID from the complete packet
@@ -2077,7 +2077,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(packet_context as u8);
+        packet.push(packet_context.to_byte());
         packet.extend_from_slice(&encrypted[..enc_len]);
 
         Ok(packet)
@@ -2115,7 +2115,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(packet_context as u8);
+        packet.push(packet_context.to_byte());
         packet.extend_from_slice(data);
 
         Ok(packet)
@@ -2150,7 +2150,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(packet_context as u8);
+        packet.push(packet_context.to_byte());
         packet.extend_from_slice(data);
 
         Ok(packet)
@@ -2203,7 +2203,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(PacketContext::None as u8);
+        packet.push(PacketContext::None.to_byte());
         packet.extend_from_slice(proof_data);
 
         Ok(packet)
@@ -2250,7 +2250,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(PacketContext::Lrrtt as u8);
+        packet.push(PacketContext::Lrrtt.to_byte());
         packet.extend_from_slice(&encrypted[..enc_len]);
 
         Ok(packet)
@@ -2296,7 +2296,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(PacketContext::Keepalive as u8);
+        packet.push(PacketContext::Keepalive.to_byte());
         packet.push(payload);
 
         Ok(packet)
@@ -2339,7 +2339,7 @@ impl Link {
         packet.push(flags.to_byte());
         packet.push(0); // hops = 0
         packet.extend_from_slice(self.id.as_bytes());
-        packet.push(PacketContext::LinkClose as u8);
+        packet.push(PacketContext::LinkClose.to_byte());
         packet.extend_from_slice(&encrypted[..enc_len]);
 
         Ok(packet)
@@ -2827,7 +2827,7 @@ mod tests {
 
         // Context should be LRPROOF
         use crate::packet::PacketContext;
-        assert_eq!(proof_packet[18], PacketContext::Lrproof as u8);
+        assert_eq!(proof_packet[18], PacketContext::Lrproof.to_byte());
 
         // Link ID in packet should match
         assert_eq!(&proof_packet[2..18], link_id.as_bytes());
@@ -3455,8 +3455,8 @@ mod tests {
 
         // Both should have Keepalive context
         use crate::packet::PacketContext;
-        assert_eq!(initiator_ka[18], PacketContext::Keepalive as u8);
-        assert_eq!(responder_ka[18], PacketContext::Keepalive as u8);
+        assert_eq!(initiator_ka[18], PacketContext::Keepalive.to_byte());
+        assert_eq!(responder_ka[18], PacketContext::Keepalive.to_byte());
 
         // Verify raw payload bytes (not encrypted)
         assert_eq!(initiator_ka[19], KEEPALIVE_INITIATOR_BYTE);
@@ -3516,7 +3516,7 @@ mod tests {
 
         // Should have LinkClose context
         use crate::packet::PacketContext;
-        assert_eq!(close_packet[18], PacketContext::LinkClose as u8);
+        assert_eq!(close_packet[18], PacketContext::LinkClose.to_byte());
     }
 
     #[test]
@@ -4064,7 +4064,7 @@ mod tests {
         assert_eq!(&packet[2..18], initiator.id().as_bytes());
 
         // Context byte = RESOURCE = 0x01
-        assert_eq!(packet[18], PacketContext::Resource as u8);
+        assert_eq!(packet[18], PacketContext::Resource.to_byte());
 
         // Payload is raw (NOT encrypted)
         assert_eq!(&packet[19..], payload);
@@ -4089,7 +4089,7 @@ mod tests {
 
         // context_flag should be false when context is None
         assert_eq!(packet[0] & 0x20, 0);
-        assert_eq!(packet[18], PacketContext::None as u8);
+        assert_eq!(packet[18], PacketContext::None.to_byte());
     }
 
     // ==================== PROOF PACKET WITH CONTEXT TESTS ====================
@@ -4119,7 +4119,7 @@ mod tests {
         assert_eq!(&packet[2..18], initiator.id().as_bytes());
 
         // Context = ResourcePrf = 0x05
-        assert_eq!(packet[18], PacketContext::ResourcePrf as u8);
+        assert_eq!(packet[18], PacketContext::ResourcePrf.to_byte());
 
         // Payload is raw
         assert_eq!(&packet[19..], proof_data);

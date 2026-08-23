@@ -107,15 +107,18 @@ fn test_packet_context_exact_byte_values() {
 
     for &(context, expected_byte, name) in expected {
         assert_eq!(
-            context as u8, expected_byte,
+            context.to_byte(),
+            expected_byte,
             "PacketContext::{} should be 0x{:02X}, got 0x{:02X}",
-            name, expected_byte, context as u8,
+            name,
+            expected_byte,
+            context.to_byte(),
         );
 
         // Verify roundtrip through TryFrom
         let parsed = PacketContext::try_from(expected_byte)
             .unwrap_or_else(|_| panic!("Failed to parse context byte 0x{:02X}", expected_byte));
-        assert_eq!(parsed as u8, expected_byte);
+        assert_eq!(parsed.to_byte(), expected_byte);
     }
 
     // Also verify that packing a packet with context_flag=true places context at offset 18

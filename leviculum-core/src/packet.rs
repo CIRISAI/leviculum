@@ -77,59 +77,125 @@ pub enum HeaderType {
 }
 
 /// Packet context (stored in context byte)
+///
+/// The context byte is a SEMANTIC field: it says how the payload should be
+/// interpreted once the packet has reached something that can interpret it.
+/// It is not part of routing. A relay therefore never needs to understand it
+/// — Python's `Packet.unpack` stores the raw byte with no validation at all
+/// (`reference/Reticulum/RNS/Packet.py:258,263`) and neither
+/// `Transport.packet_filter` nor the forwarding path rejects a value they do
+/// not know. Rejecting an unrecognised context at parse time would turn this
+/// node into a black hole for traffic from a newer RNS or a third
+/// implementation (Codeberg #332), so unknown values are preserved verbatim
+/// in [`PacketContext::Unknown`] and only the LOCAL handling paths abstain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum PacketContext {
-    None = 0x00,
-    Resource = 0x01,
-    ResourceAdv = 0x02,
-    ResourceReq = 0x03,
-    ResourceHmu = 0x04,
-    ResourcePrf = 0x05,
-    ResourceIcl = 0x06,
-    ResourceRcl = 0x07,
-    CacheRequest = 0x08,
-    Request = 0x09,
-    Response = 0x0A,
-    PathResponse = 0x0B,
-    Command = 0x0C,
-    CommandStatus = 0x0D,
-    Channel = 0x0E,
-    Keepalive = 0xFA,
-    LinkIdentify = 0xFB,
-    LinkClose = 0xFC,
-    LinkProof = 0xFD,
-    Lrrtt = 0xFE,
-    Lrproof = 0xFF,
+    None,
+    Resource,
+    ResourceAdv,
+    ResourceReq,
+    ResourceHmu,
+    ResourcePrf,
+    ResourceIcl,
+    ResourceRcl,
+    CacheRequest,
+    Request,
+    Response,
+    PathResponse,
+    Command,
+    CommandStatus,
+    Channel,
+    Keepalive,
+    LinkIdentify,
+    LinkClose,
+    LinkProof,
+    Lrrtt,
+    Lrproof,
+    /// A context byte this implementation does not assign a meaning to.
+    ///
+    /// Carries the byte verbatim so the packet re-packs bit-identically and
+    /// can be relayed unchanged. Every local (semantic) consumer must treat
+    /// this as "not interpretable here" — never as a default context.
+    Unknown(u8),
+}
+
+impl PacketContext {
+    /// Decode the context byte. Total: an unrecognised value becomes
+    /// [`PacketContext::Unknown`] rather than an error.
+    pub const fn from_byte(value: u8) -> Self {
+        match value {
+            0x00 => PacketContext::None,
+            0x01 => PacketContext::Resource,
+            0x02 => PacketContext::ResourceAdv,
+            0x03 => PacketContext::ResourceReq,
+            0x04 => PacketContext::ResourceHmu,
+            0x05 => PacketContext::ResourcePrf,
+            0x06 => PacketContext::ResourceIcl,
+            0x07 => PacketContext::ResourceRcl,
+            0x08 => PacketContext::CacheRequest,
+            0x09 => PacketContext::Request,
+            0x0A => PacketContext::Response,
+            0x0B => PacketContext::PathResponse,
+            0x0C => PacketContext::Command,
+            0x0D => PacketContext::CommandStatus,
+            0x0E => PacketContext::Channel,
+            0xFA => PacketContext::Keepalive,
+            0xFB => PacketContext::LinkIdentify,
+            0xFC => PacketContext::LinkClose,
+            0xFD => PacketContext::LinkProof,
+            0xFE => PacketContext::Lrrtt,
+            0xFF => PacketContext::Lrproof,
+            other => PacketContext::Unknown(other),
+        }
+    }
+
+    /// Encode back to the wire byte. `from_byte(c.to_byte()) == c` for every
+    /// value, so a relayed packet re-packs byte-for-byte.
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            PacketContext::None => 0x00,
+            PacketContext::Resource => 0x01,
+            PacketContext::ResourceAdv => 0x02,
+            PacketContext::ResourceReq => 0x03,
+            PacketContext::ResourceHmu => 0x04,
+            PacketContext::ResourcePrf => 0x05,
+            PacketContext::ResourceIcl => 0x06,
+            PacketContext::ResourceRcl => 0x07,
+            PacketContext::CacheRequest => 0x08,
+            PacketContext::Request => 0x09,
+            PacketContext::Response => 0x0A,
+            PacketContext::PathResponse => 0x0B,
+            PacketContext::Command => 0x0C,
+            PacketContext::CommandStatus => 0x0D,
+            PacketContext::Channel => 0x0E,
+            PacketContext::Keepalive => 0xFA,
+            PacketContext::LinkIdentify => 0xFB,
+            PacketContext::LinkClose => 0xFC,
+            PacketContext::LinkProof => 0xFD,
+            PacketContext::Lrrtt => 0xFE,
+            PacketContext::Lrproof => 0xFF,
+            PacketContext::Unknown(byte) => byte,
+        }
+    }
+
+    /// Whether this implementation assigns a meaning to the context byte.
+    ///
+    /// Relaying must NOT consult this — only local interpretation may.
+    pub const fn is_known(self) -> bool {
+        !matches!(self, PacketContext::Unknown(_))
+    }
 }
 
 impl TryFrom<u8> for PacketContext {
     type Error = ();
 
+    /// Known-contexts-only view of the byte, for callers that specifically
+    /// want "is this a context I understand?". Parsing uses
+    /// [`PacketContext::from_byte`], which never rejects.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x00 => Ok(PacketContext::None),
-            0x01 => Ok(PacketContext::Resource),
-            0x02 => Ok(PacketContext::ResourceAdv),
-            0x03 => Ok(PacketContext::ResourceReq),
-            0x04 => Ok(PacketContext::ResourceHmu),
-            0x05 => Ok(PacketContext::ResourcePrf),
-            0x06 => Ok(PacketContext::ResourceIcl),
-            0x07 => Ok(PacketContext::ResourceRcl),
-            0x08 => Ok(PacketContext::CacheRequest),
-            0x09 => Ok(PacketContext::Request),
-            0x0A => Ok(PacketContext::Response),
-            0x0B => Ok(PacketContext::PathResponse),
-            0x0C => Ok(PacketContext::Command),
-            0x0D => Ok(PacketContext::CommandStatus),
-            0x0E => Ok(PacketContext::Channel),
-            0xFA => Ok(PacketContext::Keepalive),
-            0xFB => Ok(PacketContext::LinkIdentify),
-            0xFC => Ok(PacketContext::LinkClose),
-            0xFD => Ok(PacketContext::LinkProof),
-            0xFE => Ok(PacketContext::Lrrtt),
-            0xFF => Ok(PacketContext::Lrproof),
-            _ => Err(()),
+        match PacketContext::from_byte(value) {
+            PacketContext::Unknown(_) => Err(()),
+            known => Ok(known),
         }
     }
 }
@@ -204,8 +270,6 @@ pub enum PacketError {
     TooLong,
     /// Invalid flags byte
     InvalidFlags,
-    /// Invalid context byte
-    InvalidContext,
     /// Payload too large
     PayloadTooLarge,
 }
@@ -216,7 +280,6 @@ impl core::fmt::Display for PacketError {
             PacketError::TooShort => write!(f, "packet too short"),
             PacketError::TooLong => write!(f, "packet too long"),
             PacketError::InvalidFlags => write!(f, "invalid flags byte"),
-            PacketError::InvalidContext => write!(f, "invalid context byte"),
             PacketError::PayloadTooLarge => write!(f, "payload too large"),
         }
     }
@@ -322,7 +385,7 @@ impl Packet {
         pos += TRUNCATED_HASHBYTES;
 
         // Context
-        output[pos] = self.context as u8;
+        output[pos] = self.context.to_byte();
         pos += 1;
 
         // Data
@@ -373,7 +436,12 @@ impl Packet {
         pos += TRUNCATED_HASHBYTES;
 
         // Context
-        let context = PacketContext::try_from(raw[pos]).map_err(|_| PacketError::InvalidContext)?;
+        //
+        // Never a parse error (#332): an unrecognised byte is kept verbatim as
+        // `PacketContext::Unknown` so the packet stays relayable, exactly as
+        // Python keeps the raw int (Packet.py:258,263). Only local handling
+        // gates on the value.
+        let context = PacketContext::from_byte(raw[pos]);
         pos += 1;
 
         // Data
@@ -517,6 +585,62 @@ pub fn build_proof_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every one of the 256 context bytes must survive decode/encode
+    /// unchanged (#332). This is what makes an unknown-context packet
+    /// re-packable, and therefore relayable, without a second parser: the
+    /// relay path calls `Packet::pack`, which writes `context.to_byte()`.
+    #[test]
+    fn context_byte_roundtrips_for_every_value() {
+        for byte in 0u8..=255 {
+            let ctx = PacketContext::from_byte(byte);
+            assert_eq!(
+                ctx.to_byte(),
+                byte,
+                "context byte {byte:#04x} did not round-trip"
+            );
+            assert_eq!(
+                ctx.is_known(),
+                PacketContext::try_from(byte).is_ok(),
+                "is_known must agree with the known-contexts-only view for {byte:#04x}"
+            );
+        }
+    }
+
+    /// A packet carrying an unrecognised context byte parses (it is
+    /// relayable) and re-packs to the identical bytes.
+    #[test]
+    fn unknown_context_packet_unpacks_and_repacks_identically() {
+        let raw = {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Data,
+                },
+                hops: 3,
+                transport_id: None,
+                destination_hash: [0x11; TRUNCATED_HASHBYTES],
+                context: PacketContext::Unknown(0x42),
+                data: PacketData::Owned(alloc::vec![0xAB; 32]),
+            };
+            let mut buf = [0u8; MTU];
+            let len = packet.pack(&mut buf).expect("pack");
+            buf[..len].to_vec()
+        };
+        assert_eq!(raw[18], 0x42);
+
+        let parsed = Packet::unpack(&raw).expect("an unknown context must not be a parse error");
+        assert_eq!(parsed.context, PacketContext::Unknown(0x42));
+        assert!(!parsed.context.is_known());
+
+        let mut out = [0u8; MTU];
+        let len = parsed.pack(&mut out).expect("repack");
+        assert_eq!(&out[..len], &raw[..], "repack must be byte-identical");
+    }
 
     #[test]
     fn test_flags_roundtrip() {

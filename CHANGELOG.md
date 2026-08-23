@@ -140,6 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A relay forwards packets whose context byte it does not know instead
+  of dropping them at parse time; only local delivery abstains, counted
+  as `unknown-context` (#332).
+
 - Discovery announces are minted at stamp value 16, so RNS 1.5.0
   listeners no longer discard them; the receive gate stays at 14 so
   1.3.5 neighbours still decode (#328).

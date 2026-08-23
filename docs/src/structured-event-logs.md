@@ -47,6 +47,14 @@ to stitch one packet's path across nodes:
   packet died.
 - `PKT_DROP` renders its `reason` as the kebab-case `DropReason`
   (`no-path`, `plain-group-multihop`, `forward-max-hops`, ...).
+  `unknown-context` is the one reason that says nothing about the
+  packet's validity: it means the packet was addressed to US and
+  carries a context byte this build assigns no meaning to, so nothing
+  above transport could interpret it.  The same packet addressed to
+  someone else is relayed normally and never reaches this counter —
+  the context byte is semantic, not routing information.  A rising
+  `unknown-context` on a node that is also an endpoint means a peer
+  speaks a dialect (newer RNS, third implementation) we do not.
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal
   hop, not a drop (see

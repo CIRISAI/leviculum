@@ -557,7 +557,8 @@ fn test_packet_deserialization() {
             test.name
         );
         assert_eq!(
-            packet.context as u8, test.context,
+            packet.context.to_byte(),
+            test.context,
             "Context mismatch for '{}'",
             test.name
         );

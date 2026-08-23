@@ -181,7 +181,7 @@ fn establish_captured(
     let (rtt_out, _) = deliver_collect(initiator, i_iface, std::vec![proof_wire.clone()]);
     let rtt_wire = rtt_out
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::Lrrtt as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::Lrrtt.to_byte())
         .expect("initiator must answer the proof with the LRRTT packet");
     let (_, _) = deliver_collect(responder, r_iface, std::vec![rtt_wire.clone()]);
 
@@ -501,7 +501,7 @@ fn request_wire_pins_reference_request_semantics() {
         .unwrap();
     let wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::Request as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::Request.to_byte())
         .expect("send_request must emit a REQUEST context packet");
 
     assert_eq!(
@@ -663,7 +663,7 @@ fn response_wire_pins_reference_response_semantics() {
         .unwrap();
     let req_wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::Request as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::Request.to_byte())
         .unwrap();
     let (_out, _ev) = deliver_collect(&mut responder, r_iface, std::vec![req_wire]);
 
@@ -673,7 +673,7 @@ fn response_wire_pins_reference_response_semantics() {
         .unwrap();
     let resp_wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::Response as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::Response.to_byte())
         .expect("send_response must emit a RESPONSE context packet");
 
     let plaintext = decrypt_link_payload(&responder, &resp_id, &resp_wire);
@@ -729,7 +729,7 @@ fn identify_wire_verifies_under_reference_composition() {
     let out = initiator.identify_link(&caller_id, &app_identity).unwrap();
     let wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::LinkIdentify as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::LinkIdentify.to_byte())
         .expect("identify_link must emit a LINKIDENTIFY packet");
 
     let plaintext = decrypt_link_payload(&initiator, &caller_id, &wire);
@@ -793,7 +793,7 @@ fn link_close_wire_plaintext_is_the_link_id() {
     let out = initiator.close_link(&caller_id);
     let wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::LinkClose as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::LinkClose.to_byte())
         .expect("close_link must emit a LINKCLOSE packet");
 
     let plaintext = decrypt_link_payload(&responder, &resp_id, &wire);
@@ -837,7 +837,7 @@ fn channel_envelope_wire_pins_reference_sequence_semantics() {
         let out = initiator.send_on_link(&caller_id, payload).unwrap();
         let wire = action_data(&out)
             .into_iter()
-            .find(|p| p.len() > 18 && p[18] == PacketContext::Channel as u8)
+            .find(|p| p.len() > 18 && p[18] == PacketContext::Channel.to_byte())
             .expect("send_on_link must emit a CHANNEL context packet");
         envelopes.push(decrypt_link_payload(&initiator, &caller_id, &wire));
     }
@@ -885,7 +885,7 @@ fn data_proof_wire_carries_reference_packet_hash_and_signature() {
         .unwrap();
     let data_wire = action_data(&out)
         .into_iter()
-        .find(|p| p.len() > 18 && p[18] == PacketContext::None as u8)
+        .find(|p| p.len() > 18 && p[18] == PacketContext::None.to_byte())
         .expect("send_packet_on_link must emit a plain DATA packet");
 
     // Responder proves (destination strategy PROVE_ALL).

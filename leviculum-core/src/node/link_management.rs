@@ -1220,7 +1220,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             PacketContext::CacheRequest => {
                 self.handle_cache_request(link_id, packet, now_secs);
             }
-            _ => self.handle_plain_data_packet(link_id, packet, raw_packet, now_secs),
+            // A context byte we assign no meaning to must NOT fall into the
+            // plain-data arm below: that arm means "this is link payload for
+            // the application", which is a guess we have no basis for (#332).
+            // NodeCore's delivery gate normally catches this before the packet
+            // reaches here; the arm is explicit so a future caller of this
+            // handler cannot silently reintroduce the guess. Python ends up in
+            // the same place by falling off the `elif packet.context == ...`
+            // chain in Link.receive (Link.py:972-1100).
+            PacketContext::Unknown(byte) => {
+                crate::tracing::debug!(
+                    link = %HexShort(link_id.as_bytes()),
+                    ctx = byte,
+                    "Link packet with unrecognised context byte, not interpreted"
+                );
+            }
+            PacketContext::None
+            | PacketContext::ResourcePrf
+            | PacketContext::PathResponse
+            | PacketContext::Command
+            | PacketContext::CommandStatus
+            | PacketContext::LinkProof
+            | PacketContext::Lrproof => {
+                self.handle_plain_data_packet(link_id, packet, raw_packet, now_secs)
+            }
         }
     }
 

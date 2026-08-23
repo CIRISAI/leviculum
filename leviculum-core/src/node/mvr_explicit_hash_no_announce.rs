@@ -258,7 +258,7 @@ fn link_request_to_explicit_hash_establishes() {
     raw.push(flags.to_byte());
     raw.push(0); // hops
     raw.extend_from_slice(&EXPLICIT_HASH);
-    raw.push(PacketContext::None as u8);
+    raw.push(PacketContext::None.to_byte());
     raw.extend_from_slice(&request_data);
     let link_id = Link::calculate_link_id(&raw);
     link.set_link_id(link_id);

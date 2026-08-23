@@ -230,7 +230,7 @@ async fn establish_responder_link(
     rtt_raw.push(0x0C); // flags for Data packet to Link
     rtt_raw.push(0x00); // hops
     rtt_raw.extend_from_slice(link_id.as_bytes());
-    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt as u8);
+    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     // Process RTT via node
@@ -597,7 +597,7 @@ async fn test_manager_responder_auto_accept() {
     rtt_raw.push(0x0C);
     rtt_raw.push(0x00);
     rtt_raw.extend_from_slice(link_id.as_bytes());
-    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt as u8);
+    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     let output = node.handle_packet(InterfaceId(0), &rtt_raw);
@@ -1008,7 +1008,7 @@ async fn test_rust_to_rust_via_daemon() {
     rtt_raw.push(0x0C);
     rtt_raw.push(0x00);
     rtt_raw.extend_from_slice(link_id_a.as_bytes());
-    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt as u8);
+    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     let output = node_a.handle_packet(InterfaceId(0), &rtt_raw);
@@ -1180,7 +1180,7 @@ async fn test_rust_to_rust_multiple_messages() {
     rtt_raw.push(0x0C);
     rtt_raw.push(0x00);
     rtt_raw.extend_from_slice(link_id_a.as_bytes());
-    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt as u8);
+    rtt_raw.push(leviculum_core::packet::PacketContext::Lrrtt.to_byte());
     rtt_raw.extend_from_slice(&rtt_data);
 
     let _output = node_a.handle_packet(InterfaceId(0), &rtt_raw);
