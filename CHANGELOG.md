@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through a running `lnsd`/`rnsd` shared instance and says nothing. Exit 0
   means queued, never delivered.
 
+### Changed
+
+- The GNSS wake no longer forces a UBX-CFG-RST cold start on every boot,
+  so a reboot keeps the module's assistance data and refixes in seconds
+  instead of re-downloading the sky (#324).
+
 ### Removed
 
 - The host-side airtime gate on the RNode interface (#121). Duty-cycle

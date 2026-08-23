@@ -63,7 +63,10 @@ fn acks(outputs: &[Output]) -> Vec<(Step, AckOutcome)> {
 
 // The exact bytes on the wire, against the independent fixture. This is
 // the test the positive control targets: corrupting one payload byte in
-// `lib.rs` (or one fixture byte here) must turn it red.
+// `lib.rs` (or one fixture byte here) must turn it red. The cold-start
+// frame is asserted too although it is no longer sent at boot — it is
+// kept as a diagnostic frame and a diagnostic that has silently rotted
+// is worse than none.
 #[test]
 fn frames_match_independent_fixtures() {
     assert_eq!(FACTORY_CLEAR_FRAME, FIXTURE_CFG);
@@ -76,12 +79,16 @@ fn frames_match_independent_fixtures() {
 // fixture so a wrong mask cannot hide behind a matching checksum.
 #[test]
 fn payload_semantics_hold() {
-    // CFG-CFG: clear+load all sections, save nothing, all devices.
+    // CFG-CFG: clear+load all sections, save nothing, all devices. The
+    // load in the SAME message is what makes the reset unnecessary: a
+    // clear alone only replaces the Permanent Configuration (M8 spec
+    // §3.1), the load copies it into the Current Configuration.
     assert_eq!(&FACTORY_CLEAR_FRAME[6..10], &[0xFF, 0xFF, 0x00, 0x00]);
     assert_eq!(&FACTORY_CLEAR_FRAME[10..14], &[0x00; 4]);
     assert_eq!(&FACTORY_CLEAR_FRAME[14..18], &[0xFF, 0xFF, 0x00, 0x00]);
     assert_eq!(FACTORY_CLEAR_FRAME[18], 0x17);
-    // CFG-RST: cold-start mask, controlled software reset.
+    // CFG-RST (diagnostic only): cold-start mask, controlled software
+    // reset.
     assert_eq!(&COLD_START_FRAME[6..8], &[0xFF, 0xFF]);
     assert_eq!(COLD_START_FRAME[8], 0x01);
     // CFG-PMS: powerSetupValue 0x00 = full power.
@@ -113,10 +120,73 @@ fn no_tx_before_lock() {
     );
 }
 
+// ---- The boot path never contains a reset ----
+
+// Drive a whole boot sequence with generous time and a steady sentence
+// flow, acknowledging every step. All three ACK frames are fed after
+// each send: only the matching class/id is ever consumed, so this also
+// exercises the non-matching path. Returns the steps in order.
+fn drive_boot_sequence() -> Vec<(Step, &'static [u8])> {
+    let mut m = UbxInit::new();
+    let mut seen = Vec::new();
+    for i in 0..600u64 {
+        let t = i * 100;
+        let out = poll(&mut m, true, i as u32 + 1, t);
+        for send in sends(&out) {
+            seen.push(send);
+            on_bytes(&mut m, &ACK_CFG, t + 10);
+            on_bytes(&mut m, &ACK_PMS, t + 20);
+            on_bytes(&mut m, &ACK_ANT, t + 30);
+        }
+    }
+    seen
+}
+
+// The every-boot sequence is cfg → pms → ant, and nothing else — in
+// particular no UBX-CFG-RST. A cold start wipes ephemeris, almanac and
+// last position, so forcing one on every boot costs a fresh sky
+// download (tens of minutes at a marginal window) where a warm or hot
+// start needs seconds (#324). Config hygiene does not need it: the
+// CFG-CFG clear+load applies the defaults to the Current Configuration
+// directly (M8 spec §3.1), and CFG-PMS/CFG-ANT take effect immediately
+// like every UBX-CFG message.
+#[test]
+fn boot_path_is_cfg_pms_ant_without_reset() {
+    let seen = drive_boot_sequence();
+    assert_eq!(
+        seen,
+        vec![
+            (Step::FactoryClear, &FACTORY_CLEAR_FRAME[..]),
+            (Step::FullPower, &FULL_POWER_FRAME[..]),
+            (Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..]),
+        ]
+    );
+}
+
+// The same run, asserted on the bytes rather than the step names: no
+// frame the sequencer emits at boot is the cold-start frame, and none
+// carries the UBX-CFG-RST class/id (0x06 0x04) under any other guise.
+#[test]
+fn cold_start_frame_never_reaches_the_wire_at_boot() {
+    for (step, frame) in drive_boot_sequence() {
+        assert_ne!(
+            frame,
+            &COLD_START_FRAME[..],
+            "{} must not send the cold-start frame",
+            step.as_str()
+        );
+        assert_ne!(
+            &frame[2..4],
+            &[0x06, 0x04],
+            "{} must not send UBX-CFG-RST",
+            step.as_str()
+        );
+    }
+}
+
 // ---- The full happy path ----
 
-// lock → CFG-CFG → ACK → (settle + fresh sentence) → CFG-RST →
-// (settle + fresh sentence, no ACK wait for RST) → CFG-PMS → ACK →
+// lock → CFG-CFG → ACK → (settle + fresh sentence) → CFG-PMS → ACK →
 // (settle + fresh sentence) → CFG-ANT → ACK → done, and one-shot:
 // silent forever after.
 #[test]
@@ -141,23 +211,10 @@ fn full_happy_path() {
     // Past the settle: first poll snapshots the counter, no send yet.
     let out = poll(&mut m, true, 6, 5_100 + POST_CFG_SETTLE_MS);
     assert_eq!(out.len(), 0, "snapshot poll must not send");
-    // A fresh sentence after the snapshot releases CFG-RST.
+    // A fresh sentence after the snapshot releases CFG-PMS.
     let out = poll(&mut m, true, 7, 5_200 + POST_CFG_SETTLE_MS);
-    assert_eq!(sends(&out), vec![(Step::ColdStart, &COLD_START_FRAME[..])]);
-    let rst_t = 5_200 + POST_CFG_SETTLE_MS;
-
-    // RST has no ACK wait: an ACK for (06,04) arriving now is ignored.
-    let ack_rst: [u8; 10] = [0xB5, 0x62, 0x05, 0x01, 0x02, 0x00, 0x06, 0x04, 0x12, 0x3B];
-    let out = on_bytes(&mut m, &ack_rst, rst_t + 100);
-    assert_eq!(out.len(), 0, "no ACK handling for CFG-RST");
-
-    // Reboot: settle passes, snapshot, then the first post-reboot
-    // sentence releases CFG-PMS.
-    let out = poll(&mut m, true, 7, rst_t + POST_RST_SETTLE_MS);
-    assert_eq!(out.len(), 0, "snapshot poll must not send");
-    let out = poll(&mut m, true, 8, rst_t + POST_RST_SETTLE_MS + 1_000);
     assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
-    let pms_t = rst_t + POST_RST_SETTLE_MS + 1_000;
+    let pms_t = 5_200 + POST_CFG_SETTLE_MS;
 
     // Module ACKs CFG-PMS.
     let out = on_bytes(&mut m, &ACK_PMS, pms_t + 100);
@@ -192,7 +249,7 @@ fn full_happy_path() {
 // ---- ACK outcomes ----
 
 // A NAK is reported and the sequence continues (reference behaviour:
-// warn and move on) — CFG-RST still goes out after a NAK'd CFG-CFG.
+// warn and move on) — CFG-PMS still goes out after a NAK'd CFG-CFG.
 #[test]
 fn nak_reports_and_continues() {
     let mut m = UbxInit::new();
@@ -203,11 +260,14 @@ fn nak_reports_and_continues() {
 
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     let out = poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    assert_eq!(sends(&out), vec![(Step::ColdStart, &COLD_START_FRAME[..])]);
+    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
 }
 
 // An ACK that never arrives times out, is reported, and the sequence
-// continues.
+// continues to the next step. The CFG-CFG ACK is the one most likely to
+// be lost: clearing the ioPort sub-section resets the module's I/O
+// system, and the spec warns that undefined data may be output for a
+// short period afterwards (M8 spec §UBX-CFG-CFG, clearMask/ioPort).
 #[test]
 fn ack_timeout_reports_and_continues() {
     let mut m = UbxInit::new();
@@ -216,6 +276,11 @@ fn ack_timeout_reports_and_continues() {
     assert_eq!(out.len(), 0, "deadline must run its full length");
     let out = poll(&mut m, true, 3, 1_000 + CFG_ACK_TIMEOUT_MS);
     assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Timeout)]);
+    let timeout_t = 1_000 + CFG_ACK_TIMEOUT_MS;
+
+    poll(&mut m, true, 4, timeout_t + POST_CFG_SETTLE_MS);
+    let out = poll(&mut m, true, 5, timeout_t + 100 + POST_CFG_SETTLE_MS);
+    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
 }
 
 // A NAK'd CFG-PMS does not end the sequence: CFG-ANT still follows
@@ -227,16 +292,13 @@ fn pms_nak_continues_to_ant() {
     on_bytes(&mut m, &ACK_CFG, 1_100);
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     let out = poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
-    assert_eq!(sends(&out).len(), 1);
-    poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
-    poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
-    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    let pms_t = 1_200 + POST_CFG_SETTLE_MS;
+    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
     let out = on_bytes(&mut m, &NAK_PMS, pms_t + 100);
     assert_eq!(acks(&out), vec![(Step::FullPower, AckOutcome::Nak)]);
 
-    poll(&mut m, true, 7, pms_t + 100 + POST_PMS_SETTLE_MS);
-    let out = poll(&mut m, true, 8, pms_t + 200 + POST_PMS_SETTLE_MS);
+    poll(&mut m, true, 6, pms_t + 100 + POST_PMS_SETTLE_MS);
+    let out = poll(&mut m, true, 7, pms_t + 200 + POST_PMS_SETTLE_MS);
     assert_eq!(
         sends(&out),
         vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
@@ -252,13 +314,10 @@ fn ant_nak_ends_sequence() {
     on_bytes(&mut m, &ACK_CFG, 1_100);
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
-    poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
-    poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
-    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    let pms_t = 1_200 + POST_CFG_SETTLE_MS;
     on_bytes(&mut m, &ACK_PMS, pms_t + 100);
-    poll(&mut m, true, 7, pms_t + 100 + POST_PMS_SETTLE_MS);
-    let out = poll(&mut m, true, 8, pms_t + 200 + POST_PMS_SETTLE_MS);
+    poll(&mut m, true, 6, pms_t + 100 + POST_PMS_SETTLE_MS);
+    let out = poll(&mut m, true, 7, pms_t + 200 + POST_PMS_SETTLE_MS);
     let ant_t = pms_t + 200 + POST_PMS_SETTLE_MS;
     assert_eq!(sends(&out).len(), 1);
     let out = on_bytes(&mut m, &NAK_ANT, ant_t + 100);
@@ -267,48 +326,51 @@ fn ant_nak_ends_sequence() {
     assert_eq!(poll(&mut m, true, 51, ant_t + 61_000).len(), 0);
 }
 
-// ---- Post-RST gate: the reboot race ----
+// ---- Post-CFG gate: the I/O-reset race ----
 
-// CFG-PMS must not fire into a rebooting module: neither time alone
-// (settle passed, no fresh sentence) nor sentences alone (fresh
-// sentences before the settle — the pre-reset burst still in flight)
-// release it, and a lost lock (starve re-sweep at a fallen-back baud)
-// holds it even with the counter moving.
+// CFG-PMS must not fire into a module whose I/O system is still coming
+// back: clearing the ioPort sub-section resets it, and the load may put
+// the port back on the default baud (M8 spec §3.1 and §UBX-CFG-CFG,
+// clearMask/ioPort — "undefined data may be output for a short period
+// of time"). Neither time alone (settle passed, no fresh sentence) nor
+// sentences alone (fresh sentences before the settle — the pre-clear
+// burst still in flight) release the step, and a lost lock (the
+// presence machine's starve re-sweep after a baud fallback) holds it
+// even with the counter moving.
 #[test]
 fn pms_gate_needs_settle_and_fresh_sentence_and_lock() {
     let mut m = UbxInit::new();
     poll(&mut m, true, 3, 1_000);
     on_bytes(&mut m, &ACK_CFG, 1_100);
-    poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
-    poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
+    let gate_t = 1_100 + POST_CFG_SETTLE_MS;
 
-    // Sentences flowing BEFORE the settle (pre-reset burst): no send.
-    let out = poll(&mut m, true, 9, rst_t + 500);
+    // Sentences flowing BEFORE the settle (pre-clear burst): no send.
+    let out = poll(&mut m, true, 9, 1_600);
     assert_eq!(out.len(), 0, "pre-settle sentences must not release PMS");
 
-    // Settle passed, snapshot taken — counter frozen (module silent,
-    // rebooting): no send, however often polled.
-    poll(&mut m, true, 9, rst_t + POST_RST_SETTLE_MS);
+    // Settle passed, snapshot taken — counter frozen (module silent or
+    // babbling at a baud we no longer follow): no send, however often
+    // polled.
+    poll(&mut m, true, 9, gate_t);
     for i in 1..10u64 {
-        let out = poll(&mut m, true, 9, rst_t + POST_RST_SETTLE_MS + i * 1_000);
+        let out = poll(&mut m, true, 9, gate_t + i * 1_000);
         assert_eq!(out.len(), 0, "frozen counter must not release PMS");
     }
 
-    // Counter moves but the lock is gone (starve re-sweep in progress):
-    // still held.
-    let out = poll(&mut m, false, 10, rst_t + POST_RST_SETTLE_MS + 11_000);
+    // Counter moves but the lock is gone (starve re-sweep in progress
+    // after a baud fallback): still held.
+    let out = poll(&mut m, false, 10, gate_t + 11_000);
     assert_eq!(out.len(), 0, "unlocked line must not release PMS");
 
     // Locked again with a fresh sentence: released.
-    let out = poll(&mut m, true, 11, rst_t + POST_RST_SETTLE_MS + 12_000);
+    let out = poll(&mut m, true, 11, gate_t + 12_000);
     assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
 }
 
 // ---- Post-PMS gate: same rules for CFG-ANT ----
 
 // CFG-ANT obeys the same settle + fresh-sentence + lock gate as the
-// steps before it: neither time alone nor a frozen counter releases
+// step before it: neither time alone nor a frozen counter releases
 // it, and a lost lock holds it even with the counter moving.
 #[test]
 fn ant_gate_needs_settle_and_fresh_sentence_and_lock() {
@@ -317,34 +379,27 @@ fn ant_gate_needs_settle_and_fresh_sentence_and_lock() {
     on_bytes(&mut m, &ACK_CFG, 1_100);
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    let rst_t = 1_200 + POST_CFG_SETTLE_MS;
-    poll(&mut m, true, 5, rst_t + POST_RST_SETTLE_MS);
-    poll(&mut m, true, 6, rst_t + POST_RST_SETTLE_MS + 500);
-    let pms_t = rst_t + POST_RST_SETTLE_MS + 500;
+    let pms_t = 1_200 + POST_CFG_SETTLE_MS;
     on_bytes(&mut m, &ACK_PMS, pms_t + 100);
+    let gate_t = pms_t + 100 + POST_PMS_SETTLE_MS;
 
     // Sentences flowing BEFORE the settle: no send.
     let out = poll(&mut m, true, 9, pms_t + 500);
     assert_eq!(out.len(), 0, "pre-settle sentences must not release ANT");
 
     // Settle passed, snapshot taken — counter frozen: no send.
-    poll(&mut m, true, 9, pms_t + 100 + POST_PMS_SETTLE_MS);
+    poll(&mut m, true, 9, gate_t);
     for i in 1..10u64 {
-        let out = poll(
-            &mut m,
-            true,
-            9,
-            pms_t + 100 + POST_PMS_SETTLE_MS + i * 1_000,
-        );
+        let out = poll(&mut m, true, 9, gate_t + i * 1_000);
         assert_eq!(out.len(), 0, "frozen counter must not release ANT");
     }
 
     // Counter moves but the lock is gone: still held.
-    let out = poll(&mut m, false, 10, pms_t + 100 + POST_PMS_SETTLE_MS + 11_000);
+    let out = poll(&mut m, false, 10, gate_t + 11_000);
     assert_eq!(out.len(), 0, "unlocked line must not release ANT");
 
     // Locked again with a fresh sentence: released.
-    let out = poll(&mut m, true, 11, pms_t + 100 + POST_PMS_SETTLE_MS + 12_000);
+    let out = poll(&mut m, true, 11, gate_t + 12_000);
     assert_eq!(
         sends(&out),
         vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
@@ -405,8 +460,8 @@ fn constants_hold_their_justifications() {
     assert!(MAX_FRAME >= COLD_START_FRAME.len());
     assert!(MAX_FRAME >= FULL_POWER_FRAME.len());
     assert!(MAX_FRAME >= ANTENNA_SUPPLY_FRAME.len());
-    assert!(
-        POST_RST_SETTLE_MS >= POST_CFG_SETTLE_MS,
-        "a full reboot outlasts a GNSS restart"
-    );
+    // Both settles hold at least the reference's 1 s after a message
+    // that restarts a receiver subsystem (`GPS.cpp:711-713`).
+    assert!(POST_CFG_SETTLE_MS >= 1_000);
+    assert!(POST_PMS_SETTLE_MS >= 1_000);
 }

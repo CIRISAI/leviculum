@@ -33,16 +33,20 @@
 //!
 //! One-shot UBX module init (#324): after the first baud lock the task
 //! walks the [`leviculum_gnss_init::UbxInit`] sequence — factory clear
-//! (UBX-CFG-CFG), cold start (UBX-CFG-RST), full power (UBX-CFG-PMS) —
-//! so a persisted Meshtastic-era module configuration cannot survive
-//! into our runtime, and acquisition never depends on a field module's
-//! factory defaults. The byte sequences, gates and ACK discipline are
-//! derived from the Meshtastic reference (`meshtastic/src/gps/ubx.h`,
-//! `GPS.cpp`) and live host-tested in the pure crate; this task only
-//! writes the frames and logs `[GNSS_INIT]` lines. After the CFG-RST
-//! reboot the module may fall back to its default baud — the presence
-//! machine's sentence-starvation re-sweep recovers the line, no
-//! special-casing here. The rest of the Meshtastic chain
+//! (UBX-CFG-CFG), full power (UBX-CFG-PMS), antenna supply
+//! (UBX-CFG-ANT) — so a persisted Meshtastic-era module configuration
+//! cannot survive into our runtime, and acquisition never depends on a
+//! field module's factory defaults. The byte sequences, gates and ACK
+//! discipline are derived from the Meshtastic reference
+//! (`meshtastic/src/gps/ubx.h`, `GPS.cpp`) and live host-tested in the
+//! pure crate; this task only writes the frames and logs `[GNSS_INIT]`
+//! lines. The sequence deliberately contains no reset: a forced cold
+//! start would wipe the module's assistance data on every boot, and
+//! nothing in the three messages needs a restart to take effect (the
+//! crate docs carry the spec citations). The clear still resets the
+//! module's I/O system, after which it may fall back to its default
+//! baud — the presence machine's sentence-starvation re-sweep recovers
+//! the line, no special-casing here. The rest of the Meshtastic chain
 //! (`_message_NAVX5` tuning, rate and constellation config,
 //! `ubx.h:38-321`) stays deliberately unsent.
 //!

@@ -1,5 +1,5 @@
-//! One-shot u-blox M8 UBX boot init: factory clear, cold start, full
-//! power (Codeberg #324).
+//! One-shot u-blox M8 UBX boot init: factory clear, full power,
+//! antenna supply (Codeberg #324).
 //!
 //! The WisMesh Pocket V2's ZOE-M8Q ran Meshtastic firmware before it ran
 //! ours, and u-blox modules persist configuration in battery-backed RAM
@@ -9,27 +9,27 @@
 //! way. This crate is the wake-up call, kept to the smallest honest set:
 //!
 //! 1. **UBX-CFG-CFG** (`clearMask`+`loadMask` all sections): revert the
-//!    persisted configuration to factory defaults. This — not CFG-RST —
-//!    is the message that forgets saved config: CFG-RST's `navBbrMask`
-//!    bits cover only the GNSS *data* sections (ephemeris, almanac,
-//!    position, time; M8 protocol spec §UBX-CFG-RST), so a config saved
-//!    via CFG-CFG (which Meshtastic does on every boot,
-//!    `meshtastic/src/gps/GPS.cpp:754-756` with `_message_SAVE`,
-//!    `ubx.h:323-328`) would survive any cold start.
-//! 2. **UBX-CFG-RST** (`navBbrMask=0xFFFF`, cold start; controlled
-//!    software reset): wipe the GNSS data sections and reboot the module
-//!    so it comes up entirely from the now-default configuration. The
-//!    full clear also wipes useful assistance data — ephemeris, almanac,
-//!    last position — so the next fix is a true cold start (~30 s TTFF
-//!    under open sky instead of seconds). That cost is accepted: this
-//!    boot-time init must prove the module can acquire from nothing.
-//! 3. **UBX-CFG-PMS** (`powerSetupValue=0x00`, full power): belt and
+//!    persisted configuration to factory defaults AND apply them to the
+//!    running configuration. This — not CFG-RST — is the message that
+//!    forgets saved config: CFG-RST's `navBbrMask` bits cover only the
+//!    GNSS *data* sections (ephemeris, almanac, position, time; M8
+//!    protocol spec §UBX-CFG-RST), so a config saved via CFG-CFG (which
+//!    Meshtastic does on every boot, `meshtastic/src/gps/GPS.cpp:754-756`
+//!    with `_message_SAVE`, `ubx.h:323-328`) would survive any cold
+//!    start. The `loadMask` half is what makes the reset unnecessary:
+//!    "This only replaces the Permanent Configuration, not the Current
+//!    Configuration. To make the u-blox receiver operate with the
+//!    Default Configuration which was restored to the Permanent
+//!    Configuration, a UBX-CFG-CFG/load command **must be sent or** the
+//!    u-blox receiver must be reset" (M8 protocol spec §3.1, emphasis
+//!    ours; execution order within one message is clear, save, load).
+//! 2. **UBX-CFG-PMS** (`powerSetupValue=0x00`, full power): belt and
 //!    braces against any power-save mode surviving the clear. The M8
 //!    factory default is full power, so this is a no-op on a healthy
 //!    module; Meshtastic drives the same message with 0x03
 //!    (aggressive 1 Hz, `ubx.h:315-321`, sent at `GPS.cpp:741`) — we
 //!    send the inverse.
-//! 4. **UBX-CFG-ANT** (`flags=svcs` only, `pins` untouched): drive the
+//! 3. **UBX-CFG-ANT** (`flags=svcs` only, `pins` untouched): drive the
 //!    antenna supply control signal, with every automatic power-down
 //!    path off. The wake depends on the antenna being powered, so it
 //!    configures that explicitly instead of trusting whatever the clear
@@ -51,20 +51,41 @@
 //!    `meshtastic/src/gps/`); the M8 spec (UBX-13003221 R28,
 //!    §UBX-CFG-ANT and appendix C.1) is the sole source here.
 //!
-//! Nothing else — no NAVX5 tuning, no rate changes, no constellation
-//! config. Frame bytes are computed, never hardcoded: [`ubx_frame`] is a
+//! Nothing else — and in particular **no reset**. The wake used to fire
+//! a UBX-CFG-RST cold start (`navBbrMask=0xFFFF`) between steps 1 and 2,
+//! deliberately, as a diagnostic: it proved the module could acquire
+//! from nothing. It also wiped ephemeris, almanac and last position on
+//! *every* boot, so every boot paid a fresh sky download — tens of
+//! minutes at a half-sky window where a warm or hot start needs seconds.
+//! A tracker reboots far more often than it needs that proof, so the
+//! cold start left the boot path (#324); [`COLD_START_FRAME`] stays in
+//! the crate as a diagnostic frame a future control-envelope command
+//! could send on demand (noted for #235).
+//!
+//! Nothing in the remaining three messages needs a reset to take effect.
+//! The M8 spec is explicit for the general case — "The u-blox receiver
+//! will change its Current Configuration immediately after receiving the
+//! configuration message" (§3.1) — and step 1's `loadMask` covers the
+//! one documented exception, the clear-only case quoted above. So not
+//! even the mildest documented restart (a hot start,
+//! `navBbrMask=0x0000`) is warranted; a restart we cannot justify from
+//! the spec is a restart that costs a fix for nothing.
+//!
+//! Frame bytes are computed, never hardcoded: `ubx_frame` is a
 //! `const fn` implementing the UBX framing (`B5 62`, class/id,
 //! little-endian length, 8-bit Fletcher checksum; M8 protocol spec §UBX
 //! frame structure), evaluated at compile time; the tests assert the
 //! resulting bytes against an independently computed fixture.
 //!
 //! ACK discipline follows the Meshtastic reference (it waits for ACKs,
-//! `SEND_UBX_PACKET`/`getACK`, `ubx.h:3-10`): CFG-CFG and CFG-PMS are
-//! ACK-checked, and the outcome — ok, nak or timeout — is reported for
-//! the log, but never retried and never blocking (the reference warns
-//! and continues too). CFG-RST is fire-and-forget by specification: the
-//! module resets immediately and the spec says not to expect an
-//! acknowledgement (M8 protocol spec §UBX-CFG-RST).
+//! `SEND_UBX_PACKET`/`getACK`, `ubx.h:3-10`): every step is ACK-checked,
+//! and the outcome — ok, nak or timeout — is reported for the log, but
+//! never retried and never blocking (the reference warns and continues
+//! too). A timeout is expected often enough on the first step to matter:
+//! clearing the `ioPort` sub-section "results in an IO system reset.
+//! Because of this undefined data may be output for a short period of
+//! time after receiving the message" (M8 protocol spec §UBX-CFG-CFG,
+//! `clearMask`), which can swallow the acknowledgement.
 //!
 //! Like `leviculum-gnss-presence` this is the pure, host-tested part.
 //! The firmware's GNSS task feeds it lock state, the clean-sentence
@@ -73,7 +94,8 @@
 //! currently locked baud — a UBX frame sent at the wrong baud is garbage
 //! into the module — and the steps after a disruptive one additionally
 //! require a *fresh* clean sentence after a settle period, so a frame is
-//! never fired into a rebooting or reconfiguring module.
+//! never fired into a module that is still reconfiguring or whose I/O
+//! system has just been reset under it.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -140,6 +162,8 @@ const FACTORY_CLEAR_PAYLOAD: [u8; 13] = [
 /// (controlled software reset: full receiver restart including the
 /// I/O subsystem, so the module reboots cleanly onto its default
 /// port configuration).
+///
+/// Diagnostic only — see [`COLD_START_FRAME`].
 const COLD_START_PAYLOAD: [u8; 4] = [0xFF, 0xFF, 0x01, 0x00];
 
 /// UBX-CFG-PMS payload: `version=0`, `powerSetupValue=0x00` (full
@@ -156,7 +180,23 @@ const ANTENNA_SUPPLY_PAYLOAD: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
 /// UBX-CFG-CFG frame reverting the persisted configuration to defaults.
 pub const FACTORY_CLEAR_FRAME: [u8; 21] = ubx_frame(0x06, 0x09, &FACTORY_CLEAR_PAYLOAD);
 
-/// UBX-CFG-RST cold-start frame.
+/// UBX-CFG-RST cold-start frame — **diagnostic, not on the boot path**.
+///
+/// Sending this wipes ephemeris, almanac and last position and reboots
+/// the module, so the next fix is a true cold start: minutes of sky
+/// download instead of the seconds a warm or hot start takes. That is
+/// the point of it — it proves a module can acquire from nothing, which
+/// is exactly what #324 needed to establish once. It is exactly why it
+/// must not run on every boot of a tracker that reboots often.
+///
+/// The frame stays here, tested, so the diagnostic is a wire-correct
+/// tool one command away rather than something to re-derive under
+/// pressure. Nothing in this crate sends it; [`UbxInit`] never emits it
+/// (asserted in the tests). A caller that does send it owns the
+/// aftermath: the module reboots onto its default port configuration,
+/// so the line must be re-locked (the presence machine's starve
+/// re-sweep) before anything else is written. Wiring it to an on-demand
+/// control-envelope command is a possibility for #235.
 pub const COLD_START_FRAME: [u8; 12] = ubx_frame(0x06, 0x04, &COLD_START_PAYLOAD);
 
 /// UBX-CFG-PMS full-power frame.
@@ -180,18 +220,16 @@ pub const PMS_ACK_TIMEOUT_MS: u64 = 1_500;
 /// [`PMS_ACK_TIMEOUT_MS`].
 pub const ANT_ACK_TIMEOUT_MS: u64 = 1_500;
 
-/// Settle after CFG-CFG before the next TX, in ms. The reference holds
-/// 1 s after a config message that restarts the GNSS subsystem
+/// Settle after CFG-CFG before CFG-PMS, in ms. The reference holds 1 s
+/// after a config message that restarts the GNSS subsystem
 /// (`GPS.cpp:711-713`). On top of the settle the sequencer demands a
-/// fresh clean sentence, proving the module is alive at our baud.
+/// fresh clean sentence, proving the module is alive at our baud — which
+/// is the gate that really matters here, because clearing the `ioPort`
+/// sub-section resets the I/O system and the load may put the port back
+/// on its default baud (M8 protocol spec §UBX-CFG-CFG, `clearMask`).
+/// Recovering from that is the presence machine's starve re-sweep, not
+/// something this settle tries to model.
 pub const POST_CFG_SETTLE_MS: u64 = 1_000;
-
-/// Settle after CFG-RST before CFG-PMS, in ms. A full reboot outlasts a
-/// GNSS restart, so twice the reference's reconfiguration hold; the
-/// fresh-sentence gate then carries the real weight (after a reset onto
-/// the default baud the presence machine may need a starve re-sweep
-/// first, which this settle does not try to model).
-pub const POST_RST_SETTLE_MS: u64 = 2_000;
 
 /// Settle after CFG-PMS before CFG-ANT, in ms. CFG-PMS switches the
 /// power regime without a reboot, so the CFG-side hold suffices (the
@@ -201,13 +239,13 @@ pub const POST_RST_SETTLE_MS: u64 = 2_000;
 pub const POST_PMS_SETTLE_MS: u64 = 1_000;
 
 /// One init step. `as_str` is the stable `[GNSS_INIT] step=<...>` log
-/// token.
+/// token. There is no variant for the cold start: [`Step`] is the boot
+/// path, and the cold start is not on it ([`COLD_START_FRAME`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// UBX-CFG-CFG: revert persisted configuration to defaults.
+    /// UBX-CFG-CFG: revert persisted configuration to defaults and load
+    /// them into the running configuration.
     FactoryClear,
-    /// UBX-CFG-RST: cold start (clear GNSS data, reboot).
-    ColdStart,
     /// UBX-CFG-PMS: force full-power operation.
     FullPower,
     /// UBX-CFG-ANT: drive the antenna supply, auto-power-down off.
@@ -218,7 +256,6 @@ impl Step {
     pub fn as_str(self) -> &'static str {
         match self {
             Step::FactoryClear => "cfg",
-            Step::ColdStart => "rst",
             Step::FullPower => "pms",
             Step::AntennaSupply => "ant",
         }
@@ -230,7 +267,6 @@ impl Step {
     pub fn frame(self) -> &'static [u8] {
         match self {
             Step::FactoryClear => &FACTORY_CLEAR_FRAME,
-            Step::ColdStart => &COLD_START_FRAME,
             Step::FullPower => &FULL_POWER_FRAME,
             Step::AntennaSupply => &ANTENNA_SUPPLY_FRAME,
         }
@@ -240,7 +276,6 @@ impl Step {
     fn class_id(self) -> (u8, u8) {
         match self {
             Step::FactoryClear => (0x06, 0x09),
-            Step::ColdStart => (0x06, 0x04),
             Step::FullPower => (0x06, 0x86),
             Step::AntennaSupply => (0x06, 0x13),
         }
@@ -454,14 +489,6 @@ impl UbxInit {
                 step,
                 deadline_ms: now_ms + CFG_ACK_TIMEOUT_MS,
             },
-            // CFG-RST is never acknowledged (the module resets
-            // immediately; the spec says not to expect one), so it goes
-            // straight to the gate guarding CFG-PMS.
-            Step::ColdStart => State::Gate {
-                step: Step::FullPower,
-                earliest_ms: now_ms + POST_RST_SETTLE_MS,
-                snap: None,
-            },
             Step::FullPower => State::AwaitAck {
                 step,
                 deadline_ms: now_ms + PMS_ACK_TIMEOUT_MS,
@@ -478,7 +505,7 @@ impl UbxInit {
     fn advance_past_ack(&mut self, step: Step, now_ms: u64) {
         self.state = match step {
             Step::FactoryClear => State::Gate {
-                step: Step::ColdStart,
+                step: Step::FullPower,
                 earliest_ms: now_ms + POST_CFG_SETTLE_MS,
                 snap: None,
             },
@@ -487,7 +514,7 @@ impl UbxInit {
                 earliest_ms: now_ms + POST_PMS_SETTLE_MS,
                 snap: None,
             },
-            _ => State::Done,
+            Step::AntennaSupply => State::Done,
         };
     }
 }
