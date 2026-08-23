@@ -131,6 +131,7 @@ pub mod resource;
 pub mod rnode;
 pub mod storage_types;
 pub mod sx126x;
+pub mod telemetry_target_store;
 #[cfg(all(test, feature = "tracing"))]
 pub(crate) mod test_log_capture;
 #[cfg(test)]

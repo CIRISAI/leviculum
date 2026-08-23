@@ -13,10 +13,13 @@ MEMORY
     /* 0xF4000. The bootloader's own USER_FLASH_END is 0xEA000: it declines  */
     /* every block at or above that address, so 0xEA000-0xF4000 survives a   */
     /* UF2 flash untouched (docs/src/concepts/lnode-flashing.md:139-167).    */
-    /* Both persistence pages live in that band and therefore survive a      */
+    /* All persistence pages live in that band and therefore survive a       */
     /* firmware update:                                                      */
     /*   0xEC000  identity          (BoardConfig::identity_flash_page)       */
     /*   0xEB000  radio config      (BoardConfig::radio_config_flash_page)   */
+    /*   0xEA000  telemetry target  (BoardConfig::telemetry_flash_page, #236)*/
+    /* 0xEA000 is USER_FLASH_END itself: the bootloader declines every block  */
+    /* AT or above it, so the page is the lowest one still safe from a UF2.  */
     /* Safe app space = the bootloader's window, 0xEA000 - 0x27000 =         */
     /* 0xC3000 (780K). Was 0xC5000 (788K), which promised 8K the bootloader  */
     /* would have refused to write and reached into both pages above.        */

@@ -82,9 +82,9 @@ pub const TYPE_WALL_TIME: u8 = 0x03;
 /// [`TYPE_CAPABILITY_REPORT`], which replaces guess-by-timeout probing.
 pub const TYPE_CAPABILITIES: u8 = 0x04;
 /// Telemetry target (Codeberg #236): destination hash, optional public
-/// key, profile id. The wire format is allocated and encoded/decoded here;
-/// the firmware consumer lands with #236 and until then the firmware
-/// refuses this type by name.
+/// key, profile id. `profile == TELEMETRY_PROFILE_OFF` clears the target,
+/// which is how telemetry is switched off — the configured target is the
+/// switch.
 pub const TYPE_TELEMETRY_TARGET: u8 = 0x05;
 
 // ---------------------------------------------------------------------------
@@ -255,10 +255,37 @@ pub fn decode_capability_report_payload(payload: &[u8]) -> Option<(u8, &[u8])> {
 // Telemetry target (Codeberg #236 — wire format allocated here)
 // ---------------------------------------------------------------------------
 
+/// Telemetry-target profile id that **clears** the target instead of
+/// setting one (Codeberg #236).
+///
+/// The configured target is the on-switch, so "off" is the absence of a
+/// target and needs an encoding of its own. It rides in the profile slot
+/// rather than in a magic destination hash: the payload already carries a
+/// field whose whole job is to say which cadence applies, and "none"
+/// belongs in that field's vocabulary. The rest of the payload is still
+/// parsed and must still be well-formed — a clear frame is not a licence
+/// to send a short one — and [`decode_telemetry_target_payload`] returns
+/// it like any other, so the *reader* decides what an absent profile
+/// means rather than the framing.
+pub const TELEMETRY_PROFILE_OFF: u8 = 0x00;
 /// Telemetry-target profile id: movement-driven reporting (see #236).
 pub const TELEMETRY_PROFILE_TRACKER: u8 = 0x01;
 /// Telemetry-target profile id: slow stationary heartbeat (see #236).
 pub const TELEMETRY_PROFILE_STATION: u8 = 0x02;
+
+/// Encode a complete telemetry-target frame that clears the target.
+///
+/// The destination hash is zeroed and no key is carried: with
+/// [`TELEMETRY_PROFILE_OFF`] in the profile slot neither is read, and
+/// sending the old target back to say "forget it" would put a
+/// destination on the wire for no reason.
+pub fn encode_telemetry_clear() -> Vec<u8> {
+    encode_telemetry_target(&TelemetryTargetWire {
+        profile: TELEMETRY_PROFILE_OFF,
+        dest_hash: [0u8; TRUNCATED_HASHBYTES],
+        public_key: None,
+    })
+}
 
 /// The telemetry-target frame payload (Codeberg #236, amended 2026-08-22):
 /// the public key is OPTIONAL and its presence is an explicit flag byte,
@@ -356,6 +383,12 @@ pub enum ControlAction {
     /// Envelope capability query: answer
     /// `encode_capability_report(accepted)`.
     CapabilityQuery,
+    /// Envelope telemetry target (Codeberg #236): set or clear the
+    /// reporting target, persist it, answer
+    /// `encode_ack(TYPE_TELEMETRY_TARGET)`. `profile ==
+    /// TELEMETRY_PROFILE_OFF` is the clear encoding; the destination hash
+    /// and key are then meaningless and the firmware ignores them.
+    TelemetryTarget(TelemetryTargetWire),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -364,9 +397,10 @@ pub enum ControlAction {
 /// Classify one deframed frame from the transport CDC.
 ///
 /// `accepted` is the firmware's accepted-type list (what the capability
-/// report advertises). A type outside it — including
-/// [`TYPE_TELEMETRY_TARGET`] until #236 lands its consumer — is refused
-/// with [`REFUSE_UNKNOWN_TYPE`].
+/// report advertises). A type outside it is refused with
+/// [`REFUSE_UNKNOWN_TYPE`] — which is also how a #236-aware host detects
+/// a pre-#236 board: [`TYPE_TELEMETRY_TARGET`] comes back refused by
+/// name instead of acked.
 pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
     if data == RADIO_RESET_FRAME {
         return ControlAction::LegacyReset;
@@ -420,6 +454,10 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_TELEMETRY_TARGET => match decode_telemetry_target_payload(frame.payload) {
+            Some(target) => ControlAction::TelemetryTarget(target),
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -436,6 +474,15 @@ mod tests {
 
     /// The accepted list of the current firmware (both boards).
     const ACCEPTED: &[u8] = &[
+        TYPE_RADIO_CONFIG,
+        TYPE_RESET,
+        TYPE_WALL_TIME,
+        TYPE_CAPABILITIES,
+        TYPE_TELEMETRY_TARGET,
+    ];
+
+    /// A firmware from before #236 landed its telemetry consumer.
+    const ACCEPTED_PRE_236: &[u8] = &[
         TYPE_RADIO_CONFIG,
         TYPE_RESET,
         TYPE_WALL_TIME,
@@ -540,7 +587,9 @@ mod tests {
     }
 
     #[test]
-    fn the_allocated_telemetry_type_is_refused_until_236_lands_its_consumer() {
+    fn a_pre_236_firmware_refuses_the_telemetry_type_by_name() {
+        // How a #236-aware host detects an older board: a named refusal,
+        // not a timeout.
         let target = TelemetryTargetWire {
             profile: TELEMETRY_PROFILE_TRACKER,
             dest_hash: [0x11; TRUNCATED_HASHBYTES],
@@ -548,10 +597,50 @@ mod tests {
         };
         let bytes = encode_telemetry_target(&target);
         assert_eq!(
-            classify_control_frame(&bytes, ACCEPTED),
+            classify_control_frame(&bytes, ACCEPTED_PRE_236),
             ControlAction::Refuse {
                 refused_type: TYPE_TELEMETRY_TARGET,
                 reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn a_telemetry_target_classifies_into_its_action() {
+        let target = TelemetryTargetWire {
+            profile: TELEMETRY_PROFILE_STATION,
+            dest_hash: [0x11; TRUNCATED_HASHBYTES],
+            public_key: None,
+        };
+        assert_eq!(
+            classify_control_frame(&encode_telemetry_target(&target), ACCEPTED),
+            ControlAction::TelemetryTarget(target)
+        );
+    }
+
+    #[test]
+    fn the_clear_frame_carries_the_off_profile_and_no_destination() {
+        let bytes = encode_telemetry_clear();
+        let target = match classify_control_frame(&bytes, ACCEPTED) {
+            ControlAction::TelemetryTarget(t) => t,
+            other => panic!("clear frame classified as {other:?}"),
+        };
+        assert_eq!(target.profile, TELEMETRY_PROFILE_OFF);
+        assert_eq!(target.dest_hash, [0u8; TRUNCATED_HASHBYTES]);
+        assert_eq!(target.public_key, None);
+    }
+
+    #[test]
+    fn a_malformed_telemetry_payload_is_refused_audibly() {
+        // Truncated hash: the payload's own codec refuses it, and the
+        // classifier turns that into a named refusal rather than an ack
+        // for a target it could not read.
+        let bytes = encode_frame(TYPE_TELEMETRY_TARGET, &[TELEMETRY_PROFILE_STATION, 0x01]);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_TELEMETRY_TARGET,
+                reason: REFUSE_MALFORMED
             }
         );
     }

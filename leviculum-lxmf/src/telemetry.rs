@@ -566,3 +566,76 @@ fn parse_power_producer(entry: &[u8]) -> Option<PowerProducer> {
         custom_icon,
     })
 }
+
+// ---------------------------------------------------------------------------
+// The reporting message (Codeberg #236)
+// ---------------------------------------------------------------------------
+
+/// Why a telemetry reading did not become a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportError {
+    /// No sensor had a reading. The producer rule is to send nothing at
+    /// all rather than an empty Telemeter: an empty map is a message a
+    /// receiver stores, dated, under a source that told it nothing.
+    NoReadings,
+    /// The message could not be built or signed.
+    Message(crate::message::MessageError),
+}
+
+impl core::fmt::Display for ReportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoReadings => write!(f, "no sensor had a reading"),
+            Self::Message(e) => write!(f, "telemetry message: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for ReportError {}
+
+/// Build the LXMF message that carries one telemetry reading.
+///
+/// Every rule `docs/src/concepts/telemetry.md` puts on a *reporting*
+/// message is applied here rather than left to each caller, because each
+/// of them is a rule a caller can only get wrong:
+///
+/// * **`content` and `title` are empty.** Not tidiness — Sideband
+///   suppresses the notification for a telemetry-bearing message only when
+///   both are empty, so a single non-empty byte turns the feature into a
+///   notification once per reporting interval, forever. The parameters do
+///   not exist, so they cannot be filled.
+/// * **Delivery is opportunistic.** A direct delivery pays three round
+///   trips of link setup for a payload of roughly fifty bytes; a
+///   propagated one adds a delay that makes a position stale. A port that
+///   needs something else builds its own message and states why.
+/// * **An empty Telemeter is refused.** [`ReportError::NoReadings`].
+///
+/// `timestamp` is the LXMF message timestamp, in unix seconds; the
+/// reading's own `SID_TIME` is inside `telemetry` and is what the receiver
+/// keys on. Both come from the producer's calendar, and the calendar rule
+/// — best honest estimate, never ahead of it — is the producer's to keep.
+pub fn build_report(
+    destination_hash: [u8; 16],
+    source_hash: [u8; 16],
+    source: &leviculum_core::identity::Identity,
+    timestamp: f64,
+    telemetry: &Telemetry,
+) -> Result<crate::message::Message, ReportError> {
+    if telemetry.is_empty() {
+        return Err(ReportError::NoReadings);
+    }
+    crate::message::Message::create(
+        destination_hash,
+        source_hash,
+        source,
+        timestamp,
+        Vec::new(),
+        Vec::new(),
+        alloc::vec![(
+            crate::constants::FIELD_TELEMETRY,
+            telemetry.encode_field_value()
+        )],
+        crate::message::DeliveryMethod::Opportunistic,
+    )
+    .map_err(ReportError::Message)
+}

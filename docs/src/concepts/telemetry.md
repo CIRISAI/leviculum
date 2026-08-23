@@ -247,14 +247,50 @@ configuration changeable at runtime later. The reason is operational: a
 node already running in the field must be adoptable into telemetry, and
 retirable from it, where it hangs.
 
+**One input, and it is the address.** Most users configure nothing
+beyond the target, so the target is the only thing configuration may
+*require*: profiles bundle the cadence and one of them is the default
+(station — a node that does not move is the common case, and a tracker
+misconfigured as a station still proves it is alive on the heartbeat,
+where the converse merely costs airtime). Everything else is an expert
+flag underneath a preset, in the same shape as the radio menu.
+
+### The destination hash alone is enough
+
+A user knows the LXMF address. Requiring the public key alongside it
+would make the common case the hard one, so **the key is optional**
+wherever a target is set: hash-only is expected, and the node resolves
+the key itself over the air — a path request is answered with the
+destination's announce, and the announce carries the identity.
+
+This creates a state that did not exist when a target implied a key: the
+node holds a perfectly valid target it cannot yet encrypt to. That state
+is **stated, not waited out silently**. A reporting node says which of
+three it is in — `off`, `awaiting-key`, `ready` — on the same surface as
+its clock provenance, and a target that never resolves is then a visible
+condition rather than an absence of packets.
+
+The consequence for the previous rule is that the immediate report
+fires **on key arrival**, which for a hash-only target is later than the
+moment the target was set. A frame that carries a key skips that wait,
+which is the whole benefit of carrying one.
+
 ### Setting a target emits one immediate report
 
-When a telemetry target is set or changed, the node sends one report at
-once, regardless of the configured cadence. Success must be observable
-within seconds: a station profile on an hourly heartbeat would otherwise
-leave the operator without any confirmation for up to an hour. The
-immediate report follows every other rule in this document — no fix, no
-position; empty content and title.
+When a telemetry target becomes usable — set or changed with a key, or
+set by hash and then resolved — the node sends one report at once,
+regardless of the configured cadence. Success must be observable within
+seconds: a station profile on an hourly heartbeat would otherwise leave
+the operator without any confirmation for up to an hour. The immediate
+report follows every other rule in this document — no fix, no position;
+empty content and title.
+
+The report is owed until it is actually sent, not until it was first
+due: a node that has the key but no path yet retries rather than
+counting an attempt it could not make. And a report that a target
+cannot receive is a report nobody can verify, so the node announces its
+own delivery destination before sending — the announce is what puts our
+public key in the receiver's hands.
 
 ### Fan-out is the expensive shape; collection is the cheaper one
 
@@ -426,7 +462,10 @@ has not been designed.
    inside the telemetry module?**
 5. **Are `content` and `title` empty on every reporting message?**
 6. **Does the node announce a delivery destination with a name, and does
-   it have a defined answer for a target it has never heard?**
+   it have a defined answer for a target it has never heard?** The
+   defined answer is `awaiting-key` plus a path request, reported on the
+   node's own status surface — not silence, and not a refusal to accept
+   the target.
 7. **If it collects for others: allow-list empty by default, set off
    the radio, four-element rows, inbound stamps clamped on ingest
    once the own calendar is healed (taken as-is before that), no

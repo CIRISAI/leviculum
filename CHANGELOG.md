@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Pocket V2 reports its position and battery over LXMF: an
+  announced `lxmf.delivery` destination, a target set by address alone
+  (the node resolves the key over the air and says `awaiting-key` until
+  it has), tracker and station cadence profiles, and one immediate
+  report when a target becomes usable (#236).
+
 - Every published artifact now carries `THIRD-PARTY-NOTICES`, generated
   from the lockfiles, so the MIT- and BSD-licensed crates linked into
   the binaries travel with their required notices (#288).

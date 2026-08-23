@@ -7,13 +7,19 @@ license.workspace = true
 description = "no_std LXMF messaging protocol for leviculum"
 
 [features]
-default = ["pow"]
+default = ["pow", "compression"]
 # Enables proof-of-work generation and validation. Embedded applications that
 # advertise a zero stamp cost can disable this to minimise code size.
 pow = ["dep:sha2"]
+# Forwards leviculum-core's bz2 content compression, which the resource path
+# uses for large payloads. A send-only producer of small, empty-content
+# messages (the LNode telemetry reporter, Codeberg #236) never reaches that
+# path, and linking a full bzip2 into a 780 KiB firmware image for it is not
+# a trade a firmware makes silently.
+compression = ["leviculum-core/compression"]
 
 [dependencies]
-leviculum-core = { path = "../leviculum-core", default-features = false, features = ["compression"] }
+leviculum-core = { path = "../leviculum-core", default-features = false }
 rand_core.workspace = true
 sha2 = { workspace = true, optional = true }
 rmp.workspace = true

@@ -39,6 +39,21 @@ pub struct GnssFix {
     /// position only mis-renders. Consumers must treat it as "time as of
     /// this snapshot's publication", good to ~1 s (one RMC cadence).
     pub unix_secs: Option<u64>,
+    /// Metres above mean sea level, from the latest GGA with a fix.
+    /// Follows position: kept across non-valid sentences.
+    pub altitude_m: Option<f32>,
+    /// Horizontal dilution of precision, from the latest GGA with a fix
+    /// (Codeberg #236). The only accuracy number standard NMEA carries,
+    /// and therefore the one the telemetry accuracy gate is applied to —
+    /// a position with no HDOP is a position of unknown quality and is
+    /// not reported.
+    pub hdop: Option<f32>,
+    /// Ground speed in metres per second, from the latest valid RMC.
+    pub speed_mps: Option<f32>,
+    /// Course over ground in degrees, from the latest valid RMC. `None`
+    /// while stationary — receivers stop reporting it, and inventing 0°
+    /// would claim due north.
+    pub bearing_deg: Option<f32>,
 }
 
 #[cfg(feature = "gnss")]
@@ -50,6 +65,10 @@ impl GnssFix {
             latitude: None,
             longitude: None,
             unix_secs: None,
+            altitude_m: None,
+            hdop: None,
+            speed_mps: None,
+            bearing_deg: None,
         }
     }
 }

@@ -940,6 +940,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-lxmf"
+version = "0.8.1"
+dependencies = [
+ "leviculum-core",
+ "rand_core 0.6.4",
+ "rmp",
+]
+
+[[package]]
 name = "leviculum-nrf"
 version = "0.4.0"
 dependencies = [
@@ -963,8 +972,10 @@ dependencies = [
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",
+ "leviculum-lxmf",
  "leviculum-screen",
  "leviculum-sd-policy",
+ "leviculum-telemetry-policy",
  "nmea0183",
  "nrf-softdevice",
  "nrf-softdevice-s140",
@@ -984,6 +995,10 @@ dependencies = [
 
 [[package]]
 name = "leviculum-sd-policy"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-telemetry-policy"
 version = "0.1.0"
 
 [[package]]
@@ -1237,6 +1252,15 @@ dependencies = [
  "libc",
  "rustversion",
  "svgbobdoc",
+]
+
+[[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]

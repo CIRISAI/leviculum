@@ -32,6 +32,9 @@ pub mod rng;
 #[cfg(feature = "bsp-t114")]
 pub mod st7789;
 pub mod sx1262;
+/// Telemetry reporting (Codeberg #236): the target lifecycle, the flash
+/// record, and the wiring from this board's sensors into an LXMF report.
+pub mod telemetry;
 pub mod usb;
 
 // Shared SoftwareVbusDetect, fed by the SoftDevice's SoC POWER events

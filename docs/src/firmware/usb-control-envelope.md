@@ -37,7 +37,7 @@ Commands (host → board):
 | 0x02 | RESET            | empty                                          |
 | 0x03 | WALL_TIME        | unix seconds, u64 BE (8 B)                     |
 | 0x04 | CAPABILITIES     | empty (a query)                                |
-| 0x05 | TELEMETRY_TARGET | see below — allocated here, consumed by #236   |
+| 0x05 | TELEMETRY_TARGET | see below — set or clear the telemetry target  |
 
 Responses (board → host):
 
@@ -58,7 +58,7 @@ window decides between the ack and a `value refused` refusal, and an
 accepted seed logs `[TIME_SEED] source=host` and flips the banner's
 `[TIME_SOURCE]` to `host` — the exact mirror of the GNSS path.
 
-### The telemetry-target frame (allocated for #236)
+### The telemetry-target frame (#236)
 
 ```text
 [profile: u8] [dest_hash: 16] [key_present: u8] ([public_key: 64])
@@ -67,12 +67,32 @@ accepted seed logs `[TIME_SEED] source=host` and flips the banner's
 `key_present` is `0x00` or `0x01`, never inferred from the length: per
 the #236 UX decisions (2026-08-22) the public key is optional and
 hash-only is the common case — the user knows the LXMF address, the node
-resolves the key over the air. Profile ids `0x01` (tracker) and `0x02`
-(station) are allocated; their semantics and the default belong to #236.
-The codec ships in core (`TelemetryTargetWire`), the firmware consumer
-does not yet: current firmware answers this type with an
-`unknown type` refusal and leaves it out of its capability report, which
-is precisely how a #236-aware host detects a pre-#236 board.
+resolves the key over the air.
+
+Profile ids:
+
+| id   | name    | meaning                                              |
+|------|---------|------------------------------------------------------|
+| 0x00 | OFF     | **clear the target** — telemetry off                 |
+| 0x01 | TRACKER | movement-driven cadence                              |
+| 0x02 | STATION | slow heartbeat only; the default profile             |
+
+`0x00` is the clear encoding. It rides in the profile slot rather than
+in a magic destination hash because that slot's whole job is to say
+which cadence applies, and "none" belongs in its vocabulary; the rest of
+the payload is still parsed and must still be well formed, so a clear
+frame is not a licence to send a short one. The destination hash and key
+of a clear frame are ignored, and `encode_telemetry_clear` zeroes them
+rather than echoing a target back for no reason.
+
+An id the firmware does not know is **not** a refusal: the destination
+is kept and the default profile's cadence runs, because a newer host's
+cadence preference is not worth losing a configured target over. Which
+profile is actually running is in the board's `[TELEMETRY]` banner.
+
+Firmware from before #236 answers this type with an `unknown type`
+refusal and leaves it out of its capability report, which is precisely
+how a #236-aware host detects a pre-#236 board.
 
 ## Why an envelope frame can never be a packet
 

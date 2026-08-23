@@ -50,13 +50,13 @@ static OUTGOING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel:
 static WALL_TIME_CHANNEL: Channel<CriticalSectionRawMutex, u64, 1> = Channel::new();
 
 /// The control-frame types this firmware accepts — what the capability
-/// report advertises. `TYPE_TELEMETRY_TARGET` is allocated but joins only
-/// with its #236 consumer.
+/// report advertises.
 pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_RADIO_CONFIG,
     envelope::TYPE_RESET,
     envelope::TYPE_WALL_TIME,
     envelope::TYPE_CAPABILITIES,
+    envelope::TYPE_TELEMETRY_TARGET,
 ];
 
 /// nRF52840 FICR base address
@@ -497,6 +497,24 @@ async fn retic_serial_task(
                                         if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
                                             log("SER: wall-time refusal write failed");
                                         }
+                                    }
+                                }
+                                ControlAction::TelemetryTarget(target) => {
+                                    // The main loop owns the node, so it is
+                                    // the one place a target can be looked
+                                    // up against the identity store and
+                                    // persisted. A full channel means one is
+                                    // already pending — refuse audibly.
+                                    let answer = if crate::telemetry::deliver_target(target) {
+                                        envelope::encode_ack(envelope::TYPE_TELEMETRY_TARGET)
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_TELEMETRY_TARGET,
+                                            envelope::REFUSE_BUSY,
+                                        )
+                                    };
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: telemetry answer write failed");
                                     }
                                 }
                                 ControlAction::CapabilityQuery => {

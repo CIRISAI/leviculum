@@ -88,7 +88,7 @@ const SAVE_RETRY_MS: u64 = 250;
 
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
-pub async fn store_task(mut flash: nrf_softdevice::Flash, page: u32) {
+pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
@@ -111,6 +111,7 @@ pub async fn store_task(mut flash: nrf_softdevice::Flash, page: u32) {
         let mut written = false;
         for attempt in 1..=SAVE_RETRIES {
             let result = async {
+                let mut flash = flash.lock().await;
                 flash.erase(page, page + 4096).await?;
                 flash.write(page, &encoded.0).await
             }
@@ -145,15 +146,17 @@ pub async fn store_task(mut flash: nrf_softdevice::Flash, page: u32) {
     }
 }
 
-/// Spawn the store task on `spawner`, taking the SoftDevice's flash handle.
+/// Spawn the store task on `spawner`, borrowing the shared SoftDevice
+/// flash handle ([`crate::flash::shared_flash`]).
 ///
-/// Call once, after `Softdevice::enable` — the handle is a singleton and
-/// `Flash::take` panics on a second call.
+/// Call after `Softdevice::enable`. The handle is shared rather than
+/// owned because the telemetry target (#236) persists to its own page
+/// through its own task and there is only one `Flash` to go round.
 #[cfg(feature = "softdevice")]
 pub fn spawn_store_task(
     spawner: &embassy_executor::Spawner,
-    sd: &'static nrf_softdevice::Softdevice,
+    flash: &'static crate::flash::SharedFlash,
     page: u32,
 ) {
-    spawner.must_spawn(store_task(nrf_softdevice::Flash::take(sd), page));
+    spawner.must_spawn(store_task(flash, page));
 }

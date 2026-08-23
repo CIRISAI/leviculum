@@ -265,7 +265,7 @@ async fn main(spawner: Spawner) {
     // `sd_flash_*` syscalls, which need the enabled SoftDevice.
     leviculum_nrf::radio_store::spawn_store_task(
         &spawner,
-        sd,
+        leviculum_nrf::flash::shared_flash(sd),
         t114::CONFIG.radio_config_flash_page,
     );
 

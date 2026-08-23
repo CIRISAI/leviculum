@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame, decode_refusal_payload,
-    encode_capability_query, encode_radio_config, encode_wall_time, REFUSE_BUSY, REFUSE_MALFORMED,
-    REFUSE_UNKNOWN_TYPE, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
+    encode_capability_query, encode_radio_config, encode_telemetry_clear, encode_telemetry_target,
+    encode_wall_time, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
+    REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -191,6 +192,38 @@ pub fn send_wall_time(fd: &Fd, unix_secs: u64) -> io::Result<ControlOutcome> {
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Set the telemetry target (#236, `TYPE_TELEMETRY_TARGET`).
+///
+/// The public key is optional and its absence is the common case: a user
+/// knows the LXMF address, and the node resolves the key over the air.
+/// The frame is longer than the 19-byte Reticulum minimum, so like the
+/// radio config it must only be sent to firmware whose capability report
+/// includes the type — against anything older it would be packet-shaped
+/// noise rather than a named refusal.
+pub fn send_telemetry_target(fd: &Fd, target: &TelemetryTargetWire) -> io::Result<ControlOutcome> {
+    let payload = encode_telemetry_target(target);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_TELEMETRY_TARGET),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
+/// Clear the telemetry target: telemetry off, since the configured target
+/// is the switch (#236).
+pub fn send_telemetry_clear(fd: &Fd) -> io::Result<ControlOutcome> {
+    let payload = encode_telemetry_clear();
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_TELEMETRY_TARGET),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// Send the radio configuration as an envelope frame. Only for firmware
 /// whose capability report includes `TYPE_RADIO_CONFIG`: the frame is
 /// longer than the 19-byte Reticulum minimum, so it must never be sent
@@ -213,13 +246,28 @@ mod tests {
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_refusal,
-        ControlAction, TYPE_CAPABILITIES, TYPE_RADIO_CONFIG, TYPE_RESET, TYPE_WALL_TIME,
+        ControlAction, TELEMETRY_PROFILE_OFF, TELEMETRY_PROFILE_STATION, TYPE_CAPABILITIES,
+        TYPE_RADIO_CONFIG, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::RADIO_CONFIG_ACK;
     use std::sync::{Arc, Mutex};
 
-    /// The accepted list the current firmware advertises.
+    /// The accepted list the current firmware advertises. Must stay
+    /// identical to `leviculum_nrf::usb::ACCEPTED_CONTROL_TYPES` — a stub
+    /// that accepts more than the board does proves the host against a
+    /// device that does not exist.
     const FIRMWARE_ACCEPTS: &[u8] = &[
+        TYPE_RADIO_CONFIG,
+        TYPE_RESET,
+        TYPE_WALL_TIME,
+        TYPE_CAPABILITIES,
+        TYPE_TELEMETRY_TARGET,
+    ];
+
+    /// The accepted list of firmware from before #236 landed its
+    /// telemetry consumer: everything else, and a named refusal for the
+    /// target frame. This is how a #236-aware host detects an old board.
+    const PRE_236_ACCEPTS: &[u8] = &[
         TYPE_RADIO_CONFIG,
         TYPE_RESET,
         TYPE_WALL_TIME,
@@ -249,6 +297,23 @@ mod tests {
                     encode_refusal(TYPE_WALL_TIME, REFUSE_VALUE)
                 }),
                 ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
+                ControlAction::TelemetryTarget(_) => Some(encode_ack(TYPE_TELEMETRY_TARGET)),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device running firmware from before #236: it speaks
+    /// the envelope but has no telemetry consumer, so the target frame
+    /// comes back refused by name rather than acked.
+    fn pre_236_firmware_stub(pty: &Pty) {
+        spawn_stub(pty, move |frame_bytes| {
+            match classify_control_frame(frame_bytes, PRE_236_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(PRE_236_ACCEPTS)),
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -280,7 +345,7 @@ mod tests {
         assert_eq!(caps.version, leviculum_core::envelope::ENVELOPE_VERSION);
         assert_eq!(caps.accepted, FIRMWARE_ACCEPTS);
         assert!(caps.accepts(TYPE_WALL_TIME));
-        assert!(!caps.accepts(leviculum_core::envelope::TYPE_TELEMETRY_TARGET));
+        assert!(caps.accepts(TYPE_TELEMETRY_TARGET));
     }
 
     #[test]
@@ -355,6 +420,104 @@ mod tests {
             Some(ControlOutcome::Refused {
                 reason: REFUSE_UNKNOWN_TYPE
             })
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Telemetry target (Codeberg #236)
+    // -----------------------------------------------------------------
+
+    fn hash_only_target() -> TelemetryTargetWire {
+        TelemetryTargetWire {
+            profile: TELEMETRY_PROFILE_STATION,
+            dest_hash: [0xA7; 16],
+            public_key: None,
+        }
+    }
+
+    #[test]
+    fn a_hash_only_target_is_acked_by_a_236_firmware() {
+        // The common case per the 2026-08-22 UX decision: the user knows
+        // the address and nothing else.
+        let pty = Pty::open();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let target = hash_only_target();
+        assert_eq!(
+            send_telemetry_target(&fd, &target).unwrap(),
+            ControlOutcome::Acked
+        );
+
+        // What went on the wire is what the board decoded: a hash-only
+        // payload, key-present flag explicitly absent.
+        let frames = seen.lock().unwrap().clone();
+        let payload = frames
+            .iter()
+            .find_map(|f| match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::TelemetryTarget(t) => Some(t),
+                _ => None,
+            })
+            .expect("no telemetry target frame reached the stub");
+        assert_eq!(payload, target);
+        assert_eq!(payload.public_key, None);
+    }
+
+    #[test]
+    fn a_target_with_a_key_is_acked_too() {
+        let pty = Pty::open();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let target = TelemetryTargetWire {
+            public_key: Some([0x5E; 64]),
+            ..hash_only_target()
+        };
+        assert_eq!(
+            send_telemetry_target(&fd, &target).unwrap(),
+            ControlOutcome::Acked
+        );
+    }
+
+    #[test]
+    fn a_clear_frame_carries_the_off_profile_and_is_acked() {
+        let pty = Pty::open();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_telemetry_clear(&fd).unwrap(), ControlOutcome::Acked);
+
+        let frames = seen.lock().unwrap().clone();
+        let payload = frames
+            .iter()
+            .find_map(|f| match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::TelemetryTarget(t) => Some(t),
+                _ => None,
+            })
+            .expect("no telemetry clear frame reached the stub");
+        assert_eq!(payload.profile, TELEMETRY_PROFILE_OFF);
+        assert_eq!(payload.dest_hash, [0u8; 16]);
+        assert_eq!(payload.public_key, None);
+    }
+
+    #[test]
+    fn a_pre_236_board_refuses_the_target_by_name_instead_of_timing_out() {
+        // The detection path: an old board answers, and what it answers
+        // says exactly what is missing.
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty);
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(TYPE_TELEMETRY_TARGET));
+        assert_eq!(
+            send_telemetry_target(&fd, &hash_only_target()).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_UNKNOWN_TYPE
+            }
         );
     }
 }

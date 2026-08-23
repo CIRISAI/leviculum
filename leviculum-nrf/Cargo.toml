@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -22,6 +22,16 @@ leviculum-screen = { path = "screen", optional = true }
 # Pure SoftDevice-ownership policy (error code + SD-enabled -> action),
 # host-unit-tested next to the firmware (Codeberg #249/#250).
 leviculum-sd-policy = { path = "sd-policy" }
+# LXMF, for the telemetry reporter (Codeberg #236). `default-features =
+# false` is load-bearing twice over: it keeps `pow`'s sha2 out (the node
+# advertises a zero stamp cost and mines nothing) and it keeps the bz2
+# content compression out (a send-only producer of empty-content messages
+# never reaches the resource path). Verify both with `cargo tree` before
+# raising the size budget.
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
+# Pure telemetry cadence policy and target lifecycle, host-testable next
+# to the gnss crates (#236).
+leviculum-telemetry-policy = { path = "telemetry-policy" }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }

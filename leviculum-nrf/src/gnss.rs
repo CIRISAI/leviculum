@@ -164,6 +164,11 @@ fn apply_output(output: Output, latest: &mut GnssFix, pending_baud: &mut Option<
                 // the receiver — converted as-is, never via
                 // raw GPS time (#166, time-and-clocks.md).
                 latest.unix_secs = leviculum_gnss_time::unix_secs_from_rmc_utc(&rmc.datetime);
+                // Movement, for the telemetry location sensor (#236).
+                // Course is absent while stationary on most receivers, so
+                // it is carried as absent rather than as zero.
+                latest.speed_mps = Some(rmc.speed.as_mps());
+                latest.bearing_deg = rmc.course.map(|c| c.degrees);
             } else {
                 // A stale time claim must not outlive the fix
                 // that made it: position keeps last-good for
@@ -179,6 +184,12 @@ fn apply_output(output: Output, latest: &mut GnssFix, pending_baud: &mut Option<
             if fix {
                 latest.latitude = Some(lat_to_f64(&gga.latitude));
                 latest.longitude = Some(lon_to_f64(&gga.longitude));
+                latest.altitude_m = gga.altitude.map(|a| a.meters);
+                // The accuracy gate's input (#236). Kept with position
+                // rather than cleared with time: a stale HDOP mis-scales a
+                // position that is itself stale, which is the same class
+                // of error, not a new one.
+                latest.hdop = Some(gga.hdop);
             }
             sender.send(*latest);
         }
