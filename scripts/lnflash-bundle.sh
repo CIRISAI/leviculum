@@ -102,6 +102,14 @@ install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_softdevice.hex" "$S
 install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_license-agreement.txt" "$STAGE/firmware/t114/"
 install -m 0644 "$ROOT/lnflash/payload/README-bundle.md" "$STAGE/README.md"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
+# Codeberg #288. Two things in this bundle are statically linked Rust — the
+# lnflash binary and the t114 UF2 — and both carry MIT- and BSD-licensed
+# crates whose licences require the notice to travel with the binary.
+# THIRD-PARTY-NOTICES covers both: it is generated from the two lockfiles,
+# host binaries in part 1 and the firmware image in part 2. The SoftDevice
+# beside it keeps its own licence file; that blob is never linked in, so its
+# terms are a separate matter (see the manifest's remedy section).
+install -m 0644 "$ROOT/THIRD-PARTY-NOTICES" "$STAGE/THIRD-PARTY-NOTICES"
 rm -f "$OUT_DIR/t114.bin.tmp" "$OUT_DIR/t114.uf2.tmp"
 
 sha() { sha256sum "$STAGE/firmware/$1" | cut -d' ' -f1; }
@@ -173,6 +181,31 @@ say "checking the bundle"
 "$STAGE/lnflash" --bundle "$STAGE" --check-bundle
 
 tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$VERSION"
+
+# The licence files are asserted against the TARBALL rather than the stage
+# directory, because the tarball is what ships and a `tar` that quietly leaves
+# a file out is precisely the failure worth catching here. --check-bundle above
+# cannot do it: it walks the manifest, and the manifest describes what lnflash
+# writes to a board, not what the archive must carry for the distribution to be
+# lawful (Codeberg #288).
+listing="$(tar -tzf "$TARBALL")"
+for want in \
+    "lnflash-$VERSION/LICENSE" \
+    "lnflash-$VERSION/THIRD-PARTY-NOTICES" \
+    "lnflash-$VERSION/firmware/t114/s140_nrf52_7.3.0_license-agreement.txt"; do
+    printf '%s\n' "$listing" | grep -qxF "$want" \
+        || { echo "bundle is missing $want" >&2; exit 1; }
+done
+# Not just present: both halves of the notice file have to be in it. A
+# truncated or half-generated file passes a name check and fails the obligation
+# — the firmware section is the one that is easy to lose, because it comes from
+# the second, separate workspace.
+for marker in "PART 1 — host binaries" "PART 2 — LNode firmware image"; do
+    grep -qF "$marker" "$STAGE/THIRD-PARTY-NOTICES" \
+        || { echo "THIRD-PARTY-NOTICES is missing the '$marker' section" >&2; exit 1; }
+done
+say "licence files present in the tarball (LICENSE, THIRD-PARTY-NOTICES, SoftDevice agreement)"
+
 say "wrote $TARBALL ($(du -h "$TARBALL" | cut -f1))"
 say "contents:"
-tar -tzf "$TARBALL" | sed 's/^/  /'
+printf '%s\n' "$listing" | sed 's/^/  /'

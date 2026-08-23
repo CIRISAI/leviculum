@@ -113,6 +113,14 @@ check_package() {
     done
     contains "$contents" "/usr/share/doc/${pkg}/README.md" "ships its README"
 
+    # Codeberg #288: the binaries are musl-static, so every MIT- and
+    # BSD-licensed crate travels inside them. Both families require the
+    # notice to accompany a binary distribution, and the package's own
+    # copyright file (from license-file) carries our AGPL only. A .deb
+    # without this file is a notice violation, not a cosmetic gap.
+    contains "$contents" "/usr/share/doc/${pkg}/THIRD-PARTY-NOTICES" \
+        "ships third-party licence notices"
+
     # Policy 12.7: every package installs a changelog, compressed. These
     # versions carry no Debian revision, which makes the packages native,
     # and a native package's changelog is changelog.gz — the .Debian

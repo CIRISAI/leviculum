@@ -117,6 +117,23 @@ cargo install --locked flip-link
 rustup component add llvm-tools
 echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link + llvm-tools"
 
+# 6b. Third-party licence notices (Codeberg #288). `just notices-guard`
+#     runs in Tier 0, so this is a hard dependency of the push path, not
+#     an optional extra — hence an install rather than the warn-only
+#     treatment the test-only tools above get.
+#
+#     Pinned: the generated file is checked in and diffed byte for byte,
+#     so a cargo-about that formats or classifies anything differently
+#     turns the gate red on every machine that has the other version.
+#     Bumping the pin is a deliberate act with a `just notices` commit
+#     next to it.
+#
+#     `--features cli` is not optional: without it the crate builds as a
+#     library and cargo installs no binary at all, reporting only a
+#     warning.
+cargo install --locked cargo-about --version 0.9.2 --features cli
+echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notices-guard)"
+
 # 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this
 #    installer was actually run from.  Lets a `git worktree`-based

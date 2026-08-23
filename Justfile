@@ -253,6 +253,35 @@ check-integ-bin-list:
 check-supervised-spawns:
     @python3 scripts/check-supervised-spawns.py
 
+# Regenerate THIRD-PARTY-NOTICES from the two lockfiles (Codeberg #288).
+# Needs cargo-about; scripts/install-ci.sh installs the pinned version.
+notices:
+    @python3 scripts/gen-notices.py
+
+# Codeberg #288: every published artifact carried our AGPL LICENSE and no
+# notice for the MIT- and BSD-licensed crates statically linked into it, which
+# both families require to accompany a BINARY distribution. The notices are
+# generated from Cargo.lock, checked in, and copied into the .debs, the
+# userspace tarballs and the lnflash bundle. This is what stops the checked-in
+# copy from describing a dependency graph that no longer exists.
+#
+# In `fast` rather than in the nightly's `ci-gate`, on all three of the
+# conditions the gates above are held to. Fast: ~20 s, no compilation — it
+# reads Cargo.lock and the licence files already in the cargo cache. Deterministic
+# given the tree: `--frozen` throughout, so no network and no lockfile update
+# can move the output, and a CRLF licence file cannot either (the generator
+# normalises line endings; without that the guard failed against a file it had
+# just written itself). And it fails naming the one command that fixes it, in
+# the same session that added the dependency.
+#
+# The placement follows from where the file can rot: a `cargo add` is the
+# moment the checked-in list stops matching, and the push path is the last
+# point at which the person who typed it is still there. `ci-gate` would catch
+# it too, but a night later and against a container that has neither the
+# firmware workspace fetched nor cargo-about installed.
+notices-guard:
+    @python3 scripts/gen-notices.py --check
+
 # The kernel-enforced half of "a harness that spawns a long-lived process must
 # ensure it dies with the harness" (docs/src/concepts/checks-and-citations.md).
 # ~10 s: it SIGKILLs a parent and watches its child disappear, plus the negative
@@ -279,9 +308,13 @@ check-all-targets:
 # + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
 # gates + a compile check of every workspace target (#220) + workspace lib
 # tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
-# the process-supervision pair (census over the sources, proof against the
-# kernel).
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+# the third-party notice guard (#288) + the process-supervision pair (census
+# over the sources, proof against the kernel).
+#
+# notices-guard sits after lint-nrf deliberately: it reads the firmware
+# workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
+# dependencies are fetched by the time it runs.
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

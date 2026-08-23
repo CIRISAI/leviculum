@@ -68,6 +68,12 @@ when:
         - 'leviculum-cli/Cargo.toml'
         - 'lnomad/Cargo.toml'
         - 'lblogd/Cargo.toml'
+        # Codeberg #288: every .deb, every userspace tarball and the
+        # lnflash bundle install this file. It is generated (see
+        # scripts/gen-notices.py) but tracked, so from this pipeline's
+        # point of view it is an ordinary packaging input, and a commit
+        # that changes it should prove the packages still build.
+        - 'THIRD-PARTY-NOTICES'
         # lnflash bundle inputs. lnflash/** in full rather than just its
         # Cargo.toml, because the crate carries payload/ — the SoftDevice
         # blob, its licence file and the bundle README all end up inside

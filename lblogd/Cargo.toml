@@ -79,6 +79,9 @@ assets = [
     # musl-static binary always trips; the file explains why each
     # is a deliberate deviation rather than a defect.
     ["../packaging/lintian/lblogd", "usr/share/lintian/overrides/lblogd", "644"],
+    # Codeberg #288; see leviculum-cli/Cargo.toml for what this file is and
+    # why a musl-static package needs it.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/lblogd/THIRD-PARTY-NOTICES", "644"],
 ]
 # Generated per build by scripts/deb-stamp.sh, because Debian wants the
 # top entry to carry this build's version and the version is stamped.

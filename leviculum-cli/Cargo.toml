@@ -104,6 +104,13 @@ assets = [
     # musl-static binary always trips; the file explains why each
     # is a deliberate deviation rather than a defect.
     ["../packaging/lintian/leviculum", "usr/share/lintian/overrides/leviculum", "644"],
+    # Codeberg #288. The binaries above are musl-static, so every MIT- and
+    # BSD-licensed crate is inside them rather than beside them, and both
+    # families require their copyright line and permission text to accompany
+    # a binary distribution. license-file above ships our AGPL and says
+    # nothing about them. Generated from Cargo.lock by scripts/gen-notices.py
+    # and kept honest by `just notices-guard` in Tier 0.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/leviculum/THIRD-PARTY-NOTICES", "644"],
 ]
 # Note: this is the *Debian* changelog, generated per build by
 # scripts/deb-stamp.sh. The project's own CHANGELOG.md ships separately

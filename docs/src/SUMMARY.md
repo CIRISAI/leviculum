@@ -28,6 +28,7 @@
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)
 - [Self-hosted infrastructure](concepts/self-hosted-infrastructure.md)
+- [Licensing and third-party notices](concepts/licensing-and-notices.md)
 
 # User Guide
 

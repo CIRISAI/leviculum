@@ -86,6 +86,13 @@ pack_bin_tarball() {
     done
     cp "$readme_src" "$stage/doc/README.md"
     cp LICENSE "$stage/doc/"
+    # Codeberg #288: LICENSE alone is our AGPL and covers none of the
+    # MIT/BSD crates that are statically linked into the binaries beside
+    # it. Generated from Cargo.lock by scripts/gen-notices.py and tracked,
+    # so this is a copy of a checked-in file — the tarball build needs no
+    # extra tool and no network. `just notices-guard` (Tier 0) is what
+    # keeps it describing the binaries it ships with.
+    cp THIRD-PARTY-NOTICES "$stage/doc/"
     # CHANGELOG.md documents the leviculum stack. Shipping it inside the
     # lnomad and lblogd tarballs would attach a changelog to a version it
     # does not describe, now that those two are versioned independently.

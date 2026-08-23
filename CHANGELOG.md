@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every published artifact now carries `THIRD-PARTY-NOTICES`, generated
+  from the lockfiles, so the MIT- and BSD-licensed crates linked into
+  the binaries travel with their required notices (#288).
+
 - The GNSS wake ends with an explicit UBX-CFG-ANT step: antenna supply
   on, every automatic power-down path off, so the init no longer
   depends on what the factory clear left behind (#324).
