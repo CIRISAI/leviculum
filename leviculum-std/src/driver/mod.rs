@@ -4903,7 +4903,7 @@ fn record_discovery_announce(
     ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
     heard_ifac: &mut HeardIfacMap,
 ) {
-    use leviculum_core::discovery::{APP_NAME, DEFAULT_STAMP_VALUE, DISCOVERY_ASPECTS};
+    use leviculum_core::discovery::{APP_NAME, DISCOVERY_ASPECTS, MIN_REQUIRED_STAMP_VALUE};
 
     let discovery_name_hash =
         leviculum_core::Destination::compute_name_hash(APP_NAME, &DISCOVERY_ASPECTS);
@@ -4915,17 +4915,21 @@ fn record_discovery_announce(
     // On a private discovery network, decrypt encrypted announces with the
     // configured network identity before validation (Codeberg #32, sub-task d);
     // without one, only plaintext announces decode.
+    //
+    // The gate is `MIN_REQUIRED_STAMP_VALUE` (14), not the value we mint at
+    // (16): 1.3.5 peers on the air still mint at 14, and requiring what we mint
+    // would drop every one of them (Codeberg #328).
     let parsed = match network_identity {
         Some(identity) => leviculum_core::discovery::parse_announce_app_data_decrypt(
             announce.app_data(),
             &network_id,
-            DEFAULT_STAMP_VALUE,
+            MIN_REQUIRED_STAMP_VALUE,
             identity,
         ),
         None => leviculum_core::discovery::parse_announce_app_data(
             announce.app_data(),
             &network_id,
-            DEFAULT_STAMP_VALUE,
+            MIN_REQUIRED_STAMP_VALUE,
         ),
     };
     let Some(di) = parsed else {

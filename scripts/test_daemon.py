@@ -142,7 +142,8 @@ class TestDaemon:
                  discovery_stamp_value: int = None, discovery_encrypt: bool = False,
                  discovery_port: int = None, discover_interfaces: bool = False,
                  network_identity: str = None, discovery_job_interval: float = None,
-                 discovery_publish_ifac: bool = False):
+                 discovery_publish_ifac: bool = False,
+                 required_discovery_value: int = None):
         # Interface auto-discovery (Codeberg #32): drive the REAL Python
         # RNS.Discovery.InterfaceAnnouncer / InterfaceDiscovery. `discoverable`
         # marks a TCPServer interface discoverable so the daemon emits announces
@@ -161,6 +162,13 @@ class TestDaemon:
         self.discovery_port = discovery_port
         self.discovery_publish_ifac = discovery_publish_ifac
         self.discover_interfaces = discover_interfaces
+        # `required_discovery_value` is the LISTENER's stamp gate, the
+        # `[reticulum]` key RNS feeds to InterfaceDiscovery(required_value=...).
+        # RNS 1.5.0 changed only the DEFAULT this falls back to (14 -> 16); the
+        # verification code either side of that default is identical, so setting
+        # it to 16 on the vendored 1.3.5 gives a faithful 1.5.0-strength listener
+        # (Codeberg #328).
+        self.required_discovery_value = required_discovery_value
         self.network_identity = network_identity
         self.discovery_job_interval = discovery_job_interval
         # Serial-family interface (Codeberg #102): a KISSInterface,
@@ -353,6 +361,8 @@ class TestDaemon:
             config += f"  network_identity = {self.network_identity}\n"
         if self.discover_interfaces:
             config += "  discover_interfaces = yes\n"
+        if self.required_discovery_value is not None:
+            config += f"  required_discovery_value = {self.required_discovery_value}\n"
 
         config += f"""
 [interfaces]
@@ -2349,6 +2359,9 @@ def main():
     parser.add_argument("--discovery-publish-ifac", action="store_true",
                         help="Publish the discoverable interface's IFAC keys "
                              "in the discovery announce (#151)")
+    parser.add_argument("--required-discovery-value", type=int, default=None,
+                        help="Stamp value the InterfaceDiscovery listener requires "
+                             "(RNS 1.5.0 defaults to 16, 1.3.5 to 14)")
 
     args = parser.parse_args()
 
@@ -2390,6 +2403,7 @@ def main():
         network_identity=args.network_identity,
         discovery_job_interval=args.discovery_job_interval,
         discovery_publish_ifac=args.discovery_publish_ifac,
+        required_discovery_value=args.required_discovery_value,
     )
     daemon.run()
 

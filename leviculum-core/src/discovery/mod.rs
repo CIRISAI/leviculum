@@ -39,7 +39,7 @@ pub use registry::{
 };
 pub use stamp::{
     generate_stamp, stamp_valid, stamp_value, stamp_workblock, StampError, DEFAULT_STAMP_VALUE,
-    STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS,
+    MIN_REQUIRED_STAMP_VALUE, STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS,
 };
 
 use alloc::format;
@@ -81,6 +81,10 @@ const KEY_SPREADINGFACTOR: u64 = 0x0B;
 const KEY_CODINGRATE: u64 = 0x0C;
 const KEY_MODULATION: u64 = 0x0D;
 const KEY_CHANNEL: u64 = 0x0E;
+/// Operator LXMF address, added by RNS 1.5.0 (`Discovery.py` `OP_ADDR`).
+/// Optional on the wire and not surfaced by us yet; listed here so the field is
+/// accounted for rather than merely swept up by the unknown-key arm.
+const KEY_OP_ADDR: u64 = 0xF0;
 const KEY_TRANSPORT_ID: u64 = 0xFE;
 const KEY_NAME: u64 = 0xFF;
 
@@ -419,6 +423,12 @@ fn read_float_or_nil(data: &[u8], pos: &mut usize) -> Option<Option<f64>> {
 /// when required fields are absent or the wrong type (mirroring Python, whose
 /// handler swallows such announces).
 ///
+/// `required_value` is a floor, not an equality: a stamp worth MORE than asked
+/// for is accepted. Callers on the receive path should pass
+/// [`MIN_REQUIRED_STAMP_VALUE`], not [`DEFAULT_STAMP_VALUE`] — the latter is
+/// what we mint at, and using it to gate incoming announces would make us deaf
+/// to peers still minting at the older cost.
+///
 /// `network_id` is the hash of the announce's own identity (the announcing
 /// node). Encrypted announces (the `FLAG_ENCRYPTED` bit) cannot be decoded
 /// without the network identity and return `None`; use
@@ -546,9 +556,12 @@ fn parse_announce_app_data_inner(
             KEY_CODINGRATE => codingrate = Some(msgpack::read_msgpack_uint(packed, &mut pos)?),
             KEY_IFAC_NETNAME => ifac_netname = read_str_or_nil(packed, &mut pos)?,
             KEY_IFAC_NETKEY => ifac_netkey = read_str_or_nil(packed, &mut pos)?,
-            // Weave/KISS radio specifics: recognised on the wire but not yet
-            // surfaced (deferred to sub-task (b)); skip their values for now.
-            KEY_MODULATION | KEY_CHANNEL => msgpack::skip_msgpack_value(packed, &mut pos)?,
+            // Weave/KISS radio specifics (deferred to sub-task (b)) and the
+            // 1.5.0 operator LXMF address: recognised on the wire but not yet
+            // surfaced; skip their values for now.
+            KEY_MODULATION | KEY_CHANNEL | KEY_OP_ADDR => {
+                msgpack::skip_msgpack_value(packed, &mut pos)?
+            }
             // Any other unknown key: skip for forward compatibility.
             _ => msgpack::skip_msgpack_value(packed, &mut pos)?,
         }

@@ -418,6 +418,24 @@ impl TestDaemon {
         Self::start_with_retry_args(vec!["--discover-interfaces".to_string()]).await
     }
 
+    /// Start a discovery listener whose stamp gate is `required_value` instead
+    /// of the vendored default.
+    ///
+    /// This is how a *newer* Python listener is reproduced against the 1.3.5
+    /// tree we vendor: RNS 1.5.0's discovery change is the default of the
+    /// `required_discovery_value` config key (14 -> 16), and the stamp
+    /// verification either side of that default is unchanged between the two
+    /// versions. Setting the key explicitly therefore yields a listener that
+    /// gates exactly as 1.5.0 does (Codeberg #328).
+    pub async fn start_discovering_at_value(required_value: u32) -> Result<Self, HarnessError> {
+        Self::start_with_retry_args(vec![
+            "--discover-interfaces".to_string(),
+            "--required-discovery-value".to_string(),
+            required_value.to_string(),
+        ])
+        .await
+    }
+
     /// Start a daemon running the InterfaceDiscovery listener keyed by the
     /// shared 64-byte network identity at `network_identity_path` (Codeberg
     /// #107, encrypted-reverse). Only encrypted announces sealed for this

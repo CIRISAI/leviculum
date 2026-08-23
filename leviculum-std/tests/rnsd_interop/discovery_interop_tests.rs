@@ -845,3 +845,80 @@ async fn test_lnsd_autoconnects_python_ifac_published_backbone() {
 
     node.stop().await.expect("stop node");
 }
+
+// =========================================================================
+// Test: a 1.5.0-strength listener (stamp gate 16) discovers our announcement
+// =========================================================================
+
+/// Codeberg #328. RNS 1.5.0 raised `Discovery.DEFAULT_STAMP_VALUE` from 14 to
+/// 16; a listener at that gate silently discards a value-14 stamp, which is
+/// what we used to mint. This drives the real Python announce handler with its
+/// gate set explicitly to 16 — the same code path 1.5.0 reaches by default,
+/// since the version bump changed the constant and not the verification — and
+/// requires that our announcement still lands.
+///
+/// The Python side here is the vendored 1.3.5. That is a faithful proxy for
+/// 1.5.0's *gate*, not for 1.5.0 as a whole; a run against a genuinely
+/// installed 1.5.0 is still owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_python_listener_at_150_stamp_gate_discovers_rust_announcement() {
+    use crate::harness::TestDaemon as Daemon;
+
+    let daemon = Daemon::start_discovering_at_value(16)
+        .await
+        .expect("start listener gating at the 1.5.0 stamp value");
+
+    let storage = temp_storage("disco_gate16", "node");
+    let mut node = build_connected_node(&daemon, &storage, None, 0).await;
+
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let disco_dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "rnstransport",
+        &["discovery", "interface"],
+    )
+    .expect("discovery destination");
+    let disco_hash = *disco_dest.hash();
+    node.register_destination(disco_dest);
+
+    let advertised_port: u16 = 45998;
+    let descriptor = InterfaceDescriptor {
+        interface_type: "TCPServerInterface".to_string(),
+        name: Some("RustNode16".to_string()),
+        reachable_on: Some("127.0.0.1".to_string()),
+        port: Some(advertised_port as u64),
+        ..Default::default()
+    };
+    // Minted at our production `DEFAULT_STAMP_VALUE`; before #328 that was 14
+    // and this announcement never cleared the gate.
+    let app_data = build_announce_app_data(&descriptor, &[0x5Bu8; 16], true, &mut rand_core::OsRng)
+        .expect("build discovery announce app_data");
+
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut discovered = false;
+    while Instant::now() < end {
+        node.announce_destination(&disco_hash, Some(&app_data))
+            .await
+            .expect("announce discovery record");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let listed = daemon
+            .get_discovered_interfaces()
+            .await
+            .expect("query discovered interfaces");
+        discovered = listed
+            .iter()
+            .any(|info| info.get("name").and_then(|v| v.as_str()) == Some("RustNode16"));
+        if discovered {
+            break;
+        }
+    }
+    assert!(
+        discovered,
+        "a Python listener gating at the 1.5.0 stamp value (16) did not discover our \
+         announcement -- our mint cost is below its gate"
+    );
+
+    node.stop().await.expect("stop node");
+}

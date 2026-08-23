@@ -2117,7 +2117,7 @@ mod tests {
         // descriptor -> encrypted-announce path the daemon's announcer runs.
         use leviculum_core::discovery::{
             build_announce_app_data_encrypted, parse_announce_app_data,
-            parse_announce_app_data_decrypt, DEFAULT_STAMP_VALUE,
+            parse_announce_app_data_decrypt, MIN_REQUIRED_STAMP_VALUE,
         };
         use leviculum_core::identity::Identity;
 
@@ -2156,20 +2156,20 @@ mod tests {
 
         // Matching identity decodes it.
         assert!(
-            parse_announce_app_data_decrypt(&app, &network_id, DEFAULT_STAMP_VALUE, &net_id)
+            parse_announce_app_data_decrypt(&app, &network_id, MIN_REQUIRED_STAMP_VALUE, &net_id)
                 .is_some(),
             "matching network identity must decode the encrypted announce"
         );
         // A foreign identity does not.
         let other = Identity::generate(&mut rng);
         assert!(
-            parse_announce_app_data_decrypt(&app, &network_id, DEFAULT_STAMP_VALUE, &other)
+            parse_announce_app_data_decrypt(&app, &network_id, MIN_REQUIRED_STAMP_VALUE, &other)
                 .is_none(),
             "foreign identity must not decode the announce"
         );
         // Neither does the plaintext parser.
         assert!(
-            parse_announce_app_data(&app, &network_id, DEFAULT_STAMP_VALUE).is_none(),
+            parse_announce_app_data(&app, &network_id, MIN_REQUIRED_STAMP_VALUE).is_none(),
             "plaintext parser must reject an encrypted announce"
         );
     }

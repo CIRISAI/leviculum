@@ -7,9 +7,11 @@
 //! the `workblock` is deterministically expanded from the announce material via
 //! HKDF.
 //!
-//! Discovery uses `cost = 14` ([`DEFAULT_STAMP_VALUE`]) and `rounds = 20`
+//! Discovery mints at `cost = 16` ([`DEFAULT_STAMP_VALUE`]) and `rounds = 20`
 //! ([`WORKBLOCK_EXPAND_ROUNDS`]); other LXMF call sites use different expansion
-//! rounds, which is why the round count is a parameter here.
+//! rounds, which is why the round count is a parameter here. What we *require*
+//! of a received stamp is a separate, lower number
+//! ([`MIN_REQUIRED_STAMP_VALUE`]) — see its docs for why the two differ.
 
 use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
@@ -20,8 +22,35 @@ use crate::resource::msgpack;
 /// Size of a stamp in bytes (`RNS.Identity.HASHLENGTH // 8`).
 pub const STAMP_SIZE: usize = 32;
 
-/// Default required stamp value (leading zero bits) for interface discovery.
-pub const DEFAULT_STAMP_VALUE: u32 = 14;
+/// Stamp value (leading zero bits) we MINT discovery announces at.
+///
+/// Tracks Python `RNS.Discovery.InterfaceAnnouncer.DEFAULT_STAMP_VALUE`, which
+/// RNS 1.5.0 raised from 14 to 16 (Codeberg #328). A 1.5.0 listener runs with
+/// `required_value = 16` and silently discards anything weaker, so minting at
+/// 14 made us invisible to every 1.5.0 node. Minting at 16 is accepted by 1.5.0
+/// and 1.3.5 listeners alike — a stamp is checked with `>=`, so an
+/// over-strength stamp is never a problem for an older peer.
+pub const DEFAULT_STAMP_VALUE: u32 = 16;
+
+/// Stamp value we REQUIRE of a received discovery announce.
+///
+/// Deliberately the *old* Python default (14), not [`DEFAULT_STAMP_VALUE`].
+/// Python couples the two constants, so a 1.5.0 node requires 16 and therefore
+/// stops seeing 1.3.5 neighbours; adopting that coupling would have turned
+/// #328's one-sided break into a two-sided one, with us newly deaf to every
+/// 1.3.5 announce on the air. Splitting the constants is a deviation in
+/// internals only: the wire format is untouched, the accepted set is a strict
+/// superset of Python's (a 16-value stamp still passes a 14 requirement), and
+/// hearing more neighbours is squarely Priority 1. Python itself treats the
+/// receive threshold as configuration — `InterfaceDiscovery(required_value=...)`
+/// — so this is a config choice, not a protocol divergence.
+pub const MIN_REQUIRED_STAMP_VALUE: u32 = 14;
+
+/// The receive gate must never rise above the mint cost, or we would reject our
+/// own announces on a loopback or a two-node lab mesh. Asserted at compile time
+/// rather than in a test: the pair is a design invariant of the split above, and
+/// a build that violates it should not exist for a test to catch.
+const _: () = assert!(MIN_REQUIRED_STAMP_VALUE <= DEFAULT_STAMP_VALUE);
 
 /// Number of HKDF expansion rounds for the discovery workblock.
 pub const WORKBLOCK_EXPAND_ROUNDS: usize = 20;

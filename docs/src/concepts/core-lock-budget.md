@@ -314,3 +314,13 @@ which runs it once per discoverable interface during
 `DEFAULT_STAMP_VALUE`. The invariant to keep is therefore "no
 *peer-chosen* cost is ever ground synchronously", and the async
 signature is what enforces it.
+
+That fixed cost is not static across RNS versions: #328 raised it from
+14 to 16 to stay visible to RNS 1.5.0 listeners, and each extra bit
+doubles the search. Measured on the coder host (release build, x86-64),
+one mint went from 39 ms mean / 198 ms max to 191 ms mean / 737 ms max
+over 24 samples. It is paid once per discoverable interface at wiring
+time and the result is reused for every re-announce, so this is startup
+latency, not a per-announce or per-loop cost. The budget argument is
+unchanged; the number it is measured against is four to five times
+larger.
