@@ -94,6 +94,14 @@ nrf-stack-frames:
 nrf-sd-guard:
     bash leviculum-nrf/tools/test-softdevice-guard.sh
 
+# Volume selection for the flash runner. The guard above decides WHETHER to
+# write; this decides WHERE. It used to take the first UF2 volume in the search
+# path, so one foreign board parked in its bootloader shadowed every other board
+# and left its mount behind to keep doing so (Codeberg #341). Driven against
+# fixture volume directories with stubbed mount/umount, so no board and no sudo.
+nrf-uf2-volumes:
+    bash leviculum-nrf/tools/test-uf2-volumes.sh
+
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -314,7 +322,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

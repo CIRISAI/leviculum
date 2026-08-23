@@ -140,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The flash runner enumerates every attached bootloader volume and picks
+  the one whose `Board-ID` matches, instead of taking the first it finds,
+  so a board parked in its bootloader no longer blocks flashing every
+  other board; volumes it mounts are always unmounted again (#341).
+
 - The BLE interface waits for the SoftDevice notification queue to
   drain instead of discarding the refusal, so a packet larger than one
   fragment — every announce — reaches the peer; what still cannot be

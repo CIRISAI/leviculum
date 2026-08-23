@@ -72,11 +72,30 @@ fi
 # shellcheck source=leviculum-nrf/tools/softdevice-guard.sh
 . "$SCRIPT_DIR/softdevice-guard.sh"
 
+# Which volume a write goes to. Sourced for the same reason as the guard: it
+# decides where the image lands, and tools/test-uf2-volumes.sh drives that
+# decision against fixtures without a board.
+if [ ! -f "$SCRIPT_DIR/uf2-volumes.sh" ]; then
+    echo "Error: $SCRIPT_DIR/uf2-volumes.sh is missing; refusing to flash without" >&2
+    echo "       the volume selection that keeps the image off the wrong board." >&2
+    exit 1
+fi
+# shellcheck source=leviculum-nrf/tools/uf2-volumes.sh
+. "$SCRIPT_DIR/uf2-volumes.sh"
+
 # Per-board parameters (default to T114 values for backward compatibility).
 BOARD_VID="${LEVICULUM_USB_VID:-1209}"
 BOARD_PID="${LEVICULUM_USB_PID:-0001}"
 BOARD_NAME="${LEVICULUM_BOARD_NAME:-T114}"
 BOOTLOADER_BOARD_ID="${LEVICULUM_UF2_BOARD_ID:-HT-n5262}"
+
+# A mount we make is a mount we give back. The registry records ownership and
+# the EXIT trap drains it, so no path out of this script — an early exit, a
+# failed gate, a Ctrl-C — can leave a volume behind. A left-behind volume is
+# not a cosmetic leak: it shadows every other board in the search path until
+# somebody unmounts by hand (Codeberg #341).
+uf2_registry_init
+trap 'release_unclaimed_uf2_volumes ""; rm -f "$UF2_MOUNT_REGISTRY" "$UF2_SEEN_REGISTRY"' EXIT
 
 # --- Step 1: Find objcopy ---------------------------------------------------
 
@@ -148,79 +167,9 @@ fi
 echo "==> Converting binary to UF2 (base: $FLASH_BASE, family: nRF52840)"
 "$BIN2UF2" --base "$FLASH_BASE" --family "$FAMILY_ID" "$BIN_FILE" "$UF2_FILE"
 
-# --- Helper: find UF2 drive (polled by flash_one_uf2) -----------------------
-
-find_uf2_drive() {
-    local search_dirs=()
-    # Standard Linux automount locations
-    if [ -d "/media/$USER" ]; then
-        search_dirs+=("/media/$USER")
-    fi
-    if [ -d "/run/media/$USER" ]; then
-        search_dirs+=("/run/media/$USER")
-    fi
-    if [ -d "/mnt" ]; then
-        search_dirs+=("/mnt")
-    fi
-
-    for dir in "${search_dirs[@]}"; do
-        local info
-        info="$(find "$dir" -maxdepth 2 -name INFO_UF2.TXT -type f 2>/dev/null | head -1)"
-        if [ -n "$info" ]; then
-            dirname "$info"
-            return
-        fi
-    done
-
-    # Try mounting unmounted small removable block devices
-    for dev in /dev/sd?; do
-        [ -b "$dev" ] || continue
-        # Only consider small devices (< 64MB, typical for UF2 bootloaders)
-        local size
-        size="$(cat "/sys/block/$(basename "$dev")/size" 2>/dev/null || echo 0)"
-        # size is in 512-byte sectors; 64MB = 131072 sectors
-        if [ "$size" -gt 0 ] && [ "$size" -lt 131072 ]; then
-            local part="${dev}1"
-            [ -b "$part" ] || part="$dev"
-
-            # Try udisksctl first (user-level, no sudo)
-            if command -v udisksctl >/dev/null 2>&1; then
-                local mount_output
-                mount_output="$(udisksctl mount -b "$part" 2>/dev/null || true)"
-                if [ -n "$mount_output" ]; then
-                    local mount_point
-                    mount_point="$(echo "$mount_output" | grep -oP 'at \K/.*' || true)"
-                    if [ -n "$mount_point" ] && [ -f "$mount_point/INFO_UF2.TXT" ]; then
-                        echo "$mount_point"
-                        return
-                    fi
-                fi
-            fi
-
-            # Fallback: sudo mount to /mnt
-            if sudo -n mount "$part" /mnt 2>/dev/null; then
-                if [ -f /mnt/INFO_UF2.TXT ]; then
-                    echo "/mnt"
-                    return
-                fi
-                sudo -n umount /mnt 2>/dev/null
-            fi
-        fi
-    done
-
-    echo ""
-}
-
-# Validate that the given UF2 drive belongs to the configured board.
-# Without this check `flash_one_uf2` would clobber whatever bootloader
-# happens to be mounted — if a T114 sits in UF2 mode while we are flashing
-# a RAK4631, the wrong UF2 lands on the wrong silicon.
-uf2_drive_matches_board() {
-    local d="$1"
-    [ -n "$d" ] || return 1
-    [ -f "$d/INFO_UF2.TXT" ] || return 1
-    grep -q "$BOOTLOADER_BOARD_ID" "$d/INFO_UF2.TXT" 2>/dev/null
-}
+# UF2 volume discovery (find_uf2_drive), selection by Board-ID
+# (poll_matching_drive) and the unmount obligation that goes with mounting
+# them live in tools/uf2-volumes.sh, sourced above.
 
 # --- Helper: enumerate all attached transport ports for the current board --
 # Prints one path per line, sorted by ID_SERIAL_SHORT (deterministic order).
@@ -242,45 +191,6 @@ find_all_t114_transport_ports() {
         fi
     done
     echo -n "$out" | sort | awk '{print $2}'
-}
-
-# --- Helper: poll for OUR board's UF2 bootloader drive ----------------------
-# Polls up to $2 ticks (0.5 s each; 0 = check once) for a UF2 drive whose
-# INFO_UF2.TXT Board-ID matches $BOOTLOADER_BOARD_ID. Mismatched drives (a
-# sibling board of a different kind sitting in DFU) are skipped with a one-shot
-# warning so the log does not flood. Prints the matching drive path on stdout
-# (empty + non-zero if none appeared within the budget).
-# Args: $1 = hint (for log lines), $2 = max ticks
-poll_matching_drive() {
-    local hint="$1" max_ticks="$2"
-    local warned_about="" tick=0 d
-    while : ; do
-        d="$(find_uf2_drive)"
-        if [ -n "$d" ] && ! uf2_drive_matches_board "$d"; then
-            case "$warned_about" in
-                *"|$d|"*) ;;
-                *)
-                    local seen_id="(missing)"
-                    if [ -f "$d/INFO_UF2.TXT" ]; then
-                        seen_id="$(grep -m1 -oE 'Board-ID: [^[:space:]]+' "$d/INFO_UF2.TXT" 2>/dev/null | cut -d' ' -f2)"
-                        [ -z "$seen_id" ] && seen_id="(unknown)"
-                    fi
-                    echo "[uf2-runner] $hint: ignoring UF2 drive at $d — Board-ID '$seen_id' does not match expected '$BOOTLOADER_BOARD_ID'" >&2
-                    warned_about="$warned_about|$d|"
-                    ;;
-            esac
-            d=""
-        fi
-        if [ -n "$d" ]; then
-            echo "$d"
-            return 0
-        fi
-        [ "$tick" -ge "$max_ticks" ] && break
-        sleep 0.5
-        tick=$((tick + 1))
-    done
-    echo ""
-    return 1
 }
 
 # --- Helper: copy the UF2 image onto a (validated) bootloader drive ---------
@@ -307,24 +217,26 @@ copy_uf2_to_drive() {
     uf2_blocks=$((uf2_size / 512))
     echo "==> $hint: deploying firmware.uf2 (${uf2_size} bytes, ${uf2_blocks} blocks) to $drive"
 
+    # Every exit below gives the volume back if we were the ones who mounted
+    # it, and leaves it alone if we were not. Hard-coding /mnt here was half of
+    # why a foreign volume mounted at /mnt could never be cleaned up (#341).
     if [ -w "$drive" ]; then
         if ! cp "$UF2_FILE" "$drive/NEW.UF2" 2>/dev/null; then
             echo "[uf2-runner] $hint: UF2 drive mounted at $drive but cp failed" >&2
-            if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
+            release_uf2_volume "$drive"
             return 2
         fi
         sync 2>/dev/null || true
     else
         if ! sudo cp "$UF2_FILE" "$drive/NEW.UF2" 2>/dev/null; then
             echo "[uf2-runner] $hint: UF2 drive mounted at $drive but sudo cp failed" >&2
-            if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
+            release_uf2_volume "$drive"
             return 2
         fi
         sudo sync 2>/dev/null || true
     fi
 
-    # Best-effort cleanup if we mounted to /mnt
-    if [ "$drive" = "/mnt" ]; then sudo -n umount /mnt 2>/dev/null || true; fi
+    release_uf2_volume "$drive"
     return 0
 }
 
@@ -361,13 +273,12 @@ board_app_returned() {
 verify_app_return() {
     local hint="$1" serial="${2:-}"
     local ticks=$((UF2_VERIFY_TIMEOUT * 2))
-    local tick=0 d
+    local tick=0
     while [ "$tick" -lt "$ticks" ]; do
         sleep 0.5
         tick=$((tick + 1))
         if board_app_returned "$serial"; then
-            d="$(find_uf2_drive)"
-            if [ -z "$d" ] || ! uf2_drive_matches_board "$d"; then
+            if ! matching_uf2_volume_present; then
                 echo "[uf2-runner] $hint: app-returned (${BOARD_VID}:${BOARD_PID} present, bootloader drive gone) after $((tick / 2))s"
                 return 0
             fi
@@ -394,6 +305,9 @@ flash_one_device() {
     [ -n "$serial" ] && hint="$hint (serial=$serial)"
 
     local grace_ticks=$((UF2_TIMEOUT * 2))
+    # Whether a volume for THIS board was ever found. It decides which failure
+    # the give-up line reports: a copy that did not boot, or no volume at all.
+    local saw_drive=0
     local attempt
     for (( attempt = 1; attempt <= FLASH_ATTEMPTS; attempt++ )); do
         echo ""
@@ -418,10 +332,11 @@ flash_one_device() {
         fi
 
         if [ -z "$drive" ]; then
-            echo "[uf2-runner] $hint: attempt $attempt — no UF2 drive appeared within ${UF2_TIMEOUT}s" >&2
+            echo "[uf2-runner] $hint: attempt $attempt — $(uf2_no_match_message) (waited ${UF2_TIMEOUT}s)" >&2
             continue
         fi
 
+        saw_drive=1
         echo "==> $hint: found UF2 drive at $drive ($(basename "$drive"))"
         local copy_rc=0
         copy_uf2_to_drive "$drive" "$hint" || copy_rc=$?
@@ -454,15 +369,26 @@ flash_one_device() {
         echo "==> Waiting for UF2 drive (${UF2_TIMEOUT}s)..."
         local drive
         drive="$(poll_matching_drive "$hint" "$grace_ticks" || true)"
-        if [ -n "$drive" ] && copy_uf2_to_drive "$drive" "$hint"; then
-            if verify_app_return "$hint" "$serial"; then
+        if [ -n "$drive" ]; then
+            saw_drive=1
+            if copy_uf2_to_drive "$drive" "$hint" && verify_app_return "$hint" "$serial"; then
                 echo "[uf2-runner] $hint: flash CONFIRMED after manual double-tap"
                 return 0
             fi
         fi
     fi
 
-    echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts (app never re-enumerated)" >&2
+    # Report what was observed. The old line asserted "app never re-enumerated"
+    # unconditionally, which is false whenever no volume for this board was ever
+    # found — the case #341 is about, where the message named a symptom that had
+    # not been reached and sent the diagnosis an hour in the wrong direction.
+    if [ "$saw_drive" -eq 1 ]; then
+        echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts" \
+            "(UF2 copied, app never re-enumerated)" >&2
+    else
+        echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts —" \
+            "$(uf2_no_match_message)" >&2
+    fi
     return 1
 }
 
@@ -535,45 +461,62 @@ FLASHED_SERIALS="$(echo -n "$FLASHED_SERIALS" | sed '/^$/d')"
 # drive. Flash whatever's still mounted after the touch loop. Filtered by
 # the board-specific INFO_UF2.TXT Board-ID so only the configured bootloader
 # is touched.
-while true; do
-    EXTRA_DRIVE="$(find_uf2_drive)"
+# The loop ends when the volume goes away, which is what a bootloader does
+# once it has taken the image. A volume that is STILL there afterwards did not
+# take it, so writing it again would only repeat the failure and inflate the
+# summary — hence the already-written set, plus a round cap as a backstop.
+RECOVERY_DONE=""
+RECOVERY_ROUNDS=0
+while [ "$RECOVERY_ROUNDS" -lt 4 ]; do
+    RECOVERY_ROUNDS=$((RECOVERY_ROUNDS + 1))
+    # poll_matching_drive rather than the first volume in the search path: this
+    # loop used to `break` the moment it met a foreign volume, so a T114 parked
+    # in its bootloader disabled crashed-firmware recovery for every other
+    # board just as it disabled the main loop (#341).
+    EXTRA_DRIVE="$(poll_matching_drive "(crashed-recovery)" 0 || true)"
     [ -n "$EXTRA_DRIVE" ] || break
-    if [ ! -f "$EXTRA_DRIVE/INFO_UF2.TXT" ] || ! grep -q "$BOOTLOADER_BOARD_ID" "$EXTRA_DRIVE/INFO_UF2.TXT" 2>/dev/null; then
-        break
-    fi
+    case "$RECOVERY_DONE" in
+    *"|$EXTRA_DRIVE|"*) break ;;
+    esac
+    RECOVERY_DONE="$RECOVERY_DONE|$EXTRA_DRIVE|"
     echo ""
     echo "==> Extra UF2 drive at $EXTRA_DRIVE — flashing crashed-firmware $BOARD_NAME (no transport port)"
     # This path writes without going through copy_uf2_to_drive, so it needs
-    # the guard of its own. `break` rather than `continue`: a refused drive
-    # stays mounted, and looping would refuse the same board forever.
+    # the guard of its own. `break` rather than `continue`: looping would
+    # refuse the same board forever.
     if ! guard_softdevice "$EXTRA_DRIVE" "(crashed-recovery)"; then
         FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
+        release_uf2_volume "$EXTRA_DRIVE"
         break
     fi
+    RECOVERY_COPIED=0
     if [ -w "$EXTRA_DRIVE" ]; then
         if cp "$UF2_FILE" "$EXTRA_DRIVE/NEW.UF2" 2>/dev/null; then
             sync 2>/dev/null || true
-            FLASHED_PORTS="$FLASHED_PORTS"$'\n'"(crashed-recovery)"
+            RECOVERY_COPIED=1
         else
             echo "[uf2-runner] (crashed-recovery): cp to $EXTRA_DRIVE failed" >&2
-            FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
         fi
     else
         if sudo cp "$UF2_FILE" "$EXTRA_DRIVE/NEW.UF2" 2>/dev/null; then
             sudo sync 2>/dev/null || true
-            FLASHED_PORTS="$FLASHED_PORTS"$'\n'"(crashed-recovery)"
+            RECOVERY_COPIED=1
         else
             echo "[uf2-runner] (crashed-recovery): sudo cp to $EXTRA_DRIVE failed" >&2
-            FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
         fi
     fi
-    [ "$EXTRA_DRIVE" = "/mnt" ] && sudo -n umount /mnt 2>/dev/null || true
+    release_uf2_volume "$EXTRA_DRIVE"
+    if [ "$RECOVERY_COPIED" -eq 0 ]; then
+        # A copy that failed will fail the same way on the same volume next
+        # round, and the volume is still there — stop instead of spinning.
+        FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
+        break
+    fi
+    FLASHED_PORTS="$FLASHED_PORTS"$'\n'"(crashed-recovery)"
     # Wait for the bootloader to process the file and disappear before
     # checking for more drives. Without this the same drive could be picked
     # up twice in quick succession.
-    sleep 1
-    sleep 1
-    sleep 1
+    sleep 3
 done
 
 # Strip leading newlines from accumulated lists.
@@ -684,7 +627,6 @@ if [ -n "$FLASHED_PORTS" ]; then
     # Map FLASHED entries to serials in the same order as the loop ran.
     # FLASHED_SERIALS is parallel to FLASHED_PORTS for the normal flow; the
     # legacy "(unknown)" placeholder has no entry there.
-    flashed_lines=$(echo "$FLASHED_PORTS" | wc -l)
     serial_lines=0
     [ -n "$FLASHED_SERIALS" ] && serial_lines=$(echo "$FLASHED_SERIALS" | wc -l)
 

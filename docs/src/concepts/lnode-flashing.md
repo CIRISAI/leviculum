@@ -397,7 +397,7 @@ tests equality first and the swap only as an alternative, so a board
 that keeps its serial is matched as readily as one that swaps
 it. The older runner is unaffected because it
 only compares serials in application mode
-(`leviculum-nrf/tools/uf2-runner.sh:340`).
+(`leviculum-nrf/tools/uf2-runner.sh:252`).
 
 **Writing needs root.** The mass-storage device appears as `/dev/sdX`
 owned `root:disk`. Automounting assumes a desktop stack that a headless
@@ -409,13 +409,35 @@ tool, but it cannot write the drive unprivileged.
 the moment the final UF2 block lands, while the filesystem still wants
 to flush metadata, producing `device offline error ... lost async page
 write`. This is the normal completion path, not a failure
-(`leviculum-nrf/tools/uf2-runner.sh:290`).
+(`leviculum-nrf/tools/uf2-runner.sh:199`).
 
 **A copy returning 0 does not mean the flash took.** Verify that the
 application re-enumerated and that the bootloader drive is gone
-(`leviculum-nrf/tools/uf2-runner.sh:361`). Stronger still, read the
+(`leviculum-nrf/tools/uf2-runner.sh:273`). Stronger still, read the
 periodic `[FW_BUILD]` banner off the debug port and compare the git SHA,
 as `scripts/flash-lnodes-from-head.sh:133` does.
+
+**More than one board can be in its bootloader at once, and the wrong
+one is usually first.** The volumes are anonymous mass storage; only
+`Board-ID` distinguishes them. A tool that takes the first UF2 volume it
+finds and stops looking will be handed the same wrong volume on every
+retry, refuse it every time, and never examine the board it was asked to
+flash. `find_uf2_drive` therefore enumerates every candidate and
+`poll_matching_drive` selects across the whole set
+(`leviculum-nrf/tools/uf2-volumes.sh`).
+
+**A mount you make is a mount you owe back.** Mounting a volume to read
+its `Board-ID` and then leaving it behind because it was the wrong board
+is worse than not looking: the leaked mount shadows every later board in
+the search path and survives until somebody unmounts by hand. Volumes
+this tooling mounts go under `/run/leviculum-uf2/<device>` — one mount
+point per device, never the single shared `/mnt`, so a foreign volume
+cannot occupy the only slot — and are released on every exit path.
+
+**A give-up message must report, not assert.** The runner used to end
+every failure with "app never re-enumerated" even when no volume for the
+board had ever been found, naming a symptom that had not been reached.
+It now names the volumes it saw and their `Board-ID`s.
 
 ## Structuring a flashing tool
 
