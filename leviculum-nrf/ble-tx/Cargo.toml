@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-ble-tx"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Pure BLE notification flow-control policy for leviculum-nrf, host-testable"
+
+[dependencies]

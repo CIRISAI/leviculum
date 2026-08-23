@@ -90,6 +90,43 @@ does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 A partial implementation already exists in tree (`leviculum-core/src/framing/ble.rs`,
 `leviculum-nrf/src/ble.rs`). It is incomplete and needs finishing.
 
+### Notifications are flow controlled, not fired and forgotten
+
+The GATT server sends a packet as a sequence of notifications, one per
+fragment. The SoftDevice queues those per connection, and the queue is one
+entry deep by default (`BLE_GATTS_HVN_TX_QUEUE_SIZE_DEFAULT = 1` on S140).
+The second `sd_ble_gatts_hvx` of a packet is therefore refused with
+`NRF_ERROR_RESOURCES` until the first one has actually gone out over the air.
+
+A loop that pushes every fragment back to back and ignores the return value
+consequently delivers fragment 0 and drops the rest, silently, on both sides:
+the peer sits on an assembly that never completes and the node believes it
+transmitted. That is what the interface did until Codeberg #264, and it is why
+only single-fragment traffic — anything below one fragment payload, 177 bytes
+at the default MTU — ever arrived. An announce did not.
+
+The rule that replaces it: **a fragment is offered again after the queue
+drains, and a fragment that cannot be sent is reported, never discarded.**
+
+- The wait is on the SoftDevice's own `BLE_GATTS_EVT_HVN_TX_COMPLETE`, not on
+  a guessed interval. `nrf-softdevice` surfaces it as
+  `gatt_server::Server::on_notify_tx_complete`, whose default implementation
+  throws the event away and which the `#[gatt_server]` macro does not
+  generate — so the server type implements `Server` by hand.
+- The wait is bounded, so a peer that stops listening cannot wedge the
+  outbound task. On expiry the packet is abandoned like any other failure.
+- Every abandonment emits `BLE_TX_DROP` (see
+  [Structured event logs](../structured-event-logs.md)) and bumps a counter.
+  A dropped fragment is never again indistinguishable from a sent one.
+
+The decision itself — retry, abort, report, and the exactly-once ordering —
+is pure and lives in `leviculum-nrf/ble-tx`, unit-tested on the host against a
+scripted notification sink; the firmware only performs the actions. This is
+the same split as the GNSS and telemetry policies, for the same reason: the
+interesting states are queue-full-then-drains, queue-full-then-times-out and
+hard-error-mid-packet, and none of them are reachable on demand with a real
+phone in the loop.
+
 ## ble-leviculum (BLE 5 broadcast mesh)
 
 Reticulum broadcasts are sent as real BLE 5 connectionless extended

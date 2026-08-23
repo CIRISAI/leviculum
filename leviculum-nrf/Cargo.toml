@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -32,6 +32,11 @@ leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
 # Pure telemetry cadence policy and target lifecycle, host-testable next
 # to the gnss crates (#236).
 leviculum-telemetry-policy = { path = "telemetry-policy" }
+# Pure outbound-notification flow control for the BLE peripheral: the
+# retry/abort/report decision around a full SoftDevice HVN queue (#264).
+# Unconditional like sd-policy — it is a handful of enums and costs
+# nothing on a build without the `softdevice` feature.
+leviculum-ble-tx = { path = "ble-tx" }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }

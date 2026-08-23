@@ -907,6 +907,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-ble-tx"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-core"
 version = "0.8.1"
 dependencies = [
@@ -968,6 +972,7 @@ dependencies = [
  "embedded-storage-async",
  "heapless 0.8.0",
  "heapless 0.9.3",
+ "leviculum-ble-tx",
  "leviculum-core",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",

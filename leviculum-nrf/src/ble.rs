@@ -12,8 +12,10 @@
 //!   Connection, then `gatt_server::run(&conn, &server, |evt| { ... })`
 //!   drives a callback closure for incoming writes. Outgoing
 //!   notifications use `gatt_server::notify_value(conn, handle, &data)`
-//!   sync — no async send-loop. Concurrent inbound + outbound is via
-//!   embassy_futures::select inside the connection lifetime.
+//!   sync, one fragment at a time, flow-controlled against the
+//!   SoftDevice's per-connection HVN queue (see `notify_fragments`).
+//!   Concurrent inbound + outbound is via embassy_futures::select
+//!   inside the connection lifetime.
 //! - SoftDevice owns RADIO/TIMER0/RTC0/etc.; we don't bind those.
 //!   USB VBUS detect goes via `SoftwareVbusDetect` fed by SoC events.
 
@@ -22,6 +24,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::mem;
+use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::peripherals;
@@ -29,7 +32,9 @@ use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
+use leviculum_ble_tx::{Action, Event, NotifyOutcome, PacketTx, DRAIN_WAIT_MS};
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
     KEEPALIVE_INTERVAL_MS,
@@ -39,8 +44,9 @@ use leviculum_core::InterfaceId;
 use nrf_softdevice::ble::advertisement_builder::{
     Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
 };
+use nrf_softdevice::ble::gatt_server::{NotifyValueError, Server, WriteOp};
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection};
-use nrf_softdevice::{raw, SocEvent, Softdevice};
+use nrf_softdevice::{raw, RawError, SocEvent, Softdevice};
 use static_cell::StaticCell;
 
 // USBD only. SoftDevice owns the rest of the IRQs we used to bind.
@@ -67,6 +73,55 @@ pub struct ReticulumService {
 #[nrf_softdevice::gatt_server]
 pub struct ReticulumServer {
     pub reticulum_service: ReticulumService,
+}
+
+/// Signalled on every `BLE_GATTS_EVT_HVN_TX_COMPLETE`: at least one slot
+/// of the per-connection HVN queue is free again. The outbound fragment
+/// loop waits on this instead of guessing an interval (Codeberg #264).
+static HVN_TX_DRAINED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Packets whose every fragment reached the SoftDevice's notification
+/// queue.
+pub static BLE_TX_PACKETS: AtomicU32 = AtomicU32::new(0);
+/// Packets abandoned part-way through their fragments. Before #264 this
+/// was the common case and it incremented nothing at all: the loop could
+/// not tell a dropped fragment from a sent one.
+pub static BLE_TX_DROPPED: AtomicU32 = AtomicU32::new(0);
+/// Times the outbound loop waited for the HVN queue to drain. On a
+/// one-deep queue (the S140 default) this tracks "fragments beyond the
+/// first", so it is the direct measure of multi-fragment traffic.
+pub static BLE_TX_DRAIN_WAITS: AtomicU32 = AtomicU32::new(0);
+
+/// [`ReticulumServer`] plus the one `Server` callback the
+/// `#[gatt_server]` macro does not generate.
+///
+/// The macro emits `on_write` only; every other callback keeps the
+/// trait's default, and the default for `on_notify_tx_complete` throws
+/// the event away. That event is exactly what tells us the HVN queue has
+/// room again, so the impl is written by hand here and the write path is
+/// delegated unchanged.
+pub struct NotifyAwareServer {
+    pub inner: ReticulumServer,
+}
+
+impl Server for NotifyAwareServer {
+    type Event = ReticulumServerEvent;
+
+    fn on_write(
+        &self,
+        conn: &Connection,
+        handle: u16,
+        op: WriteOp,
+        offset: usize,
+        data: &[u8],
+    ) -> Option<Self::Event> {
+        self.inner.on_write(conn, handle, op, offset, data)
+    }
+
+    fn on_notify_tx_complete(&self, _conn: &Connection, _count: u8) -> Option<Self::Event> {
+        HVN_TX_DRAINED.signal(());
+        None
+    }
 }
 
 // Channels between BLE task and the binaries' main loop.
@@ -137,12 +192,12 @@ const RETICULUM_SVC_UUID_LE: [u8; 16] = [
 #[embassy_executor::task]
 async fn ble_task(
     sd: &'static Softdevice,
-    server: &'static ReticulumServer,
+    server: &'static NotifyAwareServer,
     identity_hash: [u8; 16],
 ) {
     // Publish the identity characteristic value so a connecting peer can
     // read it before exchanging frames over rx/tx.
-    let _ = server.reticulum_service.identity_set(&identity_hash);
+    let _ = server.inner.reticulum_service.identity_set(&identity_hash);
 
     // Static-lifetime advertising / scan payloads — nrf-softdevice's
     // peripheral::advertise_connectable wants &'static slices.
@@ -191,7 +246,7 @@ async fn ble_task(
 /// concurrently via `embassy_futures::select`.
 async fn gatt_events(
     conn: &Connection,
-    server: &ReticulumServer,
+    server: &NotifyAwareServer,
     incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     outgoing_rx: &Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
 ) {
@@ -206,7 +261,7 @@ async fn gatt_events(
     // Drain stale outgoing packets from before this connection.
     while outgoing_rx.try_receive().is_ok() {}
 
-    let tx_handle = server.reticulum_service.tx_value_handle;
+    let tx_handle = server.inner.reticulum_service.tx_value_handle;
 
     let inbound = gatt_server::run(conn, server, |evt| {
         let ReticulumServerEvent::ReticulumService(service_evt) = evt;
@@ -263,13 +318,19 @@ async fn gatt_events(
             match select(outgoing_rx.receive(), keepalive_deadline).await {
                 Either::First(packet) => {
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
-                    for frag in &fragments {
-                        let _ = gatt_server::notify_value(conn, tx_handle, frag);
-                    }
+                    notify_fragments(
+                        conn,
+                        tx_handle,
+                        fragments.len(),
+                        |index| &fragments[index],
+                        "packet",
+                        packet.len(),
+                    )
+                    .await;
                 }
                 Either::Second(()) => {
                     let kv = [KEEPALIVE_BYTE];
-                    let _ = gatt_server::notify_value(conn, tx_handle, &kv);
+                    notify_fragments(conn, tx_handle, 1, |_| &kv, "keepalive", kv.len()).await;
                     last_keepalive.set(Instant::now());
                 }
             }
@@ -277,6 +338,129 @@ async fn gatt_events(
     };
 
     let _ = select(inbound, outbound).await;
+}
+
+/// Push one packet's fragments through the SoftDevice notification queue,
+/// in order and exactly once, and report it when that fails.
+///
+/// The thin driver half of Codeberg #264. Every decision — retry the
+/// same fragment, abort, give up on the budget — belongs to
+/// [`leviculum_ble_tx::PacketTx`] and is unit-tested on the host; this
+/// function only performs the actions and reports the outcome.
+///
+/// The wait is on `BLE_GATTS_EVT_HVN_TX_COMPLETE` (surfaced by
+/// `nrf-softdevice` as `Server::on_notify_tx_complete`, forwarded to
+/// [`HVN_TX_DRAINED`] by [`NotifyAwareServer`]), never on a guessed
+/// interval, and it is bounded by [`DRAIN_WAIT_MS`] so a peer that
+/// stopped listening cannot wedge the outbound task.
+///
+/// `fragment` yields fragment `index`; the caller keeps the buffers, so
+/// nothing is copied or allocated here.
+async fn notify_fragments<'a, F>(
+    conn: &Connection,
+    handle: u16,
+    fragment_count: usize,
+    fragment: F,
+    kind: &str,
+    packet_len: usize,
+) where
+    F: Fn(usize) -> &'a [u8],
+{
+    // A drain edge still pending here belongs to a fragment of an
+    // earlier packet and has already been paid for. Clearing it keeps
+    // the first wait of this packet an honest measurement.
+    HVN_TX_DRAINED.reset();
+
+    let (mut tx, mut action) = PacketTx::start(fragment_count);
+    loop {
+        match action {
+            Action::Send { index } => {
+                let outcome = match gatt_server::notify_value(conn, handle, fragment(index)) {
+                    Ok(()) => NotifyOutcome::Sent,
+                    // The queue is full; the fragment was NOT taken.
+                    Err(NotifyValueError::Raw(RawError::Resources)) => NotifyOutcome::QueueFull,
+                    Err(NotifyValueError::Disconnected) => NotifyOutcome::Disconnected,
+                    Err(NotifyValueError::Raw(err)) => NotifyOutcome::Failed(u32::from(err)),
+                };
+                action = tx.step(Event::Notify(outcome));
+            }
+            Action::AwaitDrain { .. } => {
+                let event =
+                    match select(HVN_TX_DRAINED.wait(), Timer::after_millis(DRAIN_WAIT_MS)).await {
+                        Either::First(()) => Event::Drained,
+                        Either::Second(()) => Event::WaitTimedOut,
+                    };
+                action = tx.step(event);
+            }
+            Action::Done => {
+                BLE_TX_PACKETS.fetch_add(1, Ordering::Relaxed);
+                BLE_TX_DRAIN_WAITS.fetch_add(tx.drain_waits(), Ordering::Relaxed);
+                return;
+            }
+            Action::Abort { index, reason } => {
+                report_tx_drop(
+                    kind,
+                    packet_len,
+                    index,
+                    fragment_count,
+                    &tx,
+                    reason.as_str(),
+                    reason.code(),
+                );
+                return;
+            }
+            // Unreachable: every event fed above answers the action just
+            // performed. Reported rather than swallowed — a silently
+            // dropped packet is the exact bug this function removes.
+            Action::Nothing => {
+                report_tx_drop(
+                    kind,
+                    packet_len,
+                    tx.fragments_sent(),
+                    fragment_count,
+                    &tx,
+                    "internal",
+                    0,
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// Emit the structured drop event and bump the counters.
+///
+/// Format per `docs/src/structured-event-logs.md`: `NAME key=value …
+/// t=<ms>`, one line, scalar values, no whitespace inside a value — so
+/// `grep BLE_TX_DROP` over a captured debug-port log is a usable
+/// measurement of how much BLE traffic never left the node.
+fn report_tx_drop(
+    kind: &str,
+    packet_len: usize,
+    index: usize,
+    fragment_count: usize,
+    tx: &PacketTx,
+    reason: &str,
+    code: u32,
+) {
+    let dropped = BLE_TX_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+    BLE_TX_DRAIN_WAITS.fetch_add(tx.drain_waits(), Ordering::Relaxed);
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "BLE_TX_DROP kind={} len={} frag={} of={} sent={} reason={} code={} waits={} dropped={} t={}",
+            kind,
+            packet_len,
+            index,
+            fragment_count,
+            tx.fragments_sent(),
+            reason,
+            code,
+            tx.drain_waits(),
+            dropped,
+            Instant::now().as_millis(),
+        ),
+    );
 }
 
 /// Bring up S140 + start the BLE peripheral task. Peripherals previously
@@ -351,8 +535,10 @@ pub fn init(
 
     let sd = Softdevice::enable(&config);
 
-    static SERVER: StaticCell<ReticulumServer> = StaticCell::new();
-    let server = SERVER.init(ReticulumServer::new(sd).expect("GATT server"));
+    static SERVER: StaticCell<NotifyAwareServer> = StaticCell::new();
+    let server = SERVER.init(NotifyAwareServer {
+        inner: ReticulumServer::new(sd).expect("GATT server"),
+    });
 
     spawner.must_spawn(softdevice_task(sd, vbus));
     spawner.must_spawn(ble_task(sd, server, identity_hash));

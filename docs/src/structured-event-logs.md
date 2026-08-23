@@ -196,6 +196,33 @@ discouraged: the runtime-validation layer can't detect them, so
 they silently rot.  Only add entries you have a corresponding
 emit for.
 
+## Firmware-side events
+
+The nRF firmware emits the same line grammar, but not through this
+machinery.  `leviculum-nrf` is `no_std` and cannot depend on
+`leviculum-std`, so there is no `tracing` subscriber, no `node=`
+field, and no runtime schema validation; the line goes into the
+debug-CDC ring buffer behind the module prefix that the rest of the
+firmware log uses:
+
+```text
+[BLE ] BLE_TX_DROP kind=packet len=312 frag=1 of=2 sent=1 reason=stalled code=0 waits=0 dropped=3 t=48210
+```
+
+The prefix does not disturb the grammar — the event name is still
+one whitespace-delimited token and `grep BLE_TX_DROP` over a
+captured debug-port log still works — but the event deliberately
+does **not** appear in `EVENT_CATALOG`.  A catalogue entry the
+subscriber can never see emitted is exactly the silent rot the rule
+above forbids.  Firmware events are documented here and at their
+call site instead.
+
+Current firmware events:
+
+| Event | Emitted by | Meaning |
+|-------|-----------|---------|
+| `BLE_TX_DROP` | `leviculum-nrf/src/ble.rs` | A BLE packet or keepalive was abandoned part-way through its fragments.  `frag=` is the fragment that failed, `sent=` how many did go out, `reason=` one of `stalled` (no HVN-TX-COMPLETE within the bound), `disconnected`, `budget`, `sd_error` (with the raw code in `code=`), `internal`.  `dropped=` is the cumulative counter, so one line states both the incident and the running total. |
+
 ## Validation behaviour
 
 Two violation classes, both non-blocking — the original event

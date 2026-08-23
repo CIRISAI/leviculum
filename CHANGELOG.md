@@ -140,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The BLE interface waits for the SoftDevice notification queue to
+  drain instead of discarding the refusal, so a packet larger than one
+  fragment — every announce — reaches the peer; what still cannot be
+  sent is reported as `BLE_TX_DROP` (#264).
+
 - A relay forwards packets whose context byte it does not know instead
   of dropping them at parse time; only local delivery abstains, counted
   as `unknown-context` (#332).
