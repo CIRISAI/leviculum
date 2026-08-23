@@ -315,12 +315,20 @@ fn the_help_text_says_it_needs_root_and_never_uses_the_network() {
         "--radio-txpower",
         "--radio-preset",
         "--no-radio",
+        "--telemetry",
+        "--telemetry-profile",
+        "--telemetry-key",
+        "--no-telemetry",
+        "--set-telemetry",
     ] {
         assert!(help.contains(flag), "{flag} missing from --help:\n{help}");
     }
     // What the radio flags do has to be readable without the source.
     assert!(help.contains("Spreading factor, 7 to 12"), "{help}");
     assert!(help.contains("comes back up on that frequency"), "{help}");
+    // And so does the telemetry decision: default no, one input on yes.
+    assert!(help.contains("The default is no"), "{help}");
+    assert!(help.contains("32 hex characters"), "{help}");
 }
 
 #[test]
@@ -373,6 +381,104 @@ fn a_preset_and_explicit_values_together_stop_the_run() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("pick one"), "{err}");
     assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
+#[test]
+fn a_mistyped_lxmf_address_stops_the_run_at_the_command_line() {
+    // The flash has not happened yet when the flags are parsed, so a typo in
+    // the one input telemetry needs costs nothing but the retype.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--telemetry",
+            "a7b2c3",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("32 hex characters"), "{err}");
+    assert!(err.contains("16 bytes"), "{err}");
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
+#[test]
+fn switching_telemetry_on_and_off_at_once_stops_the_run() {
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--no-telemetry",
+            "--telemetry",
+            "a7b2c3d4e5f60718293a4b5c6d7e8f90",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("pick one"), "{err}");
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
+#[test]
+fn the_config_only_session_needs_a_running_board_and_says_so() {
+    // --set-telemetry configures without flashing, so a bus with nothing
+    // running on it is a reported fact rather than a wait.
+    let bundle = unpacked_bundle();
+    let empty = TempDir::new().unwrap();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--set-telemetry",
+            "--telemetry",
+            "a7b2c3d4e5f60718293a4b5c6d7e8f90",
+            "--sysfs",
+            &empty.path().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let said = stdout(&out);
+    assert!(said.contains("No running LNode on the bus"), "{said}");
+    assert!(said.contains("--set-telemetry"), "{said}");
+    // It must not have gone anywhere near a bootloader or a write.
+    assert!(!said.contains("copied"), "{said}");
+}
+
+#[test]
+fn the_prompt_reaches_a_piped_stdin_and_a_piped_stdin_answers_no() {
+    // The real Console on a real pipe, not a test double: `Command::output`
+    // gives the child an empty stdin, which is exactly the shape of a
+    // scripted run. It must print the question, read end-of-input as "no",
+    // and finish — a tool that blocks here hangs somebody's CI job.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--set-telemetry",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    let said = stdout(&out);
+    assert!(said.contains("Send telemetry? [y/N]"), "{said}");
+    assert!(said.contains("Telemetry left as it is"), "{said}");
+    // No address was asked for, because the first question was answered no.
+    assert!(!said.contains("LXMF address"), "{said}");
+    assert!(out.status.success(), "{said}");
 }
 
 #[test]

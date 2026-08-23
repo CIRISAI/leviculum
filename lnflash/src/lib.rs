@@ -29,6 +29,7 @@ pub mod manifest;
 pub mod radio;
 pub mod softdevice;
 pub mod sys;
+pub mod telemetry;
 pub mod transport;
 pub mod uf2;
 pub mod ui;

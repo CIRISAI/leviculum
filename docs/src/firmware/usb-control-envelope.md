@@ -94,6 +94,35 @@ Firmware from before #236 answers this type with an `unknown type`
 refusal and leaves it out of its capability report, which is precisely
 how a #236-aware host detects a pre-#236 board.
 
+#### How `lnflash` drives it
+
+Telemetry is configuration, not firmware, so the same frame is reachable
+from the flash flow and without flashing anything:
+
+| flag                                | effect                                                        |
+|-------------------------------------|---------------------------------------------------------------|
+| *(none)*                            | after the radio step: `Send telemetry? [y/N]`, default **no**  |
+| `--telemetry <ADDRESS>`             | implies yes; 32 hex chars, spaces/colons/case tolerated        |
+| `--telemetry-profile <tracker\|station>` | which cadence; default `station`                         |
+| `--telemetry-key <128 hex>`         | the key-present form; absent = hash-only, the common case      |
+| `--no-telemetry`                    | send profile `0x00` — clear whatever the board had stored      |
+| `--set-telemetry`                   | the same configuration on running boards, no flash             |
+
+Answering *no* at the prompt sends **nothing**; `--no-telemetry` sends a
+clear frame. The difference matters on a board that already has a target:
+silence leaves it, the clear frame removes it.
+
+A yes needs exactly one input — the LXMF address — because that is what
+users have. Nothing detects a terminal: `Ui::ask` answers "no answer" for
+`--yes` and for a piped or closed stdin alike, and every prompt treats
+that as its stated default, so a scripted run cannot block.
+
+What the host reports back is the ack. The node's own
+`[TELEMETRY] target=… state=off|awaiting-key|ready` line goes to the
+debug CDC (if00), which `lnflash` holds open only for the post-flash boot
+check — so it is named as the place to read the rest rather than read
+back over a second connection.
+
 ## Why an envelope frame can never be a packet
 
 The channel's other occupant is HDLC-framed Reticulum traffic, so every

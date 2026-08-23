@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use leviculum_core::envelope::{TelemetryTargetWire, TELEMETRY_PROFILE_STATION};
 use lnflash::flow::{self, Options};
 use lnflash::manifest;
 use lnflash::radio::{self, RadioChoice, RadioPlan, RadioSettings};
+use lnflash::telemetry::{self, TelemetryPlan};
 use lnflash::ui::{Assumed, Console, Ui};
 use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
 
@@ -28,6 +30,10 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
                   consensus), a preset menu (eu868, us915, au915, custom), or the settings the \
                   --radio-preset / --radio-* flags name. The board stores what it is given, so \
                   it comes back up on that frequency after a reset and after the next flash.\n\n\
+                  It then asks whether the board should send telemetry. The default is no, and \
+                  a yes needs exactly one input: the LXMF address to report to. Telemetry is \
+                  configuration rather than firmware, so --set-telemetry does the same thing \
+                  later without reflashing.\n\n\
                   Needs root: the bootloader's drive is a root:disk block device and \
                   automounting assumes a desktop stack a headless host does not have.\n\n\
                   No network access, ever — everything it writes is in the bundle."
@@ -65,6 +71,33 @@ struct Cli {
     /// before the envelope reports itself as such.
     #[arg(long)]
     set_time: bool,
+
+    /// Configure the telemetry target on every running LNode, then exit.
+    /// No flashing — activation is configuration, not firmware. Takes the
+    /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
+    /// flags, and asks if none of them is given.
+    #[arg(long, conflicts_with = "set_time")]
+    set_telemetry: bool,
+
+    /// Send position telemetry to this LXMF address. Implies yes to the
+    /// prompt. 32 hex characters; spaces, colons and upper case are fine.
+    #[arg(long, value_name = "ADDRESS")]
+    telemetry: Option<String>,
+
+    /// Which cadence the telemetry uses: tracker (movement-driven) or
+    /// station (slow stationary heartbeat, the default).
+    #[arg(long, value_name = "PROFILE")]
+    telemetry_profile: Option<String>,
+
+    /// The target's public key, 128 hex characters. Optional and rarely
+    /// needed: without it the node resolves the key over the air, which is
+    /// the common case.
+    #[arg(long, value_name = "KEY")]
+    telemetry_key: Option<String>,
+
+    /// Switch telemetry off: clear whatever target the board has stored.
+    #[arg(long)]
+    no_telemetry: bool,
 
     /// Frequency in Hz for the radio settings written after the flash.
     /// Giving any --radio-* value skips the prompt; the ones not given keep
@@ -169,8 +202,55 @@ fn radio_plan(cli: &Cli) -> Result<RadioPlan, Box<dyn std::error::Error>> {
     Ok(RadioPlan::Fixed(RadioChoice::Custom(settings)))
 }
 
+/// What the `--telemetry*` flags say, before any board is touched.
+///
+/// Resolved up front for the same reason [`radio_plan`] is: a mistyped
+/// address has to stop the run at the command line, not after a board has
+/// been written and is waiting for a frame the firmware would refuse.
+fn telemetry_plan(cli: &Cli) -> Result<TelemetryPlan, Box<dyn std::error::Error>> {
+    if cli.no_telemetry {
+        // "Off" and "on" are two ways to answer one question; honouring one
+        // and dropping the other would decide silently what the user should.
+        if cli.telemetry.is_some() || cli.telemetry_key.is_some() || cli.telemetry_profile.is_some()
+        {
+            return Err(
+                "--no-telemetry switches telemetry off and the other --telemetry-* flags \
+                 switch it on; pick one"
+                    .into(),
+            );
+        }
+        return Ok(TelemetryPlan::Clear);
+    }
+    let profile = match &cli.telemetry_profile {
+        Some(name) => telemetry::parse_profile(name)?,
+        None => TELEMETRY_PROFILE_STATION,
+    };
+    let Some(address) = &cli.telemetry else {
+        if cli.telemetry_key.is_some() {
+            return Err(
+                "--telemetry-key is the key of a target, so it needs the --telemetry address \
+                 it belongs to"
+                    .into(),
+            );
+        }
+        // A profile on its own is not an answer to "send telemetry?", only
+        // to "which cadence" — so the prompt still runs, and the address it
+        // collects gets this profile.
+        return Ok(TelemetryPlan::Ask { profile });
+    };
+    Ok(TelemetryPlan::Fixed(TelemetryTargetWire {
+        profile,
+        dest_hash: telemetry::parse_address(address)?,
+        public_key: match &cli.telemetry_key {
+            Some(key) => Some(telemetry::parse_key(key)?),
+            None => None,
+        },
+    }))
+}
+
 fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let radio = radio_plan(cli)?;
+    let telemetry = telemetry_plan(cli)?;
     let dir = manifest::locate(cli.bundle.as_deref())?;
     let manifest = manifest::load(&dir)?;
 
@@ -219,6 +299,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    if cli.set_telemetry {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_telemetry(&manifest, &sysfs, ui, &telemetry)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
     // Say this before enumerating rather than after a failed mount: a user
     // who forgot sudo should learn it in the first line, not the last.
     if !cli.dry_run && !lnflash::sys::is_root() {
@@ -236,6 +329,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         board: cli.board.clone(),
         dry_run: cli.dry_run,
         radio,
+        telemetry,
         ..Options::default()
     };
 
@@ -396,5 +490,120 @@ mod tests {
     #[test]
     fn the_radio_step_can_be_left_out_altogether() {
         assert_eq!(plan(&["--no-radio"]).unwrap(), RadioPlan::Skip);
+    }
+
+    // -----------------------------------------------------------------
+    // Telemetry (Codeberg #236)
+    // -----------------------------------------------------------------
+
+    const ADDRESS: &str = "a7b2c3d4e5f60718293a4b5c6d7e8f90";
+    const ADDRESS_BYTES: [u8; 16] = [
+        0xa7, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f,
+        0x90,
+    ];
+
+    fn tplan(args: &[&str]) -> Result<TelemetryPlan, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        telemetry_plan(&cli).map_err(|err| err.to_string())
+    }
+
+    #[test]
+    fn no_telemetry_flag_leaves_the_choice_to_the_prompt_at_the_default_profile() {
+        // Defaults first: with nothing said, the tool asks, and the profile
+        // a bare "yes" would use is station.
+        for args in [vec![], vec!["--yes"]] {
+            assert_eq!(
+                tplan(&args).unwrap(),
+                TelemetryPlan::Ask {
+                    profile: leviculum_core::envelope::TELEMETRY_PROFILE_STATION
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_on_the_command_line_skips_the_prompt() {
+        let TelemetryPlan::Fixed(target) = tplan(&["--telemetry", ADDRESS]).unwrap() else {
+            panic!("a stated address has to decide the question");
+        };
+        assert_eq!(target.dest_hash, ADDRESS_BYTES);
+        assert_eq!(target.profile, TELEMETRY_PROFILE_STATION);
+        // Hash-only is the common case, so the key stays absent unless asked
+        // for: the node resolves it over the air.
+        assert_eq!(target.public_key, None);
+    }
+
+    #[test]
+    fn the_profile_flag_names_the_cadence_on_both_paths() {
+        let TelemetryPlan::Fixed(target) =
+            tplan(&["--telemetry", ADDRESS, "--telemetry-profile", "tracker"]).unwrap()
+        else {
+            panic!("the flags decide");
+        };
+        assert_eq!(
+            target.profile,
+            leviculum_core::envelope::TELEMETRY_PROFILE_TRACKER
+        );
+        // Without an address the profile is not an answer to "send
+        // telemetry?", so the prompt still runs — carrying the profile.
+        assert_eq!(
+            tplan(&["--telemetry-profile", "tracker"]).unwrap(),
+            TelemetryPlan::Ask {
+                profile: leviculum_core::envelope::TELEMETRY_PROFILE_TRACKER
+            }
+        );
+    }
+
+    #[test]
+    fn a_key_can_be_given_and_travels_with_the_target() {
+        let key = "5e".repeat(64);
+        let TelemetryPlan::Fixed(target) =
+            tplan(&["--telemetry", ADDRESS, "--telemetry-key", &key]).unwrap()
+        else {
+            panic!("the flags decide");
+        };
+        assert_eq!(target.public_key, Some([0x5Eu8; 64]));
+    }
+
+    #[test]
+    fn no_telemetry_is_an_explicit_clear_rather_than_a_skip() {
+        assert_eq!(tplan(&["--no-telemetry"]).unwrap(), TelemetryPlan::Clear);
+    }
+
+    #[test]
+    fn switching_it_on_and_off_in_one_command_is_a_usage_error() {
+        for args in [
+            vec!["--no-telemetry", "--telemetry", ADDRESS],
+            vec!["--no-telemetry", "--telemetry-profile", "tracker"],
+            vec!["--no-telemetry", "--telemetry-key", "5e"],
+        ] {
+            let err = tplan(&args).unwrap_err();
+            assert!(err.contains("pick one"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_key_without_the_address_it_belongs_to_is_a_usage_error() {
+        let err = tplan(&["--telemetry-key", &"5e".repeat(64)]).unwrap_err();
+        assert!(err.contains("--telemetry address"), "{err}");
+    }
+
+    #[test]
+    fn a_mistyped_value_stops_the_run_before_a_board_is_touched() {
+        let err = tplan(&["--telemetry", "a7b2"]).unwrap_err();
+        assert!(err.contains("32 hex characters"), "{err}");
+        let err = tplan(&["--telemetry", ADDRESS, "--telemetry-key", "5e"]).unwrap_err();
+        assert!(err.contains("128 hex characters"), "{err}");
+        let err = tplan(&["--telemetry", ADDRESS, "--telemetry-profile", "beacon"]).unwrap_err();
+        assert!(err.contains("tracker"), "{err}");
+    }
+
+    #[test]
+    fn the_two_configure_only_sessions_are_not_one_command() {
+        // --set-time and --set-telemetry both end the run after talking to
+        // the boards, so asking for both would silently drop one.
+        let err = tplan(&["--set-time", "--set-telemetry"]).unwrap_err();
+        assert!(err.contains("cannot be used with"), "{err}");
     }
 }

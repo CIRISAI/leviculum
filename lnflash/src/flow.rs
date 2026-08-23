@@ -26,10 +26,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::entry;
+use crate::envelope::SessionReply;
 use crate::infouf2::InfoUf2;
 use crate::manifest::{self, Board, Manifest, Payload};
 use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
+use crate::telemetry::{self, TelemetryPlan};
 use crate::transport::{self, Drive, Written};
 use crate::uf2::Image;
 use crate::ui::Ui;
@@ -328,6 +330,9 @@ pub struct Options {
     /// What to do about the radio configuration once the board is up: ask,
     /// send what the flags already decided, or leave it alone.
     pub radio: RadioPlan,
+    /// What to do about the telemetry target once the board is up (#236).
+    /// The default is to ask, and the default answer to that is no.
+    pub telemetry: TelemetryPlan,
 }
 
 impl Default for Options {
@@ -338,6 +343,7 @@ impl Default for Options {
             appear_within: entry::BOOTLOADER_APPEARS_WITHIN,
             banner_window: verify::BANNER_WINDOW,
             radio: RadioPlan::default(),
+            telemetry: TelemetryPlan::default(),
         }
     }
 }
@@ -409,15 +415,17 @@ pub struct Outcome {
     pub verdict: Option<Verdict>,
     /// What the radio step did, if it ran.
     pub radio: Option<RadioOutcome>,
+    /// What the telemetry step did, if anything was sent at all.
+    pub telemetry: Option<TelemetryOutcome>,
 }
 
 impl Outcome {
     /// Whether the firmware is on the board and confirmed.
     ///
-    /// The radio configuration is deliberately not part of this. The flash
-    /// has happened by the time that step runs, and a board that did not ACK
-    /// is a board running our firmware on the compiled default — worth a
-    /// warning, not worth reporting the flash as failed.
+    /// Neither the radio configuration nor the telemetry target is part of
+    /// this. The flash has happened by the time those steps run, and a board
+    /// that did not ACK is a board running our firmware on what it had
+    /// stored — worth a warning, not worth reporting the flash as failed.
     pub fn is_good(&self) -> bool {
         self.application_written.is_some()
             && self.verdict.as_ref().is_some_and(Verdict::is_confirmed)
@@ -430,6 +438,14 @@ pub struct RadioOutcome {
     pub settings: RadioSettings,
     /// Whether the board acknowledged the frame.
     pub acked: bool,
+}
+
+/// What the telemetry step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryOutcome {
+    pub target: leviculum_core::envelope::TelemetryTargetWire,
+    /// What the board answered to the target frame.
+    pub reply: crate::envelope::SessionReply,
 }
 
 /// Resolve every candidate on the bus, individually.
@@ -482,15 +498,54 @@ pub fn run(
     Ok(outcomes)
 }
 
-/// What one board answered to `--set-time`.
-enum TimeOutcome {
-    Acked,
-    Refused(u8),
-    NoAnswer,
-    /// No capability report: firmware from before the #238 envelope.
-    NoEnvelope,
-    /// A capability report that does not list the wall-time type.
-    NotAccepted,
+/// The boards that are already running, and the transport port on each.
+///
+/// The configure-without-flashing sessions all start here — "activation is
+/// configuration, not firmware" means every one of them talks to a board
+/// that is up, so finding them is written once.
+struct Reachable {
+    ports: Vec<(String, std::path::PathBuf)>,
+    /// Boards found running whose transport port never appeared. Already
+    /// reported to the user; counted so the session can still fail.
+    unreachable: usize,
+}
+
+impl Reachable {
+    /// True when nothing at all was found — the session has nothing to do.
+    fn is_empty(&self) -> bool {
+        self.ports.is_empty() && self.unreachable == 0
+    }
+}
+
+fn reachable_boards(
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+) -> Result<Reachable, Error> {
+    let candidates = find_candidates(manifest, sysfs)?;
+    let mut found = Reachable {
+        ports: Vec::new(),
+        unreachable: 0,
+    };
+    for candidate in candidates.iter().filter(|c| !c.in_bootloader) {
+        let port = candidate.device.name.clone();
+        match entry::wait_for_interface_tty(
+            sysfs,
+            &candidate.device,
+            radio::TRANSPORT_INTERFACE,
+            Duration::from_secs(2),
+        )? {
+            Some(tty) => found.ports.push((port, tty)),
+            None => {
+                ui.say(&format!(
+                    "{port}: the transport port (if{:02}) never appeared, so nothing was sent.",
+                    radio::TRANSPORT_INTERFACE
+                ));
+                found.unreachable += 1;
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The `--set-time` session (#238, #166 item 2): no flash, no bootloader
@@ -503,34 +558,18 @@ pub fn set_time(
     ui: &mut dyn Ui,
     unix_secs: u64,
 ) -> Result<bool, Error> {
-    let candidates = find_candidates(manifest, sysfs)?;
-    let running: Vec<&Candidate> = candidates.iter().filter(|c| !c.in_bootloader).collect();
-    if running.is_empty() {
+    let reachable = reachable_boards(manifest, sysfs, ui)?;
+    if reachable.is_empty() {
         ui.say(
             "No running LNode on the bus. --set-time talks to flashed boards; a board in its \
              bootloader has no clock to set.",
         );
         return Ok(false);
     }
-    let mut all_took_it = true;
-    for candidate in running {
-        let port = candidate.device.name.as_str();
-        let Some(tty) = entry::wait_for_interface_tty(
-            sysfs,
-            &candidate.device,
-            radio::TRANSPORT_INTERFACE,
-            Duration::from_secs(2),
-        )?
-        else {
-            ui.say(&format!(
-                "{port}: the transport port (if{:02}) never appeared, so nothing was sent.",
-                radio::TRANSPORT_INTERFACE
-            ));
-            all_took_it = false;
-            continue;
-        };
-        let outcome = match send_time_to(&tty, unix_secs) {
-            Ok(outcome) => outcome,
+    let mut all_took_it = reachable.unreachable == 0;
+    for (port, tty) in &reachable.ports {
+        let reply = match send_time_to(tty, unix_secs) {
+            Ok(reply) => reply,
             Err(err) => {
                 ui.say(&format!(
                     "{port}: the transport port could not be used ({err})"
@@ -539,60 +578,146 @@ pub fn set_time(
                 continue;
             }
         };
-        match outcome {
-            TimeOutcome::Acked => {
-                ui.say(&format!(
-                    "{port}: time set — the board stamps from unix {unix_secs} now \
-                     (source=host)."
-                ));
-            }
-            TimeOutcome::Refused(reason) => {
-                ui.say(&format!(
-                    "{port}: the board refused the time — {}.",
-                    crate::envelope::reason_str(reason)
-                ));
-                all_took_it = false;
-            }
-            TimeOutcome::NoAnswer => {
-                ui.say(&format!(
-                    "{port}: the board did not answer the wall-time frame."
-                ));
-                all_took_it = false;
-            }
-            TimeOutcome::NoEnvelope => {
-                ui.say(&format!(
-                    "{port}: this firmware predates the control envelope and cannot take a \
-                     wall time. Flash the current bundle first."
-                ));
-                all_took_it = false;
-            }
-            TimeOutcome::NotAccepted => {
-                ui.say(&format!(
-                    "{port}: this firmware speaks the envelope but does not accept the \
-                     wall-time frame."
-                ));
-                all_took_it = false;
-            }
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: time set — the board stamps from unix {unix_secs} now (source=host)."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the time — {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer the wall-time frame."
+            )),
+            SessionReply::NoEnvelope => ui.say(&format!(
+                "{port}: this firmware predates the control envelope and cannot take a wall \
+                 time. Flash the current bundle first."
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but does not accept the wall-time \
+                 frame."
+            )),
         }
     }
     Ok(all_took_it)
 }
 
-fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<TimeOutcome> {
-    use crate::envelope::{self, ControlOutcome};
+fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<SessionReply> {
+    use crate::envelope;
     let fd = crate::sys::Fd::open_serial(tty)?;
     fd.set_transport_port()?;
-    let Some(caps) = envelope::probe_capabilities(&fd)? else {
-        return Ok(TimeOutcome::NoEnvelope);
-    };
-    if !caps.accepts(leviculum_core::envelope::TYPE_WALL_TIME) {
-        return Ok(TimeOutcome::NotAccepted);
-    }
-    Ok(match envelope::send_wall_time(&fd, unix_secs)? {
-        ControlOutcome::Acked => TimeOutcome::Acked,
-        ControlOutcome::Refused { reason } => TimeOutcome::Refused(reason),
-        ControlOutcome::NoAnswer => TimeOutcome::NoAnswer,
+    envelope::probed(&fd, leviculum_core::envelope::TYPE_WALL_TIME, |fd| {
+        envelope::send_wall_time(fd, unix_secs)
     })
+}
+
+/// The `--set-telemetry` session (#236 scope item 5): the same telemetry
+/// configuration the flash flow offers, without flashing anything.
+/// Activation is configuration, so a board that is already running takes a
+/// new target — or loses the one it had — over the same control envelope.
+///
+/// The question is asked once and the answer goes to every board found:
+/// asking per board would make a two-board bench a two-address interview
+/// for what is one decision.
+pub fn set_telemetry(
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    plan: &TelemetryPlan,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(manifest, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-telemetry talks to flashed boards; a board in \
+             its bootloader has no telemetry to configure.",
+        );
+        return Ok(false);
+    }
+    let Some(target) = telemetry::resolve(ui, plan)? else {
+        // Answering "no" to a session whose whole purpose was to configure
+        // is a clean exit, not a failure: nothing was asked for and nothing
+        // was changed.
+        ui.say("Telemetry left as it is; nothing was sent.");
+        return Ok(true);
+    };
+
+    let mut all_took_it = reachable.unreachable == 0;
+    for (port, tty) in &reachable.ports {
+        let reply = match telemetry::send(tty, &target) {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        report_telemetry(ui, port, &target, reply);
+    }
+    Ok(all_took_it)
+}
+
+/// Say what the board answered to the telemetry target, in the same words
+/// on the flash path and on the standalone path.
+///
+/// The node's own `[TELEMETRY] target=… state=…` line is not read back
+/// here. It goes to the debug CDC (if00), and this tool holds that port
+/// open only for the boot check in [`verify_boot`], which is finished and
+/// closed by the time telemetry is configured — and on `--set-telemetry`
+/// it never opens at all. Opening it a second time to read our own effect
+/// back would be a second connection to a board mid-configuration, so the
+/// ack is what is reported and the operator is told where the node says the
+/// rest.
+fn report_telemetry(
+    ui: &mut dyn Ui,
+    port: &str,
+    target: &leviculum_core::envelope::TelemetryTargetWire,
+    reply: SessionReply,
+) {
+    use leviculum_core::envelope::TELEMETRY_PROFILE_OFF;
+    match reply {
+        SessionReply::Acked if target.profile == TELEMETRY_PROFILE_OFF => ui.say(&format!(
+            "{port}: telemetry off — the board acknowledged the cleared target and stops \
+             reporting."
+        )),
+        SessionReply::Acked => {
+            ui.say(&format!(
+                "{port}: telemetry on — {}.",
+                telemetry::describe(target)
+            ));
+            if target.public_key.is_none() {
+                ui.say(&format!(
+                    "{port}: the node has no key for that address yet, so it asks the mesh for \
+                     one; it reports [TELEMETRY] target=… state=awaiting-key on its debug port \
+                     (if00) until an announce answers, then state=ready."
+                ));
+            } else {
+                ui.say(&format!(
+                    "{port}: the key travelled with the target, so the node reports \
+                     [TELEMETRY] target=… state=ready on its debug port (if00)."
+                ));
+            }
+        }
+        SessionReply::Refused(reason) => ui.say(&format!(
+            "{port}: the board refused the telemetry target — {}.",
+            crate::envelope::reason_str(reason)
+        )),
+        SessionReply::NoAnswer => ui.say(&format!(
+            "{port}: the board did not answer the telemetry frame, so it is still on whatever \
+             target it had stored."
+        )),
+        SessionReply::NoEnvelope => ui.say(&format!(
+            "{port}: this firmware predates the control envelope and cannot take a telemetry \
+             target. Flash the current bundle first."
+        )),
+        SessionReply::NotAccepted => ui.say(&format!(
+            "{port}: this firmware speaks the envelope but has no telemetry consumer. Flash \
+             the current bundle first."
+        )),
+    }
 }
 
 fn resolve(
@@ -732,6 +857,7 @@ fn resolve(
         application_written: None,
         verdict: None,
         radio: None,
+        telemetry: None,
     };
 
     let mut drive = drive;
@@ -770,9 +896,61 @@ fn resolve(
     // board is up and the only thing missing is the proof of which build.
     if let Some(app) = &booted.app {
         outcome.radio = set_radio(sysfs, ui, opts, app, &port)?;
+        outcome.telemetry = set_telemetry_on(sysfs, ui, opts, app, &port)?;
     }
     outcome.verdict = Some(booted.verdict);
     Ok(Some(outcome))
+}
+
+/// Ask whether this board should send telemetry, and if so to where (#236).
+///
+/// Runs after the radio step because it is the same shape of question about
+/// the same board on the same port, and because a user answering "no" to
+/// the one question this adds should meet it once the board is otherwise
+/// finished. Never fails the run, for the reason [`set_radio`] gives: the
+/// firmware is already written and confirmed.
+fn set_telemetry_on(
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    app: &Device,
+    port: &str,
+) -> Result<Option<TelemetryOutcome>, Error> {
+    let Some(target) = telemetry::resolve(ui, &opts.telemetry)? else {
+        return Ok(None);
+    };
+
+    let Some(tty) =
+        entry::wait_for_interface_tty(sysfs, app, radio::TRANSPORT_INTERFACE, opts.appear_within)?
+    else {
+        ui.say(&format!(
+            "{port}: the firmware is on the board, but its transport port (if{:02}) never \
+             appeared, so the telemetry target was not sent. Re-run `lnflash --set-telemetry` \
+             once it enumerates.",
+            radio::TRANSPORT_INTERFACE
+        ));
+        return Ok(Some(TelemetryOutcome {
+            target,
+            reply: SessionReply::NoAnswer,
+        }));
+    };
+
+    ui.say(&format!(
+        "{port}: sending the telemetry target to {} — {}",
+        tty.display(),
+        telemetry::describe(&target)
+    ));
+    let reply = match telemetry::send(&tty, &target) {
+        Ok(reply) => reply,
+        Err(err) => {
+            ui.say(&format!(
+                "{port}: the transport port could not be used ({err})"
+            ));
+            SessionReply::NoAnswer
+        }
+    };
+    report_telemetry(ui, port, &target, reply);
+    Ok(Some(TelemetryOutcome { target, reply }))
 }
 
 /// Choose a radio configuration, send it, and say what happened.
@@ -1599,6 +1777,95 @@ convert = "hex-to-uf2"
         // The rejected value must not have half-landed: the re-prompt offers
         // the value that is still in force, not the one just refused.
         assert!(said.contains("spreadingfactor [8]"), "{said}");
+    }
+
+    // -----------------------------------------------------------------
+    // What the operator is told about telemetry (Codeberg #236)
+    // -----------------------------------------------------------------
+
+    fn station_target() -> leviculum_core::envelope::TelemetryTargetWire {
+        leviculum_core::envelope::TelemetryTargetWire {
+            profile: leviculum_core::envelope::TELEMETRY_PROFILE_STATION,
+            dest_hash: [0xA7; 16],
+            public_key: None,
+        }
+    }
+
+    #[test]
+    fn an_acked_hash_only_target_is_reported_with_what_the_node_does_next() {
+        // The operator wants to know it worked. The ack says the board took
+        // the frame; the node's own state line says whether it can send yet,
+        // and hash-only means "not until an announce answers".
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(&mut ui, "3-2.4", &station_target(), SessionReply::Acked);
+        let said = ui.transcript();
+        assert!(said.contains("telemetry on"), "{said}");
+        assert!(said.contains("profile=station"), "{said}");
+        assert!(said.contains("state=awaiting-key"), "{said}");
+        // And it names where that line can be read, rather than implying
+        // lnflash read it back.
+        assert!(said.contains("debug port (if00)"), "{said}");
+    }
+
+    #[test]
+    fn a_target_that_carried_its_key_is_reported_as_ready_instead() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let with_key = leviculum_core::envelope::TelemetryTargetWire {
+            public_key: Some([0x5E; 64]),
+            ..station_target()
+        };
+        report_telemetry(&mut ui, "3-2.4", &with_key, SessionReply::Acked);
+        let said = ui.transcript();
+        assert!(said.contains("state=ready"), "{said}");
+        assert!(!said.contains("awaiting-key"), "{said}");
+    }
+
+    #[test]
+    fn clearing_the_target_is_reported_as_telemetry_off() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &telemetry::clear_target(),
+            SessionReply::Acked,
+        );
+        let said = ui.transcript();
+        assert!(said.contains("telemetry off"), "{said}");
+        assert!(!said.contains("awaiting-key"), "{said}");
+    }
+
+    #[test]
+    fn a_board_that_cannot_take_a_target_is_told_apart_from_one_that_would_not() {
+        // Three different facts, three different sentences: the operator has
+        // to know whether to reflash, to retry, or to fix the value.
+        for (reply, expected) in [
+            (SessionReply::NoEnvelope, "predates the control envelope"),
+            (SessionReply::NotAccepted, "no telemetry consumer"),
+            (SessionReply::NoAnswer, "did not answer"),
+            (
+                SessionReply::Refused(leviculum_core::envelope::REFUSE_VALUE),
+                "refused the telemetry target",
+            ),
+        ] {
+            let mut ui = crate::ui::testing::Fake::agreeing();
+            report_telemetry(&mut ui, "3-2.4", &station_target(), reply);
+            let said = ui.transcript();
+            assert!(said.contains(expected), "{reply:?}: {said}");
+            assert!(!said.contains("telemetry on"), "{reply:?}: {said}");
+        }
+    }
+
+    #[test]
+    fn the_flash_flow_asks_about_telemetry_by_default_and_the_answer_is_no() {
+        let opts = Options::default();
+        assert_eq!(
+            opts.telemetry,
+            TelemetryPlan::Ask {
+                profile: leviculum_core::envelope::TELEMETRY_PROFILE_STATION
+            }
+        );
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        assert_eq!(telemetry::resolve(&mut ui, &opts.telemetry).unwrap(), None);
     }
 
     #[test]
