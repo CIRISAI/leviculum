@@ -112,6 +112,23 @@ nrf-uf2-volumes:
 nrf-fw-readback:
     bash leviculum-nrf/tools/test-fw-readback.sh
 
+# Static analysis for the flash-runner scripts (Codeberg #345). They have
+# carried `# shellcheck` directives since they were written, so somebody once
+# ran it — but nothing ever ran it again, and an SC2034 and an SC2015 sat in
+# the runner unnoticed until #341 and #343 happened to remove them.
+#
+# scripts/flash-lnodes-from-head.sh is in the same list because it sources
+# leviculum-nrf/tools/fw-readback.sh: it is part of the same source graph, and
+# leaving it out would gate the module while its only non-test caller went
+# unchecked.
+#
+# Must run from the repo root: the `source=` directives in these scripts name
+# repo-relative paths, which is what lets shellcheck resolve a `.` through
+# $SCRIPT_DIR. -x is what the ticket asks for and covers a future `source`
+# line whose directive somebody forgets.
+nrf-shellcheck:
+    shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh
+
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -332,7 +349,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

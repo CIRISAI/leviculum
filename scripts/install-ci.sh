@@ -26,7 +26,11 @@ echo "[install-ci] Installing CI pipeline in $REPO_DIR (vm-mode=$VM_MODE)"
 
 # 1. Dependency check
 MISSING=()
-for cmd in just docker notify-send cargo python3 flock socat; do
+# A hard dependency, not an optional one: `just fast` runs `just
+# nrf-shellcheck` over the flash-runner scripts (Codeberg #345), and a gate
+# that silently does not run is worse than no gate. (Written this way round
+# because a comment opening with the tool's own name parses as a directive.)
+for cmd in just docker notify-send cargo python3 flock socat shellcheck; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi

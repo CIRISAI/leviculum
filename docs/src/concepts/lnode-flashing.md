@@ -675,6 +675,14 @@ position for an identity is the defect itself.
 `tools/test-fw-readback.sh` (`just nrf-fw-readback`) drives all of this
 against stubbed boards, so it runs with no hardware.
 
+`just nrf-shellcheck` (Codeberg #345) is the static half of the same
+coverage: `shellcheck -x` over `leviculum-nrf/tools/*.sh` and
+`scripts/flash-lnodes-from-head.sh`, which sources them. The scripts
+carried `# shellcheck` directives long before anything ran them, and an
+`SC2034` and an `SC2015` sat in the runner until #341 and #343 happened
+to remove them. It runs from the repo root because the `source=`
+directives name repo-relative paths.
+
 ### The radio configuration belongs to the flash
 
 A board that has just been written runs the compiled `eu_medium`

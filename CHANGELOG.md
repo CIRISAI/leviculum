@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `just nrf-shellcheck` runs shellcheck over the flash-runner scripts and
+  is part of `just fast` (#345).
+
 - The Pocket V2 reports its position and battery over LXMF: an
   announced `lxmf.delivery` destination, a target set by address alone
   (the node resolves the key over the air and says `awaiting-key` until
