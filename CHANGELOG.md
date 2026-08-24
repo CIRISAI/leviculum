@@ -140,6 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lnflash --set-time` and `--set-telemetry` run without a firmware
+  bundle on disk: the board catalogue is compiled into the binary and
+  only the flashing paths need images (#342).
+
 - The flash runner reads the firmware back off the board before it names
   one, so the summary reports which board actually received the image
   instead of whichever candidate its USB enumeration reached first

@@ -28,7 +28,7 @@ use std::time::Duration;
 use crate::entry;
 use crate::envelope::SessionReply;
 use crate::infouf2::InfoUf2;
-use crate::manifest::{self, Board, Manifest, Payload};
+use crate::manifest::{self, Board, Catalogue, Manifest, Payload, Payloads};
 use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
 use crate::telemetry::{self, TelemetryPlan};
@@ -121,6 +121,7 @@ pub enum Error {
 pub struct Confirmed<'m> {
     name: &'m str,
     board: &'m Board,
+    payloads: &'m Payloads,
     _private: (),
 }
 
@@ -129,15 +130,31 @@ impl<'m> Confirmed<'m> {
         self.name
     }
 
+    /// The hardware facts, from the catalogue.
     pub fn board(&self) -> &'m Board {
         self.board
+    }
+
+    /// The images the bundle carries for it. A `Confirmed` cannot exist
+    /// without them, so no flashing step has to re-ask whether they are
+    /// there — [`confirm_identity`] refuses first, before anything is
+    /// mounted for writing.
+    pub fn payloads(&self) -> &'m Payloads {
+        self.payloads
     }
 }
 
 /// Stage two of identify: match what the bootloader published against the
-/// bundle. Exact match, never a substring — the T114's `Board-ID` is exactly
-/// `HT-n5262`, and a substring rule is how a near-miss becomes a wrong write.
+/// catalogue, then against what the bundle carries. Exact match, never a
+/// substring — the T114's `Board-ID` is exactly `HT-n5262`, and a substring
+/// rule is how a near-miss becomes a wrong write.
+///
+/// The two lookups fail with different errors on purpose (Codeberg #342):
+/// "lnflash knows no board with that ID" and "this bundle carries no image
+/// for it" have different remedies, and telling a user the wrong one sends
+/// them after the wrong file.
 pub fn confirm_identity<'m>(
+    catalogue: &'m Catalogue,
     manifest: &'m Manifest,
     info: &InfoUf2,
     port: &str,
@@ -149,11 +166,11 @@ pub fn confirm_identity<'m>(
             port: port.to_string(),
         });
     };
-    let Some((name, board)) = manifest.board_for_id(board_id) else {
+    let Some((name, board)) = catalogue.board_for_id(board_id) else {
         return Err(Error::UnknownBoard {
             port: port.to_string(),
             board_id: board_id.to_string(),
-            available: manifest.names().iter().map(|s| s.to_string()).collect(),
+            available: catalogue.names().iter().map(|s| s.to_string()).collect(),
         });
     };
     if let Some(asked) = asked_for {
@@ -166,9 +183,11 @@ pub fn confirm_identity<'m>(
             });
         }
     }
+    let payloads = manifest.payloads(name)?;
     Ok(Confirmed {
         name,
         board,
+        payloads,
         _private: (),
     })
 }
@@ -360,11 +379,15 @@ pub struct Candidate {
     pub hint: String,
 }
 
-/// Everything on the bus this bundle has any business touching.
-pub fn find_candidates(manifest: &Manifest, sysfs: &Sysfs) -> Result<Vec<Candidate>, Error> {
+/// Everything on the bus lnflash has any business touching.
+///
+/// The catalogue and not the bundle, because the only thing read here is
+/// which USB VID/PID pairs are LNodes — a hardware fact. That is what lets
+/// the configure-only sessions run with no bundle on disk (Codeberg #342).
+pub fn find_candidates(catalogue: &Catalogue, sysfs: &Sysfs) -> Result<Vec<Candidate>, Error> {
     let devices = sysfs.devices()?;
     let mut out: Vec<Candidate> = Vec::new();
-    for (name, board) in &manifest.board {
+    for (name, board) in &catalogue.board {
         let bootloader: Vec<UsbId> = board.bootloader_ids(name)?;
         let application: Vec<UsbId> = board.candidate_ids(name)?;
         for device in &devices {
@@ -450,17 +473,18 @@ pub struct TelemetryOutcome {
 
 /// Resolve every candidate on the bus, individually.
 pub fn run(
+    catalogue: &Catalogue,
     manifest: &Manifest,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     opts: &Options,
 ) -> Result<Vec<Outcome>, Error> {
-    let candidates = find_candidates(manifest, sysfs)?;
+    let candidates = find_candidates(catalogue, sysfs)?;
     if candidates.is_empty() {
-        ui.say("No board this bundle knows is attached.");
+        ui.say("No board lnflash knows is attached.");
         ui.say(&format!(
-            "It carries: {}. Nothing to do.",
-            manifest.names().join(", ")
+            "It knows: {}. Nothing to do.",
+            catalogue.names().join(", ")
         ));
         // A board that is physically plugged in and still lands here is the
         // common case, not the exotic one: firmware that crashes before USB
@@ -487,7 +511,7 @@ pub fn run(
 
     let mut outcomes = Vec::new();
     for candidate in candidates {
-        match resolve(manifest, sysfs, ui, opts, &candidate) {
+        match resolve(catalogue, manifest, sysfs, ui, opts, &candidate) {
             Ok(Some(outcome)) => outcomes.push(outcome),
             Ok(None) => {}
             // One board's refusal must not abandon the others: with several
@@ -518,11 +542,11 @@ impl Reachable {
 }
 
 fn reachable_boards(
-    manifest: &Manifest,
+    catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
 ) -> Result<Reachable, Error> {
-    let candidates = find_candidates(manifest, sysfs)?;
+    let candidates = find_candidates(catalogue, sysfs)?;
     let mut found = Reachable {
         ports: Vec::new(),
         unreachable: 0,
@@ -552,13 +576,16 @@ fn reachable_boards(
 /// entry — find the boards already running, tell each what time it is
 /// through the control envelope, report what each answered. `Ok(true)`
 /// means every board that was found took the time.
+///
+/// Takes the catalogue and no bundle: nothing here reads a firmware image,
+/// so requiring one on disk was an incidental dependency (Codeberg #342).
 pub fn set_time(
-    manifest: &Manifest,
+    catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     unix_secs: u64,
 ) -> Result<bool, Error> {
-    let reachable = reachable_boards(manifest, sysfs, ui)?;
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
     if reachable.is_empty() {
         ui.say(
             "No running LNode on the bus. --set-time talks to flashed boards; a board in its \
@@ -621,12 +648,12 @@ fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<SessionReply> {
 /// asking per board would make a two-board bench a two-address interview
 /// for what is one decision.
 pub fn set_telemetry(
-    manifest: &Manifest,
+    catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     plan: &TelemetryPlan,
 ) -> Result<bool, Error> {
-    let reachable = reachable_boards(manifest, sysfs, ui)?;
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
     if reachable.is_empty() {
         ui.say(
             "No running LNode on the bus. --set-telemetry talks to flashed boards; a board in \
@@ -721,6 +748,7 @@ fn report_telemetry(
 }
 
 fn resolve(
+    catalogue: &Catalogue,
     manifest: &Manifest,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
@@ -749,7 +777,7 @@ fn resolve(
     let bootloader = if candidate.in_bootloader {
         candidate.device.clone()
     } else {
-        enter_bootloader(manifest, sysfs, ui, opts, candidate)?
+        enter_bootloader(catalogue, sysfs, ui, opts, candidate)?
     };
     let Some(block) = bootloader.block_device() else {
         return Err(transport::Error::NoDrive { port }.into());
@@ -757,7 +785,7 @@ fn resolve(
 
     let drive = Drive::open(&block)?;
     let info = drive.info()?;
-    let confirmed = confirm_identity(manifest, &info, &port, opts.board.as_deref())?;
+    let confirmed = confirm_identity(catalogue, manifest, &info, &port, opts.board.as_deref())?;
     ui.say(&format!(
         "{port}: confirmed {} — Board-ID {:?}, bootloader {}",
         confirmed.name(),
@@ -776,7 +804,7 @@ fn resolve(
 
     let req = confirmed.board().softdevice_req(confirmed.name())?;
     let precondition = check_softdevice(&installed, req.as_ref());
-    let app_image = prepare(&confirmed.board().app, &manifest.root, &confirmed)?;
+    let app_image = prepare(&confirmed.payloads().app, &manifest.root, &confirmed)?;
 
     // Everything that could refuse has refused by now, so the plan the user
     // is shown is the plan that will run.
@@ -784,7 +812,7 @@ fn resolve(
     let remedy_image = match &precondition {
         Precondition::Met => None,
         needs => {
-            let Some(remedy) = &confirmed.board().remedy.softdevice else {
+            let Some(remedy) = &confirmed.payloads().remedy.softdevice else {
                 return Err(Error::NoRemedy {
                     board: confirmed.name().to_string(),
                     req: req.map(|r| r.as_str().to_string()).unwrap_or_default(),
@@ -819,9 +847,9 @@ fn resolve(
     };
     plan.push(format!(
         "  write {} ({})",
-        confirmed.board().app.file.display(),
+        confirmed.payloads().app.file.display(),
         confirmed
-            .board()
+            .payloads()
             .app
             .git_sha
             .as_deref()
@@ -871,7 +899,7 @@ fn resolve(
         // The board reboots on the last block. An application that was
         // already installed boots straight away — it was intact all along —
         // so getting back to the bootloader may need another touch.
-        let again = back_to_bootloader(manifest, sysfs, ui, opts, &bootloader, confirmed.name())?;
+        let again = back_to_bootloader(catalogue, sysfs, ui, opts, &bootloader, confirmed.name())?;
         let block = again
             .block_device()
             .ok_or_else(|| transport::Error::NoDrive { port: port.clone() })?;
@@ -879,7 +907,7 @@ fn resolve(
         // Identity is confirmed again rather than carried over: this is a
         // fresh mount of a drive that reappeared, and the rule is the rule.
         let info = drive.info()?;
-        confirm_identity(manifest, &info, &port, Some(confirmed.name()))?;
+        confirm_identity(catalogue, manifest, &info, &port, Some(confirmed.name()))?;
         let after = read_installed(&drive, &info);
         ui.say(&format!("{port}: SoftDevice now {}", after.describe()));
     }
@@ -1127,7 +1155,7 @@ fn report_write(ui: &mut dyn Ui, port: &str, what: &str, written: &Written) {
 }
 
 fn enter_bootloader(
-    manifest: &Manifest,
+    catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     opts: &Options,
@@ -1135,7 +1163,7 @@ fn enter_bootloader(
 ) -> Result<Device, Error> {
     // The hint is enough to choose *how to knock*; it is not enough to
     // choose what to write, which is why identity is confirmed afterwards.
-    let board = manifest.board(&candidate.hint)?;
+    let board = catalogue.board(&candidate.hint)?;
     let port = candidate.device.name.clone();
 
     for mechanism in &board.entry {
@@ -1176,14 +1204,14 @@ fn enter_bootloader(
 /// Get back into the bootloader after a SoftDevice install, which may have
 /// left the board running an application that was intact all along.
 fn back_to_bootloader(
-    manifest: &Manifest,
+    catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     opts: &Options,
     was: &Device,
     board_name: &str,
 ) -> Result<Device, Error> {
-    let board = manifest.board(board_name)?;
+    let board = catalogue.board(board_name)?;
     let ids = board.bootloader_ids(board_name)?;
     // Let the drive we just wrote go away first. Without this the wait below
     // answers instantly with the pre-reboot sysfs entry and the next mount
@@ -1197,7 +1225,7 @@ fn back_to_bootloader(
         in_bootloader: false,
         hint: board_name.to_string(),
     };
-    enter_bootloader(manifest, sysfs, ui, opts, &candidate)
+    enter_bootloader(catalogue, sysfs, ui, opts, &candidate)
 }
 
 fn application_after(
@@ -1260,7 +1288,7 @@ fn verify_boot(
         Some(tty) => verify::read_banner(&tty, opts.banner_window).unwrap_or(None),
         None => None,
     };
-    let verdict = verify::judge(banner, board.app.git_sha.as_deref());
+    let verdict = verify::judge(banner, confirmed.payloads().app.git_sha.as_deref());
     match &verdict {
         Verdict::Confirmed { git_sha } => {
             ui.say(&format!("{port}: running git_sha={git_sha}. Done."))
@@ -1300,9 +1328,15 @@ mod tests {
                             Ver: 0.4.3\r\n\
                             SoftDevice: S140 7.3.0\r\n";
 
+    fn catalogue() -> Catalogue {
+        Catalogue::builtin().unwrap()
+    }
+
     /// A one-board bundle, with the real vendored SoftDevice hex so the
-    /// remedy path is prepared from the real image.
-    fn bundle() -> (TempDir, Manifest) {
+    /// remedy path is prepared from the real image. The board facts it is
+    /// checked against are the compiled-in catalogue's, so these tests run
+    /// against the same t114 entry the shipped binary uses.
+    fn bundle() -> (TempDir, Catalogue, Manifest) {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("t114")).unwrap();
         let hex = include_str!("../payload/t114/s140_nrf52_7.3.0_softdevice.hex");
@@ -1330,29 +1364,10 @@ mod tests {
 [bundle]
 version = "0.8.0"
 
-[board.t114]
-family    = "nrf52840"
-transport = "uf2-msc"
-entry     = ["touch-1200", "double-tap"]
-
-[board.t114.identify]
-info_uf2_board_id = "HT-n5262"
-bootloader_usb    = ["239a:0071"]
-candidate_usb     = ["1209:0001", "239a:8071"]
-
-[board.t114.flash]
-family_id      = 0xADA52840
-writable_start = 0x1000
-writable_end   = 0xEA000
-app_base       = 0x27000
-
 [board.t114.app]
 file    = "t114/app.uf2"
 sha256  = "{app_sha}"
 git_sha = "bb7c4f64"
-
-[board.t114.requires]
-softdevice = ">=7.0.1, <8.0.0"
 
 [board.t114.remedy.softdevice]
 file    = "t114/sd.hex"
@@ -1364,8 +1379,8 @@ convert = "hex-to-uf2"
             sd_sha = manifest::hex_digest(hex.as_bytes()),
         );
         fs::write(dir.path().join("manifest.toml"), text).unwrap();
-        let manifest = load(dir.path()).unwrap();
-        (dir, manifest)
+        let manifest = load(dir.path(), &catalogue()).unwrap();
+        (dir, catalogue(), manifest)
     }
 
     fn sysfs() -> Sysfs {
@@ -1374,9 +1389,15 @@ convert = "hex-to-uf2"
 
     #[test]
     fn the_board_the_bootloader_names_is_the_board_that_gets_confirmed() {
-        let (_dir, manifest) = bundle();
-        let confirmed =
-            confirm_identity(&manifest, &infouf2::parse(T114_INFO), "3-2.4", None).unwrap();
+        let (_dir, catalogue, manifest) = bundle();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap();
         assert_eq!(confirmed.name(), "t114");
         assert_eq!(confirmed.board().flash.app_base, 0x2_7000);
     }
@@ -1385,9 +1406,15 @@ convert = "hex-to-uf2"
     fn a_rak_in_the_bootloader_is_refused_by_a_t114_only_bundle() {
         // The 362c1c2d failure, in one assertion: a T114 image must not land
         // on a RAK because the drive looked the same.
-        let (_dir, manifest) = bundle();
-        let err =
-            confirm_identity(&manifest, &infouf2::parse(RAK_INFO), "3-2.4", None).unwrap_err();
+        let (_dir, catalogue, manifest) = bundle();
+        let err = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(RAK_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::UnknownBoard { .. }));
         assert!(format!("{err}").contains("Nothing was written"));
         assert!(format!("{err}").contains("WisBlock-RAK4631-Board"));
@@ -1395,10 +1422,11 @@ convert = "hex-to-uf2"
 
     #[test]
     fn asking_for_one_board_and_finding_another_refuses_rather_than_flashing_it() {
-        let (_dir, manifest) = bundle();
+        let (_dir, catalogue, manifest) = bundle();
         // `--board rak4631` with a T114 on the bench: the bootloader says
         // T114, so the run stops rather than writing what was asked for.
         let err = confirm_identity(
+            &catalogue,
             &manifest,
             &infouf2::parse(T114_INFO),
             "3-2.4",
@@ -1409,25 +1437,31 @@ convert = "hex-to-uf2"
         assert!(format!("{err}").contains("Nothing was written"));
         // ...and asking for the board that is actually there is fine.
         assert_eq!(
-            confirm_identity(&manifest, &infouf2::parse(T114_INFO), "3-2.4", Some("t114"))
-                .unwrap()
-                .name(),
+            confirm_identity(
+                &catalogue,
+                &manifest,
+                &infouf2::parse(T114_INFO),
+                "3-2.4",
+                Some("t114")
+            )
+            .unwrap()
+            .name(),
             "t114"
         );
     }
 
     #[test]
     fn a_bootloader_that_publishes_no_board_id_gets_nothing_written_to_it() {
-        let (_dir, manifest) = bundle();
+        let (_dir, catalogue, manifest) = bundle();
         let info = infouf2::parse("UF2 Bootloader 0.9.0\r\nDate: Jul  9 2024\r\n");
         assert!(matches!(
-            confirm_identity(&manifest, &info, "3-2.4", None),
+            confirm_identity(&catalogue, &manifest, &info, "3-2.4", None),
             Err(Error::NoBoardId { .. })
         ));
         // An empty value is the same as no value: it confirms nothing.
         let blank = infouf2::parse("Board-ID:  \r\n");
         assert!(matches!(
-            confirm_identity(&manifest, &blank, "3-2.4", None),
+            confirm_identity(&catalogue, &manifest, &blank, "3-2.4", None),
             Err(Error::NoBoardId { .. })
         ));
     }
@@ -1498,11 +1532,17 @@ convert = "hex-to-uf2"
 
     #[test]
     fn the_remedy_image_is_prepared_from_the_hex_and_fits_the_window() {
-        let (_dir, manifest) = bundle();
-        let confirmed =
-            confirm_identity(&manifest, &infouf2::parse(T114_INFO), "3-2.4", None).unwrap();
+        let (_dir, catalogue, manifest) = bundle();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap();
         let remedy = &confirmed
-            .board()
+            .payloads()
             .remedy
             .softdevice
             .as_ref()
@@ -1517,11 +1557,17 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_payload_with_the_wrong_checksum_never_becomes_an_image() {
-        let (dir, manifest) = bundle();
-        let confirmed =
-            confirm_identity(&manifest, &infouf2::parse(T114_INFO), "3-2.4", None).unwrap();
+        let (dir, catalogue, manifest) = bundle();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap();
         fs::write(dir.path().join("t114/app.uf2"), b"tampered").unwrap();
-        let err = prepare(&confirmed.board().app, &manifest.root, &confirmed).unwrap_err();
+        let err = prepare(&confirmed.payloads().app, &manifest.root, &confirmed).unwrap_err();
         assert!(matches!(
             err,
             Error::Manifest(manifest::Error::Checksum { .. })
@@ -1530,7 +1576,7 @@ convert = "hex-to-uf2"
 
     #[test]
     fn an_image_reaching_past_the_writable_window_is_refused_before_any_mount() {
-        let (dir, manifest) = bundle();
+        let (dir, catalogue, manifest) = bundle();
         // 0xEC000 is the identity page: above what the bootloader accepts.
         let too_high = Image::from_spans(
             &[crate::ihex::Span {
@@ -1545,25 +1591,33 @@ convert = "hex-to-uf2"
         let text = fs::read_to_string(dir.path().join("manifest.toml"))
             .unwrap()
             .replace(
-                &manifest.board("t114").unwrap().app.sha256,
+                &manifest.payloads("t114").unwrap().app.sha256,
                 &manifest::hex_digest(&too_high),
             );
         fs::write(dir.path().join("manifest.toml"), text).unwrap();
-        let manifest = load(dir.path()).unwrap();
-        let confirmed =
-            confirm_identity(&manifest, &infouf2::parse(T114_INFO), "3-2.4", None).unwrap();
-        let err = prepare(&confirmed.board().app, &manifest.root, &confirmed).unwrap_err();
+        let manifest = load(dir.path(), &catalogue).unwrap();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap();
+        let err = prepare(&confirmed.payloads().app, &manifest.root, &confirmed).unwrap_err();
         assert!(matches!(err, Error::OutsideWindow { .. }), "{err}");
         assert!(format!("{err}").contains("Nothing was written"));
     }
 
     #[test]
     fn candidates_are_found_by_usb_id_and_labelled_as_hints_only() {
-        let (_dir, manifest) = bundle();
-        let found = find_candidates(&manifest, &sysfs()).unwrap();
+        // No bundle in this test at all, which is the #342 property itself:
+        // finding what is on the bus reads USB IDs and nothing else, so the
+        // catalogue alone is enough.
+        let found = find_candidates(&catalogue(), &sysfs()).unwrap();
         let names: Vec<&str> = found.iter().map(|c| c.device.name.as_str()).collect();
         // 3-2.3.1 is our T114 application, 3-2.4 its bootloader. The RAK on
-        // 3-2.3.4.4 is 1209:0002, which this bundle does not list.
+        // 3-2.3.4.4 is 1209:0002, which the catalogue does not list.
         assert_eq!(names, vec!["3-2.3.1", "3-2.4"]);
         assert!(!found[0].in_bootloader);
         assert!(found[1].in_bootloader);
@@ -1572,10 +1626,11 @@ convert = "hex-to-uf2"
 
     #[test]
     fn an_empty_bus_is_reported_rather_than_waited_on() {
-        let (_dir, manifest) = bundle();
+        let (_dir, catalogue, manifest) = bundle();
         let empty = TempDir::new().unwrap();
         let mut ui = crate::ui::testing::Fake::agreeing();
         let outcomes = run(
+            &catalogue,
             &manifest,
             &Sysfs::new(empty.path()),
             &mut ui,
@@ -1584,7 +1639,7 @@ convert = "hex-to-uf2"
         .unwrap();
         assert!(outcomes.is_empty());
         let said = ui.transcript();
-        assert!(said.contains("No board this bundle knows"));
+        assert!(said.contains("No board lnflash knows"));
         assert!(said.contains("t114"));
         // A dark board — crashed firmware, or firmware linked for a base this
         // bootloader does not run — is invisible on USB and lands exactly
@@ -1870,7 +1925,7 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_dry_run_will_not_even_reboot_a_board_into_its_bootloader() {
-        let (_dir, manifest) = bundle();
+        let (_dir, catalogue, manifest) = bundle();
         let mut ui = crate::ui::testing::Fake::agreeing();
         let opts = Options {
             dry_run: true,
@@ -1879,7 +1934,7 @@ convert = "hex-to-uf2"
         // Both candidates are reported; the application-mode one stops
         // before the touch, and the bootloader one stops at Drive::open,
         // which needs root. Neither writes.
-        let outcomes = run(&manifest, &sysfs(), &mut ui, &opts).unwrap();
+        let outcomes = run(&catalogue, &manifest, &sysfs(), &mut ui, &opts).unwrap();
         assert!(outcomes.is_empty());
         let said = ui.transcript();
         assert!(said.contains("would enter the bootloader"));

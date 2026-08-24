@@ -1,4 +1,18 @@
-//! The bundle manifest: every board fact this tool knows.
+//! Two tables, split by what they describe.
+//!
+//! * The **catalogue** ([`Catalogue`], `lnflash/catalogue.toml`) holds every
+//!   board fact: which USB IDs an LNode answers on, what its bootloader
+//!   publishes, where its flash window is, what SoftDevice it needs. These
+//!   are properties of the hardware, so the catalogue is compiled into the
+//!   binary and is always available.
+//! * The **manifest** ([`Manifest`], a bundle's `manifest.toml`) holds what
+//!   one firmware release carries: the version, and one image per board with
+//!   its checksum.
+//!
+//! The split is Codeberg #342. The sessions that only configure a board that
+//! is already running — `--set-time`, `--set-telemetry` — need the catalogue
+//! and no image at all; before the split they loaded the whole bundle
+//! manifest to reach the USB IDs and refused to start without one.
 //!
 //! The binary is board-agnostic. An `if board == "t114"` anywhere outside
 //! this module would mean the split has failed — a new nRF or RP2040 board
@@ -27,6 +41,13 @@ use sha2::{Digest, Sha256};
 
 use crate::softdevice::VersionReq;
 use crate::usb::UsbId;
+
+/// The board catalogue, compiled in. See [`Catalogue::builtin`].
+const CATALOGUE_TOML: &str = include_str!("../catalogue.toml");
+/// What the compiled-in catalogue is called in an error message, so a
+/// malformed one points at the file to edit rather than at a path that does
+/// not exist on the user's disk.
+const CATALOGUE_NAME: &str = "lnflash/catalogue.toml";
 
 /// Where the manifest lives inside a bundle.
 pub const MANIFEST_NAME: &str = "manifest.toml";
@@ -61,8 +82,13 @@ pub enum Error {
         expected: String,
         actual: String,
     },
-    #[error("this bundle knows no board {wanted:?}; it carries {}", available.join(", "))]
+    #[error("lnflash knows no board {wanted:?}; it knows {}", available.join(", "))]
     UnknownBoard {
+        wanted: String,
+        available: Vec<String>,
+    },
+    #[error("this bundle carries no image for {wanted:?}; it carries {}", available.join(", "))]
+    NoImage {
         wanted: String,
         available: Vec<String>,
     },
@@ -116,14 +142,32 @@ pub enum Convert {
     HexToUf2,
 }
 
+/// Every board this binary knows, independent of any firmware release.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Catalogue {
+    #[serde(default)]
+    pub board: BTreeMap<String, Board>,
+}
+
+/// What one bundle carries: the release it is, and one image per board.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub bundle: BundleInfo,
+    /// Keyed by the catalogue's board name. A bundle need not carry every
+    /// board the catalogue knows, but every board it names must be one.
     #[serde(default)]
-    pub board: BTreeMap<String, Board>,
+    pub board: BTreeMap<String, Payloads>,
     /// Directory the payload paths are relative to. Filled in by [`load`].
     #[serde(skip)]
     pub root: PathBuf,
+}
+
+/// The images one bundle carries for one board.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Payloads {
+    pub app: Payload,
+    #[serde(default)]
+    pub remedy: Remedy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,7 +180,9 @@ pub struct BundleInfo {
 }
 
 /// Everything this tool knows about one board — the four axes and the
-/// preconditions crossing them.
+/// preconditions crossing them. All of it hardware fact, which is why it
+/// lives in the catalogue and not in a bundle: none of it changes when a new
+/// firmware release is cut.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Board {
     /// Chip family, informational. `transport` is what decides behaviour.
@@ -145,11 +191,8 @@ pub struct Board {
     pub entry: Vec<Entry>,
     pub identify: Identify,
     pub flash: Flash,
-    pub app: Payload,
     #[serde(default)]
     pub requires: Requires,
-    #[serde(default)]
-    pub remedy: Remedy,
 }
 
 /// The **identify** axis, in the two stages the order of work demands.
@@ -292,7 +335,32 @@ fn parse_ids(values: &[String], board: &str, field: &str) -> Result<Vec<UsbId>, 
         .collect()
 }
 
-impl Manifest {
+impl Catalogue {
+    /// The catalogue compiled into this binary.
+    ///
+    /// Parsed on each call rather than cached: it is under two kilobytes and
+    /// no run reads it more than twice, so a `OnceLock` holding a `Result`
+    /// would buy nothing and cost a second way for this to fail.
+    ///
+    /// A parse failure here is a bug in `lnflash/catalogue.toml`, not
+    /// something a user can cause or repair, which is why it is still a
+    /// `Result` and not a panic — the same rule that keeps `expect()` out of
+    /// this crate. The unit test
+    /// `the_builtin_catalogue_is_well_formed_and_needs_no_bundle_to_read`
+    /// holds it at test time.
+    pub fn builtin() -> Result<Self, Error> {
+        Self::parse(CATALOGUE_TOML, Path::new(CATALOGUE_NAME))
+    }
+
+    fn parse(text: &str, path: &Path) -> Result<Self, Error> {
+        let catalogue: Self = toml::from_str(text).map_err(|source| Error::Toml {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        validate_catalogue(&catalogue, path)?;
+        Ok(catalogue)
+    }
+
     pub fn board(&self, name: &str) -> Result<&Board, Error> {
         self.board.get(name).ok_or_else(|| Error::UnknownBoard {
             wanted: name.to_string(),
@@ -313,13 +381,32 @@ impl Manifest {
     pub fn names(&self) -> Vec<&str> {
         self.board.keys().map(String::as_str).collect()
     }
+}
 
-    /// Read and verify every payload in the bundle. What `--dry-run` runs so
-    /// a user can check a tarball without a board attached.
+impl Manifest {
+    /// The images this bundle carries for one board.
+    ///
+    /// Separate from [`Catalogue::board`] on purpose: "lnflash does not know
+    /// that board" and "this bundle does not carry an image for it" are
+    /// different facts and get different errors, because they have different
+    /// remedies.
+    pub fn payloads(&self, name: &str) -> Result<&Payloads, Error> {
+        self.board.get(name).ok_or_else(|| Error::NoImage {
+            wanted: name.to_string(),
+            available: self.board.keys().cloned().collect(),
+        })
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        self.board.keys().map(String::as_str).collect()
+    }
+
+    /// Read and verify every payload in the bundle. What `--check-bundle`
+    /// runs so a user can check a tarball without a board attached.
     pub fn verify_all(&self) -> Result<(), Error> {
-        for board in self.board.values() {
-            board.app.read(&self.root)?;
-            if let Some(remedy) = &board.remedy.softdevice {
+        for payloads in self.board.values() {
+            payloads.app.read(&self.root)?;
+            if let Some(remedy) = &payloads.remedy.softdevice {
                 remedy.payload.read(&self.root)?;
             }
         }
@@ -327,8 +414,12 @@ impl Manifest {
     }
 }
 
-/// Load and validate a manifest from the directory that holds it.
-pub fn load(dir: &Path) -> Result<Manifest, Error> {
+/// Load and validate a bundle manifest from the directory that holds it.
+///
+/// The catalogue is needed because a manifest only names boards; whether
+/// those names mean anything, and whether a SoftDevice remedy has a
+/// precondition to repair, is the catalogue's to say.
+pub fn load(dir: &Path, catalogue: &Catalogue) -> Result<Manifest, Error> {
     let path = dir.join(MANIFEST_NAME);
     let text = std::fs::read_to_string(&path).map_err(|source| Error::Io {
         path: path.clone(),
@@ -339,19 +430,19 @@ pub fn load(dir: &Path) -> Result<Manifest, Error> {
         source,
     })?;
     manifest.root = dir.to_path_buf();
-    validate(&manifest, &path)?;
+    validate(&manifest, catalogue, &path)?;
     Ok(manifest)
 }
 
-fn validate(manifest: &Manifest, path: &Path) -> Result<(), Error> {
+fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
     let bad = |message: String| Error::Invalid {
         path: path.to_path_buf(),
         message,
     };
-    if manifest.board.is_empty() {
-        return Err(bad("a bundle with no boards in it".into()));
+    if catalogue.board.is_empty() {
+        return Err(bad("a catalogue with no boards in it".into()));
     }
-    for (name, board) in &manifest.board {
+    for (name, board) in &catalogue.board {
         if board.identify.info_uf2_board_id.trim().is_empty() {
             return Err(bad(format!(
                 "board {name}: identify.info_uf2_board_id is empty, so no board could ever \
@@ -390,9 +481,26 @@ fn validate(manifest: &Manifest, path: &Path) -> Result<(), Error> {
                 board.flash.app_base, board.flash.writable_start, board.flash.writable_end
             )));
         }
+    }
+    Ok(())
+}
 
-        exists(manifest, &board.app.file, name, "app.file", path)?;
-        if let Some(remedy) = &board.remedy.softdevice {
+fn validate(manifest: &Manifest, catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
+    let bad = |message: String| Error::Invalid {
+        path: path.to_path_buf(),
+        message,
+    };
+    if manifest.board.is_empty() {
+        return Err(bad("a bundle with no images in it".into()));
+    }
+    for (name, payloads) in &manifest.board {
+        // A bundle naming a board nothing knows would flash nothing, and the
+        // name is the only handle --board offers, so say it at load time
+        // rather than after a board has been brought into its bootloader.
+        let board = catalogue.board(name)?;
+
+        exists(manifest, &payloads.app.file, name, "app.file", path)?;
+        if let Some(remedy) = &payloads.remedy.softdevice {
             exists(
                 manifest,
                 &remedy.payload.file,
@@ -408,14 +516,15 @@ fn validate(manifest: &Manifest, path: &Path) -> Result<(), Error> {
                 "remedy.softdevice.license",
                 path,
             )?;
-        }
-        // A precondition without a remedy is a dead end for the user. It is
-        // allowed — "I cannot fix this, here is why" beats writing anyway —
-        // but a remedy without the precondition it repairs is nonsense.
-        if board.remedy.softdevice.is_some() && board.requires.softdevice.is_none() {
-            return Err(bad(format!(
-                "board {name}: a softdevice remedy with no requires.softdevice to trigger it"
-            )));
+            // A precondition without a remedy is a dead end for the user. It
+            // is allowed — "I cannot fix this, here is why" beats writing
+            // anyway — but a remedy without the precondition it repairs is
+            // nonsense.
+            if board.requires.softdevice.is_none() {
+                return Err(bad(format!(
+                    "board {name}: a softdevice remedy with no requires.softdevice to trigger it"
+                )));
+            }
         }
     }
     Ok(())
@@ -492,6 +601,24 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// The compiled-in catalogue with one substring replaced, so a test that
+    /// mutates a field is mutating the real thing.
+    ///
+    /// It asserts the substring was there. A `replace` that matches nothing
+    /// returns the input unchanged, and a validation test fed unchanged input
+    /// passes for the one reason that proves nothing.
+    fn mutated_catalogue(from: &str, to: &str) -> Result<Catalogue, Error> {
+        assert!(
+            CATALOGUE_TOML.contains(from),
+            "the catalogue no longer contains {from:?}, so this test mutates nothing"
+        );
+        Catalogue::parse(&CATALOGUE_TOML.replace(from, to), Path::new(CATALOGUE_NAME))
+    }
+
+    fn catalogue() -> Catalogue {
+        Catalogue::builtin().unwrap()
+    }
+
     /// A bundle shaped exactly like the real one, with stand-in payloads so
     /// the test states its own checksums.
     struct Fixture {
@@ -532,30 +659,10 @@ mod tests {
 version = "0.8.0"
 built = "2026-08-10"
 
-[board.t114]
-family    = "nrf52840"
-transport = "uf2-msc"
-entry     = ["touch-1200", "double-tap"]
-
-[board.t114.identify]
-info_uf2_board_id = "HT-n5262"
-bootloader_usb    = ["239a:0071"]
-candidate_usb     = ["1209:0001", "239a:8071"]
-msc_label         = "HT-n5262"
-
-[board.t114.flash]
-family_id      = 0xADA52840
-writable_start = 0x1000
-writable_end   = 0xEA000
-app_base       = 0x27000
-
 [board.t114.app]
 file    = "t114/leviculum-t114-0.8.0.uf2"
 sha256  = "{app}"
 git_sha = "bb7c4f64"
-
-[board.t114.requires]
-softdevice = ">=7.0.1, <8.0.0"
 
 [board.t114.remedy.softdevice]
 file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
@@ -569,37 +676,36 @@ convert = "hex-to-uf2"
         }
 
         fn load(&self) -> Result<Manifest, Error> {
-            load(self.dir.path())
+            load(self.dir.path(), &catalogue())
         }
     }
 
+    // -----------------------------------------------------------------
+    // The catalogue (Codeberg #342)
+    // -----------------------------------------------------------------
+
     #[test]
-    fn a_well_formed_bundle_loads_with_every_axis_populated() {
-        let f = Fixture::new();
-        let manifest = f.load().unwrap();
-        assert_eq!(manifest.bundle.version, "0.8.0");
-        let board = manifest.board("t114").unwrap();
+    fn the_builtin_catalogue_is_well_formed_and_needs_no_bundle_to_read() {
+        // The whole point of the split: this is available with nothing on
+        // disk, which is what lets --set-time and --set-telemetry start.
+        let catalogue = Catalogue::builtin().unwrap();
+        let board = catalogue.board("t114").unwrap();
         assert_eq!(board.transport, Transport::Uf2Msc);
         assert_eq!(board.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
         assert_eq!(board.identify.info_uf2_board_id, "HT-n5262");
         assert_eq!(board.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
         assert_eq!(board.flash.app_base, 0x2_7000);
-        assert_eq!(board.app.git_sha.as_deref(), Some("bb7c4f64"));
         assert_eq!(
             board.softdevice_req("t114").unwrap().unwrap().as_str(),
             ">=7.0.1, <8.0.0"
         );
-        assert_eq!(
-            board.remedy.softdevice.as_ref().unwrap().payload.convert,
-            Some(Convert::HexToUf2)
-        );
+        assert_eq!(catalogue.names(), vec!["t114"]);
     }
 
     #[test]
-    fn usb_ids_in_the_manifest_are_parsed_not_matched_as_strings() {
-        let f = Fixture::new();
-        let manifest = f.load().unwrap();
-        let board = manifest.board("t114").unwrap();
+    fn usb_ids_in_the_catalogue_are_parsed_not_matched_as_strings() {
+        let catalogue = catalogue();
+        let board = catalogue.board("t114").unwrap();
         assert_eq!(
             board.bootloader_ids("t114").unwrap(),
             vec!["239a:0071".parse::<UsbId>().unwrap()]
@@ -608,12 +714,114 @@ convert = "hex-to-uf2"
     }
 
     #[test]
+    fn a_board_lnflash_does_not_know_is_named_along_with_the_ones_it_does() {
+        match catalogue().board("rak4631") {
+            Err(Error::UnknownBoard { wanted, available }) => {
+                assert_eq!(wanted, "rak4631");
+                assert_eq!(available, vec!["t114".to_string()]);
+            }
+            other => panic!("expected UnknownBoard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_board_is_looked_up_by_the_id_the_bootloader_published() {
+        let catalogue = catalogue();
+        assert_eq!(catalogue.board_for_id("HT-n5262").unwrap().0, "t114");
+        // Exactly, never as a substring: the RAK's ID must not match.
+        assert!(catalogue.board_for_id("HT-n5262-something").is_none());
+        assert!(catalogue.board_for_id("WisBlock-RAK4631-Board").is_none());
+    }
+
+    #[test]
+    fn a_catalogue_naming_the_bootloader_family_will_not_load() {
+        let err = mutated_catalogue("0xADA52840", "0xD663823C").unwrap_err();
+        assert!(format!("{err}").contains("bootloader family"), "{err}");
+    }
+
+    #[test]
+    fn an_app_base_outside_the_writable_window_will_not_load() {
+        // 0xEC000 is the identity page, above what the bootloader will write.
+        let err =
+            mutated_catalogue("app_base       = 0x27000", "app_base       = 0xEC000").unwrap_err();
+        assert!(
+            format!("{err}").contains("outside the writable window"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_empty_board_id_will_not_load_because_nothing_could_confirm_it() {
+        let err = mutated_catalogue(
+            "info_uf2_board_id = \"HT-n5262\"",
+            "info_uf2_board_id = \"\"",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("info_uf2_board_id is empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_board_with_no_entry_mechanism_will_not_load() {
+        let err = mutated_catalogue(
+            r#"entry     = ["touch-1200", "double-tap"]"#,
+            "entry     = []",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("no entry mechanism"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_transport_will_not_load() {
+        assert!(matches!(
+            mutated_catalogue("uf2-msc", "carrier-pigeon"),
+            Err(Error::Toml { .. })
+        ));
+    }
+
+    #[test]
+    fn a_malformed_version_constraint_will_not_load() {
+        assert!(matches!(
+            mutated_catalogue(">=7.0.1, <8.0.0", "7ish"),
+            Err(Error::BadConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn a_malformed_usb_id_will_not_load() {
+        assert!(matches!(
+            mutated_catalogue("239a:0071", "239a-0071"),
+            Err(Error::BadUsbId { .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // The bundle manifest
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_well_formed_bundle_loads_with_its_images_and_their_checksums() {
+        let f = Fixture::new();
+        let manifest = f.load().unwrap();
+        assert_eq!(manifest.bundle.version, "0.8.0");
+        let payloads = manifest.payloads("t114").unwrap();
+        assert_eq!(payloads.app.git_sha.as_deref(), Some("bb7c4f64"));
+        assert_eq!(
+            payloads.remedy.softdevice.as_ref().unwrap().payload.convert,
+            Some(Convert::HexToUf2)
+        );
+        assert_eq!(manifest.names(), vec!["t114"]);
+    }
+
+    #[test]
     fn payloads_verify_and_the_whole_bundle_verifies() {
         let f = Fixture::new();
         let manifest = f.load().unwrap();
-        let board = manifest.board("t114").unwrap();
+        let payloads = manifest.payloads("t114").unwrap();
         assert_eq!(
-            board.app.read(&manifest.root).unwrap(),
+            payloads.app.read(&manifest.root).unwrap(),
             b"application image"
         );
         manifest.verify_all().unwrap();
@@ -624,33 +832,41 @@ convert = "hex-to-uf2"
         let f = Fixture::new();
         let manifest = f.load().unwrap();
         f.write("t114/leviculum-t114-0.8.0.uf2", b"application imagX");
-        let err = manifest.board("t114").unwrap().app.read(&manifest.root);
+        let err = manifest.payloads("t114").unwrap().app.read(&manifest.root);
         assert!(matches!(err, Err(Error::Checksum { .. })), "{err:?}");
         assert!(matches!(manifest.verify_all(), Err(Error::Checksum { .. })));
     }
 
     #[test]
-    fn a_board_the_bundle_does_not_carry_is_named_along_with_the_ones_it_does() {
+    fn a_bundle_carrying_no_image_for_a_board_says_so_in_its_own_words() {
+        // Distinct from "lnflash knows no such board": the catalogue knows
+        // the t114, this bundle just has nothing to write to one.
         let f = Fixture::new();
         let manifest = f.load().unwrap();
-        match manifest.board("rak4631") {
-            Err(Error::UnknownBoard { wanted, available }) => {
+        match manifest.payloads("rak4631") {
+            Err(Error::NoImage { wanted, available }) => {
                 assert_eq!(wanted, "rak4631");
                 assert_eq!(available, vec!["t114".to_string()]);
             }
-            other => panic!("expected UnknownBoard, got {other:?}"),
+            other => panic!("expected NoImage, got {other:?}"),
         }
-        assert_eq!(manifest.names(), vec!["t114"]);
     }
 
     #[test]
-    fn a_board_is_looked_up_by_the_id_the_bootloader_published() {
+    fn a_bundle_naming_a_board_the_catalogue_does_not_know_will_not_load() {
         let f = Fixture::new();
-        let manifest = f.load().unwrap();
-        assert_eq!(manifest.board_for_id("HT-n5262").unwrap().0, "t114");
-        // Exactly, never as a substring: the RAK's ID must not match.
-        assert!(manifest.board_for_id("HT-n5262-something").is_none());
-        assert!(manifest.board_for_id("WisBlock-RAK4631-Board").is_none());
+        f.write_manifest(&f.manifest_text().replace("board.t114", "board.rak4631"));
+        let err = f.load().unwrap_err();
+        assert!(format!("{err}").contains("rak4631"), "{err}");
+        assert!(format!("{err}").contains("knows no board"), "{err}");
+    }
+
+    #[test]
+    fn a_bundle_with_no_images_in_it_will_not_load() {
+        let f = Fixture::new();
+        f.write_manifest("[bundle]\nversion = \"0.8.0\"\n");
+        let err = f.load().unwrap_err();
+        assert!(format!("{err}").contains("no images in it"), "{err}");
     }
 
     #[test]
@@ -691,82 +907,13 @@ convert = "hex-to-uf2"
     }
 
     #[test]
-    fn a_manifest_naming_the_bootloader_family_will_not_load() {
-        let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace("0xADA52840", "0xD663823C"));
-        let err = f.load().unwrap_err();
-        assert!(format!("{err}").contains("bootloader family"), "{err}");
-    }
-
-    #[test]
-    fn an_app_base_outside_the_writable_window_will_not_load() {
-        let f = Fixture::new();
-        // 0xEC000 is the identity page, above what the bootloader will write.
-        f.write_manifest(
-            &f.manifest_text()
-                .replace("app_base       = 0x27000", "app_base = 0xEC000"),
-        );
-        let err = f.load().unwrap_err();
-        assert!(
-            format!("{err}").contains("outside the writable window"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn an_empty_board_id_will_not_load_because_nothing_could_confirm_it() {
-        let f = Fixture::new();
-        f.write_manifest(
-            &f.manifest_text()
-                .replace("\"HT-n5262\"\nbootloader_usb", "\"\"\nbootloader_usb"),
-        );
-        let err = f.load().unwrap_err();
-        assert!(
-            format!("{err}").contains("info_uf2_board_id is empty"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn a_board_with_no_entry_mechanism_will_not_load() {
-        let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace(
-            r#"entry     = ["touch-1200", "double-tap"]"#,
-            "entry     = []",
-        ));
-        let err = f.load().unwrap_err();
-        assert!(format!("{err}").contains("no entry mechanism"), "{err}");
-    }
-
-    #[test]
-    fn an_unknown_transport_will_not_load() {
-        let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace("uf2-msc", "carrier-pigeon"));
-        assert!(matches!(f.load(), Err(Error::Toml { .. })));
-    }
-
-    #[test]
-    fn a_malformed_version_constraint_will_not_load() {
-        let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace(">=7.0.1, <8.0.0", "7ish"));
-        assert!(matches!(f.load(), Err(Error::BadConstraint { .. })));
-    }
-
-    #[test]
-    fn a_malformed_usb_id_will_not_load() {
-        let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace("239a:0071", "239a-0071"));
-        assert!(matches!(f.load(), Err(Error::BadUsbId { .. })));
-    }
-
-    #[test]
     fn a_remedy_with_no_precondition_to_trigger_it_will_not_load() {
+        // The precondition now lives in the catalogue, so this crosses the
+        // two tables: a bundle offering a SoftDevice for a board that states
+        // no SoftDevice constraint is nonsense whichever side is wrong.
         let f = Fixture::new();
-        f.write_manifest(
-            &f.manifest_text()
-                .replace("softdevice = \">=7.0.1, <8.0.0\"", ""),
-        );
-        let err = f.load().unwrap_err();
+        let catalogue = mutated_catalogue("softdevice = \">=7.0.1, <8.0.0\"", "").unwrap();
+        let err = load(f.dir.path(), &catalogue).unwrap_err();
         assert!(format!("{err}").contains("no requires.softdevice"), "{err}");
     }
 

@@ -251,8 +251,12 @@ fn telemetry_plan(cli: &Cli) -> Result<TelemetryPlan, Box<dyn std::error::Error>
 fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let radio = radio_plan(cli)?;
     let telemetry = telemetry_plan(cli)?;
-    let dir = manifest::locate(cli.bundle.as_deref())?;
-    let manifest = manifest::load(&dir)?;
+    // The board catalogue is compiled in and always available. The bundle is
+    // located only by the paths that need an image, so a session that merely
+    // configures a board that is already running never asks for one
+    // (Codeberg #342) — and a session that does need one still fails with the
+    // bundle error, naming everywhere it looked.
+    let catalogue = manifest::Catalogue::builtin()?;
 
     let mut console;
     let mut assumed;
@@ -263,6 +267,39 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         console = Console::new(cli.quiet);
         &mut console
     };
+
+    if cli.set_time {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the host clock is before 1970; refusing to teach a board that")?
+            .as_secs();
+        let all_took_it = flow::set_time(&catalogue, &sysfs, ui, now)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if cli.set_telemetry {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_telemetry(&catalogue, &sysfs, ui, &telemetry)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    let dir = manifest::locate(cli.bundle.as_deref())?;
+    let manifest = manifest::load(&dir, &catalogue)?;
 
     ui.say(&format!(
         "lnflash {} — bundle {} from {}, carrying {}",
@@ -280,36 +317,6 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         manifest.verify_all()?;
         ui.say("Every image in this bundle matches its recorded checksum.");
         return Ok(ExitCode::SUCCESS);
-    }
-
-    if cli.set_time {
-        let sysfs = match &cli.sysfs {
-            Some(path) => Sysfs::new(path),
-            None => Sysfs::new(SYSFS_USB_DEVICES),
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "the host clock is before 1970; refusing to teach a board that")?
-            .as_secs();
-        let all_took_it = flow::set_time(&manifest, &sysfs, ui, now)?;
-        return Ok(if all_took_it {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        });
-    }
-
-    if cli.set_telemetry {
-        let sysfs = match &cli.sysfs {
-            Some(path) => Sysfs::new(path),
-            None => Sysfs::new(SYSFS_USB_DEVICES),
-        };
-        let all_took_it = flow::set_telemetry(&manifest, &sysfs, ui, &telemetry)?;
-        return Ok(if all_took_it {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        });
     }
 
     // Say this before enumerating rather than after a failed mount: a user
@@ -333,7 +340,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         ..Options::default()
     };
 
-    let outcomes = flow::run(&manifest, &sysfs, ui, &opts)?;
+    let outcomes = flow::run(&catalogue, &manifest, &sysfs, ui, &opts)?;
     if outcomes.is_empty() {
         // Nothing was flashed. That is a clean exit for --dry-run and for an
         // empty bus, and a failure for a run that was supposed to write.

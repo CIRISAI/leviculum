@@ -180,7 +180,7 @@ radio pinout turned out to be the easy half.
 > same bootloader product string `HT-n5262` for the T114, for MeshSolar
 > and for the Heltec Mesh Pocket, whose radio is wired differently and
 > which is not covered here. Both our tools match that string exactly
-> (`board_for_id` (`lnflash/src/manifest.rs:306`),
+> (`board_for_id` (`lnflash/src/manifest.rs:372`),
 > `leviculum-nrf/tools/uf2-runner.sh:79`), so if the `INFO_UF2.TXT`
 > `Board-ID` is identical too, neither can tell a Mesh Pocket from a
 > T114. We cannot check that without the hardware. Until someone does,

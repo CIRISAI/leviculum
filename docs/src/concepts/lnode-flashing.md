@@ -548,20 +548,54 @@ firmware/
     s140_nrf52_7.3.0_license-agreement.txt
 ```
 
+The data is split in two by what it describes. **Board facts** — USB
+IDs, `Board-ID`, flash geometry, the SoftDevice constraint — are
+properties of the hardware and do not change when a release is cut, so
+they live in `lnflash/catalogue.toml`, compiled into the binary:
+
 ```toml
 [board.t114]
 family      = "nrf52840"
 transport   = "uf2-msc"
 entry       = ["touch-1200", "double-tap"]
 identify    = { info_uf2_board_id = "HT-n5262" }
-app         = { file = "t114/leviculum-t114-0.8.0.uf2", sha256 = "..." }
 requires.softdevice = ">=7.0.1, <8.0.0"
-remedy.softdevice   = { file = "t114/s140_nrf52_7.3.0_softdevice.hex",
-                        license = "t114/s140_nrf52_7.3.0_license-agreement.txt",
-                        convert = "hex-to-uf2" }
 ```
 
-A new board then needs no new binary. The `license` field is not
+**Release facts** — which images this tarball carries and what they
+hash to — are the bundle's:
+
+```toml
+[bundle]
+version = "0.8.0"
+
+[board.t114.app]
+file    = "t114/leviculum-t114-0.8.0.uf2"
+sha256  = "..."
+
+[board.t114.remedy.softdevice]
+file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
+convert = "hex-to-uf2"
+```
+
+The split is Codeberg #342. Before it, both halves were in the bundle
+manifest, and `run()` loaded it before dispatching — so `--set-time`
+and `--set-telemetry`, which read nothing but the USB IDs, refused to
+start without a firmware bundle on disk. Activation is configuration,
+not firmware (#236/#238); somebody pointing a node they already own at
+an LXMF address was being sent to hunt for an image they had no use
+for. The configure-only sessions now take the catalogue and never
+locate a bundle at all; the flashing paths locate one and still fail
+with `no bundle found`, naming every place they looked.
+
+A bundle built before the split still loads: its board-fact sections
+are ignored, and the catalogue in the binary reading them is the more
+trustworthy of the two copies anyway, since binary and bundle ship
+together.
+
+A new board still needs no new binary in the sense that matters — it is
+data entry, in the catalogue plus one image. The `license` field is not
 bureaucracy: it makes shipping a third-party blob without its licence
 impossible by construction, which is exactly the mistake described
 above. Board names stay identical to the firmware-side ones in

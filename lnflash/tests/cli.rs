@@ -57,6 +57,9 @@ fn unpacked_bundle() -> TempDir {
     dir
 }
 
+/// The manifest `scripts/lnflash-bundle.sh` writes: the release, and one
+/// image per board. The board facts are the compiled-in catalogue's since
+/// Codeberg #342.
 fn manifest_text(app_sha: &str, sd_sha: &str) -> String {
     format!(
         r#"
@@ -64,6 +67,24 @@ fn manifest_text(app_sha: &str, sd_sha: &str) -> String {
 version = "0.8.0"
 built   = "2026-08-10"
 
+[board.t114.app]
+file    = "t114/leviculum-t114-0.8.0.uf2"
+sha256  = "{app_sha}"
+git_sha = "bb7c4f64"
+
+[board.t114.remedy.softdevice]
+file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
+sha256  = "{sd_sha}"
+license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
+convert = "hex-to-uf2"
+"#
+    )
+}
+
+/// The board-fact sections a pre-#342 bundle carried. Kept here so the
+/// backwards-compatibility test states what an old manifest looked like
+/// rather than pointing at a git revision.
+const PRE_342_BOARD_FACTS: &str = r#"
 [board.t114]
 family    = "nrf52840"
 transport = "uf2-msc"
@@ -81,22 +102,9 @@ writable_start = 0x1000
 writable_end   = 0xEA000
 app_base       = 0x27000
 
-[board.t114.app]
-file    = "t114/leviculum-t114-0.8.0.uf2"
-sha256  = "{app_sha}"
-git_sha = "bb7c4f64"
-
 [board.t114.requires]
 softdevice = ">=7.0.1, <8.0.0"
-
-[board.t114.remedy.softdevice]
-file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
-sha256  = "{sd_sha}"
-license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
-convert = "hex-to-uf2"
-"#
-    )
-}
+"#;
 
 /// Run the binary with no `$LNFLASH_BUNDLE` unless one is given, so the
 /// developer's own environment cannot decide a test's outcome.
@@ -127,6 +135,32 @@ fn an_unpacked_bundle_is_found_by_pointing_at_its_root() {
     assert!(out.status.success(), "{}", stdout(&out));
     assert!(stdout(&out).contains("matches its recorded checksum"));
     assert!(stdout(&out).contains("carrying t114"));
+}
+
+#[test]
+fn a_bundle_from_before_the_catalogue_split_still_loads() {
+    // A tarball downloaded before #342 carries the board facts in its own
+    // manifest. They are now the catalogue's, and the catalogue is compiled
+    // into the binary reading them — so the old sections are ignored rather
+    // than refused, and the tarball keeps working.
+    let bundle = unpacked_bundle();
+    let path = bundle.path().join("firmware/manifest.toml");
+    let old = format!(
+        "{}{PRE_342_BOARD_FACTS}",
+        fs::read_to_string(&path).unwrap()
+    );
+    fs::write(&path, old).unwrap();
+
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--check-bundle",
+        ],
+        None,
+    );
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert!(stdout(&out).contains("matches its recorded checksum"));
 }
 
 #[test]
@@ -270,7 +304,13 @@ fn an_empty_bus_is_a_clean_report_rather_than_an_error_message() {
     );
     assert!(out.status.success());
     let said = stdout(&out);
-    assert!(said.contains("No board this bundle knows is attached"));
+    // "lnflash knows", not "this bundle knows": since #342 the boards are the
+    // compiled-in catalogue's, and the bundle only says which of them it has
+    // an image for.
+    assert!(
+        said.contains("No board lnflash knows is attached"),
+        "{said}"
+    );
     // The board that produces this is usually attached, just dark: nothing to
     // enumerate and nothing to touch. Saying so is the whole use of the run.
     assert!(said.contains("Double-tap RESET"), "{said}");
@@ -319,6 +359,7 @@ fn the_help_text_says_it_needs_root_and_never_uses_the_network() {
         "--telemetry-profile",
         "--telemetry-key",
         "--no-telemetry",
+        "--set-time",
         "--set-telemetry",
     ] {
         assert!(help.contains(flag), "{flag} missing from --help:\n{help}");
@@ -454,6 +495,97 @@ fn the_config_only_session_needs_a_running_board_and_says_so() {
     assert!(said.contains("--set-telemetry"), "{said}");
     // It must not have gone anywhere near a bootloader or a write.
     assert!(!said.contains("copied"), "{said}");
+}
+
+#[test]
+fn the_config_only_sessions_run_with_no_bundle_anywhere() {
+    // Codeberg #342. Activation is configuration, not firmware (#236/#238):
+    // somebody pointing a node they already own at an LXMF address has no use
+    // for a firmware bundle, and the board facts these sessions need — which
+    // USB IDs are LNodes — are in the compiled-in catalogue, not in a bundle.
+    //
+    // Reaching "No running LNode on the bus" is what proves the session
+    // started: that message comes from `flow::set_time`/`set_telemetry` after
+    // the bus has been enumerated.
+    let empty = TempDir::new().unwrap();
+    let nowhere = TempDir::new().unwrap();
+    for args in [
+        vec!["--set-time"],
+        vec![
+            "--set-telemetry",
+            "--telemetry",
+            "a7b2c3d4e5f60718293a4b5c6d7e8f90",
+        ],
+    ] {
+        // --bundle names a directory that does not exist, so no bundle can be
+        // found by any of the four resolution steps.
+        let bundle = nowhere.path().join("absent").display().to_string();
+        let mut full = vec!["--bundle", &bundle, "--yes"];
+        full.extend_from_slice(&args);
+        let sysfs = empty.path().display().to_string();
+        full.extend_from_slice(&["--sysfs", &sysfs]);
+        let out = run(&full, None);
+        let said = stdout(&out);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("No running LNode on the bus"),
+            "{args:?}\nstdout: {said}\nstderr: {err}"
+        );
+        // And it must not have complained about a bundle it has no use for.
+        assert!(!err.contains("no bundle found"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn a_flash_still_refuses_to_run_without_a_bundle_and_says_so() {
+    // The other half of #342: the config sessions stopped needing images, the
+    // flashing paths did not. The error has to name what is missing for the
+    // operation that was asked for.
+    let nowhere = TempDir::new().unwrap();
+    let empty = TempDir::new().unwrap();
+    let out = run(
+        &[
+            "--bundle",
+            &nowhere.path().join("absent").display().to_string(),
+            "--yes",
+            "--sysfs",
+            &empty.path().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no bundle found"), "{err}");
+    assert!(err.contains("absent"), "{err}");
+}
+
+#[test]
+fn a_bundle_missing_its_image_still_stops_a_flash_before_any_board_is_touched() {
+    // The guard does not get weaker on the flashing paths. A checksum
+    // mismatch is only reachable once the image is actually read, which needs
+    // root and a mounted bootloader drive (`--check-bundle` above covers that
+    // half, and flow::prepare covers it at the unit level). What a flash can
+    // be held to with no hardware is the load-time half: an image the
+    // manifest names and the bundle does not carry stops the run before the
+    // bus is even enumerated.
+    let bundle = unpacked_bundle();
+    fs::remove_file(bundle.path().join("firmware/t114/leviculum-t114-0.8.0.uf2")).unwrap();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--yes",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("leviculum-t114-0.8.0.uf2"), "{err}");
+    assert!(err.contains("not in the bundle"), "{err}");
+    // Nothing was enumerated: the bundle was refused first.
+    assert!(!stdout(&out).contains("Found"), "{}", stdout(&out));
 }
 
 #[test]

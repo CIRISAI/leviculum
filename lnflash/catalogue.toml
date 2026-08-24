@@ -1,0 +1,55 @@
+# The board catalogue: every board fact lnflash knows, and nothing about any
+# particular firmware release.
+#
+# Compiled into the binary (`manifest::Catalogue::builtin`). It is here rather
+# than in a bundle's manifest.toml because these are properties of the
+# hardware, not of a release: which USB IDs an LNode answers on does not change
+# when we cut a new firmware, and the sessions that only configure a board that
+# is already running — `--set-time`, `--set-telemetry` — need exactly this and
+# no image at all (Codeberg #342). Activation is configuration, not firmware
+# (#236/#238), so requiring a bundle on disk for it sent people hunting for
+# firmware they had no use for.
+#
+# The bundle's manifest.toml carries the other half: the version, and one
+# payload entry per board naming the image and its checksum. Splitting them
+# this way keeps one source of truth for each — a board fact is here, a release
+# fact is there, and neither is written down twice.
+#
+# The binary stays board-agnostic: an `if board == "t114"` anywhere in the
+# source would mean the split has failed. A new nRF or RP2040 board is an entry
+# in this file plus an image in the bundle; a new chip family is one new
+# transport in Rust (docs/src/concepts/lnode-flashing.md, "Four axes").
+#
+# The constants below were measured on the rig and are recorded with their
+# evidence in docs/src/concepts/lnode-flashing.md.
+
+[board.t114]
+family    = "nrf52840"
+transport = "uf2-msc"
+# Tried in order. The touch only exists if the running firmware implements it;
+# ours does, stock Meshtastic does not, so the double-tap is a real fallback.
+entry     = ["touch-1200", "double-tap"]
+
+[board.t114.identify]
+# The truth, read from INFO_UF2.TXT after entering the bootloader. Exactly
+# this string, not a substring of something longer.
+info_uf2_board_id = "HT-n5262"
+# Hints for finding candidates. Never identity: a running application's USB ID
+# belongs to whatever firmware is installed, not to the board.
+bootloader_usb    = ["239a:0071"]
+candidate_usb     = ["1209:0001", "239a:8071"]
+msc_label         = "HT-n5262"
+
+[board.t114.flash]
+# The bootloader generates CURRENT.UF2 from exactly this window, which is how
+# both bounds were measured without reading a single constant.
+family_id      = 0xADA52840
+writable_start = 0x1000
+writable_end   = 0xEA000
+app_base       = 0x27000
+
+[board.t114.requires]
+# Our bindings are generated from 7.0.1 and the boards run 7.3.0; Nordic keeps
+# the ABI stable within a major version. A board carrying 6.1.1 puts the
+# application boundary a page lower, so our image boots into nothing.
+softdevice = ">=7.0.1, <8.0.0"
