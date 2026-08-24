@@ -24,6 +24,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::manifest::DoubleTap;
 use crate::sys::Fd;
 use crate::usb::{Device, Sysfs, UsbId};
 
@@ -160,29 +161,71 @@ pub fn wait_for_interface_tty(
     }
 }
 
+/// The press, for a board whose RESET is a button on the outside of the case.
+/// A board that needs different words says so in the catalogue rather than
+/// here (`[board.<name>.double_tap]`).
+const PRESS_RESET: &str =
+    "press RESET twice, quickly — the second press within about half a second of the first.";
+
 /// What to tell a user who has to reach for the board.
 ///
 /// Named here rather than written inline at the call site because it is the
 /// one instruction in the tool a person has to act on, and it should read
-/// the same every time.
-pub fn double_tap_instruction(what: &str) -> String {
-    format!(
-        "{what} has to be put into its bootloader by hand:\n  \
-         press RESET twice, quickly — the second press within about half a second of the first.\n  \
-         A drive appears when it worked."
-    )
+/// the same every time — for the same board. Across boards it must not: the
+/// Pocket V2 has no externally accessible RESET, and telling its owner to
+/// press one sends them looking for a button that is not there (Codeberg
+/// #261). The wording therefore comes from the board's catalogue entry, and
+/// only the shape is fixed here.
+pub fn double_tap_instruction(what: &str, board: &DoubleTap) -> String {
+    let mut text = format!(
+        "{what} has to be put into its bootloader by hand:\n  {}\n  \
+         A drive appears when it worked.",
+        board.press.as_deref().unwrap_or(PRESS_RESET)
+    );
+    if let Some(docs) = &board.docs {
+        text.push_str(&format!("\n  If it does not, see {docs}."));
+    }
+    text
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The compiled-in catalogue, so these assert on the wording that ships.
+    fn wording(board: &str) -> DoubleTap {
+        crate::manifest::Catalogue::builtin()
+            .unwrap()
+            .board(board)
+            .unwrap()
+            .double_tap
+            .clone()
+    }
+
     #[test]
     fn the_double_tap_instruction_says_what_to_press_and_what_success_looks_like() {
-        let text = double_tap_instruction("the board on 3-2.4");
+        let text = double_tap_instruction("the board on 3-2.4", &wording("t114"));
         assert!(text.contains("3-2.4"));
         assert!(text.contains("RESET twice"));
         assert!(text.contains("drive appears"));
+        // A board with nothing to add says nothing extra.
+        assert!(!text.contains("If it does not"), "{text}");
+    }
+
+    #[test]
+    fn a_board_with_no_reset_button_is_not_told_to_press_one() {
+        // Codeberg #261: the Pocket V2 has no externally accessible RESET, so
+        // the T114 wording sends its owner hunting for a button that is not
+        // there. The instruction names the pinhole and the needle, and points
+        // at the page that explains the rest.
+        let text = double_tap_instruction("The board on 3-2.3.4.4", &wording("rak4631"));
+        assert!(text.contains("3-2.3.4.4"), "{text}");
+        assert!(text.contains("pinhole"), "{text}");
+        assert!(text.contains("needle"), "{text}");
+        assert!(text.contains("no RESET button on the outside"), "{text}");
+        assert!(text.contains("recovery.md"), "{text}");
+        // And it must not carry the instruction it replaces.
+        assert!(!text.contains("press RESET twice"), "{text}");
     }
 
     #[test]

@@ -180,7 +180,7 @@ radio pinout turned out to be the easy half.
 > same bootloader product string `HT-n5262` for the T114, for MeshSolar
 > and for the Heltec Mesh Pocket, whose radio is wired differently and
 > which is not covered here. Both our tools match that string exactly
-> (`board_for_id` (`lnflash/src/manifest.rs:372`),
+> (`board_for_id` (`lnflash/src/manifest.rs:394`),
 > `leviculum-nrf/tools/uf2-runner.sh:79`), so if the `INFO_UF2.TXT`
 > `Board-ID` is identical too, neither can tell a Mesh Pocket from a
 > T114. We cannot check that without the hardware. Until someone does,
@@ -287,8 +287,26 @@ The mapping from board to binary and features used by the flash recipes:
 | WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:538`, `Justfile:556`,
-`Justfile:568`.)
+`just flash-rak4631-pocket` recipes: `Justfile:719`, `Justfile:746`,
+`Justfile:759`.)
+
+### What the `lnflash` bundle carries
+
+The distributable bundle carries an image for both families: `bsp-t114`
+for the T114 and `bsp-rak4631,rak-baseboard` for the RAK4630 module
+(Codeberg #261). The RAK row it ships is the last one in the table above,
+not the middle one — the bare module runs the baseboard image, and the
+paragraph above is why. There is deliberately no way for a user to choose
+between them: the manifest cannot express two images for one `Board-ID`,
+because a question nobody can answer from looking at their board is not a
+question worth asking.
+
+Which boards the bundle knows at all is `lnflash/catalogue.toml`, and it
+is a shorter list than the tables above on purpose. A row here says our
+image would drive that board's radio; a catalogue entry says the
+bootloader can be told apart from every other board's, which is the
+stricter of the two claims and the only one a write may rest on. See
+[Building and flashing](flashing.md), "Which boards the bundle carries".
 
 ## Build target
 

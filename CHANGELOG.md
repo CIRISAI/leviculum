@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The lnflash bundle carries the RAK4631 as well as the T114, so a
+  WisMesh Pocket V2 can be flashed and configured from the tarball
+  (#261).
+
 - `just nrf-shellcheck` runs shellcheck over the flash-runner scripts and
   is part of `just fast` (#345).
 

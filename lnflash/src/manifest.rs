@@ -193,6 +193,26 @@ pub struct Board {
     pub flash: Flash,
     #[serde(default)]
     pub requires: Requires,
+    /// What to tell a person who has to reach for this board. Absent where
+    /// the ordinary wording fits, which is every board whose RESET is a
+    /// button on the outside of the case.
+    #[serde(default)]
+    pub double_tap: DoubleTap,
+}
+
+/// Per-board wording for the one instruction in this tool a human has to act
+/// on. It is data rather than a branch for the reason the module header
+/// gives: an `if board == "rak4631"` around a prompt is the same failure as
+/// one around a flash address.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DoubleTap {
+    /// The press itself, replacing "press RESET twice, quickly — the second
+    /// press within about half a second of the first."
+    #[serde(default)]
+    pub press: Option<String>,
+    /// Where the longer story is, for a board whose recovery has one.
+    #[serde(default)]
+    pub docs: Option<String>,
 }
 
 /// The **identify** axis, in the two stages the order of work demands.
@@ -652,6 +672,27 @@ mod tests {
             hex_digest(&fs::read(self.dir.path().join(rel)).unwrap())
         }
 
+        /// Add the RAK4631 image, making this the two-board bundle
+        /// `scripts/lnflash-bundle.sh` produces (Codeberg #261). No SoftDevice
+        /// remedy: the bundle carries none for that board, which is the
+        /// decision recorded in the catalogue.
+        fn with_rak(self) -> Self {
+            fs::create_dir_all(self.dir.path().join("rak4631")).unwrap();
+            self.write("rak4631/leviculum-rak4631-0.8.0.uf2", b"the other image");
+            let text = format!(
+                r#"{}
+[board.rak4631.app]
+file    = "rak4631/leviculum-rak4631-0.8.0.uf2"
+sha256  = "{rak}"
+git_sha = "bb7c4f64"
+"#,
+                self.manifest_text(),
+                rak = self.sha("rak4631/leviculum-rak4631-0.8.0.uf2"),
+            );
+            self.write_manifest(&text);
+            self
+        }
+
         fn manifest_text(&self) -> String {
             format!(
                 r#"
@@ -699,7 +740,27 @@ convert = "hex-to-uf2"
             board.softdevice_req("t114").unwrap().unwrap().as_str(),
             ">=7.0.1, <8.0.0"
         );
-        assert_eq!(catalogue.names(), vec!["t114"]);
+        assert_eq!(catalogue.names(), vec!["rak4631", "t114"]);
+    }
+
+    #[test]
+    fn the_rak4631_is_a_board_the_binary_knows_without_any_bundle_on_disk() {
+        // Codeberg #261. Every fact here is transcribed from
+        // docs/src/concepts/lnode-flashing.md, which records where each was
+        // measured; the test is what stops a typo in the transcription.
+        let catalogue = catalogue();
+        let board = catalogue.board("rak4631").unwrap();
+        assert_eq!(board.transport, Transport::Uf2Msc);
+        assert_eq!(board.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
+        assert_eq!(board.identify.info_uf2_board_id, "WisBlock-RAK4631-Board");
+        assert_eq!(board.identify.msc_label.as_deref(), Some("RAK4631"));
+        assert_eq!(board.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
+        assert_eq!(board.flash.app_base, 0x2_7000);
+        assert_eq!(board.flash.writable_end, 0xEA000);
+        assert_eq!(
+            board.softdevice_req("rak4631").unwrap().unwrap().as_str(),
+            ">=7.0.1, <8.0.0"
+        );
     }
 
     #[test]
@@ -711,14 +772,49 @@ convert = "hex-to-uf2"
             vec!["239a:0071".parse::<UsbId>().unwrap()]
         );
         assert_eq!(board.candidate_ids("t114").unwrap().len(), 2);
+
+        let rak = catalogue.board("rak4631").unwrap();
+        assert_eq!(
+            rak.bootloader_ids("rak4631").unwrap(),
+            vec!["239a:0029".parse::<UsbId>().unwrap()]
+        );
+        assert_eq!(
+            rak.candidate_ids("rak4631").unwrap(),
+            vec!["1209:0002".parse::<UsbId>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn no_two_boards_claim_the_same_usb_id() {
+        // A shared ID would make `find_candidates` hint the wrong board, and a
+        // hint decides which bootloader IDs get waited for after the touch —
+        // so the board that came back would never be recognised. Cheap to
+        // assert here, expensive to find on a bench.
+        let catalogue = catalogue();
+        let mut seen: BTreeMap<UsbId, &str> = BTreeMap::new();
+        for (name, board) in &catalogue.board {
+            for id in board
+                .bootloader_ids(name)
+                .unwrap()
+                .into_iter()
+                .chain(board.candidate_ids(name).unwrap())
+            {
+                if let Some(other) = seen.insert(id, name) {
+                    panic!("{id} is claimed by both {other} and {name}");
+                }
+            }
+        }
+        assert!(seen.len() >= 5, "{seen:?}");
     }
 
     #[test]
     fn a_board_lnflash_does_not_know_is_named_along_with_the_ones_it_does() {
-        match catalogue().board("rak4631") {
+        // The XIAO nRF52840 family has no entry and is not meant to get one
+        // until a second discriminator exists (docs/src/firmware/boards.md).
+        match catalogue().board("xiao_nrf52840") {
             Err(Error::UnknownBoard { wanted, available }) => {
-                assert_eq!(wanted, "rak4631");
-                assert_eq!(available, vec!["t114".to_string()]);
+                assert_eq!(wanted, "xiao_nrf52840");
+                assert_eq!(available, vec!["rak4631".to_string(), "t114".to_string()]);
             }
             other => panic!("expected UnknownBoard, got {other:?}"),
         }
@@ -728,9 +824,14 @@ convert = "hex-to-uf2"
     fn a_board_is_looked_up_by_the_id_the_bootloader_published() {
         let catalogue = catalogue();
         assert_eq!(catalogue.board_for_id("HT-n5262").unwrap().0, "t114");
-        // Exactly, never as a substring: the RAK's ID must not match.
+        assert_eq!(
+            catalogue.board_for_id("WisBlock-RAK4631-Board").unwrap().0,
+            "rak4631"
+        );
+        // Exactly, never as a substring, in either direction.
         assert!(catalogue.board_for_id("HT-n5262-something").is_none());
-        assert!(catalogue.board_for_id("WisBlock-RAK4631-Board").is_none());
+        assert!(catalogue.board_for_id("WisBlock-RAK4631").is_none());
+        assert!(catalogue.board_for_id("RAK4631").is_none());
     }
 
     #[test]
@@ -840,7 +941,14 @@ convert = "hex-to-uf2"
     #[test]
     fn a_bundle_carrying_no_image_for_a_board_says_so_in_its_own_words() {
         // Distinct from "lnflash knows no such board": the catalogue knows
-        // the t114, this bundle just has nothing to write to one.
+        // both boards, this bundle just has nothing to write to a RAK.
+        //
+        // This is the #342 distinction, and #261 is exactly when it starts to
+        // earn its keep: before the RAK had a catalogue entry the two errors
+        // could not be told apart by example. A bundle built before #261, or
+        // one built with `--bin t114` alone, must still refuse a RAK with
+        // NoImage — "fetch a newer bundle" — rather than UnknownBoard, which
+        // would send the user after a newer *binary*.
         let f = Fixture::new();
         let manifest = f.load().unwrap();
         match manifest.payloads("rak4631") {
@@ -853,11 +961,35 @@ convert = "hex-to-uf2"
     }
 
     #[test]
+    fn a_bundle_carrying_both_boards_loads_and_every_image_in_it_verifies() {
+        // Codeberg #261: the shape `scripts/lnflash-bundle.sh` now emits. Two
+        // boards, one of which states a SoftDevice remedy and one of which
+        // does not — and `--check-bundle` reads both images.
+        let f = Fixture::new().with_rak();
+        let manifest = f.load().unwrap();
+        assert_eq!(manifest.names(), vec!["rak4631", "t114"]);
+        let rak = manifest.payloads("rak4631").unwrap();
+        assert_eq!(rak.app.read(&manifest.root).unwrap(), b"the other image");
+        assert!(rak.remedy.softdevice.is_none());
+        assert!(manifest
+            .payloads("t114")
+            .unwrap()
+            .remedy
+            .softdevice
+            .is_some());
+        manifest.verify_all().unwrap();
+
+        // And verify_all really reaches the second board: break only its image.
+        f.write("rak4631/leviculum-rak4631-0.8.0.uf2", b"the other imagX");
+        assert!(matches!(manifest.verify_all(), Err(Error::Checksum { .. })));
+    }
+
+    #[test]
     fn a_bundle_naming_a_board_the_catalogue_does_not_know_will_not_load() {
         let f = Fixture::new();
-        f.write_manifest(&f.manifest_text().replace("board.t114", "board.rak4631"));
+        f.write_manifest(&f.manifest_text().replace("board.t114", "board.wisdom"));
         let err = f.load().unwrap_err();
-        assert!(format!("{err}").contains("rak4631"), "{err}");
+        assert!(format!("{err}").contains("wisdom"), "{err}");
         assert!(format!("{err}").contains("knows no board"), "{err}");
     }
 

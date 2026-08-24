@@ -15,6 +15,13 @@
 #   LEVICULUM_UF2_BOARD_ID    Board-ID string in INFO_UF2.TXT, used to confirm
 #                             the right bootloader is mounted
 #                             (default: HT-n5262)
+#   LEVICULUM_DOUBLE_TAP_HINT One extra line under the manual double-tap
+#                             prompt, for a board where "double-tap RESET" is
+#                             not enough to act on. The Pocket V2 has no
+#                             externally accessible RESET at all, so its
+#                             owner is sent looking for a button that does not
+#                             exist (Codeberg #261). Empty on a board whose
+#                             RESET is a button on the outside.
 #
 # Selective flashing: set LEVICULUM_FLASH_ONLY=<port-or-symlink> to target
 # exactly one device. Useful for A/B firmware testing.
@@ -99,6 +106,7 @@ BOARD_VID="${LEVICULUM_USB_VID:-1209}"
 BOARD_PID="${LEVICULUM_USB_PID:-0001}"
 BOARD_NAME="${LEVICULUM_BOARD_NAME:-T114}"
 BOOTLOADER_BOARD_ID="${LEVICULUM_UF2_BOARD_ID:-HT-n5262}"
+DOUBLE_TAP_HINT="${LEVICULUM_DOUBLE_TAP_HINT:-}"
 
 # A mount we make is a mount we give back. The registry records ownership and
 # the EXIT trap drains it, so no path out of this script — an early exit, a
@@ -460,9 +468,14 @@ flash_one_device() {
         echo "[uf2-runner] $hint: non-interactive — skipping manual double-tap prompt" >&2
     else
         echo "==> $hint: automatic flash failed after $FLASH_ATTEMPTS attempts."
-        echo "    ┌──────────────────────────────────────────────────┐"
-        printf  "    │  Double-tap RESET on %-6s to enter bootloader. │\n" "$BOARD_NAME"
-        echo "    └──────────────────────────────────────────────────┘"
+        echo "    ┌───────────────────────────────────────────────────┐"
+        printf  "    │  Double-tap RESET on %-7s to enter bootloader. │\n" "$BOARD_NAME"
+        echo "    └───────────────────────────────────────────────────┘"
+        # Per board, because on a Pocket V2 the line above is not something a
+        # person can act on: there is no RESET button on the outside of that
+        # case (Codeberg #261). One prompt, board-specific wording — not a
+        # second prompt path.
+        if [ -n "$DOUBLE_TAP_HINT" ]; then echo "    $DOUBLE_TAP_HINT"; fi
         echo "==> Waiting for UF2 drive (${UF2_TIMEOUT}s)..."
         local drive
         drive="$(poll_matching_drive "$hint" "$grace_ticks" || true)"

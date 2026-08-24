@@ -74,6 +74,19 @@ can be fully automatic for boards already carrying our firmware, which
 is every re-flash, and must fall back to one clearly announced key press
 otherwise.
 
+**And what that key press *is* differs per board.** The WisMesh Pocket V2
+has no externally accessible RESET at all: the contact is reachable only
+through a hidden pinhole beside the USB socket, double-tapped with a
+needle ([Recovery](../firmware/recovery.md), "the hidden-pinhole
+caveat"). Telling its owner to press RESET twice sends them looking for a
+button that does not exist, which is a worse failure than saying nothing
+— they conclude the board is dead. So the wording is a board fact like
+any other and lives in `lnflash/catalogue.toml`
+(`[board.<name>.double_tap]`), not in a branch around the prompt; a board
+that says nothing there gets the ordinary wording. `just flash-rak4631`
+carries the same line into the developer runner's prompt through
+`LEVICULUM_DOUBLE_TAP_HINT` (Codeberg #261).
+
 ### RNode firmware on the T114 lands a board in exactly that state
 
 Mark's official RNode build for the Heltec T114
@@ -263,6 +276,46 @@ which had been written off as bricked for weeks. Its `INFO_UF2.TXT` read
 spike, which names only `DEC9947DAD9D2869`, so it is direct evidence for
 the factory state: **factory T114 boards ship S140 6.1.1**, as
 `leviculum-nrf/memory.x:5` claims.
+
+### The SoftDevice carve-out: the RAK4631 states the constraint and ships no remedy
+
+The version constraint is the same on both boards, `>=7.0.1, <8.0.0`, and
+for the same reason: our image is based at `0x27000` and cannot start on
+a 6.1.1 boundary. What differs is what the bundle can do about a
+violation.
+
+For the T114 the remedy is measured end to end — a genuine 6.1.1 board
+was repaired unattended on 2026-08-10, recorded under "Verified on
+hardware" below. For the RAK4631 (Codeberg #261) it is **unmeasured**.
+Our only RAK, serial `DEC9947DAD9D2869`, has carried 7.3.0 since we first
+flashed it, so we have never seen the failing state on that board and
+cannot say what a factory Pocket V2 ships. `memory.x:5` claims both
+boards leave the factory on 6.1.1, but that line predates the T114
+measurement that confirmed it for the T114 alone.
+
+So the bundle carries no SoftDevice for the RAK4631, deliberately. A
+precondition without a remedy is allowed by construction — `Requires` and
+`Remedy` are separate tables, and `flow::resolve` answers an unmet
+constraint with no remedy by refusing:
+
+    rak4631 needs SoftDevice >=7.0.1, <8.0.0 and the board has 6.1.1
+    (bootloader and flash agree), but this bundle carries no remedy for
+    that. Nothing was written.
+
+That is the honest outcome for a case nobody has seen: "I cannot fix
+this, here is why" beats writing anyway, and it beats shipping a repair
+path whose only evidence is that the same blob works on a different
+board. The opposite arrangement is what the loader refuses outright — a
+remedy with no precondition to trigger it will not load.
+
+**What would close this.** One factory or Meshtastic-stock Pocket V2 read
+through `lnflash --dry-run` under sudo, which prints the `SoftDevice:`
+line off `INFO_UF2.TXT` without writing anything. If it reads 6.1.1, the
+same vendored S140 7.3.0 hex serves this board too — it is an nRF52840
+blob, not a board-specific one — and the carve-out becomes one line in
+`scripts/lnflash-bundle.sh`'s board list plus the payload pair beside it.
+Until somebody reads one, the gap stays visible here rather than assumed
+closed.
 
 ### Installing the SoftDevice
 
@@ -546,7 +599,19 @@ firmware/
     leviculum-t114-0.8.0.uf2
     s140_nrf52_7.3.0_softdevice.hex
     s140_nrf52_7.3.0_license-agreement.txt
+  rak4631/
+    leviculum-rak4631-0.8.0.uf2
 ```
+
+The second board arrived in Codeberg #261 and cost exactly what this
+structure promised: a catalogue entry, an image, and a line in the board
+list `scripts/lnflash-bundle.sh` walks. No Rust changed except the
+per-board wording of the one prompt a human has to act on — see
+"Getting into the bootloader" below.
+
+Note what the RAK directory does *not* contain. The SoftDevice remedy is
+per board and this bundle carries none for that one; see "The SoftDevice
+carve-out" below for why, and what a board that needs it is told.
 
 The data is split in two by what it describes. **Board facts** — USB
 IDs, `Board-ID`, flash geometry, the SoftDevice constraint — are
@@ -838,7 +903,19 @@ The board was confirmed afterwards over the debug port at
 Also confirmed in the same session: a board already sitting in its
 bootloader is handled without a redundant touch, several devices on one
 bus are resolved individually, and a RAK4631 on the same hub is neither
-offered nor written to, because it has no manifest entry.
+offered nor written to, because it had no catalogue entry.
+
+That last clause is now history rather than behaviour. Codeberg #261 gave
+the RAK4631 its entry, so a Pocket V2 on the same hub is found, hinted at
+its own board, brought into its own bootloader and written its own image
+— and a bundle that carries no image for it says so in those words rather
+than falling silent. The property the 2026-08-10 session actually
+demonstrated is the one that survives: **each device is resolved
+individually, and no write rests on an identity the bootloader did not
+publish.** The structure's own claim — "the second board proves it" — is
+what #261 collected on: the RAK reached hardware readiness through a
+catalogue entry, an image, and one board-list line, with no change to the
+transport, the identify step or the write path.
 
 ## Open questions
 

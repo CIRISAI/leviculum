@@ -57,6 +57,35 @@ fn unpacked_bundle() -> TempDir {
     dir
 }
 
+/// The same bundle with the RAK4631 image beside the T114's, which is what
+/// `scripts/lnflash-bundle.sh` stages since Codeberg #261. No SoftDevice
+/// remedy for the RAK: the bundle carries none, by decision.
+fn unpacked_bundle_with_rak() -> TempDir {
+    let dir = unpacked_bundle();
+    let firmware = dir.path().join("firmware/rak4631");
+    fs::create_dir_all(&firmware).unwrap();
+    let app = lnflash::uf2::Image::from_spans(
+        &[lnflash::ihex::Span {
+            start: 0x2_7000,
+            data: vec![0xCD; 0x800],
+        }],
+        lnflash::uf2::FAMILY_NRF52840_APP,
+    )
+    .encode()
+    .unwrap();
+    fs::write(firmware.join("leviculum-rak4631-0.8.0.uf2"), &app).unwrap();
+
+    let path = dir.path().join("firmware/manifest.toml");
+    let text = format!(
+        "{}\n[board.rak4631.app]\nfile    = \"rak4631/leviculum-rak4631-0.8.0.uf2\"\n\
+         sha256  = \"{}\"\ngit_sha = \"bb7c4f64\"\n",
+        fs::read_to_string(&path).unwrap(),
+        lnflash::manifest::hex_digest(&app),
+    );
+    fs::write(&path, text).unwrap();
+    dir
+}
+
 /// The manifest `scripts/lnflash-bundle.sh` writes: the release, and one
 /// image per board. The board facts are the compiled-in catalogue's since
 /// Codeberg #342.
@@ -135,6 +164,74 @@ fn an_unpacked_bundle_is_found_by_pointing_at_its_root() {
     assert!(out.status.success(), "{}", stdout(&out));
     assert!(stdout(&out).contains("matches its recorded checksum"));
     assert!(stdout(&out).contains("carrying t114"));
+}
+
+#[test]
+fn a_bundle_carrying_both_boards_loads_and_checks_both_images() {
+    // Codeberg #261. The tarball a stranger downloads now has firmware for a
+    // RAK4631 in it, and --check-bundle is the one command that reads every
+    // image without a board attached — so it is the one that proves both
+    // arrived intact.
+    let bundle = unpacked_bundle_with_rak();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--check-bundle",
+        ],
+        None,
+    );
+    let said = stdout(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("carrying rak4631, t114"), "{said}");
+    assert!(said.contains("matches its recorded checksum"), "{said}");
+}
+
+#[test]
+fn a_two_board_bundle_whose_rak_image_was_corrupted_fails_the_check() {
+    // The positive control for the test above: with only the RAK image
+    // touched, the check has to fail. Without this, "both verified" is
+    // indistinguishable from "the second one was never read".
+    let bundle = unpacked_bundle_with_rak();
+    fs::write(
+        bundle
+            .path()
+            .join("firmware/rak4631/leviculum-rak4631-0.8.0.uf2"),
+        b"not the image the manifest recorded",
+    )
+    .unwrap();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--check-bundle",
+        ],
+        None,
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sha256"), "{err}");
+    assert!(err.contains("leviculum-rak4631-0.8.0.uf2"), "{err}");
+}
+
+#[test]
+fn a_t114_only_bundle_still_loads_and_still_names_only_the_board_it_carries() {
+    // The control for #261: a tarball built before the RAK entry existed is
+    // still a valid bundle. It loads, it checks, and it advertises exactly one
+    // board — the catalogue growing must not make old bundles look broken.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--check-bundle",
+        ],
+        None,
+    );
+    let said = stdout(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("carrying t114"), "{said}");
+    assert!(!said.contains("rak4631"), "{said}");
 }
 
 #[test]
@@ -254,7 +351,7 @@ fn no_bundle_anywhere_names_every_place_it_looked() {
 }
 
 #[test]
-fn a_dry_run_reports_both_boards_and_writes_nothing() {
+fn a_dry_run_reports_every_board_on_the_bus_and_writes_nothing() {
     let bundle = unpacked_bundle();
     let out = run(
         &[
@@ -268,19 +365,31 @@ fn a_dry_run_reports_both_boards_and_writes_nothing() {
     );
     let said = stdout(&out);
     assert!(out.status.success(), "{said}");
-    // The application on 3-2.3.1 and its bootloader on 3-2.4 are both found;
-    // the RAK on 3-2.3.4.4 is not a USB ID this bundle lists.
-    assert!(said.contains("Found 2 device(s)"), "{said}");
+    // The T114 application on 3-2.3.1, its bootloader on 3-2.4, and — since
+    // Codeberg #261 — the RAK4631 application on 3-2.3.4.4. That third line is
+    // the ticket's other end: before the catalogue entry existed, a Pocket V2
+    // on the same hub was not a device lnflash could see at all.
+    assert!(said.contains("Found 3 device(s)"), "{said}");
     assert!(
         said.contains("3-2.3.1 [1209:0001] 183004F712B4A7FE"),
+        "{said}"
+    );
+    assert!(
+        said.contains("3-2.3.4.4 [1209:0002] DEC9947DAD9D2869"),
         "{said}"
     );
     assert!(
         said.contains("3-2.4 [239a:0071] 12B4A7FE183004F7"),
         "{said}"
     );
-    assert!(!said.contains("3-2.3.4.4"), "{said}");
-    // And it stops before doing anything to either.
+    // Each is hinted at its own board, never at whichever the catalogue lists
+    // first — the hint decides which bootloader IDs get waited for.
+    assert!(
+        said.contains("leviculum RAK4631 — probably a rak4631"),
+        "{said}"
+    );
+    assert!(said.contains("leviculum T114 — probably a t114"), "{said}");
+    // And it stops before doing anything to any of them.
     assert!(
         said.contains("rebooting a board is already a change"),
         "{said}"

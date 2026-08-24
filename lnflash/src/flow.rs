@@ -1185,9 +1185,10 @@ fn enter_bootloader(
                 ui.say(&format!(
                     "{port}: no software trigger worked, so this one needs hands."
                 ));
-                ui.wait_for_human(&entry::double_tap_instruction(&format!(
-                    "The board on {port}"
-                )))?;
+                ui.wait_for_human(&entry::double_tap_instruction(
+                    &format!("The board on {port}"),
+                    &board.double_tap,
+                ))?;
             }
         }
         let ids = board.bootloader_ids(&candidate.hint)?;
@@ -1383,6 +1384,38 @@ convert = "hex-to-uf2"
         (dir, catalogue(), manifest)
     }
 
+    /// The bundle `scripts/lnflash-bundle.sh` builds since Codeberg #261: an
+    /// image per board, a SoftDevice remedy only where one is vendored.
+    ///
+    /// The RAK image is a distinct byte pattern on purpose — "which image did
+    /// this board get" is the question 362c1c2d got wrong, and two identical
+    /// payloads could not answer it.
+    fn two_board_bundle() -> (TempDir, Catalogue, Manifest) {
+        let (dir, catalogue, _) = bundle();
+        fs::create_dir_all(dir.path().join("rak4631")).unwrap();
+        let app = Image::from_spans(
+            &[crate::ihex::Span {
+                start: 0x2_7000,
+                data: vec![0xCD; 0x1000],
+            }],
+            crate::uf2::FAMILY_NRF52840_APP,
+        )
+        .encode()
+        .unwrap();
+        fs::write(dir.path().join("rak4631/app.uf2"), &app).unwrap();
+
+        let path = dir.path().join("manifest.toml");
+        let text = format!(
+            "{}\n[board.rak4631.app]\nfile    = \"rak4631/app.uf2\"\nsha256  = \"{}\"\n\
+             git_sha = \"bb7c4f64\"\n",
+            fs::read_to_string(&path).unwrap(),
+            manifest::hex_digest(&app),
+        );
+        fs::write(&path, text).unwrap();
+        let manifest = load(dir.path(), &catalogue).unwrap();
+        (dir, catalogue, manifest)
+    }
+
     fn sysfs() -> Sysfs {
         Sysfs::new(crate::sysfs_fixture::materialized())
     }
@@ -1406,6 +1439,12 @@ convert = "hex-to-uf2"
     fn a_rak_in_the_bootloader_is_refused_by_a_t114_only_bundle() {
         // The 362c1c2d failure, in one assertion: a T114 image must not land
         // on a RAK because the drive looked the same.
+        //
+        // Since #261 the catalogue knows the RAK, so the refusal comes from
+        // the bundle rather than from the catalogue — NoImage, not
+        // UnknownBoard. That is the #342 distinction doing its job and it has
+        // to survive: a bundle built before #261 is still a valid bundle, and
+        // its user needs to be sent after a newer tarball, not a newer binary.
         let (_dir, catalogue, manifest) = bundle();
         let err = confirm_identity(
             &catalogue,
@@ -1415,9 +1454,67 @@ convert = "hex-to-uf2"
             None,
         )
         .unwrap_err();
-        assert!(matches!(err, Error::UnknownBoard { .. }));
-        assert!(format!("{err}").contains("Nothing was written"));
-        assert!(format!("{err}").contains("WisBlock-RAK4631-Board"));
+        assert!(
+            matches!(err, Error::Manifest(manifest::Error::NoImage { .. })),
+            "{err:?}"
+        );
+        assert!(format!("{err}").contains("rak4631"), "{err}");
+        assert!(format!("{err}").contains("carries t114"), "{err}");
+    }
+
+    #[test]
+    fn a_rak_in_the_bootloader_is_flashed_from_a_bundle_that_carries_one() {
+        // The other half of #261: the same INFO_UF2.TXT that is refused above
+        // confirms a RAK once the bundle has an image for it, and it confirms
+        // the RAK's own facts rather than the T114's.
+        let (_dir, catalogue, manifest) = two_board_bundle();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(RAK_INFO),
+            "3-2.3.4.4",
+            None,
+        )
+        .unwrap();
+        assert_eq!(confirmed.name(), "rak4631");
+        assert_eq!(confirmed.board().flash.app_base, 0x2_7000);
+        assert_eq!(
+            confirmed.board().identify.msc_label.as_deref(),
+            Some("RAK4631")
+        );
+        // ...and the T114 on the same bench still resolves to the T114 image.
+        let t114 = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+        )
+        .unwrap();
+        assert_eq!(t114.name(), "t114");
+        assert_ne!(
+            t114.payloads().app.file,
+            confirmed.payloads().app.file,
+            "two boards on one bus must not be handed the same image"
+        );
+        // Each image is prepared against its own board's window.
+        prepare(&confirmed.payloads().app, &manifest.root, &confirmed).unwrap();
+        prepare(&t114.payloads().app, &manifest.root, &t114).unwrap();
+    }
+
+    #[test]
+    fn asking_for_the_rak_and_finding_a_t114_refuses_even_when_both_are_carried() {
+        let (_dir, catalogue, manifest) = two_board_bundle();
+        let err = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            Some("rak4631"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::WrongBoard { .. }), "{err}");
+        assert!(format!("{err}").contains("Nothing was written"), "{err}");
     }
 
     #[test]
@@ -1616,12 +1713,59 @@ convert = "hex-to-uf2"
         // catalogue alone is enough.
         let found = find_candidates(&catalogue(), &sysfs()).unwrap();
         let names: Vec<&str> = found.iter().map(|c| c.device.name.as_str()).collect();
-        // 3-2.3.1 is our T114 application, 3-2.4 its bootloader. The RAK on
-        // 3-2.3.4.4 is 1209:0002, which the catalogue does not list.
-        assert_eq!(names, vec!["3-2.3.1", "3-2.4"]);
+        // 3-2.3.1 is our T114 application, 3-2.4 its bootloader, and 3-2.3.4.4
+        // our RAK4631 application on 1209:0002. Before #261 the last one was
+        // invisible: the catalogue listed no board claiming that ID, so
+        // `lnflash --set-time` addressed the two T114s and silently skipped
+        // the Pocket V2 sitting on the same hub.
+        assert_eq!(names, vec!["3-2.3.1", "3-2.3.4.4", "3-2.4"]);
         assert!(!found[0].in_bootloader);
-        assert!(found[1].in_bootloader);
-        assert!(found[0].describe().contains("probably a t114"));
+        assert!(!found[1].in_bootloader);
+        assert!(found[2].in_bootloader);
+        // And each is hinted at its own board rather than at whichever entry
+        // the catalogue happens to list first.
+        assert!(
+            found[0].describe().contains("probably a t114"),
+            "{:?}",
+            found[0].describe()
+        );
+        assert!(
+            found[1].describe().contains("probably a rak4631"),
+            "{:?}",
+            found[1].describe()
+        );
+        assert!(found[2].describe().contains("probably a t114"));
+    }
+
+    #[test]
+    fn the_configure_only_sessions_address_the_rak_as_well_as_the_t114() {
+        // Codeberg #261, seen from the rig: `--set-time` walked the bus, found
+        // both T114s and never spoke to the Pocket V2, because no catalogue
+        // entry claimed its USB ID.
+        //
+        // This stops at the enumeration step on purpose. Everything past it
+        // opens the board's transport port, and this suite runs on the host
+        // that has the rig attached — a test that got as far as writing a
+        // wall-time frame would be writing it to somebody's real board. The
+        // bus is the stub; the port is not stubbed, so it is not reached.
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let found = reachable_boards(&catalogue(), &sysfs(), &mut ui).unwrap();
+        assert_eq!(found.unreachable, 0, "{}", ui.transcript());
+        let ports: Vec<(&str, String)> = found
+            .ports
+            .iter()
+            .map(|(port, tty)| (port.as_str(), tty.display().to_string()))
+            .collect();
+        assert_eq!(
+            ports,
+            vec![
+                ("3-2.3.1", "/dev/ttyACM2".to_string()),
+                ("3-2.3.4.4", "/dev/ttyACM4".to_string()),
+            ],
+            "both running boards, each on its own transport port (if02)"
+        );
+        // The bootloader on 3-2.4 has no clock to set and is not addressed.
+        assert!(!ports.iter().any(|(port, _)| *port == "3-2.4"));
     }
 
     #[test]

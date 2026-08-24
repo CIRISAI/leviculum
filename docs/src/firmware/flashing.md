@@ -9,7 +9,7 @@ different people.
 | needs | the bundle, and root | this checkout and the embedded toolchain |
 | builds firmware | no, it carries it | yes, from the working tree |
 | identifies the board | from its bootloader | from the USB id you configure |
-| boards today | T114 | T114, RAK4631 |
+| boards today | T114, RAK4631 | T114, RAK4631 |
 
 If you just want our firmware on a board, use `lnflash`. If you are
 changing the firmware and want your build on a board, use `just flash`.
@@ -108,11 +108,48 @@ clone-and-deploy policy forbids. (`Justfile:54-56`)
 
 ### Which boards the bundle carries
 
-**Today: the T114 only.** Boards are data rather than code, so a new
-board is a manifest entry plus a firmware build, not a new binary. But
-an entry without a firmware build is an empty promise, so the shipped
-bundle carries what we actually build. The RAK4631 has firmware and is
-flashed through `just flash-rak4631` below, but has no bundle entry yet.
+**Today: the T114 and the RAK4631** (WisMesh Pocket V2 and every other
+carrier built around the RAK4630 module). Boards are data rather than
+code, so a new board is a catalogue entry plus a firmware build, not a
+new binary — and an entry without a firmware build is an empty promise,
+so the shipped bundle carries what we actually build.
+
+The RAK4631 image is the `bsp-rak4631,rak-baseboard` build, the same one
+`just flash-rak4631-pocket` produces. Not because it is the richer build,
+but because [How far one firmware build
+reaches](../concepts/board-support-scope.md) already decided it: one
+build serves a pinout family, and everything the Pocket V2 baseboard adds
+degrades harmlessly on a bare module — the display is found by an I2C
+probe and its task exits when nothing answers, the button is `Pull::Up`
+so an absent one reads as not pressed, the GNSS task parks on a silent
+UART, and the battery task publishes to a subscriber that is not running.
+The bundle therefore does not ask which RAK you have, and the manifest
+has no way to express two images for one `Board-ID`.
+
+`scripts/lnflash-bundle.sh` walks a board list rather than naming boards
+in its steps, so a third board is one more line in that list: the
+firmware build, the UF2 conversion, the staging, the manifest sections
+and the licence assertions against the finished tarball all derive from
+it.
+
+**The SoftDevice carve-out.** The T114 entry ships Nordic's S140 7.3.0
+beside its licence, so a factory board carrying 6.1.1 is repaired and
+then flashed. The RAK4631 entry ships no SoftDevice. It states the same
+`>=7.0.1, <8.0.0` constraint, but whether a factory Pocket V2 carries
+something that constraint refuses is **unmeasured** — our only RAK has
+run 7.3.0 since we first flashed it. A board that violates the constraint
+with no remedy in the bundle is refused with `Nothing was written` rather
+than written blind. The full reasoning, and what one reading of a stock
+board would take to close it, is under "The SoftDevice carve-out" in
+[Flashing an LNode](../concepts/lnode-flashing.md).
+
+**First flash on a Pocket V2 needs the pinhole.** That board has no
+externally accessible RESET, so when the 1200-baud touch does not take —
+which is every board still running stock Meshtastic — `lnflash` asks for
+a needle double-tap in the hidden pinhole beside the USB socket by name,
+and points at [Recovery](recovery.md). The bundle does not depend on the
+`meshtastic` CLI for this; `just dfu-rak4631` below stays available in
+this checkout, but a stranger with the tarball needs only a needle.
 
 The design behind all of this, including why the bootloader rather than
 the application is the board's identity, is in

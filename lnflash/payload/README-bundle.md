@@ -1,6 +1,7 @@
 # lnflash
 
-Puts Leviculum firmware on a Heltec Mesh Node T114.
+Puts Leviculum firmware on a Heltec Mesh Node T114 or a RAK4631 (the
+WisMesh Pocket V2 and the other carriers built around that module).
 
     sudo ./lnflash
 
@@ -43,6 +44,11 @@ When that happens, `lnflash` asks you to do it by hand:
 
 A drive appears when it worked, and `lnflash` carries on.
 
+**On a WisMesh Pocket V2 there is no RESET button to press.** That case
+has none on the outside; the contact sits behind a small pinhole beside
+the USB socket and is double-tapped with a needle. `lnflash` says so in
+those words when it asks, so you do not have to know this in advance.
+
 ## Options
 
     --dry-run        Say what is attached and what would happen. Changes
@@ -78,10 +84,17 @@ reappear as a drive.
     lnflash                                  the program
     LICENSE                                  AGPL-3.0-or-later, ours
     firmware/manifest.toml                   what is here, and its checksums
-    firmware/t114/leviculum-t114-*.uf2       our firmware
+    firmware/t114/leviculum-t114-*.uf2       our firmware, T114
     firmware/t114/s140_nrf52_7.3.0_*.hex     Nordic's SoftDevice
     firmware/t114/s140_nrf52_7.3.0_license-agreement.txt
                                              its licence, Nordic's own
+    firmware/rak4631/leviculum-rak4631-*.uf2 our firmware, RAK4631
+
+One image per board, and `lnflash` picks by asking your board's
+bootloader what it is. There is no RAK4631 SoftDevice in here: every RAK
+we have seen already runs a version our firmware can use, and rather than
+ship a repair we have never had to perform, `lnflash` refuses — telling
+you what it found — if it meets one that does not.
 
 The SoftDevice is Nordic Semiconductor's, not ours, and is redistributed
 under the terms in `s140_nrf52_7.3.0_license-agreement.txt`, the file

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the lnflash tarball: a stranger unpacks it on any Linux, runs one
-# binary, and their T114 ends up running our firmware.
+# binary, and their board ends up running our firmware.
 #
 #     tar xzf lnflash-<version>.tar.gz
 #     cd lnflash-<version>
@@ -26,8 +26,35 @@ NRF_DIR="$ROOT/leviculum-nrf"
 NRF_TARGET="$NRF_DIR/target/thumbv7em-none-eabihf/release"
 OUT_DIR="${OUT_DIR:-$ROOT/target/lnflash}"
 
+# The boards this bundle carries. One record per board, four fields:
+#
+#   <name>|<cargo bin>|<cargo features>|<vendored SoftDevice stem, or empty>
+#
+# `name` is the catalogue key in lnflash/catalogue.toml, and it is the same
+# name the manifest sections and the staging directories use — that is what
+# lets everything below be a loop instead of a branch. The fourth field names
+# the pair under lnflash/payload/<name>/ that a SoftDevice remedy ships as,
+# `<stem>_softdevice.hex` beside `<stem>_license-agreement.txt`; a board that
+# carries no remedy leaves it empty and simply gets no remedy section.
+#
+# A third board is one more line here. Nothing below this list mentions a
+# board by name: the builds, the UF2 conversion, the staging, the manifest and
+# the licence assertions against the finished tarball all walk it.
+#
+# Which image a board gets is settled in docs/src/concepts/board-support-scope.md:
+# one build serves a pinout family, so the RAK4631 ships the baseboard build
+# that also runs on a bare module rather than a second, stripped one.
+BOARDS=(
+    "t114|t114|bsp-t114|s140_nrf52_7.3.0"
+    "rak4631|rak4631|bsp-rak4631,rak-baseboard|"
+)
+
 # Fixed properties of the Adafruit nRF52 UF2 family, the same two constants
-# leviculum-nrf/tools/uf2-runner.sh writes into every flashed image.
+# leviculum-nrf/tools/uf2-runner.sh writes into every flashed image and the
+# same two lnflash/catalogue.toml records per board. They are not per-board
+# fields here because every board in the list above is an nRF52840 running
+# that bootloader; a board outside the family needs a new transport in
+# lnflash, not a new column (docs/src/concepts/lnode-flashing.md, "Four axes").
 FLASH_BASE=0x27000
 FAMILY_ID=0xADA52840
 
@@ -44,19 +71,11 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     say "         dirty=true and the manifest records git_sha=$GIT_SHA anyway."
 fi
 
-# --- The application image ---------------------------------------------------
+# --- The application images --------------------------------------------------
 # Built here rather than vendored, so a bundle always carries the firmware the
 # commit it was built from produces.
-if [ "${SKIP_FIRMWARE:-0}" != 1 ]; then
-    say "building the T114 firmware"
-    (cd "$NRF_DIR" && cargo build --release --bin t114 --features bsp-t114)
-fi
+mkdir -p "$OUT_DIR"
 
-ELF="$NRF_TARGET/t114"
-[ -f "$ELF" ] || { echo "no firmware ELF at $ELF" >&2; exit 1; }
-
-# ELF -> flat binary. -R .bss -R .uninit excludes NOBITS sections, without
-# which a pre-2020 llvm-objcopy emits a ~500 MB binary at the wrong addresses.
 find_objcopy() {
     local sysroot candidate
     sysroot="$(rustc --print sysroot 2>/dev/null || true)"
@@ -77,10 +96,25 @@ if [ ! -x "$BIN2UF2" ] || [ "$NRF_DIR/tools/bin2uf2.rs" -nt "$BIN2UF2" ]; then
     rustc -O -o "$BIN2UF2" "$NRF_DIR/tools/bin2uf2.rs"
 fi
 
-say "converting the firmware to UF2"
-"$OBJCOPY" -O binary -R .bss -R .uninit "$ELF" "$OUT_DIR/t114.bin.tmp" 2>/dev/null \
-    || { mkdir -p "$OUT_DIR"; "$OBJCOPY" -O binary -R .bss -R .uninit "$ELF" "$OUT_DIR/t114.bin.tmp"; }
-"$BIN2UF2" --base "$FLASH_BASE" --family "$FAMILY_ID" "$OUT_DIR/t114.bin.tmp" "$OUT_DIR/t114.uf2.tmp"
+for record in "${BOARDS[@]}"; do
+    IFS='|' read -r name bin features _stem <<<"$record"
+
+    if [ "${SKIP_FIRMWARE:-0}" != 1 ]; then
+        say "building the $name firmware ($features)"
+        (cd "$NRF_DIR" && cargo build --release --bin "$bin" --features "$features")
+    fi
+
+    ELF="$NRF_TARGET/$bin"
+    [ -f "$ELF" ] || { echo "no firmware ELF at $ELF" >&2; exit 1; }
+
+    # ELF -> flat binary. -R .bss -R .uninit excludes NOBITS sections, without
+    # which a pre-2020 llvm-objcopy emits a ~500 MB binary at the wrong
+    # addresses.
+    say "converting the $name firmware to UF2"
+    "$OBJCOPY" -O binary -R .bss -R .uninit "$ELF" "$OUT_DIR/$name.bin.tmp"
+    "$BIN2UF2" --base "$FLASH_BASE" --family "$FAMILY_ID" \
+        "$OUT_DIR/$name.bin.tmp" "$OUT_DIR/$name.uf2.tmp"
+done
 
 # --- The binary --------------------------------------------------------------
 # musl-static by workspace default, so it runs on any Linux with no libc of
@@ -92,25 +126,35 @@ LNFLASH="$ROOT/target/x86_64-unknown-linux-musl/release/lnflash"
 
 # --- Assemble ----------------------------------------------------------------
 rm -rf "$STAGE"
-mkdir -p "$STAGE/firmware/t114"
+mkdir -p "$STAGE/firmware"
 install -m 0755 "$LNFLASH" "$STAGE/lnflash"
-install -m 0644 "$OUT_DIR/t114.uf2.tmp" "$STAGE/firmware/t114/leviculum-t114-$VERSION.uf2"
-# The SoftDevice travels as a file with its licence beside it — never linked
-# into the binary, because Nordic's clauses 4 and 5 cannot become part of one
-# combined work with AGPL code.
-install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_softdevice.hex" "$STAGE/firmware/t114/"
-install -m 0644 "$ROOT/lnflash/payload/t114/s140_nrf52_7.3.0_license-agreement.txt" "$STAGE/firmware/t114/"
 install -m 0644 "$ROOT/lnflash/payload/README-bundle.md" "$STAGE/README.md"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
-# Codeberg #288. Two things in this bundle are statically linked Rust — the
-# lnflash binary and the t114 UF2 — and both carry MIT- and BSD-licensed
-# crates whose licences require the notice to travel with the binary.
-# THIRD-PARTY-NOTICES covers both: it is generated from the two lockfiles,
-# host binaries in part 1 and the firmware image in part 2. The SoftDevice
-# beside it keeps its own licence file; that blob is never linked in, so its
-# terms are a separate matter (see the manifest's remedy section).
+# Codeberg #288. The statically linked Rust in this bundle — the lnflash binary
+# and every firmware UF2 — carries MIT- and BSD-licensed crates whose licences
+# require the notice to travel with the binary. THIRD-PARTY-NOTICES covers all
+# of it: it is generated from the two lockfiles, host binaries in part 1 and
+# the firmware in part 2, and both firmware binaries are built from the same
+# leviculum-nrf lockfile that part 2 describes. The SoftDevice beside it keeps
+# its own licence file; that blob is never linked in, so its terms are a
+# separate matter (see the manifest's remedy section).
 install -m 0644 "$ROOT/THIRD-PARTY-NOTICES" "$STAGE/THIRD-PARTY-NOTICES"
-rm -f "$OUT_DIR/t114.bin.tmp" "$OUT_DIR/t114.uf2.tmp"
+
+for record in "${BOARDS[@]}"; do
+    IFS='|' read -r name _bin _features stem <<<"$record"
+    mkdir -p "$STAGE/firmware/$name"
+    install -m 0644 "$OUT_DIR/$name.uf2.tmp" \
+        "$STAGE/firmware/$name/leviculum-$name-$VERSION.uf2"
+    rm -f "$OUT_DIR/$name.bin.tmp" "$OUT_DIR/$name.uf2.tmp"
+    [ -n "$stem" ] || continue
+    # The SoftDevice travels as a file with its licence beside it — never
+    # linked into the binary, because Nordic's clauses 4 and 5 cannot become
+    # part of one combined work with AGPL code.
+    install -m 0644 "$ROOT/lnflash/payload/$name/${stem}_softdevice.hex" \
+        "$STAGE/firmware/$name/"
+    install -m 0644 "$ROOT/lnflash/payload/$name/${stem}_license-agreement.txt" \
+        "$STAGE/firmware/$name/"
+done
 
 sha() { sha256sum "$STAGE/firmware/$1" | cut -d' ' -f1; }
 
@@ -130,23 +174,33 @@ cat > "$STAGE/firmware/manifest.toml" <<EOF
 [bundle]
 version = "$VERSION"
 built   = "$BUILT"
+EOF
 
-[board.t114.app]
-file    = "t114/leviculum-t114-$VERSION.uf2"
-sha256  = "$(sha "t114/leviculum-t114-$VERSION.uf2")"
+for record in "${BOARDS[@]}"; do
+    IFS='|' read -r name _bin _features stem <<<"$record"
+    image="$name/leviculum-$name-$VERSION.uf2"
+    cat >> "$STAGE/firmware/manifest.toml" <<EOF
+
+[board.$name.app]
+file    = "$image"
+sha256  = "$(sha "$image")"
 # Checked back off the [FW_BUILD] banner on the debug port after the flash.
 git_sha = "$GIT_SHA"
+EOF
+    [ -n "$stem" ] || continue
+    cat >> "$STAGE/firmware/manifest.toml" <<EOF
 
-[board.t114.remedy.softdevice]
-file    = "t114/s140_nrf52_7.3.0_softdevice.hex"
-sha256  = "$(sha t114/s140_nrf52_7.3.0_softdevice.hex)"
+[board.$name.remedy.softdevice]
+file    = "$name/${stem}_softdevice.hex"
+sha256  = "$(sha "$name/${stem}_softdevice.hex")"
 # Mandatory, and lnflash refuses to load a bundle whose licence file is
 # missing. Nordic's clause 2 requires the notice to travel with the blob.
-license = "t114/s140_nrf52_7.3.0_license-agreement.txt"
+license = "$name/${stem}_license-agreement.txt"
 # The hex is distributed untouched and converted at run time, which avoids the
 # question of whether repacking counts as the modification clause 5 forbids.
 convert = "hex-to-uf2"
 EOF
+done
 
 # --- Check it before shipping it ---------------------------------------------
 say "checking the bundle"
@@ -161,10 +215,20 @@ tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$VERSION"
 # writes to a board, not what the archive must carry for the distribution to be
 # lawful (Codeberg #288).
 listing="$(tar -tzf "$TARBALL")"
-for want in \
-    "lnflash-$VERSION/LICENSE" \
-    "lnflash-$VERSION/THIRD-PARTY-NOTICES" \
-    "lnflash-$VERSION/firmware/t114/s140_nrf52_7.3.0_license-agreement.txt"; do
+wanted=(
+    "lnflash-$VERSION/LICENSE"
+    "lnflash-$VERSION/THIRD-PARTY-NOTICES"
+)
+# Every board's image, and every vendored blob's licence beside it. Derived
+# from the board list rather than written out, so a board added above cannot
+# ship with its image silently missing from the archive.
+for record in "${BOARDS[@]}"; do
+    IFS='|' read -r name _bin _features stem <<<"$record"
+    wanted+=("lnflash-$VERSION/firmware/$name/leviculum-$name-$VERSION.uf2")
+    [ -n "$stem" ] || continue
+    wanted+=("lnflash-$VERSION/firmware/$name/${stem}_license-agreement.txt")
+done
+for want in "${wanted[@]}"; do
     printf '%s\n' "$listing" | grep -qxF "$want" \
         || { echo "bundle is missing $want" >&2; exit 1; }
 done

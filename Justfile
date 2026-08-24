@@ -730,24 +730,34 @@ probe *args:
 flash-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} cargo run --release --bin t114 --features bsp-t114
 
+# What every RAK4631 flash recipe tells the runner about this board: the USB
+# PID our firmware enumerates on, the names it puts in its messages, and the
+# one line that makes the manual double-tap prompt something a person can act
+# on. The Pocket V2 has no externally accessible RESET, so the generic
+# "double-tap RESET" sends its owner looking for a button that is not there
+# (Codeberg #261). Declared once because three recipes share it and a hint
+# that drifts between them is worse than none.
+rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board LEVICULUM_DOUBLE_TAP_HINT="No RESET button on this case: double-tap the reset contact in the hidden pinhole beside the USB socket, with a needle (docs/src/firmware/recovery.md)."'
+
 # First flash from Meshtastic / blank firmware needs a manual RESET
 # double-tap (the stock app has no 1200-baud-touch handler). Subsequent
 # flashes use the touch path automatically.
 # Flash every attached RAK4631 (WisMesh Pocket V2) with the current firmware.
 flash-rak4631:
-    cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
 
 # Flash a single RAK4631 by port path or udev symlink.
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 flash-rak4631-one PORT:
-    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
-# baseboard features (display, gnss, battery).
+# baseboard features (display, gnss, battery). This is the build the lnflash
+# bundle ships for this board (docs/src/concepts/board-support-scope.md).
 flash-rak4631-pocket:
-    cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+    cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no
