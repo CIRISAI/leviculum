@@ -2208,22 +2208,64 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Filter HEADER_2 packets not addressed to this transport instance
         // (Python Transport.py:1193-1196). Announces are exempt.
-        if packet.transport_id.is_some()
-            && packet.flags.packet_type != PacketType::Announce
-            && packet.transport_id != Some(*self.identity.hash())
-        {
-            crate::tracing::trace!(
-                "Dropped packet for <{}> on {}, transport ID mismatch",
-                HexShort(&packet.destination_hash),
-                self.iface_name(interface_index)
-            );
-            // High-volume "overheard / not for us" path: on a shared medium a
-            // transport node hears every HEADER_2 packet routed via its
-            // neighbours. This is correct overhearing, not loss, so it gets a
-            // counter only (surfaced in the periodic PKT_DROP_SUMMARY) and NO
-            // per-packet event, to avoid reproducing the 99%-noise problem.
-            self.stats.record_drop(DropReason::OverheardTransportId);
-            return Ok(());
+        // Bound as `if let` rather than compared through the `Option` so the
+        // carried id can be named below without an `unwrap()`.
+        if let Some(carried_transport_id) = packet.transport_id {
+            if packet.flags.packet_type != PacketType::Announce
+                && carried_transport_id != *self.identity.hash()
+            {
+                // Both operands of the decision, not only its outcome: the id
+                // the packet was addressed to and the id we answer to. Without
+                // them the line says a mismatch happened but not which side
+                // wrote the unexpected value, which is exactly the open
+                // question in Codeberg #344.
+                crate::tracing::trace!(
+                    "Dropped packet for <{}> on {}, transport ID mismatch: transport_id=<{}> expected=<{}>",
+                    HexShort(&packet.destination_hash),
+                    self.iface_name(interface_index),
+                    HexShort(&carried_transport_id),
+                    HexShort(self.identity.hash())
+                );
+                // High-volume "overheard / not for us" path: on a shared medium a
+                // transport node hears every HEADER_2 packet routed via its
+                // neighbours. This is correct overhearing, not loss, so it gets a
+                // counter only (surfaced in the periodic PKT_DROP_SUMMARY) and NO
+                // per-packet event, to avoid reproducing the 99%-noise problem.
+                //
+                // That reasoning covers packets bound elsewhere. It does not
+                // cover a destination this node itself delivers to: such a
+                // packet is not overheard, it is a message lost at its last
+                // hop, and the silence there cost a whole evening of counter
+                // correlation to undo (Codeberg #344). Those get the same
+                // per-packet visibility as any other loss; the quiet path is
+                // unchanged for every other destination.
+                if self.serves_locally(&packet.destination_hash) {
+                    crate::tracing::debug!(
+                        event = "PKT_LOCAL_DROP",
+                        dst = %HexShort(&packet.destination_hash),
+                        iface = %self.iface_name(interface_index),
+                        r#type = ?packet.flags.packet_type,
+                        hops = packet.hops,
+                        transport_id = %HexShort(&carried_transport_id),
+                        expected = %HexShort(self.identity.hash()),
+                        reason = DropReason::OverheardTransportId.kebab(),
+                    );
+                    // And the journey-contract drop, when a collector is
+                    // listening: `journey_hash` is `Some` exactly when the
+                    // `ph`-bearing target is enabled, so this neither hashes
+                    // nor emits otherwise.
+                    if let Some(h) = &journey_hash {
+                        self.pkt_drop_event(
+                            h,
+                            &packet,
+                            interface_index,
+                            DropReason::OverheardTransportId,
+                        );
+                    }
+                }
+                self.stats.record_drop(DropReason::OverheardTransportId);
+                return Ok(());
+            }
         }
 
         // Filter PLAIN and GROUP destination packets (Python Transport.py:1205-1225).
@@ -6741,6 +6783,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .is_some_and(|path| path.hops == 0)
     }
 
+    /// True when this node is the endpoint for `dest_hash`: either a
+    /// destination registered on the daemon itself, or one behind a local
+    /// client attached over the shared instance (a path entry at `hops == 0`).
+    /// Both arms are needed — the `lxmd` delivery address of Codeberg #344 is
+    /// the second kind, so `local_destinations` alone would miss the case this
+    /// predicate exists for.
+    ///
+    /// Cost, because this runs on a drop path that was deliberately kept
+    /// cheap: a `BTreeSet` probe that short-circuits, then at most one
+    /// `BTreeMap` probe of the path table — both in memory, both `O(log n)`
+    /// over 16-byte keys, tens of nanoseconds. What the quiet overheard path
+    /// actually avoids is the SHA-256 over the whole packet that the journey
+    /// correlator needs (see `journey_hash` in `process_incoming_inner`),
+    /// which is orders of magnitude more. So this is affordable at the full
+    /// overheard packet rate and no cheaper predicate is needed.
+    fn serves_locally(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
+        self.local_destinations.contains(dest_hash) || self.is_for_local_client(dest_hash)
+    }
+
     /// Check if a link table entry references a local client interface
     /// (either received_interface or next_hop_interface). Python Transport.py:1380-1381.
     fn is_for_local_client_link(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
@@ -10384,6 +10445,21 @@ mod tests {
             // transport id that is NOT ours: the high-volume "overheard / not for
             // us" drop.
             fn make_overheard_packet(transport_id: [u8; TRUNCATED_HASHBYTES]) -> Vec<u8> {
+                make_overheard_packet_for(
+                    [0x11; TRUNCATED_HASHBYTES],
+                    transport_id,
+                    PacketType::Data,
+                )
+            }
+
+            // Same, for a chosen destination and packet type, so a test can
+            // aim the packet at a destination this node serves (or announce
+            // it, which the filter exempts).
+            fn make_overheard_packet_for(
+                destination_hash: [u8; TRUNCATED_HASHBYTES],
+                transport_id: [u8; TRUNCATED_HASHBYTES],
+                packet_type: PacketType,
+            ) -> Vec<u8> {
                 use crate::destination::DestinationType;
                 use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
                 let packet = Packet {
@@ -10393,11 +10469,11 @@ mod tests {
                         context_flag: false,
                         transport_type: TransportType::Transport,
                         dest_type: DestinationType::Single,
-                        packet_type: PacketType::Data,
+                        packet_type,
                     },
                     hops: 1,
                     transport_id: Some(transport_id),
-                    destination_hash: [0x11; TRUNCATED_HASHBYTES],
+                    destination_hash,
                     context: PacketContext::None,
                     data: PacketData::Owned(b"overheard".to_vec()),
                 };
@@ -10458,6 +10534,177 @@ mod tests {
                 assert!(
                     !logs.contains("event=\"PKT_DROP\"") && !logs.contains("PKT_DROP "),
                     "overheard path must NOT emit a per-packet PKT_DROP event; logs:\n{logs}"
+                );
+                assert!(
+                    !logs.contains("PKT_LOCAL_DROP"),
+                    "a destination this node does not serve stays on the quiet \
+                     path; logs:\n{logs}"
+                );
+            }
+
+            // Codeberg #344, part 1: the drop names BOTH operands of the
+            // decision it made — the id the packet carried and the id this
+            // node answers to. The fixture makes them differ, so a line that
+            // rendered the same value twice cannot pass.
+            #[test]
+            fn test_overheard_drop_trace_names_carried_and_expected_ids() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let carried = [0xAB; TRUNCATED_HASHBYTES];
+                let expected = *transport.identity.hash();
+                assert_ne!(
+                    carried, expected,
+                    "fixture must make the two ids differ, else the assertions \
+                     below could both be satisfied by one value"
+                );
+
+                let raw = make_overheard_packet(carried);
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                let carried_hex = alloc::format!("transport_id=<{}>", HexShort(&carried));
+                let expected_hex = alloc::format!("expected=<{}>", HexShort(&expected));
+                assert!(
+                    logs.contains("transport ID mismatch"),
+                    "the mismatch line must still be written; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains(&carried_hex),
+                    "the line must name the id the packet carried ({carried_hex}); \
+                     logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains(&expected_hex),
+                    "the line must name the id we compared against \
+                     ({expected_hex}); logs:\n{logs}"
+                );
+            }
+
+            // Codeberg #344, part 2: a packet for a destination REGISTERED on
+            // this node is not overhearing, it is a lost message — counter
+            // plus a per-packet event naming the destination.
+            #[test]
+            fn test_overheard_drop_for_registered_destination_emits_event() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let dest = [0x11; TRUNCATED_HASHBYTES];
+                transport.register_destination(dest);
+
+                let raw = make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]);
+                let before = transport.stats().drops_overheard_transport_id;
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                assert_eq!(
+                    transport.stats().drops_overheard_transport_id,
+                    before + 1,
+                    "the counter is kept, not replaced by the event"
+                );
+                assert!(
+                    logs.contains("PKT_LOCAL_DROP"),
+                    "a drop for a destination we serve must be one event line, \
+                     not a counter step; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains(&alloc::format!("dst={}", HexShort(&dest))),
+                    "the event must name the destination that lost the packet; \
+                     logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("overheard-transport-id"),
+                    "the event carries the drop reason; logs:\n{logs}"
+                );
+            }
+
+            // The case actually measured in #344: the destination is not
+            // registered on the daemon but sits behind a local client over the
+            // shared instance — a path entry at hops == 0. `local_destinations`
+            // alone would miss it, which is why the predicate has two arms.
+            #[test]
+            fn test_overheard_drop_for_local_client_destination_emits_event() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let dest = [0x11; TRUNCATED_HASHBYTES];
+                let now = transport.clock.now_ms();
+                transport.insert_path(
+                    dest,
+                    PathEntry {
+                        hops: 0,
+                        expires_ms: now + 3_600_000,
+                        interface_index: 0,
+                        random_blobs: Vec::new(),
+                        next_hop: None,
+                    },
+                );
+                assert!(
+                    !transport.local_destinations.contains(&dest),
+                    "this case must be carried by the path-table arm alone"
+                );
+
+                let raw = make_overheard_packet([0xAB; TRUNCATED_HASHBYTES]);
+                let before = transport.stats().drops_overheard_transport_id;
+                let ((), logs) = capture_core_logs(|| {
+                    transport.process_incoming(0, &raw).unwrap();
+                });
+
+                assert_eq!(
+                    transport.stats().drops_overheard_transport_id,
+                    before + 1,
+                    "the counter is kept for this arm too"
+                );
+                assert!(
+                    logs.contains("PKT_LOCAL_DROP"),
+                    "a destination behind a local client is served locally; \
+                     logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains(&alloc::format!("dst={}", HexShort(&dest))),
+                    "the event must name the destination; logs:\n{logs}"
+                );
+            }
+
+            // Control: an announce is exempt from the transport-id filter, and
+            // stays exempt when the destination is one we serve — otherwise the
+            // new branch would have moved the exemption.
+            #[test]
+            fn test_header2_announce_with_foreign_transport_id_stays_exempt() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+
+                let dest = [0x11; TRUNCATED_HASHBYTES];
+                transport.register_destination(dest);
+
+                let raw = make_overheard_packet_for(
+                    dest,
+                    [0xAB; TRUNCATED_HASHBYTES],
+                    PacketType::Announce,
+                );
+                let before = transport.stats().drops_overheard_transport_id;
+                let ((), logs) = capture_core_logs(|| {
+                    // The announce body is not a valid one; it is rejected
+                    // further down the announce path. What matters here is that
+                    // it never reaches the transport-id filter.
+                    let _ = transport.process_incoming(0, &raw);
+                });
+
+                assert_eq!(
+                    transport.stats().drops_overheard_transport_id,
+                    before,
+                    "announces are exempt from the transport-id filter"
+                );
+                assert!(
+                    !logs.contains("transport ID mismatch"),
+                    "an announce must not be tested against our transport id; \
+                     logs:\n{logs}"
+                );
+                assert!(
+                    !logs.contains("PKT_LOCAL_DROP"),
+                    "and therefore emits no local-drop event; logs:\n{logs}"
                 );
             }
 

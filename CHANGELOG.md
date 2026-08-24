@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A transport-id mismatch names both ids it compared, and a packet
+  dropped that way for a destination this node serves locally is
+  reported per packet instead of only counted (#344).
+
 - The lnflash bundle carries the RAK4631 as well as the T114, so a
   WisMesh Pocket V2 can be flashed and configured from the tarball
   (#261).

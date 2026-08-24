@@ -62,7 +62,13 @@ fn ensure_global_subscriber() {
     INIT.get_or_init(|| {
         let subscriber = tracing_subscriber::fmt()
             .with_writer(ThreadLocalWriter)
-            .with_max_level(tracing::Level::DEBUG)
+            // TRACE, not DEBUG: some decisions are only ever narrated at
+            // trace level (the transport-id mismatch line, Codeberg #344), and
+            // a capture ceiling below the callsite's level makes such a line
+            // untestable. The ceiling has to be raised here rather than per
+            // test — one process-global subscriber decides enablement for
+            // every callsite, so a scoped subscriber could not widen it.
+            .with_max_level(tracing::Level::TRACE)
             .with_ansi(false)
             .with_target(true)
             .finish();
