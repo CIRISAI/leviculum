@@ -102,6 +102,16 @@ nrf-sd-guard:
 nrf-uf2-volumes:
     bash leviculum-nrf/tools/test-uf2-volumes.sh
 
+# Attribution for the flash runner. The guard decides WHETHER to write, the
+# volume selection decides WHERE, and this decides WHO GOT IT. A UF2 volume
+# carries no board serial, so the runner used to pair it with a board out of
+# its own enumeration and report that one — with two T114s attached, one in
+# DFU and one running, it wrote the image to the first and named the second
+# (Codeberg #343, measured twice, once in each direction). Driven against
+# stubbed boards, each with a firmware stamp it reports when read.
+nrf-fw-readback:
+    bash leviculum-nrf/tools/test-fw-readback.sh
+
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -322,7 +332,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

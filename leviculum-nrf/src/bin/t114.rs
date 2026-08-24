@@ -69,11 +69,7 @@ async fn main(spawner: Spawner) {
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
 
     log_critical!("leviculum T114 booting");
-    log_critical!(
-        "[FW_BUILD] git_sha={} dirty={}",
-        env!("LEVICULUM_GIT_SHA"),
-        env!("LEVICULUM_GIT_DIRTY")
-    );
+    log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     leviculum_nrf::log_stack("boot");
     leviculum_nrf::log_panic_count();
@@ -415,11 +411,7 @@ async fn boot_log_repeater(initial_len: usize) {
 async fn fw_build_banner() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
-        log_critical!(
-            "[FW_BUILD] git_sha={} dirty={}",
-            env!("LEVICULUM_GIT_SHA"),
-            env!("LEVICULUM_GIT_DIRTY")
-        );
+        log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     }
 }

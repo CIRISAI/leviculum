@@ -140,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The flash runner reads the firmware back off the board before it names
+  one, so the summary reports which board actually received the image
+  instead of whichever candidate its USB enumeration reached first
+  (#343).
+
 - The flash runner enumerates every attached bootloader volume and picks
   the one whose `Board-ID` matches, instead of taking the first it finds,
   so a board parked in its bootloader no longer blocks flashing every

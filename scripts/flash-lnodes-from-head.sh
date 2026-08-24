@@ -36,6 +36,20 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { echo "$@" >&2; }
 
+# The debug-serial reader, shared with the flash runner (see
+# read_fw_build_banner below).
+if [ ! -f "$REPO_DIR/leviculum-nrf/tools/fw-readback.sh" ]; then
+    # The one exception to "exit code is ALWAYS 0": that rule is about boards
+    # misbehaving, and a board misbehaving is a result. A missing in-repo file
+    # is a broken checkout, and exiting 0 would let the run proceed with every
+    # board's firmware unverified and nothing said about it.
+    log "[CI_HW] ERROR: leviculum-nrf/tools/fw-readback.sh is missing;"
+    log "        no board's firmware can be read back. Refusing to run."
+    exit 1
+fi
+# shellcheck source=leviculum-nrf/tools/fw-readback.sh
+. "$REPO_DIR/leviculum-nrf/tools/fw-readback.sh"
+
 # True if a single USB ID is currently enumerated.
 lnode_present() {
     lsusb -d "$1" >/dev/null 2>&1
@@ -55,6 +69,8 @@ ids_enumerated() {
 # there (same channel run-tier3.sh notifies on). Best-effort.
 notify_flash_failed() {
     local board="$1"
+    # shellcheck disable=SC2029  # $board is meant to expand here: hamster has
+    # no idea which board failed, the message is composed on this side.
     ssh hamster "notify-send -u critical 'Leviculum CI' 'LNode flash FAILED ($board): physical RESET double-tap needed'" \
         2>/dev/null || log "[CI_HW] WARN: notify-send for $board flash failure did not reach hamster"
 }
@@ -83,51 +99,15 @@ resolve_lnode_debug_port() {
 }
 
 # Read the periodic firmware [FW_BUILD] banner from a CDC-ACM debug port,
-# returning the last such line seen within <secs> (empty if none). DTR+RTS
-# are asserted on open because CDC-ACM transmits only with DTR raised.
-# Pure stdlib (termios/fcntl) so no pyserial install is required on the rig.
-read_fw_build_banner() {
-    local port="$1" secs="$2"
-    python3 - "$port" "$secs" <<'PY'
-import sys, os, time, fcntl, termios, struct, select
-port, secs = sys.argv[1], float(sys.argv[2])
-try:
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-except OSError:
-    sys.exit(0)
-try:
-    iflag, oflag, cflag, lflag, ispeed, ospeed, cc = termios.tcgetattr(fd)
-    iflag = oflag = lflag = 0
-    cflag = termios.CLOCAL | termios.CREAD | termios.CS8
-    ispeed = ospeed = termios.B115200
-    termios.tcsetattr(fd, termios.TCSANOW,
-                      [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
-    dtr = getattr(termios, 'TIOCM_DTR', 0x002)
-    rts = getattr(termios, 'TIOCM_RTS', 0x004)
-    fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', dtr | rts))
-    deadline = time.monotonic() + secs
-    buf, last = b'', ''
-    while time.monotonic() < deadline:
-        r, _, _ = select.select([fd], [], [], deadline - time.monotonic())
-        if not r:
-            continue
-        try:
-            chunk = os.read(fd, 4096)
-        except OSError:
-            break
-        if not chunk:
-            continue
-        buf += chunk
-        while b'\n' in buf:
-            line, buf = buf.split(b'\n', 1)
-            text = line.decode('utf-8', 'replace').replace('\r', '').strip()
-            if 'FW_BUILD' in text:
-                last = text
-    print(last)
-finally:
-    os.close(fd)
-PY
-}
+# returning the last such line seen within <secs> (empty if none).
+#
+# The reader itself lives in leviculum-nrf/tools/fw-readback.sh, because the
+# flash runner has to do exactly this to know which board it wrote (Codeberg
+# #343) and two copies of a serial reader drift in exactly the detail that
+# matters: DTR+RTS have to be asserted on open, since the debug CDC transmits
+# only with them raised and a port opened without them is silent. One copy,
+# and tools/test-fw-readback.sh exercises it against a pty.
+read_fw_build_banner() { fw_read_banner "$1" "$2"; }
 
 # Read the firmware [FW_BUILD] banner back over the debug serial and check
 # its git_sha against the expected HEAD sha. A silent touch-flash that did not

@@ -579,6 +579,68 @@ once landed on a RAK4631 during bring-up. Several devices on the bus
 must each be resolved individually rather than assuming "the one UF2
 drive".
 
+### Confirm by reading back, do not infer
+
+The stage above resolves identity before the write. Afterwards there is
+a second, separate question — *which board actually received it* — and
+a UF2 mass-storage volume gives no help with it at all: the volume
+carries no board serial, so a runner that finds one has no way from the
+volume alone to say whose it is.
+
+`uf2-runner.sh` used to answer by pairing the volume with a candidate
+from its own USB enumeration, which yields a board of the right *type*
+and not the board that owns the volume. With two T114s attached, one in
+DFU and one running, it wrote to the one in DFU and reported the other.
+Measured twice on the rig, 2026-08-23 and 2026-08-24, naming the
+opposite board each night — the answer follows enumeration order, which
+is neither stable nor related to which board was in the bootloader
+(Codeberg #343). The same gap made `flash CONFIRMED` mean "a board of
+this type re-enumerated" rather than "the named board runs the named
+image".
+
+The fix is a read-back, and it turns attribution into a measurement:
+
+- The firmware carries `leviculum_nrf::FW_BUILD_STAMP`, one contiguous
+  literal `git_sha=<sha> dirty=<bool>`, and prints it after
+  `[FW_BUILD] ` at boot and every five seconds thereafter.
+- The runner greps that same literal out of the **flat image it is
+  about to write** (`tools/fw-readback.sh`, `fw_image_stamp`). Not out
+  of `git rev-parse`: that describes the working tree at the moment of
+  the question rather than the bytes going to the board, and it cannot
+  express a dirty tree at all, so two different images built from one
+  commit would both answer with that commit.
+- After the copy it opens the candidate's debug port and requires the
+  stamp to match. If the named board is carrying something else, the
+  other attached candidates are asked, and the one that answers with
+  the image is the one the summary names.
+
+Three outcomes, kept apart on purpose, because they need different
+things done to them:
+
+| Outcome | Meaning | Reported as |
+|---|---|---|
+| match | the named board answers with this image | `flash CONFIRMED — serial=… reports …, read back from the board` |
+| mismatch | it answers with a different image | `flash NOT CONFIRMED — serial=… reports <its stamp>, the image that was written is <ours>` |
+| no answer | no debug port, or nothing on it | `flash UNCONFIRMED — serial=… did not answer on its debug port …; that is not the same as carrying the wrong image` |
+
+A board can legitimately fail to answer — crashed firmware, a port that
+never appears — and silence must never be reported as wrong firmware,
+nor as right firmware. When the write cannot be bound to any board at
+all, the runner says exactly that (`flash UNATTRIBUTED — … the runner
+does not know which board it wrote`) and exits non-zero. A guess in that
+position is what produced the ticket.
+
+Two constraints the read-back has to respect, both long established on
+the rig: the debug CDC transmits only with **DTR and RTS asserted**, so
+a port opened without them is silent for reasons that have nothing to
+do with its firmware; and the **`by-id` symlinks are the stable
+handle** (`-if00` debug, `-if02` transport), because a `/dev/ttyACM*`
+number is a position and moves between enumerations — trusting a
+position for an identity is the defect itself.
+
+`tools/test-fw-readback.sh` (`just nrf-fw-readback`) drives all of this
+against stubbed boards, so it runs with no hardware.
+
 ### The radio configuration belongs to the flash
 
 A board that has just been written runs the compiled `eu_medium`

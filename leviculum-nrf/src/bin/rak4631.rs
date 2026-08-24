@@ -79,11 +79,7 @@ async fn main(spawner: Spawner) {
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
 
     log_critical!("leviculum RAK4631 booting");
-    log_critical!(
-        "[FW_BUILD] git_sha={} dirty={}",
-        env!("LEVICULUM_GIT_SHA"),
-        env!("LEVICULUM_GIT_DIRTY")
-    );
+    log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     // GNSS presence banner (#240): the settled states are emitted as
     // `state=<no-hardware|no-fix|fix>` transitions by the GNSS task;
@@ -684,11 +680,7 @@ async fn boot_log_repeater(initial_len: usize) {
 async fn fw_build_banner() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
-        log_critical!(
-            "[FW_BUILD] git_sha={} dirty={}",
-            env!("LEVICULUM_GIT_SHA"),
-            env!("LEVICULUM_GIT_DIRTY")
-        );
+        log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     }
 }

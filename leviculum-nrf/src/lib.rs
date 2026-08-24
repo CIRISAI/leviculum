@@ -502,6 +502,29 @@ pub fn set_panic_led(port: u8, pin: u8, active_low: bool) {
     PANIC_LED_ARMED.store(true, Ordering::Relaxed);
 }
 
+/// The build identity this image carries, as ONE contiguous string literal.
+///
+/// It is printed verbatim after `[FW_BUILD] ` by the boot line and by the
+/// periodic banner task, so the bytes a reader sees on the debug port are
+/// literally these bytes. Being a single literal is the point: the flash
+/// runner greps the same text out of the flat image it is about to write
+/// (`leviculum-nrf/tools/fw-readback.sh`, `fw_image_stamp`), so what it
+/// expects to read back is taken from the image rather than from the working
+/// tree. Two `env!` arguments formatted at the call site would put the sha in
+/// its own rodata entry with nothing next to it to grep for, and whether it
+/// landed beside the `[FW_BUILD]` literal would be a property of rustc's
+/// constant pooling — true today, not promised tomorrow.
+///
+/// `dirty` is part of the stamp, not decoration: two images built from the
+/// same commit with different working trees are different images, and a rig
+/// that confirmed only the sha would call them the same one (Codeberg #343).
+pub const FW_BUILD_STAMP: &str = concat!(
+    "git_sha=",
+    env!("LEVICULUM_GIT_SHA"),
+    " dirty=",
+    env!("LEVICULUM_GIT_DIRTY")
+);
+
 /// Current time source of the emission timebase (Codeberg #166 item 3),
 /// mirrored out of the main loop so the periodic banner task can state it
 /// beside `[FW_BUILD]` without owning the node. Encodes

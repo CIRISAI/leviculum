@@ -83,6 +83,17 @@ fi
 # shellcheck source=leviculum-nrf/tools/uf2-volumes.sh
 . "$SCRIPT_DIR/uf2-volumes.sh"
 
+# Which board ended up with the image. Sourced for the same reason as the two
+# above: it decides what the summary claims, and tools/test-fw-readback.sh
+# drives that decision against stubbed boards with no hardware.
+if [ ! -f "$SCRIPT_DIR/fw-readback.sh" ]; then
+    echo "Error: $SCRIPT_DIR/fw-readback.sh is missing; refusing to flash without" >&2
+    echo "       the read-back that binds the image to the board it landed on." >&2
+    exit 1
+fi
+# shellcheck source=leviculum-nrf/tools/fw-readback.sh
+. "$SCRIPT_DIR/fw-readback.sh"
+
 # Per-board parameters (default to T114 values for backward compatibility).
 BOARD_VID="${LEVICULUM_USB_VID:-1209}"
 BOARD_PID="${LEVICULUM_USB_PID:-0001}"
@@ -166,6 +177,21 @@ fi
 
 echo "==> Converting binary to UF2 (base: $FLASH_BASE, family: nRF52840)"
 "$BIN2UF2" --base "$FLASH_BASE" --family "$FAMILY_ID" "$BIN_FILE" "$UF2_FILE"
+
+# The identity of the image we are about to write, taken from the image. Not
+# from `git rev-parse`: that answers about the working tree at the moment of
+# the question, which is a different thing from the bytes on their way to a
+# board, and it has no way to say "dirty" at all — so two different images
+# built from one commit would both answer with that commit. The firmware
+# prints this same stamp on its debug port, which is what makes the read-back
+# a comparison rather than an inference.
+BUILT_STAMP="$(fw_image_stamp "$BIN_FILE")"
+if [ -n "$BUILT_STAMP" ]; then
+    echo "==> Image build stamp: $BUILT_STAMP (read from $(basename "$BIN_FILE"))"
+else
+    echo "[uf2-runner] WARNING: this image carries no [FW_BUILD] stamp; the flash" >&2
+    echo "             can be performed but not confirmed against any board." >&2
+fi
 
 # UF2 volume discovery (find_uf2_drive), selection by Board-ID
 # (poll_matching_drive) and the unmount obligation that goes with mounting
@@ -288,6 +314,34 @@ verify_app_return() {
     return 1
 }
 
+# --- Read-back bookkeeping for the summary ----------------------------------
+# One formatted line per board, filled in by fw_attribute's verdict. These are
+# what Step 7 prints: the summary states what boards said about themselves,
+# never what the enumeration order suggested.
+FW_CONFIRMED_SERIALS=""    # serials proven to carry the image
+FW_UNCONFIRMED_LINES=""    # a board that answered wrong, or did not answer
+FW_UNATTRIBUTED_LINES=""   # a write nothing could be bound to
+
+# File the verdict of the last fw_attribute and echo it. A confirmed flash and
+# a corrected attribution are ordinary progress and go to stdout; everything
+# else is a thing that went wrong and goes to stderr.
+record_attribution() {
+    case "$FW_ATTR_OUTCOME" in
+    match | rebound)
+        echo "[uf2-runner] $FW_ATTR_MESSAGE"
+        FW_CONFIRMED_SERIALS="$FW_CONFIRMED_SERIALS"$'\n'"$FW_ATTR_SERIAL"
+        ;;
+    ambiguous)
+        echo "[uf2-runner] $FW_ATTR_MESSAGE" >&2
+        FW_UNATTRIBUTED_LINES="$FW_UNATTRIBUTED_LINES"$'\n'"$FW_ATTR_MESSAGE"
+        ;;
+    *)
+        echo "[uf2-runner] $FW_ATTR_MESSAGE" >&2
+        FW_UNCONFIRMED_LINES="$FW_UNCONFIRMED_LINES"$'\n'"$FW_ATTR_MESSAGE"
+        ;;
+    esac
+}
+
 # --- Flash one device: touch → copy → verify-app-return, with retries -------
 # Wraps a full detect→copy→verify cycle in a bounded retry loop
 # ($FLASH_ATTEMPTS). Only returns 0 once the application firmware is CONFIRMED
@@ -298,7 +352,10 @@ verify_app_return() {
 # non-interactive run (VFIO tier3, no human) skips the prompt and fails.
 # Args: $1 = port path ("" if none, e.g. a crashed board already in DFU)
 #       $2 = pre-flash USB serial ("" if unknown)
-# Returns 0 = app confirmed booted; non-zero = flash failed after all attempts.
+# Returns 0 = the image is on a board and confirmed there (or the board could
+#             not be read, which is reported but not retried);
+#         4 = an image was written that could not be bound to any board;
+#         other non-zero = flash failed after all attempts.
 flash_one_device() {
     local port="$1" serial="${2:-}"
     local hint="${port:-(unknown device)}"
@@ -308,6 +365,9 @@ flash_one_device() {
     # Whether a volume for THIS board was ever found. It decides which failure
     # the give-up line reports: a copy that did not boot, or no volume at all.
     local saw_drive=0
+    # The last verdict that did not end the loop, so the give-up line can name
+    # what was actually observed instead of asserting a symptom.
+    local pending_outcome="" pending_message="" pending_stamp=""
     local attempt
     for (( attempt = 1; attempt <= FLASH_ATTEMPTS; attempt++ )); do
         echo ""
@@ -351,8 +411,45 @@ flash_one_device() {
         fi
 
         if verify_app_return "$hint" "$serial"; then
-            echo "[uf2-runner] $hint: flash CONFIRMED on attempt $attempt"
-            return 0
+            # A board of this type is back on the bus. That is NOT the same as
+            # "this board runs this image" — a UF2 volume carries no serial, so
+            # the pairing that got us here was enumeration order and nothing
+            # more (#343). Ask the boards themselves.
+            fw_attribute "$hint (attempt $attempt)" "$BUILT_STAMP" "$serial"
+            case "$FW_ATTR_OUTCOME" in
+            match | noanswer | nostamp)
+                # Confirmed, or unreadable and therefore not retryable: a mute
+                # board says nothing more on the second attempt than on the
+                # first, and re-flashing it would spend flash cycles to learn
+                # the same nothing.
+                record_attribution
+                return 0
+                ;;
+            rebound)
+                # The image is real and on another board — file that now, it
+                # will not be found again once that board is bound. This board
+                # still has not been flashed, so the loop goes round: the next
+                # attempt touches it and finds a volume that is its own.
+                record_attribution
+                pending_outcome="rebound"
+                pending_stamp="$FW_ATTR_SERIAL"
+                continue
+                ;;
+            ambiguous)
+                record_attribution
+                return 4
+                ;;
+            mismatch)
+                # The copy did not take. Worth another attempt; only the last
+                # verdict is filed, so retries do not multiply summary lines.
+                pending_outcome="mismatch"
+                pending_message="$FW_ATTR_MESSAGE"
+                pending_stamp="$FW_ATTR_STAMP"
+                echo "[uf2-runner] $hint: attempt $attempt — $serial still reports" \
+                    "$FW_ATTR_STAMP, not $BUILT_STAMP; retrying" >&2
+                continue
+                ;;
+            esac
         fi
         echo "[uf2-runner] $hint: attempt $attempt — app did not return; retrying" >&2
     done
@@ -372,8 +469,23 @@ flash_one_device() {
         if [ -n "$drive" ]; then
             saw_drive=1
             if copy_uf2_to_drive "$drive" "$hint" && verify_app_return "$hint" "$serial"; then
-                echo "[uf2-runner] $hint: flash CONFIRMED after manual double-tap"
-                return 0
+                # Same rule as the automatic path: a human double-tap does not
+                # make the enumeration order true either.
+                fw_attribute "$hint (manual double-tap)" "$BUILT_STAMP" "$serial"
+                record_attribution
+                case "$FW_ATTR_OUTCOME" in
+                match | noanswer | nostamp) return 0 ;;
+                ambiguous) return 4 ;;
+                rebound)
+                    pending_outcome="rebound"
+                    pending_stamp="$FW_ATTR_SERIAL"
+                    ;;
+                mismatch)
+                    pending_outcome="mismatch"
+                    pending_message=""
+                    pending_stamp="$FW_ATTR_STAMP"
+                    ;;
+                esac
             fi
         fi
     fi
@@ -382,6 +494,23 @@ flash_one_device() {
     # unconditionally, which is false whenever no volume for this board was ever
     # found — the case #341 is about, where the message named a symptom that had
     # not been reached and sent the diagnosis an hour in the wrong direction.
+    # The read-back adds two more observations that are not "never
+    # re-enumerated" either: every write was taken by a different board, and
+    # the board took a write and still reports something else.
+    if [ -n "$pending_message" ]; then
+        FW_UNCONFIRMED_LINES="$FW_UNCONFIRMED_LINES"$'\n'"$pending_message"
+    fi
+    if [ "$pending_outcome" = "rebound" ]; then
+        echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts" \
+            "(every write was received by serial=$pending_stamp, not by this board;" \
+            "the volume could not be bound to it)" >&2
+        return 1
+    fi
+    if [ "$pending_outcome" = "mismatch" ]; then
+        echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts" \
+            "(UF2 copied, board still reports $pending_stamp, not $BUILT_STAMP)" >&2
+        return 1
+    fi
     if [ "$saw_drive" -eq 1 ]; then
         echo "[uf2-runner] $hint: FLASH FAILED after $FLASH_ATTEMPTS attempts" \
             "(UF2 copied, app never re-enumerated)" >&2
@@ -401,7 +530,10 @@ else
     PORTS="$(find_all_t114_transport_ports)"
 fi
 
-# Newline-separated lists of ports that flashed successfully / failed.
+# Newline-separated lists of ports that flashed successfully / failed. A write
+# that could not be bound to a board is not tracked here: it has no port to
+# name, which is the whole of what is wrong with it, so it is carried as the
+# read-back verdict itself in FW_UNATTRIBUTED_LINES.
 FLASHED_PORTS=""
 FAILED_PORTS=""
 
@@ -416,11 +548,13 @@ if [ -z "$PORTS" ]; then
     # bootloader mode (UF2 drive only), or all crashed. Run one round of the
     # legacy fallback (manual prompt + UF2-drive polling).
     echo "[uf2-runner] no $BOARD_NAME transport port detected; awaiting manual double-tap"
-    if flash_one_device "" ""; then
-        FLASHED_PORTS="(unknown)"
-    else
-        FAILED_PORTS="(unknown)"
-    fi
+    FLASH_RC=0
+    flash_one_device "" "" || FLASH_RC=$?
+    case "$FLASH_RC" in
+    0) FLASHED_PORTS="(unknown)" ;;
+    4) : ;; # the verdict is already filed under FW_UNATTRIBUTED_LINES
+    *) FAILED_PORTS="(unknown)" ;;
+    esac
 else
     NUM=$(echo "$PORTS" | wc -l)
     echo "==> Flashing $NUM $BOARD_NAME(s)"
@@ -441,13 +575,21 @@ else
         # verification and the bounded retry loop. Old firmware ignores the
         # touch; new firmware writes the GPREGRET magic and resets into the UF2
         # bootloader. It only returns 0 once the app is CONFIRMED back on USB.
-        if flash_one_device "$PORT" "$PORT_SERIAL"; then
+        FLASH_RC=0
+        flash_one_device "$PORT" "$PORT_SERIAL" || FLASH_RC=$?
+        case "$FLASH_RC" in
+        0)
             FLASHED_PORTS="$FLASHED_PORTS"$'\n'"$PORT"
             [ -n "$PORT_SERIAL" ] && FLASHED_SERIALS="$FLASHED_SERIALS"$'\n'"$PORT_SERIAL"
-        else
+            ;;
+        4)
+            echo "[uf2-runner] ($INDEX/$NUM) UNATTRIBUTED — continuing with next $BOARD_NAME" >&2
+            ;;
+        *)
             echo "[uf2-runner] ($INDEX/$NUM) FAILED — continuing with next $BOARD_NAME" >&2
             FAILED_PORTS="$FAILED_PORTS"$'\n'"$PORT"
-        fi
+            ;;
+        esac
     done <<< "$PORTS"
 fi
 
@@ -512,11 +654,26 @@ while [ "$RECOVERY_ROUNDS" -lt 4 ]; do
         FAILED_PORTS="$FAILED_PORTS"$'\n'"(crashed-recovery)"
         break
     fi
-    FLASHED_PORTS="$FLASHED_PORTS"$'\n'"(crashed-recovery)"
     # Wait for the bootloader to process the file and disappear before
     # checking for more drives. Without this the same drive could be picked
     # up twice in quick succession.
     sleep 3
+    # This pass has no candidate at all: it wrote to a volume it found lying
+    # there. Asking every board which one now carries the image is the only way
+    # it can name a recipient truthfully — and when none or several answer, the
+    # honest report is that it does not know which board it wrote.
+    fw_attribute "(crashed-recovery)" "$BUILT_STAMP" ""
+    record_attribution
+    case "$FW_ATTR_OUTCOME" in
+    rebound | match)
+        FLASHED_PORTS="$FLASHED_PORTS"$'\n'"(crashed-recovery serial=$FW_ATTR_SERIAL)"
+        FLASHED_SERIALS="$FLASHED_SERIALS"$'\n'"$FW_ATTR_SERIAL"
+        ;;
+    *)
+        # Either nothing to compare against (no stamp in the image) or nothing
+        # that answered with it. record_attribution has already filed which.
+        ;;
+    esac
 done
 
 # Strip leading newlines from accumulated lists.
@@ -605,6 +762,28 @@ print_device_line() {
     fi
 }
 
+# Same line, but keyed on the identity the read-back established rather than
+# on a device path. The serial is what the board answered with; the paths are
+# looked up from it, never the other way round.
+# Args: $1 = serial, $2 = stamp it reported
+print_confirmed_line() {
+    local serial="$1" stamp="$2"
+    local p props p_iface p_serial transport="" debug_port=""
+    for p in /dev/ttyACM*; do
+        [ -c "$p" ] || continue
+        props="$(udevadm info -q property "$p" 2>/dev/null || true)"
+        p_serial="$(echo "$props" | grep '^ID_SERIAL_SHORT=' | cut -d= -f2)"
+        [ "$p_serial" = "$serial" ] || continue
+        p_iface="$(echo "$props" | grep '^ID_USB_INTERFACE_NUM=' | cut -d= -f2)"
+        case "$p_iface" in
+        00) debug_port="$p" ;;
+        02) transport="$p" ;;
+        esac
+    done
+    printf "      serial=%s  transport=%s  debug=%s  %s\n" \
+        "$serial" "${transport:-(not found)}" "${debug_port:-(not found)}" "$stamp"
+}
+
 # Classify flashed devices as booted vs flashed-but-not-booted, BY SERIAL.
 # After flash a device may renumber to a different /dev/ttyACM*; the
 # authoritative identity is its USB serial number. A flashed serial is
@@ -675,18 +854,67 @@ fi
 BOOTED_PORTS="$(echo -n "$BOOTED_PORTS"         | sed '/^$/d')"
 NOT_BOOTED_PORTS="$(echo -n "$NOT_BOOTED_PORTS" | sed '/^$/d')"
 
+# The read-back verdicts, deduplicated: one board can be confirmed only once
+# per run, and a serial reached twice is the same board both times.
+FW_CONFIRMED_SERIALS="$(echo -n "$FW_CONFIRMED_SERIALS"   | sed '/^$/d' | awk '!seen[$0]++')"
+FW_UNCONFIRMED_LINES="$(echo -n "$FW_UNCONFIRMED_LINES"   | sed '/^$/d')"
+FW_UNATTRIBUTED_LINES="$(echo -n "$FW_UNATTRIBUTED_LINES" | sed '/^$/d')"
+
 NUM_BOOTED=0
 NUM_NOT_BOOTED=0
 NUM_FAILED=0
+NUM_CONFIRMED=0
+NUM_UNCONFIRMED=0
+NUM_UNATTRIBUTED=0
 if [ -n "$BOOTED_PORTS"     ]; then NUM_BOOTED=$(    echo "$BOOTED_PORTS"     | wc -l); fi
 if [ -n "$NOT_BOOTED_PORTS" ]; then NUM_NOT_BOOTED=$(echo "$NOT_BOOTED_PORTS" | wc -l); fi
 if [ -n "$FAILED_PORTS"     ]; then NUM_FAILED=$(    echo "$FAILED_PORTS"     | wc -l); fi
+if [ -n "$FW_CONFIRMED_SERIALS"  ]; then NUM_CONFIRMED=$(   echo "$FW_CONFIRMED_SERIALS"  | wc -l); fi
+if [ -n "$FW_UNCONFIRMED_LINES"  ]; then NUM_UNCONFIRMED=$( echo "$FW_UNCONFIRMED_LINES"  | wc -l); fi
+if [ -n "$FW_UNATTRIBUTED_LINES" ]; then NUM_UNATTRIBUTED=$(echo "$FW_UNATTRIBUTED_LINES" | wc -l); fi
 
 echo ""
-echo "==> Flash summary:"
+if [ -n "$BUILT_STAMP" ]; then
+    echo "==> Flash summary (image $BUILT_STAMP):"
+else
+    echo "==> Flash summary:"
+fi
 
-if [ "$NUM_BOOTED" -gt 0 ]; then
-    echo "    flashed & booted ($NUM_BOOTED):"
+if [ -n "$BUILT_STAMP" ]; then
+    # The authoritative bucket, and the one #343 was about. A board is listed
+    # here because it said so on its own debug port — not because a board of
+    # this type re-enumerated while a volume that carries no serial was being
+    # written. The two are the same thing only when exactly one board of the
+    # type is attached, which is precisely the case the rig is not.
+    echo "    carrying this image, read back from the board ($NUM_CONFIRMED):"
+    if [ "$NUM_CONFIRMED" -gt 0 ]; then
+        while IFS= read -r s; do
+            [ -n "$s" ] || continue
+            print_confirmed_line "$s" "$BUILT_STAMP"
+        done <<< "$FW_CONFIRMED_SERIALS"
+    else
+        printf "      (none — no attached board was shown to be running it)\n"
+    fi
+
+    if [ "$NUM_UNCONFIRMED" -gt 0 ]; then
+        echo "    written but not confirmed ($NUM_UNCONFIRMED):"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf "      %s\n" "$line"
+        done <<< "$FW_UNCONFIRMED_LINES"
+    fi
+
+    if [ "$NUM_UNATTRIBUTED" -gt 0 ]; then
+        echo "    written, and the runner does not know which board received it ($NUM_UNATTRIBUTED):"
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf "      %s\n" "$line"
+        done <<< "$FW_UNATTRIBUTED_LINES"
+    fi
+elif [ "$NUM_BOOTED" -gt 0 ]; then
+    # No stamp in the image, so there is nothing to read back and the only
+    # available statement is the weak one: a board of this type came back.
+    echo "    flashed & booted, NOT read back ($NUM_BOOTED):"
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         print_device_line "$p"
@@ -712,12 +940,20 @@ fi
 
 # --- Step 8: Update target/debug-port for tooling ---------------------------
 # Tools that consume target/debug-port (e.g. log readers) assume one port.
-# Write the first booted device's debug path; LEVICULUM_FLASH_ONLY pins a
-# specific device.
-if [ -n "$BOOTED_PORTS" ]; then
+# Write the first CONFIRMED device's debug path — the board that answered with
+# this image, not merely the first that re-enumerated; a log reader pointed at
+# the wrong board is the same defect one layer on. Falls back to the booted
+# set only when there is no stamp to confirm against. LEVICULUM_FLASH_ONLY
+# pins a specific device.
+first_serial=""
+if [ -n "$FW_CONFIRMED_SERIALS" ]; then
+    first_serial="$(echo "$FW_CONFIRMED_SERIALS" | head -1)"
+elif [ -z "$BUILT_STAMP" ] && [ -n "$BOOTED_PORTS" ]; then
     first_transport="$(echo "$BOOTED_PORTS" | head -1)"
     first_props="$(udevadm info -q property "$first_transport" 2>/dev/null || true)"
     first_serial="$(echo "$first_props" | grep '^ID_SERIAL_SHORT=' | cut -d= -f2)"
+fi
+if [ -n "$first_serial" ]; then
     first_debug=""
     for p in /dev/ttyACM*; do
         [ -c "$p" ] || continue
@@ -729,10 +965,14 @@ if [ -n "$BOOTED_PORTS" ]; then
             break
         fi
     done
-    # Prefer udev symlink if present (stable across reboots).
+    # Prefer udev symlink if present (stable across reboots). The unqualified
+    # /dev/leviculum-debug lands on whichever board udev saw first, so it is
+    # only safe when this run touched exactly one board.
     if [ -L "/dev/leviculum-debug-$first_serial" ]; then
         first_debug="/dev/leviculum-debug-$first_serial"
-    elif [ -L "/dev/leviculum-debug" ] && [ "$NUM_BOOTED" -eq 1 ]; then
+    elif [ -L "/dev/leviculum-debug" ] &&
+        { { [ -n "$BUILT_STAMP" ] && [ "$NUM_CONFIRMED" -eq 1 ]; } ||
+            { [ -z "$BUILT_STAMP" ] && [ "$NUM_BOOTED" -eq 1 ]; }; }; then
         first_debug="/dev/leviculum-debug"
     fi
     if [ -n "$first_debug" ]; then
@@ -752,6 +992,19 @@ rm -f "$BIN_FILE"
 if [ "$NUM_FAILED" -gt 0 ]; then
     echo ""
     echo "==> Exit 1: $NUM_FAILED of $((NUM_FLASHED + NUM_FAILED)) $BOARD_NAME(s) did not get flashed."
+    exit 1
+fi
+
+# An image that went somewhere unknown is not a success. The caller's whole
+# reason for flashing is to know what a board is running afterwards, and a run
+# that cannot say which board it wrote has not delivered that — on CI it has
+# to go red rather than let the next scenario attribute results to a firmware
+# nobody located. A board that could not be READ (mute debug port) is NOT this
+# case and stays exit 0: that is a board failing to answer, not a write
+# landing somewhere unaccounted for.
+if [ "$NUM_UNATTRIBUTED" -gt 0 ]; then
+    echo ""
+    echo "==> Exit 1: $NUM_UNATTRIBUTED write(s) could not be bound to a $BOARD_NAME."
     exit 1
 fi
 
