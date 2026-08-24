@@ -310,6 +310,10 @@ async fn main(spawner: Spawner) {
     }
     led.set_level(Level::High);
 
+    // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
+    // a spawned task: the counters live in the node this loop owns.
+    let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
+
     log_critical!("[STG] main-loop");
     // Event-driven main loop, five event sources:
     // 1. Serial incoming (USB)
@@ -318,10 +322,14 @@ async fn main(spawner: Spawner) {
     // 4. Timer deadline (protocol maintenance, announces)
     // 5. Host wall-time injection (#238 control envelope)
     loop {
+        transport_stats.poll(&node);
+        // Clamped by the stats deadline so the line is still emitted on a
+        // channel quiet enough that the node itself has nothing scheduled.
         let deadline = node
             .next_deadline()
             .map(Instant::from_millis)
-            .unwrap_or(Instant::MAX);
+            .unwrap_or(Instant::MAX)
+            .min(transport_stats.deadline());
 
         match select(
             select4(

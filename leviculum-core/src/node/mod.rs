@@ -55,6 +55,8 @@ mod mvr_app_proof_ingress_iface;
 mod mvr_bidir_transfer;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
+#[cfg(test)]
+mod mvr_embedded_same_iface_relay;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_establishment_loss;
 #[cfg(test)]

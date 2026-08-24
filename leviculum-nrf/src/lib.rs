@@ -35,6 +35,10 @@ pub mod sx1262;
 /// Telemetry reporting (Codeberg #236): the target lifecycle, the flash
 /// record, and the wiring from this board's sensors into an LXMF report.
 pub mod telemetry;
+/// Periodic `[TRANSPORT]` counter line (Codeberg #344): what the transport
+/// did with the packets it was asked to relay, on a firmware whose `tracing`
+/// call sites are compiled out.
+pub mod transport_stats;
 pub mod usb;
 
 // Shared SoftwareVbusDetect, fed by the SoftDevice's SoC POWER events

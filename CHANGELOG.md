@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The nRF firmware prints its transport counters every 30 s as
+  `[TRANSPORT] fwd= rx= tx= nopath= dup= overheard= maxhops= paths=`, so
+  a board that does not relay a packet says which decision discarded it
+  (#344).
+
 - A transport-id mismatch names both ids it compared, and a packet
   dropped that way for a destination this node serves locally is
   reported per packet instead of only counted (#344).
