@@ -304,6 +304,62 @@ pub fn packet_status_dbm(buf: [u8; 3]) -> (i16, i16) {
     (rssi, snr)
 }
 
+/// `RxGain`, the SX1262's receive-path gain selector (datasheet §15 key
+/// register table, transcribed in `docs/src/sx1262-datasheet-reference.md`).
+///
+/// There is no AGC on this part — the comment the reference firmware attaches
+/// to the same address, `sx126x.cpp:63` ("No agc in sx1262") — so whichever of
+/// the two documented values is written at bring-up is the gain the receiver
+/// runs at for the whole session.
+pub const REG_RX_GAIN: u16 = 0x08AC;
+
+/// `RxGain` power-saving value: the chip's own reset default.
+///
+/// Present so the boosted value has something to be distinguished from, and so
+/// the choice between the two is a named one rather than a bare literal. The
+/// driver never writes it — leaving the register untouched has the same
+/// effect, which is precisely how this setting stayed invisible.
+pub const RX_GAIN_POWER_SAVING: u8 = 0x94;
+
+/// `RxGain` boosted value, what the reference RNode firmware writes
+/// unconditionally at bring-up (`sx126x.cpp:361`, `writeRegister(REG_LNA_6X,
+/// 0x96)`) and what our own datasheet transcription prescribes as step 18 of
+/// the init sequence.
+///
+/// Boosted gain trades receiver current for sensitivity. The size of both
+/// halves of that trade is a documented gap: no Semtech PDF is in this tree
+/// and the local transcription gives the two values without their electrical
+/// characteristics.
+pub const RX_GAIN_BOOSTED: u8 = 0x96;
+
+/// `IqPolarity` (errata 15.4). Not a configuration register in its own right:
+/// `SetPacketParams` writes it, and the erratum is that it writes it wrongly,
+/// so every `SetPacketParams` has to be followed by a correction.
+pub const REG_IQ_POLARITY: u16 = 0x0736;
+
+/// The bit within [`REG_IQ_POLARITY`] that errata 15.4 corrects.
+pub const IQ_POLARITY_BIT: u8 = 0x04;
+
+/// Errata 15.4: the value [`REG_IQ_POLARITY`] must hold after a
+/// `SetPacketParams`, given what it holds now.
+///
+/// Bit 2 is SET for standard IQ and CLEARED for inverted IQ
+/// (`docs/src/sx1262-datasheet-reference.md` §15.4; the reference firmware
+/// applies exactly this at `sx126x.cpp:291-298`, after every
+/// `SetPacketParams`). Every other bit is left as read — the register holds
+/// state this driver has no business rewriting.
+///
+/// Read-modify-write rather than a constant because the bits beside bit 2 are
+/// not documented in the local transcription. A blind write would be a guess
+/// about seven bits in exchange for knowing one.
+pub fn iq_polarity_value(current: u8, inverted_iq: bool) -> u8 {
+    if inverted_iq {
+        current & !IQ_POLARITY_BIT
+    } else {
+        current | IQ_POLARITY_BIT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +762,75 @@ mod tests {
             packet_status_dbm([42, 40, 0]),
             packet_status_dbm([42, 40, 255])
         );
+    }
+
+    /// The two RX-gain register values are the ones the reference firmware and
+    /// the local datasheet transcription name, and they are distinct.
+    ///
+    /// A register address is the one thing in this module that cannot be
+    /// derived or sanity-checked at runtime: write 0x08AD instead of 0x08AC
+    /// and the chip accepts it silently. The value of pinning it here is that
+    /// the transposition has to survive a diff of this file, where the
+    /// citation sits beside it.
+    #[test]
+    fn rx_gain_constants_match_the_reference() {
+        // reference/RNode_Firmware/sx126x.cpp:63 — REG_LNA_6X 0x08AC.
+        assert_eq!(REG_RX_GAIN, 0x08AC);
+        // reference/RNode_Firmware/sx126x.cpp:361 — writeRegister(REG_LNA_6X, 0x96).
+        assert_eq!(RX_GAIN_BOOSTED, 0x96);
+        // docs/src/sx1262-datasheet-reference.md key register table:
+        // "0x94=power saving (default), 0x96=boosted gain".
+        assert_eq!(RX_GAIN_POWER_SAVING, 0x94);
+        assert_ne!(RX_GAIN_BOOSTED, RX_GAIN_POWER_SAVING);
+    }
+
+    /// Standard IQ sets bit 2, inverted IQ clears it, and neither disturbs any
+    /// other bit of the register.
+    ///
+    /// The whole-byte sweep is the point: the erratum is applied to a register
+    /// whose remaining seven bits are undocumented in the only transcription
+    /// we hold, so "leaves everything else alone" is the property that keeps
+    /// the correction from being a blind write.
+    #[test]
+    fn iq_polarity_touches_only_bit_2() {
+        for raw in 0u8..=255 {
+            let standard = iq_polarity_value(raw, false);
+            let inverted = iq_polarity_value(raw, true);
+            assert_eq!(standard & IQ_POLARITY_BIT, IQ_POLARITY_BIT, "raw {raw}");
+            assert_eq!(inverted & IQ_POLARITY_BIT, 0, "raw {raw}");
+            assert_eq!(standard & !IQ_POLARITY_BIT, raw & !IQ_POLARITY_BIT);
+            assert_eq!(inverted & !IQ_POLARITY_BIT, raw & !IQ_POLARITY_BIT);
+        }
+    }
+
+    /// Applying the correction twice is applying it once.
+    ///
+    /// The driver runs this after every `SetPacketParams`, which is once per
+    /// transmitted frame, so a correction that drifted on repetition would
+    /// drift in the field and nowhere else.
+    #[test]
+    fn iq_polarity_is_idempotent() {
+        for raw in 0u8..=255 {
+            for inverted in [false, true] {
+                let once = iq_polarity_value(raw, inverted);
+                assert_eq!(iq_polarity_value(once, inverted), once, "raw {raw}");
+            }
+        }
+    }
+
+    /// The standard-IQ value is what the reference computes for the packet
+    /// params this driver actually sends.
+    ///
+    /// `set_packet_params` hardcodes byte 5 (invertIQ) to 0x00, and the
+    /// reference branches on exactly that byte
+    /// (`sx126x.cpp:292`: `if (buf[5] == 0x00) writeRegister(0x0736, iqreg | 0x04)`).
+    /// This ties our `inverted_iq: false` to that branch so the two cannot be
+    /// read apart.
+    #[test]
+    fn standard_iq_matches_the_reference_branch() {
+        for raw in 0u8..=255 {
+            assert_eq!(iq_polarity_value(raw, false), raw | 0x04);
+            assert_eq!(iq_polarity_value(raw, true), raw & !0x04);
+        }
     }
 }

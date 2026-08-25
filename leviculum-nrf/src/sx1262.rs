@@ -40,12 +40,20 @@ mod opcode {
     pub const SET_STOP_RX_TIMER_ON_PREAMBLE: u8 = 0x9F;
 }
 
-/// SX1262 register addresses (datasheet §15, key register table)
+/// SX1262 register addresses (datasheet §15, key register table).
+///
+/// This list is meant to be the complete set of registers this driver touches;
+/// a register written through a literal instead of a name here is a register
+/// that is not in any audit. `RX_GAIN` was exactly that gap in the other
+/// direction — the reference writes it, we did not, and nothing named it.
 mod reg {
     pub const LORA_SYNC_WORD: u16 = 0x0740;
     pub const TX_CLAMP_CONFIG: u16 = 0x08D8;
     pub const RTC_CONTROL: u16 = 0x0902;
     pub const EVENT_MASK: u16 = 0x0944;
+    /// Re-exported from core, where the address sits beside its permitted
+    /// values and a test that pins both against the reference firmware.
+    pub use leviculum_core::sx126x::{REG_IQ_POLARITY as IQ_POLARITY, REG_RX_GAIN as RX_GAIN};
 }
 
 // IRQ bitmasks and the `SetDioIrqParams` argument builders (datasheet §8.5,
@@ -356,6 +364,19 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.calibrate(0x7F).await?;
         self.calibrate_image(freq_hz).await?;
         self.write_command(opcode::SET_PACKET_TYPE, &[0x01]).await?; // LoRa
+        // Boosted receive gain. There is no AGC on this part, so the value
+        // written here is the gain for the whole session, and until now we
+        // wrote neither value and ran at the chip's power-saving default —
+        // the one register the reference firmware sets that we did not even
+        // name (`sx126x.cpp:361`). After Calibrate, because calibration
+        // rewrites receiver trim.
+        //
+        // Not repeated in `configure_lora`: no command in that path resets it.
+        // It IS lost across a sleep/warm-start, which this driver never does;
+        // if a sleep is ever added, this write has to move or be repeated (or
+        // the address added to the chip's retention list at 0x029F).
+        self.write_register(reg::RX_GAIN, &[leviculum_core::sx126x::RX_GAIN_BOOSTED])
+            .await?;
         self.get_status().await
     }
 
@@ -409,7 +430,22 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         .await
     }
 
-    /// Set LoRa packet params (datasheet §13.4.6).
+    /// Set LoRa packet params (datasheet §13.4.6), then apply errata 15.4.
+    ///
+    /// The erratum is that `SetPacketParams` leaves `IqPolarity` (0x0736) in a
+    /// state that does not follow from the IQ setting it was just given, so
+    /// bit 2 has to be corrected afterwards — every time, which is why this
+    /// sits inside the same function rather than beside its callers. Bit 2 is
+    /// SET for the standard IQ this driver always programs (byte 5 = 0x00
+    /// below); the reference firmware branches on that same byte at
+    /// `sx126x.cpp:291-298`.
+    ///
+    /// Its absence here was not a symptom we had measured: we interoperate
+    /// with RNode peers today, which is evidence that the chip already leaves
+    /// bit 2 set in the standard-IQ case. The change removes a divergence
+    /// whose harmlessness rested on that inference rather than on the
+    /// datasheet — and it costs a register read plus a register write per
+    /// call, which on the TX path is one per frame.
     pub async fn set_packet_params(&mut self, payload_len: u8) -> Result<(), Error> {
         self.write_command(
             opcode::SET_PACKET_PARAMS,
@@ -422,7 +458,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 0x00, // standard IQ
             ],
         )
-        .await
+        .await?;
+        let mut iq = [0u8; 1];
+        self.read_register(reg::IQ_POLARITY, &mut iq).await?;
+        iq[0] = leviculum_core::sx126x::iq_polarity_value(iq[0], false);
+        self.write_register(reg::IQ_POLARITY, &iq).await
     }
 
     /// Apply TX PA clamp workaround (datasheet §15.2).

@@ -475,7 +475,7 @@ Must be done after POR or wake-up from cold start.
 After ANY Rx with Timeout active sequence, stop the RTC and clear the timeout event:
 
 ```
-WriteRegister(0x00, 0x0920)
+WriteRegister(0x00, 0x0902)
 value = ReadRegister(0x0944)
 value = value | 0x02
 WriteRegister(value, 0x0944)
