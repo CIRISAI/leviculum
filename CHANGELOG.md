@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The firmware logs every arming of the receiver as `[SX_RX_ARM] site=
+  timeout_ms= dark_ms=`, so a capture says how long the radio was not
+  listening between two windows instead of leaving it to be inferred (#344).
+
 - The firmware receives at boosted SX1262 gain and applies the errata-15.4
   IQ correction, and prints both registers before and after it writes them
   (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather

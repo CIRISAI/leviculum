@@ -261,6 +261,36 @@ Current firmware events:
 |-------|-----------|---------|
 | `BLE_TX_DROP` | `leviculum-nrf/src/ble.rs` | A BLE packet or keepalive was abandoned part-way through its fragments.  `frag=` is the fragment that failed, `sent=` how many did go out, `reason=` one of `stalled` (no HVN-TX-COMPLETE within the bound), `disconnected`, `budget`, `sd_error` (with the raw code in `code=`), `internal`.  `dropped=` is the cumulative counter, so one line states both the incident and the running total. |
 
+### Reading "was the radio listening at instant X"
+
+`[SX_RX_ARM]` is emitted at the `SetRx` that arms the SX1262, once
+per receive window:
+
+```text
+[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=3 t=123456
+```
+
+- `t=` is the instant the receiver went live.  It is *not* derivable
+  from the window's completion line: `[T114_LORA_LOOP] op=rx_*
+  duration_ms=` brackets the whole `receive()` call, IRQ setup and
+  buffer readout included, so `t - duration_ms` lands before the
+  arming, not on it.
+- `dark_ms` is the gap back to the previous window's end, computed on
+  the board.  The boot arm has no previous window and says
+  `dark_ms=first` rather than a digit.
+- `site` is which of the loop's five listening windows this is —
+  `idle`, `ack`, `csma`, `hold`, `yield` — because their timeouts
+  overlap and the length alone does not identify them.
+
+The two together close the span: window *n* was listening from its
+own `t=` until `t(n+1) - dark_ms(n+1)`.  Everything outside those
+spans is standby, including CAD and TX.  So the last window in a
+capture has no closing instant — its successor is what supplies it.
+
+The line is written through `log_fmt`, so a board with nothing
+attached to the debug CDC (`RUNTIME_DRAIN_OPEN == false`) never
+formats it.
+
 ## Validation behaviour
 
 Two violation classes, both non-blocking — the original event

@@ -462,6 +462,152 @@ impl core::fmt::Display for PacketParamsProbe {
     }
 }
 
+/// Which call site armed the receiver.
+///
+/// The vocabulary is the LoRa loop's own, not a new one: each variant names
+/// the window `lora_task` already names, in the log line that bounds it or in
+/// the comment that explains it. A capture is then readable without
+/// cross-referencing line numbers, which is the only reason the field exists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RxSite {
+    /// Outgoing queue empty: single-mode continuous listen, no hardware
+    /// timeout. This is the only site that arms with `timeout_ms == 0`.
+    Idle,
+    /// The bounded window after a transmission, waiting for the peer's
+    /// ack or reply.
+    Ack,
+    /// Listening through a CSMA backoff, after CAD reported the channel
+    /// busy (`[LORA_CAD] busy=true`).
+    Csma,
+    /// Listening while the regulatory airtime lock holds a queued frame
+    /// (`[LORA_AIRTIME_LOCK] ... holding`).
+    Hold,
+    /// The peer-turn yield after consecutive empty ack windows
+    /// (`[T114_PEER_YIELD]`).
+    Yield,
+}
+
+impl RxSite {
+    /// The stable tag the log line carries. Short on purpose: this field is
+    /// on every arm, and the arm is the most frequent line the firmware has.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            RxSite::Idle => "idle",
+            RxSite::Ack => "ack",
+            RxSite::Csma => "csma",
+            RxSite::Hold => "hold",
+            RxSite::Yield => "yield",
+        }
+    }
+}
+
+/// What `dark_ms` renders when no previous window end is on record.
+///
+/// A word, not a number. At boot there is no previous window, and any digit
+/// printed there — a zero, or an uptime-sized gap — reads downstream as a
+/// measurement of something that was never measured.
+pub const DARK_MS_FIRST: &str = "first";
+
+/// One arming of the receiver, in the order the log line prints it.
+///
+/// [`Display`](core::fmt::Display) is the line's body, so the shape the host
+/// greps is pinned by a host test rather than by a `format_args!` in a crate
+/// that has no test target.
+pub struct RxArm {
+    /// Which call site armed the radio.
+    pub site: RxSite,
+    /// The timeout this window was given, as passed to `receive()`.
+    /// Zero is single mode: no hardware timeout, the radio listens until a
+    /// packet arrives. Every bounded caller clamps to at least 1 ms
+    /// (`post_tx_rx_window_ms`, and the CSMA backoff's own clamp), so a zero
+    /// here is never a bounded window that happened to round down.
+    pub timeout_ms: u32,
+    /// Milliseconds between the previous window's end and this arming — the
+    /// span in which the radio was NOT listening. `None` when no previous
+    /// window end is on record; see [`DARK_MS_FIRST`].
+    pub dark_ms: Option<u64>,
+}
+
+impl core::fmt::Display for RxArm {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "site={} timeout_ms={} dark_ms=",
+            self.site.tag(),
+            self.timeout_ms
+        )?;
+        match self.dark_ms {
+            Some(ms) => write!(f, "{ms}"),
+            None => f.write_str(DARK_MS_FIRST),
+        }
+    }
+}
+
+/// Carries the instant the receiver stopped listening from one window to the
+/// next arming, so the gap between them is computed on the board.
+///
+/// The gap cannot be derived from a capture afterwards. The completion line's
+/// `duration_ms` brackets the whole `receive()` call — the IRQ setup before
+/// the `SetRx` and the buffer readout after the IRQ — so `t - duration_ms` is
+/// not the instant the radio was armed, and a run of windows says nothing
+/// about whether they abut.
+///
+/// The two instants are deliberately taken from opposite ends of a window:
+/// [`window_ended`](Self::window_ended) at the terminating IRQ,
+/// [`arm`](Self::arm) at the next `SetRx`. Feeding either end of the same
+/// window into both is the mistake this type exists to make impossible to
+/// write by accident, and `dark_ms_is_measured_from_the_window_end` is the
+/// control that catches it.
+pub struct RxArmClock {
+    prev_window_end_ms: Option<u64>,
+}
+
+impl RxArmClock {
+    /// No window has ended yet: the next arming reports [`DARK_MS_FIRST`].
+    pub const fn new() -> Self {
+        Self {
+            prev_window_end_ms: None,
+        }
+    }
+
+    /// Record `now_ms` as the instant the receiver stopped listening.
+    ///
+    /// Called when the terminating IRQ is observed, before any of the SPI
+    /// readout that follows it: that readout is dark time and belongs to the
+    /// next gap, not to the window.
+    ///
+    /// Idempotent-by-overwrite, which is what the RX extension needs: the
+    /// first call marks the end of the software wait, and if the reception
+    /// turns out to still be live the extended wait supersedes it.
+    pub fn window_ended(&mut self, now_ms: u64) {
+        self.prev_window_end_ms = Some(now_ms);
+    }
+
+    /// Report an arming at `now_ms`, consuming the recorded window end.
+    ///
+    /// Consuming, not peeking: if a window ends without reaching
+    /// [`window_ended`](Self::window_ended) — an SPI error returning early —
+    /// the next arming has no honest end to measure from, and says
+    /// [`DARK_MS_FIRST`] rather than silently measuring from a stale one.
+    pub fn arm(&mut self, site: RxSite, timeout_ms: u32, now_ms: u64) -> RxArm {
+        let dark_ms = self
+            .prev_window_end_ms
+            .take()
+            .map(|end| now_ms.saturating_sub(end));
+        RxArm {
+            site,
+            timeout_ms,
+            dark_ms,
+        }
+    }
+}
+
+impl Default for RxArmClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Write [`RX_GAIN_BOOSTED`] and report what the register held on either side
 /// of the write, plus [`REG_TX_MODULATION`] as found.
 ///
@@ -1237,5 +1383,181 @@ mod probe_tests {
             format!("{probe}"),
             "iq_before=0xA5 iq_after=0xA1 txmod=0x5A"
         );
+    }
+}
+
+/// The receiver-arming report, driven against a fake clock.
+///
+/// The clock is the point: `dark_ms` is a difference between two instants the
+/// board takes at opposite ends of a window, and the only way to assert it is
+/// the right difference is to supply both instants by hand. A board test can
+/// see the number is plausible; only this can see it is correct.
+///
+/// This module is where the mutation control runs. Change
+/// [`RxArmClock::arm`] to record its own `now_ms` as the window end — i.e.
+/// measure the gap from the window START — and
+/// `dark_ms_is_measured_from_the_window_end` fails.
+#[cfg(test)]
+mod rx_arm_tests {
+    extern crate std;
+
+    use super::*;
+    use alloc::format;
+
+    /// Every site's tag, spelled once so a rename shows up as a diff here.
+    ///
+    /// The tags go into captures and into the greps read against them; they
+    /// are an interface, not an internal name.
+    #[test]
+    fn every_site_has_its_stable_tag() {
+        assert_eq!(RxSite::Idle.tag(), "idle");
+        assert_eq!(RxSite::Ack.tag(), "ack");
+        assert_eq!(RxSite::Csma.tag(), "csma");
+        assert_eq!(RxSite::Hold.tag(), "hold");
+        assert_eq!(RxSite::Yield.tag(), "yield");
+        // Distinct, or two windows are indistinguishable in a capture.
+        let tags = [
+            RxSite::Idle.tag(),
+            RxSite::Ack.tag(),
+            RxSite::Csma.tag(),
+            RxSite::Hold.tag(),
+            RxSite::Yield.tag(),
+        ];
+        for (i, a) in tags.iter().enumerate() {
+            for b in &tags[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// The whole body, field by field, in the order the line prints them.
+    #[test]
+    fn the_line_body_has_the_shape_the_host_greps() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(1_000);
+        let arm = clock.arm(RxSite::Ack, 2_590, 1_007);
+        assert_eq!(format!("{arm}"), "site=ack timeout_ms=2590 dark_ms=7");
+    }
+
+    /// Single mode renders its timeout as the zero the driver passes.
+    ///
+    /// Unambiguous because no bounded caller can produce it: both bounded
+    /// window sizes clamp to at least 1 ms before they reach `receive()`.
+    #[test]
+    fn single_mode_renders_a_zero_timeout() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(500);
+        let arm = clock.arm(RxSite::Idle, 0, 503);
+        assert_eq!(format!("{arm}"), "site=idle timeout_ms=0 dark_ms=3");
+    }
+
+    /// The boot case says it has no previous window, rather than printing a
+    /// number that reads like one.
+    #[test]
+    fn the_first_arm_of_a_boot_reports_no_previous_window() {
+        let mut clock = RxArmClock::new();
+        let arm = clock.arm(RxSite::Idle, 0, 4_211);
+        assert_eq!(arm.dark_ms, None);
+        assert_eq!(format!("{arm}"), "site=idle timeout_ms=0 dark_ms=first");
+        // Not a zero and not the uptime: both would be read as measurements.
+        assert!(!format!("{arm}").contains("dark_ms=0"));
+        assert!(!format!("{arm}").contains("dark_ms=4211"));
+    }
+
+    /// **The control.** `dark_ms` spans the previous window's END to this
+    /// arming, and nothing else.
+    ///
+    /// The three instants are deliberately far apart and unequal, so every
+    /// wrong pairing produces a different number:
+    ///
+    /// | measured from            | would print |
+    /// |--------------------------|-------------|
+    /// | window end (correct)     | 7           |
+    /// | window start             | 507         |
+    /// | previous arming's `now`  | 507         |
+    ///
+    /// Make `arm` store its own `now_ms` as the window end (measuring from
+    /// the window START) and this asserts 507 against the expected 7.
+    #[test]
+    fn dark_ms_is_measured_from_the_window_end() {
+        let mut clock = RxArmClock::new();
+        // A window armed at 1000, listening for 500 ms.
+        let first = clock.arm(RxSite::Idle, 0, 1_000);
+        assert_eq!(first.dark_ms, None);
+        clock.window_ended(1_500);
+        // Re-armed 7 ms later.
+        let second = clock.arm(RxSite::Csma, 400, 1_507);
+        assert_eq!(second.dark_ms, Some(7), "dark_ms must span 1500 -> 1507");
+        assert_ne!(
+            second.dark_ms,
+            Some(507),
+            "dark_ms was measured from the window START (1000), not its end"
+        );
+    }
+
+    /// A long dark span is reported as long, not clamped or wrapped.
+    ///
+    /// The gaps worth finding are the big ones; a helper that quietly
+    /// saturated at some small width would hide exactly them.
+    #[test]
+    fn a_long_gap_is_reported_in_full() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(1_000);
+        let arm = clock.arm(RxSite::Hold, 10_000, 1_000 + 3_600_000);
+        assert_eq!(
+            format!("{arm}"),
+            "site=hold timeout_ms=10000 dark_ms=3600000"
+        );
+    }
+
+    /// Back-to-back windows with no code in between read as zero dark.
+    ///
+    /// Zero is a legitimate measurement here — it is only illegitimate as a
+    /// stand-in for "unknown", which is why that case has its own word.
+    #[test]
+    fn abutting_windows_report_zero_dark() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(2_000);
+        let arm = clock.arm(RxSite::Yield, 5_180, 2_000);
+        assert_eq!(format!("{arm}"), "site=yield timeout_ms=5180 dark_ms=0");
+    }
+
+    /// A window that never records an end leaves the next arming with
+    /// nothing to measure from, and it says so.
+    ///
+    /// Reachable: `receive()` propagates an SPI error out of the IRQ readout.
+    /// Measuring from the window before it would over-state the gap by a
+    /// whole window and look like a finding.
+    #[test]
+    fn a_missing_window_end_is_not_measured_from_a_stale_one() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(1_000);
+        assert_eq!(clock.arm(RxSite::Idle, 0, 1_010).dark_ms, Some(10));
+        // Second window errors out before window_ended.
+        let after_error = clock.arm(RxSite::Idle, 0, 9_999);
+        assert_eq!(after_error.dark_ms, None);
+        assert!(format!("{after_error}").ends_with("dark_ms=first"));
+    }
+
+    /// The extension supersedes the first end: the radio was still listening
+    /// through it, so the gap starts where the extended wait finished.
+    #[test]
+    fn the_rx_extension_moves_the_window_end_forward() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(1_000); // software wait expired...
+        clock.window_ended(3_700); // ...but the frame was still arriving.
+        assert_eq!(clock.arm(RxSite::Idle, 0, 3_705).dark_ms, Some(5));
+    }
+
+    /// A clock that went backwards yields zero rather than an underflow.
+    ///
+    /// `embassy_time::Instant` is monotonic so this should be unreachable;
+    /// it is asserted because the alternative in release mode is a wrapped
+    /// u64 printed as a 19-digit gap.
+    #[test]
+    fn a_backwards_clock_does_not_wrap() {
+        let mut clock = RxArmClock::new();
+        clock.window_ended(5_000);
+        assert_eq!(clock.arm(RxSite::Idle, 0, 4_000).dark_ms, Some(0));
     }
 }

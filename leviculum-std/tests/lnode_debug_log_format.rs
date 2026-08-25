@@ -8,6 +8,7 @@
 //! [HEAP] used=<n> free=<n> watermark=<n> size=<n> t=<ms>    (every 30 s)
 //! [SX_REG] rxgain_before=0xNN rxgain_after=0xNN txmod=0xNN  (once, end of init_radio)
 //! [SX_REG_IQ] iq_before=0xNN iq_after=0xNN txmod=0xNN       (once, first SetPacketParams)
+//! [SX_RX_ARM] site=<tag> timeout_ms=<u32> dark_ms=<u64|first>  (every SetRx)
 //! ```
 //!
 //! The trailing ` t=<ms>` is board uptime at the moment the line was
@@ -412,4 +413,186 @@ fn the_fault_paths_still_capture_rather_than_log() {
              rather than inherited"
         );
     }
+}
+
+/// Extract `(site, timeout_ms, dark_ms)` from an `[SX_RX_ARM]` line.
+///
+/// `dark_ms` is `Some(None)` for the boot arm, which carries the word `first`
+/// rather than a digit: there is no previous window to measure from, and the
+/// outer `Some` says the field was present and understood. A consumer that
+/// coerced that to zero would put a fabricated measurement — "the radio was
+/// re-armed instantly" — into the population this line exists to characterise.
+#[allow(clippy::type_complexity)]
+fn parse_rx_arm(line: &str) -> Option<(String, u32, Option<u64>)> {
+    let idx = line.find("[SX_RX_ARM] ")?;
+    let rest = &line[idx + "[SX_RX_ARM] ".len()..];
+    let mut site = None;
+    let mut timeout_ms = None;
+    let mut dark_ms = None;
+    for token in rest.split_whitespace() {
+        let (key, value) = token.split_once('=')?;
+        match key {
+            "site" => site = Some(value.to_string()),
+            "timeout_ms" => timeout_ms = Some(value.parse().ok()?),
+            "dark_ms" => {
+                dark_ms = Some(if value == "first" {
+                    None
+                } else {
+                    Some(value.parse().ok()?)
+                })
+            }
+            _ => {} // the ` t=` stamp, and anything appended after it
+        }
+    }
+    Some((site?, timeout_ms?, dark_ms?))
+}
+
+/// The receiver-arming line parses, in every shape the firmware emits it.
+///
+/// This is the line that makes "was the radio listening at instant X"
+/// readable off a capture instead of inferred: `t=` is the instant the
+/// receiver went live and `dark_ms` closes the span back to the previous
+/// window's end. Both halves are useless if a consumer cannot split them out.
+#[test]
+fn receiver_arming_line_parses() {
+    assert_eq!(
+        parse_rx_arm("[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=3 t=123456"),
+        Some(("idle".to_string(), 0, Some(3)))
+    );
+    assert_eq!(
+        parse_rx_arm("[SX_RX_ARM] site=ack timeout_ms=2590 dark_ms=0 t=91422"),
+        Some(("ack".to_string(), 2590, Some(0)))
+    );
+    // The boot arm. Not a zero, and a parser must not turn it into one.
+    assert_eq!(
+        parse_rx_arm("[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=first t=412"),
+        Some(("idle".to_string(), 0, None))
+    );
+    // A replay of the previous boot's tail still parses.
+    assert_eq!(
+        parse_rx_arm(
+            "[INFO!] [PERSISTENT_LOG] [SX_RX_ARM] site=yield timeout_ms=5180 dark_ms=461 t=9 t=2"
+        ),
+        Some(("yield".to_string(), 5180, Some(461)))
+    );
+    // A missing field is a parse failure, not a default.
+    assert_eq!(
+        parse_rx_arm("[SX_RX_ARM] site=csma timeout_ms=400 t=7"),
+        None
+    );
+    assert_eq!(
+        parse_rx_arm("[T114_LORA_LOOP] op=rx_timeout duration_ms=500"),
+        None
+    );
+}
+
+/// The two windows a capture must be able to tell apart carry different tags.
+///
+/// The five sites are the loop's five listening windows. Their timeouts
+/// overlap — the airtime hold and the ack window are the same length by
+/// construction — so the tag is the only thing distinguishing them.
+#[test]
+fn every_listening_window_has_its_own_tag() {
+    let hold = "[SX_RX_ARM] site=hold timeout_ms=2590 dark_ms=1 t=1000";
+    let ack = "[SX_RX_ARM] site=ack timeout_ms=2590 dark_ms=1 t=2000";
+    let (hold_site, hold_to, _) = parse_rx_arm(hold).expect("hold parses");
+    let (ack_site, ack_to, _) = parse_rx_arm(ack).expect("ack parses");
+    assert_eq!(
+        hold_to, ack_to,
+        "the two windows really are the same length"
+    );
+    assert_ne!(hold_site, ack_site);
+}
+
+/// The arming line does not disturb the parsers that came before it.
+#[test]
+fn the_arming_line_is_not_mistaken_for_another_line() {
+    assert_eq!(
+        parse_heap_line("[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=3 t=1"),
+        None
+    );
+    assert_eq!(
+        parse_stamp("[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=3 t=123456"),
+        Some(123456)
+    );
+    // `dark_ms=first` is a word in a numeric-looking field; the stamp parser
+    // must still find the stamp past it.
+    assert_eq!(
+        parse_stamp("[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=first t=412"),
+        Some(412)
+    );
+}
+
+/// The firmware still emits the arming line, at the `SetRx` and nowhere else,
+/// and from every one of the five windows.
+///
+/// Three separate facts, and the middle one is the load-bearing one: a line
+/// logged anywhere but immediately after the `SET_RX` command would carry a
+/// `t=` that is not the instant the receiver went live, and the whole span
+/// arithmetic downstream would be off by however much code sits in between.
+#[test]
+fn the_firmware_still_emits_the_receiver_arming_line() {
+    let sx = nrf_source("sx1262.rs");
+    assert!(
+        sx.contains(r#""[SX_RX_ARM] ""#),
+        "leviculum-nrf/src/sx1262.rs no longer emits the `[SX_RX_ARM] ` tag"
+    );
+    // The arm report is taken after the SetRx write and before the DIO1 wait.
+    let set_rx = sx
+        .find("self.write_command(opcode::SET_RX, &t).await?;")
+        .expect("leviculum-nrf/src/sx1262.rs no longer issues SetRx");
+    // Matched on `.arm(` rather than the whole receiver expression: rustfmt
+    // splits `self.rx_arm.arm(..)` across lines once the argument list grows,
+    // and a pin that a reformat can break is a pin nobody keeps.
+    let arm = sx
+        .find(".arm(site, timeout_ms,")
+        .expect("leviculum-nrf/src/sx1262.rs no longer reports the arming");
+    let wait = sx[set_rx..]
+        .find("self.dio1.wait_for_high()")
+        .map(|i| i + set_rx)
+        .expect("leviculum-nrf/src/sx1262.rs no longer waits on DIO1 after SetRx");
+    assert!(
+        set_rx < arm && arm < wait,
+        "the [SX_RX_ARM] stamp is not taken between the SetRx and the DIO1 \
+         wait, so its t= is not the instant the receiver went live"
+    );
+    // The window end is recorded on the far side of that wait, which is what
+    // makes dark_ms a gap rather than a window length.
+    let ended = sx[wait..]
+        .find(".window_ended(")
+        .map(|i| i + wait)
+        .expect("leviculum-nrf/src/sx1262.rs no longer records the window end");
+    assert!(
+        ended > wait,
+        "the window end is recorded before the DIO1 wait, so dark_ms would \
+         span a window rather than the gap between two"
+    );
+    // All five windows are tagged, and each exactly once: two windows sharing
+    // a tag is a capture nobody can read back apart.
+    let lora = nrf_source("lora.rs");
+    for site in ["Idle", "Ack", "Csma", "Hold", "Yield"] {
+        assert_eq!(
+            lora.matches(&format!("RxSite::{site}")).count(),
+            1,
+            "leviculum-nrf/src/lora.rs does not arm exactly one window as RxSite::{site}"
+        );
+    }
+    // The field names and their order are the parser's contract, and they
+    // live in core's Display impl.
+    let core_src = {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-core/src/sx126x.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    assert!(
+        core_src.contains(r#""site={} timeout_ms={} dark_ms=""#),
+        "the [SX_RX_ARM] field order or spelling changed in leviculum-core/src/sx126x.rs"
+    );
+    assert!(
+        core_src.contains(r#"pub const DARK_MS_FIRST: &str = "first";"#),
+        "the [SX_RX_ARM] no-previous-window sentinel changed in \
+         leviculum-core/src/sx126x.rs; parse_rx_arm above still expects `first`"
+    );
 }

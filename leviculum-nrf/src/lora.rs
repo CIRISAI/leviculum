@@ -533,16 +533,22 @@ async fn transmit_all_frames(
 /// Run one RX cycle with the given timeout. Feeds results through the split
 /// reassembler and pushes reassembled payloads to `incoming_tx`.
 /// Safe to call from both the idle-poll path and CSMA backoff windows.
+///
+/// `site` names this window in the `[SX_RX_ARM]` line the driver emits when
+/// it arms the receiver. Every caller below passes a distinct one, so a
+/// capture says which of the loop's five windows was listening without
+/// anybody matching timeouts against source lines.
 async fn rx_once(
     radio: &mut Radio,
     rx_buf: &mut [u8; 255],
     timeout_ms: u32,
+    site: leviculum_core::sx126x::RxSite,
     reassembler: &mut leviculum_core::rnode::SplitReassembler,
     incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     rx_timeout_count: &mut u32,
 ) -> bool {
     let rx_start = embassy_time::Instant::now();
-    let rx_result = radio.receive(rx_buf, timeout_ms).await;
+    let rx_result = radio.receive(rx_buf, timeout_ms, site).await;
     let rx_ms = rx_start.elapsed().as_millis();
     match rx_result {
         Ok((len, status)) => {
@@ -850,6 +856,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     &mut radio,
                     &mut rx_buf,
                     hold_ms,
+                    leviculum_core::sx126x::RxSite::Hold,
                     &mut reassembler,
                     &incoming_tx,
                     &mut rx_timeout_count,
@@ -941,6 +948,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                 &mut radio,
                                 &mut rx_buf,
                                 rx_ms,
+                                leviculum_core::sx126x::RxSite::Csma,
                                 &mut reassembler,
                                 &incoming_tx,
                                 &mut rx_timeout_count,
@@ -1042,6 +1050,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 &mut radio,
                 &mut rx_buf,
                 ack_window_ms,
+                leviculum_core::sx126x::RxSite::Ack,
                 &mut reassembler,
                 &incoming_tx,
                 &mut rx_timeout_count,
@@ -1076,6 +1085,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     &mut radio,
                     &mut rx_buf,
                     yield_ms,
+                    leviculum_core::sx126x::RxSite::Yield,
                     &mut reassembler,
                     &incoming_tx,
                     &mut rx_timeout_count,
@@ -1104,6 +1114,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 &mut radio,
                 &mut rx_buf,
                 0,
+                leviculum_core::sx126x::RxSite::Idle,
                 &mut reassembler,
                 &incoming_tx,
                 &mut rx_timeout_count,

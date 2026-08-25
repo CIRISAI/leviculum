@@ -202,6 +202,11 @@ pub struct Sx1262<SPI> {
     /// it carries costs two extra SPI reads. One boot, one line: this is what
     /// keeps a diagnostic from becoming a per-frame tax.
     iq_probe_done: bool,
+    /// Carries the end of one RX window into the next arming so `[SX_RX_ARM]`
+    /// can report the gap between them. Lives here rather than in the caller
+    /// because both instants are taken inside `receive()`, on either side of
+    /// the DIO1 wait; a caller could only bracket the whole call.
+    rx_arm: leviculum_core::sx126x::RxArmClock,
 }
 
 impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
@@ -227,6 +232,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             rx_ext_bw_hz: 0,
             rx_ext_cr_denom: 0,
             iq_probe_done: false,
+            rx_arm: leviculum_core::sx126x::RxArmClock::new(),
         }
     }
 
@@ -679,10 +685,16 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
     /// Receive a packet with timeout. Returns (bytes_written, RxStatus) on success.
     /// timeout_ms=0 means single mode (receive one packet then return to standby).
+    ///
+    /// `site` names the caller's window in the `[SX_RX_ARM]` line. It is a
+    /// parameter rather than something the driver could infer: the driver sees
+    /// only a duration, and two windows of the same length mean entirely
+    /// different things to whoever reads the capture.
     pub async fn receive(
         &mut self,
         buf: &mut [u8],
         timeout_ms: u32,
+        site: leviculum_core::sx126x::RxSite,
     ) -> Result<(u8, RxStatus), Error> {
         self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::rx_irq_params())
             .await?;
@@ -698,6 +710,21 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         let t = u24_be(hw_timeout);
         self.write_command(opcode::SET_RX, &t).await?;
 
+        // The receiver is live from here. Stamped AFTER the command returns,
+        // not before: the BUSY wait and SPI transaction inside it are dark,
+        // and crediting them to the window would under-report the gap. The
+        // error is bounded by one short SPI transaction and it errs the safe
+        // way — toward reporting more dark time than there was.
+        //
+        // Everything from the previous window's end to here is the gap: that
+        // window's buffer readout, the caller's reassembly and logging, the
+        // loop's decision, and the two IRQ commands above. All of it with the
+        // radio in standby.
+        let arm = self
+            .rx_arm
+            .arm(site, timeout_ms, embassy_time::Instant::now().as_millis());
+        crate::log::log_fmt("[SX_RX_ARM] ", format_args!("{arm}"));
+
         // Wait for DIO1 high via GPIOTE interrupt (hw timeout + margin)
         let sw_timeout_ms = if timeout_ms == 0 {
             60_000u64
@@ -709,6 +736,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             self.dio1.wait_for_high(),
         )
         .await;
+        // The terminating IRQ — RxDone or the hardware timeout — has been
+        // observed, so the radio has stopped listening. Recorded before the
+        // status read below, which is dark time and belongs to the next gap,
+        // and before that read's `?`: a window that ends in an SPI error still
+        // ended, and the next arm should measure from here.
+        self.rx_arm
+            .window_ended(embassy_time::Instant::now().as_millis());
 
         let mut flags = self.get_irq_status().await?;
 
@@ -732,6 +766,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 ),
             );
             let _ = with_timeout(Duration::from_millis(extend_ms), self.dio1.wait_for_high()).await;
+            // The radio kept listening through the extension, so the window
+            // ended here and not where the software wait expired. Supersedes
+            // the mark taken above.
+            self.rx_arm
+                .window_ended(embassy_time::Instant::now().as_millis());
             flags = self.get_irq_status().await?;
         }
 
