@@ -55,6 +55,14 @@ to stitch one packet's path across nodes:
   the context byte is semantic, not routing information.  A rising
   `unknown-context` on a node that is also an endpoint means a peer
   speaks a dialect (newer RNS, third implementation) we do not.
+- `no-such-interface` is the one `PKT_DROP` on the OUTBOUND path, and
+  the one with a different field set: the action was routed to an
+  interface the driver's dispatch slice does not contain, so it never
+  became a received packet and carries `iface_out` and `len` instead of
+  `dst`, `type` and `iface_in`.  Non-zero means the driver and the core
+  disagree about interface numbering — a configuration fault in the
+  driver, not a mesh condition, which is why it does not share a counter
+  with `no-path`.
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal
   hop, not a drop (see

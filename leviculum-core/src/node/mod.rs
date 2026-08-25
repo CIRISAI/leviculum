@@ -2539,6 +2539,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.stats().clone()
     }
 
+    /// Fold the unroutable actions a
+    /// [`dispatch_actions`](crate::transport::dispatch_actions) call reported
+    /// into this node's drop counters (Codeberg #344).
+    ///
+    /// Dispatch runs below the node and cannot reach the counters, so an
+    /// action addressed to an interface the driver did not hand it comes back
+    /// in [`DispatchResult::drops`](crate::transport::DispatchResult::drops)
+    /// and is accounted here.
+    pub fn record_dispatch_drops(&mut self, result: &crate::transport::DispatchResult) {
+        self.transport.record_dispatch_drops(result);
+    }
+
     /// Return a diagnostic dump of all protocol state memory usage
     pub fn diagnostic_dump(&self) -> String {
         use core::fmt::Write;

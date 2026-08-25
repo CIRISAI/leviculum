@@ -19,6 +19,7 @@ compile_error!("must enable exactly one of `bsp-rak4631` or `bsp-t114`");
 pub mod ble;
 pub mod boards;
 pub mod clock;
+pub mod dispatch;
 pub mod flash;
 pub mod interface;
 pub mod log;

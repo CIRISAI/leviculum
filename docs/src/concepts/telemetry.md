@@ -389,7 +389,7 @@ their index stamps (there is no re-index).
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:2666`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:2793`) fails without a path entry.
   The primitive for obtaining one is `request_path`
   (`leviculum-core/src/node/mod.rs:2489`); a node with the key but no
   path asks and waits rather than giving up.

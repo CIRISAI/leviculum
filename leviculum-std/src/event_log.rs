@@ -148,6 +148,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PKT_DROP",
         required_keys: &["dst", "hops", "iface_in", "ph", "reason", "type"],
     },
+    // Second PKT_DROP shape, for the one drop on the OUTBOUND path
+    // (`dispatch_actions`, Codeberg #344). The action never reached an
+    // interface, so there is no `iface_in`; it was never a parsed `Packet`
+    // at this layer, so there is no `dst` or `type`. What it does carry is
+    // the interface it was ADDRESSED to, which is the whole diagnosis.
+    EventSchema {
+        name: "PKT_DROP",
+        required_keys: &["hops", "iface_out", "len", "ph", "reason"],
+    },
     EventSchema {
         name: "PKT_FORWARD",
         required_keys: &[
@@ -303,6 +312,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "blackholed_announce",
             "single_decrypt_fail",
             "unknown_context",
+            "no_such_interface",
             "total",
         ],
     },

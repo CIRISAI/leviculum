@@ -330,11 +330,82 @@ pub struct SendRetry {
 }
 
 /// Result of dispatching actions to interfaces.
+///
+/// `#[must_use]`: every field here is a LOSS the core already worked out and
+/// handed back. Dropping the value as a bare statement throws that answer
+/// away — a `BufferFull` on a constrained link becomes a packet that is
+/// neither retried, nor counted, nor logged, and the only trace of it is a
+/// delivery rate nobody can explain. All nine firmware call sites did exactly
+/// that until Codeberg #344; the attribute is what makes the compiler find
+/// the tenth.
+#[must_use = "a dropped DispatchResult discards the retries the core asked \
+              for, the interface errors it recorded, and the actions it could \
+              not route: silent packet loss"]
 pub struct DispatchResult {
     /// Failed SendPacket actions, driver must queue these for retry.
     pub retries: Vec<SendRetry>,
     /// All errors (SendPacket and Broadcast) for logging.
     pub errors: Vec<(InterfaceId, crate::traits::InterfaceError)>,
+    /// Actions this dispatch could not route at all, with the taxonomy reason.
+    ///
+    /// Unlike [`Self::errors`], these never reached an interface: no driver
+    /// retry can help, because the addressee was not in the slice. Fold them
+    /// into a node's counters with
+    /// [`NodeCore::record_dispatch_drops`](crate::node::NodeCore::record_dispatch_drops)
+    /// so `packets_dropped` still accounts for them.
+    pub drops: Vec<(InterfaceId, DropReason)>,
+}
+
+impl DispatchResult {
+    /// `true` when this dispatch lost nothing: nothing to retry, no interface
+    /// error, nothing unroutable. The healthy case, and the one a caller must
+    /// stay silent about — a line printed per successful dispatch is a line
+    /// nobody reads on a busy mesh.
+    pub fn is_clean(&self) -> bool {
+        self.retries.is_empty() && self.errors.is_empty() && self.drops.is_empty()
+    }
+
+    /// One line naming what this dispatch lost, or `None` when it lost
+    /// nothing.
+    ///
+    /// Rendering lives here rather than at each call site so the nine
+    /// firmware sites carry no logic of their own, and so the "healthy board
+    /// stays quiet" decision is testable on the host — the firmware crate
+    /// itself only builds for `thumbv7em`.
+    pub fn loss(&self) -> Option<DispatchLoss<'_>> {
+        if self.is_clean() {
+            None
+        } else {
+            Some(DispatchLoss(self))
+        }
+    }
+}
+
+/// Display adapter for the non-empty part of a [`DispatchResult`].
+///
+/// Counts first, then the first entry of each non-empty list: a dispatch
+/// carries one or two actions in practice, so the first entry is normally the
+/// whole story, and the counts say when it is not. No allocation — the
+/// firmware formats this straight into its log ring.
+pub struct DispatchLoss<'a>(&'a DispatchResult);
+
+impl core::fmt::Display for DispatchLoss<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "errors={} retries={} unrouted={}",
+            self.0.errors.len(),
+            self.0.retries.len(),
+            self.0.drops.len()
+        )?;
+        if let Some((iface, err)) = self.0.errors.first() {
+            write!(f, " err=iface{}/{}", iface.0, err)?;
+        }
+        if let Some((iface, reason)) = self.0.drops.first() {
+            write!(f, " drop=iface{}/{}", iface.0, reason.kebab())?;
+        }
+        Ok(())
+    }
 }
 
 pub fn dispatch_actions(
@@ -344,6 +415,7 @@ pub fn dispatch_actions(
 ) -> DispatchResult {
     let mut retries = Vec::new();
     let mut errors = Vec::new();
+    let mut drops = Vec::new();
     for action in actions {
         match action {
             Action::SendPacket { iface, data } => {
@@ -373,6 +445,30 @@ pub fn dispatch_actions(
                             });
                         }
                     }
+                } else {
+                    // No interface in this slice answers to the id the core
+                    // addressed. This is the one dispatch outcome with nowhere
+                    // to go: not a `BufferFull` a driver can re-queue, not a
+                    // `Disconnected` it can re-home — the addressee does not
+                    // exist here, so the frame ends at this line. It used to
+                    // end at this line SILENTLY.
+                    //
+                    // `ph` is the hash of the bytes as they would have gone
+                    // out, so it matches the `PKT_TX` correlator for this
+                    // frame on every interface without an IFAC passphrase
+                    // (with one, the wrapping already happened above and the
+                    // two differ). Hashing here is free in practice: the
+                    // branch fires only when interface ids disagree.
+                    drops.push((iface, DropReason::NoSuchInterface));
+                    crate::tracing::debug!(
+                        target: PKT_EVENT_TARGET,
+                        event = "PKT_DROP",
+                        ph = %HexShort(&ph8(&packet_hash(&send_data))),
+                        iface_out = iface.0,
+                        hops = wire_hops(&send_data),
+                        len = send_data.len(),
+                        reason = DropReason::NoSuchInterface.kebab(),
+                    );
                 }
             }
             Action::Broadcast {
@@ -410,7 +506,11 @@ pub fn dispatch_actions(
             }
         }
     }
-    DispatchResult { retries, errors }
+    DispatchResult {
+        retries,
+        errors,
+        drops,
+    }
 }
 
 // Data Structures
@@ -984,6 +1084,7 @@ pub struct TransportStats {
     pub(crate) drops_blackholed_announce: u64,
     pub(crate) drops_single_decrypt_fail: u64,
     pub(crate) drops_unknown_context: u64,
+    pub(crate) drops_no_such_interface: u64,
 }
 
 /// Classified reason for a dropped packet (OBS-2b).
@@ -1062,6 +1163,20 @@ pub enum DropReason {
     /// `Link.receive` (Link.py:972-1100) without a counter; we name and count
     /// it so "a peer speaks a dialect we do not" is visible instead of silent.
     UnknownContext,
+    /// An outbound action addressed to an interface id that the driver's
+    /// dispatch slice does not contain (`dispatch_actions`).
+    ///
+    /// The only OUTBOUND-path drop in this taxonomy, and the reason no
+    /// existing variant fits: every other reason above names a decision this
+    /// stack made ABOUT a packet — overheard, duplicate, no path, over max
+    /// hops. This one names a packet the stack decided to SEND and then could
+    /// not hand to anybody. [`DropReason::NoPath`] is the closest neighbour
+    /// and is wrong here in the way that matters: NoPath means routing had no
+    /// answer, this means routing had an answer and the driver could not
+    /// honour it — a configuration fault in the driver, not a mesh condition,
+    /// and the two must not share a counter or a rising `no-path` on a board
+    /// would be read as a mesh problem.
+    NoSuchInterface,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -1123,11 +1238,12 @@ impl DropReason {
             DropReason::BlackholedAnnounce => "blackholed-announce",
             DropReason::SingleDecryptFail => "single-decrypt-fail",
             DropReason::UnknownContext => "unknown-context",
+            DropReason::NoSuchInterface => "no-such-interface",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 16] = [
+    pub const ALL: [DropReason; 17] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1144,6 +1260,7 @@ impl DropReason {
         DropReason::BlackholedAnnounce,
         DropReason::SingleDecryptFail,
         DropReason::UnknownContext,
+        DropReason::NoSuchInterface,
     ];
 }
 
@@ -1263,6 +1380,14 @@ impl TransportStats {
         self.drops_unknown_context
     }
 
+    /// Outbound actions the driver's dispatch could not route because no
+    /// interface in its slice carried the id the core addressed
+    /// (Codeberg #344). Non-zero means the driver and the core disagree about
+    /// interface numbering, which is a driver fault, not a mesh condition.
+    pub fn drops_no_such_interface(&self) -> u64 {
+        self.drops_no_such_interface
+    }
+
     /// Sum of every per-reason drop counter. Equals [`Self::packets_dropped`]
     /// by construction (see `record_drop`).
     pub fn drops_reason_sum(&self) -> u64 {
@@ -1282,6 +1407,7 @@ impl TransportStats {
             + self.drops_blackholed_announce
             + self.drops_single_decrypt_fail
             + self.drops_unknown_context
+            + self.drops_no_such_interface
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -1309,6 +1435,7 @@ impl TransportStats {
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
             DropReason::SingleDecryptFail => self.drops_single_decrypt_fail += 1,
             DropReason::UnknownContext => self.drops_unknown_context += 1,
+            DropReason::NoSuchInterface => self.drops_no_such_interface += 1,
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -2848,6 +2975,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 blackholed_announce = self.stats.drops_blackholed_announce,
                 single_decrypt_fail = self.stats.drops_single_decrypt_fail,
                 unknown_context = self.stats.drops_unknown_context,
+                no_such_interface = self.stats.drops_no_such_interface,
                 total = self.stats.packets_dropped,
             );
         }
@@ -2938,6 +3066,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Get transport statistics
     pub fn stats(&self) -> &TransportStats {
         &self.stats
+    }
+
+    /// Fold the unroutable actions a [`dispatch_actions`] call reported into
+    /// this transport's drop counters.
+    ///
+    /// The dispatch happens BELOW the node, with no access to these counters,
+    /// so the losses it decides are carried back in
+    /// [`DispatchResult::drops`] and land here. Routing them through the same
+    /// `record_drop` choke point as every in-transport drop is what keeps
+    /// `packets_dropped == drops_reason_sum()` true for a loss the transport
+    /// itself never saw.
+    pub fn record_dispatch_drops(&mut self, result: &DispatchResult) {
+        for (_iface, reason) in &result.drops {
+            self.stats.record_drop(*reason);
+        }
     }
 
     /// Return diagnostic dump of Transport-owned collections (not on Storage)
@@ -25813,6 +25956,232 @@ mod tests {
         }
     }
 
+    /// Codeberg #344: every loss `dispatch_actions` decides has to be
+    /// visible to whoever called it.
+    ///
+    /// The firmware discarded the `DispatchResult` as a bare statement at all
+    /// nine of its call sites, and `dispatch_actions` had no `else` for an
+    /// action addressed to an interface it was not given. Both are losses
+    /// that leave no trace at all — no counter, no event, no retry — so the
+    /// only symptom is a delivery rate nobody can attribute.
+    mod dispatch_loss_tests {
+        use super::*;
+        use crate::test_utils::{test_transport, MockInterface};
+        extern crate alloc;
+        extern crate std;
+        use alloc::vec;
+
+        /// A `BufferFull` on the interface produces a non-empty result AND a
+        /// line for the call site to print.
+        ///
+        /// `loss()` is the whole of what the nine firmware sites emit — they
+        /// add only `[DISPATCH_LOSS] site=<where>` around it — so asserting
+        /// on the rendered text asserts on the line that reaches the debug
+        /// port. The firmware crate itself builds only for `thumbv7em` and
+        /// has no host test harness; this is the seam that does.
+        #[test]
+        fn buffer_full_is_reported_to_the_call_site() {
+            let mut iface = MockInterface::new("lora", 1);
+            iface.reject_sends = true;
+            let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
+
+            let no_ifac = BTreeMap::new();
+            let result = dispatch_actions(
+                &mut interfaces,
+                vec![Action::SendPacket {
+                    iface: InterfaceId(1),
+                    data: vec![0u8; 32],
+                }],
+                &no_ifac,
+            );
+
+            assert!(!result.is_clean(), "a BufferFull is not a clean dispatch");
+            let line = std::format!(
+                "{}",
+                result
+                    .loss()
+                    .expect("a dispatch that lost a frame must render a line")
+            );
+            assert!(
+                line.contains("errors=1"),
+                "the line must count the error; got {line}"
+            );
+            assert!(
+                line.contains("retries=1"),
+                "a BufferFull is retryable and the line must say so; got {line}"
+            );
+            assert!(
+                line.contains("iface1") && line.contains("buffer full"),
+                "the line must name the interface and what happened; got {line}"
+            );
+        }
+
+        /// An action for an interface id absent from the slice is reported and
+        /// counted under its own reason.
+        ///
+        /// This is the branch that had no `else` at all: the action simply
+        /// stopped existing. The journey event it also emits is asserted in
+        /// `dispatch_loss_events` below, which needs the `tracing` feature.
+        #[test]
+        fn action_for_unknown_interface_is_counted() {
+            let mut present = MockInterface::new("serial", 0);
+            let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut present];
+
+            let no_ifac = BTreeMap::new();
+            let result = dispatch_actions(
+                &mut interfaces,
+                vec![Action::SendPacket {
+                    // Id 7 is in no dispatch slice this stack builds.
+                    iface: InterfaceId(7),
+                    data: vec![0u8; 32],
+                }],
+                &no_ifac,
+            );
+
+            assert_eq!(
+                result.drops.len(),
+                1,
+                "the unroutable action must be reported, not vanish"
+            );
+            assert_eq!(result.drops[0].0, InterfaceId(7), "names the id it wanted");
+            assert_eq!(
+                result.drops[0].1,
+                DropReason::NoSuchInterface,
+                "classified under its own reason, not folded into no-path"
+            );
+            assert!(
+                result.errors.is_empty() && result.retries.is_empty(),
+                "no interface was reached, so there is nothing to retry and \
+                 no interface error to report"
+            );
+            assert_eq!(
+                present.sent.len(),
+                0,
+                "the present interface must not have been used as a fallback"
+            );
+
+            // And the count lands in the taxonomy, so `packets_dropped`
+            // still accounts for every packet this stack threw away.
+            let mut transport = test_transport();
+            let before = transport.stats().drops_no_such_interface();
+            transport.record_dispatch_drops(&result);
+            assert_eq!(
+                transport.stats().drops_no_such_interface(),
+                before + 1,
+                "the new counter must increment"
+            );
+            assert_eq!(
+                transport.stats().packets_dropped(),
+                transport.stats().drops_reason_sum(),
+                "the drop taxonomy invariant must still hold"
+            );
+        }
+
+        /// Control: a dispatch to a present, healthy interface loses nothing
+        /// and renders no line.
+        ///
+        /// Without this, the two assertions above are satisfied by a call
+        /// site that prints on every dispatch — which on a busy mesh is the
+        /// same as printing nothing.
+        #[test]
+        fn healthy_dispatch_is_silent_and_counts_nothing() {
+            let mut iface = MockInterface::new("serial", 0);
+            let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
+
+            let no_ifac = BTreeMap::new();
+            let result = dispatch_actions(
+                &mut interfaces,
+                vec![Action::SendPacket {
+                    iface: InterfaceId(0),
+                    data: vec![0u8; 32],
+                }],
+                &no_ifac,
+            );
+
+            assert!(result.is_clean(), "nothing was lost");
+            assert!(
+                result.loss().is_none(),
+                "a healthy dispatch must render no line at all"
+            );
+            assert_eq!(iface.sent.len(), 1, "the frame did go out");
+
+            let mut transport = test_transport();
+            transport.record_dispatch_drops(&result);
+            assert_eq!(
+                transport.stats().packets_dropped(),
+                0,
+                "a healthy dispatch must increment no drop counter"
+            );
+        }
+
+        /// The journey events the two cases above emit (or must not emit).
+        ///
+        /// Split out because it captures structured tracing: under
+        /// `--no-default-features` every level macro is a no-op and there is
+        /// nothing to capture, while the counters asserted above are plain
+        /// fields that always compile. Same split as `obs_observability`.
+        #[cfg(feature = "tracing")]
+        mod dispatch_loss_events {
+            use super::*;
+            use crate::test_log_capture::with_captured_logs as capture_core_logs;
+
+            #[test]
+            fn unknown_interface_emits_a_named_drop_event() {
+                let mut present = MockInterface::new("serial", 0);
+                let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut present];
+
+                let no_ifac = BTreeMap::new();
+                let (result, logs) = capture_core_logs(|| {
+                    dispatch_actions(
+                        &mut interfaces,
+                        vec![Action::SendPacket {
+                            iface: InterfaceId(7),
+                            data: vec![0u8; 32],
+                        }],
+                        &no_ifac,
+                    )
+                });
+
+                assert_eq!(result.drops.len(), 1, "fixture must produce the drop");
+                assert!(
+                    logs.contains("PKT_DROP") && logs.contains("no-such-interface"),
+                    "the drop must emit a journey event naming its reason; \
+                     logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("iface_out=7"),
+                    "the event must name the interface that was asked for; \
+                     logs:\n{logs}"
+                );
+            }
+
+            /// Control: the healthy path emits no drop event at all.
+            #[test]
+            fn healthy_dispatch_emits_no_drop_event() {
+                let mut iface = MockInterface::new("serial", 0);
+                let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
+
+                let no_ifac = BTreeMap::new();
+                let (result, logs) = capture_core_logs(|| {
+                    dispatch_actions(
+                        &mut interfaces,
+                        vec![Action::SendPacket {
+                            iface: InterfaceId(0),
+                            data: vec![0u8; 32],
+                        }],
+                        &no_ifac,
+                    )
+                });
+
+                assert!(result.is_clean(), "fixture must be the healthy path");
+                assert!(
+                    !logs.contains("PKT_DROP"),
+                    "a healthy dispatch must emit no drop event; logs:\n{logs}"
+                );
+            }
+        }
+    }
+
     /// Tests for IFAC (Interface Access Code) integration with Transport
     mod ifac_tests {
         use super::*;
@@ -26079,7 +26448,11 @@ mod tests {
                     iface: InterfaceId(0),
                     data: raw.clone(),
                 }];
-                dispatch_actions(&mut interfaces, actions, &ifac_configs);
+                // This test is about what lands on the wire, not about loss;
+                // assert the dispatch was clean so the `sent` read below
+                // cannot silently be reading a stale frame.
+                let result = dispatch_actions(&mut interfaces, actions, &ifac_configs);
+                assert!(result.is_clean(), "IFAC dispatch must reach the interface");
             }
 
             let sent = iface.sent.last().expect("should have sent").clone();

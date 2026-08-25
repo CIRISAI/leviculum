@@ -41,8 +41,22 @@ impl Interface for EmbeddedInterface<'_> {
     }
 
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender
-            .try_send(data.to_vec())
-            .map_err(|_| InterfaceError::BufferFull)
+        self.sender.try_send(data.to_vec()).map_err(|_| {
+            // Codeberg #344: the frame is going nowhere and the caller sees
+            // only `BufferFull`. Say it at the interface, where the depth
+            // that filled is known. Error path, so the cost is irrelevant;
+            // the depth comes from the channel itself so the line cannot
+            // drift from the queue it describes.
+            crate::log::log_fmt(
+                "[IFACE_FULL] ",
+                format_args!(
+                    "iface={} depth={} len={}",
+                    self.name(),
+                    self.sender.capacity(),
+                    data.len()
+                ),
+            );
+            InterfaceError::BufferFull
+        })
     }
 }

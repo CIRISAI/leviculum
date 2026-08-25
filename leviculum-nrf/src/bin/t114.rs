@@ -368,7 +368,8 @@ async fn main(spawner: Spawner) {
                 info!("SER RX -> {} actions", output.actions.len());
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
-                dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
             }
             Either::First(Either4::Second(data)) => {
                 let output = node.handle_packet(InterfaceId(1), &data);
@@ -377,7 +378,8 @@ async fn main(spawner: Spawner) {
                 }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
-                dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
             Either::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
@@ -387,7 +389,8 @@ async fn main(spawner: Spawner) {
                 }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
-                dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
             }
             Either::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
@@ -396,7 +399,8 @@ async fn main(spawner: Spawner) {
                 }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
-                dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
             }
         }
     }

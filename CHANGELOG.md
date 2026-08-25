@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforcement is the firmware's; the host no longer holds packets back
   when it sees the firmware's lock in `CMD_STAT_CHTM`.
 
+### Fixed
+
+- A frame the firmware could not hand to an interface is no longer lost
+  in silence: `DispatchResult` is `#[must_use]`, every call site reports
+  what it lost, an action addressed to an unknown interface is counted
+  as `no-such-interface` instead of vanishing, and a full outbound queue
+  says so at the interface (#344).
+
 ## [0.8.1] - 2026-08-16
 
 ### Added

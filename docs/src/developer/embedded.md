@@ -121,9 +121,11 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:340`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:411`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
-   driver gets them for free.
+   driver gets them for free. Bind what it returns: the `DispatchResult` is
+   `#[must_use]` because dropping it discards the retries the core asked for,
+   the interface errors it saw, and any action it could not route.
 
 This loop ignores `output.events` because a leaf firmware node has no application
 logic to react to them; a richer firmware would drain `output.events` here the

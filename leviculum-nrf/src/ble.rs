@@ -164,9 +164,21 @@ impl Interface for BleInterface {
         true
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender
-            .try_send(data.to_vec())
-            .map_err(|_| InterfaceError::BufferFull)
+        self.sender.try_send(data.to_vec()).map_err(|_| {
+            // Codeberg #344: same silence as the other two. A phone that
+            // stops draining the notify path fills this queue, and the board
+            // could not tell that from a mesh with nothing to say.
+            crate::log::log_fmt(
+                "[IFACE_FULL] ",
+                format_args!(
+                    "iface={} depth={} len={}",
+                    self.name(),
+                    self.sender.capacity(),
+                    data.len()
+                ),
+            );
+            InterfaceError::BufferFull
+        })
     }
 }
 

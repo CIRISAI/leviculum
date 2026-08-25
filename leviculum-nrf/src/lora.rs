@@ -90,9 +90,26 @@ impl Interface for LoRaInterface {
         true
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender
-            .try_send(data.to_vec())
-            .map_err(|_| InterfaceError::BufferFull)
+        self.sender.try_send(data.to_vec()).map_err(|_| {
+            // Codeberg #344: a full `LORA_OUTGOING` used to be invisible — the
+            // caller saw `BufferFull` and (before #344) dropped it, so the
+            // most likely place for the board to lose a packet was also the
+            // quietest. This is the one interface where the depth is plainly
+            // in question: four slots against a 723 ms SF10 frame is under a
+            // three-second backlog. The depth is NOT changed here on purpose;
+            // changing it before this line says how often it fills would be a
+            // fix aimed at a number nobody has measured.
+            crate::log::log_fmt(
+                "[IFACE_FULL] ",
+                format_args!(
+                    "iface={} depth={} len={}",
+                    self.name(),
+                    self.sender.capacity(),
+                    data.len()
+                ),
+            );
+            InterfaceError::BufferFull
+        })
     }
 }
 
