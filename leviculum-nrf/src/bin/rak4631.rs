@@ -600,6 +600,11 @@ async fn main(spawner: Spawner) {
                         let mut ifaces: [&mut dyn Interface; 3] =
                             [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                         let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                        // The reporter settles first: it is the only caller
+                        // that owns a cadence the dispatch's verdict decides
+                        // (#344). `settle` counts and logs afterwards, as at
+                        // every other site.
+                        reporter.note_dispatch(&dispatched);
                         leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
                     }
                 }

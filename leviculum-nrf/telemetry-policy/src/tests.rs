@@ -610,3 +610,164 @@ fn a_clear_frame_on_a_node_that_had_no_target_is_still_off() {
     );
     assert_eq!(p.state(), TargetState::Off);
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch settlement (#344): a report that was not sent is not "sent"
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_lost_dispatch_leaves_the_cadence_unconsumed() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    let heartbeat = Profile::Station.params().max_interval_ms;
+
+    // The heartbeat comes due and the report is built and handed over.
+    let due = t + heartbeat;
+    assert_eq!(p.poll(due, None), Some(ReportReason::Heartbeat));
+    p.note_emitted(due, None);
+    assert!(p.has_pending_report());
+
+    // The dispatch loses it: full outbound queue, no interface, IFAC
+    // failure — the reporter is not told which, only that it went nowhere.
+    assert!(!p.note_dispatch(false));
+    assert!(!p.has_pending_report());
+
+    // The very next tick must find the same interval elapsed and emit
+    // again, rather than waiting out another whole heartbeat.
+    assert_eq!(
+        p.poll(due + 5_000, None),
+        Some(ReportReason::Heartbeat),
+        "a lost report consumed the cadence"
+    );
+}
+
+#[test]
+fn a_lost_dispatch_does_not_consume_an_armed_immediate_report() {
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(p.poll(0, Some(good_fix())), Some(ReportReason::Immediate));
+    p.note_emitted(0, Some(good_fix()));
+    assert!(!p.note_dispatch(false));
+    // The immediate is the one a user pressed a button for. Losing it to a
+    // full queue must not silently disarm it.
+    assert_eq!(
+        p.poll(1_000, Some(good_fix())),
+        Some(ReportReason::Immediate)
+    );
+}
+
+#[test]
+fn a_lost_dispatch_does_not_move_the_movement_reference() {
+    let t = 0;
+    let mut p = ready(Profile::Tracker, t);
+    let params = Profile::Tracker.params();
+    let moved = north_of(good_fix(), 200);
+    let when = t + params.min_interval_ms + params.settle_ms;
+    assert_eq!(p.poll(when, Some(moved)), Some(ReportReason::Movement));
+    p.note_emitted(when, Some(moved));
+    assert!(!p.note_dispatch(false));
+    // The position never went out, so the node has still not reported from
+    // here: the same movement is still a movement.
+    assert_eq!(
+        p.poll(when + params.min_interval_ms, Some(moved)),
+        Some(ReportReason::Movement)
+    );
+}
+
+/// Control: the success path must consume the cadence, exactly once.
+///
+/// Without this, a "fix" that simply never marks anything sent passes
+/// every test above and floods the mesh with a report per tick.
+#[test]
+fn control_a_delivered_dispatch_consumes_the_cadence_exactly_once() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    let heartbeat = Profile::Station.params().max_interval_ms;
+    let due = t + heartbeat;
+
+    assert_eq!(p.poll(due, None), Some(ReportReason::Heartbeat));
+    p.note_emitted(due, None);
+    assert!(
+        p.note_dispatch(true),
+        "a clean dispatch did not count as sent"
+    );
+
+    // Consumed: no report until the next heartbeat is due.
+    assert_eq!(p.poll(due + 5_000, None), None);
+    assert_eq!(p.poll(due + heartbeat - 1, None), None);
+    assert_eq!(p.poll(due + heartbeat, None), Some(ReportReason::Heartbeat));
+}
+
+/// Control: settling twice must not count a second report. A double
+/// settle is what a caller that dispatches an announce and a report in
+/// two batches would produce.
+#[test]
+fn control_settling_twice_counts_one_report() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    let due = t + Profile::Station.params().max_interval_ms;
+    assert_eq!(p.poll(due, None), Some(ReportReason::Heartbeat));
+    p.note_emitted(due, None);
+    assert!(p.note_dispatch(true));
+    assert!(
+        !p.note_dispatch(true),
+        "a settle with nothing pending claimed a report"
+    );
+    assert!(!p.note_dispatch(false));
+    assert_eq!(p.poll(due + 5_000, None), None);
+}
+
+/// Control: a settle for a report that was never emitted counts nothing.
+#[test]
+fn control_settling_without_an_emitted_report_counts_nothing() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    assert!(!p.note_dispatch(true));
+    assert!(!p.has_pending_report());
+    // The cadence is untouched: still no report due before the heartbeat.
+    assert_eq!(p.poll(t + 5_000, None), None);
+}
+
+/// The cadence anchors at emission, not at settlement: a dispatch that
+/// takes a moment to confirm must not stretch the next interval.
+#[test]
+fn the_cadence_anchors_at_emission_not_at_settlement() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    let heartbeat = Profile::Station.params().max_interval_ms;
+    let due = t + heartbeat;
+    assert_eq!(p.poll(due, None), Some(ReportReason::Heartbeat));
+    p.note_emitted(due, None);
+    assert!(p.note_dispatch(true));
+    // Next heartbeat measured from `due`, not from whenever the settle ran.
+    assert_eq!(p.poll(due + heartbeat, None), Some(ReportReason::Heartbeat));
+}
+
+/// A second emission without a settle in between keeps the later report:
+/// the earlier one is gone regardless, and the cadence belongs to the one
+/// actually in flight.
+#[test]
+fn a_second_emission_supersedes_an_unsettled_one() {
+    let t = 10_000;
+    let mut p = ready(Profile::Station, t);
+    let due = t + Profile::Station.params().max_interval_ms;
+    assert_eq!(p.poll(due, None), Some(ReportReason::Heartbeat));
+    p.note_emitted(due, None);
+    p.note_emitted(due + 5_000, None);
+    assert!(p.note_dispatch(true));
+    // Anchored at the later emission.
+    assert_eq!(
+        p.poll(
+            due + 5_000 + Profile::Station.params().max_interval_ms - 1,
+            None
+        ),
+        None
+    );
+    assert_eq!(
+        p.poll(
+            due + 5_000 + Profile::Station.params().max_interval_ms,
+            None
+        ),
+        Some(ReportReason::Heartbeat)
+    );
+}

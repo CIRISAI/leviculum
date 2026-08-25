@@ -334,12 +334,14 @@ fn moved_at_least(a: Fix, b: Fix, min_m: u32) -> bool {
 /// [`note_key_available`](Self::note_key_available) /
 /// [`clear_target`](Self::clear_target) from the control channel, with
 /// [`poll`](Self::poll) from the main loop, and confirm every report the
-/// radio actually took with [`note_sent`](Self::note_sent).
+/// radio actually took with [`note_emitted`](Self::note_emitted) followed
+/// by [`note_dispatch`](Self::note_dispatch).
 ///
-/// The split between `poll` and `note_sent` is deliberate: a report that
-/// could not be built or could not be handed to transport must not
-/// consume the cadence, or a node with no path would go quiet for an
-/// hour after one failed attempt.
+/// The split between `poll` and the confirmation is deliberate: a report
+/// that could not be built, could not be handed to transport, or was
+/// handed over and then lost by the dispatch must not consume the
+/// cadence, or a node would go quiet for a whole interval after one
+/// failed attempt.
 /// What a telemetry-target control frame asks for, once its profile slot
 /// has been read.
 ///
@@ -393,6 +395,20 @@ pub struct SendPolicy {
     first_fix_ms: Option<u64>,
     last_report_ms: Option<u64>,
     last_reported_fix: Option<Fix>,
+    /// A report handed to transport whose dispatch has not been settled
+    /// yet. See [`note_emitted`](Self::note_emitted).
+    pending: Option<PendingReport>,
+}
+
+/// A report that is out of the reporter's hands but not yet on the air.
+#[derive(Debug, Clone, Copy)]
+struct PendingReport {
+    /// When it was emitted. The cadence anchors here rather than at
+    /// settle time, so the confirmation's own latency does not shorten
+    /// the next interval.
+    now_ms: u64,
+    /// The position it carried, `None` if it carried none.
+    fix: Option<Fix>,
 }
 
 impl Default for SendPolicy {
@@ -413,6 +429,7 @@ impl SendPolicy {
             first_fix_ms: None,
             last_report_ms: None,
             last_reported_fix: None,
+            pending: None,
         }
     }
 
@@ -590,6 +607,56 @@ impl SendPolicy {
         if reported.is_some() {
             self.last_reported_fix = reported;
         }
+    }
+
+    /// Note that a report has been *handed to transport* — built,
+    /// encrypted, turned into actions — and is awaiting dispatch.
+    ///
+    /// This consumes nothing. Handing a packet to the core is not the
+    /// same event as the interface taking it: on a board whose outbound
+    /// queue is full, `send_single_packet` succeeds and the dispatch that
+    /// follows drops the frame. Counting the first event as "sent" is how
+    /// a report that never left the board still cost a whole cadence
+    /// interval of silence (#344).
+    ///
+    /// Pair it with [`note_dispatch`](Self::note_dispatch). Two
+    /// `note_emitted` calls without a settle in between keep only the
+    /// later one: the earlier report is gone either way, and the cadence
+    /// belongs to the report that is actually in flight.
+    pub fn note_emitted(&mut self, now_ms: u64, reported: Option<Fix>) {
+        self.pending = Some(PendingReport {
+            now_ms,
+            fix: reported,
+        });
+    }
+
+    /// Settle the pending report against what the dispatch did with it.
+    ///
+    /// `delivered` is the dispatch's own verdict, not a guess from a log
+    /// line: `true` consumes the cadence exactly as
+    /// [`note_sent`](Self::note_sent) does, `false` consumes nothing, so
+    /// the next poll finds the same interval elapsed and emits again.
+    ///
+    /// Deliberately *not* a retry: nothing is re-sent here, nothing is
+    /// queued, and the next attempt happens on the ordinary tick that was
+    /// going to run anyway.
+    ///
+    /// Returns whether the report counted as sent — `false` also for a
+    /// settle with nothing pending, so a caller cannot report success for
+    /// a report it never emitted.
+    pub fn note_dispatch(&mut self, delivered: bool) -> bool {
+        match self.pending.take() {
+            Some(report) if delivered => {
+                self.note_sent(report.now_ms, report.fix);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a report is emitted and not yet settled.
+    pub const fn has_pending_report(&self) -> bool {
+        self.pending.is_some()
     }
 }
 

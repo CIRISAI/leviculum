@@ -41,12 +41,12 @@ use leviculum_core::telemetry_target_store::{
     decode_telemetry_target, encode_telemetry_target, ENCODED_SIZE_ALIGNED,
 };
 use leviculum_core::traits::{Clock, Storage};
-use leviculum_core::transport::Action;
+use leviculum_core::transport::{Action, DispatchResult};
 use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{build_report, Battery, Location, Telemetry};
 use leviculum_telemetry_policy::{
-    command_from_wire, Fix, Profile, SendPolicy, TargetCommand, TargetState,
+    command_from_wire, Fix, Profile, ReportReason, SendPolicy, TargetCommand, TargetState,
 };
 
 /// Re-exported so the binaries name the outcome of
@@ -336,6 +336,21 @@ pub struct Reporter {
     /// blocked reporter must be legible in a log tail, which a flood is
     /// not.
     last_withheld: Option<&'static str>,
+    /// What the pending report says once its dispatch is settled: the
+    /// reason it was sent, the position it carried and the timebase it
+    /// stamped. Held only between [`tick`](Self::tick) and
+    /// [`note_dispatch`](Self::note_dispatch) — the report line is written
+    /// there, not here, because until then it is not known whether there
+    /// is a report to write a line about.
+    pending_line: Option<PendingLine>,
+}
+
+/// The report line of a report that has been handed to transport.
+#[derive(Clone, Copy)]
+struct PendingLine {
+    reason: ReportReason,
+    include_position: bool,
+    unix_secs: u64,
 }
 
 impl Reporter {
@@ -350,6 +365,7 @@ impl Reporter {
             delivery_hash,
             last_key_request_ms: None,
             last_withheld: None,
+            pending_line: None,
         }
     }
 
@@ -561,26 +577,70 @@ impl Reporter {
         match node.send_single_packet(&hash, &on_air) {
             Ok((_, out)) => {
                 actions.extend(out.actions);
-                self.last_withheld = None;
+                // Handed to transport, not yet on the air. The cadence is
+                // consumed in `note_dispatch`, once the dispatch has said
+                // whether the frame reached an interface at all (#344) —
+                // a full `LORA_OUTGOING` makes this arm succeed and the
+                // dispatch that follows drop the packet, and the report
+                // used to count as sent anyway.
                 self.policy
-                    .note_sent(now_ms, if include_position { fix } else { None });
-                crate::log::log_fmt_critical(
-                    "[INFO!] ",
-                    format_args!(
-                        "[TELEMETRY] report target={:08x} reason={} position={} unix={} src={}",
-                        self.target_short(),
-                        reason.as_str(),
-                        include_position as u8,
-                        unix_secs,
-                        crate::time_source_str()
-                    ),
-                );
+                    .note_emitted(now_ms, if include_position { fix } else { None });
+                self.pending_line = Some(PendingLine {
+                    reason,
+                    include_position,
+                    unix_secs,
+                });
             }
             Err(_) => {
+                // The core could not build or route it at all. This path
+                // already leaves the cadence unconsumed — `note_emitted`
+                // is never reached — so it needs no settlement, and it
+                // keeps the reason string `note_dispatch` reuses.
                 self.withhold("send-failed");
             }
         }
         actions
+    }
+
+    /// Settle the report `tick` handed over against what the dispatch did
+    /// with it (#344).
+    ///
+    /// The caller passes the `DispatchResult` of the dispatch that carried
+    /// this tick's actions. A dispatch that lost anything leaves the
+    /// cadence unconsumed, so the next ordinary tick emits the report
+    /// again; nothing is re-sent here and nothing is queued.
+    ///
+    /// The dispatch reports loss per dispatch, not per action, so a lost
+    /// announce settles the report as lost too. That errs toward reporting
+    /// again, which is the direction to err in: the announce and the
+    /// report go to the same interface in the same dispatch, and a
+    /// receiver that missed the announce cannot verify the report anyway.
+    ///
+    /// Silent when there is nothing pending — the common case, since the
+    /// tick that sends is one in hundreds.
+    pub fn note_dispatch(&mut self, result: &DispatchResult) {
+        let Some(line) = self.pending_line.take() else {
+            // No report this tick. `note_dispatch` still runs so a
+            // caller never has to know whether one was emitted.
+            let _ = self.policy.note_dispatch(false);
+            return;
+        };
+        if !self.policy.note_dispatch(result.is_clean()) {
+            self.withhold("send-failed");
+            return;
+        }
+        self.last_withheld = None;
+        crate::log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!(
+                "[TELEMETRY] report target={:08x} reason={} position={} unix={} src={}",
+                self.target_short(),
+                line.reason.as_str(),
+                line.include_position as u8,
+                line.unix_secs,
+                crate::time_source_str()
+            ),
+        );
     }
 
     /// The banner line, emitted beside `[TIME_SOURCE]` so a log tail

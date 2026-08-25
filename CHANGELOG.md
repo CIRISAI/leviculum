@@ -94,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `no-such-interface` instead of vanishing, and a full outbound queue
   says so at the interface (#344).
 
+- A telemetry report the dispatch lost no longer counts as sent, so the
+  next tick reports again instead of the node going quiet for a whole
+  cadence interval (#344).
+
 ## [0.8.1] - 2026-08-16
 
 ### Added
