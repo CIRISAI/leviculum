@@ -550,67 +550,15 @@ async fn rx_once(
                 "[T114_LORA_LOOP] ",
                 format_args!("op=rx_success duration_ms={}", rx_ms),
             );
-            let frame = &rx_buf[..len as usize];
-            let h = frame;
-            let n = h.len().min(9);
-            if n >= 1 {
-                let mut first8 = [0u8; 8];
-                let copy_len = (n - 1).min(8);
-                first8[..copy_len].copy_from_slice(&h[1..1 + copy_len]);
-                crate::log::log_fmt(
-                    "[T114_SX_RX] ",
-                    format_args!(
-                    "len={} first8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} rssi={} snr={}",
-                    len, first8[0], first8[1], first8[2], first8[3],
-                    first8[4], first8[5], first8[6], first8[7],
-                    status.rssi, status.snr
-                ),
-                );
-            }
-            if let Some(data) = reassembler.feed(frame, *rx_timeout_count) {
-                crate::log::log_fmt(
-                    "[LORA] ",
-                    format_args!(
-                        "RX {} bytes rssi={} snr={}",
-                        data.len(),
-                        status.rssi,
-                        status.snr
-                    ),
-                );
-                LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                #[cfg(feature = "display")]
-                crate::baseboard::LORA_RX_FLASH.signal(());
-                let plen = data.len();
-                let d = data.as_slice();
-                let m = d.len().min(8);
-                let mut p8 = [0u8; 8];
-                p8[..m].copy_from_slice(&d[..m]);
-                crate::log::log_fmt(
-                    "[T114_LORA_DELIVER] ",
-                    format_args!(
-                        "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
-                        p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
-                    ),
-                );
-                incoming_tx.send(data).await;
-            } else if len >= 2 && (rx_buf[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
-                crate::log::log_fmt(
-                    "[LORA] ",
-                    format_args!(
-                        "RX split part {} bytes seq={} rssi={} snr={}",
-                        len - 1,
-                        rx_buf[0] >> 4,
-                        status.rssi,
-                        status.snr
-                    ),
-                );
-            } else if len < 2 {
-                crate::log::log_fmt("[LORA] ", format_args!("RX too short ({})", len));
-            }
-            // A packet was received this window (full delivery, split part, or
-            // runt). The caller uses this to reset its consecutive-empty-ack
-            // counter: any reception means the peer is being heard.
-            true
+            deliver_frame(
+                rx_buf,
+                len,
+                status,
+                reassembler,
+                incoming_tx,
+                rx_timeout_count,
+            )
+            .await
         }
         Err(crate::sx1262::Error::Timeout) => {
             *rx_timeout_count = rx_timeout_count.wrapping_add(1);
@@ -655,6 +603,97 @@ async fn rx_once(
             false
         }
     }
+}
+
+/// Everything a completed reception goes through between the chip's buffer
+/// and `incoming_tx`: logging, split reassembly, delivery.
+///
+/// Factored out of [`rx_once`] because the turnaround deferral
+/// ([`Radio::defer_turnaround`](crate::sx1262::Radio::defer_turnaround)) also
+/// completes receptions, and a frame that arrives while the radio is holding
+/// a transmission back has to reach the stack by exactly the same path as one
+/// that arrives in an ordinary RX window — otherwise the fix for the loss
+/// path would introduce a second, subtly different one.
+///
+/// Returns true: a reception happened this window (full payload, split part,
+/// or runt).
+async fn deliver_frame(
+    rx_buf: &mut [u8; 255],
+    len: u8,
+    status: crate::sx1262::RxStatus,
+    reassembler: &mut leviculum_core::rnode::SplitReassembler,
+    incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    rx_timeout_count: &mut u32,
+) -> bool {
+    let frame = &rx_buf[..len as usize];
+    let h = frame;
+    let n = h.len().min(9);
+    if n >= 1 {
+        let mut first8 = [0u8; 8];
+        let copy_len = (n - 1).min(8);
+        first8[..copy_len].copy_from_slice(&h[1..1 + copy_len]);
+        crate::log::log_fmt(
+            "[T114_SX_RX] ",
+            format_args!(
+                "len={} first8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} rssi={} snr={}",
+                len,
+                first8[0],
+                first8[1],
+                first8[2],
+                first8[3],
+                first8[4],
+                first8[5],
+                first8[6],
+                first8[7],
+                status.rssi,
+                status.snr
+            ),
+        );
+    }
+    if let Some(data) = reassembler.feed(frame, *rx_timeout_count) {
+        crate::log::log_fmt(
+            "[LORA] ",
+            format_args!(
+                "RX {} bytes rssi={} snr={}",
+                data.len(),
+                status.rssi,
+                status.snr
+            ),
+        );
+        LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "display")]
+        crate::baseboard::LORA_RX_FLASH.signal(());
+        let plen = data.len();
+        let d = data.as_slice();
+        let m = d.len().min(8);
+        let mut p8 = [0u8; 8];
+        p8[..m].copy_from_slice(&d[..m]);
+        crate::log::log_fmt(
+            "[T114_LORA_DELIVER] ",
+            format_args!(
+                "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
+                p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
+            ),
+        );
+        incoming_tx.send(data).await;
+    } else if len >= 2 && (rx_buf[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
+        crate::log::log_fmt(
+            "[LORA] ",
+            format_args!(
+                "RX split part {} bytes seq={} rssi={} snr={}",
+                len - 1,
+                rx_buf[0] >> 4,
+                status.rssi,
+                status.snr
+            ),
+        );
+    } else if len < 2 {
+        crate::log::log_fmt("[LORA] ", format_args!("RX too short ({})", len));
+    }
+    // A packet was received this window (full delivery, split part, or
+    // runt). The caller uses this to reset its consecutive-empty-ack
+    // counter: any reception means the peer is being heard.
+    true
 }
 
 // Init
@@ -1123,14 +1162,41 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             }
             // The daemon has outgoing data. The RX future was dropped while the
             // radio was in continuous RX, so force standby before the CSMA/TX
-            // path drives SetTx; the dropped RX leaves no half-state. A packet
-            // racing this switch may be lost (rare, acceptable). radio_silent
-            // still drops outgoing instead of transmitting.
+            // path drives SetTx; the dropped RX leaves no half-state.
+            // radio_silent still drops outgoing instead of transmitting.
+            //
+            // **A reception already in progress is not abandoned for a
+            // transmission we want to start.** The dropped RX future used to
+            // take the frame on the air with it, and the CSMA that follows
+            // could not notice: CAD runs after standby, from a state in which
+            // the radio can no longer hear. Measured on the rig, that turned
+            // a relay deaf for exactly the window a sender's second packet
+            // arrives in — 22/22 announces received, 1-2/22 of the reports
+            // that followed them 14 ms later. So: ask the chip whether a
+            // frame is arriving *while still in RX*, and if so wait it out
+            // under a bound derived from the live modulation.
             Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
+                if let Ok(crate::sx1262::Turnaround::Received { len, status }) =
+                    radio.defer_turnaround(&mut rx_buf).await
+                {
+                    reassembler.check_timeout(rx_timeout_count, 10);
+                    if deliver_frame(
+                        &mut rx_buf,
+                        len,
+                        status,
+                        &mut reassembler,
+                        &incoming_tx,
+                        &mut rx_timeout_count,
+                    )
+                    .await
+                    {
+                        consecutive_empty_acks = 0;
+                    }
+                }
                 let _ = radio.set_standby_rc().await;
                 if config.radio_silent {
                     drop(data);

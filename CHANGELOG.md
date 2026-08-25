@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The firmware finishes a reception that is already on the air before it
+  turns the radio around to transmit, under a bound derived from the
+  spreading factor; it used to drop the frame (#344).
+
 - The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
   binds first, instead of four packets; a refusal names which bound it hit
   (#344).
