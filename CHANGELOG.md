@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The firmware receives at boosted SX1262 gain and applies the errata-15.4
+  IQ correction, and prints both registers before and after it writes them
+  (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather
+  than taken on trust (#258).
+
 - The nRF firmware prints its transport counters every 30 s as
   `[TRANSPORT] fwd= rx= tx= nopath= dup= overheard= maxhops= paths=`, so
   a board that does not relay a packet says which decision discarded it

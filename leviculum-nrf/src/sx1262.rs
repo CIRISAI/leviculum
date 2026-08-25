@@ -40,20 +40,25 @@ mod opcode {
     pub const SET_STOP_RX_TIMER_ON_PREAMBLE: u8 = 0x9F;
 }
 
-/// SX1262 register addresses (datasheet §15, key register table).
+/// SX1262 register addresses this file reaches for directly (datasheet §15,
+/// key register table).
 ///
-/// This list is meant to be the complete set of registers this driver touches;
-/// a register written through a literal instead of a name here is a register
+/// Together with `leviculum_core::sx126x`'s `REG_*` constants this is meant to
+/// be the complete set of registers the driver touches; a register written
+/// through a literal instead of a name in one of the two places is a register
 /// that is not in any audit. `RX_GAIN` was exactly that gap in the other
 /// direction — the reference writes it, we did not, and nothing named it.
+///
+/// `RxGain` (0x08AC), `IqPolarity` (0x0736) and `TxModulation` (0x0889) are
+/// deliberately NOT here: they are touched through
+/// `leviculum_core::sx126x::{probe_rx_init, apply_iq_polarity}`, where the
+/// address, the value and the read-write-read bracket sit beside a host test
+/// that can run them.
 mod reg {
     pub const LORA_SYNC_WORD: u16 = 0x0740;
     pub const TX_CLAMP_CONFIG: u16 = 0x08D8;
     pub const RTC_CONTROL: u16 = 0x0902;
     pub const EVENT_MASK: u16 = 0x0944;
-    /// Re-exported from core, where the address sits beside its permitted
-    /// values and a test that pins both against the reference firmware.
-    pub use leviculum_core::sx126x::{REG_IQ_POLARITY as IQ_POLARITY, REG_RX_GAIN as RX_GAIN};
 }
 
 // IRQ bitmasks and the `SetDioIrqParams` argument builders (datasheet §8.5,
@@ -191,6 +196,12 @@ pub struct Sx1262<SPI> {
     rx_ext_sf: u8,
     rx_ext_bw_hz: u32,
     rx_ext_cr_denom: u8,
+    /// True once the `[SX_REG_IQ]` read-back has been emitted this boot.
+    ///
+    /// `set_packet_params` runs once per transmitted frame, and the read-back
+    /// it carries costs two extra SPI reads. One boot, one line: this is what
+    /// keeps a diagnostic from becoming a per-frame tax.
+    iq_probe_done: bool,
 }
 
 impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
@@ -215,6 +226,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             rx_ext_sf: 0,
             rx_ext_bw_hz: 0,
             rx_ext_cr_denom: 0,
+            iq_probe_done: false,
         }
     }
 
@@ -363,20 +375,31 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             .await?;
         self.calibrate(0x7F).await?;
         self.calibrate_image(freq_hz).await?;
-        self.write_command(opcode::SET_PACKET_TYPE, &[0x01]).await?; // LoRa
-        // Boosted receive gain. There is no AGC on this part, so the value
-        // written here is the gain for the whole session, and until now we
-        // wrote neither value and ran at the chip's power-saving default —
-        // the one register the reference firmware sets that we did not even
-        // name (`sx126x.cpp:361`). After Calibrate, because calibration
-        // rewrites receiver trim.
+        // LoRa packet type.
+        self.write_command(opcode::SET_PACKET_TYPE, &[0x01]).await?;
+        // Boosted receive gain, and the read-back that makes it observable.
+        //
+        // There is no AGC on this part, so the value written here is the gain
+        // for the whole session, and until now we wrote neither value and ran
+        // at the chip's power-saving default — the one register the reference
+        // firmware sets that we did not even name (`sx126x.cpp:361`). After
+        // Calibrate, because calibration rewrites receiver trim.
+        //
+        // The write itself lives in `probe_rx_init` so the read-write-read
+        // bracket has a host test; the line it returns is the only evidence a
+        // capture can carry that the write happened, because the alternative
+        // — an unwritten register — looks identical in every other log.
         //
         // Not repeated in `configure_lora`: no command in that path resets it.
         // It IS lost across a sleep/warm-start, which this driver never does;
         // if a sleep is ever added, this write has to move or be repeated (or
         // the address added to the chip's retention list at 0x029F).
-        self.write_register(reg::RX_GAIN, &[leviculum_core::sx126x::RX_GAIN_BOOSTED])
-            .await?;
+        //
+        // `log_fmt_critical`, not `log_fmt`: init runs long before DTR-assert
+        // opens the runtime drain, so a gated line would be counted and
+        // dropped.
+        let probe = leviculum_core::sx126x::probe_rx_init(self).await?;
+        crate::log::log_fmt_critical("[SX_REG] ", format_args!("{}", probe));
         self.get_status().await
     }
 
@@ -396,7 +419,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             .map_err(|_| Error::Spi)
     }
 
-    /// Read a register (datasheet §13.2.2).
+    /// Read a register (datasheet §13.2.2). See also the single-byte
+    /// [`RegisterBus`](leviculum_core::sx126x::RegisterBus) forwarding below.
     pub async fn read_register(&mut self, addr: u16, data: &mut [u8]) -> Result<(), Error> {
         self.wait_busy().await?;
         let cmd = [
@@ -446,6 +470,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// whose harmlessness rested on that inference rather than on the
     /// datasheet — and it costs a register read plus a register write per
     /// call, which on the TX path is one per frame.
+    ///
+    /// The first call of a boot pays two further reads and emits
+    /// `[SX_REG_IQ]`, which is what settles whether the correction changes
+    /// anything on this chip: equal before- and after-values confirm the
+    /// inference above, unequal ones mean the divergence was real. Every
+    /// later call is exactly as expensive as it was before the read-back
+    /// existed.
     pub async fn set_packet_params(&mut self, payload_len: u8) -> Result<(), Error> {
         self.write_command(
             opcode::SET_PACKET_PARAMS,
@@ -459,10 +490,12 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             ],
         )
         .await?;
-        let mut iq = [0u8; 1];
-        self.read_register(reg::IQ_POLARITY, &mut iq).await?;
-        iq[0] = leviculum_core::sx126x::iq_polarity_value(iq[0], false);
-        self.write_register(reg::IQ_POLARITY, &iq).await
+        let probe = !self.iq_probe_done;
+        if let Some(line) = leviculum_core::sx126x::apply_iq_polarity(self, false, probe).await? {
+            self.iq_probe_done = true;
+            crate::log::log_fmt_critical("[SX_REG_IQ] ", format_args!("{}", line));
+        }
+        Ok(())
     }
 
     /// Apply TX PA clamp workaround (datasheet §15.2).
@@ -810,5 +843,27 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 Err(Error::Timeout)
             }
         }
+    }
+}
+
+/// Single-byte register access for `leviculum_core::sx126x`'s register probes.
+///
+/// Two forwarding methods and no logic. The logic — which register, which
+/// value, and in which order relative to the write — is in core, because that
+/// is where a test can run it: this crate cross-compiles to
+/// `thumbv7em-none-eabihf` and has no test target, so a read-write-read
+/// sequence written here would be a sequence nobody could distinguish from a
+/// single read plus a hardcoded second value.
+impl<SPI: SpiDeviceTrait> leviculum_core::sx126x::RegisterBus for Sx1262<SPI> {
+    type Error = Error;
+
+    async fn read_reg(&mut self, addr: u16) -> Result<u8, Error> {
+        let mut byte = [0u8; 1];
+        self.read_register(addr, &mut byte).await?;
+        Ok(byte[0])
+    }
+
+    async fn write_reg(&mut self, addr: u16, value: u8) -> Result<(), Error> {
+        self.write_register(addr, &[value]).await
     }
 }

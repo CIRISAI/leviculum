@@ -6,6 +6,8 @@
 //! ```text
 //! [INFO!] [PANIC_COUNT] total=<u32> t=<ms>                  (boot banner, once per boot)
 //! [HEAP] used=<n> free=<n> watermark=<n> size=<n> t=<ms>    (every 30 s)
+//! [SX_REG] rxgain_before=0xNN rxgain_after=0xNN txmod=0xNN  (once, end of init_radio)
+//! [SX_REG_IQ] iq_before=0xNN iq_after=0xNN txmod=0xNN       (once, first SetPacketParams)
 //! ```
 //!
 //! The trailing ` t=<ms>` is board uptime at the moment the line was
@@ -91,6 +93,146 @@ fn heap_telemetry_line_parses() {
     assert_eq!(parse_heap_line(line), Some((1, 2, 3, 4)));
     assert_eq!(parse_heap_line("[HEAP] used=1 free=2"), None);
     assert_eq!(parse_heap_line("[DIAG_MEM] stack_free=9000"), None);
+}
+
+/// Extract the hex-valued fields of an `[SX_REG]`-family register read-back.
+///
+/// Returns the fields in the order the line carries them. Shared by both
+/// lines: they differ in tag and field names, not in shape, and a consumer
+/// that wanted one of them by name would have to parse `key=0xNN` anyway.
+fn parse_reg_line(line: &str, tag: &str, keys: &[&str]) -> Option<Vec<u8>> {
+    let idx = line.find(tag)?;
+    let rest = &line[idx + tag.len()..];
+    let mut found: Vec<Option<u8>> = keys.iter().map(|_| None).collect();
+    for token in rest.split_whitespace() {
+        let (key, value) = token.split_once('=')?;
+        let Some(pos) = keys.iter().position(|k| *k == key) else {
+            continue; // the ` t=` stamp, and anything appended after it
+        };
+        found[pos] = u8::from_str_radix(value.strip_prefix("0x")?, 16).ok();
+    }
+    found.into_iter().collect()
+}
+
+const SX_REG_KEYS: [&str; 3] = ["rxgain_before", "rxgain_after", "txmod"];
+const SX_REG_IQ_KEYS: [&str; 3] = ["iq_before", "iq_after", "txmod"];
+
+/// The two register read-back lines parse, stamp and replay-wrapper included.
+///
+/// These are the only evidence a capture can carry that `35fdd87`'s two
+/// register writes took effect: an unwritten register and a written one look
+/// identical in every other line the firmware emits. The `before` field is
+/// what makes each line a measurement — `after` alone would say a register
+/// holds a value, not that we put it there — so a parser that dropped it
+/// would silently turn the measurement back into an assertion.
+#[test]
+fn register_readback_lines_parse() {
+    assert_eq!(
+        parse_reg_line(
+            "[SX_REG] rxgain_before=0x94 rxgain_after=0x96 txmod=0x0D t=412",
+            "[SX_REG] ",
+            &SX_REG_KEYS
+        ),
+        Some(vec![0x94, 0x96, 0x0D])
+    );
+    assert_eq!(
+        parse_reg_line(
+            "[SX_REG_IQ] iq_before=0x0D iq_after=0x0D txmod=0x0D t=511",
+            "[SX_REG_IQ] ",
+            &SX_REG_IQ_KEYS
+        ),
+        Some(vec![0x0D, 0x0D, 0x0D])
+    );
+    // The line is emitted through `log_fmt_critical`, so a board that crashed
+    // replays it wrapped on the next boot. Still parses.
+    assert_eq!(
+        parse_reg_line(
+            "[INFO!] [PERSISTENT_LOG] [SX_REG] rxgain_before=0x96 rxgain_after=0x96 txmod=0x0D t=412 t=7",
+            "[SX_REG] ",
+            &SX_REG_KEYS
+        ),
+        Some(vec![0x96, 0x96, 0x0D])
+    );
+    // A field missing is a parse failure, not a zero. A zero would read as a
+    // register that answered 0x00.
+    assert_eq!(
+        parse_reg_line(
+            "[SX_REG] rxgain_before=0x94 txmod=0x0D t=412",
+            "[SX_REG] ",
+            &SX_REG_KEYS
+        ),
+        None
+    );
+    // The two tags do not answer for each other.
+    assert_eq!(
+        parse_reg_line(
+            "[SX_REG] rxgain_before=0x94 rxgain_after=0x96 txmod=0x0D",
+            "[SX_REG_IQ] ",
+            &SX_REG_IQ_KEYS
+        ),
+        None
+    );
+}
+
+/// The firmware still emits what the parsers above expect, and — the part
+/// that matters — each `after` value is still a second read of the register
+/// rather than the value we sent.
+///
+/// The shaping lives in `leviculum_core::sx126x`'s two `Display` impls and the
+/// read-write-read brackets in `probe_rx_init` / `apply_iq_polarity`, which
+/// have their own host tests (`sx126x::probe_tests`). What is pinned here is
+/// the seam those tests cannot see: that the firmware actually calls them, and
+/// with the tag the host greps.
+#[test]
+fn the_firmware_still_emits_the_register_readback() {
+    let sx = nrf_source("sx1262.rs");
+    for (tag, call) in [
+        ("\"[SX_REG] \"", "sx126x::probe_rx_init(self)"),
+        ("\"[SX_REG_IQ] \"", "sx126x::apply_iq_polarity(self, false,"),
+    ] {
+        assert!(
+            sx.contains(tag),
+            "leviculum-nrf/src/sx1262.rs no longer emits the {tag} tag"
+        );
+        assert!(
+            sx.contains(call),
+            "leviculum-nrf/src/sx1262.rs no longer calls {call}, so the line it \
+             logs is no longer the core probe's bracketed read-back"
+        );
+    }
+    // Boot-critical, both of them: `init_radio` and the first
+    // `SetPacketParams` run long before DTR-assert opens the runtime drain, so
+    // a `log_fmt` here would be counted in RUNTIME_DROPPED and thrown away.
+    for tag in ["[SX_REG] ", "[SX_REG_IQ] "] {
+        let idx = sx
+            .find(tag)
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/sx1262.rs: {tag} tag gone"));
+        let call_start = sx[..idx].rfind("crate::log::").unwrap_or_else(|| {
+            panic!("leviculum-nrf/src/sx1262.rs: {tag} is not logged through crate::log")
+        });
+        assert!(
+            sx[call_start..idx].contains("log_fmt_critical"),
+            "leviculum-nrf/src/sx1262.rs logs {tag} through the runtime-gated \
+             log_fmt; it is emitted before DTR-assert and would be dropped"
+        );
+    }
+    // The field names and their order are the parsers' contract, and they live
+    // in core's Display impls.
+    let core_src = {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-core/src/sx126x.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    assert!(
+        core_src.contains("rxgain_before=0x{:02X} rxgain_after=0x{:02X} txmod=0x{:02X}"),
+        "the [SX_REG] field order or spelling changed in leviculum-core/src/sx126x.rs"
+    );
+    assert!(
+        core_src.contains("iq_before=0x{:02X} iq_after=0x{:02X} txmod=0x{:02X}"),
+        "the [SX_REG_IQ] field order or spelling changed in leviculum-core/src/sx126x.rs"
+    );
 }
 
 fn nrf_source(rel: &str) -> String {

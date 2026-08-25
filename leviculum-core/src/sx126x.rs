@@ -360,6 +360,159 @@ pub fn iq_polarity_value(current: u8, inverted_iq: bool) -> u8 {
     }
 }
 
+/// `TxModulation` (errata 15.1). Read here, never written.
+///
+/// Bit 2 must be CLEAR at 500 kHz bandwidth and SET at every other bandwidth
+/// (`docs/src/sx1262-datasheet-reference.md` §15.1). The reference firmware
+/// corrects it from `optimizeModemSensitivity` (`sx126x.cpp:796-803`) on every
+/// bandwidth change; we do not, and whether that is a real gap or a formality
+/// depends on the value the chip already holds — which is why the address is
+/// here at all. The register is on the transmit side, and the transmit side
+/// stays untouched until the batch that has the attenuator in line: a read is
+/// not a change.
+pub const REG_TX_MODULATION: u16 = 0x0889;
+
+/// The two SPI primitives the register probes below need.
+///
+/// # Why a trait
+///
+/// The probes are read-write-read brackets, and a bracket is a *sequence* —
+/// the one kind of thing this module exists to keep out of the driver. The
+/// premise for moving the register constants here was that "a constant that
+/// lives only there is a constant nobody can check"
+/// (`leviculum-nrf/src/sx1262.rs`); the same is true one level up. A sequence
+/// that lives only in `leviculum-nrf::sx1262` cannot be run against a test,
+/// so nothing can distinguish a probe that reads the chip twice from one that
+/// reads it once and reports a constant for the other half. With the sequence
+/// behind this trait, a host test drives it against a fake register file and
+/// that distinction is a `cargo test` away.
+///
+/// The driver implements it in two forwarding methods over its existing
+/// `read_register`/`write_register`. Nothing else in the driver changes.
+pub trait RegisterBus {
+    /// Whatever the transport fails with. The driver's is `sx1262::Error`.
+    type Error;
+
+    /// Read one register byte.
+    fn read_reg(
+        &mut self,
+        addr: u16,
+    ) -> impl core::future::Future<Output = Result<u8, Self::Error>>;
+
+    /// Write one register byte.
+    fn write_reg(
+        &mut self,
+        addr: u16,
+        value: u8,
+    ) -> impl core::future::Future<Output = Result<(), Self::Error>>;
+}
+
+/// What the boot-time register probe found, in the order the log line prints
+/// it.
+///
+/// [`Display`](core::fmt::Display) is the log line's body, so the shape the
+/// host greps is pinned by a host test rather than by a `format_args!` in a
+/// crate that has no test target.
+pub struct RxInitProbe {
+    /// [`REG_RX_GAIN`] as the chip held it before our write.
+    pub rx_gain_before: u8,
+    /// [`REG_RX_GAIN`] re-read from the chip after our write. Read back rather
+    /// than assumed: the written value would only say what we sent.
+    pub rx_gain_after: u8,
+    /// [`REG_TX_MODULATION`] as found. Never written, and read before
+    /// `SetModulationParams` has run, so this is the chip's own value.
+    pub tx_modulation: u8,
+}
+
+impl core::fmt::Display for RxInitProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "rxgain_before=0x{:02X} rxgain_after=0x{:02X} txmod=0x{:02X}",
+            self.rx_gain_before, self.rx_gain_after, self.tx_modulation
+        )
+    }
+}
+
+/// What the first `SetPacketParams` of a boot found.
+///
+/// Separate from [`RxInitProbe`] because the erratum-15.4 correction lives in
+/// `SetPacketParams`, which has not run yet when `init_radio` ends: there is
+/// no "after" to report there. See [`apply_iq_polarity`].
+pub struct PacketParamsProbe {
+    /// [`REG_IQ_POLARITY`] as `SetPacketParams` left it — the value errata
+    /// 15.4 says does not follow from the IQ setting the command was given.
+    pub iq_before: u8,
+    /// [`REG_IQ_POLARITY`] re-read from the chip after the correction.
+    pub iq_after: u8,
+    /// [`REG_TX_MODULATION`] as found, this time *after*
+    /// `SetModulationParams` has run. The pair of readings — this one and
+    /// [`RxInitProbe::tx_modulation`] — is what says whether the modulation
+    /// command disturbs the register errata 15.1 is about.
+    pub tx_modulation: u8,
+}
+
+impl core::fmt::Display for PacketParamsProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "iq_before=0x{:02X} iq_after=0x{:02X} txmod=0x{:02X}",
+            self.iq_before, self.iq_after, self.tx_modulation
+        )
+    }
+}
+
+/// Write [`RX_GAIN_BOOSTED`] and report what the register held on either side
+/// of the write, plus [`REG_TX_MODULATION`] as found.
+///
+/// Called once, at the end of the driver's `init_radio`. The write is the one
+/// this function exists to make observable: putting it here rather than in the
+/// driver is what lets a host test watch it happen, and what makes "skip the
+/// write and the two values are equal" a control somebody can run.
+///
+/// Three reads and one write, once per boot.
+pub async fn probe_rx_init<B: RegisterBus>(bus: &mut B) -> Result<RxInitProbe, B::Error> {
+    let rx_gain_before = bus.read_reg(REG_RX_GAIN).await?;
+    bus.write_reg(REG_RX_GAIN, RX_GAIN_BOOSTED).await?;
+    let rx_gain_after = bus.read_reg(REG_RX_GAIN).await?;
+    let tx_modulation = bus.read_reg(REG_TX_MODULATION).await?;
+    Ok(RxInitProbe {
+        rx_gain_before,
+        rx_gain_after,
+        tx_modulation,
+    })
+}
+
+/// Apply errata 15.4 to [`REG_IQ_POLARITY`], optionally reporting what the
+/// register held on either side.
+///
+/// `probe` is false on all but the first call of a boot, and it is what keeps
+/// the diagnostic off the per-frame path: `SetPacketParams` runs once per
+/// transmitted frame, so the correction's cost stays the one read and one
+/// write it was, and the two extra reads are paid once.
+///
+/// Returns `None` when `probe` is false — there is nothing to report, not a
+/// report of nothing.
+pub async fn apply_iq_polarity<B: RegisterBus>(
+    bus: &mut B,
+    inverted_iq: bool,
+    probe: bool,
+) -> Result<Option<PacketParamsProbe>, B::Error> {
+    let iq_before = bus.read_reg(REG_IQ_POLARITY).await?;
+    bus.write_reg(REG_IQ_POLARITY, iq_polarity_value(iq_before, inverted_iq))
+        .await?;
+    if !probe {
+        return Ok(None);
+    }
+    let iq_after = bus.read_reg(REG_IQ_POLARITY).await?;
+    let tx_modulation = bus.read_reg(REG_TX_MODULATION).await?;
+    Ok(Some(PacketParamsProbe {
+        iq_before,
+        iq_after,
+        tx_modulation,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +985,257 @@ mod tests {
             assert_eq!(iq_polarity_value(raw, false), raw | 0x04);
             assert_eq!(iq_polarity_value(raw, true), raw & !0x04);
         }
+    }
+
+    /// The `TxModulation` address is the one errata 15.1 and the reference
+    /// firmware name. Read-only in this tree, which is exactly why the address
+    /// has to be pinned: a transposed read is a wrong number in a report
+    /// rather than a chip that misbehaves, and a wrong number in a report is
+    /// believed.
+    #[test]
+    fn tx_modulation_address_matches_the_reference() {
+        // docs/src/sx1262-datasheet-reference.md §15.1 and its key register
+        // table: "0x0889 | TxModulation | BW500 workaround (bit 2)".
+        assert_eq!(REG_TX_MODULATION, 0x0889);
+        // reference/RNode_Firmware/sx126x.cpp:797 — readRegister(0x0889).
+        assert_ne!(REG_TX_MODULATION, REG_RX_GAIN);
+        assert_ne!(REG_TX_MODULATION, REG_IQ_POLARITY);
+    }
+}
+
+/// The read-write-read brackets, driven against a register file.
+///
+/// This is the module the mutation control runs in. Delete the `write_reg`
+/// call inside [`probe_rx_init`] and
+/// `the_boot_probe_brackets_the_rx_gain_write` fails printing the line with
+/// `rxgain_after` equal to `rxgain_before` — which is the whole point of
+/// reporting both. Nothing else in this tree can show that without a board.
+#[cfg(test)]
+mod probe_tests {
+    extern crate std;
+
+    use super::*;
+    use alloc::collections::BTreeMap;
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    /// One register access, in the order it happened.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Op {
+        Read(u16),
+        Write(u16, u8),
+    }
+
+    /// A register file that answers reads and remembers writes.
+    ///
+    /// `RX_GAIN` starts at [`RX_GAIN_POWER_SAVING`] because that is the chip's
+    /// documented reset default — the state the whole batch is about. The
+    /// other two start at values that are this fixture's and nothing else's
+    /// (0xA1, 0x5A): a test that asserted a plausible-looking datasheet value
+    /// here would be inventing one, and the real values are what the board
+    /// prints. 0xA1 has bit 2 clear and six other bits set, so a correction
+    /// that touched anything but bit 2 shows up as a different byte.
+    struct FakeChip {
+        regs: BTreeMap<u16, u8>,
+        ops: Vec<Op>,
+    }
+
+    impl FakeChip {
+        fn new() -> Self {
+            let mut regs = BTreeMap::new();
+            regs.insert(REG_RX_GAIN, RX_GAIN_POWER_SAVING);
+            regs.insert(REG_IQ_POLARITY, 0xA1); // bit 2 clear
+            regs.insert(REG_TX_MODULATION, 0x5A);
+            Self {
+                regs,
+                ops: Vec::new(),
+            }
+        }
+
+        fn with(mut self, addr: u16, value: u8) -> Self {
+            self.regs.insert(addr, value);
+            self
+        }
+
+        fn reads(&self) -> usize {
+            self.ops
+                .iter()
+                .filter(|op| matches!(op, Op::Read(_)))
+                .count()
+        }
+    }
+
+    impl RegisterBus for FakeChip {
+        type Error = ();
+
+        async fn read_reg(&mut self, addr: u16) -> Result<u8, ()> {
+            self.ops.push(Op::Read(addr));
+            Ok(self.regs.get(&addr).copied().unwrap_or(0))
+        }
+
+        async fn write_reg(&mut self, addr: u16, value: u8) -> Result<(), ()> {
+            self.ops.push(Op::Write(addr, value));
+            self.regs.insert(addr, value);
+            Ok(())
+        }
+    }
+
+    /// Run a probe to completion.
+    ///
+    /// `FakeChip`'s futures never pend — every access resolves in the poll
+    /// that starts it — so one poll is the whole execution and a `Pending`
+    /// here would mean the probe grew a wait this harness cannot see.
+    fn run<F: core::future::Future>(fut: F) -> F::Output {
+        let mut fut = core::pin::pin!(fut);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        match fut.as_mut().poll(&mut cx) {
+            core::task::Poll::Ready(v) => v,
+            core::task::Poll::Pending => panic!("the fake register file never pends"),
+        }
+    }
+
+    /// The boot line reports the register on both sides of our write.
+    ///
+    /// **This is the positive control.** Remove the `write_reg` from
+    /// `probe_rx_init` and this fails with `rxgain_after=0x94` — equal to
+    /// `rxgain_before`, which is what "the write did not happen" looks like on
+    /// the wire. A probe that reported a constant for either half would pass
+    /// this test only by accident and fail
+    /// `the_before_value_follows_the_chip_not_the_code` below.
+    #[test]
+    fn the_boot_probe_brackets_the_rx_gain_write() {
+        let mut chip = FakeChip::new();
+        let probe = run(probe_rx_init(&mut chip)).expect("the fake chip never errors");
+        assert_eq!(
+            format!("{probe}"),
+            "rxgain_before=0x94 rxgain_after=0x96 txmod=0x5A"
+        );
+        // The bracket, in order: the before-read must precede the write and
+        // the after-read must follow it, or the two values are not a bracket.
+        assert_eq!(
+            chip.ops,
+            [
+                Op::Read(REG_RX_GAIN),
+                Op::Write(REG_RX_GAIN, RX_GAIN_BOOSTED),
+                Op::Read(REG_RX_GAIN),
+                Op::Read(REG_TX_MODULATION),
+            ]
+        );
+    }
+
+    /// `before` is read off the chip, not baked into the probe.
+    ///
+    /// A board that already holds the boosted value — which is what a warm
+    /// start or a second `init_radio` looks like — must print `0x96` for
+    /// both. If `rxgain_before` were the constant `RX_GAIN_POWER_SAVING` in
+    /// disguise, this is the test that says so.
+    #[test]
+    fn the_before_value_follows_the_chip_not_the_code() {
+        let mut chip = FakeChip::new().with(REG_RX_GAIN, RX_GAIN_BOOSTED);
+        let probe = run(probe_rx_init(&mut chip)).expect("the fake chip never errors");
+        assert_eq!(
+            format!("{probe}"),
+            "rxgain_before=0x96 rxgain_after=0x96 txmod=0x5A"
+        );
+    }
+
+    /// The `txmod` field is a read and only a read.
+    ///
+    /// Errata 15.1 is reserved for the batch that has the attenuator in line;
+    /// this probe must not start correcting it by accident.
+    #[test]
+    fn the_probe_never_writes_tx_modulation() {
+        let mut chip = FakeChip::new();
+        let _ = run(probe_rx_init(&mut chip)).expect("the fake chip never errors");
+        assert!(!chip
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Write(REG_TX_MODULATION, _))));
+        assert_eq!(chip.regs.get(&REG_TX_MODULATION).copied(), Some(0x5A));
+        let mut chip = FakeChip::new();
+        let _ = run(apply_iq_polarity(&mut chip, false, true)).expect("the fake chip never errors");
+        assert!(!chip
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Write(REG_TX_MODULATION, _))));
+    }
+
+    /// The IQ line reports the register on both sides of the correction.
+    ///
+    /// Same control as the RX-gain one: drop the `write_reg` from
+    /// `apply_iq_polarity` and `iq_after` collapses onto `iq_before`.
+    #[test]
+    fn the_iq_probe_brackets_the_correction() {
+        let mut chip = FakeChip::new();
+        let probe = run(apply_iq_polarity(&mut chip, false, true))
+            .expect("the fake chip never errors")
+            .expect("probe requested");
+        // 0xA1 | 0x04 == 0xA5: bit 2 set, the other seven untouched.
+        assert_eq!(
+            format!("{probe}"),
+            "iq_before=0xA1 iq_after=0xA5 txmod=0x5A"
+        );
+        assert_eq!(
+            chip.ops,
+            [
+                Op::Read(REG_IQ_POLARITY),
+                Op::Write(REG_IQ_POLARITY, 0xA5),
+                Op::Read(REG_IQ_POLARITY),
+                Op::Read(REG_TX_MODULATION),
+            ]
+        );
+    }
+
+    /// The outcome the interop evidence predicts, and what it looks like.
+    ///
+    /// If the chip already leaves bit 2 set in the standard-IQ case — the
+    /// inference `35fdd87` rested on — the two values are equal and the
+    /// correction is confirmed a no-op. That reading is a *result*, not a
+    /// broken indicator, and this test is what tells the two apart: here the
+    /// equality is expected, in the mutation control it is the failure.
+    #[test]
+    fn an_already_correct_register_reports_before_equal_to_after() {
+        let mut chip = FakeChip::new().with(REG_IQ_POLARITY, 0xA5);
+        let probe = run(apply_iq_polarity(&mut chip, false, true))
+            .expect("the fake chip never errors")
+            .expect("probe requested");
+        assert_eq!(
+            format!("{probe}"),
+            "iq_before=0xA5 iq_after=0xA5 txmod=0x5A"
+        );
+    }
+
+    /// Off the per-frame path: with `probe` false the correction costs exactly
+    /// what it cost before this batch — one read, one write.
+    ///
+    /// `SetPacketParams` runs once per transmitted frame at 4 MHz SPI, so this
+    /// is the assertion that keeps a boot diagnostic from becoming a per-frame
+    /// tax.
+    #[test]
+    fn the_unprobed_call_costs_one_read_and_one_write() {
+        let mut chip = FakeChip::new();
+        let probe = run(apply_iq_polarity(&mut chip, false, false)).expect("never errors");
+        assert!(probe.is_none());
+        assert_eq!(
+            chip.ops,
+            [Op::Read(REG_IQ_POLARITY), Op::Write(REG_IQ_POLARITY, 0xA5),]
+        );
+        assert_eq!(chip.reads(), 1);
+    }
+
+    /// Inverted IQ clears the bit and the probe reports that too.
+    ///
+    /// The driver only ever asks for standard IQ, so this is the arm nothing
+    /// on the board exercises — which is precisely why it needs a host test.
+    #[test]
+    fn inverted_iq_is_reported_the_same_way() {
+        let mut chip = FakeChip::new().with(REG_IQ_POLARITY, 0xA5);
+        let probe = run(apply_iq_polarity(&mut chip, true, true))
+            .expect("the fake chip never errors")
+            .expect("probe requested");
+        assert_eq!(
+            format!("{probe}"),
+            "iq_before=0xA5 iq_after=0xA1 txmod=0x5A"
+        );
     }
 }
