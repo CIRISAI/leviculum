@@ -979,7 +979,6 @@ dependencies = [
  "leviculum-gnss-time",
  "leviculum-lxmf",
  "leviculum-queue-budget",
- "leviculum-rx-turnaround",
  "leviculum-screen",
  "leviculum-sd-policy",
  "leviculum-telemetry-policy",
@@ -995,13 +994,6 @@ dependencies = [
 [[package]]
 name = "leviculum-queue-budget"
 version = "0.1.0"
-
-[[package]]
-name = "leviculum-rx-turnaround"
-version = "0.1.0"
-dependencies = [
- "leviculum-core",
-]
 
 [[package]]
 name = "leviculum-screen"

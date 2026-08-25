@@ -54,45 +54,11 @@ mod reg {
 // RX-extend guard in `receive()` was dead for its whole life because nothing
 // here could be run against a test.
 use leviculum_core::sx126x as irq;
-// The defer-or-proceed decision for the RX->TX turnaround, and the bound it
-// waits out. Pure and host-tested for the same reason as `irq` above: the
-// #144 guard proved that a decision written in this file is a decision
-// nothing can be run against.
-use leviculum_rx_turnaround as turnaround;
 
 /// Received packet status (RSSI and SNR).
 pub struct RxStatus {
     pub rssi: i16,
     pub snr: i16,
-}
-
-/// What holding the turnaround open for an in-progress reception produced.
-pub enum Turnaround {
-    /// Nothing was on the air: no wait happened, and the caller's path is
-    /// bit-for-bit what it was before this existed. The common case.
-    Clear,
-    /// A frame completed during the deferral and was read into the caller's
-    /// buffer. The queued transmission still goes out afterwards.
-    Received { len: u8, status: RxStatus },
-    /// A frame completed but failed its payload CRC.
-    Corrupt,
-    /// The bound expired with no reception. The radio transmits anyway —
-    /// this is the guarantee that a channel which never goes quiet, or a
-    /// false preamble, cannot hold TX off forever.
-    Expired,
-}
-
-impl Turnaround {
-    /// Stable token for the structured log line, so the debug port shows a
-    /// deferral that delivered and a deferral that hit its bound apart.
-    fn label(&self) -> &'static str {
-        match self {
-            Turnaround::Clear => "clear",
-            Turnaround::Received { .. } => "received",
-            Turnaround::Corrupt => "corrupt",
-            Turnaround::Expired => "expired",
-        }
-    }
 }
 
 /// What a frame that failed its payload CRC looked like on the air.
@@ -737,104 +703,6 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             let _ = self.set_standby_rc().await;
             Err(Error::Timeout)
         }
-    }
-
-    /// The modulation the chip is currently programmed with, as the pure
-    /// policy crates want it. Zero `bw_hz` before `configure_lora` has run.
-    pub fn modulation(&self) -> turnaround::Modulation {
-        turnaround::Modulation {
-            bw_hz: self.rx_ext_bw_hz,
-            sf: self.rx_ext_sf,
-            cr_denom: self.rx_ext_cr_denom,
-            preamble_symbols: self.preamble_len,
-        }
-    }
-
-    /// Hold the RX→TX turnaround open for a reception that is already in
-    /// progress, and read it out if it completes.
-    ///
-    /// Called on the one path that abandons a live RX: the idle loop's
-    /// `select` losing to the outgoing queue. Everything it does happens
-    /// **while the chip is still in RX** — that is the entire point, and the
-    /// reason it cannot be expressed with the CAD that runs after standby.
-    /// It re-arms nothing: no `SetRx`, no `SetDioIrqParams`, and no
-    /// `ClearIrqStatus` until the decision is over, so a frame arriving
-    /// during the wait lands in the chip's buffer intact.
-    ///
-    /// [`turnaround::Clear`](Turnaround::Clear) is the common case and costs
-    /// exactly one `GetIrqStatus`: the caller then proceeds to standby and
-    /// CSMA as it always has.
-    ///
-    /// The bound and the defer-or-proceed decision are
-    /// [`leviculum_rx_turnaround`]; this holds only SPI and a clock.
-    pub async fn defer_turnaround(&mut self, buf: &mut [u8]) -> Result<Turnaround, Error> {
-        let m = self.modulation();
-        let mut flags = self.get_irq_status().await?;
-        let Some(mut wait_ms) = turnaround::turnaround_wait_ms(flags, 0, m) else {
-            return Ok(Turnaround::Clear);
-        };
-
-        crate::log::log_fmt(
-            "[T114_RX_DEFER] ",
-            format_args!(
-                "flags={:#06x} bound_ms={} sf={} bw_hz={}",
-                flags, wait_ms, m.sf, m.bw_hz
-            ),
-        );
-
-        // `elapsed` is cumulative from here, which is what makes the loop
-        // terminate: `turnaround_wait_ms` compares it against a bound that is
-        // a constant of the modulation, so a spurious DIO1 wake shortens the
-        // next wait instead of restarting it. Worst case the loop costs one
-        // `frame_bound_ms` in total, whatever the flags do.
-        let started = embassy_time::Instant::now();
-        let waited_ms = loop {
-            let _ = with_timeout(Duration::from_millis(wait_ms), self.dio1.wait_for_high()).await;
-            let elapsed = started.elapsed().as_millis();
-            flags = self.get_irq_status().await?;
-            match turnaround::turnaround_wait_ms(flags, elapsed, m) {
-                Some(next) => wait_ms = next,
-                None => break elapsed,
-            }
-        };
-
-        // The wait is over either because the reception concluded or because
-        // the bound expired. Read out a good frame; anything else the caller
-        // simply transmits over, which is what it would have done anyway.
-        let outcome = if flags & irq::IRQ_RX_DONE == 0 {
-            Turnaround::Expired
-        } else if flags & irq::IRQ_CRC_ERR != 0 {
-            Turnaround::Corrupt
-        } else {
-            let (len, ptr) = self.get_rx_buffer_status().await?;
-            let read_len = (len as usize).min(buf.len());
-            self.read_buffer(ptr, &mut buf[..read_len]).await?;
-            let status = self.get_packet_status().await?;
-            Turnaround::Received {
-                len: read_len as u8,
-                status,
-            }
-        };
-
-        crate::log::log_fmt(
-            "[T114_RX_DEFER_DONE] ",
-            format_args!(
-                "outcome={} waited_ms={} flags={:#06x}",
-                outcome.label(),
-                waited_ms,
-                flags
-            ),
-        );
-
-        // Drop the latched PreambleDetected/HeaderValid before the caller
-        // keys the radio. Without this the same stale bit would defer the
-        // NEXT turnaround too, and a channel with one false preamble in it
-        // could hold TX off repeatedly (the reference clears the same bit for
-        // the same reason, `sx126x.cpp:512-514`).
-        self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
-            .await?;
-
-        Ok(outcome)
     }
 
     // CAD (Channel Activity Detection)

@@ -70,14 +70,11 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
     # leviculum-screen, leviculum-sd-policy, leviculum-gnss-time,
     # leviculum-gnss-presence, leviculum-gnss-init, leviculum-telemetry-policy,
-    # leviculum-ble-tx, leviculum-queue-budget and leviculum-rx-turnaround are
-    # the pure, host-testable crates inside the leviculum-nrf workspace: clippy
-    # + tests run on the host triple (the workspace's .cargo/config defaults to
-    # thumbv7em). A new crate here that is not added to BOTH lines below is a
-    # crate whose tests nobody runs, which is the exact failure it exists to
-    # prevent.
-    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-rx-turnaround --target $(rustc -vV | sed -n 's/host: //p') -- -D warnings
-    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-rx-turnaround --target $(rustc -vV | sed -n 's/host: //p')
+    # leviculum-ble-tx and leviculum-queue-budget are the pure, host-testable
+    # crates inside the leviculum-nrf workspace: clippy + tests run on the host
+    # triple (the workspace's .cargo/config defaults to thumbv7em).
+    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget --target $(rustc -vV | sed -n 's/host: //p') -- -D warnings
+    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget --target $(rustc -vV | sed -n 's/host: //p')
 
 # Stack-frame gate for the firmware. The T114 stack grows down into the
 # SoftDevice RAM floor, so one oversized frame eats the whole margin and
