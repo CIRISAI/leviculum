@@ -446,6 +446,10 @@ async fn notify_fragments<'a, F>(
 /// t=<ms>`, one line, scalar values, no whitespace inside a value — so
 /// `grep BLE_TX_DROP` over a captured debug-port log is a usable
 /// measurement of how much BLE traffic never left the node.
+///
+/// The trailing `t=` is not written here: `log_fmt` appends it to every
+/// line, from the same `Instant::now()`. This call site used to write
+/// its own, which after that change rendered the field twice.
 fn report_tx_drop(
     kind: &str,
     packet_len: usize,
@@ -460,7 +464,7 @@ fn report_tx_drop(
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
-            "BLE_TX_DROP kind={} len={} frag={} of={} sent={} reason={} code={} waits={} dropped={} t={}",
+            "BLE_TX_DROP kind={} len={} frag={} of={} sent={} reason={} code={} waits={} dropped={}",
             kind,
             packet_len,
             index,
@@ -470,7 +474,6 @@ fn report_tx_drop(
             code,
             tx.drain_waits(),
             dropped,
-            Instant::now().as_millis(),
         ),
     );
 }

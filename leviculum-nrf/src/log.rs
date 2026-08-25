@@ -6,6 +6,11 @@
 //! This design never blocks, never drops messages for the reader, and works
 //! regardless of when the host opens the port. Old data is overwritten when
 //! the ring buffer is full (like Linux `dmesg` / `printk`).
+//!
+//! Every line carries a board-side `t=<uptime_ms>` stamp, appended at the
+//! end. The host cannot supply one: the ring is drained in 64-byte USB
+//! packets on a 100 ms loop, so a capture's arrival times measure the
+//! drain, not the board. Shape and rationale in `leviculum-log-line`.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -124,31 +129,36 @@ pub static LOG_RING: LogRing = LogRing::new();
 pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Log formatting
-/// Format a log message into a 256-byte stack buffer with the given prefix
-/// and a trailing CRLF. Returns the slice of valid bytes.
+/// Milliseconds of board uptime, for the `t=` stamp every log line carries.
+///
+/// # Why this is safe from every context that logs
+///
+/// `Instant::now()` on this target resolves to embassy-nrf's RTC1 driver:
+/// a relaxed load of the driver's `period` counter and a read of the RTC1
+/// `COUNTER` register (`embassy-nrf-0.9.0/src/time_driver.rs:344-350`).
+/// No critical section, no lock, no allocation, nothing that can panic —
+/// so it is as safe in `log_fmt_critical`'s boot-phase and PMRT-replay
+/// callers as in a task.
+///
+/// It is *meaningful* from every logging context too, because both
+/// firmware entry points call `embassy_nrf::init` — which starts RTC1 —
+/// as the FIRST statement of `main`, before any log call
+/// (`bin/t114.rs:42`, `bin/rak4631.rs:43`). The panic handler
+/// (`lib.rs:714`) and the `HardFault` exception (`lib.rs:954`) never log:
+/// both write their evidence to `.uninit` RAM and `sys_reset`, and it is
+/// the NEXT boot that logs it — with its own running clock. There is
+/// therefore no reachable call site where the driver is un-started and no
+/// line that needs a sentinel. `lnode_debug_log_format.rs` pins that
+/// ordering so it stays true.
+fn uptime_ms() -> u64 {
+    embassy_time::Instant::now().as_millis()
+}
+
+/// Format a log message into a caller-provided stack buffer: the given
+/// prefix, the body, the ` t=<uptime_ms>` stamp, and a trailing CRLF.
+/// Returns the slice of valid bytes.
 fn fmt_into<'a>(buf: &'a mut [u8; 1024], prefix: &str, args: core::fmt::Arguments) -> &'a [u8] {
-    let mut len = 0usize;
-    struct BufWriter<'a> {
-        buf: &'a mut [u8],
-        len: &'a mut usize,
-    }
-    impl core::fmt::Write for BufWriter<'_> {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            let remaining = self.buf.len() - *self.len;
-            let to_copy = s.len().min(remaining);
-            self.buf[*self.len..*self.len + to_copy].copy_from_slice(&s.as_bytes()[..to_copy]);
-            *self.len += to_copy;
-            Ok(())
-        }
-    }
-    let mut w = BufWriter {
-        buf: buf.as_mut_slice(),
-        len: &mut len,
-    };
-    let _ = core::fmt::Write::write_str(&mut w, prefix);
-    let _ = core::fmt::Write::write_fmt(&mut w, args);
-    let _ = core::fmt::Write::write_str(&mut w, "\r\n");
-    &buf[..len]
+    leviculum_log_line::format_line(buf.as_mut_slice(), prefix, args, uptime_ms())
 }
 
 /// Format and write a log message to the ring buffer. Never blocks.
@@ -369,44 +379,34 @@ impl tracing_core::Subscriber for TracingSubscriber {
             tracing_core::Level::TRACE => "TRACE",
         };
 
+        // Stamp first, so it is the moment the event happened rather
+        // than the moment its (unbounded) field list finished
+        // formatting.
+        let stamp = uptime_ms();
         let mut buf = [0u8; 1024];
         let mut len = 0usize;
 
-        struct BufWriter<'a> {
-            buf: &'a mut [u8],
-            len: &'a mut usize,
-        }
-        impl core::fmt::Write for BufWriter<'_> {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                let remaining = self.buf.len() - *self.len;
-                let to_copy = s.len().min(remaining);
-                self.buf[*self.len..*self.len + to_copy].copy_from_slice(&s.as_bytes()[..to_copy]);
-                *self.len += to_copy;
-                Ok(())
-            }
-        }
-
+        // The tail of the buffer belongs to the stamp and the CRLF; the
+        // prefix and the fields share what is left. Same reservation
+        // `format_line` makes for `log_fmt`, and for the same reason: a
+        // truncated stamp is a wrong measurement, a truncated field list
+        // is only a shorter one.
         {
-            let mut w = BufWriter {
-                buf: &mut buf,
-                len: &mut len,
-            };
+            let limit = leviculum_log_line::body_limit(buf.len());
+            let mut w = leviculum_log_line::Sink::new(&mut buf[..limit], &mut len);
             let _ = core::fmt::Write::write_fmt(
                 &mut w,
                 format_args!("[{}] {}: ", level, metadata.target()),
             );
         }
-        event.record(&mut TracingVisitor {
-            buf: &mut buf,
-            len: &mut len,
-        });
         {
-            let mut w = BufWriter {
-                buf: &mut buf,
+            let limit = leviculum_log_line::body_limit(buf.len());
+            event.record(&mut TracingVisitor {
+                buf: &mut buf[..limit],
                 len: &mut len,
-            };
-            let _ = core::fmt::Write::write_str(&mut w, "\r\n");
+            });
         }
+        let len = leviculum_log_line::finish(&mut buf, len, stamp);
 
         LOG_RING.write(&buf[..len]);
         PERSISTENT_TAIL.write(&buf[..len]);
@@ -422,23 +422,7 @@ struct TracingVisitor<'a> {
 
 impl tracing_core::field::Visit for TracingVisitor<'_> {
     fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn core::fmt::Debug) {
-        struct BufWriter<'a> {
-            buf: &'a mut [u8],
-            len: &'a mut usize,
-        }
-        impl core::fmt::Write for BufWriter<'_> {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                let remaining = self.buf.len() - *self.len;
-                let to_copy = s.len().min(remaining);
-                self.buf[*self.len..*self.len + to_copy].copy_from_slice(&s.as_bytes()[..to_copy]);
-                *self.len += to_copy;
-                Ok(())
-            }
-        }
-        let mut w = BufWriter {
-            buf: self.buf,
-            len: self.len,
-        };
+        let mut w = leviculum_log_line::Sink::new(self.buf, self.len);
         if field.name() == "message" {
             let _ = core::fmt::Write::write_fmt(&mut w, format_args!("{:?}", value));
         } else {

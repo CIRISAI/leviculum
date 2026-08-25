@@ -225,6 +225,36 @@ subscriber can never see emitted is exactly the silent rot the rule
 above forbids.  Firmware events are documented here and at their
 call site instead.
 
+### Who writes `t=` on a firmware line
+
+Nobody at the call site.  Since #344 the firmware's log formatter
+(`leviculum-nrf/src/log.rs`, shape in `leviculum-log-line`) appends
+` t=<uptime-ms>` to **every** line it emits — event lines, plain
+`[LORA]`/`[INFO]` lines, boot banners, `tracing` records alike.  A
+call site that also writes its own `t=` renders the field twice;
+`BLE_TX_DROP` did, and stopped.
+
+The stamp is taken when the line is *formatted*, not when it is
+drained: the ring is emptied in 64-byte USB packets on a 100 ms
+loop, so host arrival times measure that loop and nothing else.
+
+**A line may still legitimately carry two `t=` fields.** The boot
+replay of the persistent tail wraps a line from the previous boot,
+its stamp included, inside a line of this boot:
+
+```text
+[INFO!] [PERSISTENT_LOG] [LORA] RX 41 bytes t=91422 t=137
+```
+
+Both are true.  A line's own stamp is always its **last** `t=` —
+the same rule `merge_event_logs` already applies, so the two agree.
+
+**Epochs do not.**  A firmware `t=` is milliseconds of board uptime;
+a host-side `t=` is milliseconds since that subscriber's init.
+Merging a debug-port capture into a host event log with
+`merge_event_logs` therefore orders each stream correctly within
+itself and says nothing across the two.
+
 Current firmware events:
 
 | Event | Emitted by | Meaning |

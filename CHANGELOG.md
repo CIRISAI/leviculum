@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every firmware debug line ends in `t=<uptime-ms>`, stamped on the board
+  when the line is formatted, so a capture measures the board and not the
+  USB drain loop (#344).
+
 - The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
   binds first, instead of four packets; a refusal names which bound it hit
   (#344).

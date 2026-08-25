@@ -4,9 +4,16 @@
 //! The firmware emits two line shapes on the CDC-ACM debug console:
 //!
 //! ```text
-//! [INFO!] [PANIC_COUNT] total=<u32>                  (boot banner, once per boot)
-//! [HEAP] used=<n> free=<n> watermark=<n> size=<n>    (every 30 s)
+//! [INFO!] [PANIC_COUNT] total=<u32> t=<ms>                  (boot banner, once per boot)
+//! [HEAP] used=<n> free=<n> watermark=<n> size=<n> t=<ms>    (every 30 s)
 //! ```
+//!
+//! The trailing ` t=<ms>` is board uptime at the moment the line was
+//! formatted, appended to EVERY runtime line since the drain-latency audit
+//! (#344). It is deliberately at the END: every consumer below anchors on a
+//! `[TAG]`, and a leading stamp would break all of them at once. The parsers
+//! here therefore have to keep working with an unknown-key field appended —
+//! which is exactly what `stamp_does_not_disturb_the_existing_parsers` asserts.
 //!
 //! Two host-side consumers grep them: `scripts/catch-reboot.sh`, which reports
 //! the cause of a reboot caught under sustained LoRa load, and the ad-hoc heap
@@ -120,6 +127,147 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
         assert!(
             nrf_source(bin).contains("log_panic_count()"),
             "leviculum-nrf/src/{bin} no longer emits the [PANIC_COUNT] banner at boot"
+        );
+    }
+}
+
+/// The uptime stamp of a captured line: its LAST `t=` field.
+///
+/// The last, not the first: a `[PERSISTENT_LOG]` replay wraps a line from the
+/// previous boot — its stamp included — inside a line of this boot. The
+/// firmware-side definition of this rule lives in `leviculum-log-line`; this
+/// is the host-side copy, and the two are pinned against each other by
+/// `the_firmware_stamps_every_line_with_board_uptime` below.
+fn parse_stamp(line: &str) -> Option<u64> {
+    line.trim_end_matches(['\r', '\n'])
+        .rsplit(' ')
+        .find_map(|field| field.strip_prefix("t="))
+        .and_then(|v| v.parse().ok())
+}
+
+#[test]
+fn uptime_stamp_parses_off_the_end_of_a_line() {
+    assert_eq!(
+        parse_stamp("[HEAP] used=52376 free=13156 watermark=52376 size=65536 t=91422"),
+        Some(91422)
+    );
+    // A replayed line carries two. The line's own stamp is the outer one.
+    assert_eq!(
+        parse_stamp("[INFO!] [PERSISTENT_LOG] [LORA] RX 41 bytes t=91422 t=137"),
+        Some(137)
+    );
+    assert_eq!(parse_stamp("[LORA] RX 41 bytes"), None);
+    assert_eq!(parse_stamp("[LORA] rtt=5"), None);
+}
+
+#[test]
+fn stamp_does_not_disturb_the_existing_parsers() {
+    // The whole risk of appending a field is that a consumer keyed on the
+    // rest of the line stops seeing it. Both parsers above, on real stamped
+    // lines, must return exactly what they returned before the stamp existed.
+    assert_eq!(
+        parse_panic_count("[INFO!] [PANIC_COUNT] total=3 t=137"),
+        Some(3)
+    );
+    assert_eq!(
+        parse_heap_line("[HEAP] used=52376 free=13156 watermark=52376 size=65536 t=91422"),
+        Some((52376, 13156, 52376, 65536))
+    );
+    assert_eq!(
+        parse_heap_line("[INFO!] [PERSISTENT_LOG] [HEAP] used=1 free=2 watermark=3 size=4 t=9 t=2"),
+        Some((1, 2, 3, 4))
+    );
+}
+
+/// The stamp is only a measurement if the clock behind it was running, and
+/// only usable if it is on every line. Both are properties of the firmware
+/// source, so both are pinned here.
+#[test]
+fn the_firmware_stamps_every_line_with_board_uptime() {
+    let log = nrf_source("log.rs");
+    assert!(
+        log.contains("embassy_time::Instant::now().as_millis()"),
+        "leviculum-nrf/src/log.rs no longer reads board uptime for the t= stamp"
+    );
+    // Uniform: both formatting paths — the `log_fmt*` one and the tracing
+    // subscriber's hand-built line — close through the shared shaper. A
+    // stamp on some lines and not others is a trap for whoever reads the
+    // log next.
+    assert!(
+        log.contains("leviculum_log_line::format_line("),
+        "log_fmt/log_fmt_critical no longer shape their line through leviculum-log-line"
+    );
+    assert!(
+        log.contains("leviculum_log_line::finish("),
+        "the tracing subscriber no longer appends the t= stamp"
+    );
+    // The stamp is meaningful in every logging context only because RTC1 is
+    // already running when the first line is written. Both entry points start
+    // it — `embassy_nrf::init` — before they log anything. If that order ever
+    // flips, the boot lines silently become t=0.
+    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
+        let src = nrf_source(bin);
+        let init = src
+            .find("embassy_nrf::init(")
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} no longer calls embassy_nrf::init"));
+        let first_log = ["log_critical!", "info!(", "warn!(", "log_fmt"]
+            .iter()
+            .filter_map(|pat| src.find(pat))
+            .min()
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} logs nothing at all"));
+        assert!(
+            init < first_log,
+            "leviculum-nrf/src/{bin} logs before embassy_nrf::init starts the clock, \
+             so the first lines would carry t=0 rather than a real uptime"
+        );
+    }
+}
+
+/// The panic handler and the HardFault exception must keep NOT logging.
+///
+/// They are the two contexts where a clock read would have needed a sentinel.
+/// Today neither writes a log line: both capture their evidence into
+/// `.uninit` RAM and `sys_reset`, and the NEXT boot logs it with a running
+/// clock. That is what makes "every line carries a real stamp" true without
+/// exception, so it is asserted rather than merely described.
+/// The brace-balanced body that follows `marker` in `src`.
+fn body_after<'a>(src: &'a str, marker: &str, what: &str) -> &'a str {
+    let after = src
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("leviculum-nrf/src/lib.rs: {what} not found ({marker:?})"))
+        .1;
+    let open = after
+        .find('{')
+        .unwrap_or_else(|| panic!("leviculum-nrf/src/lib.rs: {what} has no body"));
+    let mut depth = 0usize;
+    for (i, c) in after[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &after[open..open + i + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("leviculum-nrf/src/lib.rs: {what} body is not brace-balanced");
+}
+
+#[test]
+fn the_fault_paths_still_capture_rather_than_log() {
+    let lib = nrf_source("lib.rs");
+    for (marker, what) in [
+        ("#[panic_handler]", "the panic handler"),
+        ("unsafe fn HardFault(", "the HardFault handler"),
+    ] {
+        let body = body_after(&lib, marker, what);
+        assert!(
+            !body.contains("log_fmt") && !body.contains("log_critical!"),
+            "{what} now logs; it runs with the executor dead, and whether its line \
+             can carry a real t= stamp is a decision that has to be made explicitly \
+             rather than inherited"
         );
     }
 }

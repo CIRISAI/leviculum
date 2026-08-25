@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -41,6 +41,11 @@ leviculum-ble-tx = { path = "ble-tx" }
 # host-testable like sd-policy/ble-tx (#344). Not in leviculum-core: that
 # crate must build for thumbv6m, which has no atomic CAS.
 leviculum-queue-budget = { path = "queue-budget" }
+# Pure debug-log line shaping, including the board-side `t=<ms>` uptime
+# stamp. The firmware crate cross-compiles and runs no host tests, so the
+# byte-exact shape every capture consumer greps lives here where it can be
+# asserted (#344).
+leviculum-log-line = { path = "log-line" }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
