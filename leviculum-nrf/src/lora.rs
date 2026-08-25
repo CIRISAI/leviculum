@@ -17,6 +17,7 @@ use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
+use leviculum_queue_budget::{QueueBudget, LORA_QUEUE_BYTES, LORA_QUEUE_SLOTS};
 use static_cell::StaticCell;
 
 use crate::sx1262::Sx1262;
@@ -44,13 +45,52 @@ type Spi = SpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
 pub type Radio = Sx1262<Spi>;
 
 // Channels between LoRa task and main loop
+//
+// `LORA_INCOMING` keeps its four slots and gets no byte budget (#344). Its
+// producer is `incoming_tx.send(…).await`, a *blocking* send: a full incoming
+// queue costs the LoRa task a wait, never a dropped packet, so there is no
+// silent loss for a bound to make visible. Deepening it would only let the
+// radio run further ahead of a main loop that is already the thing to measure
+// — which is what the receive-path audit accompanying this batch is about, and
+// the wrong end to change before that map is read.
 static LORA_INCOMING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
-static LORA_OUTGOING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
+static LORA_OUTGOING: Channel<CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS> = Channel::new();
 static LORA_CONFIG: Channel<CriticalSectionRawMutex, RadioConfig, 1> = Channel::new();
+
+/// Occupancy of `LORA_OUTGOING`, in slots and in bytes.
+///
+/// The channel's own slot bound cannot see bytes, so a queue of twelve MTU
+/// packets and a queue of twelve acks look identical to it while differing by
+/// 6 KB of a 96 KiB heap. This is the second bound, in the reference's shape
+/// (`CONFIG_QUEUE_SIZE`); the channel's `try_send` stays as the backstop.
+///
+/// Reserved by the single producer (`LoRaInterface::try_send`) before the
+/// packet enters the channel, released by the single consumer (`lora_task`)
+/// the instant it leaves — so the count is of what is *in the channel*, and a
+/// packet already handed to the transmitter is not counted against the queue.
+static OUTGOING_BUDGET: QueueBudget = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QUEUE_BYTES);
+
+/// Take one packet out of the outgoing queue, releasing its budget.
+///
+/// Every dequeue goes through here or through the `Either::Second` arm of the
+/// idle select; a dequeue that forgets to release would leak the budget until
+/// the queue refused everything forever, so there is exactly one non-obvious
+/// place to get this right and it is spelled once.
+fn take_outgoing(
+    outgoing_rx: &Receiver<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+) -> Option<Vec<u8>> {
+    match outgoing_rx.try_receive() {
+        Ok(data) => {
+            OUTGOING_BUDGET.release(data.len());
+            Some(data)
+        }
+        Err(_) => None,
+    }
+}
 
 pub struct LoRaChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
 }
 
 pub fn channels() -> LoRaChannels {
@@ -67,11 +107,13 @@ pub fn config_sender() -> Sender<'static, CriticalSectionRawMutex, RadioConfig, 
 
 // LoRaInterface for NodeCore dispatch
 pub struct LoRaInterface {
-    sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
 }
 
 impl LoRaInterface {
-    pub fn new(sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>) -> Self {
+    pub fn new(
+        sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+    ) -> Self {
         Self { sender }
     }
 }
@@ -90,19 +132,43 @@ impl Interface for LoRaInterface {
         true
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.sender.try_send(data.to_vec()).map_err(|_| {
-            // Codeberg #344: a full `LORA_OUTGOING` used to be invisible — the
-            // caller saw `BufferFull` and (before #344) dropped it, so the
-            // most likely place for the board to lose a packet was also the
-            // quietest. This is the one interface where the depth is plainly
-            // in question: four slots against a 723 ms SF10 frame is under a
-            // three-second backlog. The depth is NOT changed here on purpose;
-            // changing it before this line says how often it fills would be a
-            // fix aimed at a number nobody has measured.
+        // Two bounds, the reference's shape (`CONFIG_QUEUE_SIZE` /
+        // `CONFIG_QUEUE_MAX_LENGTH`), checked before the packet is copied:
+        // whichever binds first refuses, and the copy a refused packet would
+        // have needed is not made.
+        //
+        // Codeberg #344: a full `LORA_OUTGOING` used to be invisible — the
+        // caller saw `BufferFull` and (before #344) dropped it, so the most
+        // likely place for the board to lose a packet was also the quietest.
+        // The four slots this queue had were under a three-second backlog at
+        // SF10 (723 ms a frame), which any ordinary burst overran.
+        if let Err(bound) = OUTGOING_BUDGET.reserve(data.len()) {
             crate::log::log_fmt(
                 "[IFACE_FULL] ",
                 format_args!(
-                    "iface={} depth={} len={}",
+                    "iface={} bound={} slots={}/{} bytes={}/{} len={}",
+                    self.name(),
+                    bound.as_str(),
+                    OUTGOING_BUDGET.queued_slots(),
+                    OUTGOING_BUDGET.max_slots(),
+                    OUTGOING_BUDGET.queued_bytes(),
+                    OUTGOING_BUDGET.max_bytes(),
+                    data.len()
+                ),
+            );
+            return Err(InterfaceError::BufferFull);
+        }
+        self.sender.try_send(data.to_vec()).map_err(|_| {
+            // Unreachable while the reservation and the channel agree — the
+            // slot bound the budget enforces is the channel's own capacity.
+            // Handed back rather than asserted: a leaked reservation would
+            // close the queue permanently, and the line below says the two
+            // disagreed, which is the bug to see.
+            OUTGOING_BUDGET.release(data.len());
+            crate::log::log_fmt(
+                "[IFACE_FULL] ",
+                format_args!(
+                    "iface={} bound=channel depth={} len={}",
                     self.name(),
                     self.sender.capacity(),
                     data.len()
@@ -750,7 +816,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
         // Used to keep unused test T114s from polluting the LoRa channel
         // with their own Reticulum announces.
         if pending_tx.is_none() {
-            if let Ok(data) = outgoing_rx.try_receive() {
+            if let Some(data) = take_outgoing(&outgoing_rx) {
                 if config.radio_silent {
                     drop(data);
                 } else {
@@ -940,8 +1006,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // before. Embassy's try_receive consumes, so a peeked frame is
             // stashed into pending_tx and transmitted next iteration through
             // the normal CSMA/CAD TX path.
-            let queue_empty = match outgoing_rx.try_receive() {
-                Ok(next) => {
+            let queue_empty = match take_outgoing(&outgoing_rx) {
+                Some(next) => {
                     if config.radio_silent {
                         drop(next);
                         true
@@ -952,7 +1018,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                         false
                     }
                 }
-                Err(_) => true,
+                None => true,
             };
             if !leviculum_core::rnode::burst_should_yield(
                 queue_empty,
@@ -1061,6 +1127,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // racing this switch may be lost (rare, acceptable). radio_silent
             // still drops outgoing instead of transmitting.
             Either::Second(data) => {
+                // The one dequeue that does not go through `take_outgoing`:
+                // `receive()` is the awaited form, and the budget it held is
+                // released here for the same reason and at the same moment.
+                OUTGOING_BUDGET.release(data.len());
                 let _ = radio.set_standby_rc().await;
                 if config.radio_silent {
                     drop(data);

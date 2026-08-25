@@ -978,6 +978,7 @@ dependencies = [
  "leviculum-gnss-presence",
  "leviculum-gnss-time",
  "leviculum-lxmf",
+ "leviculum-queue-budget",
  "leviculum-screen",
  "leviculum-sd-policy",
  "leviculum-telemetry-policy",
@@ -989,6 +990,10 @@ dependencies = [
  "static_cell",
  "tracing-core",
 ]
+
+[[package]]
+name = "leviculum-queue-budget"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-screen"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
+  binds first, instead of four packets; a refusal names which bound it hit
+  (#344).
+
 ### Added
 
 - The nRF firmware prints its transport counters every 30 s as
