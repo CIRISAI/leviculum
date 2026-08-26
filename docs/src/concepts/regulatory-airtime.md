@@ -27,7 +27,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1389`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:994-1013`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1026-1045`), continuing to listen so RX is
 not starved.
 
 The host-side airtime credit bucket
@@ -53,10 +53,10 @@ configured value always wins — including an explicit `0`, which the
 firmware reads as unlimited.
 
 **A cap that cannot be read back is not a cap anyone can check.** The
-firmware states the settings it applied and the cap it derived on the
-boot-critical log path — the one that bypasses the debug port's
-runtime drain gate (`lawful_airtime_default`,
-`leviculum-nrf/log-line/src/facts.rs:104`) — and states them again on
+firmware states the settings it applied and the limits it loaded into
+the tracker on the boot-critical log path — the one that bypasses the
+debug port's runtime drain gate (`airtime_limits`,
+`leviculum-nrf/log-line/src/facts.rs:182`) — and states them again on
 every runtime reconfiguration. Until 2026-08 both were ordinary
 runtime lines: a board that came up before a reader attached dropped
 them with everything else, so the two facts a compliance question is
@@ -64,6 +64,21 @@ actually about were the two that could never be obtained from a
 running board. Neither is recoverable any other way — the settings
 live in the radio's registers and the cap in the airtime tracker, and
 nothing reads either back out.
+
+The limits line is unconditional, and it names an origin per limit.
+It used to be emitted only when the firmware had derived the cap
+itself, which left the more dangerous case silent: a host that sent
+an explicit `0` switched the cap off and produced no line at all, so
+the cap in force had to be inferred from an absence, and a board
+legitimately unlimited on a shielded bench read exactly like one
+unlimited in the field. It now carries both limits with the raw u16
+and a human rendering (`lt_cap=unlimited` versus `lt_cap=0.10%` — the
+one confusion on this line with a legal consequence), whether each
+came from the host or was derived, and the lawful cap the frequency
+alone would give, so a host's choice can be weighed against the band
+without looking a sub-band up in this page. `grep AIRTIME` on a fresh
+boot answers "under what cap is this board transmitting, and who
+chose it".
 
 Every row of the table has been verified against the standard text:
 ERC Recommendation 70-03, Annex 1, sub-bands h1.3-h1.9 for

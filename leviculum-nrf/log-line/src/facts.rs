@@ -25,7 +25,7 @@
 //! lines that say what the radio was set to and under what lawful duty-cycle
 //! cap it was transmitting. Neither is obtainable from a running board any
 //! other way — the applied configuration lives in the radio's registers and
-//! the derived cap lives in the airtime tracker, and nothing reads either
+//! the enforced cap lives in the airtime tracker, and nothing reads either
 //! back out. For a *regulatory* limit that is the wrong property to have:
 //! the question "under what cap is this board transmitting?" has to be
 //! answerable at the bench, not reconstructable from the source.
@@ -94,18 +94,106 @@ pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
     );
 }
 
-/// `[LORA_AIRTIME_LOCK] lawful default …` — the regulatory duty-cycle cap
-/// the firmware derived from its own TX frequency because the host sent no
-/// explicit `lt_alock`.
+/// Who chose a limit the airtime tracker is enforcing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitSource {
+    /// The host sent this value explicitly, and it wins verbatim — including
+    /// an explicit `0`, which means *unlimited* and not *unset*.
+    Host,
+    /// The firmware derived it from its own TX frequency because no explicit
+    /// value reached it.
+    Derived,
+    /// Taken verbatim from the active configuration, with no way to tell an
+    /// explicit host value from the compiled default.
+    ///
+    /// Only the short-term limit is ever this. The firmware derives no
+    /// short-term cap, and the radio-config wire format carries no presence
+    /// bit for `st_alock` the way it does for `lt_alock`, so a short frame
+    /// that omitted the field and a host that sent `0` arrive identical. The
+    /// *value* below is still the one loaded into the tracker; only its
+    /// authorship is unknown, and the line says so rather than guessing.
+    Config,
+}
+
+impl core::fmt::Display for LimitSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            LimitSource::Host => "host",
+            LimitSource::Derived => "derived",
+            LimitSource::Config => "config",
+        })
+    }
+}
+
+/// An `alock` u16 rendered the way a human reads a duty cycle.
 ///
-/// Critical for the same reason, and more sharply: this is the number a
-/// compliance question is about. `lt_alock` is the RNode `CMD_LT_ALOCK`
-/// u16 encoding (percent × 100), so `100` is 1 % and `0` is unlimited.
-pub fn lawful_airtime_default<S: LineSink>(sink: &mut S, freq_hz: u32, lt_alock: u16) {
+/// The RNode `CMD_ST_ALOCK` / `CMD_LT_ALOCK` encoding is percent × 100, so
+/// `1000` is 10 % and `0` is *no limit at all*. Those two facts are why this
+/// exists: `lt=0` looks like the smallest possible cap and is the largest,
+/// and a reader who mistakes "unlimited" for "0.1 %" has made the one error
+/// on this line that has a legal consequence. Rendered with the raw number
+/// beside it, never instead of it, so the line stays machine-readable.
+struct Cap(u16);
+
+impl core::fmt::Display for Cap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == 0 {
+            f.write_str("unlimited")
+        } else {
+            // Integer division: no float formatter in the firmware's log path.
+            write!(f, "{}.{:02}%", self.0 / 100, self.0 % 100)
+        }
+    }
+}
+
+/// The airtime limits the tracker is actually enforcing, and where each came
+/// from.
+///
+/// Both limits are the RNode u16 encoding (percent × 100); `0` is unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AirtimeLimits {
+    /// Effective long-term limit loaded into the tracker — the host's value
+    /// or the frequency-derived lawful one, whichever won.
+    pub lt_alock: u16,
+    pub lt_source: LimitSource,
+    /// Short-term limit loaded into the tracker.
+    pub st_alock: u16,
+    pub st_source: LimitSource,
+    /// The TX frequency the lawful default is derived from.
+    pub freq_hz: u32,
+    /// The lawful long-term cap this frequency derives, stated whether or not
+    /// it is the one being enforced: with it on the line, an operator can see
+    /// that a host value is under, at, or above the lawful one without
+    /// looking a sub-band up in a table.
+    pub lawful_lt_alock: u16,
+}
+
+/// `[LORA_AIRTIME_LOCK] limits …` — the caps the board is transmitting under
+/// and who chose them, emitted at radio bring-up and on every reconfiguration.
+///
+/// Critical for the same reason as the settings above, and more sharply: this
+/// is the number a compliance question is about.
+///
+/// Unconditional, which is the whole point. It used to be emitted only when
+/// the firmware derived the cap itself, so an explicit host value produced no
+/// line at all and the cap in force had to be inferred from a silence — and
+/// an explicit `0` (unlimited: a legitimate bench setting, an unacceptable
+/// field one) was indistinguishable from a small derived cap from the outside.
+pub fn airtime_limits<S: LineSink>(sink: &mut S, l: &AirtimeLimits) {
     sink.line(
         Route::Critical,
         "[LORA_AIRTIME_LOCK] ",
-        format_args!("lawful default freq={freq_hz} lt_alock={lt_alock}"),
+        format_args!(
+            "limits lt={} lt_cap={} lt_src={} st={} st_cap={} st_src={} freq={} lawful={}",
+            l.lt_alock,
+            Cap(l.lt_alock),
+            l.lt_source,
+            l.st_alock,
+            Cap(l.st_alock),
+            l.st_source,
+            l.freq_hz,
+            l.lawful_lt_alock,
+        ),
     );
 }
 
@@ -159,21 +247,170 @@ mod tests {
         );
     }
 
+    /// 869.463 MHz falls in ERC 70-03 h1.7, 10 % duty cycle; the
+    /// `CMD_LT_ALOCK` encoding of 10 % is 1000.
+    fn derived_eu_limits() -> AirtimeLimits {
+        AirtimeLimits {
+            lt_alock: 1000,
+            lt_source: LimitSource::Derived,
+            st_alock: 0,
+            st_source: LimitSource::Config,
+            freq_hz: 869_463_000,
+            lawful_lt_alock: 1000,
+        }
+    }
+
     #[test]
-    fn the_lawful_cap_goes_out_on_the_critical_sink() {
+    fn a_derived_cap_names_the_frequency_it_came_from() {
         let mut sink = Recorder::default();
-        // 869.463 MHz falls in ERC 70-03 h1.7, 10 % duty cycle; the
-        // `CMD_LT_ALOCK` encoding of 10 % is 1000.
-        lawful_airtime_default(&mut sink, 869_463_000, 1000);
+        airtime_limits(&mut sink, &derived_eu_limits());
         assert_eq!(
             sink.lines,
             [(
                 Route::Critical,
                 String::from(
-                    "[LORA_AIRTIME_LOCK] lawful default freq=869463000 lt_alock=1000 t=191\r\n"
+                    "[LORA_AIRTIME_LOCK] limits lt=1000 lt_cap=10.00% lt_src=derived st=0 \
+                     st_cap=unlimited st_src=config freq=869463000 lawful=1000 t=191\r\n"
                 )
             )]
         );
+    }
+
+    /// The case that used to produce no line at all: the host sent an explicit
+    /// `lt_alock`, so the firmware derived nothing. Both limits are the host's,
+    /// and the lawful value for the frequency is stated beside them so the two
+    /// can be compared without a sub-band table — here 5 % against a lawful
+    /// 10 %, i.e. an operator who chose to stay under it.
+    #[test]
+    fn an_explicit_host_cap_is_stated_next_to_the_lawful_one() {
+        let mut sink = Recorder::default();
+        airtime_limits(
+            &mut sink,
+            &AirtimeLimits {
+                lt_alock: 500,
+                lt_source: LimitSource::Host,
+                st_alock: 1500,
+                st_source: LimitSource::Host,
+                freq_hz: 869_463_000,
+                lawful_lt_alock: 1000,
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[LORA_AIRTIME_LOCK] limits lt=500 lt_cap=5.00% lt_src=host st=1500 \
+                     st_cap=15.00% st_src=host freq=869463000 lawful=1000 t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// The control. An explicit `0` is the dangerous value on this line: it
+    /// disables the cap, and it is the one number that looks like the
+    /// *smallest* cap while being the absence of one. A reader who cannot
+    /// tell it from a derived 0.1 % has a compliance error, not a cosmetic
+    /// one, so the two renderings are asserted against each other.
+    #[test]
+    fn an_explicit_zero_reads_as_unlimited_and_not_as_a_small_cap() {
+        let mut unlimited = Recorder::default();
+        airtime_limits(
+            &mut unlimited,
+            &AirtimeLimits {
+                lt_alock: 0,
+                lt_source: LimitSource::Host,
+                st_alock: 0,
+                st_source: LimitSource::Host,
+                freq_hz: 869_463_000,
+                lawful_lt_alock: 1000,
+            },
+        );
+
+        // 864 MHz derives ERC 70-03 h1.3's 0.1 % cap: the smallest one the
+        // table holds, and the one an unlimited board could be mistaken for.
+        let mut smallest = Recorder::default();
+        airtime_limits(
+            &mut smallest,
+            &AirtimeLimits {
+                lt_alock: 10,
+                lt_source: LimitSource::Derived,
+                st_alock: 0,
+                st_source: LimitSource::Config,
+                freq_hz: 864_000_000,
+                lawful_lt_alock: 10,
+            },
+        );
+
+        assert!(
+            unlimited.lines[0].1.contains("lt=0 lt_cap=unlimited"),
+            "got {:?}",
+            unlimited.lines[0].1
+        );
+        assert!(
+            smallest.lines[0].1.contains("lt=10 lt_cap=0.10%"),
+            "got {:?}",
+            smallest.lines[0].1
+        );
+        assert_ne!(unlimited.lines[0].1, smallest.lines[0].1);
+        // And the reason the two differ is stated, not left to the number:
+        // one is a choice, the other is a band.
+        assert!(unlimited.lines[0].1.contains("lt_src=host"));
+        assert!(smallest.lines[0].1.contains("lt_src=derived"));
+        // An operator who disabled a cap that exists can see that it exists.
+        assert!(unlimited.lines[0].1.contains("lawful=1000"));
+    }
+
+    /// A frequency the table does not cover derives nothing, and `lawful=0`
+    /// has to say so: "this band has no cap in our table" is a different
+    /// statement from "the operator switched the cap off", and only the
+    /// `lt_src` field separates them.
+    #[test]
+    fn an_out_of_band_frequency_states_that_it_derived_nothing() {
+        let mut sink = Recorder::default();
+        airtime_limits(
+            &mut sink,
+            &AirtimeLimits {
+                lt_alock: 0,
+                lt_source: LimitSource::Derived,
+                st_alock: 0,
+                st_source: LimitSource::Config,
+                freq_hz: 915_000_000,
+                lawful_lt_alock: 0,
+            },
+        );
+        assert_eq!(sink.lines[0].0, Route::Critical);
+        assert!(
+            sink.lines[0].1.contains(
+                "limits lt=0 lt_cap=unlimited lt_src=derived st=0 st_cap=unlimited \
+                 st_src=config freq=915000000 lawful=0"
+            ),
+            "got {:?}",
+            sink.lines[0].1
+        );
+    }
+
+    /// `grep AIRTIME` on a fresh boot answers the question with no inference
+    /// from silence: one line, whatever the origins are.
+    #[test]
+    fn every_origin_combination_emits_exactly_one_greppable_line() {
+        for (lt_source, st_source) in [
+            (LimitSource::Host, LimitSource::Host),
+            (LimitSource::Derived, LimitSource::Config),
+            (LimitSource::Host, LimitSource::Config),
+        ] {
+            let mut sink = Recorder::default();
+            airtime_limits(
+                &mut sink,
+                &AirtimeLimits {
+                    lt_source,
+                    st_source,
+                    ..derived_eu_limits()
+                },
+            );
+            assert_eq!(sink.lines.len(), 1, "{lt_source:?}/{st_source:?}");
+            assert!(sink.lines[0].1.contains("AIRTIME"));
+        }
     }
 
     /// The reason these two are on the critical sink at all: a board that
@@ -204,28 +441,11 @@ mod tests {
         // A routine runtime line, for contrast: it is gated and is lost.
         sink.line(Route::Gated, "[LORA] ", format_args!("RX 41 bytes"));
         active_radio_config(&mut sink, &eu_medium());
-        lawful_airtime_default(&mut sink, 869_463_000, 1000);
+        airtime_limits(&mut sink, &derived_eu_limits());
 
         assert_eq!(sink.dropped, 1);
         assert_eq!(sink.kept.len(), 2, "kept: {:?}", sink.kept);
         assert!(sink.kept[0].starts_with("[LORA] active config: "));
-        assert!(sink.kept[1].starts_with("[LORA_AIRTIME_LOCK] lawful default "));
-    }
-
-    /// An out-of-band frequency derives no lawful cap, and the line has to
-    /// say `0` rather than not be emitted: "no cap was derived" is the
-    /// answer an operator most needs and least expects.
-    #[test]
-    fn an_underived_cap_is_still_stated() {
-        let mut sink = Recorder::default();
-        lawful_airtime_default(&mut sink, 915_000_000, 0);
-        assert_eq!(sink.lines[0].0, Route::Critical);
-        assert!(
-            sink.lines[0]
-                .1
-                .contains("lawful default freq=915000000 lt_alock=0"),
-            "got {:?}",
-            sink.lines[0].1
-        );
+        assert!(sink.kept[1].starts_with("[LORA_AIRTIME_LOCK] limits "));
     }
 }

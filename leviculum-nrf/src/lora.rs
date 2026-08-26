@@ -461,9 +461,14 @@ fn active_facts(config: &RadioConfig) -> leviculum_log_line::facts::ActiveRadioC
 
 /// Apply a config's airtime limits to the tracker, deriving the lawful
 /// long-term cap from the TX frequency when the host set no explicit `lt_alock`
-/// (see [`RadioConfig::effective_lt_alock`]). Emits a one-line log when the
-/// firmware applies its own lawful default so the derived cap is visible in the
-/// debug capture.
+/// (see [`RadioConfig::effective_lt_alock`]), and state both limits and their
+/// origins on the boot-critical log path.
+///
+/// The line is unconditional. It used to be emitted only on the derived path,
+/// which made the far more dangerous case — a host that explicitly sent `0`,
+/// switching the cap off — the case that produced no line at all: the cap in
+/// force had to be inferred from a silence, and a board legitimately unlimited
+/// on a shielded bench was indistinguishable from one unlimited in the field.
 ///
 /// Called at radio bring-up and again on every runtime reconfiguration, so a
 /// board reconfigured in the field states its new cap too.
@@ -471,13 +476,38 @@ fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, con
     let lt_alock = config.effective_lt_alock();
     airtime.set_st_limit_u16(config.st_alock);
     airtime.set_lt_limit_u16(lt_alock);
-    if !config.lt_alock_present {
-        leviculum_log_line::facts::lawful_airtime_default(
-            &mut FirmwareLog,
-            config.frequency_hz,
+    use leviculum_log_line::facts::LimitSource;
+    leviculum_log_line::facts::airtime_limits(
+        &mut FirmwareLog,
+        &leviculum_log_line::facts::AirtimeLimits {
             lt_alock,
-        );
-    }
+            lt_source: if config.lt_alock_present {
+                LimitSource::Host
+            } else {
+                LimitSource::Derived
+            },
+            st_alock: config.st_alock,
+            // `lt_alock` sits *after* `st_alock` on the wire, so a frame that
+            // carried an explicit long-term lock provably carried the
+            // short-term one too — that much is host-authored for certain.
+            // Without it the value may be an old short frame's or the compiled
+            // default's, and nothing on hand separates the two, so the line
+            // reports the value and declines to name an author.
+            st_source: if config.lt_alock_present {
+                LimitSource::Host
+            } else {
+                LimitSource::Config
+            },
+            freq_hz: config.frequency_hz,
+            // What the frequency alone would have given, stated even when it
+            // lost, so a reader can weigh the host's choice against the lawful
+            // value without a sub-band table.
+            lawful_lt_alock: leviculum_core::rnode::firmware_default_lt_alock(
+                config.frequency_hz as u64,
+                None,
+            ),
+        },
+    );
 }
 
 /// Transmit one or two LoRa frames back-to-back. For split packets, both

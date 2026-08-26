@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived from its frequency now survive a boot nobody was watching: both
   are emitted on the log path that bypasses the debug port's runtime gate,
   at bring-up and on every reconfiguration.
+- A board states the airtime limits it is enforcing and who chose each of
+  them on every boot, instead of only when it derived the cap itself — an
+  explicit host `0` used to switch the cap off silently.
 - The citation guard reads the `` (`ident`, `path:line`) `` spelling as
   naming its subject, so 130 citations that were existence-checked are
   drift-checked; 30 that had drifted are corrected.
