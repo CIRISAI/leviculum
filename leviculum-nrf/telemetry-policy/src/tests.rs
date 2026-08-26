@@ -912,3 +912,117 @@ fn a_second_emission_supersedes_an_unsettled_one() {
         Some(ReportReason::Heartbeat)
     );
 }
+
+// ---------------------------------------------------------------------------
+// #348: a report that went out counts as gone out
+// ---------------------------------------------------------------------------
+//
+// The board of #348: telemetry over LoRa, BLE advertised with no phone
+// attached. Every dispatch carries the announce broadcast and the report,
+// LoRa takes both, and the BLE queue refuses the broadcast with
+// `BufferFull`. The dispatch is therefore not *clean* — and the call site
+// used to read "not clean" as "not emitted".
+
+/// The interface the report's own frame was addressed to.
+const REPORT_IFACE: usize = 1;
+/// The interface that refuses everything for as long as no phone is
+/// attached. It carried none of this report's frames.
+const REFUSING_IFACE: usize = 2;
+
+/// How often the firmware asks the policy whether a report is due.
+const TICK_MS: u64 = 5_000;
+
+/// The route the core chose for one report: its single frame, on the
+/// interface the path table named.
+fn report_route() -> EmissionRoute {
+    let mut route = EmissionRoute::new();
+    route.add(REPORT_IFACE);
+    route
+}
+
+/// A stationary `TRACKER` node with no fix, polled on the firmware's tick,
+/// whose every dispatch loses something on `losses`. Returns the times at
+/// which it emitted a report.
+fn emission_times(window_ms: u64, losses: &[usize]) -> Vec<u64> {
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, true);
+    let mut times = Vec::new();
+    let mut t = 0;
+    while t <= window_ms {
+        if p.poll(t, None).is_some() {
+            p.note_emitted(t, None);
+            p.note_dispatch(report_route().went_out(losses.iter().copied()));
+            times.push(t);
+        }
+        t += TICK_MS;
+    }
+    times
+}
+
+/// The reproducer. A dispatch that lost a frame on an interface this
+/// report never used is still an emission, so the cadence advances and a
+/// stationary tracker reports on its heartbeat — not on the attempt floor,
+/// which is the storm #348 measured.
+#[test]
+fn a_loss_on_an_interface_the_report_did_not_use_is_still_an_emission() {
+    let heartbeat = Profile::Tracker.params().max_interval_ms;
+    let times = emission_times(2 * heartbeat, &[REFUSING_IFACE]);
+    assert_eq!(
+        times,
+        vec![0, heartbeat, 2 * heartbeat],
+        "a stationary TRACKER must emit on the heartbeat, not on the attempt floor"
+    );
+}
+
+/// Control, and the one that keeps the fix honest: a dispatch that placed
+/// nothing anywhere is not an emission, so a board whose radio is wedged
+/// still retries — at the attempt floor, which is what the floor is for.
+#[test]
+fn control_a_dispatch_that_placed_nothing_is_not_an_emission() {
+    let floor = Profile::Tracker.params().min_interval_ms;
+    let times = emission_times(3 * floor, &[REPORT_IFACE, REFUSING_IFACE]);
+    assert_eq!(times, vec![0, floor, 2 * floor, 3 * floor]);
+}
+
+/// Control: the report's own interface refusing it is not an emission even
+/// when every other interface in the dispatch was happy.
+#[test]
+fn control_a_loss_on_the_reports_own_interface_is_not_an_emission() {
+    assert!(!report_route().went_out([REPORT_IFACE]));
+}
+
+/// A dispatch that lost nothing at all is an emission, which is the case
+/// that must not regress while the predicate is loosened.
+#[test]
+fn a_dispatch_that_lost_nothing_is_an_emission() {
+    assert!(report_route().went_out([]));
+}
+
+/// A report that never became a frame on any interface is not an emission,
+/// whatever the dispatch did or did not lose.
+#[test]
+fn a_report_addressed_nowhere_is_not_an_emission() {
+    assert!(EmissionRoute::new().is_empty());
+    assert!(!EmissionRoute::new().went_out([]));
+    assert!(!EmissionRoute::new().went_out([REFUSING_IFACE]));
+}
+
+/// An interface id no bit can hold falls back to the conservative answer:
+/// every loss in the dispatch counts as this report's.
+#[test]
+fn an_interface_id_beyond_the_mask_treats_every_loss_as_its_own() {
+    let mut route = EmissionRoute::new();
+    route.add(u32::BITS as usize + 7);
+    assert!(!route.is_empty());
+    assert!(route.went_out([]));
+    assert!(!route.went_out([REFUSING_IFACE]));
+}
+
+/// Duplicate and out-of-order loss entries decide the same way: the caller
+/// chains the dispatch's three lists in without deduplicating them, and
+/// `retries` today repeats what `errors` already recorded.
+#[test]
+fn repeated_loss_entries_decide_the_same_way() {
+    assert!(report_route().went_out([REFUSING_IFACE, REFUSING_IFACE]));
+    assert!(!report_route().went_out([REFUSING_IFACE, REPORT_IFACE, REFUSING_IFACE]));
+}

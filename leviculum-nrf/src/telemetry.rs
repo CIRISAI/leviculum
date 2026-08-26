@@ -46,7 +46,8 @@ use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{build_report, Battery, Location, Telemetry};
 use leviculum_telemetry_policy::{
-    command_from_wire, Fix, Profile, ReportReason, SendPolicy, TargetCommand, TargetState,
+    command_from_wire, EmissionRoute, Fix, Profile, ReportReason, SendPolicy, TargetCommand,
+    TargetState,
 };
 
 /// Re-exported so the binaries name the outcome of
@@ -351,6 +352,11 @@ struct PendingLine {
     reason: ReportReason,
     include_position: bool,
     unix_secs: u64,
+    /// The interfaces this report's own frames were handed to, which is
+    /// what decides whether it went out (#348). The announce that shares
+    /// the dispatch is not in here: it is a broadcast toward everyone and
+    /// its fate on a third interface says nothing about this report.
+    route: EmissionRoute,
 }
 
 impl Reporter {
@@ -576,6 +582,16 @@ impl Reporter {
 
         match node.send_single_packet(&hash, &on_air) {
             Ok((_, out)) => {
+                // Note the route before the actions are merged with the
+                // announce's: after the merge there is no telling which
+                // frame was whose, and that distinction is the whole of
+                // the #348 fix.
+                let mut route = EmissionRoute::new();
+                for action in &out.actions {
+                    if let Action::SendPacket { iface, .. } = action {
+                        route.add(iface.0);
+                    }
+                }
                 actions.extend(out.actions);
                 // Handed to transport, not yet on the air. The cadence is
                 // consumed in `note_dispatch`, once the dispatch has said
@@ -589,6 +605,7 @@ impl Reporter {
                     reason,
                     include_position,
                     unix_secs,
+                    route,
                 });
             }
             Err(_) => {
@@ -606,15 +623,29 @@ impl Reporter {
     /// with it (#344).
     ///
     /// The caller passes the `DispatchResult` of the dispatch that carried
-    /// this tick's actions. A dispatch that lost anything leaves the
-    /// cadence unconsumed, so the next ordinary tick emits the report
-    /// again; nothing is re-sent here and nothing is queued.
+    /// this tick's actions. A report that did not go out leaves the
+    /// cadence unconsumed, so the next ordinary tick emits it again;
+    /// nothing is re-sent here and nothing is queued.
     ///
-    /// The dispatch reports loss per dispatch, not per action, so a lost
-    /// announce settles the report as lost too. That errs toward reporting
-    /// again, which is the direction to err in: the announce and the
-    /// report go to the same interface in the same dispatch, and a
-    /// receiver that missed the announce cannot verify the report anyway.
+    /// **The report went out when every interface its own frames were
+    /// addressed to accepted them** ([`EmissionRoute`]) — not when the
+    /// dispatch was *clean*. `DispatchResult::is_clean` asks whether
+    /// anything was lost anywhere, which is the right question for the
+    /// `[DISPATCH_LOSS]` line `settle` writes and the wrong one here: on a
+    /// board advertising BLE with no phone attached, the announce that
+    /// shares this dispatch is refused by the BLE queue while LoRa puts the
+    /// report on the air. Reading that refusal as "not emitted" left
+    /// `last_report_ms` for ever unset, so a report was always due and only
+    /// the attempt floor stood between two of them — one per minute against
+    /// a fifteen-minute profile (#348).
+    ///
+    /// The announce's own fate is therefore no longer this report's: it is
+    /// a broadcast toward everyone, and an interface with nobody behind it
+    /// refusing a copy is not this report's failure. A loss on the
+    /// interface the report itself used still is one, announce or report,
+    /// and that keeps the older argument intact where it applies — a
+    /// receiver on that interface that missed the announce cannot verify
+    /// the report anyway.
     ///
     /// Silent when there is nothing pending — the common case, since the
     /// tick that sends is one in hundreds.
@@ -625,7 +656,16 @@ impl Reporter {
             let _ = self.policy.note_dispatch(false);
             return;
         };
-        if !self.policy.note_dispatch(result.is_clean()) {
+        // `retries` repeats what `errors` already recorded for a
+        // `BufferFull`; chaining all three costs one extra comparison and
+        // keeps this total if that ever stops being true.
+        let losses = result
+            .errors
+            .iter()
+            .map(|(iface, _)| iface.0)
+            .chain(result.drops.iter().map(|(iface, _)| iface.0))
+            .chain(result.retries.iter().map(|retry| retry.iface_idx));
+        if !self.policy.note_dispatch(line.route.went_out(losses)) {
             self.withhold("send-failed");
             return;
         }

@@ -710,5 +710,77 @@ impl SendPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// What "the report went out" means (#348)
+// ---------------------------------------------------------------------------
+
+/// The interfaces one report's own frames were handed to, and with them the
+/// verdict [`SendPolicy::note_dispatch`] wants.
+///
+/// **The rule: a report went out when every interface its own frames were
+/// addressed to accepted them; a loss the same dispatch recorded against any
+/// other interface belongs to that interface's traffic, not to this report.**
+///
+/// This is deliberately not "did the dispatch lose anything anywhere", which
+/// is the right question for a `[DISPATCH_LOSS]` line and the wrong one here:
+/// a board with BLE advertised and no phone attached refuses the announce
+/// broadcast on BLE while LoRa puts the report on the air, and reading that
+/// refusal as "not emitted" left the cadence unconsumed for ever (#348). It is
+/// equally not "did LoRa take it" — a report only BLE accepted has gone out
+/// too, energy was spent on it and a peer may hold it — so the question is
+/// asked of the route the core actually chose and never of a named medium.
+///
+/// A route with no interface in it is a report that never became a frame on
+/// any interface, and that is not an emission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmissionRoute {
+    /// One bit per interface id, which covers every id a firmware board hands
+    /// out (three, on the largest board we build).
+    mask: u32,
+    /// An id of 32 or above, which no bit can hold. It makes every loss in
+    /// the dispatch count as this report's — the conservative answer, which
+    /// costs a re-sent reading rather than a silently swallowed one.
+    beyond_mask: bool,
+}
+
+impl EmissionRoute {
+    /// A report that has been addressed nowhere yet.
+    pub const fn new() -> Self {
+        Self {
+            mask: 0,
+            beyond_mask: false,
+        }
+    }
+
+    /// Record that one of this report's frames was addressed to `iface`.
+    pub fn add(&mut self, iface: usize) {
+        if iface < u32::BITS as usize {
+            self.mask |= 1 << iface;
+        } else {
+            self.beyond_mask = true;
+        }
+    }
+
+    /// Whether this report reached an interface at all.
+    pub const fn is_empty(&self) -> bool {
+        self.mask == 0 && !self.beyond_mask
+    }
+
+    /// Whether `iface` carried one of this report's frames.
+    const fn carried(&self, iface: usize) -> bool {
+        self.beyond_mask || (iface < u32::BITS as usize && self.mask & (1 << iface) != 0)
+    }
+
+    /// Apply the rule to one dispatch.
+    ///
+    /// `losses` names every interface that dispatch recorded a retry, an
+    /// interface error or an unroutable drop against. Order does not matter
+    /// and duplicates are fine — a caller chains the three lists straight in
+    /// rather than deduplicating them.
+    pub fn went_out(&self, losses: impl IntoIterator<Item = usize>) -> bool {
+        !self.is_empty() && !losses.into_iter().any(|iface| self.carried(iface))
+    }
+}
+
 #[cfg(test)]
 mod tests;
