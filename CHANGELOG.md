@@ -11,6 +11,46 @@ git tag, not the version string. -->
 
 ## [0.24.0+ciris.1] — CIRIS fork
 
+### Added — a transfer of any size is one delivery (leviculum#62)
+
+A payload past `RESOURCE_MAX_EFFICIENT_SIZE` (1 MiB − 1) is split into
+segments, and core delivers one `ResourceCompleted` **per segment**. That is
+right for `leviculum-core` — `no_std`, on boards that cannot hold a
+multi-megabyte transfer in RAM — and wrong for a consumer: the reference
+fires its resource callback **once per transfer**, so code written to
+reference semantics decoded our first event as the whole message and got a
+body cut at the ceiling minus the metadata size. That cost a downstream
+consumer 765 messages, surfacing as decode errors blamed on the *sender*
+(leviculum#61).
+
+`leviculum-std` now reassembles. Intermediate segments are absorbed; the
+final segment becomes one `ResourceCompleted` carrying the whole payload and
+segment 1's metadata. Single-segment transfers and sender-side events pass
+through untouched, and a batch with nothing segmented does no extra work.
+Correlation needed no new wire or event field — a link carries at most one
+incoming resource at a time, so `LinkId` is an exact key.
+
+**Bounded, because the segment count is peer-supplied**: per transfer
+(default 64 MiB, `ReticulumNodeBuilder::max_assembled_resource_size`) and in
+aggregate across links at four times that. A transfer that cannot be
+assembled within the ceilings is **neither dropped nor truncated** — it
+degrades to the documented per-segment delivery with an error naming the
+ceiling and the knob. A link that dies mid-transfer releases its partial.
+
+Assembly runs *before* observation and emission, so the completion registry,
+the event tap and the consumer all see the same whole-transfer event.
+
+### Fixed — the efficient-size ceiling was reported as a typo; the comment was (leviculum#61)
+
+`RESOURCE_MAX_EFFICIENT_SIZE = 1_048_575` **is correct** and must not change:
+reference RNS is `1 * 1024 * 1024 - 1` (`Resource.py:116`), so raising it to
+16 MiB — as reported — would emit segments a reference receiver cannot accept.
+What was wrong is the comment beside it, claiming a "3-byte length encoding
+(0xFFFFFF)", which made a correct value look like an off-by-one-hex-digit
+typo. It is now written as an expression with the reference cited, and
+`NodeEvent::ResourceCompleted` documents the per-segment contract in the
+place a consumer actually reads.
+
 ### Changed — catch-up to upstream master @ `50388fc6` (+57)
 
 The largest catch-up since the 0.8.1 line, and almost all of it is LNode
