@@ -1286,22 +1286,24 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             //
             // How often this arm runs is measured: 21-34 % of all armings on
             // the bench take it, so the "rare" this comment used to claim was
-            // wrong. What is NOT measured, and what alone decides whether a
-            // guard is warranted, is whether anything was on the air when the
-            // window came down. An idle listen stood down here loses nothing —
-            // that is half duplex, and the reference firmware does the same.
-            // A window with `PreambleDetected` latched loses a frame that
-            // would otherwise have completed. `abort_rx_for_tx` reads the
-            // chip's latched IRQs before the standby and emits
-            // `[SX_RX_ABORT]`; it changes nothing else, and the rate it
-            // reports is what the fix, if any, gets designed against.
+            // wrong. Whether anything was on the air when the window came down
+            // is measured too, and by the same call that takes it down: an
+            // idle listen stood down here loses nothing — that is half duplex,
+            // and the reference firmware does the same — while a window with
+            // `PreambleDetected` latched loses a frame that would otherwise
+            // have completed. `disarm_rx` reads the chip's latched IRQs before
+            // the standby and emits `[SX_RX_TEARDOWN] site=select`; it changes
+            // nothing else, and the residue it reports is what the next fix,
+            // if any, gets designed against.
             // radio_silent still drops outgoing instead of transmitting.
             Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
-                let _ = radio.abort_rx_for_tx().await;
+                let _ = radio
+                    .disarm_rx(leviculum_core::sx126x::RxTeardownBy::Select)
+                    .await;
                 if config.radio_silent {
                     drop(data);
                 } else {

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The LNode radio is listening again before a received frame is handed to
   the stack, instead of after it has been processed.
+- The LoRa loop keeps a receive window that already has the parameters it
+  wants instead of standing it down and arming an identical one, so a
+  frame arriving 20 ms behind another is no longer ended mid-air by the
+  loop's own next decision (#276).
 - A telemetry report whose dispatch was lost is retried no sooner than the
   policy's own `min_interval_ms`, instead of on the next main-loop tick
   (#344).
@@ -37,9 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout_ms= dark_ms=`, so a capture says how long the radio was not
   listening between two windows instead of leaving it to be inferred (#344).
 
-- Standing the receiver down to transmit logs `[SX_RX_ABORT] site=
-  preamble= header= armed_ms=`, so a capture says whether a frame was
-  already arriving when the window came down, not just how often it did.
+- Standing the receiver down logs `[SX_RX_TEARDOWN] site= preamble=
+  header= rxdone= armed_ms=` from every caller, `site=` naming the caller,
+  so a capture says whether a frame was already arriving when the window
+  came down (#276).
+
+- A receive window that is kept instead of re-armed logs `[SX_RX_ADOPT]
+  latched= preamble= header= rxdone= stood_ms=`, which counts the
+  receptions the previous firmware destroyed.
 
 - The firmware receives at boosted SX1262 gain and applies the errata-15.4
   IQ correction, and prints both registers before and after it writes them

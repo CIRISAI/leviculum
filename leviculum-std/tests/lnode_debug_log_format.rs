@@ -9,7 +9,16 @@
 //! [SX_REG] rxgain_before=0xNN rxgain_after=0xNN txmod=0xNN  (once, end of init_radio)
 //! [SX_REG_IQ] iq_before=0xNN iq_after=0xNN txmod=0xNN       (once, first SetPacketParams)
 //! [SX_RX_ARM] site=<tag> timeout_ms=<u32> dark_ms=<u64|first>  (every SetRx)
+//! [SX_RX_ADOPT] latched=0xNNNN preamble=<0|1> header=<0|1> rxdone=<0|1> stood_ms=<u32>
+//! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
 //! ```
+//!
+//! The last two are a pair and are read as a rate against each other: an
+//! `[SX_RX_ADOPT]` with any flag set is a reception the pre-adoption firmware
+//! destroyed, an `[SX_RX_TEARDOWN]` with any flag set is one still being
+//! destroyed, and `site=` on the teardown says by which caller. Both are
+//! emitted with the flags as read, all-zero included; a line that appeared
+//! only when it had bad news would give a numerator with no denominator.
 //!
 //! The trailing ` t=<ms>` is board uptime at the moment the line was
 //! formatted, appended to EVERY runtime line since the drain-latency audit
@@ -595,4 +604,138 @@ fn the_firmware_still_emits_the_receiver_arming_line() {
         "the [SX_RX_ARM] no-previous-window sentinel changed in \
          leviculum-core/src/sx126x.rs; parse_rx_arm above still expects `first`"
     );
+}
+
+/// Extract `(preamble, header, rxdone, age_ms)` from an `[SX_RX_ADOPT]` or an
+/// `[SX_RX_TEARDOWN]` line.
+///
+/// `age_ms` is `stood_ms` on the one and `armed_ms` on the other — the same
+/// quantity, a window's age measured from its own arming, named for what the
+/// line is about. Both are read as rates over the whole population, so a
+/// consumer that skipped the all-zero lines would compute a numerator against
+/// no denominator; there is deliberately nothing here that filters them.
+fn parse_rx_latch(tag: &str, line: &str) -> Option<(bool, bool, bool, u32)> {
+    let idx = line.find(&format!("[{tag}] "))?;
+    let rest = &line[idx + tag.len() + 3..];
+    let (mut preamble, mut header, mut rxdone, mut age) = (None, None, None, None);
+    let bit = |v: &str| match v {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    };
+    for token in rest.split_whitespace() {
+        let (key, value) = token.split_once('=')?;
+        match key {
+            "preamble" => preamble = Some(bit(value)?),
+            "header" => header = Some(bit(value)?),
+            "rxdone" => rxdone = Some(bit(value)?),
+            "stood_ms" | "armed_ms" => age = Some(value.parse().ok()?),
+            _ => {} // `latched=`, `site=`, the ` t=` stamp, anything appended
+        }
+    }
+    Some((preamble?, header?, rxdone?, age?))
+}
+
+/// The adoption pair parses, in both shapes and including the all-zero case.
+#[test]
+fn the_adopt_and_teardown_lines_parse() {
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_ADOPT",
+            "[SX_RX_ADOPT] latched=0x0016 preamble=1 header=1 rxdone=1 stood_ms=20 t=1421792"
+        ),
+        Some((true, true, true, 20))
+    );
+    // The denominator. A window adopted with an empty channel behind it is
+    // still a sample, and it is the majority of them.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_ADOPT",
+            "[SX_RX_ADOPT] latched=0x0000 preamble=0 header=0 rxdone=0 stood_ms=101 t=9"
+        ),
+        Some((false, false, false, 101))
+    );
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[SX_RX_TEARDOWN] site=arm preamble=1 header=0 rxdone=0 armed_ms=214 t=42"
+        ),
+        Some((true, false, false, 214))
+    );
+    // A replay of the previous boot's tail still parses.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[INFO!] [PERSISTENT_LOG] [SX_RX_TEARDOWN] site=select preamble=0 header=0 \
+             rxdone=0 armed_ms=3 t=9 t=2"
+        ),
+        Some((false, false, false, 3))
+    );
+    // A missing field is a parse failure, not a default, and a flag that is
+    // not a bit is not a `false`.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[SX_RX_TEARDOWN] site=tx preamble=0 header=0 armed_ms=3"
+        ),
+        None
+    );
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_ADOPT",
+            "[SX_RX_ADOPT] latched=0x0000 preamble=no header=0 rxdone=0 stood_ms=3"
+        ),
+        None
+    );
+    // The two do not answer for each other, and neither answers for the arm.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_ADOPT",
+            "[SX_RX_ARM] site=idle timeout_ms=0 dark_ms=1"
+        ),
+        None
+    );
+    assert_eq!(
+        parse_rx_arm("[SX_RX_TEARDOWN] site=tx preamble=0 header=0 rxdone=0 armed_ms=3"),
+        None
+    );
+}
+
+/// The firmware still emits both halves of the adoption instrument, and the
+/// field order they are read in is still the one the crate renders.
+///
+/// The pair only means anything together: without the teardown line the
+/// adoptions are a count with nothing to compare against, and without the
+/// adoption line the fix cannot report what it saved — after it lands, the
+/// loss it removed can no longer be measured any other way.
+#[test]
+fn the_firmware_still_emits_both_halves_of_the_adoption_instrument() {
+    let sx = nrf_source("sx1262.rs");
+    for tag in ["[SX_RX_ADOPT] ", "[SX_RX_TEARDOWN] "] {
+        // The quoted form: the tag as a string literal in the source, so a
+        // mention in a comment does not satisfy the pin.
+        assert!(
+            sx.contains(&format!("\"{tag}\"")),
+            "leviculum-nrf/src/sx1262.rs no longer emits the `{tag}` tag"
+        );
+    }
+    let crate_src = {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-nrf/rx-arming/src/lib.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    for shape in [
+        r#""preamble={} header={} rxdone={}""#,
+        r#""latched={:#06x} {} stood_ms={}""#,
+        r#""site={} {} armed_ms={}""#,
+    ] {
+        assert!(
+            crate_src.contains(shape),
+            "the field order or spelling of {shape} changed in \
+             leviculum-nrf/rx-arming/src/lib.rs; parse_rx_latch above still \
+             expects it"
+        );
+    }
 }

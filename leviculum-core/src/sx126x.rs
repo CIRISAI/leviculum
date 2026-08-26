@@ -501,6 +501,51 @@ impl RxSite {
     }
 }
 
+/// Which call site stood a listening window down.
+///
+/// The other half of [`RxSite`]: that one names the window, this one names the
+/// path that ended it. `[SX_RX_TEARDOWN]` carries this rather than the
+/// window's own tag because the window's tag is recoverable from a capture —
+/// it is whatever the last `[SX_RX_ARM]` said — and the path is not.
+///
+/// The vocabulary is deliberately every caller and not just the key-ups. A
+/// batch that instrumented only the three transmit paths, on the reasoning
+/// that a re-arm is "the same window continuing", missed the site that
+/// mattered: the re-arm's own head issues a real `SetStandby`, and a standby
+/// during a frame's airtime ends that reception.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RxTeardownBy {
+    /// An arming that wants different parameters than the standing window has.
+    /// Not a key-up, and the one this vocabulary exists to make countable.
+    Arm,
+    /// The idle `select`'s outgoing arm: the daemon has data, so the receive
+    /// future was dropped and the window it left standing is spent here.
+    Select,
+    /// The CAD that opens the CSMA path.
+    Cad,
+    /// A transmission, on the path that reaches it without a CAD.
+    Tx,
+    /// The software wait around a window expired with neither terminating IRQ
+    /// set, so the chip may still be in RX and is stood down explicitly.
+    RxWait,
+    /// A reconfiguration of the modulation, which cannot run from RX.
+    Config,
+}
+
+impl RxTeardownBy {
+    /// The stable tag the log line carries.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            RxTeardownBy::Arm => "arm",
+            RxTeardownBy::Select => "select",
+            RxTeardownBy::Cad => "cad",
+            RxTeardownBy::Tx => "tx",
+            RxTeardownBy::RxWait => "rxwait",
+            RxTeardownBy::Config => "config",
+        }
+    }
+}
+
 /// What `dark_ms` renders when no previous window end is on record.
 ///
 /// A word, not a number. At boot there is no previous window, and any digit
@@ -1422,6 +1467,35 @@ mod rx_arm_tests {
             RxSite::Csma.tag(),
             RxSite::Hold.tag(),
             RxSite::Yield.tag(),
+        ];
+        for (i, a) in tags.iter().enumerate() {
+            for b in &tags[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// Every teardown caller's tag, spelled once, and all of them distinct.
+    ///
+    /// `[SX_RX_TEARDOWN] site=` is read as a rate per caller — how many of the
+    /// windows this path takes down were holding a frame — so two callers
+    /// sharing a tag do not merely read badly, they sum two populations into
+    /// one number.
+    #[test]
+    fn every_teardown_caller_has_its_stable_tag() {
+        assert_eq!(RxTeardownBy::Arm.tag(), "arm");
+        assert_eq!(RxTeardownBy::Select.tag(), "select");
+        assert_eq!(RxTeardownBy::Cad.tag(), "cad");
+        assert_eq!(RxTeardownBy::Tx.tag(), "tx");
+        assert_eq!(RxTeardownBy::RxWait.tag(), "rxwait");
+        assert_eq!(RxTeardownBy::Config.tag(), "config");
+        let tags = [
+            RxTeardownBy::Arm.tag(),
+            RxTeardownBy::Select.tag(),
+            RxTeardownBy::Cad.tag(),
+            RxTeardownBy::Tx.tag(),
+            RxTeardownBy::RxWait.tag(),
+            RxTeardownBy::Config.tag(),
         ];
         for (i, a) in tags.iter().enumerate() {
             for b in &tags[i + 1..] {

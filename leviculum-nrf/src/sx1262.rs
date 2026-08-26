@@ -233,9 +233,11 @@ pub struct Sx1262<SPI> {
 struct ArmedWindow {
     timeout_ms: u32,
     hw_timeout: u32,
-    /// The site that opened this window, carried so an abort can name the
-    /// window it destroyed rather than the path that destroyed it. `SetRx`
-    /// itself has no use for it; `[SX_RX_ABORT]` does.
+    /// The site that opened this window. Half of the window's identity for
+    /// the adoption decision, and the reason two windows of equal length
+    /// opened by different callers are not the same window: adopting across
+    /// them would keep listening correctly and lose the loop's decision trail
+    /// from the capture, which is the only thing that makes a run readable.
     site: leviculum_core::sx126x::RxSite,
     /// Uptime in milliseconds at the moment the window was recorded, i.e.
     /// immediately before `SetRx` goes out. Stamped there rather than after
@@ -564,7 +566,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // takes a runtime config override at the top of an iteration, which
         // can be the iteration right after a reception re-armed the receiver
         // provisionally. Every command below expects STBY_RC.
-        self.disarm_rx().await?;
+        self.disarm_rx(leviculum_core::sx126x::RxTeardownBy::Config)
+            .await?;
         self.preamble_len = preamble_len;
         // Cache the modulation profile so `receive()` can size its software-wait
         // extension. `cr` is the SX1262 code (denominator - 4); `bw` is the
@@ -645,12 +648,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // listening chip is the "armed while transmitting" case the arming
         // state exists to make impossible.
         //
-        // `abort_rx_for_tx` rather than `disarm_rx`: the same standby in the
-        // same place, plus the read that says whether the window it stood
-        // down had a frame in it. On the ordinary CSMA path the CAD has
-        // already taken that standby and this finds nothing standing, so one
-        // key-up still produces at most one `[SX_RX_ABORT]`.
-        self.abort_rx_for_tx().await?;
+        // The standby carries the instrument with it: `disarm_rx` reads what
+        // the window had latched before it ends it. On the ordinary CSMA path
+        // the CAD has already taken that standby and this finds nothing
+        // standing, so one key-up still produces at most one
+        // `[SX_RX_TEARDOWN]`.
+        self.disarm_rx(leviculum_core::sx126x::RxTeardownBy::Tx)
+            .await?;
         self.set_packet_params(data.len() as u8).await?;
         self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::tx_irq_params())
             .await?;
@@ -737,19 +741,21 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.write_register(reg::EVENT_MASK, &val).await
     }
 
-    /// Stand the receiver down, if a window is standing.
+    /// Put the chip in standby if a window is standing, with no instrument
+    /// attached.
     ///
-    /// The one place a `SetStandby` is spent on account of RX, and the reason
-    /// every path that leaves RX — transmit, CAD, the outgoing-data arm of the
-    /// idle `select` — can call it unconditionally: it costs nothing when no
-    /// window is standing, and exactly one command when one is.
+    /// The one place a `SetStandby` is spent on account of RX. Private, and
+    /// reached only through [`disarm_rx`](Self::disarm_rx) or the
+    /// `RxPort::disarm` that [`leviculum_rx_arming::stand_down`] calls after
+    /// its read: an uninstrumented teardown in the firmware is a hole in the
+    /// rate.
     ///
     /// The order inside matters. The state is cleared only *after* the standby
     /// command has completed, so a future dropped inside that command still
     /// owes a standby and the next caller spends it. Clearing first would let
     /// a dropped disarm leave a listening chip that nothing believes is
     /// listening — and the next thing that path does is `SetTx`.
-    pub async fn disarm_rx(&mut self) -> Result<(), Error> {
+    async fn standby_rx(&mut self) -> Result<(), Error> {
         if !self.rx_state.standby_owed() {
             return Ok(());
         }
@@ -764,39 +770,30 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         Ok(())
     }
 
-    /// Stand the receiver down because the caller is about to key, and record
-    /// what was on the air when it went down.
+    /// Stand the receiver down, if a window is standing, and record what was
+    /// on the air when it went down.
     ///
-    /// [`disarm_rx`](Self::disarm_rx) plus one status read, and it returns
-    /// exactly what `disarm_rx` would have returned. It exists because the
-    /// abort count on its own cannot answer the question that decides whether
-    /// a guard is warranted: standing down an idle listen is how half duplex
-    /// works and costs nothing, standing down a window whose preamble has
-    /// already arrived destroys a reception. `[SX_RX_ABORT]` tells them apart.
+    /// What every path that leaves RX calls: it costs nothing when no window
+    /// is standing, exactly one command when one is, and one
+    /// `[SX_RX_TEARDOWN]` line either way round. `by` names the caller — see
+    /// [`leviculum_rx_arming::RxTeardown`] for why that and not the window's
+    /// own tag.
+    ///
+    /// One implementation for all six callers rather than one for the key-ups
+    /// and another for the rest. The previous batch instrumented only the
+    /// three key-ups, reasoning that a re-arm is "the same window continuing";
+    /// the sweep refuted it, and a second implementation would have been a
+    /// second place for that reasoning to hide.
     ///
     /// A failed read is reported on its own line rather than folded into the
-    /// abort line or swallowed: it is a lost sample, and a rate computed from
-    /// a population with invisible holes is wrong in the direction that says
-    /// "no problem here".
-    ///
-    /// Used by the three paths that leave RX to transmit — the idle
-    /// `select`'s outgoing arm, [`cad`](Self::cad), and
-    /// [`transmit`](Self::transmit). The other three callers of `disarm_rx`
-    /// (a re-arm, a reconfigure, and the software wait expiring) are not
-    /// key-ups and are deliberately not instrumented; counting them would put
-    /// the loop's own bookkeeping in the numerator.
-    pub async fn abort_rx_for_tx(&mut self) -> Result<(), Error> {
-        let outcome = leviculum_rx_arming::stand_down_for_tx(self).await;
-        match outcome.abort {
-            Ok(Some(abort)) => {
-                crate::log::log_fmt("[SX_RX_ABORT] ", format_args!("{abort}"));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                crate::log::log_fmt("[SX_RX_ABORT_ERR] ", format_args!("error={:?}", e));
-            }
-        }
-        outcome.stood_down
+    /// teardown line or swallowed: it is a lost sample, and a rate computed
+    /// from a population with invisible holes is wrong in the direction that
+    /// says "no problem here".
+    pub async fn disarm_rx(
+        &mut self,
+        by: leviculum_core::sx126x::RxTeardownBy,
+    ) -> Result<(), Error> {
+        leviculum_rx_arming::stand_down(self, by.tag()).await
     }
 
     /// Arm the receiver: the chip starts listening. `timeout_ms == 0` is
@@ -807,20 +804,29 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// [`leviculum_rx_arming::receive_and_hand_up`], which is the only caller
     /// that pairs it with [`await_rx`](Self::await_rx).
     ///
+    /// **Unconditional.** Whether a `SetRx` is wanted at all is
+    /// [`leviculum_rx_arming::ensure_armed`]'s decision, and this is what it
+    /// calls when the answer is yes; a window that is already standing with
+    /// these exact parameters never reaches here.
+    ///
     /// `site` names the caller's window in the `[SX_RX_ARM]` line. It is a
     /// parameter rather than something the driver could infer: the driver sees
     /// only a duration, and two windows of the same length mean entirely
-    /// different things to whoever reads the capture.
+    /// different things to whoever reads the capture. It is also half of the
+    /// window's identity for the adoption decision, so a window is adopted
+    /// only if the capture would call it the same thing.
     pub async fn arm_rx(
         &mut self,
         timeout_ms: u32,
         site: leviculum_core::sx126x::RxSite,
     ) -> Result<(), Error> {
-        // Never armed twice: a standing window is stood down first. It is a
-        // no-op on the ordinary path (the chip left RX at the terminating IRQ)
-        // and one command on the path this batch adds, where the previous
-        // window was re-armed provisionally to cover a hand-off.
-        self.disarm_rx().await?;
+        // Never armed twice: a standing window is stood down first — and
+        // counted, because this `SetStandby` is the one the sweep found
+        // ending receptions mid-air. It is a no-op on the ordinary path (the
+        // chip left RX at the terminating IRQ) and one command where the
+        // loop wants a window different from the one standing.
+        self.disarm_rx(leviculum_core::sx126x::RxTeardownBy::Arm)
+            .await?;
 
         self.write_command(opcode::SET_DIO_IRQ_PARAMS, &irq::rx_irq_params())
             .await?;
@@ -865,20 +871,21 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         Ok(())
     }
 
-    /// Await the standing window's terminating IRQ and read the frame out of
-    /// the chip's buffer. Returns (bytes_written, RxStatus) on success.
+    /// Wait for the standing window's terminating IRQ and read the frame out
+    /// of the chip's buffer. Returns (bytes_written, RxStatus) on success.
     ///
     /// The awaiting half of what used to be `receive()`. The chip has left RX
     /// when this returns: on `RxDone` and on the hardware timeout it returns
     /// to STBY_RC by itself, and the one branch where it might not — the
     /// software wait expiring with neither IRQ set — forces a standby.
+    ///
+    /// **Waits on an edge, so it must not be entered with a terminating IRQ
+    /// already latched.** On an adopted window that IRQ can have fired while
+    /// nobody was waiting, and DIO1 will not rise a second time for it.
+    /// [`leviculum_rx_arming::await_window`] is what keeps that case away from
+    /// here, by asking [`take_latched_frame`](Self::take_latched_frame) first.
     pub async fn await_rx(&mut self, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
-        let Some(&ArmedWindow {
-            timeout_ms,
-            hw_timeout,
-            ..
-        }) = self.rx_state.window()
-        else {
+        let Some(&ArmedWindow { timeout_ms, .. }) = self.rx_state.window() else {
             return Err(Error::NotArmed);
         };
 
@@ -901,7 +908,50 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.rx_arm
             .window_ended(embassy_time::Instant::now().as_millis());
 
-        let mut flags = self.get_irq_status().await?;
+        let flags = self.get_irq_status().await?;
+        self.finish_rx(flags, buf).await
+    }
+
+    /// Take a reception the chip has already completed, without waiting on any
+    /// edge. `Ok(None)` when no terminating IRQ is latched, in which case
+    /// nothing has been consumed or cleared and the caller may wait.
+    ///
+    /// The hazard of adoption, handled where it can be: a window that was
+    /// adopted rather than armed may already have run to `RxDone` — that is
+    /// the whole point of adopting it — and the frame is sitting in the chip's
+    /// buffer with DIO1 already high and no second edge coming. Reading the
+    /// status first costs one short transaction on a freshly armed window,
+    /// whose status the arming just cleared.
+    async fn take_latched_frame(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<Option<(u8, RxStatus)>, Error> {
+        if !self.rx_state.standby_owed() {
+            return Err(Error::NotArmed);
+        }
+        let flags = self.get_irq_status().await?;
+        if flags & (irq::IRQ_RX_DONE | irq::IRQ_TIMEOUT) == 0 {
+            return Ok(None);
+        }
+        // The window ended when that IRQ fired, which was before anybody
+        // looked; "now" is the earliest instant we can honestly claim, and it
+        // is the one the next arming's `dark_ms` measures from.
+        self.rx_arm
+            .window_ended(embassy_time::Instant::now().as_millis());
+        self.finish_rx(flags, buf).await.map(Some)
+    }
+
+    /// Classify a terminated window and read out whatever it caught.
+    ///
+    /// The tail both entries into the window share — the wait in
+    /// [`await_rx`](Self::await_rx) and the latched take above — so a
+    /// reception is completed identically however it was noticed. `flags` is
+    /// the status as read, not re-read: on the adopted path a second read
+    /// after the first would be a second chance to race the clear below.
+    async fn finish_rx(&mut self, mut flags: u16, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
+        let Some(&ArmedWindow { hw_timeout, .. }) = self.rx_state.window() else {
+            return Err(Error::NotArmed);
+        };
 
         // The software wait (timeout_ms + 500) can expire while a slow-SF frame
         // is still on the air; see `sx126x::rx_extend_ms` for the mechanism and
@@ -983,8 +1033,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             // Neither terminating IRQ: the software wait expired on a chip
             // that may still be in RX. `disarm_rx` rather than a bare
             // `set_standby_rc` so the state and the gap clock agree with the
-            // command — the window is over exactly once, here.
-            let _ = self.disarm_rx().await;
+            // command — the window is over exactly once, here — and so this
+            // teardown lands in the same population as the others. It is one
+            // that can genuinely destroy a reception: a preamble whose frame
+            // outlasted even the extension is still on the air.
+            let _ = self
+                .disarm_rx(leviculum_core::sx126x::RxTeardownBy::RxWait)
+                .await;
             Err(Error::Timeout)
         }
     }
@@ -1015,8 +1070,9 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Same reason as `transmit`: the CSMA path can reach here with a
         // provisional window standing, and `SetCad` expects STBY_RC. This is
         // the first of the two commands a key-up issues, so on the CSMA path
-        // it is where the abort is measured.
-        self.abort_rx_for_tx().await?;
+        // it is where the teardown is measured.
+        self.disarm_rx(leviculum_core::sx126x::RxTeardownBy::Cad)
+            .await?;
 
         self.write_command(
             opcode::SET_CAD_PARAMS,
@@ -1086,40 +1142,77 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxPort for Sx1262<SPI> {
     }
 
     async fn disarm(&mut self) -> Result<(), Error> {
-        self.disarm_rx().await
+        // The uninstrumented standby: this is what `stand_down` calls *after*
+        // its own read, so routing it back through `disarm_rx` would read the
+        // status twice and recurse.
+        self.standby_rx().await
     }
 }
 
-/// What the abort instrument asks the chip and the arming state, as
-/// [`leviculum_rx_arming::stand_down_for_tx`] asks it.
+/// What the arming decision and the teardown instrument ask the chip and the
+/// arming state, as [`leviculum_rx_arming::ensure_armed`] and
+/// [`leviculum_rx_arming::stand_down`] ask it.
 ///
-/// Two observations and no logic, for the same reason the port above is three
-/// forwarding methods: the sequence — read, then stand down, exactly one
-/// standby, a line either way — lives where a fake radio can assert it.
-impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxAbortProbe for Sx1262<SPI> {
-    fn standing_window(&self) -> Option<(&'static str, u32)> {
+/// Observations and one log side-channel, no logic, for the same reason the
+/// port above is three forwarding methods: the sequences — adopt or replace,
+/// read before the standby, take a latched reception before waiting on an
+/// edge — live where a fake radio can assert them.
+impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
+    fn standing_window(
+        &self,
+    ) -> Option<leviculum_rx_arming::StandingWindow<(u32, leviculum_core::sx126x::RxSite)>> {
         self.rx_state.window().map(|w| {
-            let armed_ms = embassy_time::Instant::now()
+            let stood_ms = embassy_time::Instant::now()
                 .as_millis()
                 .saturating_sub(w.armed_at_ms);
-            // A window standing for 49 days is not a reading anybody needs
-            // to distinguish; the clamp keeps the field a `u32` and the line
-            // a fixed width.
-            (w.site.tag(), armed_ms.min(u32::MAX as u64) as u32)
+            leviculum_rx_arming::StandingWindow {
+                window: (w.timeout_ms, w.site),
+                // A window standing for 49 days is not a reading anybody needs
+                // to distinguish; the clamp keeps the field a `u32` and the
+                // line a fixed width.
+                stood_ms: stood_ms.min(u32::MAX as u64) as u32,
+            }
         })
     }
 
-    async fn latched_progress(&mut self) -> Result<leviculum_rx_arming::RxProgress, Error> {
+    async fn latched(&mut self) -> Result<leviculum_rx_arming::RxLatch, Error> {
         // `GetIrqStatus` reads; `ClearIrqStatus` is a separate opcode and is
         // deliberately not issued here. The window's latch mask is
-        // `IRQ_LATCH_ALL` (see `irq::rx_irq_params`), so both bits of
-        // `irq::RX_EXTEND_INPUTS` are readable back even though only
-        // `DIO1_RX` ever raised the pin.
+        // `IRQ_LATCH_ALL` (see `irq::rx_irq_params`), so the preamble and
+        // header bits are readable back even though only `DIO1_RX` ever raised
+        // the pin — and on an adopted window a clear here would consume the
+        // `RxDone` the awaiting half is about to take.
         let flags = self.get_irq_status().await?;
-        Ok(leviculum_rx_arming::RxProgress {
+        Ok(leviculum_rx_arming::RxLatch {
+            raw: flags,
             preamble: flags & irq::IRQ_PREAMBLE_DETECTED != 0,
             header: flags & irq::IRQ_HEADER_VALID != 0,
+            rxdone: flags & irq::IRQ_RX_DONE != 0,
         })
+    }
+
+    async fn take_latched_frame(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<Option<(u8, RxStatus)>, Error> {
+        self.take_latched_frame(buf).await
+    }
+
+    fn report(&mut self, event: leviculum_rx_arming::RxEvent<'_, Error>) {
+        match event {
+            leviculum_rx_arming::RxEvent::Adopted(adopt) => {
+                crate::log::log_fmt("[SX_RX_ADOPT] ", format_args!("{adopt}"));
+            }
+            leviculum_rx_arming::RxEvent::TornDown(teardown) => {
+                crate::log::log_fmt("[SX_RX_TEARDOWN] ", format_args!("{teardown}"));
+            }
+            leviculum_rx_arming::RxEvent::ProbeFailed { at, error } => {
+                crate::log::log_fmt(
+                    "[SX_RX_PROBE_ERR] ",
+                    format_args!("at={} error={:?}", at, error),
+                );
+            }
+        }
     }
 }
 
