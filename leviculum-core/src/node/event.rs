@@ -287,7 +287,23 @@ pub enum NodeEvent {
         link_id: LinkId,
         /// Hash identifying this resource
         resource_hash: [u8; 32],
-        /// Assembled data (receiver only; empty Vec for sender)
+        /// Data for **this segment** (receiver only; empty `Vec` for sender).
+        ///
+        /// # This is not necessarily the whole payload (leviculum#61)
+        ///
+        /// A transfer larger than [`RESOURCE_MAX_EFFICIENT_SIZE`]
+        /// (`crate::resource::RESOURCE_MAX_EFFICIENT_SIZE`, 1 MiB − 1) is
+        /// split into segments, and **one of these events is delivered per
+        /// segment**, each carrying only that segment's slice. A consumer
+        /// that decodes the first event's `data` as a complete message sees a
+        /// body truncated at `RESOURCE_MAX_EFFICIENT_SIZE - metadata_size` —
+        /// which is exactly how this bit a downstream consumer in production,
+        /// as a decode error blamed on the *sender*.
+        ///
+        /// Reassemble by concatenating `data` in `segment_index` order until
+        /// `segment_index == total_segments`; that final event is the one the
+        /// reference implementation treats as "the transfer concluded"
+        /// (Python fires its resource callback only there).
         data: Vec<u8>,
         /// Extracted metadata (receiver only; None for sender).
         /// Contains raw msgpack-encoded bytes as received on the wire.
