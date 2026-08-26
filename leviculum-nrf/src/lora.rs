@@ -428,7 +428,11 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
 /// The mapping is the whole implementation: the decision about which sink a
 /// startup fact belongs on is made — and tested — in `facts`, and this only
 /// carries it out.
-struct FirmwareLog;
+///
+/// `pub(crate)` because one of those facts is stated from inside the SX1262
+/// driver, which is the only place that knows what the PA was actually
+/// programmed with.
+pub(crate) struct FirmwareLog;
 
 impl leviculum_log_line::facts::LineSink for FirmwareLog {
     fn line(

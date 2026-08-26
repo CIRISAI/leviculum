@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A board states the airtime limits it is enforcing and who chose each of
   them on every boot, instead of only when it derived the cap itself — an
   explicit host `0` used to switch the cap off silently.
+- A board says when it could not transmit at the power it was given,
+  naming the request and the power the PA was actually programmed with —
+  a request below 14 dBm rounds up, and the line reporting it used to be
+  dropped on a boot nobody was watching (#349).
 - The citation guard reads the `` (`ident`, `path:line`) `` spelling as
   naming its subject, so 130 citations that were existence-checked are
   drift-checked; 30 that had drifted are corrected.

@@ -35,6 +35,15 @@
 //! cost is two lines per boot. Anything that repeats belongs on the gated
 //! sink, where it cannot lap the ring before a reader arrives.
 //!
+//! A third fact joins them only when it has something to say:
+//! [`pa_profile_substitution`] states the transmit power the radio was
+//! programmed with when that is not the power it was asked for. The same
+//! window swallowed it, and it contradicts the settings line above — which
+//! reports the request — so a board whose PA saturated said `txp=2` and
+//! transmitted 14 dBm. A fact that is only interesting when it fires is
+//! emitted only when it fires; the alternative puts it back out of sight
+//! among the lines nobody reads.
+//!
 //! The functions take a sink rather than calling the firmware's logger, so
 //! the routing is assertable on the host: `leviculum-nrf` cross-compiles to
 //! thumbv7em and runs no host tests, and reading the source to check which
@@ -193,6 +202,52 @@ pub fn airtime_limits<S: LineSink>(sink: &mut S, l: &AirtimeLimits) {
             l.st_source,
             l.freq_hz,
             l.lawful_lt_alock,
+        ),
+    );
+}
+
+/// `[SX_PA_PROFILE] requested=… programmed=…` — the transmit power the radio
+/// was actually programmed with, when it is not the one that was asked for.
+///
+/// The SX1262 high-power PA has a documented `SetPaConfig` setting for four
+/// output powers and nothing in between (`sx126x::PA_PROFILES_DBM`), so any
+/// other request is programmed as one of those four. `sx126x::pa_profile_dbm`
+/// rounds down — except below the lowest profile, where there is nothing to
+/// round down to and the PA saturates at 14 dBm, which is the one direction in
+/// which a board transmits MORE than it was told to. That case is reachable
+/// from a real flash: `lnflash` accepts -9 dBm, and the hardware corpus asks
+/// for 2.
+///
+/// Critical, for the same reason as the two facts above and with the same
+/// consequence: the substitution used to go out on the gated sink from inside
+/// `configure_lora`, inside the window a board drops when nobody has attached
+/// to the debug port yet, while `[LORA] active config` reported `txp=` the
+/// *request*. So the number an operator could read was the one the radio was
+/// not programmed with.
+///
+/// Emitted only when the two values differ. A request that lands on a profile
+/// exactly has nothing to report, and a line on every boot regardless would
+/// make the interesting case invisible again one level up.
+///
+/// `requested_dbm` is what the configuration asked for; `programmed_dbm` is
+/// what `pa_profile_dbm` chose. The direction is stated in words because it is
+/// the compliance-relevant half: rounding down spends the operator's own
+/// margin, rounding up spends the regulator's.
+pub fn pa_profile_substitution<S: LineSink>(sink: &mut S, requested_dbm: i8, programmed_dbm: i8) {
+    if programmed_dbm == requested_dbm {
+        return;
+    }
+    let direction = if programmed_dbm > requested_dbm {
+        "above the request"
+    } else {
+        "below the request"
+    };
+    sink.line(
+        Route::Critical,
+        "[SX_PA_PROFILE] ",
+        format_args!(
+            "requested={} dBm has no PA profile, programmed={} dBm, {}",
+            requested_dbm, programmed_dbm, direction
         ),
     );
 }
@@ -410,6 +465,59 @@ mod tests {
             );
             assert_eq!(sink.lines.len(), 1, "{lt_source:?}/{st_source:?}");
             assert!(sink.lines[0].1.contains("AIRTIME"));
+        }
+    }
+
+    /// The case the line exists for: the chip has no setting below 14 dBm, so
+    /// a request under it is the one substitution that programs MORE power
+    /// than was asked for. 91 hardware scenarios ask for 2 dBm, and the only
+    /// line that mentioned it said `txp=2` — the request, not the profile.
+    #[test]
+    fn a_request_below_the_lowest_profile_states_both_values_and_the_direction() {
+        let mut sink = Recorder::default();
+        pa_profile_substitution(&mut sink, 2, 14);
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[SX_PA_PROFILE] requested=2 dBm has no PA profile, programmed=14 dBm, \
+                     above the request t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// The other direction, which is the safe one and still a substitution: a
+    /// request between two profiles is rounded down, and the line says so with
+    /// the same two numbers rather than a different vocabulary.
+    #[test]
+    fn a_request_between_two_profiles_says_it_was_rounded_down() {
+        let mut sink = Recorder::default();
+        pa_profile_substitution(&mut sink, 21, 20);
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[SX_PA_PROFILE] requested=21 dBm has no PA profile, programmed=20 dBm, \
+                     below the request t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// The control, and the reason the condition lives in here rather than at
+    /// the call site: a line emitted on every boot regardless would put the
+    /// interesting case back out of sight, one level up from where it was.
+    /// The four values are `sx126x::PA_PROFILES_DBM`, spelled out because this
+    /// crate does not depend on core.
+    #[test]
+    fn a_request_that_lands_on_a_profile_exactly_says_nothing() {
+        for profile in [14i8, 17, 20, 22] {
+            let mut sink = Recorder::default();
+            pa_profile_substitution(&mut sink, profile, profile);
+            assert!(sink.lines.is_empty(), "profile {profile}: {:?}", sink.lines);
         }
     }
 

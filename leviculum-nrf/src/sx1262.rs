@@ -584,16 +584,20 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // test target; this driver holds only SPI. The substitution is logged
         // rather than silent: a configured 21 dBm used to fall through a `_`
         // arm and transmit 14 dBm with nothing said.
+        //
+        // Below the lowest profile there is nothing to round down to, so the
+        // PA saturates at 14 dBm and the board transmits ABOVE its request —
+        // and the `[LORA] active config` line reports the request, so nothing
+        // an operator can read names the programmed power. The line therefore
+        // goes out through `facts`, on the sink that survives a boot nobody
+        // was attached for; the gated one dropped it inside the same window
+        // that used to swallow the settings line.
         let profile_dbm = leviculum_core::sx126x::pa_profile_dbm(power_dbm);
-        if profile_dbm != power_dbm {
-            crate::log::log_fmt(
-                "[SX_PA_PROFILE] ",
-                format_args!(
-                    "requested={} dBm is not a supported PA profile, using={} dBm",
-                    power_dbm, profile_dbm
-                ),
-            );
-        }
+        leviculum_log_line::facts::pa_profile_substitution(
+            &mut crate::lora::FirmwareLog,
+            power_dbm,
+            profile_dbm,
+        );
         let (pa_duty, hp_max) = match profile_dbm {
             22 => (0x04, 0x07),
             20 => (0x03, 0x05),

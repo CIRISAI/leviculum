@@ -56,7 +56,7 @@ firmware reads as unlimited.
 firmware states the settings it applied and the limits it loaded into
 the tracker on the boot-critical log path — the one that bypasses the
 debug port's runtime drain gate (`airtime_limits`,
-`leviculum-nrf/log-line/src/facts.rs:182`) — and states them again on
+`leviculum-nrf/log-line/src/facts.rs:191`) — and states them again on
 every runtime reconfiguration. Until 2026-08 both were ordinary
 runtime lines: a board that came up before a reader attached dropped
 them with everything else, so the two facts a compliance question is
