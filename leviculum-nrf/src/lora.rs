@@ -1279,18 +1279,29 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // can now happen at three points instead of one — inside the
             // arming, inside the wait, or inside the hand-off that follows the
             // provisional re-arm — so the receiver is stood down here rather
-            // than assumed to be down. `disarm_rx` is the one that knows: the
-            // arming state is set before `SetRx` goes out and cleared only
-            // after a standby completes, so a drop anywhere in that span still
-            // owes exactly one standby and this spends it. A packet racing the
-            // switch may be lost (rare, acceptable, and unchanged).
+            // than assumed to be down. The arming state is the one that knows:
+            // it is set before `SetRx` goes out and cleared only after a
+            // standby completes, so a drop anywhere in that span still owes
+            // exactly one standby and this spends it.
+            //
+            // How often this arm runs is measured: 21-34 % of all armings on
+            // the bench take it, so the "rare" this comment used to claim was
+            // wrong. What is NOT measured, and what alone decides whether a
+            // guard is warranted, is whether anything was on the air when the
+            // window came down. An idle listen stood down here loses nothing —
+            // that is half duplex, and the reference firmware does the same.
+            // A window with `PreambleDetected` latched loses a frame that
+            // would otherwise have completed. `abort_rx_for_tx` reads the
+            // chip's latched IRQs before the standby and emits
+            // `[SX_RX_ABORT]`; it changes nothing else, and the rate it
+            // reports is what the fix, if any, gets designed against.
             // radio_silent still drops outgoing instead of transmitting.
             Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
-                let _ = radio.disarm_rx().await;
+                let _ = radio.abort_rx_for_tx().await;
                 if config.radio_silent {
                     drop(data);
                 } else {

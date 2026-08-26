@@ -25,6 +25,16 @@
 //! window that just fired, and it is provisional: the loop's next decision
 //! either awaits it or leaves RX, and leaving RX owes exactly one standby.
 //! [`RxArmState`] is what tracks that debt.
+//!
+//! # What the abort instrument is, and is not
+//!
+//! [`stand_down_for_tx`] adds no guard and no deferral: it takes the same
+//! standby the TX paths already took, in the same place, and reads back what
+//! the chip latched first. Standing down an idle listen is not a loss — it is
+//! how half duplex works. Standing down a window whose preamble has already
+//! arrived destroys a reception that would otherwise have completed. The
+//! count of aborts cannot tell those apart; [`RxAbort`] can, and until it has
+//! been run on the bench nobody knows which of the two the loop is doing.
 
 /// The receiver operations the arming order is defined over.
 ///
@@ -205,6 +215,152 @@ impl<W> Default for RxArmState<W> {
     }
 }
 
+/// What the chip latched while a window was standing.
+///
+/// The two bits `leviculum_core::sx126x::RX_EXTEND_INPUTS` is built from,
+/// decoded. They are the whole discriminator: `PreambleDetected` says
+/// something was on the air, `HeaderValid` says it was a frame for this
+/// modulation and its length was already known. A window stood down with
+/// neither is an idle listen and costs nothing; a window stood down with
+/// either is a reception that will not complete.
+///
+/// Decoded by the port rather than carried as raw flags so the bit values
+/// stay in the one crate that owns them — this crate has no dependency on
+/// the chip's register map and gains nothing from one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RxProgress {
+    /// `PreambleDetected` was latched during the window.
+    pub preamble: bool,
+    /// `HeaderValid` was latched during the window.
+    pub header: bool,
+}
+
+impl RxProgress {
+    /// Neither bit: the window was standing on an empty channel.
+    pub const CLEAR: Self = Self {
+        preamble: false,
+        header: false,
+    };
+}
+
+/// One standing window stood down because the loop is about to key.
+///
+/// [`Display`](core::fmt::Display) is the body of the `[SX_RX_ABORT]` line,
+/// so the shape the host greps is pinned by a host test rather than by a
+/// `format_args!` in a crate that has no test target — the same arrangement
+/// `leviculum_core::sx126x::RxArm` uses for `[SX_RX_ARM]`.
+///
+/// `preamble` and `header` render as `0`/`1` and never as anything else,
+/// including when the window was clean. A discriminator that only speaks
+/// when it has bad news gives a numerator with no denominator, and the
+/// question this exists to answer is a rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RxAbort {
+    /// The stood-down window's own site tag — which of the loop's windows
+    /// was listening, not which path did the standing down. The port reads
+    /// it back off the standing window, so it is the same tag `[SX_RX_ARM]`
+    /// printed when that window opened.
+    pub site: &'static str,
+    /// What the chip had latched when the abort read it.
+    pub progress: RxProgress,
+    /// How long the window had been standing, in milliseconds, measured
+    /// from its own arming. A preamble that latched 5 ms in and one that
+    /// latched 400 ms in are different stories, and without this they are
+    /// one number.
+    pub armed_ms: u32,
+}
+
+impl core::fmt::Display for RxAbort {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "site={} preamble={} header={} armed_ms={}",
+            self.site,
+            u8::from(self.progress.preamble),
+            u8::from(self.progress.header),
+            self.armed_ms
+        )
+    }
+}
+
+/// What a port must be able to answer at the moment a window is stood down.
+///
+/// Separate from [`RxPort`] on purpose: that trait is the three transitions
+/// the chip has and nothing else, and these two are observations, not
+/// transitions. Neither may move the chip — `standing_window` touches no
+/// bus at all, and `latched_progress` is a status read.
+#[allow(async_fn_in_trait)]
+pub trait RxAbortProbe: RxPort {
+    /// The standing window's site tag and how long it has stood, in
+    /// milliseconds. `None` when no window is standing — the same question
+    /// [`RxArmState::standby_owed`] answers, asked of the port that owns
+    /// the state.
+    fn standing_window(&self) -> Option<(&'static str, u32)>;
+
+    /// Read back the interrupts the chip latched during the standing
+    /// window.
+    ///
+    /// **Must not clear them.** The window is about to be stood down and
+    /// the arming that follows clears the status itself; a clear here would
+    /// consume a pending terminating IRQ that the caller has not yet seen.
+    async fn latched_progress(&mut self) -> Result<RxProgress, Self::Error>;
+}
+
+/// The outcome of [`stand_down_for_tx`]: what the instrument saw, and what
+/// the standby returned.
+///
+/// Two independent results rather than one. `stood_down` is exactly what a
+/// bare [`RxPort::disarm`] would have returned, so a caller can propagate it
+/// unchanged; a probe that fails must not turn into a transmit that does not
+/// happen.
+pub struct StandDown<E> {
+    /// `Ok(None)` when no window was standing, `Ok(Some)` when one was and
+    /// the probe read it, `Err` when the probe itself failed. The last case
+    /// is a lost sample and the caller should say so out loud — a silently
+    /// dropped abort deflates the rate this measures.
+    pub abort: Result<Option<RxAbort>, E>,
+    /// What the standby returned.
+    pub stood_down: Result<(), E>,
+}
+
+/// Stand a listening receiver down because the loop is about to key, and say
+/// what was on the air when it went down.
+///
+/// Instrument only. The sequence is unchanged from before it existed except
+/// for the status read: exactly one standby is spent, at the same point, and
+/// the read happens strictly before it so the chip's latched flags still
+/// describe the window rather than the standby that ended it.
+///
+/// When nothing is standing this is the same no-op [`RxPort::disarm`] always
+/// was, and it emits nothing: there was no window to destroy, so there is no
+/// sample.
+pub async fn stand_down_for_tx<R>(radio: &mut R) -> StandDown<R::Error>
+where
+    R: RxAbortProbe,
+{
+    let Some((site, armed_ms)) = radio.standing_window() else {
+        return StandDown {
+            abort: Ok(None),
+            stood_down: radio.disarm().await,
+        };
+    };
+    // Before the standby, and before any `?`: the standby is owed whatever
+    // this read did, and a chip left listening while the next command is
+    // `SetTx` is the one state the arming discipline exists to prevent.
+    let progress = radio.latched_progress().await;
+    let stood_down = radio.disarm().await;
+    StandDown {
+        abort: progress.map(|progress| {
+            Some(RxAbort {
+                site,
+                progress,
+                armed_ms,
+            })
+        }),
+        stood_down,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +401,9 @@ mod tests {
         HandOffPending,
         Transmit,
         Cad,
+        /// The abort's status read. Recorded so "before the standby" and
+        /// "exactly once" are assertions rather than descriptions.
+        ProbeIrq,
     }
 
     /// One log for the radio and the hand-off together.
@@ -283,6 +442,20 @@ mod tests {
         /// Fail the Nth `arm` call (0-based).
         fail_arm_at: Option<usize>,
         arms: usize,
+        /// Fake monotonic clock in milliseconds, advanced by the test. The
+        /// driver's is `embassy_time::Instant::now`.
+        now: u32,
+        /// Reading of `now` taken when the standing window was armed. This
+        /// is what makes `armed_ms` a measurement rather than a constant:
+        /// a test that advances the clock across a whole receive cycle can
+        /// tell "since the arming" from "since the loop iteration".
+        armed_at: u32,
+        /// The site tag `arm` records on the window it opens.
+        site: &'static str,
+        /// What the fake chip has latched, as `latched_progress` reports it.
+        latched: RxProgress,
+        /// Fail the status read, the way an SPI error would.
+        fail_probe: bool,
     }
 
     impl<'a> FakePort<'a> {
@@ -293,18 +466,45 @@ mod tests {
                 inbox,
                 fail_arm_at: None,
                 arms: 0,
+                now: 0,
+                armed_at: 0,
+                site: "idle",
+                latched: RxProgress::CLEAR,
+                fail_probe: false,
             }
         }
 
         /// The driver's `transmit()`/`cad()` head: leave RX, then key.
-        async fn transmit(&mut self) {
-            self.disarm().await.expect("fake disarm cannot fail");
+        ///
+        /// Both go through [`stand_down_for_tx`], exactly as the driver's do
+        /// since the abort instrument landed, so the standby-accounting
+        /// controls below run against the path the firmware takes.
+        async fn transmit(&mut self) -> StandDown<()> {
+            let outcome = stand_down_for_tx(self).await;
             self.log.push(Op::Transmit);
+            outcome
         }
 
-        async fn cad(&mut self) {
-            self.disarm().await.expect("fake disarm cannot fail");
+        async fn cad(&mut self) -> StandDown<()> {
+            let outcome = stand_down_for_tx(self).await;
             self.log.push(Op::Cad);
+            outcome
+        }
+    }
+
+    impl RxAbortProbe for FakePort<'_> {
+        fn standing_window(&self) -> Option<(&'static str, u32)> {
+            self.state
+                .window()
+                .map(|_| (self.site, self.now.saturating_sub(self.armed_at)))
+        }
+
+        async fn latched_progress(&mut self) -> Result<RxProgress, ()> {
+            self.log.push(Op::ProbeIrq);
+            if self.fail_probe {
+                return Err(());
+            }
+            Ok(self.latched)
         }
     }
 
@@ -318,7 +518,10 @@ mod tests {
             self.disarm().await?;
             let n = self.arms;
             self.arms += 1;
-            // Pessimistic, exactly as the driver records it.
+            // Pessimistic, exactly as the driver records it — and the arm
+            // instant is stamped with it, so a window that never reached
+            // `SetRx` still has an honest start.
+            self.armed_at = self.now;
             self.state.arming(window);
             if self.fail_arm_at == Some(n) {
                 return Err(());
@@ -608,6 +811,178 @@ mod tests {
         state.arming(0);
         state.disarmed();
         assert!(!state.standby_owed());
+    }
+
+    /// Arm a window, advance the fake clock, and stand it down for a key-up.
+    fn arm_then_abort(
+        log: &OpLog,
+        latched: RxProgress,
+        armed_for_ms: u32,
+    ) -> (FakePort<'_>, StandDown<()>) {
+        let mut port = FakePort::new(log, Vec::new());
+        port.latched = latched;
+        block_on(port.arm(500)).expect("fake arm");
+        port.now += armed_for_ms;
+        let outcome = block_on(stand_down_for_tx(&mut port));
+        (port, outcome)
+    }
+
+    /// The instrument itself: the line carries the flags the chip had
+    /// latched, and it carries them as the grammar the host greps.
+    #[test]
+    fn an_abort_reports_the_flags_the_chip_latched() {
+        let log = OpLog::default();
+        let latched = RxProgress {
+            preamble: true,
+            header: true,
+        };
+        let (_port, outcome) = arm_then_abort(&log, latched, 47);
+        let abort = outcome
+            .abort
+            .expect("the probe read")
+            .expect("a window was standing");
+        assert_eq!(abort.progress, latched);
+        let mut line = alloc::string::String::new();
+        core::fmt::write(&mut line, format_args!("{abort}")).expect("render");
+        assert_eq!(line, "site=idle preamble=1 header=1 armed_ms=47");
+    }
+
+    /// A preamble with no header — the frame arrived but the abort beat its
+    /// header — is a distinct reading and must not collapse into either
+    /// neighbour.
+    #[test]
+    fn a_preamble_without_a_header_reports_one_and_zero() {
+        let log = OpLog::default();
+        let (_port, outcome) = arm_then_abort(
+            &log,
+            RxProgress {
+                preamble: true,
+                header: false,
+            },
+            5,
+        );
+        let abort = outcome.abort.expect("read").expect("standing");
+        let mut line = alloc::string::String::new();
+        core::fmt::write(&mut line, format_args!("{abort}")).expect("render");
+        assert_eq!(line, "site=idle preamble=1 header=0 armed_ms=5");
+    }
+
+    /// Control: a clean status still produces a line. The question is a
+    /// rate, and a discriminator that speaks only when it has bad news
+    /// gives a numerator with no denominator.
+    #[test]
+    fn a_clean_abort_still_reports_a_line() {
+        let log = OpLog::default();
+        let (_port, outcome) = arm_then_abort(&log, RxProgress::CLEAR, 312);
+        let abort = outcome
+            .abort
+            .expect("the probe read")
+            .expect("a clean window is still a sample");
+        let mut line = alloc::string::String::new();
+        core::fmt::write(&mut line, format_args!("{abort}")).expect("render");
+        assert_eq!(line, "site=idle preamble=0 header=0 armed_ms=312");
+    }
+
+    /// Control: the abort spends exactly one standby, and the status read
+    /// happens strictly before it — after the standby the flags describe
+    /// the command that ended the window rather than the window.
+    #[test]
+    fn an_abort_reads_before_the_standby_and_spends_exactly_one() {
+        let log = OpLog::default();
+        let (port, outcome) = arm_then_abort(&log, RxProgress::CLEAR, 1);
+        assert!(outcome.stood_down.is_ok());
+        assert!(!port.state.standby_owed());
+
+        let ops = log.ops();
+        assert_eq!(
+            log.count(|op| *op == Op::Disarm),
+            1,
+            "exactly one standby, ops={ops:?}"
+        );
+        assert_eq!(
+            log.count(|op| *op == Op::ProbeIrq),
+            1,
+            "exactly one status read, ops={ops:?}"
+        );
+        let probe = log.position(|op| *op == Op::ProbeIrq).expect("probe");
+        let standby = log.position(|op| *op == Op::Disarm).expect("standby");
+        assert!(probe < standby, "ops={ops:?}");
+    }
+
+    /// Control: no window standing is not an abort. The disarm is the same
+    /// no-op it always was, nothing is read, and no sample is invented.
+    #[test]
+    fn standing_down_an_unarmed_radio_is_not_a_sample() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        let outcome = block_on(stand_down_for_tx(&mut port));
+        assert_eq!(outcome.abort, Ok(None));
+        assert!(outcome.stood_down.is_ok());
+        let ops = log.ops();
+        assert_eq!(log.count(|op| *op == Op::ProbeIrq), 0, "ops={ops:?}");
+        assert_eq!(log.count(|op| *op == Op::Disarm), 0, "ops={ops:?}");
+        assert_eq!(log.count(|op| *op == Op::DisarmNoop), 1, "ops={ops:?}");
+    }
+
+    /// Control: a failed status read still stands the receiver down, and
+    /// still reports the standby's own result. An instrument that can block
+    /// a transmit is a guard, and this batch ships no guard.
+    #[test]
+    fn a_failed_probe_does_not_cost_the_standby() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        port.fail_probe = true;
+        block_on(port.arm(500)).expect("fake arm");
+        let outcome = block_on(stand_down_for_tx(&mut port));
+
+        assert_eq!(outcome.abort, Err(()), "the lost sample is reported");
+        assert!(
+            outcome.stood_down.is_ok(),
+            "the standby is unaffected, ops={:?}",
+            log.ops()
+        );
+        assert!(!port.state.standby_owed());
+        assert_eq!(log.count(|op| *op == Op::Disarm), 1, "ops={:?}", log.ops());
+    }
+
+    /// `armed_ms` is measured from the arming of the window that is being
+    /// stood down, not from the loop iteration that decided to key.
+    ///
+    /// The clock runs across a whole receive cycle: the first window arms at
+    /// t=0 and the provisional re-arm happens at t=1000, so an abort at
+    /// t=1030 that reported "since the iteration started" would say 1030.
+    #[test]
+    fn armed_ms_is_measured_from_the_arming() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, alloc::vec![Some(alloc::vec![1])]);
+        block_on(port.arm(500)).expect("first arm");
+        // The window stands for a second before the frame lands.
+        port.now += 1_000;
+        // The reception's provisional re-arm: a new window, a new start.
+        block_on(port.arm(500)).expect("re-arm");
+        port.now += 30;
+
+        let outcome = block_on(stand_down_for_tx(&mut port));
+        let abort = outcome.abort.expect("read").expect("standing");
+        assert_eq!(
+            abort.armed_ms, 30,
+            "measured from the re-arm at t=1000, not from t=0"
+        );
+    }
+
+    /// The site is the stood-down window's own, so a capture says which of
+    /// the loop's windows the key-up destroyed — not which path keyed.
+    #[test]
+    fn the_abort_names_the_window_that_was_standing() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        port.site = "csma";
+        block_on(port.arm(120)).expect("fake arm");
+        let abort = block_on(stand_down_for_tx(&mut port))
+            .abort
+            .expect("read")
+            .expect("standing");
+        assert_eq!(abort.site, "csma");
     }
 
     /// Re-arming over a standing window replaces it rather than stacking:

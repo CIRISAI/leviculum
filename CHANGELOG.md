@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout_ms= dark_ms=`, so a capture says how long the radio was not
   listening between two windows instead of leaving it to be inferred (#344).
 
+- Standing the receiver down to transmit logs `[SX_RX_ABORT] site=
+  preamble= header= armed_ms=`, so a capture says whether a frame was
+  already arriving when the window came down, not just how often it did.
+
 - The firmware receives at boosted SX1262 gain and applies the errata-15.4
   IQ correction, and prints both registers before and after it writes them
   (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather
