@@ -151,6 +151,61 @@ pub fn rx_extend_ms(
     )
 }
 
+/// How long a transmit may be held off by a reception the standing window is
+/// already holding, or `None` to key up now.
+///
+/// Deliberately [`rx_extend_ms`] and not a second arithmetic. The two ask the
+/// same question of the same three bits — *how much longer can this frame
+/// still be arriving?* — and the answer is the same number: one maximum-size
+/// frame at the live modulation. The chip does not expose the in-flight
+/// header's length field (`GetRxBufferStatus` is valid only after `RxDone`),
+/// so the true remaining airtime is not computable from anything a standing
+/// window can be asked, and the largest legal frame is the tightest honest
+/// upper bound either caller can have.
+///
+/// # `preamble=1` and `header=1` earn the same bound, on purpose
+///
+/// They are not the same evidence. A latched `HeaderValid` means an explicit
+/// header passed its own CRC, so a real frame at this modulation is on the
+/// air and its end is a fact; a bare `PreambleDetected` means only that
+/// something started, and it may be noise. What they earn is nevertheless the
+/// same, for three reasons:
+///
+/// 1. **This is a bound, not a delay.** The wait ends at the terminating IRQ,
+///    so on a frame that completes, the tightness of the bound costs nothing.
+///    Only a carrier that never completes ever spends it.
+/// 2. **Being wrong is asymmetric.** A bound that is too long costs one
+///    outgoing packet some latency, once, and only while something is on the
+///    air. A bound that is too short costs the packet the deferral exists to
+///    save — and a bare preamble, read at an unknown point inside a frame, is
+///    exactly where a tight bound is most likely to cut a real reception off.
+/// 3. **The alternative is a measurement, not a guess.** Whether a shorter
+///    bare-preamble bound is worth its own arithmetic is answered by
+///    `[SX_TX_DEFER] reason=preamble outcome=timeout` as a fraction of
+///    `reason=preamble`. The reference firmware's false-preamble bound
+///    (preamble time + header time, `reference/RNode_Firmware/sx126x.cpp:508`)
+///    is the change to make if that fraction turns out to be material — made
+///    then on a number rather than on a hunch.
+///
+/// What the two bits do change is the line: `reason=` carries which of them
+/// earned the wait, so the two populations are separable in a capture even
+/// though the bound is not.
+///
+/// `RxDone` or `Timeout` latched returns `None`, inherited from
+/// [`rx_extend_ms`]: the window is holding a reception that has already
+/// concluded, and there is nothing still arriving to wait for. Harvesting that
+/// completed frame instead of tearing it down would be a second behaviour and
+/// is deliberately not this one.
+pub fn tx_defer_ms(
+    flags: u16,
+    bw_hz: u32,
+    sf: u8,
+    cr_denom: u8,
+    preamble_symbols: u16,
+) -> Option<u64> {
+    rx_extend_ms(flags, bw_hz, sf, cr_denom, preamble_symbols)
+}
+
 /// Slack added on top of a computed on-air time when sizing the software
 /// timeout around a started radio operation (TX completion, CAD completion).
 ///
@@ -845,6 +900,77 @@ mod tests {
             rx_extend_ms(IRQ_PREAMBLE_DETECTED, 0, 10, 5, SLOW_PREAMBLE),
             None
         );
+    }
+
+    /// The transmit deferral is the receive extension, on every input, and
+    /// that identity is the claim rather than a coincidence: two functions
+    /// answering "how much longer can this frame be arriving?" with different
+    /// arithmetic is how a guard and the window it guards drift apart.
+    #[test]
+    fn the_transmit_deferral_is_the_receive_extension() {
+        let (bw, sf, cr) = SLOW;
+        for flags in [
+            0,
+            IRQ_PREAMBLE_DETECTED,
+            IRQ_HEADER_VALID,
+            IRQ_PREAMBLE_DETECTED | IRQ_HEADER_VALID,
+            IRQ_PREAMBLE_DETECTED | IRQ_RX_DONE,
+            IRQ_PREAMBLE_DETECTED | IRQ_TIMEOUT,
+            IRQ_HEADER_VALID | IRQ_RX_DONE | IRQ_CRC_ERR,
+            IRQ_CAD_DETECTED,
+            IRQ_LATCH_ALL,
+        ] {
+            assert_eq!(
+                tx_defer_ms(flags, bw, sf, cr, SLOW_PREAMBLE),
+                rx_extend_ms(flags, bw, sf, cr, SLOW_PREAMBLE),
+                "flags={flags:#06x}"
+            );
+        }
+        // And on the one input that has no airtime at all.
+        assert_eq!(
+            tx_defer_ms(IRQ_PREAMBLE_DETECTED, 0, sf, cr, SLOW_PREAMBLE),
+            None
+        );
+    }
+
+    /// A bare preamble and a decoded header earn the same bound. Asserted
+    /// rather than left implicit: a later "tighten the preamble case" edit
+    /// that does not also state its measurement has to go red here first.
+    #[test]
+    fn a_bare_preamble_and_a_decoded_header_earn_the_same_bound() {
+        let (bw, sf, cr) = SLOW;
+        let preamble =
+            tx_defer_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE).expect("defers");
+        let header = tx_defer_ms(
+            IRQ_PREAMBLE_DETECTED | IRQ_HEADER_VALID,
+            bw,
+            sf,
+            cr,
+            SLOW_PREAMBLE,
+        )
+        .expect("defers");
+        assert_eq!(preamble, header);
+    }
+
+    /// The starvation bound, as a number, at the profile the sweep runs
+    /// (SF8/BW125/CR4:5, 18-symbol derived preamble).
+    ///
+    /// One deferral is spent per transmit at the one site that defers, so this
+    /// figure IS the worst case a busy channel can impose on an outgoing
+    /// packet — a bounded, single-frame wait, not an unbounded hold. It is the
+    /// same order as the 672 ms the board reports for its own frames at this
+    /// profile, which is the point: the transmitter waits about as long as the
+    /// frame it is waiting for.
+    #[test]
+    fn the_deferral_bound_is_one_frame_and_it_is_a_number() {
+        let bound =
+            tx_defer_ms(IRQ_PREAMBLE_DETECTED, 125_000, 8, 5, 18).expect("a preamble defers");
+        assert_eq!(bound, 728);
+        // The same shape at the slow end of the rig, where it is seconds and
+        // still finite.
+        let (bw, sf, cr) = SLOW;
+        let slow = tx_defer_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE).expect("defers");
+        assert_eq!(slow, 4_756);
     }
 
     /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the

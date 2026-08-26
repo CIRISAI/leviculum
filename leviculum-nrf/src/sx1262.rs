@@ -796,6 +796,33 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         leviculum_rx_arming::stand_down(self, by.tag()).await
     }
 
+    /// Stand the receiver down for a transmit, waiting first if the window is
+    /// holding a frame that is still arriving.
+    ///
+    /// [`disarm_rx`](Self::disarm_rx) with the deferral in front of it, and
+    /// the reason it is a separate method rather than a flag: exactly one
+    /// caller may defer. The bound is per call, so a second site reaching for
+    /// this would turn "one frame's airtime, once" into a wait that compounds,
+    /// and the starvation argument would stop holding. The sequence itself is
+    /// [`leviculum_rx_arming::stand_down_for_tx`], where a fake radio asserts
+    /// it.
+    ///
+    /// `buf` and `sink` are what a reception the wait catches goes through —
+    /// the same buffer and the same `lora::CoreHandoff` any other
+    /// window's frame takes, so a frame delivered from a deferral is
+    /// indistinguishable downstream from one delivered from `rx_once`.
+    pub async fn disarm_rx_for_tx<S>(
+        &mut self,
+        by: leviculum_core::sx126x::RxTeardownBy,
+        buf: &mut [u8],
+        sink: &mut S,
+    ) -> Result<(), Error>
+    where
+        S: leviculum_rx_arming::FrameSink<Meta = RxStatus>,
+    {
+        leviculum_rx_arming::stand_down_for_tx(self, by.tag(), buf, sink).await
+    }
+
     /// Arm the receiver: the chip starts listening. `timeout_ms == 0` is
     /// single mode (no hardware timeout, listen until a packet arrives).
     ///
@@ -1198,6 +1225,40 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
         self.take_latched_frame(buf).await
     }
 
+    /// Forwards to `sx126x::tx_defer_ms` against the modulation the last
+    /// `configure_lora` programmed — the same three cached fields
+    /// [`finish_rx`](Sx1262::finish_rx) sizes its RX extension from, because
+    /// it is the same question. `rx_ext_bw_hz` is 0 before the radio is
+    /// configured, which is the one state in which no airtime exists and the
+    /// answer is "do not wait".
+    fn defer_ms(&self, latch: &leviculum_rx_arming::RxLatch) -> Option<u64> {
+        irq::tx_defer_ms(
+            latch.raw,
+            self.rx_ext_bw_hz,
+            self.rx_ext_sf,
+            self.rx_ext_cr_denom,
+            self.preamble_len,
+        )
+    }
+
+    /// The DIO1 wait, bounded, with the chip left in RX for its whole
+    /// duration — no command goes out here, which is the entire point.
+    ///
+    /// `DIO1_RX` routes only the terminating interrupts (`RxDone`, `CrcErr`,
+    /// `Timeout`), so the pin cannot rise for the preamble or header bits that
+    /// earned the wait; and the deferral is only ever entered with none of the
+    /// terminating three latched, so the edge this waits on is genuinely still
+    /// to come rather than one that has already passed.
+    ///
+    /// The elapsed time is measured across the wait rather than assumed to be
+    /// the bound: it is the numerator of the question `[SX_TX_DEFER]` exists
+    /// to answer.
+    async fn wait_for_frame(&mut self, wait_ms: u64) -> u64 {
+        let started = embassy_time::Instant::now();
+        let _ = with_timeout(Duration::from_millis(wait_ms), self.dio1.wait_for_high()).await;
+        started.elapsed().as_millis()
+    }
+
     fn report(&mut self, event: leviculum_rx_arming::RxEvent<'_, Error>) {
         match event {
             leviculum_rx_arming::RxEvent::Adopted(adopt) => {
@@ -1205,6 +1266,9 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
             }
             leviculum_rx_arming::RxEvent::TornDown(teardown) => {
                 crate::log::log_fmt("[SX_RX_TEARDOWN] ", format_args!("{teardown}"));
+            }
+            leviculum_rx_arming::RxEvent::Deferred(defer) => {
+                crate::log::log_fmt("[SX_TX_DEFER] ", format_args!("{defer}"));
             }
             leviculum_rx_arming::RxEvent::ProbeFailed { at, error } => {
                 crate::log::log_fmt(

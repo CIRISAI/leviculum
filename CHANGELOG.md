@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wants instead of standing it down and arming an identical one, so a
   frame arriving 20 ms behind another is no longer ended mid-air by the
   loop's own next decision (#276).
+- A transmit that would end a receive window holding an arriving frame
+  waits for that frame first, bounded by one maximum-size frame's airtime
+  at the live modulation, and delivers it (#276).
 - A telemetry report whose dispatch was lost is retried no sooner than the
   policy's own `min_interval_ms`, instead of on the next main-loop tick
   (#344).
@@ -49,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A receive window that is kept instead of re-armed logs `[SX_RX_ADOPT]
   latched= preamble= header= rxdone= stood_ms=`, which counts the
   receptions the previous firmware destroyed.
+
+- A transmit that waits for an arriving frame logs `[SX_TX_DEFER]
+  waited_ms= reason= outcome=`, so the airtime the wait costs and what it
+  bought are one ratio in the capture (#276).
 
 - The firmware receives at boosted SX1262 gain and applies the errata-15.4
   IQ correction, and prints both registers before and after it writes them

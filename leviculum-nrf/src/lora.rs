@@ -1291,18 +1291,43 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             // idle listen stood down here loses nothing — that is half duplex,
             // and the reference firmware does the same — while a window with
             // `PreambleDetected` latched loses a frame that would otherwise
-            // have completed. `disarm_rx` reads the chip's latched IRQs before
-            // the standby and emits `[SX_RX_TEARDOWN] site=select`; it changes
-            // nothing else, and the residue it reports is what the next fix,
-            // if any, gets designed against.
+            // have completed.
+            //
+            // The sweep that measured it named this site and nothing else: at
+            // a 20 ms on-air gap, 8 of the teardowns here carried a live frame
+            // (4 of them past the header) and 0 reports were delivered, while
+            // at 30-60 ms the windows were adopted instead and the reports
+            // landed. So this is the one teardown in the firmware that waits:
+            // `disarm_rx_for_tx` holds the key-up for the frame that is
+            // arriving, for one maximum-size frame's airtime at the live
+            // modulation and no longer, hands that frame up by the same route
+            // `rx_once` would have, and then spends the same single standby.
+            // A window with a clear latch is stood down exactly as before —
+            // the wait is conditional on a measured reception and on nothing
+            // else, which is what keeps this from being a spacing delay.
             // radio_silent still drops outgoing instead of transmitting.
             Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
+                // The same sink `rx_once` builds, so a frame the deferral
+                // catches reaches the core indistinguishably from any other.
+                // `rx_start` is taken here, before the wait, so the
+                // `op=rx_success duration_ms` it reports brackets the
+                // deferral rather than nothing.
+                let mut sink = CoreHandoff {
+                    rx_start: embassy_time::Instant::now(),
+                    reassembler: &mut reassembler,
+                    incoming_tx: &incoming_tx,
+                    rx_timeout_count,
+                };
                 let _ = radio
-                    .disarm_rx(leviculum_core::sx126x::RxTeardownBy::Select)
+                    .disarm_rx_for_tx(
+                        leviculum_core::sx126x::RxTeardownBy::Select,
+                        &mut rx_buf,
+                        &mut sink,
+                    )
                     .await;
                 if config.radio_silent {
                     drop(data);

@@ -11,14 +11,23 @@
 //! [SX_RX_ARM] site=<tag> timeout_ms=<u32> dark_ms=<u64|first>  (every SetRx)
 //! [SX_RX_ADOPT] latched=0xNNNN preamble=<0|1> header=<0|1> rxdone=<0|1> stood_ms=<u32>
 //! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
+//! [SX_TX_DEFER] waited_ms=<u64> reason=<preamble|header> outcome=<frame|timeout|abandoned>
 //! ```
 //!
-//! The last two are a pair and are read as a rate against each other: an
+//! The adopt/teardown pair is read as a rate against each other: an
 //! `[SX_RX_ADOPT]` with any flag set is a reception the pre-adoption firmware
 //! destroyed, an `[SX_RX_TEARDOWN]` with any flag set is one still being
 //! destroyed, and `site=` on the teardown says by which caller. Both are
 //! emitted with the flags as read, all-zero included; a line that appeared
 //! only when it had bad news would give a numerator with no denominator.
+//!
+//! `[SX_TX_DEFER]` is the third of that family and the one that reports a
+//! behaviour rather than an observation: a transmit that found a reception
+//! arriving on the window it was about to end waited for it instead.
+//! `outcome=frame` against `outcome=timeout`, taken per `reason=`, is whether
+//! the wait is earning its keep or merely delaying the transmitter — the ratio
+//! the guard has to justify itself with, and the reason the line carries the
+//! measured `waited_ms` rather than the bound it was allowed.
 //!
 //! The trailing ` t=<ms>` is board uptime at the moment the line was
 //! formatted, appended to EVERY runtime line since the drain-latency audit
@@ -736,6 +745,146 @@ fn the_firmware_still_emits_both_halves_of_the_adoption_instrument() {
             "the field order or spelling of {shape} changed in \
              leviculum-nrf/rx-arming/src/lib.rs; parse_rx_latch above still \
              expects it"
+        );
+    }
+}
+
+/// Extract `(waited_ms, reason, outcome)` from an `[SX_TX_DEFER]` line.
+///
+/// All three fields are required. `waited_ms` alone says how much airtime the
+/// transmitter gave up and nothing about what it bought; `outcome` alone is a
+/// count with no cost attached; and without `reason` the two evidence bits —
+/// a bare preamble and a decoded header, which earn the same bound and are not
+/// the same evidence — collapse into one population that cannot be separated
+/// afterwards.
+fn parse_tx_defer(line: &str) -> Option<(u64, String, String)> {
+    let idx = line.find("[SX_TX_DEFER] ")?;
+    let rest = &line[idx + "[SX_TX_DEFER] ".len()..];
+    let (mut waited, mut reason, mut outcome) = (None, None, None);
+    for token in rest.split_whitespace() {
+        let (key, value) = token.split_once('=')?;
+        match key {
+            "waited_ms" => waited = Some(value.parse().ok()?),
+            "reason" => {
+                reason = match value {
+                    "preamble" | "header" => Some(value.to_string()),
+                    _ => return None,
+                }
+            }
+            "outcome" => {
+                outcome = match value {
+                    "frame" | "timeout" | "abandoned" => Some(value.to_string()),
+                    _ => return None,
+                }
+            }
+            _ => {} // the ` t=` stamp, and anything appended after it
+        }
+    }
+    Some((waited?, reason?, outcome?))
+}
+
+/// The deferral line parses, in every outcome it can report.
+#[test]
+fn the_tx_defer_line_parses() {
+    assert_eq!(
+        parse_tx_defer("[SX_TX_DEFER] waited_ms=446 reason=header outcome=frame t=1053832"),
+        Some((446, "header".into(), "frame".into()))
+    );
+    // The bound expiring is the case the ratio is computed against, so it has
+    // to parse just as readily as the repaid one.
+    assert_eq!(
+        parse_tx_defer("[SX_TX_DEFER] waited_ms=728 reason=preamble outcome=timeout t=9"),
+        Some((728, "preamble".into(), "timeout".into()))
+    );
+    assert_eq!(
+        parse_tx_defer(
+            "[INFO!] [PERSISTENT_LOG] [SX_TX_DEFER] waited_ms=60 reason=header \
+             outcome=abandoned t=9 t=2"
+        ),
+        Some((60, "header".into(), "abandoned".into()))
+    );
+    // A missing field is a parse failure, not a default: a line with no
+    // outcome would otherwise be counted as one.
+    assert_eq!(
+        parse_tx_defer("[SX_TX_DEFER] waited_ms=1 reason=header"),
+        None
+    );
+    // A vocabulary this parser does not know is a firmware that moved, not a
+    // value to pass through.
+    assert_eq!(
+        parse_tx_defer("[SX_TX_DEFER] waited_ms=1 reason=cad outcome=frame"),
+        None
+    );
+    assert_eq!(
+        parse_tx_defer("[SX_TX_DEFER] waited_ms=1 reason=header outcome=deferred"),
+        None
+    );
+    // And it does not answer for its neighbours in the same family.
+    assert_eq!(
+        parse_tx_defer("[SX_RX_TEARDOWN] site=select preamble=1 header=1 rxdone=0 armed_ms=446"),
+        None
+    );
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_TEARDOWN",
+            "[SX_TX_DEFER] waited_ms=1 reason=header outcome=frame"
+        ),
+        None
+    );
+}
+
+/// The firmware still emits the deferral line, from the one site that may
+/// defer, and in the grammar the parser above reads.
+///
+/// `site=` is deliberately absent from the line and that is what the second
+/// half pins: the bound is spent once per call, so "exactly one caller" is
+/// what makes the starvation argument hold, and a second `disarm_rx_for_tx`
+/// appearing in the loop would turn one frame's airtime into a wait that
+/// compounds. A capture cannot see that; this can.
+#[test]
+fn the_firmware_still_emits_the_transmit_deferral_line() {
+    let sx = nrf_source("sx1262.rs");
+    assert!(
+        sx.contains(r#""[SX_TX_DEFER] ""#),
+        "leviculum-nrf/src/sx1262.rs no longer emits the `[SX_TX_DEFER] ` tag"
+    );
+    let lora = nrf_source("lora.rs");
+    assert_eq!(
+        lora.matches("disarm_rx_for_tx(").count(),
+        1,
+        "exactly one site in leviculum-nrf/src/lora.rs may defer a transmit; \
+         the bound is per call, so a second one compounds it"
+    );
+    // And that site is the idle select's outgoing arm, which is what the
+    // teardown table named.
+    assert!(
+        lora.contains("RxTeardownBy::Select"),
+        "the deferring site is no longer the idle select's outgoing arm"
+    );
+    let crate_src = {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-nrf/rx-arming/src/lib.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    assert!(
+        crate_src.contains(r#""waited_ms={} reason={} outcome={}""#),
+        "the [SX_TX_DEFER] field order or spelling changed in \
+         leviculum-nrf/rx-arming/src/lib.rs; parse_tx_defer above still expects it"
+    );
+    for tag in [
+        "\"preamble\"",
+        "\"header\"",
+        "\"frame\"",
+        "\"timeout\"",
+        "\"abandoned\"",
+    ] {
+        assert!(
+            crate_src.contains(tag),
+            "the [SX_TX_DEFER] vocabulary lost {tag} in \
+             leviculum-nrf/rx-arming/src/lib.rs; parse_tx_defer above rejects \
+             anything else"
         );
     }
 }

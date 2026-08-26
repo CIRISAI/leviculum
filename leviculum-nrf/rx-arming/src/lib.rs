@@ -51,19 +51,43 @@
 //! that pins it, and `an_unlatched_window_waits_for_the_edge` is the control
 //! that shows the harness can go red.
 //!
+//! # The residue adoption left, and the one wait this crate does
+//!
+//! Adoption kept the window and delivery followed it — except at a 20 ms
+//! on-air gap, where the sweep found 8 teardowns carrying a live frame (4 of
+//! them past the header) and 0 reports delivered, all at one caller: the idle
+//! `select`'s outgoing arm. That caller has a window standing, a frame
+//! arriving on it, and a packet of its own to send, and it resolved the
+//! conflict by ending the reception.
+//!
+//! [`stand_down_for_tx`] is that one branch: a transmit that would stand down
+//! a window holding an arriving frame waits for the frame instead of killing
+//! it, for one maximum-size frame at the live modulation and no longer. It is
+//! spent once per call and it ends early on the terminating IRQ, so a busy
+//! channel delays a transmit by that one bound and then keys up regardless.
+//!
 //! # What this crate deliberately does not do
 //!
-//! No spacing, no jitter, no delay, and no continuous RX. The re-arm uses the
-//! window that just fired, and it is provisional: the loop's next decision
-//! either adopts it, replaces it, or leaves RX, and leaving RX owes exactly
-//! one standby. [`RxArmState`] is what tracks that debt.
+//! No spacing, no jitter, no periodic delay, and no continuous RX. The one
+//! wait above is conditional on a measured reception in progress and on
+//! nothing else; a guard that always waits would be a spacing delay wearing a
+//! costume, and `a_window_with_a_clear_latch_is_not_deferred_for` is the
+//! control that says this one is not.
+//!
+//! The re-arm uses the window that just fired, and it is provisional: the
+//! loop's next decision either adopts it, replaces it, or leaves RX, and
+//! leaving RX owes exactly one standby. [`RxArmState`] is what tracks that
+//! debt.
 //!
 //! # What the instrument is, and is not
 //!
-//! Neither line adds a guard or a deferral. [`stand_down`] takes the same
-//! standby the caller already took, in the same place, and reads back what the
-//! chip latched first; [`ensure_armed`] reads the same status on the window it
-//! adopts and issues nothing.
+//! [`stand_down`] takes the same standby the caller already took, in the same
+//! place, and reads back what the chip latched first; [`ensure_armed`] reads
+//! the same status on the window it adopts and issues nothing. Neither adds a
+//! guard. The third line, `[SX_TX_DEFER]`, is not an observation of an
+//! unchanged sequence but the report of the one that did change, and it
+//! carries the ratio the guard has to justify itself with: `outcome=frame`
+//! against `outcome=timeout`, per `reason=`.
 //!
 //! Every `[SX_RX_ADOPT]` carrying a latched preamble, header or `RxDone` is a
 //! frame the previous code destroyed — the counterfactual, measured rather
@@ -394,6 +418,117 @@ impl core::fmt::Display for RxTeardown {
     }
 }
 
+/// What earned a transmit its deferral: the strongest evidence the standing
+/// window had latched when the transmit asked to have it stood down.
+///
+/// The two are not the same evidence and the line has to say which it was.
+/// Why they nevertheless earn the same bound, and what would have to be
+/// measured before that changes, is on `leviculum_core::sx126x::tx_defer_ms`
+/// — this crate has no dependency on the chip's register map and computes no
+/// bound of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxDeferReason {
+    /// `PreambleDetected` and nothing beyond it: something started on the air,
+    /// and it may still turn out to be noise.
+    Preamble,
+    /// `HeaderValid`: an explicit header passed its own CRC, so a real frame
+    /// at this modulation is arriving and its length is known to the chip.
+    Header,
+}
+
+impl TxDeferReason {
+    /// The stable tag the log line carries.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            TxDeferReason::Preamble => "preamble",
+            TxDeferReason::Header => "header",
+        }
+    }
+
+    /// The evidence a latch carries, or `None` if it carries none.
+    ///
+    /// `header` outranks `preamble` when both are set, which on a real frame
+    /// they always are: the preamble bit latches first and nothing clears it,
+    /// so a line reporting `reason=preamble` for a frame whose header had
+    /// decoded would understate what the wait was spent on.
+    ///
+    /// Derived here rather than returned alongside the bound so the two can
+    /// never disagree about which bit was read: this reads the same
+    /// [`RxLatch`] the bound was computed from.
+    pub const fn from_latch(latch: &RxLatch) -> Option<Self> {
+        if latch.header {
+            Some(TxDeferReason::Header)
+        } else if latch.preamble {
+            Some(TxDeferReason::Preamble)
+        } else {
+            None
+        }
+    }
+}
+
+/// What a deferral was repaid with.
+///
+/// The ratio across a capture is the whole question the deferral has to answer
+/// for itself: `frame` is a packet that the previous firmware destroyed,
+/// `timeout` is airtime the transmitter waited and got nothing for. A guard
+/// whose `timeout` fraction is high is a spacing delay wearing a costume, and
+/// without this field the next reader has to take it on faith.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxDeferOutcome {
+    /// The wait ended with a reception, and it went up to the sink.
+    Frame,
+    /// The bound expired with no terminating IRQ: the carrier never became a
+    /// frame, and the bound is what released the transmitter.
+    Timeout,
+    /// The window ended within the bound but nothing reached the sink — a
+    /// payload-CRC failure, the window's own hardware timeout, or a readout
+    /// that failed on the bus. The wait was spent and not repaid, which is a
+    /// different story from either of the two above and is not folded into
+    /// them.
+    Abandoned,
+}
+
+impl TxDeferOutcome {
+    /// The stable tag the log line carries.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            TxDeferOutcome::Frame => "frame",
+            TxDeferOutcome::Timeout => "timeout",
+            TxDeferOutcome::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// One transmit deferred to a reception that was already arriving.
+///
+/// [`Display`](core::fmt::Display) is the body of the `[SX_TX_DEFER]` line,
+/// pinned by a host test for the same reason [`RxTeardown`]'s is: the crate
+/// that emits it has no test target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxDefer {
+    /// How long the transmit actually waited, measured by the port. Not the
+    /// bound it was allowed: a deferral repaid in 40 ms of a 728 ms bound is
+    /// a cheap one, and a line carrying the bound would report it as the
+    /// expensive case.
+    pub waited_ms: u64,
+    /// Which latched bit earned the wait.
+    pub reason: TxDeferReason,
+    /// What the wait bought.
+    pub outcome: TxDeferOutcome,
+}
+
+impl core::fmt::Display for TxDefer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "waited_ms={} reason={} outcome={}",
+            self.waited_ms,
+            self.reason.tag(),
+            self.outcome.tag()
+        )
+    }
+}
+
 /// What the instrument saw, handed to the port for logging.
 ///
 /// The sequence decides *when* an event happens and lives here, where a fake
@@ -405,6 +540,11 @@ pub enum RxEvent<'a, E> {
     Adopted(&'a RxAdopt),
     /// A standing window was stood down.
     TornDown(&'a RxTeardown),
+    /// A transmit waited for a reception the standing window was holding
+    /// instead of ending it. Emitted once per deferral, after the wait and
+    /// before the frame (if there was one) is handed up, so the capture reads
+    /// in the order the events happened on the air.
+    Deferred(&'a TxDefer),
     /// The status read failed, so this sample is lost — the window itself is
     /// unaffected. Reported rather than swallowed: a rate computed from a
     /// population with invisible holes is wrong in the direction that says
@@ -467,8 +607,37 @@ pub trait RxWindowProbe: RxPort {
         buf: &mut [u8],
     ) -> Result<Option<(u8, Self::Meta)>, Self::Error>;
 
-    /// Emit one instrument event. Called once per adoption and once per
-    /// teardown of a standing window, with the flags as read.
+    /// How much longer the standing window's reception may still need, given
+    /// what it has latched — or `None` to stand the window down now.
+    ///
+    /// The whole of the deferral decision, and pure: [`stand_down_for_tx`]
+    /// decides *when* to ask and what to do with the answer, the port owns the
+    /// modulation the bound is computed from. The driver forwards to
+    /// `leviculum_core::sx126x::tx_defer_ms`, where the arithmetic has a host
+    /// test and where the reasoning about the two evidence bits lives; nothing
+    /// in this crate re-derives it.
+    ///
+    /// Touches no bus — it is a question about a status word that has already
+    /// been read, so it cannot itself become the cause of a teardown.
+    fn defer_ms(&self, latch: &RxLatch) -> Option<u64>;
+
+    /// Keep listening for up to `wait_ms` for the standing window's
+    /// terminating IRQ, and answer how long that actually took.
+    ///
+    /// **Moves nothing.** The chip stays in RX for the whole wait and keeps
+    /// receiving whatever is on the air; that is the entire point, because
+    /// the alternative on this path is a `SetStandby` mid-frame. It returns as
+    /// soon as the IRQ latches or the bound expires, whichever is first, and
+    /// [`take_latched_frame`](Self::take_latched_frame) is what says which of
+    /// the two it was.
+    ///
+    /// The elapsed figure is the port's because the clock is the port's, and
+    /// it is what `[SX_TX_DEFER] waited_ms=` carries. Returning the bound
+    /// instead would report every cheap deferral as the expensive case.
+    async fn wait_for_frame(&mut self, wait_ms: u64) -> u64;
+
+    /// Emit one instrument event. Called once per adoption, once per teardown
+    /// of a standing window, and once per deferral, with the flags as read.
     fn report(&mut self, event: RxEvent<'_, Self::Error>);
 }
 
@@ -593,20 +762,146 @@ where
     // this read did, and a chip left listening while the next command is
     // `SetTx` is the one state the arming discipline exists to prevent.
     match radio.latched().await {
-        Ok(latch) => {
-            let teardown = RxTeardown {
-                site,
-                latch,
-                armed_ms: standing.stood_ms,
-            };
-            radio.report(RxEvent::TornDown(&teardown));
-        }
+        Ok(latch) => return tear_down(radio, site, standing, latch).await,
         Err(e) => radio.report(RxEvent::ProbeFailed {
             at: site,
             error: &e,
         }),
     }
     radio.disarm().await
+}
+
+/// Report one teardown and spend its standby, from a latch that has already
+/// been read.
+///
+/// Split out of [`stand_down`] so [`stand_down_for_tx`] can reach the same
+/// tail without reading the status a second time on the path where it does
+/// not defer — that path has to stay byte-for-byte the sequence it was, or
+/// the teardown rate this batch is measured against moves for a reason that
+/// is not the fix.
+async fn tear_down<R>(
+    radio: &mut R,
+    site: &'static str,
+    standing: StandingWindow<R::Window>,
+    latch: RxLatch,
+) -> Result<(), R::Error>
+where
+    R: RxWindowProbe,
+{
+    let teardown = RxTeardown {
+        site,
+        latch,
+        armed_ms: standing.stood_ms,
+    };
+    radio.report(RxEvent::TornDown(&teardown));
+    radio.disarm().await
+}
+
+/// Stand a listening receiver down for a transmit — but if the window is
+/// holding a frame that is still arriving, wait for that frame first.
+///
+/// # What this is
+///
+/// [`stand_down`] with one branch in front of it: the same status read, and
+/// then, only when that read says a reception is in progress, a bounded wait
+/// for it before the standby that would otherwise end it. Where the latch is
+/// clear — the common case, an idle listen handed back for half duplex — this
+/// runs exactly the sequence `stand_down` always ran, at the same cost, and
+/// emits exactly the same one line.
+///
+/// # The bound, and why there is no starvation
+///
+/// The wait is [`RxWindowProbe::defer_ms`], which is one maximum-size frame at
+/// the live modulation and nothing else — 728 ms at SF8/BW125/CR4:5 with the
+/// derived 18-symbol preamble, 4.8 s at the rig's slow SF10/BW62.5 profile.
+/// It is spent **once per call**: there is no loop, no re-check, and no second
+/// deferral, so a channel that never goes quiet delays a transmit by that one
+/// bound and then keys up regardless. A caller that reached this in a loop
+/// would break that property, which is why exactly one site in the firmware
+/// calls it.
+///
+/// The wait also ends early on the terminating IRQ, so the bound is an upper
+/// limit rather than a delay: a frame that completes in 40 ms costs 40 ms.
+/// Nothing here spaces, jitters, or paces anything — the wait is conditional
+/// on a measured reception in progress and on nothing else, and
+/// `a_window_with_a_clear_latch_is_not_deferred_for` is the control that says
+/// so.
+///
+/// # Why the frame is taken here
+///
+/// Waiting for a reception and then standing the window down would lose the
+/// frame anyway, one bound later — the worst of both. So the wait ends the
+/// way any other window ends: the completed reception is taken out of the
+/// latched status and handed to the sink by the same route every other
+/// reception takes. The window has then ended by itself, the `stand_down`
+/// below finds nothing standing, and the standby it would have spent is the
+/// no-op it always is after a completed reception.
+pub async fn stand_down_for_tx<R, S>(
+    radio: &mut R,
+    site: &'static str,
+    buf: &mut [u8],
+    sink: &mut S,
+) -> Result<(), R::Error>
+where
+    R: RxWindowProbe,
+    S: FrameSink<Meta = R::Meta>,
+{
+    let Some(standing) = radio.standing_window() else {
+        return radio.disarm().await;
+    };
+    let latch = match radio.latched().await {
+        Ok(latch) => latch,
+        // A lost sample, and with it the deferral decision: there is no honest
+        // basis to hold the transmit off, so this behaves exactly as
+        // `stand_down` does — the standby is unaffected and the hole is
+        // reported.
+        Err(e) => {
+            radio.report(RxEvent::ProbeFailed {
+                at: site,
+                error: &e,
+            });
+            return radio.disarm().await;
+        }
+    };
+    // `zip` rather than two ifs: a bound with no reason, or a reason with no
+    // bound, is the two halves of the decision having read different bits.
+    let Some((bound_ms, reason)) = radio
+        .defer_ms(&latch)
+        .zip(TxDeferReason::from_latch(&latch))
+    else {
+        return tear_down(radio, site, standing, latch).await;
+    };
+
+    let waited_ms = radio.wait_for_frame(bound_ms).await;
+    let taken = radio.take_latched_frame(buf).await;
+    let outcome = match &taken {
+        Ok(Some(_)) => TxDeferOutcome::Frame,
+        Ok(None) => TxDeferOutcome::Timeout,
+        // Swallowed on purpose, and this is the only place in the sequence
+        // where an error is: propagating here would skip the standby below and
+        // leave a listening chip whose next command is `SetTx`. The line
+        // carries it as `outcome=abandoned`.
+        Err(_) => TxDeferOutcome::Abandoned,
+    };
+    let defer = TxDefer {
+        waited_ms,
+        reason,
+        outcome,
+    };
+    // Before the hand-off, which blocks: the same reason the re-arm precedes
+    // the hand-off in `receive_and_hand_up`. A line emitted after the sink had
+    // yielded would carry a `t=` from after the main task ran.
+    radio.report(RxEvent::Deferred(&defer));
+    if let Ok(Some((len, meta))) = taken {
+        let n = (len as usize).min(buf.len());
+        sink.deliver(&buf[..n], &meta).await;
+    }
+
+    // Exactly one standby, whatever the wait bought. On `outcome=frame` the
+    // chip left RX at the reception and this is the no-op it always is; on the
+    // other two the window is still standing and this is the teardown that was
+    // deferred, counted at its own site with the latch as it now reads.
+    stand_down(radio, site).await
 }
 
 #[cfg(test)]
@@ -679,6 +974,12 @@ mod tests {
         Teardown(String),
         /// A lost sample, with the site that would have been on the line.
         ProbeErr(String),
+        /// The bounded wait for a reception in progress, carrying the bound it
+        /// was given. Recorded so "waits once" can be told apart from "waits
+        /// until the channel is quiet".
+        DeferWait(u64),
+        /// A rendered `[SX_TX_DEFER]` body.
+        Defer(String),
     }
 
     /// One log for the radio and the hand-off together.
@@ -762,6 +1063,16 @@ mod tests {
         edge_to_come: bool,
         /// Fail the status read, the way an SPI error would.
         fail_probe: bool,
+        /// The bound `defer_ms` hands back for a latch holding a reception.
+        /// A constant here on purpose: the arithmetic is
+        /// `leviculum_core::sx126x::tx_defer_ms`'s and is tested there, and a
+        /// second derivation in this harness would be a second place for it to
+        /// drift.
+        defer_bound_ms: u64,
+        /// How long after the wait starts the frame completes, if it ever
+        /// does. `None` is the carrier that never becomes a frame — the case
+        /// the bound exists for.
+        frame_completes_after_ms: Option<u64>,
     }
 
     impl<'a> FakePort<'a> {
@@ -777,6 +1088,8 @@ mod tests {
                 latch: RxLatch::CLEAR,
                 edge_to_come: true,
                 fail_probe: false,
+                defer_bound_ms: 728,
+                frame_completes_after_ms: None,
             }
         }
 
@@ -810,6 +1123,22 @@ mod tests {
             self.log.push(Op::Cad);
             outcome
         }
+
+        /// The idle `select`'s outgoing arm: leave RX for a transmit, but
+        /// defer to a reception already in progress. The one site in the
+        /// firmware that reaches for [`stand_down_for_tx`], modelled as the
+        /// firmware has it — the key-up follows immediately, so "the transmit
+        /// follows the reception" is an ordering assertion on this log and not
+        /// a description.
+        async fn transmit_deferring<S: FrameSink<Meta = i16>>(
+            &mut self,
+            buf: &mut [u8],
+            sink: &mut S,
+        ) -> Result<(), ()> {
+            let outcome = stand_down_for_tx(self, "select", buf, sink).await;
+            self.log.push(Op::Transmit);
+            outcome
+        }
     }
 
     impl RxWindowProbe for FakePort<'_> {
@@ -837,10 +1166,48 @@ mod tests {
             self.readout(buf).map(Some)
         }
 
+        /// The same three cases the driver's forwarding to
+        /// `sx126x::tx_defer_ms` produces: a concluded window earns nothing,
+        /// a clear one earns nothing, a live one earns the bound.
+        fn defer_ms(&self, latch: &RxLatch) -> Option<u64> {
+            if latch.rxdone {
+                return None;
+            }
+            (latch.header || latch.preamble).then_some(self.defer_bound_ms)
+        }
+
+        /// The chip keeps listening for up to `wait_ms`. If the frame
+        /// completes inside that, the wait ends there and `RxDone` is latched
+        /// — which is what makes the elapsed figure a measurement rather than
+        /// an echo of the bound.
+        async fn wait_for_frame(&mut self, wait_ms: u64) -> u64 {
+            self.log.push(Op::DeferWait(wait_ms));
+            match self.frame_completes_after_ms {
+                Some(after) if after <= wait_ms => {
+                    self.now += after as u32;
+                    self.latch = RxLatch {
+                        raw: 0x0016,
+                        preamble: true,
+                        header: true,
+                        rxdone: true,
+                    };
+                    // The edge arrived while we were waiting on it, so it is
+                    // spent: a later `await_frame` would park forever.
+                    self.edge_to_come = false;
+                    after
+                }
+                _ => {
+                    self.now += wait_ms as u32;
+                    wait_ms
+                }
+            }
+        }
+
         fn report(&mut self, event: RxEvent<'_, ()>) {
             let op = match event {
                 RxEvent::Adopted(a) => Op::Adopt(format!("{a}")),
                 RxEvent::TornDown(t) => Op::Teardown(format!("{t}")),
+                RxEvent::Deferred(d) => Op::Defer(format!("{d}")),
                 RxEvent::ProbeFailed { at, .. } => Op::ProbeErr(format!("at={at}")),
             };
             self.log.push(op);
@@ -1610,5 +1977,438 @@ mod tests {
         ] {
             assert!(latch.caught_something(), "latch={latch:?}");
         }
+    }
+
+    // The deferral: this batch.
+
+    /// A window holding a frame whose header has decoded, as the chip reports
+    /// it — the preamble bit stays latched, so a line that read the weaker bit
+    /// would call this `reason=preamble`.
+    const LIVE_HEADER: RxLatch = RxLatch {
+        raw: 0x0014,
+        preamble: true,
+        header: true,
+        rxdone: false,
+    };
+
+    /// A carrier that has not become a frame yet, and may never.
+    const LIVE_PREAMBLE: RxLatch = RxLatch {
+        raw: 0x0004,
+        preamble: true,
+        header: false,
+        rxdone: false,
+    };
+
+    /// Set a fake up mid-reception: one window standing, holding `latch`, with
+    /// the frame completing after `completes_after_ms` if it ever does.
+    fn mid_reception<'a>(
+        log: &'a OpLog,
+        latch: RxLatch,
+        completes_after_ms: Option<u64>,
+        inbox: Vec<Option<Vec<u8>>>,
+    ) -> FakePort<'a> {
+        let mut port = FakePort::new(log, inbox);
+        block_on(port.arm(IDLE)).expect("arm");
+        port.latch = latch;
+        port.frame_completes_after_ms = completes_after_ms;
+        port
+    }
+
+    fn one_defer_line(log: &OpLog) -> String {
+        log.one_line(|op| match op {
+            Op::Defer(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    /// The change itself. A teardown request against a window with a latched
+    /// header defers, and the transmit follows the reception rather than
+    /// ending it.
+    ///
+    /// The ordering is the claim: the frame is delivered, and only then does
+    /// the key-up happen. Before this batch the same situation produced a
+    /// standby 446 ms into a ~690 ms frame and no delivery at all.
+    #[test]
+    fn a_latched_header_defers_and_the_transmit_follows_the_reception() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0x11, 0x22, 0x33];
+        let mut port = mid_reception(
+            &log,
+            LIVE_HEADER,
+            Some(100),
+            alloc::vec![Some(payload.clone())],
+        );
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 1,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("deferred");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            1,
+            "exactly one wait, after={after:?}"
+        );
+        assert_eq!(after[0], Op::ProbeIrq, "after={after:?}");
+        assert_eq!(after[1], Op::DeferWait(728), "after={after:?}");
+        let deliver = after
+            .iter()
+            .position(|op| matches!(op, Op::Deliver(_)))
+            .expect("the reception must reach the sink");
+        let transmit = after
+            .iter()
+            .position(|op| *op == Op::Transmit)
+            .expect("the transmit must still happen");
+        assert!(
+            deliver < transmit,
+            "the transmit must follow the reception, after={after:?}"
+        );
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=100 reason=header outcome=frame"
+        );
+    }
+
+    /// Control: a teardown against a window with a clear latch does not defer.
+    ///
+    /// The test above passes just as well against a guard that always waits,
+    /// and a guard that always waits is a spacing delay wearing a costume. On
+    /// a quiet channel — the common case, and the one that would cost
+    /// throughput — the sequence has to be exactly what `stand_down` always
+    /// did: one status read, one teardown line, one standby, no wait.
+    #[test]
+    fn a_window_with_a_clear_latch_is_not_deferred_for() {
+        let log = OpLog::default();
+        let mut port = mid_reception(&log, RxLatch::CLEAR, Some(1), Vec::new());
+        port.now += 12;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("stood down");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            0,
+            "a quiet channel must not be waited on, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| matches!(op, Op::Defer(_))).count(),
+            0,
+            "no deferral, no line, after={after:?}"
+        );
+        assert_eq!(
+            after,
+            [
+                Op::ProbeIrq,
+                Op::Teardown("site=select preamble=0 header=0 rxdone=0 armed_ms=12".into()),
+                Op::Disarm,
+                Op::Transmit,
+            ],
+            "the quiet path is the sequence stand_down always ran"
+        );
+    }
+
+    /// The bound holds: a preamble whose frame never completes releases the
+    /// transmit within the computed airtime.
+    ///
+    /// Asserted twice over, because "bounded" has two halves. The wait is
+    /// entered with the bound and returns after exactly it — the clock is
+    /// read, not the argument — and it is entered **once**: the latch still
+    /// says `preamble=1` afterwards, so a sequence that re-checked would defer
+    /// again, and again, and a busy channel would hold the transmitter
+    /// forever. One call, one bound, then the key-up regardless.
+    #[test]
+    fn the_bound_releases_a_preamble_whose_frame_never_completes() {
+        let log = OpLog::default();
+        let mut port = mid_reception(&log, LIVE_PREAMBLE, None, Vec::new());
+        let started = port.now;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("released");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .collect::<Vec<_>>(),
+            alloc::vec![&Op::DeferWait(728)],
+            "one wait, at the computed bound, after={after:?}"
+        );
+        assert_eq!(
+            port.now - started,
+            728,
+            "the transmit was held for exactly the bound, after={after:?}"
+        );
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=728 reason=preamble outcome=timeout"
+        );
+        // Released, and the window it was still holding is counted where it
+        // always was — the residue this batch reports rather than hides.
+        assert!(
+            after.iter().any(|op| *op
+                == Op::Teardown("site=select preamble=1 header=0 rxdone=0 armed_ms=728".into())),
+            "after={after:?}"
+        );
+        assert!(
+            after.contains(&Op::Transmit),
+            "the transmit must happen anyway, after={after:?}"
+        );
+        assert!(!port.state.standby_owed());
+    }
+
+    /// Control: a reception still reaches the sink exactly once with the same
+    /// bytes, whether it arrived on a window that was awaited or on one a
+    /// transmit deferred to.
+    ///
+    /// A deferral that waited for a frame and then delivered it twice, or
+    /// truncated, or not at all, would look identical in every other
+    /// assertion here.
+    #[test]
+    fn a_deferred_reception_reaches_the_sink_exactly_once_with_the_same_bytes() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let mut port = mid_reception(
+            &log,
+            LIVE_HEADER,
+            Some(40),
+            alloc::vec![Some(payload.clone())],
+        );
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 1,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("deferred");
+
+        assert_eq!(
+            log.count(|op| matches!(op, Op::Deliver(_))),
+            1,
+            "ops={:?}",
+            log.ops()
+        );
+        assert_eq!(
+            log.count(|op| *op == Op::Deliver(payload.clone())),
+            1,
+            "the delivered bytes must be the received bytes, ops={:?}",
+            log.ops()
+        );
+    }
+
+    /// Control: every path that leaves RX still spends exactly one standby,
+    /// and a deferral in front of one changes neither the count nor which
+    /// command it is.
+    ///
+    /// The three outcomes reach it differently and that is the point: a
+    /// reception ends the window itself, so the standby is the no-op it always
+    /// is after one; a bound that expires leaves the window standing, so the
+    /// standby is real and is the teardown that was postponed. Neither may be
+    /// zero, and neither may be two — one too few drives `SetTx` out of RX.
+    #[test]
+    fn deferring_spends_exactly_one_standby_on_every_outcome() {
+        for (name, latch, completes, inbox, expect_real_standby) in [
+            (
+                "frame",
+                LIVE_HEADER,
+                Some(40u64),
+                alloc::vec![Some(alloc::vec![1u8, 2])],
+                false,
+            ),
+            ("timeout", LIVE_PREAMBLE, None, Vec::new(), true),
+            ("quiet", RxLatch::CLEAR, None, Vec::new(), true),
+        ] {
+            let log = OpLog::default();
+            let mut port = mid_reception(&log, latch, completes, inbox);
+            let before = log.ops().len();
+
+            let mut buf = [0u8; 8];
+            let mut sink = FakeSink {
+                log: &log,
+                pends: 1,
+            };
+            block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("left RX");
+
+            let ops = log.ops();
+            let after = &ops[before..];
+            let real = after.iter().filter(|op| **op == Op::Disarm).count();
+            let noop = after.iter().filter(|op| **op == Op::DisarmNoop).count();
+            assert_eq!(
+                real + noop,
+                1,
+                "exactly one departure from RX, case={name} after={after:?}"
+            );
+            assert_eq!(
+                real,
+                usize::from(expect_real_standby),
+                "case={name} after={after:?}"
+            );
+            assert!(
+                !port.state.standby_owed(),
+                "nothing may be left listening while the next command is SetTx, \
+                 case={name}"
+            );
+            // And the key-up is on the far side of whichever it was.
+            let departure = after
+                .iter()
+                .position(|op| matches!(op, Op::Disarm | Op::DisarmNoop))
+                .expect("a departure");
+            let transmit = after
+                .iter()
+                .position(|op| *op == Op::Transmit)
+                .expect("a transmit");
+            assert!(departure < transmit, "case={name} after={after:?}");
+        }
+    }
+
+    /// Control: a failed status read does not defer and does not cost the
+    /// standby. The instrument that decides the deferral must not be able to
+    /// hold a transmit off on the strength of a read it did not get.
+    #[test]
+    fn a_failed_probe_does_not_defer() {
+        let log = OpLog::default();
+        let mut port = mid_reception(&log, LIVE_HEADER, Some(10), Vec::new());
+        port.fail_probe = true;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("the standby is unaffected");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            0,
+            "after={after:?}"
+        );
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| **op == Op::ProbeErr(String::from("at=select")))
+                .count(),
+            1,
+            "after={after:?}"
+        );
+        assert_eq!(after.iter().filter(|op| **op == Op::Disarm).count(), 1);
+        assert!(!port.state.standby_owed());
+    }
+
+    /// Control: no window standing is not a deferral, and not a sample. The
+    /// CSMA path reaches the key-up with the chip already in standby, and
+    /// nothing here may invent a wait for a receiver that is not listening.
+    #[test]
+    fn nothing_standing_is_not_a_deferral() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("nothing to stand down");
+
+        let ops = log.ops();
+        assert_eq!(log.count(|op| *op == Op::ProbeIrq), 0, "ops={ops:?}");
+        assert_eq!(
+            log.count(|op| matches!(op, Op::DeferWait(_))),
+            0,
+            "ops={ops:?}"
+        );
+        assert_eq!(log.count(|op| *op == Op::DisarmNoop), 1, "ops={ops:?}");
+    }
+
+    /// A terminating IRQ that brings no frame is its own outcome. The wait was
+    /// spent and not repaid, which is neither a delivery nor an expired bound,
+    /// and folding it into either would misreport the ratio the guard is
+    /// judged on.
+    #[test]
+    fn a_reception_that_yields_no_frame_is_abandoned_not_counted_as_either() {
+        let log = OpLog::default();
+        // The frame completes, but the readout produces nothing — the shape a
+        // payload-CRC failure has on this path.
+        let mut port = mid_reception(&log, LIVE_HEADER, Some(60), Vec::new());
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("the standby is unaffected");
+
+        assert_eq!(
+            one_defer_line(&log),
+            "waited_ms=60 reason=header outcome=abandoned"
+        );
+        assert_eq!(log.count(|op| matches!(op, Op::Deliver(_))), 0);
+        assert!(!port.state.standby_owed());
+    }
+
+    /// The line renders the wait, the evidence and the outcome, in the
+    /// grammar the host greps — and `header` outranks `preamble` when both
+    /// bits are set, which on a real frame they always are.
+    #[test]
+    fn the_defer_line_renders_the_wait_the_reason_and_the_outcome() {
+        assert_eq!(
+            format!(
+                "{}",
+                TxDefer {
+                    waited_ms: 446,
+                    reason: TxDeferReason::Preamble,
+                    outcome: TxDeferOutcome::Timeout,
+                }
+            ),
+            "waited_ms=446 reason=preamble outcome=timeout"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                TxDefer {
+                    waited_ms: 0,
+                    reason: TxDeferReason::Header,
+                    outcome: TxDeferOutcome::Abandoned,
+                }
+            ),
+            "waited_ms=0 reason=header outcome=abandoned"
+        );
+        assert_eq!(
+            TxDeferReason::from_latch(&LIVE_HEADER),
+            Some(TxDeferReason::Header)
+        );
+        assert_eq!(
+            TxDeferReason::from_latch(&LIVE_PREAMBLE),
+            Some(TxDeferReason::Preamble)
+        );
+        assert_eq!(TxDeferReason::from_latch(&RxLatch::CLEAR), None);
     }
 }
