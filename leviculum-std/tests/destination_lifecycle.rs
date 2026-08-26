@@ -282,7 +282,22 @@ async fn plane_stats_report_limits_and_track_the_live_set() {
         .await
         .expect("establish");
 
-    // Both sides now see exactly one live link.
+    // The two sides establish at different moments, and that is protocol
+    // correct: the initiator is established once it validates the responder's
+    // proof, while the responder reaches the same state slightly later. This
+    // test originally asserted the serve side immediately after the client's
+    // await returned, which was a race it happened to win until upstream
+    // timing shifted — so wait for the responder's own event before reading
+    // its gauge.
+    let mut srv = srv;
+    assert!(
+        saw_event(&mut srv.rx, Duration::from_secs(8), |ev| matches!(
+            ev,
+            NodeEvent::LinkEstablished { .. }
+        ))
+        .await,
+        "the responder must observe the link it accepted"
+    );
     assert_eq!(srv.node.plane_stats().live_links, 1, "serve side");
     assert_eq!(cli.node.plane_stats().live_links, 1, "client side");
 
