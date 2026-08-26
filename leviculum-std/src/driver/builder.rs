@@ -57,6 +57,8 @@ pub struct ReticulumNodeBuilder {
     instance_name_explicit: Option<String>,
     /// Explicit flush_interval_secs override (takes priority over config value)
     flush_interval_secs_explicit: Option<u64>,
+    /// Explicit multi-segment assembly ceiling (leviculum#62).
+    max_assembled_resource_size_explicit: Option<usize>,
     /// Explicit control-channel capacity override (takes priority over config)
     control_channel_capacity_explicit: Option<usize>,
     /// Explicit data-channel capacity override (takes priority over config)
@@ -107,6 +109,7 @@ impl ReticulumNodeBuilder {
             share_instance_explicit: None,
             instance_name_explicit: None,
             flush_interval_secs_explicit: None,
+            max_assembled_resource_size_explicit: None,
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
@@ -796,6 +799,26 @@ impl ReticulumNodeBuilder {
     /// Crash protection only, normal shutdown flushes via the signal
     /// handler. If not called, the value from the loaded config is used
     /// (default: 3600 seconds).
+    /// Per-transfer ceiling for multi-segment resource assembly
+    /// (leviculum#62). Default
+    /// [`DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE`](crate::driver::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE)
+    /// (64 MiB).
+    ///
+    /// A transfer past `RESOURCE_MAX_EFFICIENT_SIZE` arrives as segments; the
+    /// driver reassembles them so a consumer sees one `ResourceCompleted`
+    /// carrying the whole payload. The segment count is peer-supplied, so the
+    /// buffering is bounded — per transfer by this value, and in aggregate
+    /// across links at four times it.
+    ///
+    /// A transfer that would exceed a ceiling is **never dropped or
+    /// truncated**: it degrades to per-segment delivery with an error log
+    /// naming this knob, and the consumer can concatenate `data` in
+    /// `segment_index` order.
+    pub fn max_assembled_resource_size(mut self, bytes: usize) -> Self {
+        self.max_assembled_resource_size_explicit = Some(bytes);
+        self
+    }
+
     pub fn flush_interval_secs(mut self, secs: u64) -> Self {
         self.flush_interval_secs_explicit = Some(secs);
         self
@@ -1055,6 +1078,9 @@ impl ReticulumNodeBuilder {
             control_channel_capacity,
             data_channel_capacity,
         );
+        if let Some(bytes) = self.max_assembled_resource_size_explicit {
+            node.max_assembled_resource_size = bytes;
+        }
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
         // Capture the configured shared-instance TCP-loopback ports
         // (`shared_instance_port` / `instance_control_port`, Codeberg #112) for
