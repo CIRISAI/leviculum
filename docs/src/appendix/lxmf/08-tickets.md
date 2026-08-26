@@ -34,9 +34,9 @@ a destination more often than `TICKET_INTERVAL` (`LXMRouter.py:1076-1081`).
 
 A ticket is delivered to a correspondent inside a message via `FIELD_TICKET`
 (0x0C, `LXMF.py:19`), carrying the `[expires, ticket]` pair. The receiver remembers
-it as an outbound ticket (`remember_ticket`, `LXMRouter.py:1054-1057`) and uses it
+it as an outbound ticket (`remember_ticket`, `LXMRouter.py:1102-1105`) and uses it
 for subsequent stamps until it expires (`get_outbound_ticket`,
-`LXMRouter.py:1059-1065`).
+`LXMRouter.py:1107-1113`).
 
 The Rust router follows the same default: `enqueue()` automatically derives and
 attaches the 16-byte delivery stamp whenever `TicketStore` holds a valid

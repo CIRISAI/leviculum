@@ -19,13 +19,47 @@
 //! **1. A `path:line` citation — resolved.** Per citation:
 //! - the cited file exists in the repo and has at least the cited number
 //!   of lines (catches deletions and renames);
-//! - where the citation follows a backticked identifier — the
-//!   ``ident` (`path:line`)` convention — that identifier occurs within
+//! - where the citation *names what it points at* — a backticked
+//!   identifier attached to it, see below — that identifier occurs within
 //!   `WINDOW` lines of the cited span (catches drift).
 //!
-//! A bare citation with no adjacent identifier only gets the existence
-//! check. Both kinds are counted and printed so the coverage is visible:
-//! run with `--nocapture` to see the counts.
+//! A bare citation that names nothing only gets the existence check. Both
+//! kinds are counted and printed so the coverage is visible: run with
+//! `--nocapture` to see the counts.
+//!
+//! ## What "names what it points at" means
+//!
+//! A line number in a moving tree is not a durable anchor: every batch that
+//! inserts a line above the cited one silently repoints the citation at
+//! whatever now sits there. Existence-checking a line number cannot see
+//! that, because the line still exists — it is simply about something else.
+//! The name is what survives the move, so a citation that carries one can
+//! be checked and a citation that carries none cannot.
+//!
+//! Two spellings count as attaching a name, and both are what the corpus
+//! already writes:
+//!
+//! ```text
+//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:353`)   -- paren
+//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:353`)  -- comma
+//! ```
+//!
+//! Nothing but whitespace may sit between the name and the citation, so
+//! the pairing is unambiguous: an identifier mentioned earlier in the
+//! sentence is not read as the citation's subject. A token that is itself
+//! a citation (`Destination.py:322`) or that carries no letter in its last
+//! segment (a `1209:0001` USB VID:PID) is not an identifier and does not
+//! attach — those sit next to citations in tables and would otherwise be
+//! read as the subject of the citation beside them.
+//!
+//! The comma spelling was admitted in 2026-08 after `lora.rs:725` drifted
+//! onto radio-init code inside a *regulatory* claim and this guard passed
+//! it. Adding it converted 75 book and 55 source citations from
+//! existence-checked to drift-checked without editing one of them, and
+//! immediately reported 30 that had drifted. Which is the argument for
+//! spelling the shape the tree already uses rather than inventing a new
+//! one: a scheme that needs every citation rewritten by hand is a
+//! migration, and gets done never.
 //!
 //! A citation into a `reference/` submodule that is not checked out is a
 //! *different* failure from a drifted one, and says so: nothing is wrong
@@ -157,8 +191,8 @@ struct Citation {
     /// Inclusive line spans: `329` → [(329,329)], `155-199,204` →
     /// [(155,199),(204,204)].
     spans: Vec<(usize, usize)>,
-    /// The backticked identifier immediately preceding the citation, if
-    /// the text uses the ``ident` (`path:line`)` convention.
+    /// The backticked identifier attached to the citation, if it names
+    /// what it points at. See [`attached_ident`].
     ident: Option<String>,
 }
 
@@ -220,10 +254,47 @@ fn cite_regex(corpus: Corpus) -> Regex {
     }
 }
 
-/// ``ident` (` directly before the citation, whitespace (incl. line breaks)
-/// allowed. A trailing `()` (function spelling) is stripped.
-fn ident_regex() -> Regex {
-    Regex::new(r"`([A-Za-z0-9_:.]+)(?:\(\))?`\s*\(\s*$").unwrap()
+/// The two spellings that attach a name to the citation that follows:
+/// ``ident` (` and `` `ident`, ``. Whitespace (including line breaks) may
+/// sit between; nothing else may. A trailing `()` (function spelling) is
+/// stripped.
+fn ident_regexes() -> [Regex; 2] {
+    [
+        Regex::new(r"`([A-Za-z0-9_:.]+)(?:\(\))?`\s*\(\s*$").unwrap(),
+        Regex::new(r"`([A-Za-z0-9_:.]+)(?:\(\))?`\s*,\s*$").unwrap(),
+    ]
+}
+
+/// A backticked token that is itself a citation: `Destination.py:322`,
+/// `Justfile:719`. Tables list these next to each other, so without this
+/// the second citation of a row would take the first as its subject.
+fn citation_shaped() -> Regex {
+    Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
+}
+
+/// Whether `token` can be the name of a code item.
+///
+/// Fails closed, on both counts a real corpus supplies: a token that is
+/// itself a citation, and one whose last segment carries no letter — a
+/// `1209:0001` USB VID:PID, a `4.2:1` ratio. Neither can be searched for
+/// as an identifier, and reading either as one would count a citation as
+/// drift-checked while checking nothing.
+fn looks_like_identifier(token: &str, citation_shaped: &Regex) -> bool {
+    !citation_shaped.is_match(token)
+        && token
+            .rsplit([':', '.'])
+            .next()
+            .is_some_and(|seg| seg.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// The identifier the citation starting at the end of `before` names, if
+/// any.
+fn attached_ident(before: &str, idents: &[Regex; 2], citation_shaped: &Regex) -> Option<String> {
+    idents
+        .iter()
+        .find_map(|re| re.captures(before))
+        .map(|c| c[1].to_string())
+        .filter(|token| looks_like_identifier(token, citation_shaped))
 }
 
 /// Scheme-relative or absolute URLs contain `host.tld` shapes that the path
@@ -242,7 +313,8 @@ fn inside_url(text: &str, start: usize) -> bool {
 
 fn scan(root: &Path, files: &[PathBuf], corpus: Corpus) -> Vec<Citation> {
     let cite_re = cite_regex(corpus);
-    let ident_re = ident_regex();
+    let ident_res = ident_regexes();
+    let citation_shaped_re = citation_shaped();
     let mut citations = Vec::new();
     for file in files {
         let Ok(text) = fs::read_to_string(file) else {
@@ -275,9 +347,7 @@ fn scan(root: &Path, files: &[PathBuf], corpus: Corpus) -> Vec<Citation> {
                 raw: whole.as_str().to_string(),
                 path: m[1].to_string(),
                 spans,
-                ident: ident_re
-                    .captures(&text[..whole.start()])
-                    .map(|c| c[1].to_string()),
+                ident: attached_ident(&text[..whole.start()], &ident_res, &citation_shaped_re),
             });
         }
     }
@@ -323,6 +393,43 @@ fn span_distance(line: usize, span: (usize, usize)) -> usize {
     } else {
         line.saturating_sub(span.1)
     }
+}
+
+/// Whether the cited span lies inside the block the identifier at `hit`
+/// introduces. Both are 1-based line numbers.
+///
+/// The second thing a citation means. `` `remember_ticket`,
+/// `LXMRouter.py:1102-1105` `` points at the item itself and the
+/// adjacency window sees it; `` `Transport.request_path`,
+/// `Transport.py:2786-2787` `` names the *enclosing* function and points at
+/// two statements 15 lines into its body, which adjacency cannot see and
+/// which is just as much "the citation names what it points at". Both
+/// spellings are in the corpus in roughly equal numbers, so a rule that
+/// only understood the first would report every instance of the second —
+/// and a guard with false positives gets switched off.
+///
+/// Indentation rather than syntax, so this needs no parser and holds for
+/// Rust, Python, C and the Arduino sources alike: the line that names an
+/// item is less indented than every line of its body. Blank lines carry no
+/// indentation of their own and are skipped.
+///
+/// What it gives up: an identifier that merely occurs on some line above
+/// the span, with the span nested deeper, satisfies this without being the
+/// enclosing item — a `let` binding above a block, say. So this is a
+/// weaker check than adjacency, not a stronger one. It is still the
+/// difference between "the citation is somewhere in the named item" and
+/// "the citation is somewhere in the file", which is what the existence
+/// check already was.
+fn encloses(lines: &[&str], hit: usize, span_start: usize) -> bool {
+    if hit >= span_start || hit == 0 || span_start > lines.len() {
+        return false;
+    }
+    let indent = |l: &&str| l.len() - l.trim_start().len();
+    let base = indent(&lines[hit - 1]);
+    lines[hit..span_start]
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| indent(l) > base)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -490,10 +597,12 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                 .filter(|(_, l)| l.contains(needle))
                 .map(|(i, _)| i + 1)
                 .collect();
-            let in_window = hits
-                .iter()
-                .any(|&h| c.spans.iter().any(|&span| span_distance(h, span) <= WINDOW));
-            if in_window {
+            let resolved = hits.iter().any(|&h| {
+                c.spans
+                    .iter()
+                    .any(|&span| span_distance(h, span) <= WINDOW || encloses(&lines, h, span.0))
+            });
+            if resolved {
                 passed = true;
                 break;
             }
@@ -793,7 +902,7 @@ fn report(label: &str, failures: &[Failure]) {
 /// guards. The fixture puts its subject at line `CANARY_SUBJECT_LINE` and pads
 /// to 60 lines, so the citation to `CANARY_DRIFT_LINE` is inside the file but
 /// far outside `WINDOW`. `tests/citation_canary/README.md` says what each of
-/// the four fixture citations is for.
+/// the fixture citations is for.
 const CANARY_TARGET: &str = include_str!("citation_canary/canary_target.rs.in");
 const CANARY_CITATIONS: &str = include_str!("citation_canary/canary_citations.rs.in");
 const CANARY_FIGURES: &str = include_str!("citation_canary/canary_figures.rs.in");
@@ -907,25 +1016,32 @@ fn run_canary() {
     );
     assert_eq!(
         citations.len(),
-        4,
-        "CANARY: the parser found {} of 4 fixture citations. It has stopped \
+        8,
+        "CANARY: the parser found {} of 8 fixture citations. It has stopped \
          matching; every green run since it broke means nothing.",
         citations.len()
     );
 
     let (counts, failures) = check(root, &citations);
+    // Six of the eight name what they point at: four in the paren spelling,
+    // two in the comma spelling. The remaining two are the last fixture
+    // line, whose leading backticked token is itself a citation -- pinned in
+    // both directions at once, because 5 means the comma spelling stopped
+    // being seen (and 130 real citations silently fell back to an existence
+    // check) while 7 means a citation next to a citation is being read as
+    // its subject.
     assert_eq!(
-        counts.with_ident, 4,
-        "CANARY: identifier detection stopped working ({} of 4 seen), which \
-         silently downgrades every citation to an existence check.",
+        counts.with_ident, 6,
+        "CANARY: identifier detection saw {} of 6, which silently changes \
+         how much of the corpus is drift-checked.",
         counts.with_ident
     );
 
     let kinds: Vec<&FailureKind> = failures.iter().map(|f| &f.kind).collect();
     assert_eq!(
         kinds.len(),
-        3,
-        "CANARY: expected exactly 3 failures (drift, missing, absent \
+        4,
+        "CANARY: expected exactly 4 failures (two drifts, missing, absent \
          submodule); got {}:\n{}",
         kinds.len(),
         failures
@@ -938,21 +1054,35 @@ fn run_canary() {
     // scanned as part of the corpus this file guards.
     let drifted = format!("canary_target.rs:{CANARY_DRIFT_LINE}");
     let correct = format!("canary_target.rs:{CANARY_SUBJECT_LINE}");
-    // The drifted citation must be reported: this is the failure the guard
-    // exists for, and the one that decays silently.
-    assert!(
-        failures
-            .iter()
-            .any(|f| f.kind == FailureKind::Drift && f.message.contains(&drifted)),
-        "CANARY: a deliberately drifted citation was NOT reported. The guard \
-         cannot see the defect it exists to catch."
+    // The drifted citations must be reported: this is the failure the guard
+    // exists for, and the one that decays silently. Once per spelling --
+    // a comma-form drift that goes unreported is the `lora.rs:725` case
+    // over again, which is what admitting the spelling was for.
+    let drifts: Vec<&Failure> = failures
+        .iter()
+        .filter(|f| f.kind == FailureKind::Drift && f.message.contains(&drifted))
+        .collect();
+    assert_eq!(
+        drifts.len(),
+        2,
+        "CANARY: {} of the 2 deliberately drifted citations (paren spelling, \
+         comma spelling) were reported. The guard cannot see the defect it \
+         exists to catch in one of the two forms the corpus writes.",
+        drifts.len()
     );
-    // The correct one must not be, or the guard is noise and gets disabled.
+    // The correct ones must not be, or the guard is noise and gets disabled.
+    // `: <raw>\n` is how `check` opens a failure message, so this matches the
+    // citation as written and not a line number quoted inside a note.
     assert!(
         !failures
             .iter()
-            .any(|f| f.message.contains(&format!("({correct})"))),
-        "CANARY: a correct citation was reported as broken."
+            .any(|f| f.message.contains(&format!(": {correct}\n"))),
+        "CANARY: a correct citation was reported as broken:\n{}",
+        failures
+            .iter()
+            .map(|f| f.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     );
     // Absent-submodule and drift must stay distinguishable: sending a reader
     // to `git submodule update --init` for a drifted citation, or to the
@@ -1082,6 +1212,62 @@ fn githook_citations_match_without_loosening_the_pattern() {
         "the reported failure names the wrong citation: {}",
         failures[0].message
     );
+}
+
+/// Both spellings that attach a name to a citation are seen, and nothing
+/// else became a name with them.
+///
+/// The false-positive side is the load-bearing half. A token wrongly read
+/// as the citation's subject does not usually produce a red — it produces a
+/// citation counted as drift-checked whose needle (`3`, `0001`) matches
+/// something within the window by accident. That is worse than leaving it
+/// bare, because the coverage number then says the citation is checked.
+#[test]
+fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
+    let idents = ident_regexes();
+    let shaped = citation_shaped();
+    let ident = |before: &str| attached_ident(before, &idents, &shaped);
+
+    // The two spellings, including across a line break.
+    assert_eq!(
+        ident("derived by `resolve_lt_alock` ("),
+        Some("resolve_lt_alock".into())
+    );
+    assert_eq!(
+        ident("derived by (`resolve_lt_alock`, "),
+        Some("resolve_lt_alock".into())
+    );
+    assert_eq!(ident("(`erp_band_gap`,\n"), Some("erp_band_gap".into()));
+    // The function spelling loses its parens; `Type::method` and
+    // `module.attr` keep theirs, because `check` searches the last segment.
+    assert_eq!(ident("`airtime_ms()` ("), Some("airtime_ms".into()));
+    assert_eq!(
+        ident("`RadioConfig::eu_medium` ("),
+        Some("RadioConfig::eu_medium".into())
+    );
+
+    for not_attached in [
+        // Prose between the name and the citation: the pairing has to be
+        // unambiguous, so an identifier mentioned earlier in the sentence
+        // is not the citation's subject.
+        "`Transport.outbound()` at ",
+        "`Transport.outbound()` is the loop, and (",
+        // A citation next to a citation, the shape a comparison table has.
+        "| Self-announce one-shot | `Destination.py:322`, ",
+        "the recipe moved (`Justfile:719`, ",
+        // A token with no letter in its last segment cannot be searched
+        // for as an identifier.
+        "the VID:PID `1209:0001` (",
+        "`4.2` (",
+        // Nothing at all: the bare citation, which stays existence-checked.
+        "while the tracker is locked (",
+    ] {
+        assert_eq!(
+            ident(not_attached),
+            None,
+            "`{not_attached}` was read as naming the citation that follows it"
+        );
+    }
 }
 
 /// Guarantee C, kind 2: a figure a doc comment attributes to a document

@@ -423,22 +423,59 @@ fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
     (reply_airtime + turnaround).clamp(1, 10_000) as u32
 }
 
+/// Routes [`leviculum_log_line::facts`] onto the firmware's two log sinks.
+///
+/// The mapping is the whole implementation: the decision about which sink a
+/// startup fact belongs on is made — and tested — in `facts`, and this only
+/// carries it out.
+struct FirmwareLog;
+
+impl leviculum_log_line::facts::LineSink for FirmwareLog {
+    fn line(
+        &mut self,
+        route: leviculum_log_line::facts::Route,
+        prefix: &str,
+        args: core::fmt::Arguments,
+    ) {
+        match route {
+            leviculum_log_line::facts::Route::Critical => {
+                crate::log::log_fmt_critical(prefix, args)
+            }
+            leviculum_log_line::facts::Route::Gated => crate::log::log_fmt(prefix, args),
+        }
+    }
+}
+
+/// The human-readable half of a config, as the `[LORA] active config:` line
+/// states it.
+fn active_facts(config: &RadioConfig) -> leviculum_log_line::facts::ActiveRadioConfig {
+    leviculum_log_line::facts::ActiveRadioConfig {
+        freq_hz: config.frequency_hz,
+        sf: config.sf,
+        bw_hz: config.bw_hz,
+        cr_denom: config.cr_denom,
+        txp_dbm: config.tx_power_dbm,
+        csma: config.csma_enabled,
+    }
+}
+
 /// Apply a config's airtime limits to the tracker, deriving the lawful
 /// long-term cap from the TX frequency when the host set no explicit `lt_alock`
 /// (see [`RadioConfig::effective_lt_alock`]). Emits a one-line log when the
 /// firmware applies its own lawful default so the derived cap is visible in the
 /// debug capture.
+///
+/// Called at radio bring-up and again on every runtime reconfiguration, so a
+/// board reconfigured in the field states its new cap too.
 fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, config: &RadioConfig) {
     let lt_alock = config.effective_lt_alock();
     airtime.set_st_limit_u16(config.st_alock);
     airtime.set_lt_limit_u16(lt_alock);
     if !config.lt_alock_present {
-        crate::log::log_fmt(
-            "[LORA_AIRTIME_LOCK] ",
-            format_args!(
-                "lawful default freq={} lt_alock={}",
-                config.frequency_hz, lt_alock
-            ),
+        leviculum_log_line::facts::lawful_airtime_default(
+            &mut FirmwareLog,
+            config.frequency_hz,
+            lt_alock,
         );
     }
 }
@@ -851,18 +888,9 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
         )
         .await
     {
-        Ok(()) => crate::log::log_fmt(
-            "[LORA] ",
-            format_args!(
-                "active config: freq={} sf={} bw={} cr={} txp={} csma={}",
-                config.frequency_hz,
-                config.sf,
-                config.bw_hz,
-                config.cr_denom,
-                config.tx_power_dbm,
-                config.csma_enabled
-            ),
-        ),
+        Ok(()) => {
+            leviculum_log_line::facts::active_radio_config(&mut FirmwareLog, &active_facts(&config))
+        }
         Err(e) => {
             crate::log::log_fmt("[LORA] ", format_args!("configure FAILED: {:?}", e));
             return;
@@ -928,17 +956,9 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 .await
             {
                 Ok(()) => {
-                    crate::log::log_fmt(
-                        "[LORA] ",
-                        format_args!(
-                            "active config: freq={} sf={} bw={} cr={} txp={} csma={}",
-                            new_cfg.frequency_hz,
-                            new_cfg.sf,
-                            new_cfg.bw_hz,
-                            new_cfg.cr_denom,
-                            new_cfg.tx_power_dbm,
-                            new_cfg.csma_enabled
-                        ),
+                    leviculum_log_line::facts::active_radio_config(
+                        &mut FirmwareLog,
+                        &active_facts(&new_cfg),
                     );
                     config = new_cfg;
                     slot_ms = compute_slot_ms(&config);

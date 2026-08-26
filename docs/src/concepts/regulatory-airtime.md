@@ -26,8 +26,9 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1389`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
-while the tracker is locked (`leviculum-nrf/src/lora.rs:725`),
-continuing to listen so RX is not starved.
+while the tracker is locked (`is_locked`,
+`leviculum-nrf/src/lora.rs:994-1013`), continuing to listen so RX is
+not starved.
 
 The host-side airtime credit bucket
 (`leviculum-std/src/interfaces/airtime.rs`, see
@@ -41,7 +42,7 @@ nothing may treat it as one.
 A node that is not told otherwise obeys the band it is on. When no
 `airtime_limit_long` is configured, the host derives the lawful
 long-term limit from the TX frequency (`resolve_lt_alock`,
-`leviculum-std/src/driver/mod.rs:329`) and sends it to the modem; a
+`leviculum-std/src/driver/mod.rs:353-368`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
 `leviculum-core/src/rnode.rs:1302`). Both read the same table,
@@ -50,6 +51,19 @@ carries the EU 863-870 MHz sub-bands with their 0.1 % / 1 % / 10 %
 duty cycles and the 433.05-434.79 MHz band at 10 %. An explicit
 configured value always wins — including an explicit `0`, which the
 firmware reads as unlimited.
+
+**A cap that cannot be read back is not a cap anyone can check.** The
+firmware states the settings it applied and the cap it derived on the
+boot-critical log path — the one that bypasses the debug port's
+runtime drain gate (`lawful_airtime_default`,
+`leviculum-nrf/log-line/src/facts.rs:104`) — and states them again on
+every runtime reconfiguration. Until 2026-08 both were ordinary
+runtime lines: a board that came up before a reader attached dropped
+them with everything else, so the two facts a compliance question is
+actually about were the two that could never be obtained from a
+running board. Neither is recoverable any other way — the settings
+live in the radio's registers and the cap in the airtime tracker, and
+nothing reads either back out.
 
 Every row of the table has been verified against the standard text:
 ERC Recommendation 70-03, Annex 1, sub-bands h1.3-h1.9 for

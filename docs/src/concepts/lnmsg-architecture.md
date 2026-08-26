@@ -278,9 +278,9 @@ entry is removed, and from then on it is indistinguishable from a message
 that vanished.
 
 Terminal states remove the entry from the outbound map
-(`remove_outbound`, `leviculum-lxmf/src/router.rs:771-773`; call sites at
-`:1212`, `:1236`, `:1506` and
-`leviculum-lxmf/src/router/propagation_runtime.rs:883`). If the client does
+(`remove_outbound`, `leviculum-lxmf/src/router.rs:844-847`; call sites at
+`:859`, `:1298`, `:1322` and
+`leviculum-lxmf/src/router/propagation_runtime.rs:887`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
 `MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:46`).
@@ -288,18 +288,18 @@ message afterwards, and it cannot offer a retry button.
 ### Propagation: what the router does, and what it refuses to do
 
 Setup requires the client to mint a second destination
-(`lxmf.propagation`, `leviculum-lxmf/src/propagation_client.rs:253-263`),
+(`lxmf.propagation`, `leviculum-lxmf/src/propagation_client.rs:282-292`),
 register it, and hand it to `enable_propagation_client`
 (`leviculum-lxmf/src/router.rs:577`); the transport identity must equal the
 router's or you get `RouterError::IdentityMismatch`
 (`leviculum-lxmf/src/router.rs:582-584`).
 
 Node discovery is automatic from announces (`remember_announce`,
-`leviculum-lxmf/src/propagation_client.rs:355-371`, driven from the
-announce arm at `:704-713`), and the decoded announce carries `enabled`,
+`leviculum-lxmf/src/propagation_client.rs:384-400`, driven from the
+announce arm at `:733-742`), and the decoded announce carries `enabled`,
 `transfer_limit_kb`, `sync_limit_kb`, `stamp_cost`, `peering_cost` and
 `metadata` (`PropagationNodeAnnounce`,
-`leviculum-lxmf/src/propagation.rs:492-504`), all of which are directly
+`leviculum-lxmf/src/propagation.rs:513-525`), all of which are directly
 displayable. `select_outbound_propagation_node` with `None` auto-ranks by
 route, hops, peering cost and stamp cost
 (`leviculum-lxmf/src/router/propagation_runtime.rs:1153-1188`).
@@ -329,7 +329,7 @@ What the router will not do:
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1127-1133`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
-  `leviculum-lxmf/src/propagation_client.rs:238`) and are absent from the
+  `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
   router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:1828-1844`).
   The client must persist and replay them via
   `restore_known_propagation_node`
@@ -389,7 +389,7 @@ restarts, and must not pretend to.
   (`leviculum-lxmf/src/attachments.rs:78`). Attachments are inline bytes in
   the message, so anything with a real attachment exceeds the packet MDU
   and forces link or Resource delivery (`representation`,
-  `leviculum-lxmf/src/node.rs:444-471`).
+  `leviculum-lxmf/src/node.rs:488-516`).
 - **Paper messages** (`leviculum-lxmf/src/paper.rs`): a message encrypted
   to a destination and rendered as an `lxm://` base64 URI (`to_uri`,
   `leviculum-lxmf/src/paper.rs:170`), capped at `PAPER_MDU = 2210` bytes
@@ -413,7 +413,7 @@ restarts, and must not pretend to.
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is
   2^cost hashes plus a workblock expansion of 3000 rounds
-  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:16`). Costs
+  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:39`). Costs
   above about 40 bits are described in-tree as "already unreachable in
   practice" (`leviculum-lxmf/src/router.rs:1109-1110`). No wall-clock
   benchmark exists in the crate and none was run for this document, so any

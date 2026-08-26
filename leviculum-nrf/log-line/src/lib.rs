@@ -45,11 +45,21 @@
 //! was emitted, this boot. The stamp of a line is therefore always its
 //! LAST `t=`, which is what [`parse_stamp`] reads. The same holds for a
 //! `tracing` event whose own fields happen to include a `t`.
+//!
+//! # Which sink a line goes to
+//!
+//! Shaping is half of what makes a line readable; the other half is
+//! whether it is emitted at all. [`facts`] holds the startup lines whose
+//! *route* — the gated sink or the one that bypasses the gate — is a
+//! property rather than a call-site detail, and states that route as data
+//! so it can be asserted on the host.
 
 #![no_std]
 
 #[cfg(test)]
 extern crate std;
+
+pub mod facts;
 
 use core::fmt::Write;
 

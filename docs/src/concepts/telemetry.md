@@ -384,7 +384,7 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:2478`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:2760`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.

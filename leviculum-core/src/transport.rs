@@ -7611,7 +7611,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Fresh hops=0 path request bytes for forwarding or re-origination
-    /// (Python `Transport.request_path`, Transport.py:2554-2568: dest_hash
+    /// (Python `Transport.request_path`, Transport.py:2783-2784: dest_hash
     /// + own identity hash when transport is enabled + tag).
     fn build_forwarded_path_request(
         &self,

@@ -161,7 +161,7 @@ signalling:
 A peering key is a proof-of-work over `peer_identity_hash || node_identity_hash`
 with `WORKBLOCK_EXPAND_ROUNDS_PEERING` = 25 rounds against the node's advertised
 `peering_cost` (`LXMPeer.py:242-265`; validated by `validate_peering_key`,
-`LXStamper.py:48-51`). It authorizes a party to offer messages to the node.
+`LXStamper.py:79-82`). It authorizes a party to offer messages to the node.
 
 ## Node transient ingest and expiry (Python reference only; not implemented)
 

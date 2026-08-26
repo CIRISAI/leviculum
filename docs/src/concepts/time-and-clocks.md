@@ -766,7 +766,7 @@ arms-1–2 evidence. No operator action at any step — switch on and it
 works, with the residuals stated.
 
 **Implementation status.** Arm 4's single-announce learning
-(`learn_emission_timebase`, `transport.rs:2999`) implements the
+(`learn_emission_timebase`, `transport.rs:3311`) implements the
 rank-5 re-anchor today. The median re-anchor, the collection of
 LXMF-stamp evidence, the high-water persistence, and the RTC
 write-back are spec, tracked as implementation issues per platform.

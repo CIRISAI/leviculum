@@ -108,7 +108,7 @@ program presents it as one.
 **Never auto-adopt silently.** On first run, and whenever the selected node
 becomes unreachable, present a picker with the candidates, their hop
 counts, their advertised limits and costs (`PropagationNodeAnnounce`,
-`leviculum-lxmf/src/propagation.rs:492-504`), and require one keystroke to
+`leviculum-lxmf/src/propagation.rs:513-525`), and require one keystroke to
 accept. Automatic *failover* between nodes the user has already approved is
 fine and the library already does it
 (`leviculum-lxmf/src/router/propagation_runtime.rs:817-838`); automatic

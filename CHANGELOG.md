@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A telemetry report whose dispatch was lost is retried no sooner than the
   policy's own `min_interval_ms`, instead of on the next main-loop tick
   (#344).
+- The applied radio settings and the lawful duty-cycle cap the firmware
+  derived from its frequency now survive a boot nobody was watching: both
+  are emitted on the log path that bypasses the debug port's runtime gate,
+  at bring-up and on every reconfiguration.
+- The citation guard reads the `` (`ident`, `path:line`) `` spelling as
+  naming its subject, so 130 citations that were existence-checked are
+  drift-checked; 30 that had drifted are corrected.
 
 ### Changed
 
