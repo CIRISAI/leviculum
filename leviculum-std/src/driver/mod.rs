@@ -51,11 +51,13 @@ mod completions;
 mod interface_build;
 mod processor;
 mod remote_mgmt;
+mod segments;
 mod sender;
 mod stream;
 
 use completions::CompletionRegistry;
 use remote_mgmt::RemoteMgmtResponder;
+use segments::SegmentAssembler;
 
 pub use builder::ReticulumNodeBuilder;
 pub use completions::{
@@ -64,6 +66,7 @@ pub use completions::{
     DEFAULT_EVENT_TAP_CAPACITY,
 };
 pub use processor::{CoreProcessor, PROCESSOR_TICK_BUDGET};
+pub use segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE;
 pub use sender::PacketSender;
 pub use stream::LinkHandle;
 
@@ -1579,6 +1582,9 @@ pub struct ReticulumNode {
     /// Cumulative plane drop counters, shared with the runner's `EventSink`
     /// so [`plane_stats`](Self::plane_stats) can report them (leviculum#60).
     plane_counters: Arc<PlaneCounters>,
+    /// Per-transfer ceiling for multi-segment resource assembly
+    /// (leviculum#62).
+    pub(crate) max_assembled_resource_size: usize,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1805,6 +1811,7 @@ impl ReticulumNode {
             control_channel_capacity,
             control_dropped,
             plane_counters: Arc::new(PlaneCounters::default()),
+            max_assembled_resource_size: segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -2358,6 +2365,7 @@ impl ReticulumNode {
         self.completions.reopen();
         let completions = Arc::clone(&self.completions);
         let ifac_rotation = self.ifac_rotation.clone();
+        let max_assembled_resource_size = self.max_assembled_resource_size;
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -2396,6 +2404,7 @@ impl ReticulumNode {
                 core_processor,
                 completions,
                 ifac_rotation,
+                max_assembled_resource_size,
             )
             .await;
         });
@@ -4825,6 +4834,7 @@ async fn run_event_loop(
     core_processor: Option<Box<dyn CoreProcessor>>,
     completions: Arc<CompletionRegistry>,
     ifac_rotation: IfacRotation,
+    max_assembled_resource_size: usize,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -4899,6 +4909,10 @@ async fn run_event_loop(
     // Clone IFAC configs from core so dispatch_output can apply IFAC outside the lock.
     // This is the canonical source of truth for "what IFAC config does interface N have
     // according to the INI config". On reconnect, we re-apply from this map.
+    // leviculum#62: reassembles multi-segment receiver transfers so a
+    // consumer gets one completion per transfer, not one per segment.
+    let mut assembler = SegmentAssembler::new(max_assembled_resource_size);
+
     let mut last_ifac_generation: u64 = ifac_rotation
         .generation
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -5008,6 +5022,7 @@ async fn run_event_loop(
                 discovery_network_identity.as_deref(),
                 &mut discovery_heard_ifac,
                 &completions,
+                &mut assembler,
                 core_processor.as_mut(),
             );
             tighten_next_poll(&mut next_poll, processor_delay);
@@ -5156,6 +5171,7 @@ async fn run_event_loop(
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
                             &completions,
+            &mut assembler,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -5211,6 +5227,7 @@ async fn run_event_loop(
                                     None,
                                     &mut discovery_heard_ifac,
                                     &completions,
+            &mut assembler,
                                     core_processor.as_mut(),
                                 ));
                             }
@@ -5251,6 +5268,7 @@ async fn run_event_loop(
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
                     &completions,
+            &mut assembler,
                     core_processor.as_mut(),
                 );
                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -5319,6 +5337,7 @@ async fn run_event_loop(
                     discovery_network_identity.as_deref(),
                     &mut discovery_heard_ifac,
                     &completions,
+            &mut assembler,
                     core_processor.as_mut(),
                 );
                 // The processor's periodic output goes out on the driver's own
@@ -5342,6 +5361,7 @@ async fn run_event_loop(
                             None,
                             &mut discovery_heard_ifac,
                             &completions,
+            &mut assembler,
                             None,
                         );
                     }
@@ -5395,6 +5415,7 @@ async fn run_event_loop(
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
                             &completions,
+            &mut assembler,
                             core_processor.as_mut(),
                         );
                     }
@@ -5530,7 +5551,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
                 }
             }
 
@@ -5554,7 +5575,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
             }
 
             // Branch 6b: the shared instance this node is a client of went
@@ -5651,7 +5672,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet
@@ -5792,6 +5813,7 @@ async fn run_event_loop(
                             discovery_network_identity.as_deref(),
                             &mut discovery_heard_ifac,
                             &completions,
+            &mut assembler,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -5874,6 +5896,7 @@ async fn run_event_loop(
                                     discovery_network_identity.as_deref(),
                                     &mut discovery_heard_ifac,
                                     &completions,
+            &mut assembler,
                                     core_processor.as_mut(),
                                 );
                                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -6197,7 +6220,7 @@ fn tighten_next_poll(next_poll: &mut tokio::time::Instant, delay: Option<Duratio
 /// [`tighten_next_poll`].
 #[allow(clippy::too_many_arguments)]
 fn dispatch_output(
-    output: TickOutput,
+    mut output: TickOutput,
     registry: &mut InterfaceRegistry,
     mut event_sink: Option<&mut EventSink>,
     inner: &Arc<Mutex<StdNodeCore>>,
@@ -6210,6 +6233,7 @@ fn dispatch_output(
     discovery_network_identity: Option<&leviculum_core::Identity>,
     discovery_heard_ifac: &mut HeardIfacMap,
     completions: &CompletionRegistry,
+    assembler: &mut SegmentAssembler,
     core_processor: Option<&mut processor::ProcessorSlot>,
 ) -> Option<Duration> {
     // Drain retry queues before dispatching new actions
@@ -6266,6 +6290,11 @@ fn dispatch_output(
     // event flows, ahead of `EventSink::emit` — so waiters resolve in daemon
     // mode (`event_sink` None) too. The node lock is NOT held at this point;
     // the registry is a leaf and must stay one (see completions.rs).
+    // Multi-segment assembly (leviculum#62) runs BEFORE observation and
+    // emission, so the registry, the tap and the consumer all see the same
+    // whole-transfer event rather than slices.
+    output.events = assembler.process(std::mem::take(&mut output.events));
+
     for ev in drop_events.iter().chain(output.events.iter()) {
         completions.observe(ev);
     }
@@ -6440,6 +6469,7 @@ fn dispatch_output(
             None,
             discovery_heard_ifac,
             completions,
+            assembler,
             // The `/status` response is the driver's own; it is not the
             // processor's business and must not re-enter the tap.
             None,
@@ -6471,6 +6501,7 @@ fn dispatch_output(
             None,
             discovery_heard_ifac,
             completions,
+            assembler,
             None,
         );
     }
@@ -8231,6 +8262,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
     }
@@ -8328,6 +8360,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
 
@@ -9995,6 +10028,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10063,6 +10097,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10111,6 +10146,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10160,6 +10196,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10229,6 +10266,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10308,6 +10346,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         )
         .expect("the tap asked for a deadline; the driver must be told");
@@ -10369,6 +10408,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
 
@@ -10425,6 +10465,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
         std::panic::set_hook(previous_hook);
@@ -10469,6 +10510,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             Some(&mut slot),
         );
         assert!(
@@ -10703,6 +10745,7 @@ mod tests {
             None,
             CompletionRegistry::new(),
             IfacRotation::default(),
+            segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
         ));
 
         FlushLoopHarness {
@@ -11261,6 +11304,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
 
@@ -11308,6 +11352,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
 
@@ -11406,6 +11451,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &node.completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
 
@@ -11448,6 +11494,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
 
@@ -11681,6 +11728,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &node.completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
         assert!(
@@ -11713,6 +11761,7 @@ mod tests {
             None,
             &mut BTreeMap::new(),
             &node.completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));

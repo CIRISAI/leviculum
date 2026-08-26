@@ -198,7 +198,22 @@ async fn a_payload_past_the_efficient_size_round_trips_intact() {
     assert_eq!(
         assembled.len(),
         bytes.len(),
-        "every byte sent must reach the receiver across the segments"
+        "every byte sent must reach the receiver"
     );
     assert_eq!(assembled, bytes, "content must survive segmentation");
+    // leviculum#62: the consumer sees ONE completion for the transfer, the
+    // shape the reference delivers — not one per segment. This is the
+    // assertion that would have caught the downstream truncation: a consumer
+    // decoding the first event now has the whole payload.
+    assert_eq!(
+        segments.len(),
+        1,
+        "a segmented transfer must arrive as a single assembled completion, got {segments:?}"
+    );
+    let (seg, total, len) = segments[0];
+    assert_eq!(
+        (seg, total, len),
+        (3, 3, bytes.len()),
+        "the delivered event is the final segment, carrying the whole payload"
+    );
 }
