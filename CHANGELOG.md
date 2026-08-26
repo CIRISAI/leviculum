@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.24.0+ciris.1] — CIRIS fork
+
+### Changed — catch-up to upstream master @ `50388fc6` (+57)
+
+The largest catch-up since the 0.8.1 line, and almost all of it is LNode
+firmware and radio work: the receiver runs at boosted gain rather than an
+unchosen default, a reception in progress is no longer abandoned for a
+transmission, the radio listens again before handing a packet upward, the
+inter-packet gap is settable, plus register read-back at bring-up, airtime
+and listen-window reporting, and a plain reader for the LNode debug port.
+`leviculum-std` movement is mostly rnsd-interop coverage (RPC, status
+parity, MTU); `leviculum-core` picks up the supporting changes. Nothing
+touched the fork's carry — the rebase was clean, and every carried feature
+was symbol-audited afterwards.
+
+### Fixed — a latent race in this fork's own conformance suite
+
+`plane_stats_report_limits_and_track_the_live_set` read the **responder's**
+live-link gauge immediately after the *initiator's* `await_link_established`
+returned. The two sides reach the established state at different moments and
+that is protocol-correct — the initiator is established once it validates the
+responder's proof, the responder slightly later — so the assertion was a race
+the test happened to keep winning until upstream's timing shifted. It now
+waits for the responder's own `LinkEstablished` before reading its gauge.
+Verified as a test defect, not a regression: the responder does establish and
+the mirror does record it (10× stress clean).
+
 ## [0.23.0+ciris.1] — CIRIS fork
 
 ### Added — saturation is readable before it bites (leviculum#60, properties 2–3)
