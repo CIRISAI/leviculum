@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The LNode radio is listening again before a received frame is handed to
+  the stack, instead of after it has been processed.
 - A telemetry report whose dispatch was lost is retried no sooner than the
   policy's own `min_interval_ms`, instead of on the next main-loop tick
   (#344).

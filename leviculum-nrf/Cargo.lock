@@ -984,6 +984,7 @@ dependencies = [
  "leviculum-log-line",
  "leviculum-lxmf",
  "leviculum-queue-budget",
+ "leviculum-rx-arming",
  "leviculum-screen",
  "leviculum-sd-policy",
  "leviculum-telemetry-policy",
@@ -999,6 +1000,10 @@ dependencies = [
 
 [[package]]
 name = "leviculum-queue-budget"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-rx-arming"
 version = "0.1.0"
 
 [[package]]

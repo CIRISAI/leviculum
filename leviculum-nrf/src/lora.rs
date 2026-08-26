@@ -586,9 +586,113 @@ async fn transmit_all_frames(
 }
 
 // RX helper
+/// Everything a reception has to pass through on its way to the core, as one
+/// [`FrameSink`](leviculum_rx_arming::FrameSink).
+///
+/// This is the hand-off, and it is what the radio used to wait behind: the
+/// last line of `deliver` is a bounded channel send that wakes the main task
+/// and yields it the CPU, so `node.handle_packet` — announce signature
+/// verification included — runs before this function returns. Everything in
+/// it now happens with the receiver already armed.
+struct CoreHandoff<'a> {
+    /// When the window was armed, for the `op=rx_success duration_ms` line.
+    /// Read at the top of `deliver`, i.e. immediately after the re-arm, so
+    /// the figure still brackets the reception and not the hand-off behind it.
+    rx_start: embassy_time::Instant,
+    reassembler: &'a mut leviculum_core::rnode::SplitReassembler,
+    incoming_tx: &'a Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    /// Snapshot of the loop's RX-timeout counter, which is what the split
+    /// reassembler ages its partial frames against.
+    rx_timeout_count: u32,
+}
+
+impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
+    type Meta = crate::sx1262::RxStatus;
+
+    async fn deliver(&mut self, frame: &[u8], status: &Self::Meta) {
+        crate::log::log_fmt(
+            "[T114_LORA_LOOP] ",
+            format_args!(
+                "op=rx_success duration_ms={}",
+                self.rx_start.elapsed().as_millis()
+            ),
+        );
+        let len = frame.len();
+        let n = len.min(9);
+        if n >= 1 {
+            let mut first8 = [0u8; 8];
+            let copy_len = (n - 1).min(8);
+            first8[..copy_len].copy_from_slice(&frame[1..1 + copy_len]);
+            crate::log::log_fmt(
+                "[T114_SX_RX] ",
+                format_args!(
+                    "len={} first8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} rssi={} snr={}",
+                    len,
+                    first8[0],
+                    first8[1],
+                    first8[2],
+                    first8[3],
+                    first8[4],
+                    first8[5],
+                    first8[6],
+                    first8[7],
+                    status.rssi,
+                    status.snr
+                ),
+            );
+        }
+        if let Some(data) = self.reassembler.feed(frame, self.rx_timeout_count) {
+            crate::log::log_fmt(
+                "[LORA] ",
+                format_args!(
+                    "RX {} bytes rssi={} snr={}",
+                    data.len(),
+                    status.rssi,
+                    status.snr
+                ),
+            );
+            LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "display")]
+            crate::baseboard::LORA_RX_FLASH.signal(());
+            let plen = data.len();
+            let d = data.as_slice();
+            let m = d.len().min(8);
+            let mut p8 = [0u8; 8];
+            p8[..m].copy_from_slice(&d[..m]);
+            crate::log::log_fmt(
+                "[T114_LORA_DELIVER] ",
+                format_args!(
+                    "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
+                    p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
+                ),
+            );
+            self.incoming_tx.send(data).await;
+        } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
+            crate::log::log_fmt(
+                "[LORA] ",
+                format_args!(
+                    "RX split part {} bytes seq={} rssi={} snr={}",
+                    len - 1,
+                    frame[0] >> 4,
+                    status.rssi,
+                    status.snr
+                ),
+            );
+        } else if len < 2 {
+            crate::log::log_fmt("[LORA] ", format_args!("RX too short ({})", len));
+        }
+    }
+}
+
 /// Run one RX cycle with the given timeout. Feeds results through the split
 /// reassembler and pushes reassembled payloads to `incoming_tx`.
 /// Safe to call from both the idle-poll path and CSMA backoff windows.
+///
+/// The radio is armed, awaited, and — on a reception — armed again *before*
+/// the frame is handed up; the sequence itself is
+/// [`leviculum_rx_arming::receive_and_hand_up`], where a fake radio asserts
+/// it. What this function keeps is everything specific to the board: the
+/// logging, the reassembler, and the classification of the three RX errors.
 ///
 /// `site` names this window in the `[SX_RX_ARM]` line the driver emits when
 /// it arms the receiver. Every caller below passes a distinct one, so a
@@ -604,70 +708,24 @@ async fn rx_once(
     rx_timeout_count: &mut u32,
 ) -> bool {
     let rx_start = embassy_time::Instant::now();
-    let rx_result = radio.receive(rx_buf, timeout_ms, site).await;
+    let mut sink = CoreHandoff {
+        rx_start,
+        reassembler,
+        incoming_tx,
+        rx_timeout_count: *rx_timeout_count,
+    };
+    let rx_result =
+        leviculum_rx_arming::receive_and_hand_up(radio, rx_buf, (timeout_ms, site), &mut sink)
+            .await;
     let rx_ms = rx_start.elapsed().as_millis();
     match rx_result {
-        Ok((len, status)) => {
-            crate::log::log_fmt(
-                "[T114_LORA_LOOP] ",
-                format_args!("op=rx_success duration_ms={}", rx_ms),
-            );
-            let frame = &rx_buf[..len as usize];
-            let h = frame;
-            let n = h.len().min(9);
-            if n >= 1 {
-                let mut first8 = [0u8; 8];
-                let copy_len = (n - 1).min(8);
-                first8[..copy_len].copy_from_slice(&h[1..1 + copy_len]);
-                crate::log::log_fmt(
-                    "[T114_SX_RX] ",
-                    format_args!(
-                    "len={} first8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} rssi={} snr={}",
-                    len, first8[0], first8[1], first8[2], first8[3],
-                    first8[4], first8[5], first8[6], first8[7],
-                    status.rssi, status.snr
-                ),
-                );
-            }
-            if let Some(data) = reassembler.feed(frame, *rx_timeout_count) {
-                crate::log::log_fmt(
-                    "[LORA] ",
-                    format_args!(
-                        "RX {} bytes rssi={} snr={}",
-                        data.len(),
-                        status.rssi,
-                        status.snr
-                    ),
-                );
-                LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                #[cfg(feature = "display")]
-                crate::baseboard::LORA_RX_FLASH.signal(());
-                let plen = data.len();
-                let d = data.as_slice();
-                let m = d.len().min(8);
-                let mut p8 = [0u8; 8];
-                p8[..m].copy_from_slice(&d[..m]);
-                crate::log::log_fmt(
-                    "[T114_LORA_DELIVER] ",
-                    format_args!(
-                        "pkt_hash8={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} len={}",
-                        p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
-                    ),
-                );
-                incoming_tx.send(data).await;
-            } else if len >= 2 && (rx_buf[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
-                crate::log::log_fmt(
-                    "[LORA] ",
-                    format_args!(
-                        "RX split part {} bytes seq={} rssi={} snr={}",
-                        len - 1,
-                        rx_buf[0] >> 4,
-                        status.rssi,
-                        status.snr
-                    ),
-                );
-            } else if len < 2 {
-                crate::log::log_fmt("[LORA] ", format_args!("RX too short ({})", len));
+        Ok(reception) => {
+            // The re-arm that covers the hand-off is not allowed to cost the
+            // frame, so its failure is reported rather than propagated. The
+            // next window arms from scratch: the arming state still owes a
+            // standby, so nothing is left half-armed.
+            if let Err(e) = reception.rearm {
+                crate::log::log_fmt("[SX_RX_REARM] ", format_args!("failed error={:?}", e));
             }
             // A packet was received this window (full delivery, split part, or
             // runt). The caller uses this to reset its consecutive-empty-ack
@@ -1217,17 +1275,22 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     consecutive_empty_acks = 0;
                 }
             }
-            // The daemon has outgoing data. The RX future was dropped while the
-            // radio was in continuous RX, so force standby before the CSMA/TX
-            // path drives SetTx; the dropped RX leaves no half-state. A packet
-            // racing this switch may be lost (rare, acceptable). radio_silent
-            // still drops outgoing instead of transmitting.
+            // The daemon has outgoing data. The RX future was dropped, which
+            // can now happen at three points instead of one — inside the
+            // arming, inside the wait, or inside the hand-off that follows the
+            // provisional re-arm — so the receiver is stood down here rather
+            // than assumed to be down. `disarm_rx` is the one that knows: the
+            // arming state is set before `SetRx` goes out and cleared only
+            // after a standby completes, so a drop anywhere in that span still
+            // owes exactly one standby and this spends it. A packet racing the
+            // switch may be lost (rare, acceptable, and unchanged).
+            // radio_silent still drops outgoing instead of transmitting.
             Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
-                let _ = radio.set_standby_rc().await;
+                let _ = radio.disarm_rx().await;
                 if config.radio_silent {
                     drop(data);
                 } else {
