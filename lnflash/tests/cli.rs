@@ -625,6 +625,7 @@ fn the_config_only_sessions_run_with_no_bundle_anywhere() {
             "--telemetry",
             "a7b2c3d4e5f60718293a4b5c6d7e8f90",
         ],
+        vec!["--set-tx-spacing", "60"],
     ] {
         // --bundle names a directory that does not exist, so no bundle can be
         // found by any of the four resolution steps.
@@ -642,6 +643,58 @@ fn the_config_only_sessions_run_with_no_bundle_anywhere() {
         );
         // And it must not have complained about a bundle it has no use for.
         assert!(!err.contains("no bundle found"), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn the_transmit_spacing_session_needs_a_running_board_and_says_so() {
+    // #345. Like the other configure-only sessions it never flashes, so an
+    // empty bus is a reported fact rather than a wait — and the message has
+    // to name the flag, because a sweep script reads this and nothing else.
+    let empty = TempDir::new().unwrap();
+    let out = run(
+        &[
+            "--yes",
+            "--set-tx-spacing",
+            "60",
+            "--sysfs",
+            &empty.path().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    let said = stdout(&out);
+    assert!(said.contains("No running LNode on the bus"), "{said}");
+    assert!(said.contains("--set-tx-spacing"), "{said}");
+}
+
+#[test]
+fn a_transmit_spacing_that_does_not_fit_the_wire_stops_at_the_command_line() {
+    // The frame carries a u16, so a value the board could never take has
+    // to be refused before a board is touched, not truncated into a
+    // different sweep point.
+    let empty = TempDir::new().unwrap();
+    for value in ["-1", "70000", "sixty"] {
+        let out = run(
+            &[
+                "--yes",
+                "--set-tx-spacing",
+                value,
+                "--sysfs",
+                &empty.path().display().to_string(),
+            ],
+            None,
+        );
+        assert!(!out.status.success(), "{value} was accepted");
+        // The refusal names the value that was refused, so a sweep script
+        // that mistypes a point is told which one.
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(value), "{value}: {err}");
+        // And nothing was enumerated: the run stopped at the command line.
+        assert!(
+            !stdout(&out).contains("No running LNode on the bus"),
+            "{value}: the session started before the value was checked"
+        );
     }
 }
 

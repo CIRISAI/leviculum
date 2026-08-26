@@ -57,6 +57,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_WALL_TIME,
     envelope::TYPE_CAPABILITIES,
     envelope::TYPE_TELEMETRY_TARGET,
+    envelope::TYPE_TX_SPACING,
 ];
 
 /// nRF52840 FICR base address
@@ -515,6 +516,28 @@ async fn retic_serial_task(
                                     };
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: telemetry answer write failed");
+                                    }
+                                }
+                                ControlAction::TxSpacing(spacing_ms) => {
+                                    // The LoRa interface owns the knob:
+                                    // the gap is a property of the medium
+                                    // and is applied at key-up, so the
+                                    // value goes straight there and no
+                                    // other layer learns of it. A full
+                                    // channel means the task has not read
+                                    // the previous value yet — refuse
+                                    // audibly so a sweep never believes a
+                                    // point it did not get.
+                                    let answer = if crate::lora::deliver_tx_spacing(spacing_ms) {
+                                        envelope::encode_ack(envelope::TYPE_TX_SPACING)
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_TX_SPACING,
+                                            envelope::REFUSE_BUSY,
+                                        )
+                                    };
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: tx-spacing answer write failed");
                                     }
                                 }
                                 ControlAction::CapabilityQuery => {

@@ -38,6 +38,7 @@ Commands (host → board):
 | 0x03 | WALL_TIME        | unix seconds, u64 BE (8 B)                     |
 | 0x04 | CAPABILITIES     | empty (a query)                                |
 | 0x05 | TELEMETRY_TARGET | see below — set or clear the telemetry target  |
+| 0x06 | TX_SPACING       | on-air transmit spacing in ms, u16 BE (2 B)    |
 
 Responses (board → host):
 
@@ -57,6 +58,33 @@ The wall-time frame calls the calendar seam
 window decides between the ack and a `value refused` refusal, and an
 accepted seed logs `[TIME_SEED] source=host` and flips the banner's
 `[TIME_SOURCE]` to `host` — the exact mirror of the GNSS path.
+
+### The transmit-spacing frame (#345)
+
+```text
+[spacing_ms: u16 BE]
+```
+
+The gap the board's LoRa interface leaves between the end of one packet's
+airtime and the key-up of the next. It is applied inside
+`transmit_all_frames`, the last thing before the radio is keyed, so it is a
+gap between two packets on the air rather than between two hand-overs, and
+whatever the transmit path already spent since the previous packet ended
+(the CAD, the SPI traffic, the log lines) is counted against the requested
+gap rather than added to it. The split frames of one packet are unaffected:
+they still go out back-to-back, because the receiver's reassembler requires
+that.
+
+Every u16 value is legal, `0` included — `0` is the compiled default and
+imposes nothing, so the only malformed frame is one of the wrong length.
+The value is **not persisted**: it is a measurement instrument (the sweep of
+the telemetry announce/report spacing, #345), and a reset returns the board
+to the default. The board logs `[LORA_TX_SPACING] intended_ms=… waited_ms=…
+gap_ms=…` at every key-up; `gap_ms` is the gap that was measured, and `-1`
+is the first packet since boot, which has no previous airtime edge to be
+measured from.
+
+`lnflash --set-tx-spacing <MS>` is the host side.
 
 ### The telemetry-target frame (#236)
 

@@ -987,6 +987,7 @@ dependencies = [
  "leviculum-screen",
  "leviculum-sd-policy",
  "leviculum-telemetry-policy",
+ "leviculum-tx-spacing",
  "nmea0183",
  "nrf-softdevice",
  "nrf-softdevice-s140",
@@ -1014,6 +1015,10 @@ version = "0.1.0"
 
 [[package]]
 name = "leviculum-telemetry-policy"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-tx-spacing"
 version = "0.1.0"
 
 [[package]]

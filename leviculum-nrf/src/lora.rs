@@ -57,6 +57,25 @@ static LORA_INCOMING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::ne
 static LORA_OUTGOING: Channel<CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS> = Channel::new();
 static LORA_CONFIG: Channel<CriticalSectionRawMutex, RadioConfig, 1> = Channel::new();
 
+/// On-air transmit spacing in ms, set from the host (#345,
+/// `TYPE_TX_SPACING`). One slot: the value is a level, not an event, and a
+/// second one arriving while the first is unread means the task has not
+/// reached its next key-up yet — the host is told to retry rather than
+/// having a sweep point silently overwritten.
+static LORA_TX_SPACING: Channel<CriticalSectionRawMutex, u16, 1> = Channel::new();
+
+/// Hand the LoRa task a new on-air transmit spacing (#345). `false` means
+/// one is already queued and unread — the caller answers `REFUSE_BUSY`.
+///
+/// The knob lives here rather than in [`RadioConfig`] because it is a
+/// measurement instrument and not part of the board's stored profile: it
+/// is deliberately not persisted, so a reset returns the board to the
+/// compiled default and no sweep can outlive the bench session that set
+/// it.
+pub fn deliver_tx_spacing(spacing_ms: u16) -> bool {
+    LORA_TX_SPACING.try_send(spacing_ms).is_ok()
+}
+
 /// Occupancy of `LORA_OUTGOING`, in slots and in bytes.
 ///
 /// The channel's own slot bound cannot see bytes, so a queue of twelve MTU
@@ -431,14 +450,47 @@ fn apply_airtime_limits(airtime: &mut leviculum_core::rnode::AirtimeTracker, con
 /// Every successfully keyed frame's on-air time is recorded into `airtime`
 /// (mirrors the RNode firmware's `add_airtime()` on each `transmit()`), which
 /// drives the regulatory airtime lock enforced in `lora_task`.
+///
+/// This is also where the #345 on-air spacing is applied, and it is applied
+/// here rather than at any earlier point on purpose: this function is the
+/// last thing between a packet and the radio being keyed, so the gap it
+/// enforces is a gap between two packets' *airtimes* — the thing a receiver
+/// sees — and not a gap between two hand-overs, which the CSMA/CAD path
+/// and the airtime lock would then reshape into something else. Whatever
+/// the path spent getting here since the previous packet left the air is
+/// counted against the requested gap rather than added to it, so the
+/// spacing is the number that appears on the air. The spacing applies per
+/// *packet*: the split frames below still go out back-to-back, because the
+/// receiver's reassembler requires that.
 async fn transmit_all_frames(
     radio: &mut Radio,
     data: &[u8],
     rng_state: &mut u32,
     config: &RadioConfig,
     airtime: &mut leviculum_core::rnode::AirtimeTracker,
+    spacer: &mut leviculum_tx_spacing::TxSpacer,
 ) {
+    let wait_ms = spacer.wait_ms(embassy_time::Instant::now().as_millis());
+    if wait_ms > 0 {
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
+    }
     let tx_start = embassy_time::Instant::now();
+    // The achieved gap, measured and not inferred: a sweep reads this off
+    // the board instead of assuming the value it set is the value the air
+    // saw. `gap_ms=-1` is the first packet since boot, which has no
+    // previous airtime edge to be measured from.
+    crate::log::log_fmt(
+        "[LORA_TX_SPACING] ",
+        format_args!(
+            "intended_ms={} waited_ms={} gap_ms={}",
+            spacer.spacing_ms(),
+            wait_ms,
+            match spacer.achieved_gap_ms(tx_start.as_millis()) {
+                Some(gap) => gap as i64,
+                None => -1,
+            }
+        ),
+    );
     let seq_nibble = (xorshift32(rng_state) as u8) & 0xF0;
     let frames = leviculum_core::rnode::build_lora_frames(data, seq_nibble);
 
@@ -508,6 +560,10 @@ async fn transmit_all_frames(
                     config.preamble_len,
                 );
                 airtime.add_airtime(now_ms, cost);
+                // This frame has left the air. Recorded per frame, so for
+                // a split packet the next packet's gap is measured from
+                // the second frame's end — the last edge on the air.
+                spacer.note_tx_end(now_ms);
             }
             Err(e) => {
                 crate::log::log_fmt("[LORA] ", format_args!("TX err frame {}: {:?}", i, e));
@@ -712,6 +768,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     let outgoing_rx = LORA_OUTGOING.receiver();
     let incoming_tx = LORA_INCOMING.sender();
     let config_rx = LORA_CONFIG.receiver();
+    let spacing_rx = LORA_TX_SPACING.receiver();
 
     // Init radio
     radio.reset().await;
@@ -781,7 +838,24 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
     let mut airtime = leviculum_core::rnode::AirtimeTracker::new();
     apply_airtime_limits(&mut airtime, &config);
 
+    // On-air spacing knob (#345). Starts at the compiled default, which
+    // imposes nothing, so an unconfigured board transmits exactly as it did
+    // before the knob existed.
+    let mut spacer =
+        leviculum_tx_spacing::TxSpacer::new(leviculum_tx_spacing::DEFAULT_TX_SPACING_MS);
+
     loop {
+        // Take a new on-air spacing before anything is keyed this
+        // iteration, so a value the host set is in force for the very next
+        // transmission rather than the one after it.
+        if let Ok(spacing_ms) = spacing_rx.try_receive() {
+            spacer.set_spacing_ms(spacing_ms);
+            crate::log::log_fmt(
+                "[LORA_TX_SPACING] ",
+                format_args!("set intended_ms={}", spacing_ms),
+            );
+        }
+
         // Check for runtime radio config override (test infrastructure)
         if let Ok(new_cfg) = config_rx.try_receive() {
             match radio
@@ -879,7 +953,15 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
             );
 
             if !config.csma_enabled {
-                transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut airtime).await;
+                transmit_all_frames(
+                    &mut radio,
+                    data,
+                    &mut rng_state,
+                    &config,
+                    &mut airtime,
+                    &mut spacer,
+                )
+                .await;
                 pending_tx = None;
                 frames_since_yield += 1;
                 airtime_since_yield_ms += tx_cost_ms;
@@ -905,6 +987,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             &mut rng_state,
                             &config,
                             &mut airtime,
+                            &mut spacer,
                         )
                         .await;
                         pending_tx = None;
@@ -931,6 +1014,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                 &mut rng_state,
                                 &config,
                                 &mut airtime,
+                                &mut spacer,
                             )
                             .await;
                             pending_tx = None;
@@ -980,6 +1064,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                                 &mut rng_state,
                                 &config,
                                 &mut airtime,
+                                &mut spacer,
                             )
                             .await;
                             pending_tx = None;

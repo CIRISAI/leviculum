@@ -86,6 +86,12 @@ pub const TYPE_CAPABILITIES: u8 = 0x04;
 /// which is how telemetry is switched off — the configured target is the
 /// switch.
 pub const TYPE_TELEMETRY_TARGET: u8 = 0x05;
+/// On-air transmit spacing (Codeberg #345); payload is milliseconds as
+/// u16 big-endian. A measurement knob: it sets the gap the LoRa interface
+/// leaves between the end of one packet's airtime and the key-up of the
+/// next, so the spacing of the telemetry announce/report pair can be swept
+/// without a reflash. `0` is the compiled default and imposes nothing.
+pub const TYPE_TX_SPACING: u8 = 0x06;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -192,6 +198,22 @@ pub fn encode_wall_time(unix_secs: u64) -> Vec<u8> {
 pub fn decode_wall_time_payload(payload: &[u8]) -> Option<u64> {
     let bytes: [u8; 8] = payload.try_into().ok()?;
     Some(u64::from_be_bytes(bytes))
+}
+
+/// Encode a complete transmit-spacing frame (#345).
+pub fn encode_tx_spacing(spacing_ms: u16) -> Vec<u8> {
+    encode_frame(TYPE_TX_SPACING, &spacing_ms.to_be_bytes())
+}
+
+/// Decode a transmit-spacing payload: exactly 2 bytes, u16 big-endian.
+///
+/// Every value the two bytes can hold is a legal spacing, `0` included —
+/// `0` is the default, "impose nothing", and not an absent value. So there
+/// is no refusable range here and the only malformed frame is one of the
+/// wrong length.
+pub fn decode_tx_spacing_payload(payload: &[u8]) -> Option<u16> {
+    let bytes: [u8; 2] = payload.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
 }
 
 /// Encode a complete reset frame.
@@ -389,6 +411,11 @@ pub enum ControlAction {
     /// TELEMETRY_PROFILE_OFF` is the clear encoding; the destination hash
     /// and key are then meaningless and the firmware ignores them.
     TelemetryTarget(TelemetryTargetWire),
+    /// Envelope transmit spacing (Codeberg #345): hand the value to the
+    /// LoRa interface, which applies it at key-up, and answer
+    /// `encode_ack(TYPE_TX_SPACING)`. A measurement knob, not persisted:
+    /// a reset returns the board to the compiled default.
+    TxSpacing(u16),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -458,6 +485,10 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             Some(target) => ControlAction::TelemetryTarget(target),
             None => malformed,
         },
+        TYPE_TX_SPACING => match decode_tx_spacing_payload(frame.payload) {
+            Some(spacing_ms) => ControlAction::TxSpacing(spacing_ms),
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -479,6 +510,7 @@ mod tests {
         TYPE_WALL_TIME,
         TYPE_CAPABILITIES,
         TYPE_TELEMETRY_TARGET,
+        TYPE_TX_SPACING,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -641,6 +673,98 @@ mod tests {
             ControlAction::Refuse {
                 refused_type: TYPE_TELEMETRY_TARGET,
                 reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Transmit spacing (Codeberg #345)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_tx_spacing_frame_round_trips_and_classifies() {
+        let bytes = encode_tx_spacing(60);
+        // Like every other pre-handshake-shaped command, it stays under
+        // the 19-byte minimum Reticulum packet, so firmware that does not
+        // know the type can never take it for one.
+        assert!(bytes.len() < 19);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::TxSpacing(60)
+        );
+    }
+
+    #[test]
+    fn zero_and_the_largest_spacing_both_survive_the_wire() {
+        // 0 is the default ("impose nothing"), not an absent value, so it
+        // has to arrive as a value and be acted on like any other.
+        for spacing_ms in [0u16, 1, 15, 76, 1_000, u16::MAX] {
+            assert_eq!(
+                decode_tx_spacing_payload(&spacing_ms.to_be_bytes()),
+                Some(spacing_ms)
+            );
+            assert_eq!(
+                classify_control_frame(&encode_tx_spacing(spacing_ms), ACCEPTED),
+                ControlAction::TxSpacing(spacing_ms)
+            );
+        }
+    }
+
+    #[test]
+    fn the_spacing_payload_is_two_bytes_big_endian() {
+        // The byte order is the contract a non-Rust host would implement
+        // against, so it is asserted on the bytes and not on a round trip.
+        let bytes = encode_tx_spacing(0x1234);
+        assert_eq!(&bytes[ENVELOPE_HEADER_LEN..], &[0x12, 0x34]);
+    }
+
+    #[test]
+    fn a_spacing_payload_of_the_wrong_size_is_refused_as_malformed() {
+        for payload in [vec![], vec![0x00], vec![0x00, 0x3C, 0x00]] {
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_TX_SPACING, &payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_TX_SPACING,
+                    reason: REFUSE_MALFORMED
+                },
+                "payload {payload:?} was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_spacing_frame_and_the_telemetry_frames_cannot_be_confused() {
+        // The control at the one place the knob and the reporter meet: a
+        // spacing frame must never turn into a telemetry command, and a
+        // telemetry command must never turn into a spacing.
+        assert!(matches!(
+            classify_control_frame(&encode_tx_spacing(60), ACCEPTED),
+            ControlAction::TxSpacing(_)
+        ));
+        assert!(matches!(
+            classify_control_frame(&encode_telemetry_clear(), ACCEPTED),
+            ControlAction::TelemetryTarget(_)
+        ));
+        // And the profile ids, which are the reporter's whole vocabulary,
+        // are not spacing values in disguise: the two payloads differ in
+        // length as well as in type.
+        assert_ne!(TYPE_TX_SPACING, TYPE_TELEMETRY_TARGET);
+        assert_ne!(
+            encode_tx_spacing(TELEMETRY_PROFILE_STATION as u16).len(),
+            encode_telemetry_clear().len()
+        );
+    }
+
+    #[test]
+    fn firmware_without_the_spacing_knob_refuses_it_by_name() {
+        // A board flashed before #345 answers what is missing instead of
+        // going quiet, so a sweep learns immediately that it is talking to
+        // the wrong image.
+        assert_eq!(
+            classify_control_frame(&encode_tx_spacing(60), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_TX_SPACING,
+                reason: REFUSE_UNKNOWN_TYPE
             }
         );
     }

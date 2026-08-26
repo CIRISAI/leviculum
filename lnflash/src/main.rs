@@ -72,6 +72,14 @@ struct Cli {
     #[arg(long)]
     set_time: bool,
 
+    /// Set the on-air transmit spacing, in milliseconds, on every running
+    /// LNode, then exit. No flashing. The board leaves this gap between the
+    /// end of one packet's airtime and the key-up of the next; 0 is the
+    /// compiled default and imposes nothing. A bench instrument for #345:
+    /// the value is not persisted, so a reset restores the default.
+    #[arg(long, value_name = "MS", conflicts_with_all = ["set_time", "set_telemetry"])]
+    set_tx_spacing: Option<u16>,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -278,6 +286,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             .map_err(|_| "the host clock is before 1970; refusing to teach a board that")?
             .as_secs();
         let all_took_it = flow::set_time(&catalogue, &sysfs, ui, now)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(spacing_ms) = cli.set_tx_spacing {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_tx_spacing(&catalogue, &sysfs, ui, spacing_ms)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -612,5 +633,58 @@ mod tests {
         // the boards, so asking for both would silently drop one.
         let err = tplan(&["--set-time", "--set-telemetry"]).unwrap_err();
         assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // Transmit spacing (Codeberg #345)
+    // -----------------------------------------------------------------
+
+    fn spacing(args: &[&str]) -> Result<Option<u16>, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok(cli.set_tx_spacing)
+    }
+
+    #[test]
+    fn no_spacing_flag_means_the_session_does_not_run_at_all() {
+        // The control: without the flag nothing about the board's transmit
+        // path is touched, so a plain flash cannot change the spacing.
+        assert_eq!(spacing(&[]).unwrap(), None);
+        assert_eq!(spacing(&["--yes"]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_spacing_on_the_command_line_is_carried_verbatim() {
+        // Including the two ends of the range: 0 is the default and has to
+        // be a value rather than an absent flag.
+        for ms in [0u16, 15, 60, 76, u16::MAX] {
+            assert_eq!(
+                spacing(&["--set-tx-spacing", &ms.to_string()]).unwrap(),
+                Some(ms)
+            );
+        }
+    }
+
+    #[test]
+    fn a_spacing_that_does_not_fit_the_wire_is_a_usage_error() {
+        for value in ["-1", "70000", "sixty"] {
+            assert!(
+                spacing(&["--set-tx-spacing", value]).is_err(),
+                "{value} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_configure_only_sessions_are_not_one_command() {
+        // Each of them ends the run after talking to the boards, so any
+        // pair would silently drop one.
+        for args in [
+            vec!["--set-time", "--set-tx-spacing", "60"],
+            vec!["--set-telemetry", "--set-tx-spacing", "60"],
+        ] {
+            let err = spacing(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
     }
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The gap the LoRa interface leaves between two packets on the air is
+  settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
+  frame `0x06`. The default imposes nothing (#345).
+
 ### Fixed
 
 - A telemetry report whose dispatch was lost is retried no sooner than the

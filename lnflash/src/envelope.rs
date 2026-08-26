@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame, decode_refusal_payload,
-    encode_capability_query, encode_radio_config, encode_telemetry_target, encode_wall_time,
-    TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE, REFUSE_VALUE,
-    TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
+    encode_capability_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
+    encode_wall_time, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
+    REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -274,6 +274,27 @@ pub fn send_telemetry_target(fd: &Fd, target: &TelemetryTargetWire) -> io::Resul
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Set the on-air transmit spacing (#345, `TYPE_TX_SPACING`).
+///
+/// A bench instrument: the value is what the board's LoRa interface leaves
+/// between the end of one packet's airtime and the key-up of the next, and
+/// it is deliberately not persisted, so a reset puts the board back on the
+/// compiled default. The frame is 7 bytes — shorter than the 19-byte
+/// Reticulum minimum — so, like the wall time, it cannot be mistaken for a
+/// packet by firmware that does not know the type; it still goes through
+/// [`probed`] on the flow path so an old board is reported as old rather
+/// than as silent.
+pub fn send_tx_spacing(fd: &Fd, spacing_ms: u16) -> io::Result<ControlOutcome> {
+    let payload = encode_tx_spacing(spacing_ms);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_TX_SPACING),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// Send the radio configuration as an envelope frame. Only for firmware
 /// whose capability report includes `TYPE_RADIO_CONFIG`: the frame is
 /// longer than the 19-byte Reticulum minimum, so it must never be sent
@@ -302,7 +323,7 @@ pub(crate) mod testing {
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_refusal,
         ControlAction, TYPE_CAPABILITIES, TYPE_RADIO_CONFIG, TYPE_RESET, TYPE_TELEMETRY_TARGET,
-        TYPE_WALL_TIME,
+        TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::RADIO_CONFIG_ACK;
     use std::sync::{Arc, Mutex};
@@ -325,6 +346,7 @@ pub(crate) mod testing {
         TYPE_WALL_TIME,
         TYPE_CAPABILITIES,
         TYPE_TELEMETRY_TARGET,
+        TYPE_TX_SPACING,
     ];
 
     /// The accepted list of firmware from before #236 landed its
@@ -353,6 +375,7 @@ pub(crate) mod testing {
                 }),
                 ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
                 ControlAction::TelemetryTarget(_) => Some(encode_ack(TYPE_TELEMETRY_TARGET)),
+                ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -390,6 +413,16 @@ pub(crate) mod testing {
                 _ => None,
             }
         });
+    }
+
+    /// The transmit spacing the stub decoded, if a #345 frame reached it.
+    pub fn tx_spacing_frame(seen: &Seen) -> Option<u16> {
+        seen.lock().unwrap().iter().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::TxSpacing(ms) => Some(ms),
+                _ => None,
+            }
+        })
     }
 
     /// The telemetry-target payload the stub decoded, if one reached it.
@@ -570,6 +603,67 @@ mod tests {
         assert!(!caps.accepts(TYPE_TELEMETRY_TARGET));
         assert_eq!(
             send_telemetry_target(&fd, &hash_only_target()).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Transmit spacing (Codeberg #345)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_transmit_spacing_is_acked_and_the_value_reaches_the_board() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_tx_spacing(&fd, 60).unwrap(), ControlOutcome::Acked);
+        // The number on the wire is the number asked for, not a rounding
+        // or a default: a sweep point that arrives changed is worse than
+        // one that does not arrive.
+        assert_eq!(tx_spacing_frame(&seen), Some(60));
+    }
+
+    #[test]
+    fn zero_travels_as_a_value_rather_than_as_nothing_sent() {
+        // Zero is how a sweep puts a board back on the default, so it has
+        // to be a frame the board acks, not a skipped command.
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_tx_spacing(&fd, 0).unwrap(), ControlOutcome::Acked);
+        assert_eq!(tx_spacing_frame(&seen), Some(0));
+    }
+
+    #[test]
+    fn the_largest_spacing_the_wire_can_carry_is_acked_too() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(
+            send_tx_spacing(&fd, u16::MAX).unwrap(),
+            ControlOutcome::Acked
+        );
+        assert_eq!(tx_spacing_frame(&seen), Some(65_535));
+    }
+
+    #[test]
+    fn a_board_without_the_knob_refuses_it_by_name_instead_of_timing_out() {
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(leviculum_core::envelope::TYPE_TX_SPACING));
+        assert_eq!(
+            send_tx_spacing(&fd, 60).unwrap(),
             ControlOutcome::Refused {
                 reason: REFUSE_UNKNOWN_TYPE
             }

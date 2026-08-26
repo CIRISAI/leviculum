@@ -639,6 +639,82 @@ fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<SessionReply> {
     })
 }
 
+/// The `--set-tx-spacing` session (#345): no flash — find the boards
+/// already running and tell each what gap to leave between the end of one
+/// packet's airtime and the key-up of the next.
+///
+/// A bench instrument, and shaped like one: the value is not persisted on
+/// the board, so a reset or a power cycle puts it back on the compiled
+/// default. That is the point — a sweep must not be able to leave a board
+/// silently spaced after the session that swept it.
+pub fn set_tx_spacing(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    spacing_ms: u16,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-tx-spacing talks to flashed boards; a board in \
+             its bootloader has no transmit path to space.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for (port, tty) in &reachable.ports {
+        let reply = match send_tx_spacing_to(tty, spacing_ms) {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked if spacing_ms == 0 => ui.say(&format!(
+                "{port}: transmit spacing back to the compiled default — the board imposes no \
+                 gap and transmits as it does out of the box."
+            )),
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: transmit spacing set to {spacing_ms} ms. The board logs \
+                 [LORA_TX_SPACING] intended_ms=… waited_ms=… gap_ms=… on its debug port (if00) \
+                 at every key-up; gap_ms is the gap that was actually on the air. Not \
+                 persisted: a reset returns it to the default."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the transmit spacing — {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer the transmit-spacing frame, so it is still on \
+                 whatever spacing it had."
+            )),
+            SessionReply::NoEnvelope => ui.say(&format!(
+                "{port}: this firmware predates the control envelope and has no transmit-spacing \
+                 knob. Flash the current bundle first."
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no transmit-spacing knob. \
+                 Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_tx_spacing_to(tty: &Path, spacing_ms: u16) -> std::io::Result<SessionReply> {
+    use crate::envelope;
+    let fd = crate::sys::Fd::open_serial(tty)?;
+    fd.set_transport_port()?;
+    envelope::probed(&fd, leviculum_core::envelope::TYPE_TX_SPACING, |fd| {
+        envelope::send_tx_spacing(fd, spacing_ms)
+    })
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a
