@@ -328,20 +328,6 @@ fn moved_at_least(a: Fix, b: Fix, min_m: u32) -> bool {
 // The policy
 // ---------------------------------------------------------------------------
 
-/// The send policy and target lifecycle of one node.
-///
-/// Drive it with [`set_target`](Self::set_target) /
-/// [`note_key_available`](Self::note_key_available) /
-/// [`clear_target`](Self::clear_target) from the control channel, with
-/// [`poll`](Self::poll) from the main loop, and confirm every report the
-/// radio actually took with [`note_emitted`](Self::note_emitted) followed
-/// by [`note_dispatch`](Self::note_dispatch).
-///
-/// The split between `poll` and the confirmation is deliberate: a report
-/// that could not be built, could not be handed to transport, or was
-/// handed over and then lost by the dispatch must not consume the
-/// cadence, or a node would go quiet for a whole interval after one
-/// failed attempt.
 /// What a telemetry-target control frame asks for, once its profile slot
 /// has been read.
 ///
@@ -383,6 +369,23 @@ pub enum TargetOutcome {
     Cleared,
 }
 
+/// The send policy and target lifecycle of one node.
+///
+/// Drive it with [`set_target`](Self::set_target) /
+/// [`note_key_available`](Self::note_key_available) /
+/// [`clear_target`](Self::clear_target) from the control channel, with
+/// [`poll`](Self::poll) from the main loop, and confirm every report the
+/// radio actually took with [`note_emitted`](Self::note_emitted) followed
+/// by [`note_dispatch`](Self::note_dispatch).
+///
+/// The split between `poll` and the confirmation is deliberate: a report
+/// that could not be built, could not be handed to transport, or was
+/// handed over and then lost by the dispatch must not consume the
+/// cadence, or a node would go quiet for a whole interval after one
+/// failed attempt. The converse is just as deliberate and is enforced by
+/// the attempt floor in [`poll`](Self::poll): a node that cannot deliver
+/// must not retry faster than it would have reported, or one unreachable
+/// target turns a reporter into a transmitter.
 #[derive(Debug, Clone)]
 pub struct SendPolicy {
     profile: Profile,
@@ -394,6 +397,12 @@ pub struct SendPolicy {
     /// window is measured from here.
     first_fix_ms: Option<u64>,
     last_report_ms: Option<u64>,
+    /// When a report was last *handed to transport*, whatever became of
+    /// it. Separate from `last_report_ms` because the two answer different
+    /// questions — "when did a report actually go out" versus "when did
+    /// this node last spend airtime trying" — and only the second one can
+    /// bound a retry. See [`poll`](SendPolicy::poll).
+    last_attempt_ms: Option<u64>,
     last_reported_fix: Option<Fix>,
     /// A report handed to transport whose dispatch has not been settled
     /// yet. See [`note_emitted`](Self::note_emitted).
@@ -428,6 +437,7 @@ impl SendPolicy {
             immediate_pending: false,
             first_fix_ms: None,
             last_report_ms: None,
+            last_attempt_ms: None,
             last_reported_fix: None,
             pending: None,
         }
@@ -460,6 +470,11 @@ impl SendPolicy {
     ///
     /// Returns the state it entered. Setting a target always restarts the
     /// cadence: the last report went to somebody else.
+    ///
+    /// It does *not* restart the attempt floor. Airtime is airtime whoever
+    /// the recipient is, and an exception here would be an escape hatch —
+    /// a host that re-sends its target frame on a timer would drive
+    /// exactly the storm the floor exists to stop.
     pub fn set_target(&mut self, profile: Profile, key_known: bool) -> TargetState {
         self.profile = profile;
         self.params = profile.params();
@@ -553,6 +568,25 @@ impl SendPolicy {
     ///
     /// Mutates only the settle anchor: the first usable fix starts the
     /// settle window whether or not anything is sent.
+    ///
+    /// # The attempt floor
+    ///
+    /// The first gate is not the cadence but `min_interval_ms` since the
+    /// last *emission*, successful or not, and it sits ahead of every
+    /// other path including the immediate report. It states one invariant:
+    ///
+    /// > Between any two emissions of a telemetry report, successful or
+    /// > not, at least `min_interval_ms` of clock has passed.
+    ///
+    /// A lost dispatch consumes no cadence and no reading — that is
+    /// deliberate and stays — but without a second clock the node then
+    /// finds the same interval elapsed on the very next tick and re-emits
+    /// at the tick rate. Measured on the bench: an announce-plus-report
+    /// pair every 6.5 s against a 60 s policy, ~20 % channel occupancy
+    /// from one node.
+    ///
+    /// A node that has emitted nothing yet has no floor to clear, which is
+    /// what keeps the immediate report of a newly usable target immediate.
     pub fn poll(&mut self, now_ms: u64, fix: Option<Fix>) -> Option<ReportReason> {
         if self.state != TargetState::Ready {
             return None;
@@ -560,6 +594,11 @@ impl SendPolicy {
         let usable = fix.filter(|f| self.position_is_reportable(*f));
         if usable.is_some() && self.first_fix_ms.is_none() {
             self.first_fix_ms = Some(now_ms);
+        }
+        if let Some(attempt) = self.last_attempt_ms {
+            if now_ms.saturating_sub(attempt) < self.params.min_interval_ms {
+                return None;
+            }
         }
         if self.immediate_pending {
             return Some(ReportReason::Immediate);
@@ -619,11 +658,19 @@ impl SendPolicy {
     /// a report that never left the board still cost a whole cadence
     /// interval of silence (#344).
     ///
+    /// It does, however, start the attempt floor: this is the moment
+    /// airtime was spent, and [`poll`](Self::poll) refuses to emit again
+    /// for `min_interval_ms` from here whatever the dispatch decides. That
+    /// is the whole of the rate limit — the failure path adds nothing,
+    /// because a floor that only the failure path raised would be a floor
+    /// a caller could forget to raise.
+    ///
     /// Pair it with [`note_dispatch`](Self::note_dispatch). Two
     /// `note_emitted` calls without a settle in between keep only the
     /// later one: the earlier report is gone either way, and the cadence
     /// belongs to the report that is actually in flight.
     pub fn note_emitted(&mut self, now_ms: u64, reported: Option<Fix>) {
+        self.last_attempt_ms = Some(now_ms);
         self.pending = Some(PendingReport {
             now_ms,
             fix: reported,
@@ -634,12 +681,15 @@ impl SendPolicy {
     ///
     /// `delivered` is the dispatch's own verdict, not a guess from a log
     /// line: `true` consumes the cadence exactly as
-    /// [`note_sent`](Self::note_sent) does, `false` consumes nothing, so
-    /// the next poll finds the same interval elapsed and emits again.
+    /// [`note_sent`](Self::note_sent) does, `false` consumes neither the
+    /// cadence nor the reading, so the reading is still owed and goes out
+    /// on the first tick past the attempt floor
+    /// ([`poll`](Self::poll)) rather than on the very next one.
     ///
     /// Deliberately *not* a retry: nothing is re-sent here, nothing is
     /// queued, and the next attempt happens on the ordinary tick that was
-    /// going to run anyway.
+    /// going to run anyway — the *reading* it carries is whatever the
+    /// sensors say then, not the one that failed.
     ///
     /// Returns whether the report counted as sent — `false` also for a
     /// settle with nothing pending, so a caller cannot report success for

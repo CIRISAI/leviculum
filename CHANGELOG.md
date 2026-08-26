@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A telemetry report whose dispatch was lost is retried no sooner than the
+  policy's own `min_interval_ms`, instead of on the next main-loop tick
+  (#344).
+
 ### Changed
 
 - Every firmware debug line ends in `t=<uptime-ms>`, stamped on the board

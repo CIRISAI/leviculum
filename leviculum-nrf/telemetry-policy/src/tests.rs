@@ -632,10 +632,13 @@ fn a_lost_dispatch_leaves_the_cadence_unconsumed() {
     assert!(!p.note_dispatch(false));
     assert!(!p.has_pending_report());
 
-    // The very next tick must find the same interval elapsed and emit
-    // again, rather than waiting out another whole heartbeat.
+    // The report is still owed — not deferred to another whole heartbeat
+    // — but it is owed no sooner than the attempt floor allows. The next
+    // few ticks are silent and the tick at the floor emits.
+    let floor = Profile::Station.params().min_interval_ms;
+    assert_eq!(p.poll(due + 5_000, None), None);
     assert_eq!(
-        p.poll(due + 5_000, None),
+        p.poll(due + floor, None),
         Some(ReportReason::Heartbeat),
         "a lost report consumed the cadence"
     );
@@ -649,9 +652,12 @@ fn a_lost_dispatch_does_not_consume_an_armed_immediate_report() {
     p.note_emitted(0, Some(good_fix()));
     assert!(!p.note_dispatch(false));
     // The immediate is the one a user pressed a button for. Losing it to a
-    // full queue must not silently disarm it.
+    // full queue must not silently disarm it — it is still armed once the
+    // attempt floor has passed, and still armed as Immediate, not demoted
+    // to whatever the cadence would have produced.
+    assert_eq!(p.poll(1_000, Some(good_fix())), None);
     assert_eq!(
-        p.poll(1_000, Some(good_fix())),
+        p.poll(Profile::Tracker.params().min_interval_ms, Some(good_fix())),
         Some(ReportReason::Immediate)
     );
 }
@@ -741,6 +747,141 @@ fn the_cadence_anchors_at_emission_not_at_settlement() {
     assert!(p.note_dispatch(true));
     // Next heartbeat measured from `due`, not from whenever the settle ran.
     assert_eq!(p.poll(due + heartbeat, None), Some(ReportReason::Heartbeat));
+}
+
+// ---------------------------------------------------------------------------
+// The attempt floor (#344): a failed send must not shorten the cadence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_failed_dispatches_cannot_emit_closer_together_than_the_minimum_interval() {
+    let params = Profile::Tracker.params();
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, true);
+
+    // The first attempt: the one report a newly usable target owes. It is
+    // handed over and the dispatch loses it.
+    assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
+    p.note_emitted(0, None);
+    assert!(!p.note_dispatch(false));
+
+    // The main loop keeps turning. None of those turns may emit: the
+    // reading is not consumed, but the *attempt* is held to the same floor
+    // a successful report is held to. Without this the node re-emits at
+    // the tick rate — 1.3 s of airtime every 6.5 s, measured on the bench.
+    for t in (1_000..params.min_interval_ms).step_by(1_000) {
+        assert_eq!(
+            p.poll(t, None),
+            None,
+            "re-emitted {t} ms after a failed send, floor is {} ms",
+            params.min_interval_ms
+        );
+    }
+
+    // At the floor it tries again, and the reason is still the one it owed.
+    assert_eq!(
+        p.poll(params.min_interval_ms, None),
+        Some(ReportReason::Immediate)
+    );
+}
+
+/// Control for the property `2c9d8ac` established: a failed dispatch still
+/// does not consume the reading. A "fix" that simply consumed it on
+/// failure would pass the test above and reintroduce the defect.
+#[test]
+fn control_a_failed_dispatch_still_does_not_consume_the_reading() {
+    let params = Profile::Tracker.params();
+    let mut p = ready(Profile::Tracker, 0);
+    let moved = north_of(good_fix(), 200);
+    let when = params.min_interval_ms + params.settle_ms;
+
+    assert_eq!(p.poll(when, Some(moved)), Some(ReportReason::Movement));
+    p.note_emitted(when, Some(moved));
+    assert!(!p.note_dispatch(false));
+
+    // Held back by the floor rather than dropped...
+    assert_eq!(p.poll(when + params.min_interval_ms - 1, Some(moved)), None);
+    // ...and when the floor opens, the same movement is still a movement:
+    // the position never went out, so the reference never moved with it.
+    assert_eq!(
+        p.poll(when + params.min_interval_ms, Some(moved)),
+        Some(ReportReason::Movement)
+    );
+}
+
+/// Control: the immediate report of a newly usable target is not held back.
+///
+/// The floor is a floor *between emissions*; a node that has emitted
+/// nothing has nothing to be held back from, or a newly learned target
+/// would wait a whole interval for its first reading.
+#[test]
+fn control_the_immediate_report_is_not_held_back_by_the_attempt_floor() {
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(p.poll(0, Some(good_fix())), Some(ReportReason::Immediate));
+
+    // Same on the hash-only path, where the key — and with it the arming —
+    // arrives long after the target was set.
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, false);
+    assert_eq!(p.poll(5_000, Some(good_fix())), None);
+    assert!(p.note_key_available());
+    assert_eq!(
+        p.poll(5_001, Some(good_fix())),
+        Some(ReportReason::Immediate)
+    );
+}
+
+/// The floor is the policy's own `min_interval_ms` and not a second
+/// constant beside it: change the parameter and the floor moves with it.
+#[test]
+fn the_attempt_floor_is_the_policys_own_minimum_interval() {
+    let expert = PolicyParams {
+        min_interval_ms: 5_000,
+        ..Profile::Tracker.params()
+    };
+    for params in [Profile::Tracker.params(), Profile::Station.params(), expert] {
+        let floor = params.min_interval_ms;
+        let mut p = SendPolicy::new();
+        p.set_target(Profile::Tracker, true);
+        p.set_params(params);
+
+        assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
+        p.note_emitted(0, None);
+        assert!(!p.note_dispatch(false));
+
+        assert_eq!(
+            p.poll(floor - 1, None),
+            None,
+            "emitted below a {floor} ms floor"
+        );
+        assert_eq!(
+            p.poll(floor, None),
+            Some(ReportReason::Immediate),
+            "still held at a {floor} ms floor"
+        );
+    }
+}
+
+/// A target change does not reset the floor.
+///
+/// Airtime is airtime whoever the recipient is, and an exception here is
+/// an escape hatch: a host that re-sends its target frame on a timer would
+/// drive exactly the storm the floor exists to stop. The cost is bounded
+/// and legible — an operator who re-targets within the floor sees the
+/// report withheld and then sent, at most one interval later.
+#[test]
+fn a_new_target_does_not_reset_the_attempt_floor() {
+    let floor = Profile::Tracker.params().min_interval_ms;
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
+    p.note_emitted(0, None);
+    assert!(!p.note_dispatch(false));
+
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(p.poll(1_000, None), None);
+    assert_eq!(p.poll(floor, None), Some(ReportReason::Immediate));
 }
 
 /// A second emission without a settle in between keeps the later report:
