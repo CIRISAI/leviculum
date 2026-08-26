@@ -55,8 +55,22 @@ pub const RESOURCE_ADV_OVERHEAD: usize = 134;
 /// Size of the random hash that makes each resource transfer unique.
 pub const RESOURCE_RANDOM_HASH_SIZE: usize = 4;
 
-/// Maximum efficient resource size: fits in 3-byte length encoding (0xFFFFFF).
-pub const RESOURCE_MAX_EFFICIENT_SIZE: usize = 1_048_575;
+/// Largest payload carried in a **single segment**; a transfer past it is
+/// split, exactly as the reference does it.
+///
+/// `1 MiB - 1`, matching Python RNS `Resource.MAX_EFFICIENT_SIZE`
+/// (`Resource.py:116` — `1 * 1024 * 1024 - 1`). Written as an expression
+/// because the previous literal, paired with a comment claiming a "3-byte
+/// length encoding (0xFFFFFF)", read as an off-by-one-hex-digit typo and was
+/// reported as one (leviculum#61). It is not: the value is right, the comment
+/// was wrong, and raising it to 16 MiB would emit segments a reference
+/// receiver cannot take.
+///
+/// A larger payload is **not truncated** — the sender splits it into
+/// `((total - 1) / this) + 1` segments, each separately advertised, and the
+/// receiver reassembles. See [`crate::node::NodeEvent::ResourceCompleted`]
+/// for what a consumer observes per segment.
+pub const RESOURCE_MAX_EFFICIENT_SIZE: usize = 1024 * 1024 - 1;
 
 /// Maximum encrypted transfer size (advertisement `t` field) accepted from a
 /// peer, in bytes. Checked before any allocation, in
