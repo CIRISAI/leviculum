@@ -531,6 +531,14 @@ pub fn init(
             conn_count: 1,
             event_length: 24,
         }),
+        // The SoftDevice negotiates a peer's MTU request DOWN to this, so 256
+        // is what a phone asking for the BLE 5 maximum of 517 actually gets.
+        // That cap is also what keeps the largest event we can be handed
+        // (att_mtu - 3 of ATT payload behind an 18-byte header, 271 bytes)
+        // inside the `nrf-softdevice/evt-max-size-512` buffer selected in
+        // Cargo.toml. 512 is the largest size that crate offers and it panics
+        // rather than truncating (Codeberg #354), so raising this number
+        // toward 517 has no matching buffer to move to.
         conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 256 }),
         gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
             attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
