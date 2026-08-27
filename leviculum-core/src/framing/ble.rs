@@ -10,12 +10,37 @@
 //! [Type:1][Sequence:2 BE][Total:2 BE][Payload...]
 //! ```
 //!
-//! | Type | Value | Meaning |
-//! |------|-------|---------|
-//! | LONE | 0x00 | Complete packet in single fragment |
-//! | START | 0x01 | First fragment of multi-fragment packet |
-//! | CONTINUE | 0x02 | Middle fragment |
-//! | END | 0x03 | Last fragment |
+//! | Type | Value | Meaning | We send | We accept |
+//! |------|-------|---------|---------|-----------|
+//! | LONE | 0x00 | Complete packet in single fragment | no | yes |
+//! | START | 0x01 | First fragment (also: the only fragment) | yes | yes |
+//! | CONTINUE | 0x02 | Middle fragment | yes | yes |
+//! | END | 0x03 | Last fragment | yes | yes |
+//!
+//! # Single-fragment packets
+//!
+//! A packet that fits in one fragment goes out as **START with `total = 1`**,
+//! not as LONE. The reference implementation
+//! (`ble-reticulum@07d94130`, `src/ble_reticulum/BLEFragmentation.py`) defines
+//! exactly three types — `TYPE_START = 0x01`, `TYPE_CONTINUE = 0x02`,
+//! `TYPE_END = 0x03` — and its reassembler raises
+//! `ValueError: Invalid fragment type` on anything else, so a peer running it
+//! discards every 0x00 fragment we emit. Since with a negotiated MTU of 517
+//! essentially all ordinary traffic (a 167-byte announce included) is
+//! single-fragment, emitting LONE silently drops nearly the whole outbound
+//! direction.
+//!
+//! The reference's own `BLE_PROTOCOL_v2.2.md` disagrees with its code here: the
+//! spec's sequence diagram renders a single fragment as `0x01+0x03`
+//! ("START+END"). Its sender does no such thing — the type is assigned by an
+//! `if i == 0 / elif i == num_fragments - 1 / else` chain, whose first branch
+//! wins for `num_fragments == 1`, so a lone fragment leaves as a plain `0x01`.
+//! **We follow the implementation, not the diagram**; a real peer runs the
+//! code. Either reading rules out 0x00.
+//!
+//! LONE stays accepted on receive: older peers running our own firmware still
+//! send it. Reassembly completes on fragment count rather than on seeing END,
+//! so an inbound START with `total = 1` completes immediately.
 //!
 //! # Usage
 //!
@@ -25,7 +50,7 @@
 //! // Fragment a packet for sending
 //! let packet = b"Hello, Reticulum!";
 //! let fragments = fragment_packet(packet, DEFAULT_MTU);
-//! assert_eq!(fragments.len(), 1); // fits in one LONE fragment
+//! assert_eq!(fragments.len(), 1); // fits in a single START fragment
 //!
 //! // Defragment received data
 //! let mut defrag = BleDefragmenter::new();
@@ -46,8 +71,12 @@ use alloc::vec::Vec;
 pub const FRAGMENT_HEADER_SIZE: usize = 5;
 
 /// Single-fragment packet (no fragmentation needed).
+///
+/// Accepted on receive for compatibility with older peers running our own
+/// firmware, never emitted: the pinned reference rejects it. See the module
+/// docs.
 pub const FRAGMENT_TYPE_LONE: u8 = 0x00;
-/// First fragment of a multi-fragment packet.
+/// First fragment of a multi-fragment packet, and the type of a lone fragment.
 pub const FRAGMENT_TYPE_START: u8 = 0x01;
 /// Middle fragment of a multi-fragment packet.
 pub const FRAGMENT_TYPE_CONTINUE: u8 = 0x02;
@@ -82,11 +111,11 @@ pub const fn payload_per_fragment(mtu: usize) -> usize {
 
 /// Number of fragments needed to send `data_len` bytes at the given BLE MTU.
 ///
-/// Always returns at least 1 (a zero-length packet produces one LONE fragment).
+/// Always returns at least 1 (a zero-length packet produces one fragment).
 pub fn fragment_count(data_len: usize, mtu: usize) -> usize {
     let ppf = payload_per_fragment(mtu);
     if ppf == 0 {
-        return 1; // degenerate MTU, send empty LONE
+        return 1; // degenerate MTU, send an empty single fragment
     }
     if data_len == 0 {
         return 1;
@@ -96,15 +125,14 @@ pub fn fragment_count(data_len: usize, mtu: usize) -> usize {
 
 /// Build the 5-byte header for fragment `index` of `total` fragments.
 ///
-/// The type byte is determined by position:
-/// - total == 1: LONE
-/// - index == 0: START
+/// The type byte is determined by position, exactly as the reference sender
+/// does it — so `total == 1` falls into the first branch and a lone fragment
+/// is a START, never a LONE (see the module docs):
+/// - index == 0: START (including the single-fragment case)
 /// - index == total - 1: END
 /// - otherwise: CONTINUE
 pub fn build_fragment_header(index: usize, total: usize) -> [u8; FRAGMENT_HEADER_SIZE] {
-    let ftype = if total == 1 {
-        FRAGMENT_TYPE_LONE
-    } else if index == 0 {
+    let ftype = if index == 0 {
         FRAGMENT_TYPE_START
     } else if index == total - 1 {
         FRAGMENT_TYPE_END
@@ -299,19 +327,49 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// A packet that fits in one fragment must go out as START with total=1.
+    ///
+    /// Byte-level on purpose: the reference reassembler
+    /// (`BLEFragmentation.py`, pinned commit 07d94130) knows only 0x01/0x02/
+    /// 0x03 and raises `ValueError: Invalid fragment type` on 0x00, so the
+    /// literal first byte is the wire contract. Asserted as `0x01`, not as
+    /// `FRAGMENT_TYPE_START`, so redefining the constant cannot make this pass.
     #[test]
-    fn test_lone_fragment_roundtrip() {
+    fn test_single_fragment_is_start_on_the_wire() {
         let data = b"Hello, Reticulum!";
         let frags = fragment_packet(data, DEFAULT_MTU);
         assert_eq!(frags.len(), 1);
 
-        // Verify header: LONE, seq=0, total=1
-        assert_eq!(frags[0][0], FRAGMENT_TYPE_LONE);
-        assert_eq!(u16::from_be_bytes([frags[0][1], frags[0][2]]), 0);
-        assert_eq!(u16::from_be_bytes([frags[0][3], frags[0][4]]), 1);
+        // Header bytes: type=0x01 (START), seq=0x0000, total=0x0001
+        assert_eq!(
+            frags[0][..FRAGMENT_HEADER_SIZE],
+            [0x01, 0x00, 0x00, 0x00, 0x01]
+        );
+        assert_ne!(
+            frags[0][0], FRAGMENT_TYPE_LONE,
+            "0x00 is rejected by the reference"
+        );
 
+        // Round-trip through our own defragmenter still completes.
         let mut defrag = BleDefragmenter::new();
         match defrag.process(&frags[0], 1000) {
+            DefragResult::Complete(result) => assert_eq!(result, data),
+            other => panic!("Expected Complete, got {:?}", other),
+        }
+    }
+
+    /// A LONE fragment from an older peer still reassembles.
+    ///
+    /// Pins the receive-side compatibility the send-side change deliberately
+    /// leaves in place: peers running our previous firmware still emit 0x00.
+    #[test]
+    fn test_received_lone_fragment_still_reassembles() {
+        let data = b"Hello, Reticulum!";
+        let mut lone = vec![FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x01];
+        lone.extend_from_slice(data);
+
+        let mut defrag = BleDefragmenter::new();
+        match defrag.process(&lone, 1000) {
             DefragResult::Complete(result) => assert_eq!(result, data),
             other => panic!("Expected Complete, got {:?}", other),
         }
@@ -367,7 +425,7 @@ mod tests {
         let data: Vec<u8> = (0..ppf).map(|i| (i % 256) as u8).collect();
         let frags = fragment_packet(&data, DEFAULT_MTU);
         assert_eq!(frags.len(), 1);
-        assert_eq!(frags[0][0], FRAGMENT_TYPE_LONE);
+        assert_eq!(frags[0][0], 0x01); // START, not LONE
 
         // One byte over → splits into 2 fragments
         let data2: Vec<u8> = (0..ppf + 1).map(|i| (i % 256) as u8).collect();
@@ -496,11 +554,14 @@ mod tests {
     #[test]
     fn test_max_mtu() {
         // MAX_MTU 517 → payload = 517 - 3 - 5 = 509 bytes per fragment
-        // A 500-byte packet fits in a single LONE fragment
+        // A 500-byte packet fits in a single fragment, sent as START/total=1
         let data: Vec<u8> = vec![0xBB; 500];
         let frags = fragment_packet(&data, MAX_MTU);
         assert_eq!(frags.len(), 1);
-        assert_eq!(frags[0][0], FRAGMENT_TYPE_LONE);
+        assert_eq!(
+            frags[0][..FRAGMENT_HEADER_SIZE],
+            [0x01, 0x00, 0x00, 0x00, 0x01]
+        );
 
         let mut defrag = BleDefragmenter::new();
         match defrag.process(&frags[0], 1000) {
