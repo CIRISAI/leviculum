@@ -128,7 +128,22 @@ nrf-fw-readback:
 # $SCRIPT_DIR. -x is what the ticket asks for and covers a future `source`
 # line whose directive somebody forgets.
 nrf-shellcheck:
-    shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh
+    shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
+        scripts/debug-witness.sh scripts/test-debug-witness.sh \
+        scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh
+
+# The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
+# reset themselves mid-run for months and every occurrence was closed as
+# "suspected self-reset", because the board printed its reason to nobody: the
+# post-mortem is read-and-cleared at boot and nothing listened on a debug port
+# during a run. This gate holds the two claims that can be settled without a
+# rig — which ports get a witness, and that a reader survives losing its port
+# — plus the verdict-side claim that the RED banner names the resulting file.
+# No board, no periculum, no flash; the reader half runs against a pty that is
+# taken away and given back.
+hw-witness:
+    bash scripts/test-debug-witness.sh
+    bash scripts/tier3-hw-selftest.sh
 
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
@@ -350,7 +365,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

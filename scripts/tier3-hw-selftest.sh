@@ -9,6 +9,9 @@
 #   - a board vanish -> tier3 RED with the vanished board named
 #     (board_vanish=<vid:pid> firmware_self_reset_suspected), and NOTHING
 #     marked INFRA_INVALID (the class is retired);
+#   - a board vanish -> the RED banner names the WITNESS FILE for that board
+#     (Codeberg #353): a witness nobody can find is not a witness, and the
+#     watchdog knows only a vid:pid, so the banner has to do the lookup;
 #   - a clean run -> tier3 GREEN, no vanish tokens;
 #   - a genuine scenario failure with no vanish -> tier3 RED (periculum's own
 #     exit-1 contract, passed through unchanged);
@@ -105,6 +108,34 @@ assert_contains "$OUT" "BOARD VANISH (RED)" "loud board-vanish banner emitted"
 assert_contains "$OUT" "UNTRUSTED" "banner says the post-vanish verdicts are untrusted"
 assert_absent  "$OUT" "INFRA_INVALID" "no INFRA_INVALID class anywhere"
 assert_absent  "$OUT" "infra_invalid=" "no infra_invalid verdict counter"
+
+echo "== Case 1b: the RED banner names the vanished board's witness file (#353) =="
+# A planted witness file, because selftest mode starts no readers (the rig host
+# is also the host `just fast` runs on). What is under test is the lookup the
+# banner does from a vid:pid — the only thing the watchdog knows — to a path.
+WITNESS_SANDBOX=$(mktemp -d)
+: >"$WITNESS_SANDBOX/1209_0001-183004F712B4A7FE.log"
+: >"$WITNESS_SANDBOX/1209_0002-D57C9A1104E2B6F3.log"
+run_case \
+    LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)" \
+    LEVICULUM_SIMULATE_VANISH=1 \
+    LEVICULUM_SIMULATE_VANISH_VIDPID=1209:0001 \
+    LEVICULUM_WITNESS_DIR="$WITNESS_SANDBOX"
+assert_contains "$OUT" "1209:0001 -> $WITNESS_SANDBOX/1209_0001-183004F712B4A7FE.log" \
+    "the banner names the vanished board's witness file, not the directory"
+assert_absent "$OUT" "1209_0002-D57C9A1104E2B6F3.log" \
+    "and not some other board's file"
+
+echo "== Case 1c: a vanished board with no witness file says so, and where it looked =="
+WITNESS_EMPTY=$(mktemp -d)
+run_case \
+    LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)" \
+    LEVICULUM_SIMULATE_VANISH=1 \
+    LEVICULUM_SIMULATE_VANISH_VIDPID=1a86:55d4 \
+    LEVICULUM_WITNESS_DIR="$WITNESS_EMPTY"
+assert_contains "$OUT" "1a86:55d4 -> no witness file in $WITNESS_EMPTY" \
+    "an RNode vanish admits there is no witness rather than implying one"
+rm -rf "$WITNESS_SANDBOX" "$WITNESS_EMPTY"
 
 echo "== Case 2: clean run -> GREEN, no vanish tokens =="
 run_case LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)"

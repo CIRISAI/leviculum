@@ -16,7 +16,9 @@
 #   4. LNode flash-from-HEAD and [FW_BUILD] firmware-identity verification
 #      (scripts/flash-lnodes-from-head.sh) — periculum deliberately leaves
 #      board preparation outside its scope;
-#   5. the USB device-vanish watchdog and its always-RED attribution.
+#   5. the USB device-vanish watchdog and its always-RED attribution;
+#   6. the debug-port witness (scripts/debug-witness.sh, Codeberg #353) that
+#      makes a vanish explicable instead of only detectable.
 #
 # Everything else — scenario discovery, rig profiles and board pinning, the
 # governed `[marginal]` carve-outs (formerly the EXPECTED_MARGINAL allowlist
@@ -46,6 +48,15 @@
 # therefore ALWAYS a real device/firmware failure (a self-reset under sustained
 # load, suspected heap exhaustion, Codeberg 65), not an infra glitch, and must
 # read as RED. There is no INFRA_INVALID class: a vanish is never absorbed.
+#
+# DEVICE-VANISH EVIDENCE (Codeberg #353). Detecting the vanish was never the
+# hard part; explaining it was. The board says why it reset — [PANIC_COUNT],
+# the [HARDFAULT_PMRT]/[PANIC_PMRT] block, the persistent log tail from the
+# boot that died — and for the whole life of this runner it said it to nobody,
+# because nothing listened on a debug port during a run. This script now starts
+# one scripts/debug-witness-reader.py per LNode after the flash phase and
+# names its file in the RED banner. See scripts/debug-witness.sh for why the
+# readers attach only across a vanish rather than holding the port.
 #
 # CHANGED WITH THE PERICULUM MOVE: the watchdog now covers the WHOLE run
 # instead of one profile group, and the vanish is no longer followed by a
@@ -92,8 +103,26 @@ exec > >(tee -a "$LOG") 2>&1
 
 log() { echo "$@"; }
 
-# No EXIT trap to restore hub state: with all boards permanently powered
-# on there is nothing to switch back, so no restore is needed.
+# Debug-port witness (Codeberg #353). Sourced, not executed: the discovery and
+# the reader invocation are functions so scripts/test-debug-witness.sh can
+# drive them against a fixture device list. Sourcing starts nothing.
+# shellcheck source=scripts/debug-witness.sh
+. "$REPO_DIR/scripts/debug-witness.sh"
+
+# One witness directory per run, sharing the run log's timestamp so a vanish
+# line in the log leads to the evidence without guessing: nightly-hw-<stamp>.log
+# is witnessed by nightly-hw-<stamp>-witness/. LEVICULUM_WITNESS_DIR overrides
+# it — used by the selftest, which has to plant a file where the banner will
+# look for it, and the run stamp is not knowable from outside.
+WITNESS_DIR="${LEVICULUM_WITNESS_DIR:-${LOG%.log}-witness}"
+WITNESS_READER="$REPO_DIR/scripts/debug-witness-reader.py"
+
+# There is still no EXIT trap to restore hub state: with all boards permanently
+# powered on there is nothing to switch back. This trap is for the witnesses
+# only. A reader left running past an aborted run would still hold — or race
+# for — a debug port when the NEXT run's flash phase needs it, which is exactly
+# the failure the witness design was written to avoid causing.
+trap 'witness_stop' EXIT
 
 # --- Periculum resolution ---
 #
@@ -313,6 +342,24 @@ if [[ -n "${LEVICULUM_SIMULATE_FW_STALE:-}" ]]; then
     log "[CI_HW] FW_VERIFY: simulated firmware-unverified injected (board=${LEVICULUM_SIMULATE_FW_STALE}, LEVICULUM_SIMULATE_FW_STALE)"
 fi
 
+# --- Put a witness on every LNode debug port ---
+#
+# HERE, and not one line earlier. The flash phase above touch-flashes at 1200
+# baud, waits for the boards to re-enumerate, and then reads the [FW_BUILD]
+# banner back off the very same if00 debug ports. A reader started before it
+# fights all three, and did: the reviewer's own capture died to this twice on
+# 2026-08-26. Discovery runs here for the same reason — the ports enumerated
+# before a flash are not the ports that exist after it.
+#
+# Skipped in selftest mode. That guard is load-bearing rather than tidy: the
+# rig host is also the host `just fast` runs on, so an unguarded selftest would
+# attach readers to the live boards.
+mkdir -p "$WITNESS_DIR"
+log "[CI_HW] witness dir: $WITNESS_DIR"
+if [[ -z "${LEVICULUM_SELFTEST:-}" ]]; then
+    witness_start "$WITNESS_DIR" "$WITNESS_READER"
+fi
+
 # --- The run ---
 
 mapfile -t TARGETS < <(select_targets)
@@ -342,6 +389,10 @@ else
 fi
 
 stop_device_watchdog "$STOP"
+
+# Stop the readers before the verdict block reads their files, so a witness
+# file quoted in the banner is complete rather than still being appended to.
+witness_stop
 
 VANISHED_BOARDS=()
 if [[ -s "$POISON" ]]; then
@@ -431,6 +482,23 @@ if [[ -n "$BOARD_VANISH_IDS" ]]; then
     log "[CI_HW] load (Codeberg 65). Forces tier3 RED. Every scenario verdict from"
     log "[CI_HW] the vanish timestamp above onwards is UNTRUSTED: the rig it ran on"
     log "[CI_HW] was not the rig the corpus assumes."
+    # Name the file, not the directory. A witness nobody can find is not a
+    # witness, and "look in the witness dir" is one guess more than the person
+    # reading this banner at 07:00 should have to make. Codeberg #353.
+    log "[CI_HW] WITNESS: what the board said across the reset is in ---"
+    for vp in "${VANISHED_BOARDS[@]}"; do
+        if witness_out=$(witness_files_for "$WITNESS_DIR" "$vp"); then
+            while IFS= read -r wf; do
+                [[ -n "$wf" ]] || continue
+                log "[CI_HW]   $vp -> $wf"
+            done <<<"$witness_out"
+        else
+            # No file at all: either the board is not an LNode (an RNode has no
+            # such debug console) or no witness could be started. Say which is
+            # unknowable here, so say neither and point at the directory.
+            log "[CI_HW]   $vp -> no witness file in $WITNESS_DIR (not an LNode, or no reader started)"
+        fi
+    done
     log "[CI_HW] ===================================================================="
 fi
 
