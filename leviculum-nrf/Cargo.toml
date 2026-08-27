@@ -183,11 +183,12 @@ softdevice = [
     # bindings), giving 269 bytes. Change that 251 and this line has to be
     # rechecked — src/ble.rs carries the pointer back here.
     #
-    # 512 is the largest the crate offers, and it covers the worst case our
-    # own config allows rather than merely the case we hit: `sd_config` pins
-    # `conn_gatt.att_mtu` to 256 (src/ble.rs), so the SoftDevice negotiates a
-    # phone's 517-byte request down to 256, the largest ATT write payload is
-    # 253 and the largest event 271 bytes.
+    # 512 is the largest the crate offers, so 269 sits inside it with room to
+    # spare. The bound that produces 269 is the 251 above and nothing else —
+    # in particular not `conn_gatt.att_mtu` (src/ble.rs). A larger ATT MTU only
+    # lets a peer put more bytes into one PDU; the SoftDevice still refuses
+    # anything past the attribute's 251-byte max_len before an event exists.
+    # So raising the MTU does not move this number, and raising 251 does.
     "nrf-softdevice/evt-max-size-512",
 ]
 

@@ -249,7 +249,15 @@ async fn ble_task(
             Ok(conn) => {
                 crate::info!("BLE: connected");
                 gatt_events(&conn, server, &incoming_tx, &outgoing_rx).await;
-                crate::info!("BLE: disconnected");
+                // The ATT MTU the peer and we settled on, reported here
+                // rather than at connect because the Exchange MTU Request
+                // arrives after the connection event. `on_disconnected` does
+                // not clear it and we still hold the `Connection`, so the
+                // negotiated value is still readable. This is the only place
+                // `conn_gatt.att_mtu` becomes observable from outside the
+                // board — without it, "is our conn_cfg in force?" can only be
+                // answered by reading crate source.
+                crate::info!("BLE: disconnected att_mtu={}", conn.att_mtu());
             }
             Err(_) => {
                 Timer::after_millis(1000).await;
@@ -531,14 +539,28 @@ pub fn init(
             conn_count: 1,
             event_length: 24,
         }),
-        // The SoftDevice negotiates a peer's MTU request DOWN to this, so 256
-        // is what a phone asking for the BLE 5 maximum of 517 actually gets.
-        // That cap is also what keeps the largest event we can be handed
-        // (att_mtu - 3 of ATT payload behind an 18-byte header, 271 bytes)
-        // inside the `nrf-softdevice/evt-max-size-512` buffer selected in
-        // Cargo.toml. 512 is the largest size that crate offers and it panics
-        // rather than truncating (Codeberg #354), so raising this number
-        // toward 517 has no matching buffer to move to.
+        // A ceiling, not an answer. `ble_gatt_conn_cfg_t::att_mtu` is the
+        // "maximum size of ATT packet the SoftDevice can send or receive" for
+        // connections opened on this conn_cfg tag; the S140 does not answer an
+        // Exchange MTU Request on its own, it raises
+        // BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST and waits for
+        // `sd_ble_gatts_exchange_mtu_reply`, whose server_rx_mtu "maximum
+        // value is ble_gatt_conn_cfg_t::att_mtu in the connection
+        // configuration used for this connection". nrf-softdevice makes that
+        // reply for us with min(peer's request, this value)
+        // (nrf-softdevice/src/ble/gatt_server.rs:447-463), and the connection
+        // is opened on the tag this value was set under: the crate sets every
+        // conn_cfg under APP_CONN_CFG_TAG = 1 (softdevice.rs:68) and starts
+        // advertising with the same tag (peripheral.rs:277).
+        //
+        // What this does NOT do is keep events inside the
+        // `nrf-softdevice/evt-max-size-512` buffer selected in Cargo.toml.
+        // That bound is the 251-byte width of rx/tx (see `ReticulumService`
+        // above): both values live in the SoftDevice's attribute table with
+        // max_len 251 and no write authorization, so a longer write is
+        // rejected by the SoftDevice with an ATT error and never becomes an
+        // event. Widening 251 is what forces a recheck of `evt-max-size-*`;
+        // moving this number does not.
         conn_gatt: Some(raw::ble_gatt_conn_cfg_t { att_mtu: 256 }),
         gatts_attr_tab_size: Some(raw::ble_gatts_cfg_attr_tab_size_t {
             attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
