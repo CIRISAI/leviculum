@@ -350,9 +350,36 @@ impl EventReceiver {
 /// becomes the default (lawful-by-default, Codeberg #55): the fraction from
 /// `etsi_eu868_duty_cycle` maps to `fraction * 10000`. Non-EU / out-of-band
 /// frequencies with no explicit limit stay off (`None`).
+///
+/// An explicit value *more permissive* than the lawful default for the band —
+/// including `0`, which is the airtime lock's "unlimited" and therefore the
+/// most permissive value there is, not the least — is warned about and then
+/// honoured, the same way [`leviculum_core::rnode::resolve_tx_power`] treats a
+/// `txpower` over the derived e.r.p. cap. No radio configuration is refused
+/// for a radio-regulatory reason; a silent override is the other half of that
+/// policy failing, so the warning is at WARN and needs no debug filter.
 fn resolve_lt_alock(airtime_limit_long: Option<f64>, frequency: u32) -> Option<u16> {
     match airtime_limit_long {
-        Some(p) => Some((p * 100.0) as u16),
+        Some(p) => {
+            let alock = (p * 100.0) as u16;
+            if let Some(fraction) = leviculum_core::rnode::etsi_eu868_duty_cycle(frequency as u64) {
+                let lawful = (fraction * 10000.0) as u16;
+                if alock == 0 || alock > lawful {
+                    tracing::warn!(
+                        "airtime_limit_long {} exceeds the ETSI EU868 lawful default {:.1}% \
+                         for {} Hz; honouring the explicit value",
+                        if alock == 0 {
+                            "0% (unlimited)".to_string()
+                        } else {
+                            format!("{:.2}%", p)
+                        },
+                        fraction * 100.0,
+                        frequency,
+                    );
+                }
+            }
+            Some(alock)
+        }
         None => leviculum_core::rnode::etsi_eu868_duty_cycle(frequency as u64).map(|fraction| {
             let alock = (fraction * 10000.0) as u16;
             tracing::info!(

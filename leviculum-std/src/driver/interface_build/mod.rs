@@ -172,17 +172,27 @@ mod tests {
     }
 
     /// A 125 kHz carrier centred at 868.65 MHz sits in the 868.6-868.7 MHz
-    /// alarm band (<= 25 kHz channel spacing only): interface build must
-    /// refuse with a config error naming the band, not fall through to a
-    /// "no known limit" default. The check fires before any port is opened.
-    #[test]
-    fn rnode_build_refuses_a_carrier_in_an_alarm_band() {
+    /// alarm band (<= 25 kHz channel spacing only). It builds — the operator
+    /// carries the regulatory responsibility, and the same carrier is lawful
+    /// under a licence or in a shielded chamber — but it does not build
+    /// quietly: the band is named at WARN, where no debug filter can hide it.
+    ///
+    /// Until 2026-08-27 this was an `Err`, which is the one refusal on the
+    /// RNode path that was about radio law rather than device capability.
+    #[tokio::test]
+    async fn rnode_build_warns_about_a_carrier_in_an_alarm_band_and_honours_it() {
         let owner = CtxOwner::new();
-        let err = rnode::build(0, &rnode_config(868_650_000), &owner.ctx())
-            .err()
-            .expect("868.65 MHz / 125 kHz must not build");
-        let msg = err.to_string();
-        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+        let (seen, subscriber) = warn_tap();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            rnode::build(0, &rnode_config(868_650_000), &owner.ctx())
+                .expect("868.65 MHz / 125 kHz builds; it is warned about, not refused");
+        }
+        let warnings = seen.lock().expect("warn tap");
+        assert!(
+            warnings.iter().any(|w| w.contains("868.6-868.7 MHz")),
+            "the band is named at WARN: {warnings:?}"
+        );
     }
 
     /// The same block one sub-band over builds fine — the refusal is the gap,
@@ -195,8 +205,19 @@ mod tests {
         assert!(rnode::build(0, &rnode_config(869_525_000), &owner.ctx()).is_ok());
     }
 
-    /// The `SerialInterface` LNode path refuses the same carrier the same
-    /// way, before `serial_radio_config` resolves anything.
+    /// The `SerialInterface` LNode path still refuses the same carrier,
+    /// before `serial_radio_config` resolves anything.
+    ///
+    /// **Known policy violation, deliberately left standing.** This is a
+    /// regulatory refusal — the same predicate, the same band, the same
+    /// reason — on a path the 2026-08-27 audit did not cover (it enumerated
+    /// the refusals reachable from an *RNode* build, and a `SerialInterface`
+    /// with a `frequency` is the LNode LoRa modem, not an RNode). Converting
+    /// it was explicitly out of scope for that batch, so the behaviour and
+    /// this test are unchanged and the case is reported rather than fixed.
+    /// The regulatory guard below therefore does not yet cover
+    /// `SerialInterface`; the row is one line to add once the conversion is
+    /// authorised.
     #[test]
     fn serial_build_refuses_a_carrier_in_an_alarm_band() {
         let owner = CtxOwner::new();
@@ -347,9 +368,11 @@ mod tests {
         assert!(msg.contains("only supported on"), "{msg}");
     }
 
-    /// The multi builder checks each subinterface's own frequency.
-    #[test]
-    fn rnode_multi_build_refuses_a_subinterface_in_an_alarm_band() {
+    /// The multi builder checks each subinterface's own frequency, and warns
+    /// per subinterface rather than refusing the whole port: one
+    /// out-of-sub-band vport must not take the other three off the air.
+    #[tokio::test]
+    async fn rnode_multi_build_warns_about_a_subinterface_in_an_alarm_band() {
         let owner = CtxOwner::new();
         let config = InterfaceConfig {
             interface_type: "RNodeMultiInterface".to_string(),
@@ -365,10 +388,255 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = rnode_multi::build(0, &config, &owner.ctx())
-            .err()
-            .expect("868.65 MHz / 125 kHz must not build");
-        let msg = err.to_string();
-        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+        let (seen, subscriber) = warn_tap();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            rnode_multi::build(0, &config, &owner.ctx())
+                .expect("868.65 MHz / 125 kHz builds; it is warned about, not refused");
+        }
+        let warnings = seen.lock().expect("warn tap");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("868.6-868.7 MHz") && w.contains("'gap'")),
+            "the band and the subinterface are named at WARN: {warnings:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The regulatory guard
+    // ------------------------------------------------------------------
+    //
+    // Project policy, decided 2026-08-16 and restated 2026-08-27:
+    //
+    //   No radio configuration is ever refused for a radio-regulatory
+    //   reason. It is warned about, loudly, and then honoured.
+    //
+    // The reasoning is not only that we cannot know the operator's
+    // jurisdiction. In the EU the operator, not the manufacturer, carries the
+    // legal responsibility for compliant operation, so software that refuses
+    // a setting takes on a responsibility it does not hold — and blocks
+    // operation that is lawful elsewhere, under a licence, or in a shielded
+    // chamber.
+    //
+    // The rule was written down and then drifted for eleven days without
+    // anyone noticing. Prose has failed twice, so this is the mechanical
+    // form. It is behavioural rather than source-level (an assertion that no
+    // `Err` arm in this module is reachable from a regulatory predicate) for
+    // three reasons:
+    //
+    //   * a source-level check cannot tell a regulatory predicate from a
+    //     capability one without a hand-maintained list of predicate names,
+    //     and that list is exactly the prose that already drifted;
+    //   * it proves nothing about what a config file does — a refusal moved
+    //     one call deeper, into `validate_config` or a new helper, passes it
+    //     while the operator's daemon still will not start;
+    //   * it goes stale the first time the module is refactored, whereas
+    //     these cases are stated in the operator's own terms.
+    //
+    // The cost is a spawned interface per case against a port that does not
+    // exist, which the reconnect loop already tolerates.
+    //
+    // The two halves are one guard. `no_radio_configuration_is_refused_for_a_
+    // regulatory_reason` alone would be satisfied by deleting every check in
+    // the file, so `capability_refusals_are_untouched_by_the_regulatory_guard`
+    // pins the five refusals that must stay: the chip's tuning range, the ten
+    // LoRa bandwidths, the RNode wire field's 0..=37, and the SF/CR ranges
+    // shared with Python-RNS. Those are arithmetic, not paternalism.
+
+    /// One radio block, so each case differs from the lawful control by
+    /// exactly the key under test.
+    #[derive(Clone, Copy)]
+    struct Radio {
+        frequency: u64,
+        bandwidth: u32,
+        sf: u8,
+        cr: u8,
+        tx_power: Option<i8>,
+        airtime_limit_long: Option<f64>,
+    }
+
+    impl Radio {
+        /// 869.525 MHz / BW125 / SF7 / CR4:5 — ERC 70-03 sub-band h1.7,
+        /// inside every listed limit, with nothing explicitly configured that
+        /// a regulatory predicate could object to.
+        fn lawful() -> Self {
+            Self {
+                frequency: 869_525_000,
+                bandwidth: 125_000,
+                sf: 7,
+                cr: 5,
+                tx_power: None,
+                airtime_limit_long: None,
+            }
+        }
+
+        fn single(&self) -> InterfaceConfig {
+            InterfaceConfig {
+                name: "guard".to_string(),
+                interface_type: "RNodeInterface".to_string(),
+                port: Some("/dev/nonexistent-test-port".to_string()),
+                frequency: Some(self.frequency),
+                bandwidth: Some(self.bandwidth),
+                spreading_factor: Some(self.sf),
+                coding_rate: Some(self.cr),
+                tx_power: self.tx_power,
+                airtime_limit_long: self.airtime_limit_long,
+                ..Default::default()
+            }
+        }
+
+        fn multi(&self) -> InterfaceConfig {
+            InterfaceConfig {
+                name: "guard".to_string(),
+                interface_type: "RNodeMultiInterface".to_string(),
+                port: Some("/dev/nonexistent-test-port".to_string()),
+                subinterfaces: vec![crate::config::SubinterfaceConfig {
+                    name: "guard".to_string(),
+                    vport: Some(0),
+                    frequency: Some(self.frequency),
+                    bandwidth: Some(self.bandwidth),
+                    spreading_factor: Some(self.sf),
+                    coding_rate: Some(self.cr),
+                    tx_power: self.tx_power,
+                    airtime_limit_long: self.airtime_limit_long,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Both shapes the RNode family is configured in, so a refusal cannot
+    /// survive by living only in the one the guard does not drive. Driven
+    /// through `build_interface`, the dispatch a config file actually
+    /// reaches, not the submodule entry points.
+    fn rnode_shapes(radio: &Radio) -> [(&'static str, InterfaceConfig); 2] {
+        [
+            ("RNodeInterface", radio.single()),
+            ("RNodeMultiInterface", radio.multi()),
+        ]
+    }
+
+    /// The guard. Every known regulatory edge case builds, and says so out
+    /// loud. See the block comment above for why this shape.
+    ///
+    /// "Warns" is asserted at WARN specifically: a decision narrated at debug
+    /// is invisible in a default daemon log, which is the silent-substitution
+    /// defect of Codeberg #349/#350 rather than a fix for it.
+    #[tokio::test]
+    async fn no_radio_configuration_is_refused_for_a_regulatory_reason() {
+        let cases: [(&str, Radio, &str); 3] = [
+            (
+                "a carrier occupying the 868.6-868.7 MHz narrowband alarm band",
+                Radio {
+                    frequency: 868_650_000,
+                    ..Radio::lawful()
+                },
+                "868.6-868.7 MHz",
+            ),
+            (
+                "22 dBm on 867.2 MHz, 8 dB over the 14 dBm h1.4 e.r.p. limit",
+                Radio {
+                    frequency: 867_200_000,
+                    tx_power: Some(22),
+                    ..Radio::lawful()
+                },
+                "exceeds the derived ERP limit",
+            ),
+            (
+                "the ETSI duty cycle switched off outright",
+                Radio {
+                    airtime_limit_long: Some(0.0),
+                    ..Radio::lawful()
+                },
+                "exceeds the ETSI EU868 lawful default",
+            ),
+        ];
+
+        let owner = CtxOwner::new();
+        for (case, radio, expected) in cases {
+            for (idx, (shape, config)) in rnode_shapes(&radio).into_iter().enumerate() {
+                let (seen, subscriber) = warn_tap();
+                let built = {
+                    let _guard = tracing::subscriber::set_default(subscriber);
+                    build_interface(idx, &config, &owner.ctx(), &AutoPeerCount::default())
+                };
+                if let Err(e) = built {
+                    panic!(
+                        "{shape}: {case} was refused, which project policy forbids \
+                         for a regulatory reason: {e}"
+                    );
+                }
+                let warnings = seen.lock().expect("warn tap");
+                assert!(
+                    warnings.iter().any(|w| w.contains(expected)),
+                    "{shape}: {case} built silently; a warning containing {expected:?} \
+                     must reach the daemon log at WARN. Seen: {warnings:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half. A refusal about what the chip or the wire format can
+    /// carry is arithmetic, not radio law, and must survive the guard above
+    /// intact — a guard that also forbade these would be worse than none.
+    #[tokio::test]
+    async fn capability_refusals_are_untouched_by_the_regulatory_guard() {
+        let cases: [(&str, Radio); 5] = [
+            (
+                "below the transceiver's 137 MHz tuning floor",
+                Radio {
+                    frequency: 100_000_000,
+                    ..Radio::lawful()
+                },
+            ),
+            (
+                "not one of the ten LoRa bandwidths",
+                Radio {
+                    bandwidth: 100_000,
+                    ..Radio::lawful()
+                },
+            ),
+            (
+                "over the RNode wire field's 0..=37 dBm",
+                Radio {
+                    tx_power: Some(38),
+                    ..Radio::lawful()
+                },
+            ),
+            (
+                "outside the LoRa spreading factors 5..=12",
+                Radio {
+                    sf: 13,
+                    ..Radio::lawful()
+                },
+            ),
+            (
+                "outside the LoRa coding rates 5..=8",
+                Radio {
+                    cr: 9,
+                    ..Radio::lawful()
+                },
+            ),
+        ];
+
+        let owner = CtxOwner::new();
+        // Control: the block every case is one key away from must build, or
+        // the assertions below would pass for the wrong reason.
+        for (shape, config) in rnode_shapes(&Radio::lawful()) {
+            build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default())
+                .unwrap_or_else(|e| panic!("{shape}: the lawful control must build: {e}"));
+        }
+
+        for (case, radio) in cases {
+            for (idx, (shape, config)) in rnode_shapes(&radio).into_iter().enumerate() {
+                assert!(
+                    build_interface(idx, &config, &owner.ctx(), &AutoPeerCount::default()).is_err(),
+                    "{shape}: {case} is a capability limit, not radio law, and must \
+                     still be refused"
+                );
+            }
+        }
     }
 }

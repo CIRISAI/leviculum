@@ -34,16 +34,23 @@ pub(super) fn build(
         .coding_rate
         .ok_or_else(|| Error::Config("RNodeInterface requires coding_rate".to_string()))?;
     // A carrier whose occupied bandwidth touches one of the narrowband alarm
-    // bands between the ERC 70-03 wideband sub-bands is refused outright: no
-    // LoRa bandwidth fits their <= 25 kHz channel spacing, so "no known
-    // limit, board maximum" would be the wrong default exactly there.
+    // bands between the ERC 70-03 wideband sub-bands is warned about loudly
+    // and then honoured. The reason it is not refused is project policy: no
+    // radio configuration is ever refused for a radio-regulatory reason,
+    // because the operator — not this software — carries the legal
+    // responsibility for compliant operation, and the same carrier is lawful
+    // under a licence, in another region, or in a shielded chamber. WARN, not
+    // debug: a warning behind a filter is the silent substitution this policy
+    // exists to prevent.
     if let Some(gap) = leviculum_core::rnode::erp_band_gap(u64::from(frequency), bandwidth) {
-        return Err(Error::Config(format!(
+        tracing::warn!(
             "RNodeInterface: frequency {} Hz with bandwidth {} Hz overlaps the {} band, \
              where ERC 70-03 permits only <= 25 kHz channel spacing; \
              choose a centre frequency whose signal fits a listed sub-band",
-            frequency, bandwidth, gap
-        )));
+            frequency,
+            bandwidth,
+            gap
+        );
     }
 
     // Absent `txpower` asks for the board maximum capped by the lawful ERP

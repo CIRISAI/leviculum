@@ -1177,8 +1177,9 @@ pub fn alock_u16_to_fraction(at: u16) -> f32 {
 /// without it a 433 MHz node derived no airtime limit at all.
 ///
 /// Guard gaps (868.6-868.7, 869.2-869.4, 869.65-869.7 MHz — narrowband-only
-/// bands a LoRa carrier is refused on at interface build, see
-/// [`erp_band_gap`]) and frequencies outside every listed band return `None`
+/// bands a LoRa carrier is warned about, and then honoured, on at RNode
+/// interface build, see [`erp_band_gap`]) and frequencies outside every
+/// listed band return `None`
 /// (no regulatory auto cap applies). The returned fraction maps to the
 /// firmware `lt_alock` via `fraction * 10000` (see `alock_u16_to_fraction`).
 ///
@@ -1229,9 +1230,10 @@ pub fn etsi_eu868_duty_cycle(freq_hz: u64) -> Option<f64> {
 ///
 /// 500 mW is the exception, not the rule: every other listed European band
 /// allows 25 mW e.r.p. or less. The bands *between* the h1.x entries are not
-/// "no entry" — they are narrowband allocations a LoRa carrier is refused on
-/// at interface build ([`erp_band_gap`]); by the time this table is consulted
-/// for a default, a frequency in one of them has already been rejected.
+/// "no entry" — they are narrowband allocations a LoRa carrier is warned
+/// about on at RNode interface build ([`erp_band_gap`]) and then permitted;
+/// a default derived here for such a frequency therefore falls through to
+/// `None`, the same as any other uncitable band.
 ///
 /// `None` means the tree cannot cite a limit for the frequency (US 902-928,
 /// AU/NZ, ...): no cap is derived and the caller warns, exactly as the
@@ -1259,10 +1261,16 @@ pub fn lawful_erp_dbm(freq_hz: u64) -> Option<i8> {
 /// recommendation — permit only <= 25 kHz channel spacing, which no LoRa
 /// bandwidth this stack configures can satisfy. A configured centre frequency
 /// whose occupied bandwidth (approximated by the signal bandwidth) touches
-/// one of them is therefore a **configuration error at interface build**, not
-/// an "unlisted frequency": falling through to "no known limit, board
-/// maximum" would be the most permissive outcome exactly where the correct
-/// one is refusal.
+/// one of them is therefore **worth a loud warning at interface build**, not
+/// silence: falling through to "no known limit, board maximum" without a word
+/// would be the most permissive outcome exactly where the operator most needs
+/// to be told.
+///
+/// It is a warning and never a refusal. Project policy: no radio
+/// configuration is refused for a radio-regulatory reason — the operator, not
+/// this software, carries the legal responsibility for compliant operation,
+/// and the same carrier is lawful under a licence, in another region, or in a
+/// shielded chamber.
 ///
 /// The overlap test is strict on both edges: a signal whose occupied band
 /// *ends* exactly where an alarm band begins (e.g. an upper edge at precisely
@@ -2301,6 +2309,70 @@ mod tests {
     #[test]
     fn an_explicit_txpower_above_the_derived_cap_is_honoured() {
         assert_eq!(resolve_tx_power(Some(20), 867_200_000), 20);
+    }
+
+    /// The policy this whole area exists to hold down: **no radio
+    /// configuration is refused for a radio-regulatory reason — it is warned
+    /// about, loudly, and then honoured.** An explicit 20 dBm on 867.2 MHz is
+    /// 6 dB over the lawful 14 dBm e.r.p. of h1.4; the value reaches the
+    /// caller untouched *and* the operator is told, at WARN so no debug
+    /// filter is needed to see it. Value-only assertions do not pin this:
+    /// silently honouring the excess would pass them and is the defect.
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn an_explicit_txpower_over_the_erp_limit_is_honoured_and_warned_about() {
+        let (resolved, logs) =
+            crate::test_log_capture::with_captured_logs(|| resolve_tx_power(Some(20), 867_200_000));
+        assert_eq!(resolved, 20, "the operator's value reaches the caller");
+        assert!(
+            logs.contains("WARN"),
+            "the excess is warned about, not whispered at debug; logs={logs:?}"
+        );
+        assert!(
+            logs.contains("honouring the explicit value"),
+            "the warning says the value is honoured; logs={logs:?}"
+        );
+        assert!(
+            logs.contains("20") && logs.contains("14") && logs.contains("867200000"),
+            "the warning names the value, the limit and the frequency; logs={logs:?}"
+        );
+    }
+
+    /// The same for a band this tree cannot cite a limit for: 30 dBm on
+    /// 915 MHz (US ISM) reaches the caller unchanged. There is no cap to
+    /// exceed, so there is nothing to warn about — and in particular no
+    /// warning may claim a limit the table does not hold, which would read as
+    /// authoritative to exactly the operator who most needs it not to.
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn an_explicit_txpower_on_an_uncitable_band_is_honoured_unchanged() {
+        assert_eq!(
+            lawful_erp_dbm(915_000_000),
+            None,
+            "premise: no citable limit"
+        );
+        let (resolved, logs) =
+            crate::test_log_capture::with_captured_logs(|| resolve_tx_power(Some(30), 915_000_000));
+        assert_eq!(resolved, 30, "the operator's value reaches the caller");
+        assert!(
+            !logs.contains("exceeds the derived ERP limit"),
+            "no invented limit is cited for an uncitable band; logs={logs:?}"
+        );
+    }
+
+    /// The control the two above are worthless without: the cap is a
+    /// *default*, not a veto. With no `txpower` key at all, 867.2 MHz still
+    /// resolves to the lawful 14 dBm rather than the 22 dBm board maximum —
+    /// so "no opinion" and "this value" stay distinguishable, and a guard
+    /// that simply deleted the ERP table would fail here.
+    #[test]
+    fn an_absent_txpower_still_resolves_to_the_capped_default() {
+        assert_eq!(resolve_tx_power(None, 867_200_000), 14);
+        assert_eq!(
+            resolve_tx_power(Some(22), 867_200_000),
+            22,
+            "and the same band explicitly asked for 22 gets 22"
+        );
     }
 
     /// Every other stated value passes through untouched, negatives included

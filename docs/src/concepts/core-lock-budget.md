@@ -249,7 +249,7 @@ earlier, on the mutex.
 
 And no `block_on` is needed. `ReticulumNode` carries roughly forty
 plain synchronous `pub fn`s that open by locking the core —
-`has_path` (`leviculum-std/src/driver/mod.rs:2480`) is
+`has_path` (`leviculum-std/src/driver/mod.rs:2507`) is
 `self.inner.lock_recover().has_path(dest_hash)` and is entirely typical.
 A callee holding an `Arc<ReticulumNode>` deadlocks the node on its first
 invocation, in ordinary safe synchronous code, with no `.await`, no

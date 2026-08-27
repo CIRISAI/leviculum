@@ -75,14 +75,18 @@ pub(super) fn build(
             ))
         })?;
         // A carrier occupying one of the ERC 70-03 narrowband alarm bands is
-        // a config error, not a default. See the single-interface builder.
+        // warned about and then honoured — the regulatory judgement is the
+        // operator's. See the single-interface builder for the policy.
         if let Some(gap) = leviculum_core::rnode::erp_band_gap(u64::from(frequency), bandwidth) {
-            return Err(Error::Config(format!(
+            tracing::warn!(
                 "RNodeMultiInterface subinterface '{}': frequency {} Hz with bandwidth {} Hz \
                  overlaps the {} band, where ERC 70-03 permits only <= 25 kHz channel spacing; \
                  choose a centre frequency whose signal fits a listed sub-band",
-                sub.name, frequency, bandwidth, gap
-            )));
+                sub.name,
+                frequency,
+                bandwidth,
+                gap
+            );
         }
 
         // Absent `txpower` asks for the board maximum capped by the lawful
