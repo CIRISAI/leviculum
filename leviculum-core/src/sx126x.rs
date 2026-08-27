@@ -297,40 +297,161 @@ pub fn ldro_enabled(bw_hz: u32, sf: u8) -> bool {
     (1u64 << sf) / bw_khz > 16
 }
 
-/// Output powers the high-power PA has a documented `SetPaConfig` setting for
-/// (datasheet Table 13-21), ascending.
-///
-/// These are the only four points the driver can program. Everything else is
-/// an approximation, and the whole reason this table is public is that the
-/// approximation used to happen silently: `configure_lora` matched 22/20/17
-/// and sent a fourth arm's 14 dBm setting for every other value, so a
-/// configured 21, 18 or 15 dBm — all of which pass `rnode::validate_config` —
-/// transmitted 14 dBm with nothing said.
-pub const PA_PROFILES_DBM: [i8; 4] = [14, 17, 20, 22];
+// ---------------------------------------------------------------------------
+// Transmit power (Codeberg #349)
+// ---------------------------------------------------------------------------
 
-/// Which PA profile a requested output power is programmed as.
+/// `SetPaConfig` (datasheet §13.1.14).
+pub const OP_SET_PA_CONFIG: u8 = 0x95;
+/// `SetTxParams` (datasheet §13.4.4).
+pub const OP_SET_TX_PARAMS: u8 = 0x8E;
+/// Over-current protection, `REG_OCP` (`reference/RNode_Firmware/sx126x.cpp:62`
+/// `REG_OCP_6X`). One byte, 2.5 mA per step.
+pub const REG_OCP: u16 = 0x08E7;
+
+/// The one `SetPaConfig` argument block the high-power PA is driven with:
+/// `PADutyCycle`, `HPMax`, `DeviceSel`, `PALut`.
 ///
-/// The requested value is rounded **down** to the nearest profile: never
-/// transmit above what the operator asked for, because the margin between a
-/// configured power and the regulatory ceiling is the operator's to spend.
+/// Byte-for-byte the reference's (`reference/RNode_Firmware/sx126x.cpp:722-726`):
+/// duty cycle 0x04 and `HPMax` 0x07 are the datasheet's +22 dBm row (Table
+/// 13-21), `DeviceSel` 0x00 selects the SX1262 rather than the SX1261, and
+/// `PALut` is reserved at 0x01.
 ///
-/// A request below the lowest profile has nothing to round down to. The PA
-/// setting saturates at [`PA_PROFILES_DBM`]`[0]` (14 dBm) and the caller is
-/// expected to log the substitution — the driver programs `SetTxParams` at the
-/// profile's power, so sub-14 dBm requests are not reachable by profile
-/// selection alone and would need the `SetTxParams` power field driven from
-/// the request instead. `lnflash` accepts -9..=22 dBm
-/// (`lnflash/src/radio.rs:79`), so this case is reachable from a real flash,
-/// and it is the one direction in which the programmed power exceeds the
-/// request. Saying so beats the silent 14 dBm that preceded it.
-pub fn pa_profile_dbm(requested_dbm: i8) -> i8 {
-    let mut chosen = PA_PROFILES_DBM[0];
-    for profile in PA_PROFILES_DBM {
-        if profile <= requested_dbm {
-            chosen = profile;
-        }
+/// **One config for every power, not four.** The driver used to pick one of
+/// the table's four rows from the requested power and then send `SetTxParams`
+/// a hardcoded +22, which made the PA row the only thing that decided output
+/// — four reachable powers, nothing below 14 dBm, and a request for 2 dBm on
+/// the air at roughly 14. The rows exist for PA *efficiency* at a given
+/// output, not to set the output; the output is [`OP_SET_TX_PARAMS`]'s first
+/// argument, which is what [`plan_tx_power`] now drives. Matching the
+/// reference here is what makes an LNode and an RNode radiate the same for
+/// the same configured number, which is the property the 23 mixed hardware
+/// scenarios are written against.
+pub const PA_CONFIG_HIGH_POWER: [u8; 4] = [0x04, 0x07, 0x00, 0x01];
+
+/// Lowest power the SX1262 high-power PA accepts (datasheet §13.4.4, and
+/// `sx126x.cpp:728-729` clamps to the same).
+pub const TX_POWER_MIN_DBM: i8 = -9;
+/// Highest power the SX1262 high-power PA accepts.
+pub const TX_POWER_MAX_DBM: i8 = 22;
+
+/// PA ramp time byte for `SetTxParams`: 0x04 is 200 µs (datasheet Table 13-41).
+///
+/// **A deliberate difference from the reference**, which uses 0x02 (40 µs,
+/// `sx126x.cpp:734`). Ours is the slower ramp and it is kept: a longer ramp
+/// spreads the switching transient over five times the interval, so it is the
+/// quieter of the two spectrally, and nothing about it changes the steady-state
+/// output power the acceptance measures — the ramp is over before the preamble
+/// is. Changing it would alter what every archived LNode capture was taken
+/// with, for no gain this batch can name. Stated here so the next reader does
+/// not take it for an oversight.
+pub const PA_RAMP_200US: u8 = 0x04;
+
+/// `REG_OCP` value the high-power PA runs with: 0x38, i.e. 140 mA.
+///
+/// This is the SX1262's own documented default — `SetPaConfig` resets the
+/// register to it whenever `DeviceSel` selects the SX1262 — so writing it
+/// changes nothing about what the chip does today. It is written anyway,
+/// explicitly and after [`OP_SET_PA_CONFIG`], because the alternative is to
+/// depend on a reset value for the one limit that can silently swallow the
+/// power this batch exists to deliver.
+///
+/// **A second deliberate difference from the reference**, which writes
+/// `OCP_TUNED` = 0x28 = 100 mA (`Boards.h:930-933`, the `#ifndef` fallback
+/// every SX1262 board falls through to). 100 mA is *below* the datasheet's own
+/// typical supply current at +22 dBm (118 mA), so the reference's value can
+/// only limit the top of the range, never extend it. Taking it would be the
+/// one way this batch produced less power rather than more. The deviation rule
+/// is satisfied on all three counts: nothing about OCP is on the wire, no peer
+/// can observe it, and the direction is strictly towards delivering the
+/// configured power (Priority 1).
+pub const OCP_HIGH_POWER: u8 = 0x38;
+
+/// What the driver programmed the PA with, and what was asked for.
+///
+/// Returned by [`program_tx_power`] so the caller can state it on the boot
+/// log without re-deriving anything: every field here is a value that was
+/// actually put on the SPI bus, not a value that was intended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxPowerProgram {
+    /// The configured power, as the host or the stored profile stated it.
+    pub requested_dbm: i8,
+    /// The first `SetTxParams` argument, i.e. what the chip was told to
+    /// radiate. Equal to `requested_dbm` unless it was outside the part's
+    /// range.
+    pub programmed_dbm: i8,
+    /// The `SetPaConfig` argument block, as written.
+    pub pa_config: [u8; 4],
+    /// The second `SetTxParams` argument.
+    pub ramp: u8,
+    /// The `REG_OCP` byte, as written.
+    pub ocp: u8,
+    /// Whether the request had to be brought into range.
+    pub clamped: bool,
+}
+
+/// Decide what to program for a requested output power.
+///
+/// The whole decision is the clamp to
+/// [`TX_POWER_MIN_DBM`]`..=`[`TX_POWER_MAX_DBM`], because the part takes every
+/// value in that range and the request is passed straight through
+/// (`sx126x.cpp:728-735` does exactly this). There is no rounding and no
+/// profile table any more: the four-point table was an artefact of deriving
+/// output from `SetPaConfig`, and deriving it from `SetTxParams` instead makes
+/// all 32 points reachable — including the negatives `lnflash --radio-txpower`
+/// has always accepted (`lnflash/src/radio.rs:76`).
+///
+/// **A value the chip cannot do is clamped and announced, never refused.**
+/// The announcement is the caller's `[SX_TX_POWER]` line, and
+/// [`TxPowerProgram::clamped`] is what it reports.
+pub fn plan_tx_power(requested_dbm: i8) -> TxPowerProgram {
+    let programmed_dbm = requested_dbm.clamp(TX_POWER_MIN_DBM, TX_POWER_MAX_DBM);
+    TxPowerProgram {
+        requested_dbm,
+        programmed_dbm,
+        pa_config: PA_CONFIG_HIGH_POWER,
+        ramp: PA_RAMP_200US,
+        ocp: OCP_HIGH_POWER,
+        clamped: programmed_dbm != requested_dbm,
     }
-    chosen
+}
+
+/// The command half of the SPI port, for sequences this module owns.
+///
+/// [`RegisterBus`] covers the register accesses; a power change is a
+/// three-op sequence of two opcodes and one register write, and the order
+/// among them matters — `SetPaConfig` resets `REG_OCP`, so an OCP written
+/// before it would be thrown away. That ordering is exactly the kind of thing
+/// a host test must be able to watch, which is why the sequence lives here
+/// and not in the driver.
+pub trait CommandBus: RegisterBus {
+    /// Issue an opcode with its argument bytes.
+    fn write_cmd(
+        &mut self,
+        opcode: u8,
+        args: &[u8],
+    ) -> impl core::future::Future<Output = Result<(), Self::Error>>;
+}
+
+/// Program the PA for `requested_dbm` and report what was written.
+///
+/// Three operations, in the reference's order
+/// (`reference/RNode_Firmware/sx126x.cpp:722-735`):
+///
+/// 1. `SetPaConfig` with [`PA_CONFIG_HIGH_POWER`] — also the point at which
+///    the chip resets `REG_OCP`;
+/// 2. `REG_OCP` with [`OCP_HIGH_POWER`], which is why it comes after;
+/// 3. `SetTxParams` with the clamped power and [`PA_RAMP_200US`].
+pub async fn program_tx_power<B: CommandBus>(
+    bus: &mut B,
+    requested_dbm: i8,
+) -> Result<TxPowerProgram, B::Error> {
+    let plan = plan_tx_power(requested_dbm);
+    bus.write_cmd(OP_SET_PA_CONFIG, &plan.pa_config).await?;
+    bus.write_reg(REG_OCP, plan.ocp).await?;
+    bus.write_cmd(OP_SET_TX_PARAMS, &[plan.programmed_dbm as u8, plan.ramp])
+        .await?;
+    Ok(plan)
 }
 
 /// Decode a LoRa `GetPacketStatus` (opcode 0x14) response into
@@ -1151,46 +1272,48 @@ mod tests {
         assert!(pre18 - pre8 >= 163, "preamble delta {}ms", pre18 - pre8);
     }
 
-    /// A request that is one of the four documented settings is programmed
-    /// as asked, with nothing to log.
+    /// Every power the part accepts is planned as itself, negatives included.
+    ///
+    /// The table rather than three examples: the defect this replaces was a
+    /// four-entry match, and a spot check of three values is how a
+    /// four-entry match survives a rewrite. Sub-14 dBm is the half that used
+    /// to be unreachable at all — a configured 2 transmitted at roughly 14.
     #[test]
-    fn a_supported_pa_profile_is_programmed_as_asked() {
-        for profile in PA_PROFILES_DBM {
-            assert_eq!(pa_profile_dbm(profile), profile, "profile {profile}");
+    fn every_power_in_range_is_planned_as_itself() {
+        for requested in TX_POWER_MIN_DBM..=TX_POWER_MAX_DBM {
+            let plan = plan_tx_power(requested);
+            assert_eq!(plan.programmed_dbm, requested, "{requested} dBm");
+            assert!(!plan.clamped, "{requested} dBm reported as clamped");
         }
     }
 
-    /// The defect: 21, 18 and 15 dBm all pass `rnode::validate_config`, all
-    /// fell through the driver's `_` arm, and all transmitted 14 dBm in
-    /// silence. Each now lands on the profile below it — never above, the
-    /// margin to the regulatory ceiling is the operator's to spend.
+    /// Out of range in either direction is clamped, and says it was.
+    ///
+    /// Never refused: a value the chip cannot do is brought into range and
+    /// announced. `37` is `rnode::MAX_TX_POWER`, the widest thing the wire's
+    /// field can carry, so it is the value a host can actually send.
     #[test]
-    fn an_unsupported_pa_value_rounds_down_never_up() {
-        assert_eq!(pa_profile_dbm(21), 20);
-        assert_eq!(pa_profile_dbm(19), 17);
-        assert_eq!(pa_profile_dbm(18), 17);
-        assert_eq!(pa_profile_dbm(16), 14);
-        assert_eq!(pa_profile_dbm(15), 14);
-        // Above the top profile there is nothing higher to round to.
-        assert_eq!(pa_profile_dbm(37), 22);
-        for requested in -9i8..=37 {
-            assert!(
-                pa_profile_dbm(requested) <= requested.max(PA_PROFILES_DBM[0]),
-                "{requested} dBm was rounded up past its own request"
-            );
-        }
+    fn a_power_out_of_range_is_clamped_and_says_so() {
+        let high = plan_tx_power(37);
+        assert_eq!(high.programmed_dbm, TX_POWER_MAX_DBM);
+        assert!(high.clamped);
+
+        let low = plan_tx_power(-40);
+        assert_eq!(low.programmed_dbm, TX_POWER_MIN_DBM);
+        assert!(low.clamped);
+
+        assert_eq!(plan_tx_power(i8::MIN).programmed_dbm, TX_POWER_MIN_DBM);
+        assert_eq!(plan_tx_power(i8::MAX).programmed_dbm, TX_POWER_MAX_DBM);
     }
 
-    /// Below the lowest profile there is nothing to round down to: the PA
-    /// setting saturates at 14 dBm and the caller logs it. This is the one
-    /// direction in which the programmed power exceeds the request, and it
-    /// is reachable — `lnflash` accepts -9 dBm.
+    /// The clamp is the reference's, bound to the reference's own numbers.
+    ///
+    /// `sx126x.cpp:728-729` — `if (level > 22) { level = 22; } else if
+    /// (level < -9) { level = -9; }`.
     #[test]
-    fn a_request_below_the_lowest_pa_profile_saturates_at_it() {
-        assert_eq!(pa_profile_dbm(13), PA_PROFILES_DBM[0]);
-        assert_eq!(pa_profile_dbm(0), 14);
-        assert_eq!(pa_profile_dbm(-9), 14);
-        assert_eq!(pa_profile_dbm(i8::MIN), 14);
+    fn the_clamp_matches_the_reference() {
+        assert_eq!(TX_POWER_MAX_DBM, 22);
+        assert_eq!(TX_POWER_MIN_DBM, -9);
     }
 
     /// A real `GetPacketStatus` response off the rig: `rssi=-21 snr=10` is a
@@ -1336,11 +1459,13 @@ mod probe_tests {
     use alloc::format;
     use alloc::vec::Vec;
 
-    /// One register access, in the order it happened.
+    /// One access to the chip, in the order it happened.
     #[derive(Debug, PartialEq, Eq)]
     enum Op {
         Read(u16),
         Write(u16, u8),
+        /// An opcode and its argument bytes, exactly as they went out.
+        Cmd(u8, Vec<u8>),
     }
 
     /// A register file that answers reads and remembers writes.
@@ -1393,6 +1518,19 @@ mod probe_tests {
         async fn write_reg(&mut self, addr: u16, value: u8) -> Result<(), ()> {
             self.ops.push(Op::Write(addr, value));
             self.regs.insert(addr, value);
+            Ok(())
+        }
+    }
+
+    impl CommandBus for FakeChip {
+        async fn write_cmd(&mut self, opcode: u8, args: &[u8]) -> Result<(), ()> {
+            self.ops.push(Op::Cmd(opcode, args.to_vec()));
+            // `SetPaConfig` resets REG_OCP to the part's default. Modelled so
+            // an OCP written on the wrong side of it is visible here rather
+            // than only on a board.
+            if opcode == OP_SET_PA_CONFIG {
+                self.regs.insert(REG_OCP, OCP_HIGH_POWER);
+            }
             Ok(())
         }
     }
@@ -1554,6 +1692,122 @@ mod probe_tests {
             format!("{probe}"),
             "iq_before=0xA5 iq_after=0xA1 txmod=0x5A"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Transmit power (Codeberg #349)
+    // -----------------------------------------------------------------------
+
+    /// Every power the part accepts reaches `SetTxParams` unchanged, on the
+    /// wire, as the byte the chip reads.
+    ///
+    /// The whole table, and against the recorded ops rather than against
+    /// `plan_tx_power`: the defect was not in the decision, it was that the
+    /// decision never reached the bus — `SetTxParams` was sent a literal 22
+    /// for every configured value. A test that only checked the plan would
+    /// have passed on the broken driver.
+    #[test]
+    fn every_power_in_range_reaches_set_tx_params_unchanged() {
+        for requested in TX_POWER_MIN_DBM..=TX_POWER_MAX_DBM {
+            let mut chip = FakeChip::new();
+            let plan = run(program_tx_power(&mut chip, requested)).expect("fake never errors");
+            assert_eq!(plan.programmed_dbm, requested, "{requested} dBm");
+            assert!(!plan.clamped, "{requested} dBm reported as clamped");
+            let tx_params = chip
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::Cmd(OP_SET_TX_PARAMS, args) => Some(args.clone()),
+                    _ => None,
+                })
+                .expect("SetTxParams was never issued");
+            assert_eq!(
+                tx_params,
+                Vec::from([requested as u8, PA_RAMP_200US]),
+                "{requested} dBm went out as {tx_params:?}"
+            );
+        }
+    }
+
+    /// Out of range in either direction is clamped on the bus too, and the
+    /// clamp is reported back to the caller that has to announce it.
+    #[test]
+    fn a_power_out_of_range_is_clamped_on_the_wire_and_reported() {
+        for (requested, expected) in [(37i8, 22i8), (23, 22), (-10, -9), (i8::MIN, -9)] {
+            let mut chip = FakeChip::new();
+            let plan = run(program_tx_power(&mut chip, requested)).expect("fake never errors");
+            assert_eq!(plan.programmed_dbm, expected, "{requested} dBm");
+            assert!(plan.clamped, "{requested} dBm did not report its clamp");
+            assert_eq!(plan.requested_dbm, requested);
+            assert!(
+                chip.ops.contains(&Op::Cmd(
+                    OP_SET_TX_PARAMS,
+                    Vec::from([expected as u8, PA_RAMP_200US])
+                )),
+                "{requested} dBm: ops were {:?}",
+                chip.ops
+            );
+        }
+    }
+
+    /// **The control.** The PA-config bytes are the reference's, for every
+    /// power, and they are the same block every time.
+    ///
+    /// Asserted as exact bytes rather than as "some PA config was sent":
+    /// these four bytes are what decides whether the number in `SetTxParams`
+    /// means what the datasheet says it means, and a future edit that
+    /// reintroduced a per-power table would otherwise change what we radiate
+    /// without changing a single test.
+    #[test]
+    fn the_pa_config_is_the_references_for_every_power() {
+        // reference/RNode_Firmware/sx126x.cpp:722-725.
+        assert_eq!(PA_CONFIG_HIGH_POWER, [0x04, 0x07, 0x00, 0x01]);
+        for requested in -20i8..=30 {
+            let mut chip = FakeChip::new();
+            run(program_tx_power(&mut chip, requested)).expect("fake never errors");
+            assert!(
+                chip.ops.contains(&Op::Cmd(
+                    OP_SET_PA_CONFIG,
+                    Vec::from([0x04u8, 0x07, 0x00, 0x01])
+                )),
+                "{requested} dBm sent a different PA config: {:?}",
+                chip.ops
+            );
+        }
+    }
+
+    /// The three operations happen in the reference's order, and the OCP
+    /// survives.
+    ///
+    /// The ordering is not cosmetic: `SetPaConfig` resets `REG_OCP`, which
+    /// the fake models, so an OCP written first would be back at the default
+    /// by the time the PA is keyed. Reading the register out at the end is
+    /// what turns "we wrote it" into "it is in force".
+    #[test]
+    fn the_ocp_is_written_after_the_pa_config_and_survives_it() {
+        let mut chip = FakeChip::new();
+        run(program_tx_power(&mut chip, 14)).expect("fake never errors");
+        assert_eq!(
+            chip.ops,
+            Vec::from([
+                Op::Cmd(OP_SET_PA_CONFIG, Vec::from([0x04u8, 0x07, 0x00, 0x01])),
+                Op::Write(REG_OCP, OCP_HIGH_POWER),
+                Op::Cmd(OP_SET_TX_PARAMS, Vec::from([14u8, PA_RAMP_200US])),
+            ])
+        );
+        assert_eq!(chip.regs.get(&REG_OCP).copied(), Some(OCP_HIGH_POWER));
+    }
+
+    /// The OCP we write is at or above the reference's, never below.
+    ///
+    /// The reference tunes it down to 0x28 (100 mA); the datasheet's own
+    /// typical current at +22 dBm is 118 mA, so that value can only limit the
+    /// top of the range. This is the assertion that keeps a later "match the
+    /// reference exactly" edit from quietly capping our output.
+    #[test]
+    fn the_ocp_is_not_below_the_references() {
+        assert_eq!(OCP_HIGH_POWER, 0x38); // 56 steps x 2.5 mA = 140 mA
+        assert!(OCP_HIGH_POWER > 0x28); // reference/RNode_Firmware/Boards.h:932
     }
 }
 

@@ -262,6 +262,18 @@ calibParam is a bitmask: Bit 0=RC64k, 1=RC13M, 2=PLL, 3=ADC pulse, 4=ADC bulk N,
 | +17dBm | 0x02 | 0x03 | 0x00 | 0x01 | +22dBm |
 | +14dBm | 0x02 | 0x02 | 0x00 | 0x01 | +22dBm |
 
+**We do not drive the PA from this table.** These four rows are the *most
+efficient* pairing for four particular outputs, not the way an output is
+selected: every row leaves `SetTxParams` at +22 and lets the PA row set the
+power, which reaches exactly these four points and nothing between or below
+them. `leviculum_core::sx126x::program_tx_power` instead writes the +22 row
+once (`PA_CONFIG_HIGH_POWER`) and passes the configured power to
+`SetTxParams`, clamped to -9..=22 — the whole range, and the same shape the
+RNode firmware uses (`reference/RNode_Firmware/sx126x.cpp:714-735`), so an
+LNode and an RNode configured to the same number radiate the same. The cost
+is PA efficiency, i.e. supply current, at the three lower points; the benefit
+is that the other 28 points exist at all (Codeberg #349).
+
 ### 13.1.15 SetRxTxFallbackMode
 
 | Byte | 0 | 1 |

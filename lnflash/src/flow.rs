@@ -715,6 +715,135 @@ fn send_tx_spacing_to(tty: &Path, spacing_ms: u16) -> std::io::Result<SessionRep
     })
 }
 
+/// The `--set-tx-power` session (Codeberg #349): set the transmit power on
+/// every running LNode, no flashing, then exit.
+///
+/// Why it exists at all: the acceptance for #349 is a power sweep, and
+/// without this each of its points costs a flash. A flash reboots the board,
+/// which restarts the mesh, the duty-cycle histogram and every piece of state
+/// the measurement is taken against — so six points would not be a sweep, they
+/// would be six separate experiments with one number each.
+///
+/// **Read, modify, write.** A radio config frame carries the whole parameter
+/// set, so the only honest way to move one field is to obtain the other ten
+/// from the board first ([`crate::envelope::query_radio_config`], #349's
+/// `TYPE_RADIO_QUERY`). Substituting this tool's own defaults for them would
+/// reset the bandwidth while claiming to set the power, and the resulting
+/// numbers would look like power. A board that cannot answer the query is
+/// therefore left alone and said so — never written to on a guess.
+///
+/// **Persisted.** The board saves every radio config it applies, and this is
+/// one, so a reset comes back on the swept power rather than on the previous
+/// one. That is the opposite of `--set-tx-spacing`, which is deliberately
+/// volatile; the difference is that spacing is a bench instrument and power
+/// is part of the board's profile. Set it back when the sweep is over.
+pub fn set_tx_power(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    dbm: i8,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-tx-power talks to flashed boards; a board in \
+             its bootloader has no radio to configure.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for (port, tty) in &reachable.ports {
+        match send_tx_power_to(tty, dbm) {
+            Ok(TxPowerOutcome::Applied { was, now }) => ui.say(&format!(
+                "{port}: transmit power {was} -> {now} dBm requested. The other radio settings \
+                 came back off the board and went out again unchanged. The board states what it \
+                 programmed on its debug port (if00) as [SX_TX_POWER] requested_dbm=… \
+                 tx_params_dbm=… clamped=… — read that line before measuring the point; a value \
+                 outside the part's -9..=22 range is clamped there, not here. Persisted: a reset \
+                 comes back on this power."
+            )),
+            Ok(TxPowerOutcome::Unreadable) => {
+                all_took_it = false;
+                ui.say(&format!(
+                    "{port}: the board did not report its current radio settings, so nothing was \
+                     sent. A config frame carries every parameter at once; writing one without \
+                     knowing the other values would set the power and move the modulation with \
+                     it. Flash the current bundle first."
+                ));
+            }
+            Ok(TxPowerOutcome::Answered(reply)) => {
+                all_took_it &= reply.took_it();
+                match reply {
+                    SessionReply::Acked => unreachable!("acked is reported as Applied"),
+                    SessionReply::Refused(reason) => ui.say(&format!(
+                        "{port}: the board refused the radio configuration — {}.",
+                        crate::envelope::reason_str(reason)
+                    )),
+                    SessionReply::NoAnswer => ui.say(&format!(
+                        "{port}: the board did not answer the radio-config frame, so it is still \
+                         on whatever power it had."
+                    )),
+                    SessionReply::NoEnvelope => ui.say(&format!(
+                        "{port}: this firmware predates the control envelope. Flash the current \
+                         bundle first."
+                    )),
+                    SessionReply::NotAccepted => ui.say(&format!(
+                        "{port}: this firmware speaks the envelope but takes no radio \
+                         configuration. Flash the current bundle first."
+                    )),
+                }
+            }
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+            }
+        }
+    }
+    Ok(all_took_it)
+}
+
+/// What one board did with a `--set-tx-power` session.
+enum TxPowerOutcome {
+    /// The board reported its settings and acked the changed ones back.
+    Applied { was: i8, now: i8 },
+    /// The board never reported its settings, so nothing was sent.
+    Unreadable,
+    /// Settings were read and a config frame went out, but the board did not
+    /// ack it.
+    Answered(SessionReply),
+}
+
+fn send_tx_power_to(tty: &Path, dbm: i8) -> std::io::Result<TxPowerOutcome> {
+    use crate::envelope;
+    use leviculum_core::envelope::{TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY};
+
+    let fd = crate::sys::Fd::open_serial(tty)?;
+    fd.set_transport_port()?;
+    // The probe first, and against BOTH types: the config frame is longer
+    // than the 19-byte Reticulum minimum, so sending it on a guess is
+    // packet-shaped noise on the transport CDC, and without the query there
+    // is nothing to base it on anyway.
+    let Some(caps) = envelope::probe_capabilities(&fd)? else {
+        return Ok(TxPowerOutcome::Answered(SessionReply::NoEnvelope));
+    };
+    if !caps.accepts(TYPE_RADIO_QUERY) || !caps.accepts(TYPE_RADIO_CONFIG) {
+        return Ok(TxPowerOutcome::Answered(SessionReply::NotAccepted));
+    }
+    let Some(mut cfg) = envelope::query_radio_config(&fd)? else {
+        return Ok(TxPowerOutcome::Unreadable);
+    };
+    let was = cfg.tx_power_dbm;
+    // One field. Everything else in `cfg` is the board's own answer, passed
+    // straight back — this line is the whole read-modify-write contract.
+    cfg.tx_power_dbm = dbm;
+    match SessionReply::from(envelope::send_radio_config(&fd, &cfg)?) {
+        SessionReply::Acked => Ok(TxPowerOutcome::Applied { was, now: dbm }),
+        other => Ok(TxPowerOutcome::Answered(other)),
+    }
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a

@@ -33,8 +33,10 @@ pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
 pub const LORA_TCXO_VOLTAGE: f32 = 1.8;
 /// SX1262 max TX power (dBm)
 pub const LORA_MAX_POWER_DBM: i8 = 22;
-/// SX1262 OCP current limit (mA)
-pub const LORA_OCP_CURRENT_MA: u16 = 140;
+// The OCP current limit is not here. It is written as part of the
+// transmit-power sequence, which has to stay in one host-testable piece
+// (`leviculum_core::sx126x::OCP_HIGH_POWER`); this constant was never read by
+// anything and a second copy of the number is a second thing to keep in step.
 /// SX1262 uses DIO2 as internal RF switch (no external RXEN/TXEN pins)
 pub const LORA_DIO2_AS_RF_SWITCH: bool = true;
 /// SX1262 BUSY polling timeout (ms, from RNode firmware)

@@ -58,6 +58,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_CAPABILITIES,
     envelope::TYPE_TELEMETRY_TARGET,
     envelope::TYPE_TX_SPACING,
+    envelope::TYPE_RADIO_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -545,6 +546,28 @@ async fn retic_serial_task(
                                         envelope::encode_capability_report(ACCEPTED_CONTROL_TYPES);
                                     if !write_framed(&mut cdc, &report, &mut frame_buf).await {
                                         log("SER: capability report write failed");
+                                    }
+                                }
+                                ControlAction::RadioQuery => {
+                                    // Answered from what the LoRa task
+                                    // actually configured, never from the
+                                    // flash page or the compiled default:
+                                    // those describe the board a reset would
+                                    // produce, and a host that reads one and
+                                    // writes it back would apply settings
+                                    // this board is not on. Before the radio
+                                    // has come up there is no honest answer,
+                                    // so the query is refused as busy and the
+                                    // host retries.
+                                    let answer = match crate::lora::running_config() {
+                                        Some(wire) => envelope::encode_radio_report(&wire),
+                                        None => envelope::encode_refusal(
+                                            envelope::TYPE_RADIO_QUERY,
+                                            envelope::REFUSE_BUSY,
+                                        ),
+                                    };
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: radio report write failed");
                                     }
                                 }
                                 ControlAction::Refuse {

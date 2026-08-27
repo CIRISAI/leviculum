@@ -80,6 +80,21 @@ struct Cli {
     #[arg(long, value_name = "MS", conflicts_with_all = ["set_time", "set_telemetry"])]
     set_tx_spacing: Option<u16>,
 
+    /// Set the transmit power, in dBm, on every running LNode, then exit.
+    /// No flashing. Reads the board's current radio settings first and sends
+    /// them back with only the power changed, so nothing else moves; a board
+    /// that cannot report them is left alone. Unlike --set-tx-spacing this
+    /// IS persisted — a reset comes back on the value set here. -9 to 22;
+    /// anything outside that range is clamped by the board, which says so on
+    /// its debug port.
+    #[arg(
+        long,
+        value_name = "DBM",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing"]
+    )]
+    set_tx_power: Option<i32>,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -299,6 +314,25 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_tx_spacing(&catalogue, &sysfs, ui, spacing_ms)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(dbm) = cli.set_tx_power {
+        // The wire field is one signed byte; the CLI takes an i32 so a value
+        // outside it is named here rather than wrapping into a plausible one.
+        // The *range* check is the board's — a value the chip cannot do is
+        // clamped and announced, never refused (see #349).
+        let dbm = i8::try_from(dbm)
+            .map_err(|_| format!("--set-tx-power {dbm} does not fit the one-byte wire field"))?;
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_tx_power(&catalogue, &sysfs, ui, dbm)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -676,15 +710,60 @@ mod tests {
     }
 
     #[test]
-    fn the_three_configure_only_sessions_are_not_one_command() {
+    fn the_configure_only_sessions_are_not_one_command() {
         // Each of them ends the run after talking to the boards, so any
         // pair would silently drop one.
         for args in [
             vec!["--set-time", "--set-tx-spacing", "60"],
             vec!["--set-telemetry", "--set-tx-spacing", "60"],
+            vec!["--set-time", "--set-tx-power", "14"],
+            vec!["--set-telemetry", "--set-tx-power", "14"],
+            vec!["--set-tx-spacing", "60", "--set-tx-power", "14"],
         ] {
             let err = spacing(&args).unwrap_err();
             assert!(err.contains("cannot be used with"), "{args:?}: {err}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Transmit power (Codeberg #349)
+    // -----------------------------------------------------------------
+
+    fn txpower(args: &[&str]) -> Result<Option<i32>, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok(cli.set_tx_power)
+    }
+
+    #[test]
+    fn no_tx_power_flag_means_the_session_does_not_run_at_all() {
+        assert_eq!(txpower(&[]).unwrap(), None);
+        assert_eq!(txpower(&["--yes"]).unwrap(), None);
+    }
+
+    /// The whole -9..=22 range reaches the flow, negatives included. The
+    /// leading `-` is why the argument needs `allow_hyphen_values`, and a
+    /// parser that lost it would turn -9 into an unknown flag rather than
+    /// into a power.
+    #[test]
+    fn every_power_the_part_accepts_parses_including_the_negatives() {
+        for dbm in -9i32..=22 {
+            assert_eq!(
+                txpower(&["--set-tx-power", &dbm.to_string()]).unwrap(),
+                Some(dbm),
+                "{dbm} dBm"
+            );
+        }
+    }
+
+    /// Out of range is NOT a usage error: the board clamps and says so, which
+    /// is the project's rule for a value the hardware cannot do. Only a value
+    /// that does not fit the one-byte wire field is refused, and that
+    /// refusal is in `run`, not in the parser.
+    #[test]
+    fn an_out_of_range_power_is_carried_to_the_board_rather_than_refused_here() {
+        assert_eq!(txpower(&["--set-tx-power", "37"]).unwrap(), Some(37));
+        assert_eq!(txpower(&["--set-tx-power", "-20"]).unwrap(), Some(-20));
+        assert!(txpower(&["--set-tx-power", "loud"]).is_err());
     }
 }

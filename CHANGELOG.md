@@ -12,8 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The gap the LoRa interface leaves between two packets on the air is
   settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
   frame `0x06`. The default imposes nothing (#345).
+- The transmit power is settable without a reflash — `lnflash
+  --set-tx-power <DBM>`, which reads the board's current radio settings
+  back (envelope frame `0x07`) and returns them with only the power
+  changed. Persisted (#349).
+- A board states the transmit power it programmed, and whether the
+  request was clamped, on its critical log path (#349).
 
 ### Fixed
+
+- An LNode transmits the power it was configured with. The requested
+  value never reached `SetTxParams`, so only four powers were reachable
+  and a configured 2 dBm went out at roughly 14 (#349).
 
 - The LNode radio is listening again before a received frame is handed to
   the stack, instead of after it has been processed.

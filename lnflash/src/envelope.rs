@@ -310,6 +310,29 @@ pub fn send_radio_config(fd: &Fd, cfg: &RadioConfigWire) -> io::Result<ControlOu
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Ask the board what its radio is running (#349, `TYPE_RADIO_QUERY`).
+///
+/// `Ok(None)` is "no report came back": firmware without the query, or a
+/// board whose radio has not come up yet and answered `REFUSE_BUSY`. Either
+/// way the caller has no current settings, and the one thing it must not do
+/// is invent them — a config frame carries the whole parameter set, so
+/// substituting defaults for the fields it did not mean to touch is how a
+/// power sweep quietly resets the bandwidth.
+pub fn query_radio_config(fd: &Fd) -> io::Result<Option<RadioConfigWire>> {
+    transact(
+        fd,
+        &leviculum_core::envelope::encode_radio_query(),
+        CONTROL_TIMING,
+        |data| {
+            let frame = decode_frame(data).ok()?;
+            if frame.frame_type != leviculum_core::envelope::TYPE_RADIO_REPORT {
+                return None;
+            }
+            leviculum_core::envelope::decode_radio_report_payload(frame.payload)
+        },
+    )
+}
+
 /// The scripted boards every control-plane test drives.
 ///
 /// Shared rather than per-test-module on purpose: a stub is a claim about
@@ -321,11 +344,11 @@ pub(crate) mod testing {
     use crate::sys::testpty::{spawn_stub, Pty};
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
-        classify_control_frame, encode_ack, encode_capability_report, encode_refusal,
-        ControlAction, TYPE_CAPABILITIES, TYPE_RADIO_CONFIG, TYPE_RESET, TYPE_TELEMETRY_TARGET,
-        TYPE_TX_SPACING, TYPE_WALL_TIME,
+        classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
+        encode_refusal, ControlAction, TYPE_CAPABILITIES, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY,
+        TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
-    use leviculum_core::rnode::RADIO_CONFIG_ACK;
+    use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
 
     /// Every frame the stub was handed, for tests that assert on the bytes
@@ -347,7 +370,31 @@ pub(crate) mod testing {
         TYPE_CAPABILITIES,
         TYPE_TELEMETRY_TARGET,
         TYPE_TX_SPACING,
+        TYPE_RADIO_QUERY,
     ];
+
+    /// What the scripted board's radio is running.
+    ///
+    /// Deliberately not the eu868 default any part of `lnflash` would
+    /// substitute: SF9 and 250 kHz are this fixture's and nothing else's, so
+    /// a flow that quietly rebuilt the config from its own defaults instead
+    /// of from the report shows up as a changed number rather than as a
+    /// coincidence.
+    pub fn stub_running_config() -> RadioConfigWire {
+        RadioConfigWire {
+            frequency_hz: 867_500_000,
+            bandwidth_hz: 250_000,
+            sf: 9,
+            cr: 6,
+            tx_power_dbm: 14,
+            preamble_len: 20,
+            csma_enabled: true,
+            radio_silent: false,
+            st_alock: 1_500,
+            lt_alock: 250,
+            lt_alock_present: true,
+        }
+    }
 
     /// The accepted list of firmware from before #236 landed its
     /// telemetry consumer: everything else, and a named refusal for the
@@ -374,6 +421,7 @@ pub(crate) mod testing {
                     encode_refusal(TYPE_WALL_TIME, super::REFUSE_VALUE)
                 }),
                 ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
+                ControlAction::RadioQuery => Some(encode_radio_report(&stub_running_config())),
                 ControlAction::TelemetryTarget(_) => Some(encode_ack(TYPE_TELEMETRY_TARGET)),
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
                 ControlAction::Refuse {
@@ -420,6 +468,16 @@ pub(crate) mod testing {
         seen.lock().unwrap().iter().find_map(|f| {
             match classify_control_frame(f, FIRMWARE_ACCEPTS) {
                 ControlAction::TxSpacing(ms) => Some(ms),
+                _ => None,
+            }
+        })
+    }
+
+    /// The radio config the stub was sent, if a config frame reached it.
+    pub fn radio_config_frame(seen: &Seen) -> Option<RadioConfigWire> {
+        seen.lock().unwrap().iter().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::RadioConfig(cfg) => Some(cfg),
                 _ => None,
             }
         })
@@ -668,6 +726,71 @@ mod tests {
                 reason: REFUSE_UNKNOWN_TYPE
             }
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Reading the radio back (#349)
+    // -----------------------------------------------------------------
+
+    /// The board's own settings come back, not the host's defaults.
+    #[test]
+    fn the_radio_query_returns_what_the_board_is_running() {
+        let pty = Pty::open();
+        envelope_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(
+            query_radio_config(&fd).unwrap(),
+            Some(stub_running_config())
+        );
+    }
+
+    /// **The control for `--set-tx-power`.** Read the board's settings,
+    /// change one field, send them back: the frame that reaches the board
+    /// differs from what it reported in the power and in nothing else.
+    ///
+    /// Asserted field by field against the board's own report rather than
+    /// against a constructed expectation, so a flow that rebuilt the config
+    /// from `lnflash`'s eu868 defaults — the failure this whole read-back
+    /// exists to prevent, since it would reset the bandwidth while claiming
+    /// to set the power — fails here.
+    #[test]
+    fn changing_the_power_leaves_every_other_setting_where_the_board_had_it() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let mut cfg = query_radio_config(&fd).unwrap().expect("board reports");
+        cfg.tx_power_dbm = -9;
+        assert_eq!(send_radio_config(&fd, &cfg).unwrap(), ControlOutcome::Acked);
+
+        let arrived = radio_config_frame(&seen).expect("a config frame reached the board");
+        let running = stub_running_config();
+        assert_eq!(arrived.tx_power_dbm, -9, "the power did not change");
+        assert_eq!(arrived.frequency_hz, running.frequency_hz);
+        assert_eq!(arrived.bandwidth_hz, running.bandwidth_hz);
+        assert_eq!(arrived.sf, running.sf);
+        assert_eq!(arrived.cr, running.cr);
+        assert_eq!(arrived.preamble_len, running.preamble_len);
+        assert_eq!(arrived.csma_enabled, running.csma_enabled);
+        assert_eq!(arrived.radio_silent, running.radio_silent);
+        assert_eq!(arrived.st_alock, running.st_alock);
+        assert_eq!(arrived.lt_alock, running.lt_alock);
+        assert_eq!(arrived.lt_alock_present, running.lt_alock_present);
+    }
+
+    /// Firmware without the query answers nothing usable, and the caller is
+    /// told so rather than handed a plausible config it can act on.
+    #[test]
+    fn a_board_without_the_query_yields_no_config_rather_than_a_guess() {
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(leviculum_core::envelope::TYPE_RADIO_QUERY));
+        assert_eq!(query_radio_config(&fd).unwrap(), None);
     }
 
     // -----------------------------------------------------------------

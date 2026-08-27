@@ -35,14 +35,14 @@
 //! cost is two lines per boot. Anything that repeats belongs on the gated
 //! sink, where it cannot lap the ring before a reader arrives.
 //!
-//! A third fact joins them only when it has something to say:
-//! [`pa_profile_substitution`] states the transmit power the radio was
-//! programmed with when that is not the power it was asked for. The same
-//! window swallowed it, and it contradicts the settings line above — which
-//! reports the request — so a board whose PA saturated said `txp=2` and
-//! transmitted 14 dBm. A fact that is only interesting when it fires is
-//! emitted only when it fires; the alternative puts it back out of sight
-//! among the lines nobody reads.
+//! A third joins them on the same terms: [`tx_power_programmed`] states what
+//! the PA was actually programmed with. The settings line above reports the
+//! *request*, and for as long as the driver hardcoded `SetTxParams` those two
+//! were different numbers — a board configured for 2 dBm said `txp=2` and
+//! radiated about 14. Nothing readable off a running board named the
+//! programmed power, so the sweep that would have caught it had nothing to
+//! verify a point against. Unconditional, like the cap line: "what is this
+//! board radiating" is not a question a silence can answer.
 //!
 //! The functions take a sink rather than calling the firmware's logger, so
 //! the routing is assertable on the host: `leviculum-nrf` cross-compiles to
@@ -206,48 +206,72 @@ pub fn airtime_limits<S: LineSink>(sink: &mut S, l: &AirtimeLimits) {
     );
 }
 
-/// `[SX_PA_PROFILE] requested=… programmed=…` — the transmit power the radio
-/// was actually programmed with, when it is not the one that was asked for.
+/// Everything the transmit-power line states, as it was written to the chip.
 ///
-/// The SX1262 high-power PA has a documented `SetPaConfig` setting for four
-/// output powers and nothing in between (`sx126x::PA_PROFILES_DBM`), so any
-/// other request is programmed as one of those four. `sx126x::pa_profile_dbm`
-/// rounds down — except below the lowest profile, where there is nothing to
-/// round down to and the PA saturates at 14 dBm, which is the one direction in
-/// which a board transmits MORE than it was told to. That case is reachable
-/// from a real flash: `lnflash` accepts -9 dBm, and the hardware corpus asks
-/// for 2.
+/// Built from `sx126x::TxPowerProgram`, which the driver gets back from the
+/// call that did the writing — so every field here is a byte that went out on
+/// the SPI bus, not one the caller intended to send.
+pub struct TxPowerProgrammed {
+    /// The configured request, before any clamp.
+    pub requested_dbm: i8,
+    /// The first `SetTxParams` argument: what the chip was told to radiate.
+    pub programmed_dbm: i8,
+    /// The `SetPaConfig` argument block: PADutyCycle, HPMax, DeviceSel, PALut.
+    pub pa_config: [u8; 4],
+    /// The `SetTxParams` ramp byte.
+    pub ramp: u8,
+    /// The `REG_OCP` byte.
+    pub ocp: u8,
+    /// Whether the request had to be brought into the part's range.
+    pub clamped: bool,
+}
+
+/// `[SX_TX_POWER] requested_dbm=… tx_params_dbm=… pa=… ocp=… clamped=…` — the
+/// transmit power the radio is actually running, readable off a running board
+/// without inference.
 ///
-/// Critical, for the same reason as the two facts above and with the same
-/// consequence: the substitution used to go out on the gated sink from inside
-/// `configure_lora`, inside the window a board drops when nobody has attached
-/// to the debug port yet, while `[LORA] active config` reported `txp=` the
-/// *request*. So the number an operator could read was the one the radio was
-/// not programmed with.
+/// The line this replaces (`[SX_PA_PROFILE]`) reported a *substitution*, and
+/// only when there was one. That was the right shape while the driver could
+/// only reach four powers; it is the wrong shape now that it reaches all 32,
+/// because the question at the rig is not "was I given something odd" but
+/// "what is this board radiating right now" — and a fact that is emitted only
+/// in the interesting case cannot answer that. So this one is unconditional,
+/// the same decision and for the same reason as `[LORA_AIRTIME_LOCK]` beside
+/// it: a cap in force had to be inferred from a silence, once.
 ///
-/// Emitted only when the two values differ. A request that lands on a profile
-/// exactly has nothing to report, and a line on every boot regardless would
-/// make the interesting case invisible again one level up.
+/// Four things, none of them derivable from the others:
 ///
-/// `requested_dbm` is what the configuration asked for; `programmed_dbm` is
-/// what `pa_profile_dbm` chose. The direction is stated in words because it is
-/// the compliance-relevant half: rounding down spends the operator's own
-/// margin, rounding up spends the regulator's.
-pub fn pa_profile_substitution<S: LineSink>(sink: &mut S, requested_dbm: i8, programmed_dbm: i8) {
-    if programmed_dbm == requested_dbm {
-        return;
-    }
-    let direction = if programmed_dbm > requested_dbm {
-        "above the request"
-    } else {
-        "below the request"
-    };
+/// * `requested_dbm` — what the configuration asked for;
+/// * `tx_params_dbm` — the byte `SetTxParams` was given, i.e. the output;
+/// * `pa` — the four `SetPaConfig` bytes, so a board that somehow programmed
+///   a different PA row says so rather than being taken on trust;
+/// * `clamped` — whether the request was outside the part's range. Clamped and
+///   announced, never refused.
+///
+/// `ramp` and `ocp` ride along because they are the other two bytes of the
+/// same three-op sequence and cost nothing to state; `ocp` in particular is
+/// the one value that could make a board deliver less than `tx_params_dbm`
+/// says.
+///
+/// Critical, for the same reason as the two facts above: a board that boots
+/// before a reader attaches drops everything gated, and this is the fact a
+/// sweep has to confirm each point against before it measures it.
+pub fn tx_power_programmed<S: LineSink>(sink: &mut S, p: &TxPowerProgrammed) {
     sink.line(
         Route::Critical,
-        "[SX_PA_PROFILE] ",
+        "[SX_TX_POWER] ",
         format_args!(
-            "requested={} dBm has no PA profile, programmed={} dBm, {}",
-            requested_dbm, programmed_dbm, direction
+            "requested_dbm={} tx_params_dbm={} pa=0x{:02X},0x{:02X},0x{:02X},0x{:02X} \
+             ramp=0x{:02X} ocp=0x{:02X} clamped={}",
+            p.requested_dbm,
+            p.programmed_dbm,
+            p.pa_config[0],
+            p.pa_config[1],
+            p.pa_config[2],
+            p.pa_config[3],
+            p.ramp,
+            p.ocp,
+            if p.clamped { "yes" } else { "no" },
         ),
     );
 }
@@ -468,56 +492,87 @@ mod tests {
         }
     }
 
-    /// The case the line exists for: the chip has no setting below 14 dBm, so
-    /// a request under it is the one substitution that programs MORE power
-    /// than was asked for. 91 hardware scenarios ask for 2 dBm, and the only
-    /// line that mentioned it said `txp=2` — the request, not the profile.
+    /// The PA bytes below are `sx126x::PA_CONFIG_HIGH_POWER`, spelled out
+    /// because this crate does not depend on core.
+    fn programmed(requested_dbm: i8, programmed_dbm: i8, clamped: bool) -> TxPowerProgrammed {
+        TxPowerProgrammed {
+            requested_dbm,
+            programmed_dbm,
+            pa_config: [0x04, 0x07, 0x00, 0x01],
+            ramp: 0x04,
+            ocp: 0x38,
+            clamped,
+        }
+    }
+
+    /// The case the line exists for: 23 hardware scenarios configure 2 dBm,
+    /// and the only line that mentioned it said `txp=2` — the request. Now the
+    /// programmed byte is beside it, so the two can be read against each other
+    /// instead of one standing in for the other.
     #[test]
-    fn a_request_below_the_lowest_profile_states_both_values_and_the_direction() {
+    fn the_line_states_the_request_the_programmed_byte_and_the_pa_config() {
         let mut sink = Recorder::default();
-        pa_profile_substitution(&mut sink, 2, 14);
+        tx_power_programmed(&mut sink, &programmed(2, 2, false));
         assert_eq!(
             sink.lines,
             [(
                 Route::Critical,
                 String::from(
-                    "[SX_PA_PROFILE] requested=2 dBm has no PA profile, programmed=14 dBm, \
-                     above the request t=191\r\n"
+                    "[SX_TX_POWER] requested_dbm=2 tx_params_dbm=2 pa=0x04,0x07,0x00,0x01 \
+                     ramp=0x04 ocp=0x38 clamped=no t=191\r\n"
                 )
             )]
         );
     }
 
-    /// The other direction, which is the safe one and still a substitution: a
-    /// request between two profiles is rounded down, and the line says so with
-    /// the same two numbers rather than a different vocabulary.
+    /// A clamp is named as one. The request stays on the line beside the
+    /// programmed value: "clamped" without both numbers would say that
+    /// something was changed without saying from what.
     #[test]
-    fn a_request_between_two_profiles_says_it_was_rounded_down() {
+    fn a_clamped_request_keeps_both_numbers_and_says_it_was_clamped() {
         let mut sink = Recorder::default();
-        pa_profile_substitution(&mut sink, 21, 20);
+        tx_power_programmed(&mut sink, &programmed(37, 22, true));
         assert_eq!(
             sink.lines,
             [(
                 Route::Critical,
                 String::from(
-                    "[SX_PA_PROFILE] requested=21 dBm has no PA profile, programmed=20 dBm, \
-                     below the request t=191\r\n"
+                    "[SX_TX_POWER] requested_dbm=37 tx_params_dbm=22 pa=0x04,0x07,0x00,0x01 \
+                     ramp=0x04 ocp=0x38 clamped=yes t=191\r\n"
                 )
             )]
         );
     }
 
-    /// The control, and the reason the condition lives in here rather than at
-    /// the call site: a line emitted on every boot regardless would put the
-    /// interesting case back out of sight, one level up from where it was.
-    /// The four values are `sx126x::PA_PROFILES_DBM`, spelled out because this
-    /// crate does not depend on core.
+    /// **The control that the old line could not have.** A negative power is a
+    /// real configuration — `lnflash --radio-txpower` accepts -9 — and it has
+    /// to survive the formatting as a negative number rather than as a wrapped
+    /// byte. `247` on this line would be the u8 reinterpretation of -9.
     #[test]
-    fn a_request_that_lands_on_a_profile_exactly_says_nothing() {
-        for profile in [14i8, 17, 20, 22] {
+    fn a_negative_power_is_printed_as_a_negative_number() {
+        let mut sink = Recorder::default();
+        tx_power_programmed(&mut sink, &programmed(-9, -9, false));
+        assert!(
+            sink.lines[0]
+                .1
+                .contains("requested_dbm=-9 tx_params_dbm=-9"),
+            "{}",
+            sink.lines[0].1
+        );
+        assert!(!sink.lines[0].1.contains("247"), "{}", sink.lines[0].1);
+    }
+
+    /// The line is unconditional: every power produces exactly one, including
+    /// the ones that need no clamp. The old line's silence in the ordinary
+    /// case is precisely what made "what is this board radiating" unanswerable
+    /// at the bench.
+    #[test]
+    fn every_power_produces_a_line() {
+        for dbm in -9i8..=22 {
             let mut sink = Recorder::default();
-            pa_profile_substitution(&mut sink, profile, profile);
-            assert!(sink.lines.is_empty(), "profile {profile}: {:?}", sink.lines);
+            tx_power_programmed(&mut sink, &programmed(dbm, dbm, false));
+            assert_eq!(sink.lines.len(), 1, "{dbm} dBm: {:?}", sink.lines);
+            assert_eq!(sink.lines[0].0, Route::Critical, "{dbm} dBm");
         }
     }
 

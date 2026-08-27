@@ -341,6 +341,55 @@ impl RadioConfig {
             lt_alock_present: wire.lt_alock_present,
         })
     }
+
+    /// The wire form of this config, for the radio report (#349).
+    ///
+    /// Every field of [`RadioConfigWire`] survives
+    /// [`from_wire_config`](Self::from_wire_config), so this is the exact
+    /// inverse rather than a reconstruction with gaps: the register codes
+    /// `bw` and `cr` are derived from `bw_hz` and `cr_denom`, which are both
+    /// kept, and nothing else is transformed at all.
+    pub fn to_wire(&self) -> leviculum_core::rnode::RadioConfigWire {
+        leviculum_core::rnode::RadioConfigWire {
+            frequency_hz: self.frequency_hz,
+            bandwidth_hz: self.bw_hz,
+            sf: self.sf,
+            cr: self.cr_denom,
+            tx_power_dbm: self.tx_power_dbm,
+            preamble_len: self.preamble_len,
+            csma_enabled: self.csma_enabled,
+            radio_silent: self.radio_silent,
+            st_alock: self.st_alock,
+            lt_alock: self.lt_alock,
+            lt_alock_present: self.lt_alock_present,
+        }
+    }
+}
+
+/// The settings the radio is running right now, for the radio query (#349).
+///
+/// `None` until the LoRa task has configured the chip for the first time. The
+/// distinction is the point: a query answered from the compiled default, or
+/// from the flash page, would describe what the board *would* come up on
+/// rather than what it is on. Only a config that survived `configure_lora`
+/// is published here, so an answer is always a description of the live
+/// hardware.
+static RUNNING_CONFIG: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::Cell<Option<leviculum_core::rnode::RadioConfigWire>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
+
+/// Publish what the radio was just configured with. Called on the success
+/// arm of every `configure_lora`, beside the `[LORA] active config` line and
+/// for the same reason.
+fn publish_running_config(config: &RadioConfig) {
+    RUNNING_CONFIG.lock(|slot| slot.set(Some(config.to_wire())));
+}
+
+/// The settings the radio is running, or `None` if it has not been
+/// configured yet (#349, `TYPE_RADIO_QUERY`).
+pub fn running_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
+    RUNNING_CONFIG.lock(|slot| slot.get())
 }
 
 // CSMA/CA constants
@@ -923,7 +972,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
         .await
     {
         Ok(()) => {
-            leviculum_log_line::facts::active_radio_config(&mut FirmwareLog, &active_facts(&config))
+            leviculum_log_line::facts::active_radio_config(
+                &mut FirmwareLog,
+                &active_facts(&config),
+            );
+            publish_running_config(&config);
         }
         Err(e) => {
             crate::log::log_fmt("[LORA] ", format_args!("configure FAILED: {:?}", e));
@@ -995,6 +1048,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                         &active_facts(&new_cfg),
                     );
                     config = new_cfg;
+                    publish_running_config(&config);
                     slot_ms = compute_slot_ms(&config);
                     apply_airtime_limits(&mut airtime, &config);
                 }

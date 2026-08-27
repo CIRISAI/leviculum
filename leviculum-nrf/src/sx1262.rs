@@ -23,8 +23,10 @@ mod opcode {
     pub const SET_DIO2_AS_RF_SWITCH: u8 = 0x9D;
     pub const SET_PACKET_TYPE: u8 = 0x8A;
     pub const SET_RF_FREQUENCY: u8 = 0x86;
-    pub const SET_PA_CONFIG: u8 = 0x95;
-    pub const SET_TX_PARAMS: u8 = 0x8E;
+    // `SetPaConfig` and `SetTxParams` are not here: they belong to a sequence
+    // whose ordering has to be host-testable, so they live beside it in
+    // `leviculum_core::sx126x` (`OP_SET_PA_CONFIG`, `OP_SET_TX_PARAMS`). A
+    // second copy here would be a second thing to keep in step.
     pub const SET_BUFFER_BASE_ADDRESS: u8 = 0x8F;
     pub const SET_MODULATION_PARAMS: u8 = 0x8B;
     pub const SET_PACKET_PARAMS: u8 = 0x8C;
@@ -576,41 +578,36 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.rx_ext_bw_hz = bw_code_to_hz(bw);
         self.rx_ext_cr_denom = cr.saturating_add(4);
         self.set_rf_frequency(freq_hz).await?;
-        // PA config for target power (datasheet Table 13-21). The chip has a
-        // setting for four output powers and nothing in between, so a request
-        // that is not one of them is rounded DOWN to the nearest one — never
-        // up, the margin to the regulatory ceiling is the operator's to spend.
-        // The decision is `sx126x::pa_profile_dbm` in core so it has a host
-        // test target; this driver holds only SPI. The substitution is logged
-        // rather than silent: a configured 21 dBm used to fall through a `_`
-        // arm and transmit 14 dBm with nothing said.
+        // Transmit power: one PA config for every output, the configured value
+        // passed through to `SetTxParams`, clamped to what the part can do
+        // (Codeberg #349). The sequence — and the ordering inside it, which
+        // matters because `SetPaConfig` resets the OCP register — is
+        // `sx126x::program_tx_power` in core, where a fake SPI port can watch
+        // the ops; this driver holds only the bus.
         //
-        // Below the lowest profile there is nothing to round down to, so the
-        // PA saturates at 14 dBm and the board transmits ABOVE its request —
-        // and the `[LORA] active config` line reports the request, so nothing
-        // an operator can read names the programmed power. The line therefore
-        // goes out through `facts`, on the sink that survives a boot nobody
-        // was attached for; the gated one dropped it inside the same window
-        // that used to swallow the settings line.
-        let profile_dbm = leviculum_core::sx126x::pa_profile_dbm(power_dbm);
-        leviculum_log_line::facts::pa_profile_substitution(
+        // What it replaces: the requested power never reached `SetTxParams`,
+        // which was sent a literal +22 while a four-row PA table decided the
+        // real output. Four reachable powers, nothing below 14 dBm, and a
+        // configured 2 dBm on the air at roughly 14 — about 12 dB louder than
+        // the RNode leg of the same scenario, driven from the same `txpower`
+        // line.
+        //
+        // The read-back goes out through `facts`, unconditionally, on the sink
+        // that survives a boot nobody was attached for: `[LORA] active config`
+        // reports the *request*, so without this nothing an operator can read
+        // names the power the chip was actually given.
+        let programmed = leviculum_core::sx126x::program_tx_power(self, power_dbm).await?;
+        leviculum_log_line::facts::tx_power_programmed(
             &mut crate::lora::FirmwareLog,
-            power_dbm,
-            profile_dbm,
+            &leviculum_log_line::facts::TxPowerProgrammed {
+                requested_dbm: programmed.requested_dbm,
+                programmed_dbm: programmed.programmed_dbm,
+                pa_config: programmed.pa_config,
+                ramp: programmed.ramp,
+                ocp: programmed.ocp,
+                clamped: programmed.clamped,
+            },
         );
-        let (pa_duty, hp_max) = match profile_dbm {
-            22 => (0x04, 0x07),
-            20 => (0x03, 0x05),
-            17 => (0x02, 0x03),
-            // `pa_profile_dbm` returns only the four values in
-            // `sx126x::PA_PROFILES_DBM`, so this arm is the 14 dBm profile.
-            _ => (0x02, 0x02),
-        };
-        self.write_command(opcode::SET_PA_CONFIG, &[pa_duty, hp_max, 0x00, 0x01])
-            .await?;
-        // SetTxParams: +22 raw power (PA config limits actual output), ramp 200µs
-        self.write_command(opcode::SET_TX_PARAMS, &[22u8, 0x04])
-            .await?;
         self.write_command(opcode::SET_BUFFER_BASE_ADDRESS, &[0x00, 0x00])
             .await?;
         // LDRO is keyed to symbol duration; the decision lives in core
@@ -1303,5 +1300,17 @@ impl<SPI: SpiDeviceTrait> leviculum_core::sx126x::RegisterBus for Sx1262<SPI> {
 
     async fn write_reg(&mut self, addr: u16, value: u8) -> Result<(), Error> {
         self.write_register(addr, &[value]).await
+    }
+}
+
+/// The command half, for the transmit-power sequence (Codeberg #349).
+///
+/// One forwarding method, for the same reason as the two above: the sequence
+/// `SetPaConfig` -> `REG_OCP` -> `SetTxParams` has an order that matters and
+/// bytes that decide what goes on the air, and neither can be checked in a
+/// crate with no test target.
+impl<SPI: SpiDeviceTrait> leviculum_core::sx126x::CommandBus for Sx1262<SPI> {
+    async fn write_cmd(&mut self, opcode: u8, args: &[u8]) -> Result<(), Error> {
+        self.write_command(opcode, args).await
     }
 }

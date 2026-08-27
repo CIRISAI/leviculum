@@ -92,6 +92,18 @@ pub const TYPE_TELEMETRY_TARGET: u8 = 0x05;
 /// next, so the spacing of the telemetry announce/report pair can be swept
 /// without a reflash. `0` is the compiled default and imposes nothing.
 pub const TYPE_TX_SPACING: u8 = 0x06;
+/// Radio-configuration query (Codeberg #349); empty payload. Answered with
+/// [`TYPE_RADIO_REPORT`] carrying the settings the radio is running right
+/// now.
+///
+/// The read direction of [`TYPE_RADIO_CONFIG`], and it exists because that
+/// frame carries the *whole* parameter set: a host that wants to change one
+/// value and has no way to read the other nine can only substitute its own
+/// defaults for them, which turns "set the transmit power" into "reset the
+/// bandwidth as well". A sweep whose points silently differ in modulation is
+/// not a sweep. Five bytes, so firmware from before the envelope drops it
+/// silently and the probe times out, exactly like [`TYPE_CAPABILITIES`].
+pub const TYPE_RADIO_QUERY: u8 = 0x07;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -103,6 +115,14 @@ pub const TYPE_ACK: u8 = 0x81;
 pub const TYPE_REFUSAL: u8 = 0x82;
 /// Capability report; payload is `[ENVELOPE_VERSION, accepted types...]`.
 pub const TYPE_CAPABILITY_REPORT: u8 = 0x83;
+/// Radio report (Codeberg #349); payload is the same parameter block
+/// [`TYPE_RADIO_CONFIG`] carries, describing what the radio is running.
+///
+/// The same codec in both directions on purpose: a host reads one of these,
+/// changes one field, and sends it straight back as a config. Any asymmetry
+/// between the two encodings would be a place for a value to change while
+/// being copied.
+pub const TYPE_RADIO_REPORT: u8 = 0x84;
 
 // ---------------------------------------------------------------------------
 // Refusal reasons
@@ -231,6 +251,24 @@ pub fn encode_capability_query() -> Vec<u8> {
 pub fn encode_radio_config(cfg: &RadioConfigWire) -> Vec<u8> {
     let legacy = crate::rnode::build_radio_config_frame(cfg);
     encode_frame(TYPE_RADIO_CONFIG, &legacy[RADIO_CONFIG_MAGIC.len()..])
+}
+
+/// Encode a complete radio-config query (Codeberg #349).
+pub fn encode_radio_query() -> Vec<u8> {
+    encode_frame(TYPE_RADIO_QUERY, &[])
+}
+
+/// Encode a complete radio report: the settings the board is running, in the
+/// codec [`encode_radio_config`] uses, so the host can change one field and
+/// send it straight back.
+pub fn encode_radio_report(cfg: &RadioConfigWire) -> Vec<u8> {
+    let legacy = crate::rnode::build_radio_config_frame(cfg);
+    encode_frame(TYPE_RADIO_REPORT, &legacy[RADIO_CONFIG_MAGIC.len()..])
+}
+
+/// Decode a radio-report payload back into the settings it describes.
+pub fn decode_radio_report_payload(payload: &[u8]) -> Option<RadioConfigWire> {
+    parse_radio_config(payload)
 }
 
 /// Encode a complete acknowledgement for `acked_type`.
@@ -405,6 +443,11 @@ pub enum ControlAction {
     /// Envelope capability query: answer
     /// `encode_capability_report(accepted)`.
     CapabilityQuery,
+    /// Envelope radio query (Codeberg #349): answer
+    /// `encode_radio_report(&running_config)`. Read-only — it changes
+    /// nothing about the radio, which is what makes it safe to send to a
+    /// board mid-measurement.
+    RadioQuery,
     /// Envelope telemetry target (Codeberg #236): set or clear the
     /// reporting target, persist it, answer
     /// `encode_ack(TYPE_TELEMETRY_TARGET)`. `profile ==
@@ -481,6 +524,13 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_RADIO_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::RadioQuery
+            } else {
+                malformed
+            }
+        }
         TYPE_TELEMETRY_TARGET => match decode_telemetry_target_payload(frame.payload) {
             Some(target) => ControlAction::TelemetryTarget(target),
             None => malformed,
@@ -511,6 +561,7 @@ mod tests {
         TYPE_CAPABILITIES,
         TYPE_TELEMETRY_TARGET,
         TYPE_TX_SPACING,
+        TYPE_RADIO_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -843,6 +894,76 @@ mod tests {
         };
         assert_eq!(from_envelope, from_legacy);
         assert_eq!(from_envelope, cfg);
+    }
+
+    /// The query is short enough that pre-envelope firmware ignores it, and
+    /// the report it is answered with decodes back to the settings that went
+    /// in — the property `--set-tx-power` depends on when it changes one
+    /// field and sends the rest back untouched.
+    #[test]
+    fn a_radio_query_is_answered_with_a_report_that_round_trips() {
+        let query = encode_radio_query();
+        assert!(query.len() < 19);
+        assert_eq!(
+            classify_control_frame(&query, ACCEPTED),
+            ControlAction::RadioQuery
+        );
+
+        let cfg = sample_config();
+        let report = encode_radio_report(&cfg);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(frame.frame_type, TYPE_RADIO_REPORT);
+        assert_eq!(decode_radio_report_payload(frame.payload), Some(cfg));
+    }
+
+    /// A report, with one field changed, is a valid config frame.
+    ///
+    /// This is the whole read-modify-write contract in one assertion: if the
+    /// two codecs ever diverge, a sweep would set the power and move something
+    /// else at the same time, and the numbers would look like power.
+    #[test]
+    fn a_report_with_one_field_changed_is_a_config_the_board_takes() {
+        let mut cfg = sample_config();
+        let report = encode_radio_report(&cfg);
+        let mut echoed = decode_radio_report_payload(decode_frame(&report).unwrap().payload)
+            .expect("the report decodes");
+        echoed.tx_power_dbm = -9;
+        let back = encode_radio_config(&echoed);
+        match classify_control_frame(&back, ACCEPTED) {
+            ControlAction::RadioConfig(parsed) => {
+                assert_eq!(parsed.tx_power_dbm, -9);
+                cfg.tx_power_dbm = -9;
+                assert_eq!(parsed, cfg, "a field other than the power moved");
+            }
+            other => panic!("the echoed config classified as {other:?}"),
+        }
+    }
+
+    /// A query carrying a payload is malformed, not a query with junk after
+    /// it. Same rule as the capability query beside it.
+    #[test]
+    fn a_radio_query_with_a_payload_is_refused_by_name() {
+        let framed = encode_frame(TYPE_RADIO_QUERY, &[0x00]);
+        assert_eq!(
+            classify_control_frame(&framed, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_RADIO_QUERY,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+    }
+
+    /// Firmware that does not list the type refuses it by name rather than
+    /// timing out, so a host can tell "too old" from "not answering".
+    #[test]
+    fn a_board_without_the_query_refuses_it_by_name() {
+        assert_eq!(
+            classify_control_frame(&encode_radio_query(), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_RADIO_QUERY,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
     }
 
     #[test]
