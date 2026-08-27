@@ -27,19 +27,27 @@ pub(super) fn build(
     let iface_name = format!("serial_{}", idx);
     let id = InterfaceId(idx);
 
-    // A `frequency` makes this a LoRa modem, and a carrier occupying one of
-    // the ERC 70-03 narrowband alarm bands is a config error, not a default.
-    // Checked before `serial_radio_config` resolves any radio parameter. The
-    // bandwidth default mirrors `serial_radio_config`'s.
+    // A `frequency` makes this a LoRa modem — the LNode path — and a carrier
+    // occupying one of the ERC 70-03 narrowband alarm bands is warned about
+    // loudly and then honoured, exactly as on the RNode builders: no radio
+    // configuration is ever refused for a radio-regulatory reason, because the
+    // operator carries the legal responsibility for compliant operation and the
+    // same carrier is lawful under a licence, in another region, or in a
+    // shielded chamber. WARN, not debug: a warning behind a filter is the
+    // silent substitution this policy exists to prevent. Checked before
+    // `serial_radio_config` resolves any radio parameter; the bandwidth default
+    // mirrors `serial_radio_config`'s.
     if let Some(frequency) = config.frequency {
         let bandwidth = config.bandwidth.unwrap_or(125_000);
         if let Some(gap) = leviculum_core::rnode::erp_band_gap(frequency, bandwidth) {
-            return Err(Error::Config(format!(
+            tracing::warn!(
                 "SerialInterface: frequency {} Hz with bandwidth {} Hz overlaps the {} band, \
                  where ERC 70-03 permits only <= 25 kHz channel spacing; \
                  choose a centre frequency whose signal fits a listed sub-band",
-                frequency, bandwidth, gap
-            )));
+                frequency,
+                bandwidth,
+                gap
+            );
         }
     }
 

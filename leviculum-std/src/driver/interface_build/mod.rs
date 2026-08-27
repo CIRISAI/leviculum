@@ -205,21 +205,18 @@ mod tests {
         assert!(rnode::build(0, &rnode_config(869_525_000), &owner.ctx()).is_ok());
     }
 
-    /// The `SerialInterface` LNode path still refuses the same carrier,
-    /// before `serial_radio_config` resolves anything.
+    /// The `SerialInterface` LNode path treats the same carrier the same way:
+    /// it builds, and the band is named at WARN before `serial_radio_config`
+    /// resolves anything.
     ///
-    /// **Known policy violation, deliberately left standing.** This is a
-    /// regulatory refusal — the same predicate, the same band, the same
-    /// reason — on a path the 2026-08-27 audit did not cover (it enumerated
-    /// the refusals reachable from an *RNode* build, and a `SerialInterface`
-    /// with a `frequency` is the LNode LoRa modem, not an RNode). Converting
-    /// it was explicitly out of scope for that batch, so the behaviour and
-    /// this test are unchanged and the case is reported rather than fixed.
-    /// The regulatory guard below therefore does not yet cover
-    /// `SerialInterface`; the row is one line to add once the conversion is
-    /// authorised.
-    #[test]
-    fn serial_build_refuses_a_carrier_in_an_alarm_band() {
+    /// Until 2026-08-27 this was an `Err`. The 2026-08-27 audit enumerated the
+    /// refusals reachable from an *RNode* build and missed this one, because a
+    /// `SerialInterface` with a `frequency` is the LNode LoRa modem, not an
+    /// RNode — the same predicate, the same band, the same reason, on the path
+    /// our own hardware uses. Needs a runtime: a successful build spawns the
+    /// interface tasks.
+    #[tokio::test]
+    async fn serial_build_warns_about_a_carrier_in_an_alarm_band_and_honours_it() {
         let owner = CtxOwner::new();
         let config = InterfaceConfig {
             interface_type: "SerialInterface".to_string(),
@@ -227,11 +224,17 @@ mod tests {
             frequency: Some(868_650_000),
             ..Default::default()
         };
-        let err = serial::build(0, &config, &owner.ctx())
-            .err()
-            .expect("868.65 MHz / 125 kHz must not build");
-        let msg = err.to_string();
-        assert!(msg.contains("868.6-868.7 MHz"), "names the band: {msg}");
+        let (seen, subscriber) = warn_tap();
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            serial::build(0, &config, &owner.ctx())
+                .expect("868.65 MHz / 125 kHz builds; it is warned about, not refused");
+        }
+        let warnings = seen.lock().expect("warn tap");
+        assert!(
+            warnings.iter().any(|w| w.contains("868.6-868.7 MHz")),
+            "the band is named at WARN: {warnings:?}"
+        );
     }
 
     /// Every `warn!` message emitted while the returned guard lives.
@@ -505,17 +508,67 @@ mod tests {
                 ..Default::default()
             }
         }
+
+        /// The LNode LoRa modem: a `SerialInterface` block with a `frequency`.
+        /// Not an RNode — it speaks our own firmware, not the RNode KISS
+        /// dialect — but it carries the same radio keys, so the same policy
+        /// binds it. This is the shape the 2026-08-27 audit missed.
+        fn serial(&self) -> InterfaceConfig {
+            InterfaceConfig {
+                name: "guard".to_string(),
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/nonexistent-test-port".to_string()),
+                frequency: Some(self.frequency),
+                bandwidth: Some(self.bandwidth),
+                spreading_factor: Some(self.sf),
+                coding_rate: Some(self.cr),
+                tx_power: self.tx_power,
+                airtime_limit_long: self.airtime_limit_long,
+                ..Default::default()
+            }
+        }
     }
 
-    /// Both shapes the RNode family is configured in, so a refusal cannot
-    /// survive by living only in the one the guard does not drive. Driven
-    /// through `build_interface`, the dispatch a config file actually
-    /// reaches, not the submodule entry points.
+    /// Every shape a radio configuration can arrive in, so a refusal cannot
+    /// survive by living only in one the guard does not drive. Driven through
+    /// `build_interface`, the dispatch a config file actually reaches, not the
+    /// submodule entry points.
+    fn radio_shapes(radio: &Radio) -> [(&'static str, InterfaceConfig); 3] {
+        [
+            ("RNodeInterface", radio.single()),
+            ("RNodeMultiInterface", radio.multi()),
+            ("SerialInterface", radio.serial()),
+        ]
+    }
+
+    /// The shapes that validate device capability at build time — the RNode
+    /// family, both of them, via `leviculum_core::rnode::validate_config`.
+    /// `SerialInterface` is absent because it validates nothing: it resolves
+    /// its radio block and hands it to the modem. See
+    /// `capability_refusals_are_untouched_by_the_regulatory_guard`.
     fn rnode_shapes(radio: &Radio) -> [(&'static str, InterfaceConfig); 2] {
         [
             ("RNodeInterface", radio.single()),
             ("RNodeMultiInterface", radio.multi()),
         ]
+    }
+
+    /// One regulatory edge case: the block, the substring the warning it must
+    /// provoke carries, and the shapes that can carry it.
+    ///
+    /// Every shape must *build* every case — that half is unconditional, it is
+    /// the policy itself. `warns_on` is narrower because the warning comes out
+    /// wherever the key is resolved, and `SerialInterface` resolves
+    /// `airtime_limit_long` through the firmware's own silent derivation
+    /// (`leviculum_core::rnode::firmware_default_lt_alock`) rather than the
+    /// driver's `resolve_lt_alock`, which is where that warning lives. The gap
+    /// is data here, not prose, so it cannot widen unnoticed: a shape added to
+    /// `radio_shapes` is refusal-checked whether or not anyone remembers it.
+    struct Case {
+        what: &'static str,
+        radio: Radio,
+        expected: &'static str,
+        warns_on: &'static [&'static str],
     }
 
     /// The guard. Every known regulatory edge case builds, and says so out
@@ -526,37 +579,42 @@ mod tests {
     /// defect of Codeberg #349/#350 rather than a fix for it.
     #[tokio::test]
     async fn no_radio_configuration_is_refused_for_a_regulatory_reason() {
-        let cases: [(&str, Radio, &str); 3] = [
-            (
-                "a carrier occupying the 868.6-868.7 MHz narrowband alarm band",
-                Radio {
+        const RADIO_SHAPES: &[&str] = &["RNodeInterface", "RNodeMultiInterface", "SerialInterface"];
+        let cases: [Case; 3] = [
+            Case {
+                what: "a carrier occupying the 868.6-868.7 MHz narrowband alarm band",
+                radio: Radio {
                     frequency: 868_650_000,
                     ..Radio::lawful()
                 },
-                "868.6-868.7 MHz",
-            ),
-            (
-                "22 dBm on 867.2 MHz, 8 dB over the 14 dBm h1.4 e.r.p. limit",
-                Radio {
+                expected: "868.6-868.7 MHz",
+                warns_on: RADIO_SHAPES,
+            },
+            Case {
+                what: "22 dBm on 867.2 MHz, 8 dB over the 14 dBm h1.4 e.r.p. limit",
+                radio: Radio {
                     frequency: 867_200_000,
                     tx_power: Some(22),
                     ..Radio::lawful()
                 },
-                "exceeds the derived ERP limit",
-            ),
-            (
-                "the ETSI duty cycle switched off outright",
-                Radio {
+                expected: "exceeds the derived ERP limit",
+                warns_on: RADIO_SHAPES,
+            },
+            Case {
+                what: "the ETSI duty cycle switched off outright",
+                radio: Radio {
                     airtime_limit_long: Some(0.0),
                     ..Radio::lawful()
                 },
-                "exceeds the ETSI EU868 lawful default",
-            ),
+                expected: "exceeds the ETSI EU868 lawful default",
+                // Not SerialInterface: see `Case`.
+                warns_on: &["RNodeInterface", "RNodeMultiInterface"],
+            },
         ];
 
         let owner = CtxOwner::new();
-        for (case, radio, expected) in cases {
-            for (idx, (shape, config)) in rnode_shapes(&radio).into_iter().enumerate() {
+        for case in cases {
+            for (idx, (shape, config)) in radio_shapes(&case.radio).into_iter().enumerate() {
                 let (seen, subscriber) = warn_tap();
                 let built = {
                     let _guard = tracing::subscriber::set_default(subscriber);
@@ -564,15 +622,21 @@ mod tests {
                 };
                 if let Err(e) = built {
                     panic!(
-                        "{shape}: {case} was refused, which project policy forbids \
-                         for a regulatory reason: {e}"
+                        "{shape}: {} was refused, which project policy forbids \
+                         for a regulatory reason: {e}",
+                        case.what
                     );
+                }
+                if !case.warns_on.contains(&shape) {
+                    continue;
                 }
                 let warnings = seen.lock().expect("warn tap");
                 assert!(
-                    warnings.iter().any(|w| w.contains(expected)),
-                    "{shape}: {case} built silently; a warning containing {expected:?} \
-                     must reach the daemon log at WARN. Seen: {warnings:?}"
+                    warnings.iter().any(|w| w.contains(case.expected)),
+                    "{shape}: {} built silently; a warning containing {:?} \
+                     must reach the daemon log at WARN. Seen: {warnings:?}",
+                    case.what,
+                    case.expected
                 );
             }
         }
@@ -581,6 +645,14 @@ mod tests {
     /// The other half. A refusal about what the chip or the wire format can
     /// carry is arithmetic, not radio law, and must survive the guard above
     /// intact — a guard that also forbade these would be worse than none.
+    ///
+    /// Driven over `rnode_shapes`, not `radio_shapes`: `SerialInterface` has
+    /// no capability validation to pin. It resolves its radio block and hands
+    /// it to the LNode firmware without calling `validate_config`, so all five
+    /// cases below build there. That is a gap in *this* half — an unbuildable
+    /// PHY reaches the modem instead of failing daemon startup — and it is a
+    /// separate concern from the regulatory policy, so it is recorded rather
+    /// than fixed here. The lawful control below does cover all three shapes.
     #[tokio::test]
     async fn capability_refusals_are_untouched_by_the_regulatory_guard() {
         let cases: [(&str, Radio); 5] = [
@@ -623,8 +695,9 @@ mod tests {
 
         let owner = CtxOwner::new();
         // Control: the block every case is one key away from must build, or
-        // the assertions below would pass for the wrong reason.
-        for (shape, config) in rnode_shapes(&Radio::lawful()) {
+        // the assertions below would pass for the wrong reason. All three
+        // shapes, because it is also the control for the regulatory guard.
+        for (shape, config) in radio_shapes(&Radio::lawful()) {
             build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default())
                 .unwrap_or_else(|e| panic!("{shape}: the lawful control must build: {e}"));
         }
