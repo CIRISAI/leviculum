@@ -86,6 +86,16 @@ lint-nrf:
 nrf-stack-frames:
     bash scripts/check-nrf-stack-frames.sh
 
+# BLE event-buffer gate. nrf-softdevice sizes the `sd_ble_evt_get` buffer from
+# a cargo feature, defaults to 128 bytes when none is picked, and panics rather
+# than truncating when an event does not fit. Our characteristics are 251 bytes
+# wide, so on the default every LNode reset within seconds of a real Android
+# peer connecting (Codeberg #354). Losing the feature again is invisible: the
+# firmware still builds, and the LNode-to-LNode bench negotiates an MTU small
+# enough to stay under 128. Asserted against cargo's resolved feature graph.
+nrf-evt-max-size:
+    bash scripts/check-nrf-evt-max-size.sh
+
 # SoftDevice guard for the flash runner. Our image is linked at 0x27000 and a
 # factory board still carrying S140 6.1.1 forwards to 0x26000, so writing to
 # one soft-bricks it (docs/src/concepts/lnode-flashing.md). The runner refuses
@@ -130,7 +140,8 @@ nrf-fw-readback:
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
-        scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh
+        scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
+        scripts/check-nrf-evt-max-size.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -365,7 +376,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -382,6 +393,9 @@ fast: check-submodules check-trailers check-integ-bin-list check-supervised-spaw
 #   lint-nrf              — leviculum-nrf is its own workspace, needs the
 #                           thumbv7em target plus flip-link as its linker.
 #   nrf-stack-frames      — reads a linked firmware ELF that is never built here.
+#   nrf-evt-max-size      — resolves the firmware workspace's feature graph
+#                           `--frozen`, so it needs that workspace's git
+#                           dependencies already fetched.
 #   m0-build-gate,
 #   lxmf-embedded-gate    — thumbv6m / thumbv7em cross-compiles.
 # Those keep running on the push path, which has the targets and the submodules.

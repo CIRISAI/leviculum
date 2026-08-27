@@ -54,6 +54,12 @@ bind_interrupts!(pub struct Irqs {
     USBD => embassy_nrf::usb::InterruptHandler<peripherals::USBD>;
 });
 
+/// The two data characteristics are 251 bytes wide, which is also the
+/// largest GATTS write event the SoftDevice can hand us (251 bytes of data
+/// behind an 18-byte event header). The buffer that event is read into is
+/// sized by the `nrf-softdevice/evt-max-size-*` feature in `Cargo.toml`, and
+/// nrf-softdevice panics rather than truncating when the event does not fit
+/// (Codeberg #354). Widening 251 means rechecking that feature.
 #[nrf_softdevice::gatt_service(uuid = "37145b00-442d-4a94-917f-8f42c5da28e3")]
 pub struct ReticulumService {
     #[characteristic(

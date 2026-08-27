@@ -168,6 +168,27 @@ softdevice = [
     "nrf-softdevice/ble-gatt-server",
     "nrf-softdevice/critical-section-impl",
     "nrf-softdevice/macros",
+    # Sizes the buffer nrf-softdevice hands to `sd_ble_evt_get`. With no
+    # evt-max-size-* feature selected the buffer is 128 bytes, and an event
+    # that does not fit makes the call return `DataSize`, on which the crate
+    # panics unconditionally (nrf-softdevice/src/events.rs:92). That killed
+    # every LNode within seconds of a real Android peer connecting
+    # (Codeberg #354).
+    #
+    # `-256` is not enough. Our two data characteristics are declared
+    # `heapless_v8::Vec<u8, 251>` in `ReticulumService` (src/ble.rs), so a
+    # GATTS write can carry 251 bytes; the write event puts 18 bytes of
+    # header in front of them (measured offset of
+    # `ble_evt_t.evt.gatts_evt.params.write.data` for the pinned s140
+    # bindings), giving 269 bytes. Change that 251 and this line has to be
+    # rechecked — src/ble.rs carries the pointer back here.
+    #
+    # 512 is the largest the crate offers, and it covers the worst case our
+    # own config allows rather than merely the case we hit: `sd_config` pins
+    # `conn_gatt.att_mtu` to 256 (src/ble.rs), so the SoftDevice negotiates a
+    # phone's 517-byte request down to 256, the largest ATT write payload is
+    # 253 and the largest event 271 bytes.
+    "nrf-softdevice/evt-max-size-512",
 ]
 
 # Per-board BSPs: same SoftDevice stack, board-specific peripherals

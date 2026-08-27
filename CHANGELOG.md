@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An LNode no longer panics and resets when a phone connects over BLE. The
+  event buffer was left at its 128-byte default, and any peer negotiating a
+  large ATT MTU overflowed it on its first full-size write (#354).
+
 - An LNode transmits the power it was configured with. The requested
   value never reached `SetTxParams`, so only four powers were reachable
   and a configured 2 dBm went out at roughly 14 (#349).
