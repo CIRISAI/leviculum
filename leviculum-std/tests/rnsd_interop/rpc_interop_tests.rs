@@ -370,3 +370,151 @@ async fn test_rnstatus_link_stats_against_rust_daemon() {
 
     cleanup_config_dir(&config_dir);
 }
+
+// --- The drop-in rule against a post-1.3.5 rnstatus (Codeberg #329) -------
+
+/// Environment variable naming a Reticulum source checkout to run the client
+/// tools from, instead of the vendored `reference/Reticulum`.
+const RNS_ROOT_ENV: &str = "LEVICULUM_RNS_ROOT";
+
+/// Run a Python utility out of an arbitrary Reticulum source tree.
+async fn run_python_tool_from(
+    rns_root: &Path,
+    script_rel: &str,
+    args: &[&str],
+    config_dir: &Path,
+) -> Output {
+    let config_str = config_dir.to_str().expect("config dir must be valid UTF-8");
+
+    tokio::process::Command::new("python3")
+        .arg(rns_root.join(script_rel))
+        .arg("--config")
+        .arg(config_str)
+        .args(args)
+        .env("PYTHONPATH", rns_root)
+        .output()
+        .await
+        .expect("failed to spawn python3")
+}
+
+/// The drop-in rule measured against the rnstatus operators actually install.
+///
+/// `reference/Reticulum` is pinned at 1.3.5, and 1.3.5's rnstatus reads a
+/// strictly smaller `interface_stats` key set than current releases — it has
+/// no `txdrp` at all. Codeberg #329 was exactly that blind spot: the
+/// periculum-test image resolves `rns` from PyPI (its vendored LXMF requires
+/// `rns>=1.4.0`, so pip installs the current release over the vendored
+/// 1.3.5), and the rnstatus that lands indexes `ifstat["txdrp"]` with no
+/// presence guard (1.5.2 rnstatus.py:495), so every invocation against lnsd
+/// died with `KeyError`. Two regression cells went red on nothing but an
+/// image rebuild.
+///
+/// One run of this test walks every rnstatus path that indexes an ifstat or
+/// top-level key without a guard, which is the whole surface a new upstream
+/// key can crash us on:
+///
+/// * default text path — `txdrp`/`txdrb`, `mtu` (reached because our
+///   `bitrate` is never None), `txbuffered`/`txstalled`
+/// * `--sort txdrp` / `--sort txbuf` — the sort keys
+/// * `-A` / `-P` — `arxc`/`atxc`, `prxc`/`ptxc` and the `arxs`/`atxs`,
+///   `prxs`/`ptxs` flow ratios
+/// * `--queues` / `--pps` — the top-level `rxq*` and `rxpps`/`txpps` set
+/// * `--json` — the one path that enumerates keys (to hex-encode bytes)
+///
+/// `#[ignore]`d because the tree it needs is not vendored: pointing the suite
+/// at a second Reticulum release is a deliberate act, not a default. Run it
+/// against the release you want lnsd to be drop-in with:
+///
+/// ```text
+/// LEVICULUM_RNS_ROOT=/path/to/Reticulum-1.5.x \
+///   cargo test -p leviculum-std --test rnsd_interop \
+///   test_current_rns_rnstatus_against_rust_daemon -- --ignored --nocapture
+/// ```
+///
+/// It panics rather than skips when the variable is unset, and refuses a tree
+/// that is the vendored 1.3.5 — a green run must mean it measured something.
+#[tokio::test]
+#[ignore = "needs LEVICULUM_RNS_ROOT pointing at a post-1.3.5 Reticulum checkout"]
+async fn test_current_rns_rnstatus_against_rust_daemon() {
+    init_tracing();
+
+    let rns_root = PathBuf::from(std::env::var(RNS_ROOT_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{RNS_ROOT_ENV} must name a post-1.3.5 Reticulum source checkout; \
+             without it this test would measure nothing"
+        )
+    }));
+
+    let version = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import RNS; print(RNS.__version__)")
+        .env("PYTHONPATH", &rns_root)
+        .output()
+        .expect("failed to spawn python3");
+    let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+    assert!(
+        !version.is_empty() && version != "1.3.5",
+        "{RNS_ROOT_ENV}={} reports RNS {version:?}; the point of this test is a \
+         release NEWER than the vendored 1.3.5, which has no txdrp to crash on",
+        rns_root.display()
+    );
+    eprintln!("measuring drop-in compatibility against RNS {version}");
+
+    let (_node, instance_name, _tcp_addr, identity_bytes, _storage) =
+        start_rust_daemon_with_rpc().await;
+    let config_dir = python_client_ready(&instance_name, &identity_bytes).await;
+
+    // Every unguarded-access path in one sweep. `--json` last so a failure in
+    // a text path names the flag that broke rather than a parse error.
+    let flag_sets: [&[&str]; 8] = [
+        &[],
+        &["--sort", "txdrp"],
+        &["--sort", "txbuf"],
+        &["-A"],
+        &["-P"],
+        &["-A", "-P", "-l"],
+        &["--queues", "--pps"],
+        &["--json"],
+    ];
+
+    for args in flag_sets {
+        let output =
+            run_python_tool_from(&rns_root, "RNS/Utilities/rnstatus.py", args, &config_dir).await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "rnstatus {args:?} (RNS {version}) exited {:?}\n\
+             === STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}",
+            output.status.code(),
+        );
+        // rnstatus catches nothing around its render loop, so a KeyError is a
+        // traceback on stderr and a non-zero exit — but a future release could
+        // wrap it. Assert on the symptom name too.
+        assert!(
+            !stderr.contains("KeyError") && !stderr.contains("Traceback"),
+            "rnstatus {args:?} (RNS {version}) faulted on our reply:\n{stderr}"
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "rnstatus {args:?} (RNS {version}) produced no output"
+        );
+    }
+
+    // The acceptance the batch is written against: the interface block
+    // renders, not just the transport banner.
+    let output =
+        run_python_tool_from(&rns_root, "RNS/Utilities/rnstatus.py", &[], &config_dir).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Transport Instance"),
+        "rnstatus (RNS {version}) must show the transport banner, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("TCPServerInterface[") && stdout.contains("Status"),
+        "rnstatus (RNS {version}) must render the interface block, got:\n{stdout}"
+    );
+
+    cleanup_config_dir(&config_dir);
+}
