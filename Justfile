@@ -96,6 +96,18 @@ nrf-stack-frames:
 nrf-evt-max-size:
     bash scripts/check-nrf-evt-max-size.sh
 
+# GAP device-name pointer gate. `ble_gap_cfg_device_name_t` under
+# BLE_GATTS_VLOC_STACK takes a flash pointer or NULL and nothing else; a RAM
+# pointer earns NRF_ERROR_INVALID_ADDR from `sd_ble_cfg_set`, which
+# nrf-softdevice turns into a panic inside `Softdevice::enable` — reached from
+# `main` before its first await, so the USB task never runs and the board
+# boot-loops without ever enumerating. `e52dba1` shipped exactly that and no
+# other gate saw it: the name builder is pure and host-tested, both BSPs build,
+# clippy is clean. Text check by necessity (the bad value is a runtime
+# address); carries its own positive control.
+nrf-gap-device-name:
+    bash scripts/check-nrf-gap-device-name.sh
+
 # SoftDevice guard for the flash runner. Our image is linked at 0x27000 and a
 # factory board still carrying S140 6.1.1 forwards to 0x26000, so writing to
 # one soft-bricks it (docs/src/concepts/lnode-flashing.md). The runner refuses
@@ -141,7 +153,8 @@ nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
-        scripts/check-nrf-evt-max-size.sh
+        scripts/check-nrf-evt-max-size.sh \
+        scripts/check-nrf-gap-device-name.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -376,7 +389,7 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

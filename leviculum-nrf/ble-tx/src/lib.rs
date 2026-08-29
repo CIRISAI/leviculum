@@ -85,9 +85,25 @@ pub fn drain_wait_budget(fragment_count: usize) -> u32 {
 /// structures, a Complete Local Name structure costs 2 bytes of
 /// overhead (length + AD type), and our scan response is name-only, so
 /// up to 29 name bytes would fit. 11 keeps 18 bytes in reserve for
-/// anything the scan response carries later. The GAP device-name
-/// attribute has no such ceiling.
+/// anything the scan response carries later.
+///
+/// The GAP device-name attribute has a second, softer ceiling of its
+/// own: `BLE_GAP_DEVNAME_DEFAULT_LEN` (31). The name is reserved in the
+/// SoftDevice's attribute table (`p_value` NULL under
+/// `BLE_GATTS_VLOC_STACK`, see `leviculum_nrf::ble::init`), and the
+/// bindings note that going past 31 there "the attribute table size must
+/// be increased to have room for the longer device name". Nothing on the
+/// board would say so — the config would simply fail to apply — so the
+/// bound is asserted below instead.
 pub const DEVICE_NAME_LEN: usize = 11;
+
+/// `BLE_GAP_DEVNAME_DEFAULT_LEN`: the longest GAP device name the
+/// SoftDevice's default attribute table has room for.
+///
+/// Mirrored from the `nrf-softdevice-s140` bindings rather than imported:
+/// this crate is the pure, host-tested half and does not link the
+/// SoftDevice. See [`DEVICE_NAME_LEN`].
+pub const GAP_DEVNAME_DEFAULT_LEN: usize = 31;
 
 /// The node's individual BLE name: `LN-<hex8>` (#255).
 ///
@@ -699,6 +715,15 @@ mod tests {
         // 31-byte legacy scan-response AD budget, minus the 2-byte
         // length + AD-type overhead of a Complete Local Name structure.
         assert!(DEVICE_NAME_LEN <= 31 - 2);
+    }
+
+    #[test]
+    fn the_device_name_fits_the_default_gap_attribute_table() {
+        // Past BLE_GAP_DEVNAME_DEFAULT_LEN the `gatts_attr_tab_size`
+        // config has to grow with it, and the only symptom of forgetting
+        // is a SoftDevice that refuses the name config at enable — on a
+        // board, before USB comes up.
+        assert!(DEVICE_NAME_LEN <= GAP_DEVNAME_DEFAULT_LEN);
     }
 
     #[test]

@@ -24,6 +24,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::mem;
+use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
@@ -522,6 +523,43 @@ fn report_tx_drop(
     );
 }
 
+/// Write this node's individual GAP device name, `LN-<hex8>` of the
+/// identity hash (#255), into the SoftDevice's attribute table.
+///
+/// This is the runtime half of the `gap_device_name` config in [`init`]:
+/// the config reserves `DEVICE_NAME_LEN` bytes with a NULL `p_value` —
+/// the only pointer `BLE_GATTS_VLOC_STACK` accepts for a name that is not
+/// a flash literal — leaving the name empty, and `sd_ble_gap_device_name_
+/// set` fills it in. The SoftDevice copies the bytes out of `name`, so a
+/// stack local is a valid source; nothing has to stay alive afterwards.
+///
+/// Deliberately non-fatal. The device name is cosmetic — it decides what
+/// a scanner lists, nothing about whether packets move — while this call
+/// sits on the boot path ahead of USB enumeration, where a panic costs
+/// the whole node and takes the log with it. `e52dba1` is exactly that
+/// failure, and the lesson is not only "hand it the right pointer" but
+/// "never let the name be able to stop the boot".
+fn set_gap_device_name(identity_hash: &[u8; 16]) {
+    let name = device_name(identity_hash);
+    // No write access: the name is derived from the identity, a peer has
+    // no business changing it. Same permission the config carries.
+    let write_perm: raw::ble_gap_conn_sec_mode_t = unsafe { mem::zeroed() };
+    // SAFETY: the SoftDevice is enabled (the caller just returned from
+    // `Softdevice::enable`), both pointers are valid for the duration of
+    // the call, and `len` is the true length of `name`.
+    let ret = unsafe {
+        raw::sd_ble_gap_device_name_set(&write_perm, name.as_ptr(), DEVICE_NAME_LEN as u16)
+    };
+    if ret == raw::NRF_SUCCESS {
+        crate::info!(
+            "BLE: gap device name set to {}",
+            core::str::from_utf8(&name).unwrap_or("<non-utf8>")
+        );
+    } else {
+        crate::warn!("BLE: gap device name set failed err={}", ret);
+    }
+}
+
 /// Bring up S140 + start the BLE peripheral task. Peripherals previously
 /// owned by MPSL/SDC (RTC0/TIMER0/PPI/RNG/etc.) are kept in the signature
 /// for ABI compatibility with the binaries; the SoftDevice claims them
@@ -555,14 +593,6 @@ pub fn init(
     _ppi_ch29: Peri<'static, peripherals::PPI_CH29>,
     _rng_periph: Peri<'static, peripherals::RNG>,
 ) -> &'static Softdevice {
-    // The GAP device name a connected peer reads. Runtime-built (the
-    // hex comes from this node's identity), so unlike the old string
-    // literal it needs its own `'static` home — the config struct only
-    // carries a pointer, and with `VLOC_STACK` the SoftDevice copies
-    // the bytes out of it during `enable`.
-    static GAP_NAME: StaticCell<[u8; DEVICE_NAME_LEN]> = StaticCell::new();
-    let gap_name = GAP_NAME.init(device_name(&identity_hash));
-
     let config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
             // Synthesized LF from HF crystal; matches Heltec/RAK/Adafruit
@@ -610,9 +640,30 @@ pub fn init(
             central_sec_count: 0,
             _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
         }),
+        // The GAP device name a connected peer reads. Our name is
+        // runtime-derived (`LN-<hex8>` of this node's identity hash), and
+        // the SoftDevice's contract for this struct is explicit
+        // (`nrf-softdevice-s140` bindings, `ble_gap_cfg_device_name_t`):
+        //
+        //   "If vloc is BLE_GATTS_VLOC_STACK:
+        //     - p_value must point to non-volatile memory (flash) or be NULL.
+        //     - If p_value is NULL, the device name will initially be empty."
+        //
+        // So a pointer into RAM is not an option here, no matter how
+        // 'static that RAM is — handing `sd_ble_cfg_set` one earns
+        // NRF_ERROR_INVALID_ADDR, which nrf-softdevice turns into an
+        // outright panic (`softdevice.rs`, `cfg_set`). That panic sits
+        // inside `Softdevice::enable` below, i.e. inside `main` before its
+        // first await, so the USB task never gets polled: the board dies
+        // pre-enumeration and boot-loops (fixed here; regression `e52dba1`).
+        //
+        // NULL + `max_len` is the reservation: the name lives in the
+        // SoftDevice's own attribute table, empty at enable, and
+        // `set_gap_device_name` below writes it. 11 <= BLE_GAP_DEVNAME_
+        // DEFAULT_LEN (31), so `gatts_attr_tab_size` needs no bump.
         gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
-            p_value: gap_name.as_mut_ptr(),
-            current_len: DEVICE_NAME_LEN as u16,
+            p_value: ptr::null_mut(),
+            current_len: 0,
             max_len: DEVICE_NAME_LEN as u16,
             write_perm: unsafe { mem::zeroed() },
             _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
@@ -623,6 +674,7 @@ pub fn init(
     };
 
     let sd = Softdevice::enable(&config);
+    set_gap_device_name(&identity_hash);
 
     static SERVER: StaticCell<NotifyAwareServer> = StaticCell::new();
     let server = SERVER.init(NotifyAwareServer {
