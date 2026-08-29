@@ -26,18 +26,37 @@ MEMORY
     FLASH : ORIGIN = 0x00027000, LENGTH = 0xC3000
 
     /*
-     * RAM ORIGIN derived empirically via local Cargo [patch] on
-     * nrf-softdevice's softdevice.rs:243 — captured wanted_app_ram_base
-     * value sd_ble_enable returns for our config (BleGapConfig:
-     * periph=1, central=0; default att_mtu=251; default attr_tab_size).
+     * RAM ORIGIN is the SoftDevice's ceiling and, under flip-link, our
+     * stack's FLOOR (`_stack_end`). It is sized from what the S140
+     * itself says it needs, measured with `src/bin/sd-ram-probe.rs`:
+     * `sd_ble_enable` against a deliberately undersized base answers
+     * NRF_ERROR_NO_MEM and writes the exact required base back.
      *
-     * Captured value: wanted_app_ram_base = 0x20002CE0
-     *                 softdevice_ram      = 11488 bytes (~11.2 KiB)
-     *                 board               = RAK4631 (Pocket V2)
-     *                 date                = 2026-05-02
-     * Margin: +0x400 (1 KiB) → final RAM ORIGIN = 0x200030E0
-     *                          (already 32-byte aligned: 0xE0 / 0x20 = 7)
-     * SD reservation: 12512 bytes (= 0x30E0)
+     * 2026-05-02, RAK4631 (Pocket V2), the config that shipped then:
+     *     wanted_app_ram_base = 0x20002CE0  (11 488 B of SD RAM)
+     *     + 0x400 margin      = 0x200030E0  <- the previous ORIGIN
+     *
+     * 2026-08-29, #255 T2 probe, case "c1" — conn_count 2, periph 1,
+     * central 1, att_mtu 256, event_length 24, i.e. the phase-B
+     * configuration (phone + one neighbour LNode):
+     *     wanted_app_ram_base = 0x20003BA8  (15 272 B of SD RAM)
+     *     + 0x400 margin      = 0x20003FA8
+     *     rounded up to 32-byte alignment = 0x20003FC0  <- ORIGIN now
+     *
+     * The 0x400 margin is deliberately kept rather than spent: the
+     * previous ORIGIN carried it, and a configuration that outgrows the
+     * floor is a board that panics at boot (see `assert_sd_fits_below_
+     * the_stack` in src/ble/mod.rs). The alignment round-up preserves
+     * the 32-byte property this file has always had; nothing requires
+     * more than 8 bytes.
+     *
+     * Cost, paid HERE in phase A rather than in phase B, so the stack
+     * consequence of the central role is measurable before the role
+     * exists (#255 phase A / A4): ORIGIN moves up by
+     *     0x20003FC0 - 0x200030E0 = 0xEE0 = 3 808 B
+     * and the stack region — [_stack_end, __sdata), everything below
+     * .data — shrinks by exactly that. Phase B then raises conn_count
+     * and central_role_count with no change to this file.
      *
      * Lower bound: S140 v7 reserves the bottom 8 KiB (0x20000000-
      * 0x20001FFF) for MBR + master-init scratch; cannot probe below
@@ -50,7 +69,7 @@ MEMORY
      * register access from RawHwRng, fixed in commit f093099). Worth
      * re-running 64 KiB with the f093099 build to confirm.
      *
-     * Leaves 256K - 12.2K = 243.8K (0x3CF20) for application.
+     * Leaves 256K - 15.9K = 240.1K (0x3C040) for application.
      */
-    RAM   : ORIGIN = 0x200030E0, LENGTH = 0x3CF20
+    RAM   : ORIGIN = 0x20003FC0, LENGTH = 0x3C040
 }
