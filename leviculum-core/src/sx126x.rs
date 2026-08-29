@@ -1806,8 +1806,14 @@ mod probe_tests {
     /// reference exactly" edit from quietly capping our output.
     #[test]
     fn the_ocp_is_not_below_the_references() {
-        assert_eq!(OCP_HIGH_POWER, 0x38); // 56 steps x 2.5 mA = 140 mA
-        assert!(OCP_HIGH_POWER > 0x28); // reference/RNode_Firmware/Boards.h:932
+        // 56 steps x 2.5 mA = 140 mA
+        assert_eq!(OCP_HIGH_POWER, 0x38);
+        // reference/RNode_Firmware/Boards.h:932. Both operands are compile-time
+        // constants, so the comparison belongs in a const block:
+        // clippy::assertions_on_constants rejects the runtime form, and the
+        // const one fails the BUILD rather than a test run — which is what an
+        // invariant over a constant should do.
+        const { assert!(OCP_HIGH_POWER > 0x28) };
     }
 }
 
