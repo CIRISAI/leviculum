@@ -143,6 +143,9 @@ pub(crate) struct InterfaceCounters {
     /// it exceeded its cap while TX was held (a dropped frame must be
     /// counted, never silent).
     pub tx_queue_drops: AtomicU64,
+    /// Payload bytes of those dropped frames, in the same currency as
+    /// `tx_bytes` (Python `tx_dropped_bytes`, the `txdrb` stats key).
+    pub tx_dropped_bytes: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
 }
@@ -154,6 +157,7 @@ impl InterfaceCounters {
             tx_bytes: AtomicU64::new(0),
             test_direct_ingress_drops: AtomicU64::new(0),
             tx_queue_drops: AtomicU64::new(0),
+            tx_dropped_bytes: AtomicU64::new(0),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,

@@ -380,6 +380,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                 parent: None,
             },
             bitrate: TCP_BITRATE_GUESS,
+            hw_mtu: 262_144,
             mode,
             announce_rate,
             ifac_size_bits: ifac.as_ref().map(|c| (c.ifac_size() * 8) as i64),

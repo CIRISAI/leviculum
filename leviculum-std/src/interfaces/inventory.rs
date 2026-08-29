@@ -124,6 +124,12 @@ pub(crate) struct ListenerRow {
     /// Python `interface.bitrate` (`TCPServerInterface.BITRATE_GUESS` /
     /// `LocalServerInterface` 1 Gbps, LocalInterface.py:431).
     pub bitrate: i64,
+    /// Python `interface.HW_MTU`, the `mtu` stats key: 262144 for both the
+    /// shared-instance server (`HW_MTU`, LocalInterface.py:71) and — on the
+    /// Reticulum 1.5.2 the nightly containers run, where the key itself
+    /// originates — a TCP listener (its `TCPInterface.HW_MTU` class value,
+    /// adopted by the spawning server).
+    pub hw_mtu: i64,
     pub mode: InterfaceMode,
     /// `announce_rate_target/penalty/grace`. The shared-instance server pins
     /// all three to `None` (LocalInterface.py:427-429); a configured listener
@@ -267,6 +273,7 @@ mod tests {
                     parent: None,
                 },
                 bitrate: 10_000_000,
+                hw_mtu: 262_144,
                 mode: InterfaceMode::default(),
                 announce_rate: (None, None, None),
                 ifac_size_bits: None,

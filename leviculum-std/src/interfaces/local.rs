@@ -258,6 +258,7 @@ pub(crate) fn spawn_local_server(
                 parent: None,
             },
             bitrate: LOCAL_BITRATE,
+            hw_mtu: LOCAL_HW_MTU as i64,
             mode: leviculum_core::traits::InterfaceMode::default(),
             // The reference pins all three to None on this interface
             // (LocalInterface.py:427-429), unlike a config interface.

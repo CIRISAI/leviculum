@@ -322,8 +322,18 @@ struct StatRow {
     txs: f64,
     /// Outgoing frames the interface's host-side send queue shed or
     /// abandoned (Codeberg #318). Reads 0 on a medium that holds no
-    /// host-side queue.
+    /// host-side queue. Doubles as the `txdrp` key, which upstream fills
+    /// from `interface.tx_drops` (post-1.3.5; Reticulum 1.5.2,
+    /// `get_interface_stats`).
     tx_queue_drops: u64,
+    /// Payload bytes of those shed frames: the `txdrb` key (upstream
+    /// `interface.tx_dropped_bytes`, same vintage).
+    tx_dropped_bytes: u64,
+    /// The `mtu` key (upstream `interface.HW_MTU`). `None` when the driver
+    /// registered none — the reference base class also initialises
+    /// `HW_MTU` (Interface.py:103) to `None`, and rnstatus renders it
+    /// verbatim.
+    mtu: Option<i64>,
     status: bool,
     mode: u8,
     bitrate: i64,
@@ -377,6 +387,58 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
             pickle_str_key("tx_queue_drops"),
             pickle_int(row.tx_queue_drops as i64),
         ),
+        // The post-1.3.5 upstream key set. These keys exist nowhere in our
+        // pinned 1.3.5 reference; the authoritative shape was measured on
+        // Reticulum 1.5.2 (`get_interface_stats`, the version the nightly
+        // containers run). Its rnstatus indexes several of them unguarded —
+        // `txdrp` and, whenever `bitrate` is non-None (ours always is),
+        // `mtu`, plus `txbuffered`, on the default path; every `--sort` key;
+        // and the `arxc`/`atxc`/`prxc`/`ptxc` totals under `-a`/`-p` — so a
+        // missing key is a KeyError crash, not a cosmetic gap.
+        //
+        // `txdrp`/`txdrb` carry our real shed-frame counters (the pair
+        // behind RNODE_TX_QUEUE_DROP; upstream increments its
+        // `tx_drops`/`tx_dropped_bytes` at its own send-buffer drop sites).
+        // `mtu` carries the registered HW_MTU. The rest report the value a
+        // 1.5.2 interface holds when the mechanism has never fired: we do
+        // not run those mechanisms — no per-interface announce/path-request
+        // byte or count ledger, no transmit buffer gauge, no violation or
+        // filter counters, no switch gravity — so the never-fired constant
+        // is the truthful report, and rnstatus degrades to the same output
+        // it shows for an idle rnsd.
+        (pickle_str_key("mtu"), opt_int(row.mtu)),
+        (
+            pickle_str_key("txdrp"),
+            pickle_int(row.tx_queue_drops as i64),
+        ),
+        (
+            pickle_str_key("txdrb"),
+            pickle_int(row.tx_dropped_bytes as i64),
+        ),
+        (pickle_str_key("txstalled"), pickle_bool(false)),
+        (pickle_str_key("txbuffered"), pickle_int(0)),
+        (pickle_str_key("arxb"), pickle_int(0)),
+        (pickle_str_key("atxb"), pickle_int(0)),
+        (pickle_str_key("arxc"), pickle_int(0)),
+        (pickle_str_key("atxc"), pickle_int(0)),
+        (pickle_str_key("prxb"), pickle_int(0)),
+        (pickle_str_key("ptxb"), pickle_int(0)),
+        (pickle_str_key("prxc"), pickle_int(0)),
+        (pickle_str_key("ptxc"), pickle_int(0)),
+        (pickle_str_key("arxs"), pickle_float(0.0)),
+        (pickle_str_key("atxs"), pickle_float(0.0)),
+        (pickle_str_key("prxs"), pickle_float(0.0)),
+        (pickle_str_key("ptxs"), pickle_float(0.0)),
+        // Upstream's base class exposes `ic_burst_count`/`ic_pr_burst_count`
+        // as properties returning None (1.5.2 Interface.py).
+        (pickle_str_key("burst_count"), pickle_none()),
+        (pickle_str_key("pr_burst_count"), pickle_none()),
+        (pickle_str_key("gravity"), pickle_int(0)),
+        (pickle_str_key("announces_to_internal"), pickle_none()),
+        (pickle_str_key("protocol_violations"), pickle_int(0)),
+        (pickle_str_key("ifac_violations"), pickle_int(0)),
+        (pickle_str_key("packet_filter_hits"), pickle_int(0)),
+        (pickle_str_key("autoconnect_source"), pickle_none()),
         // status: real `Interface::is_online()` (Codeberg #56). Source of
         // truth is `iface_online_map`, populated by the driver on register
         // and cleared on disconnect. Missing entry → fall back to `true`
@@ -591,7 +653,7 @@ pub(crate) fn build_interface_stats(
             .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
 
         // Read byte counters and compute speeds from the shared counters
-        let (rxb, txb, rxs, txs, tx_queue_drops) = counters_map
+        let (rxb, txb, rxs, txs, tx_queue_drops, tx_dropped_bytes) = counters_map
             .get(&entry.id)
             .map(|c| {
                 let (rxs, txs) = c.speeds();
@@ -601,9 +663,10 @@ pub(crate) fn build_interface_stats(
                     rxs,
                     txs,
                     c.tx_queue_drops.load(Ordering::Relaxed),
+                    c.tx_dropped_bytes.load(Ordering::Relaxed),
                 )
             })
-            .unwrap_or((0, 0, 0.0, 0.0, 0));
+            .unwrap_or((0, 0, 0.0, 0.0, 0, 0));
 
         // Totals stay what they were: the traffic-bearing, non-local
         // interfaces. Local IPC clients and (below) listeners are excluded, so
@@ -664,6 +727,8 @@ pub(crate) fn build_interface_stats(
             rxs,
             txs,
             tx_queue_drops,
+            tx_dropped_bytes,
+            mtu: entry.hw_mtu.map(|m| m as i64),
             status: online_map.get(&entry.id).copied().unwrap_or(true),
             mode: entry.mode.as_u8(),
             bitrate,
@@ -712,6 +777,8 @@ pub(crate) fn build_interface_stats(
             // A listener carries no packets, so it holds no send queue
             // that could shed one.
             tx_queue_drops: 0,
+            tx_dropped_bytes: 0,
+            mtu: Some(listener.hw_mtu),
             status: true,
             mode: listener.mode.as_u8(),
             bitrate: listener.bitrate,
@@ -746,6 +813,45 @@ pub(crate) fn build_interface_stats(
         (pickle_str_key("rxs"), pickle_float(total_rxs)),
         (pickle_str_key("txs"), pickle_float(total_txs)),
         (pickle_str_key("rss"), pickle_none()),
+        // Top-level keys upstream 1.5.2 emits unconditionally (same
+        // `get_interface_stats` producer as the per-interface set; all
+        // post-1.3.5). Its `rnstatus --pps` reads rxpps/txpps and
+        // `--queues` reads every rxq*/*pressure key unguarded; the
+        // announce/path-request totals are presence-guarded but complete
+        // the drop-in shape. As above, we keep no announce/PR traffic
+        // ledger and no partitioned inbound queues, so the never-fired
+        // constants are the truthful report.
+        (pickle_str_key("arxb"), pickle_int(0)),
+        (pickle_str_key("atxb"), pickle_int(0)),
+        (pickle_str_key("arxs"), pickle_float(0.0)),
+        (pickle_str_key("atxs"), pickle_float(0.0)),
+        (pickle_str_key("arxf"), pickle_float(0.0)),
+        (pickle_str_key("atxf"), pickle_float(0.0)),
+        (pickle_str_key("prxb"), pickle_int(0)),
+        (pickle_str_key("ptxb"), pickle_int(0)),
+        (pickle_str_key("prxs"), pickle_float(0.0)),
+        (pickle_str_key("ptxs"), pickle_float(0.0)),
+        (pickle_str_key("prxf"), pickle_float(0.0)),
+        (pickle_str_key("ptxf"), pickle_float(0.0)),
+        // Upstream rounds its `rx_pps`/`tx_pps` to int before storing.
+        (pickle_str_key("rxpps"), pickle_int(0)),
+        (pickle_str_key("txpps"), pickle_int(0)),
+        (pickle_str_key("rxqt"), pickle_int(0)),
+        (pickle_str_key("rxqd"), pickle_int(0)),
+        (pickle_str_key("rxqa"), pickle_int(0)),
+        (pickle_str_key("rxqp"), pickle_int(0)),
+        (pickle_str_key("rxqil"), pickle_int(0)),
+        (pickle_str_key("rxqtd"), pickle_int(0)),
+        (pickle_str_key("rxqdd"), pickle_int(0)),
+        (pickle_str_key("rxqad"), pickle_int(0)),
+        (pickle_str_key("rxqpd"), pickle_int(0)),
+        (pickle_str_key("rxqild"), pickle_int(0)),
+        (pickle_str_key("tqpressure"), pickle_float(0.0)),
+        (pickle_str_key("dqpressure"), pickle_float(0.0)),
+        (pickle_str_key("aqpressure"), pickle_float(0.0)),
+        (pickle_str_key("pqpressure"), pickle_float(0.0)),
+        (pickle_str_key("ilqpressure"), pickle_float(0.0)),
+        (pickle_str_key("txq"), pickle_none()),
     ];
 
     if transport_enabled {
@@ -2138,6 +2244,7 @@ mod tests {
                         parent: None,
                     },
                     bitrate: 10_000_000,
+                    hw_mtu: 262_144,
                     mode: InterfaceMode::default(),
                     announce_rate: (Some(3600), Some(0), Some(5)),
                     ifac_size_bits: None,

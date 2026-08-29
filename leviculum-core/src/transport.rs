@@ -767,6 +767,13 @@ pub struct InterfaceStatEntry {
     /// (`RNodeInterface.updateBitrate`, RNodeInterface.py:693-696), and the
     /// jitter ceiling has no reference equivalent.
     pub link_profile: Option<LinkProfile>,
+    /// Hardware MTU the driver registered for this interface. Reported as the
+    /// `mtu` key, which upstream fills from `interface.HW_MTU` (the key
+    /// postdates our pinned 1.3.5 reference; measured on Reticulum 1.5.2,
+    /// `get_interface_stats`). `None` when none was registered — the
+    /// reference base class also initialises `HW_MTU` (Interface.py:103) to
+    /// `None`.
+    pub hw_mtu: Option<u32>,
 }
 
 /// What an interface reports about the medium it drives.
@@ -7491,6 +7498,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     pr_burst_activated,
                     held_announces,
                     link_profile: self.interface_link_profiles.get(&id).copied(),
+                    hw_mtu: self.interface_hw_mtus.get(&id).copied(),
                 }
             })
             .collect()

@@ -8612,6 +8612,7 @@ mod tests {
                             parent: None,
                         },
                         bitrate: 10_000_000,
+                        hw_mtu: 262_144,
                         mode: InterfaceMode::Full,
                         announce_rate: (None, None, None),
                         ifac_size_bits: None,

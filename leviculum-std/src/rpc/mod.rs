@@ -531,9 +531,12 @@ mod tests {
         let core = make_test_core(true);
         // Register an interface so it appears in the stats list (not a local
         // client -> not skipped by build_interface_stats).
-        core.lock()
-            .unwrap()
-            .set_interface_name(0, "tcp_client_0".to_string());
+        {
+            let mut c = core.lock().unwrap();
+            c.set_interface_name(0, "tcp_client_0".to_string());
+            // Registered HW_MTU must come back as the `mtu` key.
+            c.set_interface_hw_mtu(0, 262_144);
+        }
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -640,6 +643,79 @@ mod tests {
                     Some(&Value::I64(0)),
                     "pr_burst_activated default 0"
                 );
+
+                // The post-1.3.5 upstream key set, measured on Reticulum
+                // 1.5.2 (`get_interface_stats`; none of these keys exist in
+                // the pinned 1.3.5 reference). Its rnstatus indexes txdrp,
+                // mtu and txbuffered unguarded on its default path and
+                // crashed on their absence — this pins presence, type, and
+                // the documented value.
+                assert_eq!(
+                    get("mtu"),
+                    Some(&Value::I64(262_144)),
+                    "mtu carries the registered HW_MTU"
+                );
+                assert_eq!(get("txdrp"), Some(&Value::I64(0)), "txdrp default 0");
+                assert_eq!(get("txdrb"), Some(&Value::I64(0)), "txdrb default 0");
+                assert_eq!(
+                    get("txstalled"),
+                    Some(&Value::Bool(false)),
+                    "txstalled default false"
+                );
+                assert_eq!(
+                    get("txbuffered"),
+                    Some(&Value::I64(0)),
+                    "txbuffered default 0"
+                );
+                // Sortable / flag-path keys (rnstatus --sort, -a, -p).
+                for key in [
+                    "arxb", "atxb", "arxc", "atxc", "prxb", "ptxb", "prxc", "ptxc",
+                ] {
+                    assert_eq!(get(key), Some(&Value::I64(0)), "{key} default 0");
+                }
+                for key in ["arxs", "atxs", "prxs", "ptxs"] {
+                    assert_eq!(get(key), Some(&Value::F64(0.0)), "{key} default 0.0");
+                }
+                for key in [
+                    "burst_count",
+                    "pr_burst_count",
+                    "announces_to_internal",
+                    "autoconnect_source",
+                ] {
+                    assert_eq!(get(key), Some(&Value::None), "{key} default None");
+                }
+                for key in [
+                    "gravity",
+                    "protocol_violations",
+                    "ifac_violations",
+                    "packet_filter_hits",
+                ] {
+                    assert_eq!(get(key), Some(&Value::I64(0)), "{key} default 0");
+                }
+
+                // Top-level keys of the same 1.5.2 producer: its rnstatus
+                // reads these unguarded under --pps and --queues.
+                let top = |k: &str| d.get(&HashableValue::String(k.into()));
+                for key in [
+                    "rxpps", "txpps", "rxqt", "rxqd", "rxqa", "rxqp", "rxqil", "rxqtd", "rxqdd",
+                    "rxqad", "rxqpd", "rxqild",
+                ] {
+                    assert_eq!(top(key), Some(&Value::I64(0)), "{key} default 0");
+                }
+                for key in [
+                    "arxf",
+                    "atxf",
+                    "prxf",
+                    "ptxf",
+                    "tqpressure",
+                    "dqpressure",
+                    "aqpressure",
+                    "pqpressure",
+                    "ilqpressure",
+                ] {
+                    assert_eq!(top(key), Some(&Value::F64(0.0)), "{key} default 0.0");
+                }
+                assert_eq!(top("txq"), Some(&Value::None), "txq default None");
             }
             other => panic!("expected dict response, got: {:?}", other),
         }

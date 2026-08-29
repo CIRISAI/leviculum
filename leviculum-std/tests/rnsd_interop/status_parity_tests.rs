@@ -110,8 +110,13 @@
 //!     LocalClientInterface while the sampling rnstatus is connected. The
 //!     whole-inventory comparison lives in
 //!     `status_inventory_parity_across_daemons`;
-//!   * per-interface key set: ours adds announce_queue/peers, Python adds
-//!     autoconnect_source;
+//!   * per-interface key set: ours adds announce_queue/peers/tx_queue_drops
+//!     plus the post-1.3.5 upstream key set (txdrp and its siblings, added
+//!     for current-rnstatus drop-in compatibility — see the note above
+//!     `row_fields` in rpc/handlers.rs) that the 1.3.5 vendor rnsd here
+//!     predates; nothing is Python-only;
+//!   * top-level key set: ours additionally carries the post-1.3.5 upstream
+//!     totals/queue keys, pinned exactly below;
 //!   * top-level rss: Python reports the daemon process RSS, ours reports
 //!     null;
 //!   * interface identity fields carry per-daemon values (instance name,
@@ -2400,16 +2405,68 @@ async fn lnstatus_rnstatus_multi_interface_sort_parity() {
 /// per daemon instead; the known structural divergences are pinned exactly
 /// so any drift fails the test.
 fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
-    // Top-level key sets must be identical.
+    // Top-level key sets: identical up to the pinned lnsd-only additions.
+    // The post-1.3.5 upstream totals/queue keys (announce/path-request
+    // traffic, pps, inbound-queue pressure, txq) exist in current upstream
+    // but not in the 1.3.5 vendor rnsd sampled here; we emit them for
+    // current-rnstatus drop-in compatibility (its --pps/--queues paths
+    // index them unguarded). Pinned exactly so a vendor bump or an
+    // accidental key drop fails loudly.
     let keys = |v: &Value| -> BTreeSet<String> {
         v.as_object()
             .map(|o| o.keys().cloned().collect())
             .unwrap_or_default()
     };
+    let top_ours_only: BTreeSet<String> = [
+        "arxb",
+        "atxb",
+        "arxs",
+        "atxs",
+        "arxf",
+        "atxf",
+        "prxb",
+        "ptxb",
+        "prxs",
+        "ptxs",
+        "prxf",
+        "ptxf",
+        "rxpps",
+        "txpps",
+        "rxqt",
+        "rxqd",
+        "rxqa",
+        "rxqp",
+        "rxqil",
+        "rxqtd",
+        "rxqdd",
+        "rxqad",
+        "rxqpd",
+        "rxqild",
+        "tqpressure",
+        "dqpressure",
+        "aqpressure",
+        "pqpressure",
+        "ilqpressure",
+        "txq",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     assert_eq!(
-        keys(on_lnsd),
-        keys(on_rnsd),
-        "top-level interface_stats key sets must match across daemons"
+        keys(on_lnsd)
+            .difference(&keys(on_rnsd))
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        top_ours_only,
+        "unexpected lnsd-only top-level interface_stats keys"
+    );
+    assert_eq!(
+        keys(on_rnsd)
+            .difference(&keys(on_lnsd))
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::new(),
+        "unexpected rnsd-only top-level interface_stats keys"
     );
 
     // Pinned interface-list shapes (see module doc). rnstatus is connected
@@ -2463,12 +2520,45 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     let (kl, kr) = (keys(&tl), keys(&tr));
     let ours_only: BTreeSet<String> = kl.difference(&kr).cloned().collect();
     let python_only: BTreeSet<String> = kr.difference(&kl).cloned().collect();
+    // The post-1.3.5 upstream per-interface keys (see the note above
+    // `row_fields` in rpc/handlers.rs): current rnstatus indexes txdrp/mtu/
+    // txbuffered unguarded on its default path and every one of these under
+    // some --sort or -a/-p flag, while the 1.3.5 vendor rnsd here predates
+    // them all.
+    let upstream_additions = [
+        "mtu",
+        "txdrp",
+        "txdrb",
+        "txstalled",
+        "txbuffered",
+        "arxb",
+        "atxb",
+        "arxc",
+        "atxc",
+        "prxb",
+        "ptxb",
+        "prxc",
+        "ptxc",
+        "arxs",
+        "atxs",
+        "prxs",
+        "ptxs",
+        "burst_count",
+        "pr_burst_count",
+        "gravity",
+        "announces_to_internal",
+        "protocol_violations",
+        "ifac_violations",
+        "packet_filter_hits",
+    ];
     let ours_only_full: BTreeSet<String> = ["announce_queue", "peers", "tx_queue_drops"]
         .iter()
+        .chain(upstream_additions.iter())
         .map(|s| s.to_string())
         .collect();
     let ours_only_queued: BTreeSet<String> = ["peers", "tx_queue_drops"]
         .iter()
+        .chain(upstream_additions.iter())
         .map(|s| s.to_string())
         .collect();
     assert!(
@@ -2477,14 +2567,12 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     );
     // `parent_interface_name`/`parent_interface_hash` are emitted by BOTH
     // stacks since Codeberg #177 (the spawned connection points at its
-    // listener), so `autoconnect_source` is all that is left on the Python
-    // side. Its value is asserted below rather than merely tolerated.
+    // listener), and `autoconnect_source` moved to both sides with the
+    // upstream key-set batch (its cross-daemon equality is asserted below),
+    // so nothing is left on the Python side.
     assert_eq!(
         python_only,
-        ["autoconnect_source"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        BTreeSet::new(),
         "unexpected rnsd-only interface_stats keys"
     );
     for (label, t) in [("lnsd", &tl), ("rnsd", &tr)] {
@@ -2523,6 +2611,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "outgoing_pr_frequency",
         "rxs",
         "txs",
+        "autoconnect_source",
     ] {
         let (a, b) = (canon(&tl[key]), canon(&tr[key]));
         assert_eq!(

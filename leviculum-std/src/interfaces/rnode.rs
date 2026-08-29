@@ -648,20 +648,24 @@ fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -
 /// One summary event per return path, never one per frame: a reconnect must
 /// not be able to produce 64 log lines in one moment. `depth` is therefore
 /// always 0 — nothing survives this call.
-fn abandon_send_queue<T>(
+fn abandon_send_queue(
     name: &str,
     counters: &InterfaceCounters,
-    send_queue: &mut VecDeque<T>,
+    send_queue: &mut VecDeque<QueuedFrame>,
     reason: &'static str,
 ) {
     let abandoned = send_queue.len();
     if abandoned == 0 {
         return;
     }
+    let abandoned_bytes: u64 = send_queue.iter().map(|f| f.payload_len).sum();
     send_queue.clear();
     counters
         .tx_queue_drops
         .fetch_add(abandoned as u64, std::sync::atomic::Ordering::Relaxed);
+    counters
+        .tx_dropped_bytes
+        .fetch_add(abandoned_bytes, std::sync::atomic::Ordering::Relaxed);
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
         iface = %name,
@@ -688,11 +692,15 @@ fn abandon_multi_send_queue(
     if abandoned == 0 {
         return;
     }
-    for (subint, _) in send_queue.drain(..) {
+    for (subint, frame) in send_queue.drain(..) {
         vports[subint]
             .counters
             .tx_queue_drops
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        vports[subint]
+            .counters
+            .tx_dropped_bytes
+            .fetch_add(frame.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
@@ -1006,6 +1014,10 @@ where
                                 counters
                                     .tx_queue_drops
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                counters.tx_dropped_bytes.fetch_add(
+                                    dropped.payload_len,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                                 tracing::warn!(
                                     event = "RNODE_TX_QUEUE_DROP",
                                     iface = %name,
@@ -2124,6 +2136,10 @@ async fn rnode_multi_io_task<S>(
                                     .counters
                                     .tx_queue_drops
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                vports[shed_subint].counters.tx_dropped_bytes.fetch_add(
+                                    shed.len() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                                 tracing::warn!(
                                     event = "RNODE_TX_QUEUE_DROP",
                                     iface = %name,
