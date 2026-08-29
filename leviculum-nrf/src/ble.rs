@@ -34,7 +34,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use leviculum_ble_tx::{Action, Event, NotifyOutcome, PacketTx, DRAIN_WAIT_MS};
+use leviculum_ble_tx::{AbortReason, Action, Event, NotifyOutcome, PacketTx, DRAIN_WAIT_MS};
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
     KEEPALIVE_INTERVAL_MS,
@@ -433,6 +433,31 @@ async fn notify_fragments<'a, F>(
                     reason.as_str(),
                     reason.code(),
                 );
+                // A packet abandoned after an accepted fragment leaves
+                // the peer's reassembler holding a torn head, and the
+                // wire protocol has no abort marker: the peer keeps the
+                // head for its full reassembly window and completes it
+                // with the NEXT packet's tail (#255 — Columba glued a
+                // torn announce head onto the following report's END
+                // fragment and rejected the result as an announce with
+                // an invalid signature). The only in-band reset of the
+                // peer's per-connection reassembly state is dropping
+                // the connection; a reconnect is cheaper than a poisoned
+                // stream. Pointless after `Disconnected` — the
+                // connection, and with it the peer's partial state, is
+                // already gone.
+                if tx.torn() && !matches!(reason, AbortReason::Disconnected) {
+                    let _ = conn.disconnect();
+                    crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "BLE_TX_RESYNC action=disconnect frag={} of={} sent={}",
+                            index,
+                            fragment_count,
+                            tx.fragments_sent(),
+                        ),
+                    );
+                }
                 return;
             }
             // Unreachable: every event fed above answers the action just

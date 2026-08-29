@@ -54,10 +54,12 @@
 /// stall is reported as a stall.
 ///
 /// Residual: a spec-legal but exotic central negotiating an interval
-/// above 2 s would see spurious aborts. That peer is out of scope for an
-/// interactive mesh link, and the abort is *visible* (event + counter)
-/// rather than silent, which is strictly better than the behaviour it
-/// replaces.
+/// above 2 s spends extra waits from the budget on every fragment
+/// beyond the first. Since a timed-out wait re-offers the fragment
+/// rather than aborting (#255 — one timeout used to tear the packet
+/// mid-stream), such a peer sees delay, not loss; only a queue that
+/// stays wedged for the whole budget aborts, and that abort is
+/// *visible* (event + counter) rather than silent.
 pub const DRAIN_WAIT_MS: u64 = 2_000;
 
 /// How many drain waits one packet may spend before it is abandoned.
@@ -107,7 +109,10 @@ pub enum Event {
 /// Why a packet was abandoned part-way through its fragments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbortReason {
-    /// No `HVN_TX_COMPLETE` within [`DRAIN_WAIT_MS`].
+    /// Every drain wait timed out until the [`drain_wait_budget`] was
+    /// spent — the queue never made room and never signalled. A single
+    /// timed-out wait only re-offers the fragment (#255: one timeout
+    /// must not tear the packet mid-stream).
     Stalled,
     /// The connection dropped mid-packet.
     Disconnected,
@@ -240,7 +245,29 @@ impl PacketTx {
                 self.phase = Phase::Sending(index);
                 Action::Send { index }
             }
-            (Phase::Waiting(index), Event::WaitTimedOut) => self.abort(index, AbortReason::Stalled),
+            (Phase::Waiting(index), Event::WaitTimedOut) => {
+                // A timed-out wait is NOT license to tear the packet
+                // (#255): fragments already accepted are on the air, and
+                // a peer's reassembler holds them as the head of this
+                // packet. Abandoning the rest turns the *next* packet's
+                // tail into the completion of this one — the Columba
+                // reassembler glued a torn 186 B announce head onto the
+                // following report's END fragment and rejected the
+                // result as a 211/259 B announce with an invalid
+                // signature. Re-offer the fragment instead: if the
+                // drain edge was merely lost, the queue has room now;
+                // if not, QueueFull leads back into the wait. The waits
+                // budget still bounds the total, so a genuinely wedged
+                // queue aborts (and the driver then resyncs the peer by
+                // dropping the connection) instead of looping forever.
+                self.waits += 1;
+                if self.waits >= self.budget {
+                    self.abort(index, AbortReason::Stalled)
+                } else {
+                    self.phase = Phase::Sending(index);
+                    Action::Send { index }
+                }
+            }
             _ => Action::Nothing,
         }
     }
@@ -267,6 +294,25 @@ impl PacketTx {
     #[must_use]
     pub fn budget(&self) -> u32 {
         self.budget
+    }
+
+    /// Whether an abort left the fragment stream torn: at least one
+    /// fragment of this packet was accepted before the rest was
+    /// abandoned.
+    ///
+    /// A torn stream is worse than a lost packet. The wire protocol has
+    /// no abort marker, so the peer's reassembler keeps the accepted
+    /// head for its full reassembly window and completes it with the
+    /// **next** packet's tail — which then parses as a packet of this
+    /// one's type and fails validation (#255: a torn announce head plus
+    /// a report END fragment arrived at Columba as a 211/259 B announce
+    /// with an invalid signature, deterministically). The only in-band
+    /// reset of the peer's per-connection reassembly state is dropping
+    /// the connection; the driver must do exactly that when this is
+    /// `true`.
+    #[must_use]
+    pub fn torn(&self) -> bool {
+        matches!(self.phase, Phase::Aborted) && self.sent > 0
     }
 }
 
@@ -416,6 +462,83 @@ mod tests {
         );
         assert_eq!(sink.accepted, vec![0], "fragment 1 was never queued");
         assert_eq!(tx.fragments_sent(), 1);
+        // The whole budget was spent waiting before giving up: a stall
+        // abort is a last resort, not a first response (#255).
+        assert_eq!(tx.drain_waits(), tx.budget());
+        // Fragment 0 is on the air, so the peer holds a torn head — the
+        // driver must reset it by dropping the connection.
+        assert!(tx.torn());
+    }
+
+    /// The #255 mechanism, minimal: a TRANSIENT drain stall (the drain
+    /// arrives, but later than `DRAIN_WAIT_MS`) must not tear the packet
+    /// mid-stream. Red while one `WaitTimedOut` aborted the packet: the
+    /// peer's reassembler then held fragment 0 as a torn head and
+    /// completed it with the next packet's END fragment — Columba logged
+    /// the glue as a 211/259 B announce with an invalid signature.
+    #[test]
+    fn a_transient_stall_retries_and_delivers_instead_of_tearing() {
+        let mut sink = Sink::new(1);
+        let (mut tx, mut action) = PacketTx::start(2);
+        let mut timeouts_left = 1;
+        for _ in 0..100 {
+            match action {
+                Action::Send { index } => {
+                    action = tx.step(Event::Notify(sink.notify(index)));
+                }
+                Action::AwaitDrain { .. } => {
+                    let event = if timeouts_left > 0 {
+                        timeouts_left -= 1;
+                        Event::WaitTimedOut
+                    } else {
+                        sink.wait()
+                    };
+                    action = tx.step(event);
+                }
+                terminal => {
+                    assert_eq!(
+                        terminal,
+                        Action::Done,
+                        "one late drain must not tear the packet"
+                    );
+                    assert_eq!(sink.accepted, vec![0, 1]);
+                    assert!(!tx.torn());
+                    return;
+                }
+            }
+        }
+        panic!("driver did not terminate");
+    }
+
+    /// `torn()` is precisely "aborted after at least one accepted
+    /// fragment" — the condition under which the driver must reset the
+    /// peer's reassembler by dropping the connection (#255).
+    #[test]
+    fn torn_is_abort_after_an_accepted_fragment_and_nothing_else() {
+        // Abort at fragment 0: nothing on the air, not torn.
+        let (mut tx, _) = PacketTx::start(2);
+        assert!(matches!(
+            tx.step(Event::Notify(NotifyOutcome::Failed(NRF_ERROR_DATA_SIZE))),
+            Action::Abort { index: 0, .. }
+        ));
+        assert!(!tx.torn());
+
+        // Abort at fragment 1: fragment 0 accepted, torn.
+        let (mut tx, _) = PacketTx::start(2);
+        assert_eq!(
+            tx.step(Event::Notify(NotifyOutcome::Sent)),
+            Action::Send { index: 1 }
+        );
+        assert!(matches!(
+            tx.step(Event::Notify(NotifyOutcome::Disconnected)),
+            Action::Abort { index: 1, .. }
+        ));
+        assert!(tx.torn());
+
+        // A completed packet is never torn.
+        let (mut tx, _) = PacketTx::start(1);
+        assert_eq!(tx.step(Event::Notify(NotifyOutcome::Sent)), Action::Done);
+        assert!(!tx.torn());
     }
 
     #[test]

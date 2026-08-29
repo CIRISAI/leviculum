@@ -36,6 +36,7 @@ mod announce_interop_tests;
 mod auto_interop_tests;
 mod backbone_interop_tests;
 mod blackhole_interop_tests;
+mod ble_torn_announce_tests;
 mod channel_tests;
 mod common;
 mod comprehensive_network_test;
