@@ -154,7 +154,8 @@ nrf-shellcheck:
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/check-nrf-evt-max-size.sh \
-        scripts/check-nrf-gap-device-name.sh
+        scripts/check-nrf-gap-device-name.sh \
+        scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as

@@ -281,11 +281,20 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
 }
 
 /// RX side of the debug CDC port. The debug console was historically
-/// write-only; the single command implemented here is the post-mortem
-/// query: any received `p` byte replays `[PANIC_COUNT]` and the stored
-/// post-mortem block through the normal log path (host helper:
-/// `scripts/lnode-panic-query.sh`). All other bytes are ignored, so
-/// terminal line endings and stray input are harmless.
+/// write-only; two single-byte commands are implemented here:
+///
+/// - `p` — post-mortem query. Replays `[PANIC_COUNT]` and the stored
+///   post-mortem block through the normal log path (host helper:
+///   `scripts/lnode-panic-query.sh`).
+/// - `s` — stack high-water reset (#255 phase A). Emits `[STACK]
+///   tag=pre-reset` (the peak of the phase just ended) and then
+///   `tag=reset`, and restarts the measurement from here. Sending `s`
+///   at each phase boundary of a load run turns the one boot-dominated
+///   number into a per-phase peak; see
+///   [`crate::reset_stack_watermark`].
+///
+/// All other bytes are ignored, so terminal line endings and stray input
+/// are harmless.
 #[embassy_executor::task]
 async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
     let mut buf = [0u8; 64];
@@ -295,6 +304,13 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
         while let Ok(n) = cdc.read_packet(&mut buf).await {
             if buf[..n].contains(&b'p') {
                 crate::postmortem_query();
+            }
+            if buf[..n].contains(&b's') {
+                // SAFETY: this task's frame is the deepest live one (the
+                // executor polls task futures on this single stack), and
+                // everything below it is dead. See the fn docs for the
+                // interrupt-nesting caveat the margin covers.
+                unsafe { crate::reset_stack_watermark() };
             }
         }
     }

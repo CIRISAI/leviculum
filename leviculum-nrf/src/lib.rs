@@ -414,8 +414,28 @@ pub unsafe fn paint_stack() {
     /// Headroom below the live SP left unpainted: this function's frame
     /// plus room for an interrupt frame taken mid-paint.
     const SP_MARGIN: usize = 1024;
+    paint_below_sp(SP_MARGIN);
+}
+
+/// Headroom left unpainted by [`reset_stack_watermark`].
+///
+/// Four times [`paint_stack`]'s boot-time margin, because the situation
+/// is not the same one. At boot nothing else is running; a runtime
+/// repaint happens with the SoftDevice enabled, the LoRa driver armed
+/// and USB enumerated, and every one of those takes interrupts that push
+/// their frames below the current SP while the repaint is in flight.
+/// Nordic's guidance for the S140 is that the application reserve on the
+/// order of 1.5 KiB of stack for the SoftDevice's own interrupt
+/// handlers; 4 KiB is that with room for one of ours nested on top.
+const RESET_SP_MARGIN: usize = 4096;
+
+/// Paint `[_stack_end, SP - margin)` and record how far it reached.
+///
+/// # Safety
+/// Nothing may be using the stack below `SP - margin`.
+unsafe fn paint_below_sp(margin: usize) {
     let (lo, hi) = stack_region();
-    let limit = stack_pointer().saturating_sub(SP_MARGIN).min(hi);
+    let limit = stack_pointer().saturating_sub(margin).min(hi);
     let mut p = lo as *mut u32;
     while (p as usize) < limit {
         core::ptr::write_volatile(p, STACK_CANARY);
@@ -425,6 +445,40 @@ pub unsafe fn paint_stack() {
         limit.saturating_sub(lo),
         core::sync::atomic::Ordering::Relaxed,
     );
+}
+
+/// Restart the stack high-water measurement from here.
+///
+/// The canary scheme records the deepest the stack has *ever* been since
+/// the paint, which makes the boot transient — the deepest single moment
+/// on most boards — the number every later reading reports. Peak stack
+/// under a named load (BLE traffic, LoRa relay, telemetry) is therefore
+/// not readable at all from a boot-painted stack: it is hidden behind
+/// whatever `main` did on the way up.
+///
+/// This repaints everything below the live frame, so the next
+/// `[STACK] min_free` is the peak of the phase that *follows* the reset.
+/// Drive one phase, read it, reset, drive the next. It emits two lines:
+/// `tag=pre-reset` (the peak of the phase just ended, the number to
+/// record) and `tag=reset` (the new ceiling, i.e. `painted`).
+///
+/// Reachable over the debug CDC port with the byte `s`
+/// (`usb::debug_reader_task`), alongside the `p` post-mortem query.
+///
+/// # Safety
+/// Everything below `SP - `[`RESET_SP_MARGIN`] must be dead. That holds
+/// for the embassy executor — task futures live in their own storage and
+/// are polled on this one stack, so at any instant only the frames at or
+/// above the current SP are live — and the margin covers an interrupt
+/// frame taken while the repaint runs. It does NOT hold for an interrupt
+/// handler that nests deeper than the margin; nothing in this firmware
+/// does, but a handler added later that does would have its frame
+/// overwritten. The reported `painted` is the ceiling on the reading, as
+/// it is at boot.
+pub unsafe fn reset_stack_watermark() {
+    log_stack("pre-reset");
+    paint_below_sp(RESET_SP_MARGIN);
+    log_stack("reset");
 }
 
 /// Emit one `[STACK]` telemetry line.
