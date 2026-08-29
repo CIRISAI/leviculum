@@ -34,6 +34,15 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod adv;
+pub mod drain;
+
+pub use adv::{
+    ad_structure_len, manufacturer_data, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, COMPANY_ID,
+    LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
+};
+pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
+
 /// Upper bound on a single wait for the SoftDevice's
 /// `BLE_GATTS_EVT_HVN_TX_COMPLETE`, in milliseconds.
 ///

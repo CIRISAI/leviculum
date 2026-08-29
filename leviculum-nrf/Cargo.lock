@@ -909,6 +909,10 @@ dependencies = [
 [[package]]
 name = "leviculum-ble-tx"
 version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-sync 0.7.2",
+]
 
 [[package]]
 name = "leviculum-core"
