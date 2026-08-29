@@ -34,7 +34,10 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use leviculum_ble_tx::{AbortReason, Action, Event, NotifyOutcome, PacketTx, DRAIN_WAIT_MS};
+use leviculum_ble_tx::{
+    device_name, AbortReason, Action, Event, NotifyOutcome, PacketTx, DEVICE_NAME_LEN,
+    DRAIN_WAIT_MS,
+};
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
     KEEPALIVE_INTERVAL_MS,
@@ -230,11 +233,13 @@ async fn ble_task(
             )
             .build(),
     );
-    let scan = SCAN_DATA.init(
-        LegacyAdvertisementBuilder::new()
-            .full_name("leviculum")
-            .build(),
-    );
+    // Individual per-node name, `LN-<hex8>` from the identity hash
+    // (#255) — same hex as the LXMF display name Columba shows, see
+    // `leviculum_ble_tx::device_name`. Hex output is ASCII, so the
+    // `from_utf8` fallback arm is unreachable.
+    let name = device_name(&identity_hash);
+    let name = core::str::from_utf8(&name).unwrap_or("LN-invalid");
+    let scan = SCAN_DATA.init(LegacyAdvertisementBuilder::new().full_name(name).build());
 
     let outgoing_rx = BLE_OUTGOING.receiver();
     let incoming_tx = BLE_INCOMING.sender();
@@ -550,6 +555,14 @@ pub fn init(
     _ppi_ch29: Peri<'static, peripherals::PPI_CH29>,
     _rng_periph: Peri<'static, peripherals::RNG>,
 ) -> &'static Softdevice {
+    // The GAP device name a connected peer reads. Runtime-built (the
+    // hex comes from this node's identity), so unlike the old string
+    // literal it needs its own `'static` home — the config struct only
+    // carries a pointer, and with `VLOC_STACK` the SoftDevice copies
+    // the bytes out of it during `enable`.
+    static GAP_NAME: StaticCell<[u8; DEVICE_NAME_LEN]> = StaticCell::new();
+    let gap_name = GAP_NAME.init(device_name(&identity_hash));
+
     let config = nrf_softdevice::Config {
         clock: Some(raw::nrf_clock_lf_cfg_t {
             // Synthesized LF from HF crystal; matches Heltec/RAK/Adafruit
@@ -598,9 +611,9 @@ pub fn init(
             _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
         }),
         gap_device_name: Some(raw::ble_gap_cfg_device_name_t {
-            p_value: b"leviculum" as *const u8 as _,
-            current_len: 9,
-            max_len: 9,
+            p_value: gap_name.as_mut_ptr(),
+            current_len: DEVICE_NAME_LEN as u16,
+            max_len: DEVICE_NAME_LEN as u16,
             write_perm: unsafe { mem::zeroed() },
             _bitfield_1: raw::ble_gap_cfg_device_name_t::new_bitfield_1(
                 raw::BLE_GATTS_VLOC_STACK as u8,

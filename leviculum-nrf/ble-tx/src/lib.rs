@@ -78,6 +78,40 @@ pub fn drain_wait_budget(fragment_count: usize) -> u32 {
     n.saturating_mul(2).saturating_add(4)
 }
 
+/// Length in bytes of the advertised device name: `LN-` + 8 hex digits.
+///
+/// Sized against the scan response, the tighter of the two surfaces the
+/// name occupies: a legacy scan-response PDU carries 31 bytes of AD
+/// structures, a Complete Local Name structure costs 2 bytes of
+/// overhead (length + AD type), and our scan response is name-only, so
+/// up to 29 name bytes would fit. 11 keeps 18 bytes in reserve for
+/// anything the scan response carries later. The GAP device-name
+/// attribute has no such ceiling.
+pub const DEVICE_NAME_LEN: usize = 11;
+
+/// The node's individual BLE name: `LN-<hex8>` (#255).
+///
+/// `<hex8>` is the leading 4 bytes of the identity hash — the same
+/// bytes the LXMF announce's `app_data` display name `LNode-<hex8>`
+/// (`leviculum-nrf/src/telemetry.rs`, `announce_app_data`) is built
+/// from, so a BLE scanner listing and a Columba contact list show the
+/// same hex for the same node. The full identity hash is also what the
+/// GATT identity characteristic publishes; the name is a readable
+/// prefix of it. The LXMF *destination* hash is deliberately not the
+/// source: no name Columba ever displays is derived from it.
+///
+/// The output is ASCII by construction, so it is always valid UTF-8.
+#[must_use]
+pub fn device_name(identity_hash: &[u8; 16]) -> [u8; DEVICE_NAME_LEN] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut name = *b"LN-00000000";
+    for (i, byte) in identity_hash[..4].iter().enumerate() {
+        name[3 + 2 * i] = HEX[usize::from(byte >> 4)];
+        name[4 + 2 * i] = HEX[usize::from(byte & 0x0F)];
+    }
+    name
+}
+
 /// The result of one `sd_ble_gatts_hvx` call, as the driver saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyOutcome {
@@ -647,5 +681,32 @@ mod tests {
         assert_eq!(drain_wait_budget(1), 6);
         assert_eq!(drain_wait_budget(3), 10);
         assert!(drain_wait_budget(usize::MAX) > 0);
+    }
+
+    #[test]
+    fn the_device_name_is_ln_dash_plus_the_leading_hex_of_the_hash() {
+        let hash = [
+            0xa1, 0xb2, 0xc3, 0xd4, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66,
+            0x55, 0x44,
+        ];
+        let name = device_name(&hash);
+        assert_eq!(&name, b"LN-a1b2c3d4");
+        assert_eq!(name.len(), DEVICE_NAME_LEN);
+    }
+
+    #[test]
+    fn the_device_name_fits_a_name_only_scan_response() {
+        // 31-byte legacy scan-response AD budget, minus the 2-byte
+        // length + AD-type overhead of a Complete Local Name structure.
+        assert!(DEVICE_NAME_LEN <= 31 - 2);
+    }
+
+    #[test]
+    fn the_device_name_is_ascii_for_every_hash_byte() {
+        for byte in 0..=255u8 {
+            let name = device_name(&[byte; 16]);
+            assert!(name.iter().all(|c| c.is_ascii_graphic()));
+            assert!(core::str::from_utf8(&name).is_ok());
+        }
     }
 }
