@@ -232,3 +232,10 @@ path = "src/bin/t114.rs"
 [[bin]]
 name = "rak4631"
 path = "src/bin/rak4631.rs"
+
+# Measurement instrument, not firmware: prints the S140's required app
+# RAM base for a series of BLE configs (#255 T2 central-role design).
+# No flash recipe references it; flashing it is a deliberate act.
+[[bin]]
+name = "sd-ram-probe"
+path = "src/bin/sd-ram-probe.rs"
