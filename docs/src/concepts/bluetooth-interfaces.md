@@ -88,7 +88,7 @@ across all apps; in practice 3 to 4 links are reliable. This protocol therefore
 does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 
 A partial implementation already exists in tree (`leviculum-core/src/framing/ble.rs`,
-`leviculum-nrf/src/ble.rs`). It is incomplete and needs finishing.
+`leviculum-nrf/src/ble/`). It is incomplete and needs finishing.
 
 ### Notifications are flow controlled, not fired and forgotten
 

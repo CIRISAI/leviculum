@@ -259,7 +259,11 @@ Current firmware events:
 
 | Event | Emitted by | Meaning |
 |-------|-----------|---------|
-| `BLE_TX_DROP` | `leviculum-nrf/src/ble.rs` | A BLE packet or keepalive was abandoned part-way through its fragments.  `frag=` is the fragment that failed, `sent=` how many did go out, `reason=` one of `stalled` (no HVN-TX-COMPLETE within the bound), `disconnected`, `budget`, `sd_error` (with the raw code in `code=`), `internal`.  `dropped=` is the cumulative counter, so one line states both the incident and the running total. |
+| `BLE_TX_DROP` |  `leviculum-nrf/src/ble/notify.rs` | A BLE packet or keepalive was abandoned part-way through its fragments.  `frag=` is the fragment that failed, `sent=` how many did go out, `reason=` one of `stalled` (no HVN-TX-COMPLETE within the bound), `disconnected`, `budget`, `sd_error` (with the raw code in `code=`), `internal`.  `dropped=` is the cumulative counter, so one line states both the incident and the running total. |
+| `BLE_TX_RESYNC` | `leviculum-nrf/src/ble/notify.rs` | The connection was dropped deliberately after a torn fragment stream, because the wire protocol has no abort marker and a reconnect is the only in-band reset of the peer's reassembler (#255). |
+| `BLE_DRAIN_TABLE_FULL` | `leviculum-nrf/src/ble/columba.rs` | A connection could not claim a per-connection HVN drain slot; `slots=` is the table size.  Expected never: it means more live connections than `ble::MAX_LINKS`. |
+| `SD_RAM_FLOOR` | `leviculum-nrf/src/ble/mod.rs` | One line per boot, before `Softdevice::enable`.  `wanted=` is the app RAM base the S140 says this BLE configuration needs, `floor=` is `ORIGIN(RAM)` from `memory.x` (the flip-link stack floor), `margin=` their signed difference.  `fits=0` never appears — the boot panics instead. |
+| `ADV` | `leviculum-nrf/src/ble/columba.rs` | One line per boot when the advertising payloads are built.  `adv_bytes=`/`scan_bytes=` are the built PDU sizes against `cap=31`, and `peripheral_only=` is the v0.3.0 capability bit (1 until the firmware gains a central role). |
 
 ### Reading "was the radio listening at instant X"
 

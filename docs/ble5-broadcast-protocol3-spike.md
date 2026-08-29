@@ -22,7 +22,7 @@ dependency. If the submodule or the SoftDevice is bumped, re-run this spike, the
 2. BLE 4 mesh (Columba). Connection oriented, one link per peer, the peer is
    a full Reticulum node. Hardware allows only 3 or 4 simultaneous links, so
    it does not scale. Partial implementation already in tree
-   (leviculum-core/src/framing/ble.rs, leviculum-nrf/src/ble.rs), buggy and
+   (leviculum-core/src/framing/ble.rs, leviculum-nrf/src/ble/), buggy and
    incomplete. Tracked by #45.
 3. BLE 5 broadcast mesh (this spike). Connectionless extended advertising, so
    any number of devices in range form a mesh without per peer links. New

@@ -77,7 +77,7 @@ hex = "0.4"
 regex = "1"
 tempfile = "3"
 # The BLE notification flow-control policy the firmware drives
-# (leviculum-nrf/src/ble.rs::notify_fragments). Dev-only and dependency-free;
+# (leviculum-nrf/src/ble/notify.rs::notify_fragments). Dev-only and dependency-free;
 # pulled in so the #255 torn-fragment-stream mvr can drive the exact sender
 # state machine against the vendored Python announce validator.
 leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
