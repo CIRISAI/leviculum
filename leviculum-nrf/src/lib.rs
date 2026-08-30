@@ -18,6 +18,7 @@ compile_error!("must enable exactly one of `bsp-rak4631` or `bsp-t114`");
 
 pub mod ble;
 pub mod boards;
+pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
 pub mod flash;
@@ -135,40 +136,19 @@ pub fn log_irq_priorities() {
     );
 }
 
-/// Read, print, and clear POWER.RESETREAS.
+/// Print a POWER.RESETREAS value the caller already holds.
 ///
-/// MUST run before `Softdevice::enable` — once the SD owns POWER this
-/// register is only reachable via `sd_power_reset_reason_get/clr`.
-/// Cleared after the print (write-1-to-clear: writing back the read
-/// value clears exactly the latched bits) so every boot reports only
-/// its own cause. An all-zero raw value on a boot that was clearly a
-/// reset (not first power-up) is itself a diagnosis: POR and brownout
-/// latch NO bit, so raw=0x0 in a boot loop points at the supply.
-pub fn log_reset_reason() {
-    // embassy-nrf 0.9 keeps its pac crate-private, so raw volatile
-    // access: POWER.RESETREAS at 0x40000000 + 0x400. Bit layout from
-    // the nRF52840 product spec (matches nrf-pac's Resetreas): 0
-    // RESETPIN, 1 DOG, 2 SREQ, 3 LOCKUP, 16 OFF, 17 LPCOMP, 18 DIF,
-    // 19 NFC, 20 VBUS.
-    const POWER_RESETREAS: *mut u32 = 0x4000_0400 as *mut u32;
-    let raw = unsafe { core::ptr::read_volatile(POWER_RESETREAS) };
+/// The register read (and its mandatory clear) moved to
+/// [`boot_trace::capture`], which runs first thing in `main` — before
+/// `Softdevice::enable`, after which POWER belongs to the SD and the
+/// register is only reachable via `sd_power_reset_reason_get/clr`. This
+/// keeps one read for both the `BOOT_TRACE` line and this decoded one;
+/// the decode itself is host-tested in `leviculum-boot-trace`.
+pub fn log_reset_reason(raw: u32) {
     log::log_fmt_critical(
         "[RESET_REASON] ",
-        format_args!(
-            "raw=0x{:08x} resetpin={} dog={} sreq={} lockup={} off={} lpcomp={} dif={} nfc={} vbus={}",
-            raw,
-            (raw & 1 << 0 != 0) as u8,
-            (raw & 1 << 1 != 0) as u8,
-            (raw & 1 << 2 != 0) as u8,
-            (raw & 1 << 3 != 0) as u8,
-            (raw & 1 << 16 != 0) as u8,
-            (raw & 1 << 17 != 0) as u8,
-            (raw & 1 << 18 != 0) as u8,
-            (raw & 1 << 19 != 0) as u8,
-            (raw & 1 << 20 != 0) as u8,
-        ),
+        format_args!("{}", leviculum_boot_trace::ResetReasons::decode(raw)),
     );
-    unsafe { core::ptr::write_volatile(POWER_RESETREAS, raw) };
 }
 
 // RAK19026 baseboard peripherals — each gated on its own feature so the

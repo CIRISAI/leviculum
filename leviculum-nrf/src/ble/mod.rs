@@ -682,6 +682,7 @@ pub fn init(
     assert_sd_fits_below_the_stack(wanted);
 
     let sd = Softdevice::enable(&sd_config());
+    crate::boot_trace::phase(crate::boot_trace::Phase::SdEnabled);
     set_gap_device_name(&identity_hash);
 
     let sd = if columba_enabled {
@@ -691,6 +692,7 @@ pub fn init(
         sd
     };
     spawner.must_spawn(softdevice_task(sd, vbus));
+    crate::boot_trace::phase(crate::boot_trace::Phase::BleTask);
     // The outbound fan-out is protocol-neutral machinery, like the
     // drain table it reads: packets in, one copy per live link out. It
     // runs either way: with no protocol task there is no claimed drain

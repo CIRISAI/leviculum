@@ -30,16 +30,16 @@ runs an event-driven main loop that dispatches packets between them:
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:171-179`) and
-`leviculum-nrf/src/bin/rak4631.rs:200-208`. The main loop selecting over
+`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:189-197`) and
+`leviculum-nrf/src/bin/rak4631.rs:230-238`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:331`.)
+`leviculum-nrf/src/bin/t114.rs:426`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:145`),
-`leviculum-nrf/src/bin/rak4631.rs:182`)
+(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:155`),
+`leviculum-nrf/src/bin/rak4631.rs:196`)
 
 ## Hardware coverage
 

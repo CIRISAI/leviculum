@@ -35,6 +35,12 @@ use leviculum_nrf::{info, init_heap, log_critical};
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // First statement on purpose: reads the PREVIOUS boot's breadcrumbs
+    // and RESETREAS (and clears it), then arms this boot's record at
+    // enter-main — so even a hang inside `embassy_nrf::init`'s HFXO wait
+    // is attributable on the next boot's BOOT_TRACE line.
+    let boot = leviculum_nrf::boot_trace::capture();
+
     let mut config = embassy_nrf::config::Config::default();
     config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     config.gpiote_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
@@ -86,18 +92,22 @@ async fn main(spawner: Spawner) {
     // is their spawn decision. A memory-mapped flash read, legal this
     // early and before `Softdevice::enable`.
     let (media, media_src) = leviculum_nrf::media::load_at_boot(t114::CONFIG.telemetry_flash_page);
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
 
     log_critical!("leviculum T114 booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     leviculum_nrf::log_stack("boot");
     leviculum_nrf::log_panic_count();
-    // Boot-loop instrumentation: what kind of reset got us here? Must
-    // stay ahead of ble::init — after Softdevice::enable the POWER
-    // registers belong to the SD.
-    leviculum_nrf::log_reset_reason();
+    // Boot-loop instrumentation: how far did the previous boot get, and
+    // what kind of reset got us here? Both values were captured by
+    // `boot_trace::capture` at the top of main (POWER was still ours
+    // there; after Softdevice::enable it belongs to the SD).
+    leviculum_nrf::boot_trace::log_prev(&boot);
+    leviculum_nrf::log_reset_reason(boot.reset_reason);
     leviculum_nrf::log_irq_priorities();
 
     // Shared boot/query formatter — the same block is retrievable at any
@@ -252,8 +262,10 @@ async fn main(spawner: Spawner) {
     // makes a single-medium measurement falsifiable.
     if media.lora_enabled {
         spawner.must_spawn(leviculum_nrf::lora::lora_task(lora, radio_cfg));
+        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
     } else {
         leviculum_nrf::media::log_carrier_held_down("lora");
+        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraSkipped);
     }
 
     // BLE — full init restored. RAM ORIGIN bumped to 40K (memory.x) to give
@@ -401,6 +413,7 @@ async fn main(spawner: Spawner) {
     let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
 
     log_critical!("[STG] main-loop");
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
     // Event-driven main loop, seven event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
