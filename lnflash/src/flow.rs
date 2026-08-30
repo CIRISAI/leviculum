@@ -109,6 +109,16 @@ pub enum Error {
         req: String,
         found: String,
     },
+    #[error(
+        "{board} still reports SoftDevice {found} after the remedy was written, and it needs \
+         {req}. The application was NOT written — writing it onto the wrong SoftDevice produces \
+         a board that goes dark. The board is in its bootloader and can be flashed again."
+    )]
+    RemedyDidNotTake {
+        board: String,
+        req: String,
+        found: String,
+    },
     #[error("cancelled")]
     Cancelled,
 }
@@ -258,6 +268,26 @@ pub fn check_softdevice(installed: &Installed, req: Option<&VersionReq>) -> Prec
             req: req.as_str().to_string(),
         },
     }
+}
+
+/// The post-remedy gate: what the board reports *after* the SoftDevice write
+/// decides whether the application may be written (#278).
+///
+/// Separate from [`check_softdevice`] because the two failures are different
+/// facts. Before the remedy, an unmet precondition means "install the
+/// SoftDevice first". After it, it means the write did not take, and the one
+/// thing that must not follow is our application landing on the wrong
+/// SoftDevice — the board goes dark and the operator has no way back except a
+/// bootloader they can no longer reach the same way.
+pub fn remedy_took(after: &Installed, req: Option<&VersionReq>, board: &str) -> Result<(), Error> {
+    if check_softdevice(after, req) == Precondition::Met {
+        return Ok(());
+    }
+    Err(Error::RemedyDidNotTake {
+        board: board.to_string(),
+        req: req.map(|r| r.as_str().to_string()).unwrap_or_default(),
+        found: after.describe(),
+    })
 }
 
 /// Read both statements of the installed SoftDevice version.
@@ -1197,7 +1227,10 @@ fn resolve(
             let Some(remedy) = &confirmed.payloads().remedy.softdevice else {
                 return Err(Error::NoRemedy {
                     board: confirmed.name().to_string(),
-                    req: req.map(|r| r.as_str().to_string()).unwrap_or_default(),
+                    req: req
+                        .as_ref()
+                        .map(|r| r.as_str().to_string())
+                        .unwrap_or_default(),
                     found: installed.describe(),
                 });
             };
@@ -1292,6 +1325,12 @@ fn resolve(
         confirm_identity(catalogue, manifest, &info, &port, Some(confirmed.name()))?;
         let after = read_installed(&drive, &info);
         ui.say(&format!("{port}: SoftDevice now {}", after.describe()));
+
+        // The precondition is re-checked, not carried over. A `ui.say` in a
+        // stream of progress output is not a guard, and the failure it would
+        // let through — our application written onto the wrong SoftDevice —
+        // is the unrecoverable one in the field (#278).
+        remedy_took(&after, req.as_ref(), confirmed.name())?;
     }
 
     let declined = app_image.blocks_below(confirmed.board().flash.writable_start);
@@ -2034,6 +2073,60 @@ convert = "hex-to-uf2"
         ));
         // No constraint at all is a different thing and needs no remedy.
         assert_eq!(check_softdevice(&installed, None), Precondition::Met);
+    }
+
+    #[test]
+    fn a_remedy_that_took_lets_the_application_through() {
+        let after = Installed {
+            from_info: Some(Version::new(7, 3, 0)),
+            from_flash: Some(Version::new(7, 3, 0)),
+        };
+        let req = VersionReq::parse(">=7.0.1, <8.0.0").unwrap();
+        assert!(remedy_took(&after, Some(&req), "t114").is_ok());
+    }
+
+    #[test]
+    fn a_remedy_write_that_silently_failed_stops_the_application() {
+        // The board was mounted again, re-identified, and still carries the
+        // factory 6.1.1: the SD.UF2 write reported success and did nothing.
+        // Before #278 this printed one line and wrote the application on top.
+        let after = Installed {
+            from_info: Some(Version::new(6, 1, 1)),
+            from_flash: Some(Version::new(6, 1, 1)),
+        };
+        let req = VersionReq::parse(">=7.0.1, <8.0.0").unwrap();
+        let err = remedy_took(&after, Some(&req), "t114")
+            .expect_err("a remedy that did not take must refuse the application write");
+        match &err {
+            Error::RemedyDidNotTake { board, req, found } => {
+                assert_eq!(board, "t114");
+                assert_eq!(req, ">=7.0.1, <8.0.0");
+                assert!(found.contains("6.1.1"), "found should name the version");
+            }
+            other => panic!("expected RemedyDidNotTake, got {other:?}"),
+        }
+        assert!(
+            format!("{err}").contains("NOT written"),
+            "the operator must be told the application did not go on: {err}"
+        );
+    }
+
+    #[test]
+    fn a_version_still_unreadable_after_the_remedy_is_not_a_pass() {
+        // Unknown before the remedy takes the remedy; unknown *after* it means
+        // the write cannot be shown to have taken, and guessing is the brick.
+        let after = Installed {
+            from_info: None,
+            from_flash: None,
+        };
+        let req = VersionReq::parse(">=7.0.1, <8.0.0").unwrap();
+        assert!(matches!(
+            remedy_took(&after, Some(&req), "t114"),
+            Err(Error::RemedyDidNotTake { .. })
+        ));
+        // A board with no stated requirement never runs a remedy, and the gate
+        // stays out of its way.
+        assert!(remedy_took(&after, None, "t114").is_ok());
     }
 
     #[test]
