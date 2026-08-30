@@ -390,9 +390,17 @@ check-all-targets:
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
 # dependencies are fetched by the time it runs.
+#
+# `clippy --all-targets`, matching ci-gate below. Without it this line lints
+# libs and bins only, so a lint that fires solely in test code is invisible on
+# the push path: `clippy --workspace --all-targets` was red for three days in
+# August 2026 (an `assertions_on_constants` in a #349 test, fixed in c746bf8)
+# while every per-batch and pre-push run of this recipe stayed green. The
+# `check-all-targets` dependency compiles those targets but does not lint
+# them, which is exactly the gap.
 fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
-    cargo clippy --workspace -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
 
 # The gate .woodpecker/nightly.yml runs before it builds anything it publishes
