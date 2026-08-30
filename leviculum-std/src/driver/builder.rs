@@ -1383,18 +1383,86 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_size_identity_file_returns_none() {
+    fn test_wrong_size_identity_file_is_a_hard_error() {
         use leviculum_core::identity_store::IdentityStore;
         let path = temp_storage_path().join("wrong_size");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
-        // Write a too-short file
-        std::fs::write(path.join("transport_identity"), b"too_short").unwrap();
+        // A truncated identity file: the shape a power cut mid-write leaves.
+        let file = path.join("transport_identity");
+        std::fs::write(&file, b"too_short").unwrap();
 
         let mut store = crate::file_identity_store::FileIdentityStore::new(&path);
-        let result = store.load().unwrap();
-        assert!(result.is_none(), "wrong-size file should return None");
+        let Err(err) = store.load() else {
+            panic!("a short identity file must refuse, not report absence");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("transport_identity"),
+            "the error must name the unreadable file, got: {err}"
+        );
+
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"too_short",
+            "the damaged file must survive so a backup can be reconciled"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_truncated_identity_refuses_build_instead_of_rotating() {
+        // The data-loss path end to end: builder must not mint a fresh
+        // identity over a damaged file (#273).
+        let path = temp_storage_path().join("truncated_build");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+
+        let good = Identity::generate(&mut rand_core::OsRng);
+        let good_bytes = good.private_key_bytes().unwrap();
+        let file = path.join("transport_identity");
+        // Half a key, as an interrupted write would leave it.
+        std::fs::write(&file, &good_bytes[..32]).unwrap();
+
+        let Err(err) = ReticulumNodeBuilder::new()
+            .storage_path(path.clone())
+            .build_sync()
+        else {
+            panic!("build must refuse on a damaged identity file");
+        };
+        assert!(
+            err.to_string().contains("transport_identity"),
+            "the operator must be told which file is unreadable, got: {err}"
+        );
+
+        assert_eq!(
+            std::fs::read(&file).unwrap().len(),
+            32,
+            "the damaged file must not be overwritten by a new identity"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn test_save_leaves_no_temp_file_behind() {
+        use leviculum_core::identity_store::IdentityStore;
+        let path = temp_storage_path().join("durable_save");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+
+        let mut store = crate::file_identity_store::FileIdentityStore::new(&path);
+        store
+            .save(&Identity::generate(&mut rand_core::OsRng))
+            .unwrap();
+
+        assert!(path.join("transport_identity").exists());
+        assert!(
+            !path.join("transport_identity.tmp").exists(),
+            "the temp file must be renamed into place, not left next to it"
+        );
 
         let _ = std::fs::remove_dir_all(&path);
     }
