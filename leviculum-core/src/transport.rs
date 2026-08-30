@@ -2683,6 +2683,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         reason: DropReason,
     ) {
         self.stats.record_drop(reason);
+        // The `None` arm is a tracing event: feature sets without the
+        // tracing backend compile it to nothing, and clippy then flags a
+        // single_match whose "fix" would delete the event where it exists.
+        #[allow(clippy::single_match)]
         match raw_hash {
             Some(h) => self.pkt_drop_event(h, packet, iface_in, reason),
             None => crate::tracing::debug!(
