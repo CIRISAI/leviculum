@@ -29,9 +29,9 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnomad, lblogd and
 lnflash. Built for x86_64-unknown-linux-musl and
 aarch64-unknown-linux-musl.
 
-330 third-party crates, by licence:
+331 third-party crates, by licence:
 
-  Apache-2.0                   228
+  Apache-2.0                   229
   BSD-3-Clause                 5
   CC0-1.0                      1
   CDLA-Permissive-2.0          2
@@ -2087,6 +2087,7 @@ Applies to:
   fragile 2.1.0
   static_assertions 1.1.0
   zeroize 1.8.2
+  zeroize_derive 1.5.0
 
 
                                  Apache License
@@ -11483,9 +11484,9 @@ PART 2 — LNode firmware image
 Linked into the t114 UF2 image the lnflash bundle carries.
 Built for thumbv7em-none-eabihf.
 
-139 third-party crates, by licence:
+140 third-party crates, by licence:
 
-  Apache-2.0                   116
+  Apache-2.0                   117
   BSD-2-Clause                 1
   BSD-3-Clause                 5
   LicenseRef-Nordic-5-Clause   1
@@ -12578,6 +12579,7 @@ Applies to:
   encode_unicode 0.3.6
   micromath 2.1.0
   zeroize 1.9.0
+  zeroize_derive 1.5.0
 
 
                                  Apache License
