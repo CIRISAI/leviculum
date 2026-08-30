@@ -1003,11 +1003,11 @@ mod tests {
             self.0.borrow().iter().filter(|op| f(op)).count()
         }
         fn position(&self, f: impl Fn(&Op) -> bool) -> Option<usize> {
-            self.0.borrow().iter().position(|op| f(op))
+            self.0.borrow().iter().position(f)
         }
         /// Every rendered body of this kind, in the order they were emitted.
         fn lines(&self, f: impl Fn(&Op) -> Option<String>) -> Vec<String> {
-            self.0.borrow().iter().filter_map(|op| f(op)).collect()
+            self.0.borrow().iter().filter_map(f).collect()
         }
         /// The rendered body of the one line of this kind, or a panic naming
         /// what was logged instead.
@@ -1861,7 +1861,7 @@ mod tests {
         block_on(stand_down(&mut port, "tx")).expect("the standby is unaffected");
 
         assert_eq!(
-            log.count(|op| *op == Op::ProbeErr(format!("at=tx"))),
+            log.count(|op| *op == Op::ProbeErr(String::from("at=tx"))),
             1,
             "the lost sample is reported, ops={:?}",
             log.ops()

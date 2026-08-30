@@ -107,7 +107,8 @@ mod tests {
     #[test]
     fn the_advertisement_fits_the_legacy_pdu_with_room_to_spare() {
         assert_eq!(ADV_BYTES_USED, 27);
-        assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY);
+        // Both constants: a const block fails the build, not one test run.
+        const { assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY) };
         assert_eq!(LEGACY_AD_CAPACITY - ADV_BYTES_USED, 4, "bytes left over");
     }
 

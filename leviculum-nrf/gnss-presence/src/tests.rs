@@ -673,16 +673,14 @@ fn event_tokens_are_stable() {
 #[test]
 fn constants_hold_their_justifications() {
     assert_eq!(BAUD_SWEEP, [9600, 38_400, 115_200]);
-    assert!(
-        DETECT_WINDOW_MS >= 2_000,
-        "window must cover ≥2 NMEA periods"
-    );
-    assert!(
-        FIX_HOLD_MS >= 5_000,
-        "hold must ride out multi-sentence flaps"
-    );
-    assert!(
-        LOCK_STARVE_RESWEEP_MS > FIX_HOLD_MS,
-        "Fix must demote before the starve re-sweep can fire"
-    );
+    // Every operand below is a compile-time constant, so these belong in const
+    // blocks: clippy::assertions_on_constants rejects the runtime form, and the
+    // const one fails the BUILD rather than one test run — which is what an
+    // invariant over a constant should do (same move as c746bf8).
+    // Window must cover ≥2 NMEA periods.
+    const { assert!(DETECT_WINDOW_MS >= 2_000) };
+    // Hold must ride out multi-sentence flaps.
+    const { assert!(FIX_HOLD_MS >= 5_000) };
+    // Fix must demote before the starve re-sweep can fire.
+    const { assert!(LOCK_STARVE_RESWEEP_MS > FIX_HOLD_MS) };
 }

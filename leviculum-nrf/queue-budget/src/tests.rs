@@ -167,6 +167,8 @@ fn shipped_bounds_are_the_reference_shape() {
     assert_eq!(LORA_QUEUE_BYTES, 6144, "CONFIG_QUEUE_SIZE for T114/RAK4631");
     assert_eq!(LORA_QUEUE_SLOTS, 64);
     // The byte bound must be the one that binds under large packets, which is
-    // only true while the slot count exceeds budget/MTU.
-    assert!(LORA_QUEUE_SLOTS > LORA_QUEUE_BYTES / 500);
+    // only true while the slot count exceeds budget/MTU. Both operands are
+    // compile-time constants, so this is a const block: it fails the build
+    // rather than one test run (same move as c746bf8).
+    const { assert!(LORA_QUEUE_SLOTS > LORA_QUEUE_BYTES / 500) };
 }

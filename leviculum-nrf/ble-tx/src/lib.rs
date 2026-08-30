@@ -723,7 +723,8 @@ mod tests {
     fn the_device_name_fits_a_name_only_scan_response() {
         // 31-byte legacy scan-response AD budget, minus the 2-byte
         // length + AD-type overhead of a Complete Local Name structure.
-        assert!(DEVICE_NAME_LEN <= 31 - 2);
+        // Constant on both sides, so a const block: it fails the build.
+        const { assert!(DEVICE_NAME_LEN <= 31 - 2) };
     }
 
     #[test]
@@ -731,8 +732,9 @@ mod tests {
         // Past BLE_GAP_DEVNAME_DEFAULT_LEN the `gatts_attr_tab_size`
         // config has to grow with it, and the only symptom of forgetting
         // is a SoftDevice that refuses the name config at enable — on a
-        // board, before USB comes up.
-        assert!(DEVICE_NAME_LEN <= GAP_DEVNAME_DEFAULT_LEN);
+        // board, before USB comes up. Constant on both sides, so a const
+        // block: the build fails rather than one test run.
+        const { assert!(DEVICE_NAME_LEN <= GAP_DEVNAME_DEFAULT_LEN) };
     }
 
     #[test]

@@ -74,7 +74,15 @@ lint-nrf:
     # leviculum-tx-spacing and leviculum-rx-arming are the pure, host-testable
     # crates inside the leviculum-nrf workspace: clippy + tests run on the host
     # triple (the workspace's .cargo/config defaults to thumbv7em).
-    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming --target $(rustc -vV | sed -n 's/host: //p') -- -D warnings
+    #
+    # `--all-targets` here, unlike the two embedded feature-set lines above:
+    # these crates' whole value is their host test suites, and without the flag
+    # clippy lints their libs only while the `cargo test` line below merely
+    # COMPILES the test code. A lint that fires solely in a test was therefore
+    # invisible to every run of this recipe — the same gap the workspace line in
+    # `fast` closed in e27a15e. The embedded lines stay narrow: `--all-targets`
+    # there would pull in test/bench harnesses that do not link for thumbv7em.
+    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
     cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming --target $(rustc -vV | sed -n 's/host: //p')
 
 # Stack-frame gate for the firmware. The T114 stack grows down into the

@@ -461,7 +461,8 @@ fn constants_hold_their_justifications() {
     assert!(MAX_FRAME >= FULL_POWER_FRAME.len());
     assert!(MAX_FRAME >= ANTENNA_SUPPLY_FRAME.len());
     // Both settles hold at least the reference's 1 s after a message
-    // that restarts a receiver subsystem (`GPS.cpp:711-713`).
-    assert!(POST_CFG_SETTLE_MS >= 1_000);
-    assert!(POST_PMS_SETTLE_MS >= 1_000);
+    // that restarts a receiver subsystem (`GPS.cpp:711-713`). Constants on
+    // both sides, so const blocks: they fail the build, not one test run.
+    const { assert!(POST_CFG_SETTLE_MS >= 1_000) };
+    const { assert!(POST_PMS_SETTLE_MS >= 1_000) };
 }
