@@ -203,9 +203,12 @@ const INITIAL_BUFFER_CAPACITY: usize = 600;
 /// lives here, so a caller cannot forget it; callers that know a tighter
 /// HW_MTU pass it to [`Deframer::with_max_frame`].
 ///
-/// 262144 is the largest HW_MTU we speak (Python's `TCPInterface.HW_MTU` and
-/// `LocalInterface.HW_MTU`), so the default never discards a frame a Python
-/// peer may legitimately send.
+/// 262144 is the largest HW_MTU we speak — the shared-instance interface's
+/// (`LocalInterface.HW_MTU`, LocalInterface.py:71) — so the default never
+/// discards a frame a Python peer may legitimately send. TCP is not the
+/// ceiling any more: its HW_MTU is derived from the interface bitrate like
+/// Python's (Codeberg #355) and passes the tighter bound to
+/// [`Deframer::with_max_frame`].
 ///
 /// Note the reference does *not* bound its own HDLC path: `TCPInterface.py`'s
 /// `len(data_buffer) < self.HW_MTU` check sits in the KISS branch

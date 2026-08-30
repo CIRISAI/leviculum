@@ -30,15 +30,29 @@ use super::InterfaceHandle;
 /// bitrate a TCP interface reports when the config sets none.
 pub(crate) const TCP_BITRATE_GUESS: i64 = 10_000_000;
 
-/// Python `TCPInterface.HW_MTU` (TCPInterface.py:42), the ceiling handed to the
+/// The hardware MTU a TCP interface signals, and the ceiling handed to the
 /// deframer so one peer cannot grow our buffer without limit (Codeberg #271).
 ///
-/// The reference does not bound its own HDLC read path — its `len(data_buffer)
-/// < self.HW_MTU` check is in the KISS branch (TCPInterface.py:362) — so this
-/// is a deviation, not parity. It preserves wire and semantic compatibility:
-/// 262144 is the value Python already negotiates as this interface's hardware
-/// MTU, so no frame a Python peer legitimately sends is affected.
-pub(crate) const TCP_HW_MTU: u32 = 262_144;
+/// Derived, not chosen: `TCPInterface.HW_MTU` (TCPInterface.py:42) is only what
+/// a Python TCP interface carries into `interface_post_init`
+/// (Reticulum.py:879), which immediately runs `optimise_mtu` (Interface.py:198)
+/// over the interface bitrate — with `TCPServerInterface.BITRATE_GUESS`
+/// (TCPInterface.py:453) that lands on 16384 from Reticulum 1.5.2 on and on
+/// 8192 before it, and the class value never reaches the wire. We signalled the class value until Codeberg #355, which
+/// made a Python client on our shared instance negotiate a 262144-byte link
+/// MTU across a TCP hop where an all-Python mesh negotiates 16384 — a 32x
+/// larger frame than a Reticulum 1.5.x peer accepts on that hop, whose receive
+/// path rejects any frame longer than its own HW_MTU.
+///
+/// Bounding our own read path is still a deviation from the reference, which
+/// bounds only its KISS branch (TCPInterface.py:362) — it is the same value we
+/// signal, so no frame a Python peer legitimately sends is affected.
+pub(crate) const TCP_HW_MTU: u32 = match super::hw_mtu_for_bitrate(TCP_BITRATE_GUESS) {
+    Some(mtu) => mtu,
+    // Unreachable for the 10 Mbps guess; the base protocol MTU is the
+    // "no link MTU upgrade" answer Python gives for HW_MTU = None.
+    None => MTU as u32,
+};
 
 /// Default channel buffer size for TCP interfaces.
 /// Used for both incoming and outgoing channels.
@@ -251,7 +265,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
         info: InterfaceInfo {
             id,
             name,
-            hw_mtu: Some(262_144),
+            hw_mtu: Some(TCP_HW_MTU),
             is_local_client: false,
             bitrate: None,
             tx_jitter_max_ms: None,
@@ -380,7 +394,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                 parent: None,
             },
             bitrate: TCP_BITRATE_GUESS,
-            hw_mtu: 262_144,
+            hw_mtu: TCP_HW_MTU as i64,
             mode,
             announce_rate,
             ifac_size_bits: ifac.as_ref().map(|c| (c.ifac_size() * 8) as i64),
@@ -498,7 +512,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
         info: InterfaceInfo {
             id,
             name: config.name,
-            hw_mtu: Some(262_144),
+            hw_mtu: Some(TCP_HW_MTU),
             is_local_client: false,
             bitrate: None,
             tx_jitter_max_ms: None,

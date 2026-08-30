@@ -16,6 +16,9 @@
 //! With the default `BITRATE_GUESS = 10_000_000` (10 Mbps) and the strictly-greater
 //! check `> 10_000_000`, the bitrate falls through to `> 5_000_000 → HW_MTU = 8192`.
 //! All daemon TCP tests therefore negotiate MTU=8192, not the class-level 262144.
+//! (Reticulum 1.5.2 turned those checks into `>=`, which puts the same guess
+//! on 16384. We signal the derived value too since Codeberg #355 — the vendored
+//! reference here is 1.3.5, so its 8192 wins the per-hop clamp in these tests.)
 //!
 //! For UDP, Python's UDPInterface has `AUTOCONFIGURE_MTU=False` and `FIXED_MTU=False`,
 //! so `Transport.next_hop_interface_hw_mtu()` returns None and the Transport layer
@@ -649,17 +652,18 @@ async fn test_mtu_a4_bidirectional_tcp_full_mdu() {
     );
 }
 
-/// A0: Direct Rust-to-Rust TCP, no Python daemon, full 262144 MTU.
+/// A0: Direct Rust-to-Rust TCP, no Python daemon, undamped TCP HW_MTU.
 ///
 /// RustA (TCP server, responder) <-TCP-> RustB (TCP client, initiator)
 ///
-/// Without a Python daemon relay, no `optimise_mtu()` clamping occurs.
-/// Both sides negotiate the full TCP HW_MTU=262144.
+/// Without a Python peer on the path, nothing clamps the signalled value, so
+/// both sides negotiate our own TCP HW_MTU — the bitrate-derived 16384 since
+/// Codeberg #355, which is what a Reticulum 1.5.2 peer derives as well.
 ///
 /// Verifies:
-/// - negotiated MTU = 262144
-/// - MDU = 262063
-/// - Full channel-MDU payload (262057 bytes) transfers correctly
+/// - negotiated MTU = TCP_HW_MTU (16384)
+/// - MDU = 16303
+/// - Full channel-MDU payload (16297 bytes) transfers correctly
 #[tokio::test]
 async fn test_mtu_a0_direct_tcp_full_mtu() {
     use leviculum_core::identity::Identity;
@@ -1596,7 +1600,7 @@ async fn test_mtu_c3_over_mdu() {
 /// Topology:
 ///   RustA (TCP client, initiator) <-TCP-> RustRelay (TCP server + UDP, transport=true) <-UDP-> RustB (UDP, responder)
 ///
-/// RustA's TCP interface has HW_MTU=262144. The relay's `clamp_link_request_mtu()`
+/// RustA's TCP interface has HW_MTU=16384. The relay's `clamp_link_request_mtu()`
 /// detects the outgoing UDP interface with HW_MTU=1064 and clamps the signaling
 /// bytes. Both sides negotiate MTU=1064.
 #[tokio::test]

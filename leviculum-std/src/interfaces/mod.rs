@@ -419,6 +419,47 @@ pub(crate) fn test_drop_direct_ingress_frame(
     true
 }
 
+/// Python `optimise_mtu` (Interface.py:198-221), the hardware MTU an
+/// autoconfiguring interface reports: derived from the interface bitrate, not
+/// from the interface class constant. The class constant is only the value the
+/// interface carries until `interface_post_init` (Reticulum.py:879) runs this
+/// derivation over it.
+///
+/// The thresholds are the `>=` form Reticulum uses from 1.5.2 on. Up to and
+/// including 1.5.0 they were strictly-greater, which is why the same 10 Mbps
+/// TCP bitrate guess lands on 8192 against a 1.3.5 peer and on 16384 against a
+/// 1.5.2 one — measured, both values, on the mixed path in Codeberg #355. A peer clamps a larger signalled MTU down to its own on
+/// every hop it carries, so signalling the current-release value is what
+/// interoperates cleanly in both directions.
+///
+/// `None` below 62500 bps mirrors Python's `HW_MTU = None`: too slow to carry
+/// an upgraded link MTU at all, so links stay at the base protocol MTU.
+pub(crate) const fn hw_mtu_for_bitrate(bitrate: i64) -> Option<u32> {
+    if bitrate >= 1_000_000_000 {
+        Some(524_288)
+    } else if bitrate >= 750_000_000 {
+        Some(262_144)
+    } else if bitrate >= 400_000_000 {
+        Some(131_072)
+    } else if bitrate >= 200_000_000 {
+        Some(65_536)
+    } else if bitrate >= 100_000_000 {
+        Some(32_768)
+    } else if bitrate >= 10_000_000 {
+        Some(16_384)
+    } else if bitrate >= 5_000_000 {
+        Some(8_192)
+    } else if bitrate >= 2_000_000 {
+        Some(4_096)
+    } else if bitrate >= 1_000_000 {
+        Some(2_048)
+    } else if bitrate >= 62_500 {
+        Some(1_024)
+    } else {
+        None
+    }
+}
+
 /// Packet to send out through an interface
 pub(crate) struct OutgoingPacket {
     pub data: Vec<u8>,
@@ -432,7 +473,8 @@ pub(crate) struct OutgoingPacket {
 pub(crate) struct InterfaceInfo {
     pub id: InterfaceId,
     pub name: String,
-    /// Hardware MTU for link MTU negotiation (e.g., TCP=262144, UDP=1064).
+    /// Hardware MTU for link MTU negotiation (e.g., TCP=16384 derived by
+    /// [`hw_mtu_for_bitrate`], UDP=1064).
     /// `None` means the interface uses the base protocol MTU (500).
     pub hw_mtu: Option<u32>,
     /// Whether this interface is a local IPC client (shared instance).
@@ -628,6 +670,43 @@ impl InterfaceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every rung of the reference's MTU ladder, and the boundary values that
+    /// distinguish its `>=` form from the `>` form of Reticulum <= 1.5.0:
+    /// the 10 Mbps TCP bitrate guess sits exactly on a threshold, which is the
+    /// whole difference between 16384 and 8192 (Codeberg #355).
+    #[test]
+    fn hw_mtu_follows_the_reference_bitrate_ladder() {
+        assert_eq!(hw_mtu_for_bitrate(10_000_000_000), Some(524_288));
+        assert_eq!(hw_mtu_for_bitrate(1_000_000_000), Some(524_288));
+        assert_eq!(hw_mtu_for_bitrate(999_999_999), Some(262_144));
+        assert_eq!(hw_mtu_for_bitrate(750_000_000), Some(262_144));
+        assert_eq!(hw_mtu_for_bitrate(400_000_000), Some(131_072));
+        assert_eq!(hw_mtu_for_bitrate(200_000_000), Some(65_536));
+        assert_eq!(hw_mtu_for_bitrate(100_000_000), Some(32_768));
+        assert_eq!(hw_mtu_for_bitrate(10_000_000), Some(16_384));
+        assert_eq!(hw_mtu_for_bitrate(9_999_999), Some(8_192));
+        assert_eq!(hw_mtu_for_bitrate(5_000_000), Some(8_192));
+        assert_eq!(hw_mtu_for_bitrate(2_000_000), Some(4_096));
+        assert_eq!(hw_mtu_for_bitrate(1_000_000), Some(2_048));
+        assert_eq!(hw_mtu_for_bitrate(62_500), Some(1_024));
+        // Below the floor Python sets HW_MTU = None: no link MTU upgrade.
+        assert_eq!(hw_mtu_for_bitrate(62_499), None);
+        assert_eq!(hw_mtu_for_bitrate(0), None);
+    }
+
+    /// The TCP interface signals what `rnsd` 1.5.2 signals for the same
+    /// bitrate guess, not `TCPInterface.HW_MTU`. Measured on the mixed path
+    /// in Codeberg #355: the class value put 262144-byte frames on a hop
+    /// where an all-Python mesh puts 16384-byte ones.
+    #[test]
+    fn tcp_hw_mtu_is_the_derived_value_not_the_class_constant() {
+        assert_eq!(crate::interfaces::tcp::TCP_HW_MTU, 16_384);
+        assert_eq!(
+            hw_mtu_for_bitrate(crate::interfaces::tcp::TCP_BITRATE_GUESS),
+            Some(crate::interfaces::tcp::TCP_HW_MTU)
+        );
+    }
 
     /// Build a bare-bones InterfaceHandle plus the kept-alive receiver
     /// for the outgoing channel. The receiver must stay in scope for

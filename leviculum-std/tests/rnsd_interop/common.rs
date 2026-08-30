@@ -1369,9 +1369,14 @@ pub async fn wait_for_link_on_daemon(
 // MTU test constants and helpers
 // =========================================================================
 
-/// TCP interface hardware MTU, the class-level maximum (TCPInterface.HW_MTU).
+/// TCP interface hardware MTU. Not `TCPInterface.HW_MTU = 262144`: that class
+/// value never reaches the wire, because `interface_post_init` runs
+/// `optimise_mtu()` over the interface bitrate before the interface carries
+/// traffic (Reticulum.py:948). With `TCPServerInterface.BITRATE_GUESS` that
+/// derivation gives 16384 on Reticulum >= 1.5.2 and 8192 on <= 1.5.0, and
+/// lnsd signals the same derived value since Codeberg #355.
 /// Used when configuring Rust node interfaces via `set_interface_hw_mtu()`.
-pub const TCP_HW_MTU: u32 = 262144;
+pub const TCP_HW_MTU: u32 = 16384;
 
 /// UDP interface hardware MTU (matches Python UDPInterface.HW_MTU)
 pub const UDP_HW_MTU: u32 = 1064;
@@ -1416,15 +1421,16 @@ pub const DAEMON_UDP_LINK_MDU: usize = 431;
 pub const DAEMON_UDP_MAX_CHANNEL_PAYLOAD: usize = DAEMON_UDP_LINK_MDU - CHANNEL_OVERHEAD;
 
 /// Direct Rust-to-Rust TCP link MDU (no daemon clamping):
-/// floor((262144 - 1 - 19 - 48) / 16) * 16 - 1 = 262063
-pub const DIRECT_TCP_LINK_MDU: usize = 262063;
+/// floor((16384 - 1 - 19 - 48) / 16) * 16 - 1 = 16303
+pub const DIRECT_TCP_LINK_MDU: usize = 16303;
 
-/// Maximum channel payload over direct TCP link.
+/// Maximum channel payload over direct TCP link: 16303 - 6 = 16297.
 ///
-/// The link MDU formula gives 262063 - 6 = 262057, but the channel envelope
-/// uses a u16 length field (max 65535). The effective channel payload is
-/// min(link_mdu - overhead, u16::MAX) = 65535.
-pub const DIRECT_TCP_MAX_CHANNEL_PAYLOAD: usize = u16::MAX as usize;
+/// The channel envelope's u16 length field (max 65535) no longer binds here:
+/// since the TCP HW_MTU is derived from the bitrate (#355), the link MDU is
+/// the smaller of the two limits, so the payload is min(link_mdu - overhead,
+/// u16::MAX) = 16297.
+pub const DIRECT_TCP_MAX_CHANNEL_PAYLOAD: usize = DIRECT_TCP_LINK_MDU - CHANNEL_OVERHEAD;
 
 /// Generate a deterministic test payload of the given size.
 ///

@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A TCP interface signals the hardware MTU `rnsd` signals, 16384, instead
+  of the 262144 class constant. Python derives it from the interface
+  bitrate at interface post-init, so the class value never reaches the
+  wire; we read the constant. A Python client on an `lnsd` shared
+  instance therefore negotiated a 262144-byte link MTU across a TCP hop
+  where the same client gets 16384 from `rnsd`, and put frames on that
+  hop at 32x the size any Reticulum 1.5.x peer accepts on its own receive
+  path (#355).
+
 - `rnstatus -l` reads the same link-table line off `lnsd` as it does off
   `rnsd`. The `link_count` and `active_link_count` RPC verbs answered with
   the links the daemon terminates; upstream they report the transport link

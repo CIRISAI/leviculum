@@ -193,6 +193,50 @@ refuse a LoRa carrier at interface build outright
 (`rnode::erp_band_gap`): a 125 kHz signal cannot meet their ≤ 25 kHz
 channel spacing on any power.
 
+### Not a deviation: a class constant is not the value on the wire
+
+An interface's `HW_MTU` in the reference is a class attribute that
+looks like the answer and is not it. `TCPInterface.HW_MTU = 262144`
+(`TCPInterface.py:42`) is only what the interface carries into
+`interface_post_init` (`Reticulum.py:879`), which immediately runs
+`optimise_mtu` (`Interface.py:198`) over the interface bitrate for
+every interface with `AUTOCONFIGURE_MTU` set — TCP among them. With
+`TCPServerInterface.BITRATE_GUESS` = 10 Mbps
+(`TCPInterface.py:453`) the derivation lands on 8192 up to and
+including Reticulum 1.5.0, and on 16384 from 1.5.2 on, where the
+thresholds became `>=`. The class value never reaches the wire on
+either.
+
+We read the class constant instead of the derivation until Codeberg
+#355. The measurement that closed it drove the same two Python
+clients, attached to the shared instances of two relays, over one TCP
+hop between the relays, swapping only which daemon the relays were:
+
+| relay 1 | relay 2 | negotiated link MTU | largest single packet |
+| --- | --- | --- | --- |
+| `rnsd` 1.3.5 | `rnsd` 1.3.5 | 8192 | 8111 |
+| `rnsd` 1.5.2 | `rnsd` 1.5.2 | 16384 | 16303 |
+| `lnsd` (before) | `lnsd` (before) | 262144 | 262063 |
+| `lnsd` (after) | `lnsd` (after) | 16384 | 16303 |
+
+So the constant acted on the wire: a Python client on our shared
+instance negotiated a link MTU 32x larger than the same client gets
+from `rnsd`, and the frames actually crossed the TCP hop at that size.
+A Python peer *on* the path clamps a too-large signalled MTU down to
+its own on the hop it carries — the mixed rows of the same measurement
+settle on 8192 — so nothing broke as long as one was there to do it.
+That conditional is the semantic-compatibility risk: a Reticulum 1.5.x
+peer's receive path rejects a frame longer than its own HW_MTU, so any
+route change onto such a peer silently drops the traffic. Speed is
+Priority 2 and does not buy that.
+
+The lesson generalises past MTU: before adopting a reference class
+attribute as a value we signal, check whether the reference derives it
+at interface post-init. `UDPInterface` is the sibling case still open
+— it sets `AUTOCONFIGURE_MTU = False`, so a Python peer signals no MTU
+at all for a UDP hop and links stay at the base protocol MTU, while we
+signal `HW_MTU = 1064`.
+
 ## Same-interface relay on shared media
 
 Path-directed transport forwarding transmits on the next-hop
