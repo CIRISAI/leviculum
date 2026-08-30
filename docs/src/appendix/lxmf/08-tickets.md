@@ -1,6 +1,6 @@
 # Tickets
 
-A ticket is a 16-byte shared secret (`TICKET_LENGTH`, `LXMessage.py:41`) that lets
+A ticket is a 16-byte shared secret (`TICKET_LENGTH`, `LXMessage.py:42`) that lets
 a known correspondent skip proof-of-work. The recipient issues a ticket to a
 sender; the sender then derives stamps from it cheaply.
 

@@ -35,7 +35,7 @@ same trap.
 | Element | msgpack type | Citation |
 |---------|--------------|----------|
 | `timestamp` | float64 (`f64`), seconds since the Unix epoch | `LXMessage.py:354,359` |
-| `title` | binary (`bin`), not string | `LXMessage.py:190-193` |
+| `title` | binary (`bin`), not string | `LXMessage.py:196-197` |
 | `content` | binary (`bin`), not string | `LXMessage.py:199-202` |
 | `fields` | map, integer keys (may be empty `{}`) | `LXMessage.py:212-216` |
 | `stamp` (optional) | binary (`bin`), 32 bytes | `LXMessage.py:370` |
@@ -82,7 +82,7 @@ writers in a real mesh. `[VEC-MSG-FOREIGN-UINT32]`,
 reference decoder's verdict on each form.
 
 `title` and `content` are a different case: the reference does not type-check
-them either, but `set_title_from_bytes` (`LXMessage.py:190-193`) stores
+them either, but `set_title_from_bytes` (`LXMessage.py:196-197`) stores
 whatever it is handed, and a `str`-typed title produces a message whose bytes
 no writer that follows this specification would have produced. A reader MAY
 require `bin` for those.

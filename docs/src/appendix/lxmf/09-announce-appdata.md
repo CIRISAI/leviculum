@@ -7,19 +7,19 @@ announce. Both are normative and proven by `[VEC-ANN-DELIVERY]` and
 
 ## Delivery announce
 
-The delivery announce app_data is (`LXMRouter.py:985-1001`):
+The delivery announce app_data is (`LXMRouter.py:1034-1050`):
 
 ```
 msgpack([ display_name, stamp_cost, supported_functionality ])
 ```
 
 - `display_name`: the UTF-8 encoded display name as `bin`, or `None`
-  (`LXMRouter.py:989-991`).
+  (`LXMRouter.py:1038-1040`).
 - `stamp_cost`: an integer in `(0, 255)`, or `None`
-  (`LXMRouter.py:993-996`).
+  (`LXMRouter.py:1042-1045`).
 - `supported_functionality`: a list of advertised feature codes. LXMF 1.0.1
   emits `[SF_COMPRESSION]`, where `SF_COMPRESSION = 0x00`
-  (`LXMRouter.py:998-999`; `LXMF.py:140-142`).
+  (`LXMRouter.py:1047-1048`; `LXMF.py:140-142`).
 
 ### Format detection
 
@@ -44,7 +44,7 @@ third element is a list, compression is supported only if that list contains
 ## Propagation-node announce
 
 The propagation announce app_data is a 7-element list
-(`LXMRouter.py:306-318`):
+(`LXMRouter.py:328-336`):
 
 ```
 msgpack([
@@ -72,7 +72,7 @@ accepted.
 Keys: `PN_META_VERSION` (0x00), `PN_META_NAME` (0x01), `PN_META_SYNC_STRATUM`
 (0x02), `PN_META_SYNC_THROTTLE` (0x03), `PN_META_AUTH_BAND` (0x04),
 `PN_META_UTIL_PRESSURE` (0x05), `PN_META_CUSTOM` (0xFF). The node name is
-`metadata[PN_META_NAME]` as UTF-8 bytes (`LXMRouter.py:304`).
+`metadata[PN_META_NAME]` as UTF-8 bytes (`LXMRouter.py:321`).
 
 ### Proof: `[VEC-ANN-PROPAGATION]`
 

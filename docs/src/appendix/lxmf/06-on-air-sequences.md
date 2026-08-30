@@ -25,7 +25,7 @@ content limit.
 
 1. Ensure a path, then establish a Reticulum `Link` to the destination's
    `lxmf/delivery` endpoint.
-2. When the link is `ACTIVE` (`LXMessage.py:647`):
+2. When the link is `ACTIVE` (`LXMessage.py:650`):
    - if representation is `PACKET`, send one Packet carrying the full `packed`
      bytes over the link (`LXMessage.py:633`);
    - if representation is `RESOURCE`, transfer `packed` as a Reticulum Resource

@@ -40,7 +40,7 @@ by content, not just extension (`config.rs:630-656`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:609-614`).
+as `false` (`ini_config.rs:619-630`).
 
 ## The `[reticulum]` section
 
@@ -49,12 +49,12 @@ Core daemon settings. Every key below is parsed in
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `140`) |
-| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `141`; `ini_config.rs:257-259`) |
-| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:32-35`, `142`; key `share_instance` → `shared_instance`, `ini_config.rs:220-222`) |
-| `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:36-39`, `143`; `ini_config.rs:223-225`) |
-| `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:40-47`; `ini_config.rs:226-235`, `179-181`) |
-| `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:48-53`; `ini_config.rs:236-238`) |
+| `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `202`) |
+| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `203`; `ini_config.rs:265-267`) |
+| `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:37-40`, `205`; key `share_instance` → `shared_instance`, `ini_config.rs:228-230`) |
+| `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:41-44`, `206`; `ini_config.rs:231-233`) |
+| `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:45-52`; `ini_config.rs:234-243`, `179-181`) |
+| `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:53-58`; `ini_config.rs:244-246`) |
 | `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:251-253`) |
 | `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:263-267`) |
 | `storage_path` | path | unset | Storage path, relative to the config dir or absolute. (`config.rs:64-66`, `148`) |
@@ -211,10 +211,10 @@ RNode block of `InterfaceConfig` (`InterfaceConfig::frequency`
 | `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`spreadingfactor` (`ini_config.rs:466`); `InterfaceConfig::spreading_factor` (`config.rs:451-452`)) |
 | `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`codingrate` (`ini_config.rs:467`); `InterfaceConfig::coding_rate` (`config.rs:453-454`)) |
 | `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`txpower` (`ini_config.rs:468`); `InterfaceConfig::tx_power` (`config.rs:455-456`); `resolve_tx_power` (`rnode.rs:693`); [deviation](../concepts/python-rns-compatibility.md)) |
-| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:482`); `InterfaceConfig::flow_control` (`config.rs:470-471`)) |
-| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:483`); `InterfaceConfig::airtime_limit_short` (`config.rs:472-473`)) |
-| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:484`); `InterfaceConfig::airtime_limit_long` (`config.rs:474-475`)) |
-| `csma_enabled` | bool | unset | Enable CSMA/CA on the T114 LoRa interface (needs CAD-capable firmware). (`csma_enabled` (`ini_config.rs:485`); `InterfaceConfig::csma_enabled` (`config.rs:476-477`)) |
+| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:482`); `InterfaceConfig::flow_control` (`config.rs:473-474`)) |
+| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:483`); `InterfaceConfig::airtime_limit_short` (`config.rs:475-476`)) |
+| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:484`); `InterfaceConfig::airtime_limit_long` (`config.rs:477-478`)) |
+| `csma_enabled` | bool | unset | Enable CSMA/CA on the T114 LoRa interface (needs CAD-capable firmware). (`csma_enabled` (`ini_config.rs:485`); `InterfaceConfig::csma_enabled` (`config.rs:479-480`)) |
 | `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:473`); `InterfaceConfig::preamble_symbols` (`config.rs:457-469`); `derive_preamble_symbols` (`rnode.rs:839`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
 
 **Test-only:** `test_drop_direct_ingress` (bool, default off) emulates

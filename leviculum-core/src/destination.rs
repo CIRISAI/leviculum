@@ -736,7 +736,7 @@ impl Destination {
     /// Since Python doesn't store timestamps, loaded ratchets get
     /// `created_at_ms = 0`.
     ///
-    /// Python ref: `Destination._reload_ratchets()` (Destination.py:437-476).
+    /// Python ref: `Destination._reload_ratchets()` (Destination.py:426-464).
     pub fn load_ratchets_signed(&mut self, data: &[u8]) -> Result<usize, DestinationError> {
         let identity = self.identity.as_ref().ok_or(DestinationError::NoIdentity)?;
 

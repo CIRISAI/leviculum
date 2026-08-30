@@ -234,7 +234,7 @@ pub(crate) struct OutgoingResource {
     /// Which parts have been transmitted at least once. Retransmissions must
     /// not count toward completion: the AwaitingProof transition requires
     /// every DISTINCT part sent, mirroring Python's first-send-only
-    /// `sent_parts` (Resource.py:1013).
+    /// `sent_parts` (Resource.py:1013-1015).
     sent_mask: Vec<bool>,
     receiver_min_consecutive_height: usize,
     total_hashmap_segments: u32,
@@ -1665,7 +1665,7 @@ mod tests {
     /// receiver re-REQs the same parts repeatedly; the sender must stay in
     /// Transferring until every DISTINCT part has been sent at least once,
     /// no matter how many transmissions have accumulated (Python only counts
-    /// first sends, Resource.py:1013).
+    /// first sends, Resource.py:1013-1015).
     #[test]
     fn test_retransmissions_do_not_trigger_awaiting_proof() {
         let (link, _) = make_test_link();

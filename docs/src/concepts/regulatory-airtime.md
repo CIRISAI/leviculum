@@ -24,7 +24,7 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 *enforcement* never leaves the device.
 
 Our LNode firmware enforces the same way: `AirtimeTracker`
-(`leviculum-core/src/rnode.rs:1389`) mirrors the RNode ledger, and
+(`leviculum-core/src/rnode.rs:1397`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
 `leviculum-nrf/src/lora.rs:1084-1103`), continuing to listen so RX is
@@ -45,8 +45,8 @@ long-term limit from the TX frequency (`resolve_lt_alock`,
 `leviculum-std/src/driver/mod.rs:353-368`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
-`leviculum-core/src/rnode.rs:1302`). Both read the same table,
-`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1195`), which
+`leviculum-core/src/rnode.rs:1310`). Both read the same table,
+`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1196`), which
 carries the EU 863-870 MHz sub-bands with their 0.1 % / 1 % / 10 %
 duty cycles and the 433.05-434.79 MHz band at 10 %. An explicit
 configured value always wins — including an explicit `0`, which the
@@ -96,7 +96,7 @@ operator who most needs it not to be. Supply the citation and the
 table grows.
 
 TX power follows the same lawful-by-default shape (`resolve_tx_power`
-capped by `lawful_erp_dbm`, `leviculum-core/src/rnode.rs:1240`): an
+capped by `lawful_erp_dbm`, `leviculum-core/src/rnode.rs:1242`): an
 absent `txpower` asks for the board maximum, capped by the sub-band's
 e.r.p. limit — 25 mW everywhere in the European SRD spectrum except
 500 mW in 869.4-869.65 MHz and 10 mW in 433.05-434.79 MHz. An
@@ -105,7 +105,7 @@ licence or know the jurisdiction); the excess is logged. The
 narrowband bands *between* the wideband sub-bands (868.6-868.7 MHz
 and its four siblings, alarms, ≤ 25 kHz channel spacing) refuse a
 LoRa carrier at interface build (`erp_band_gap`,
-`leviculum-core/src/rnode.rs:1270`) — a gap is a configuration error,
+`leviculum-core/src/rnode.rs:1278`) — a gap is a configuration error,
 not an unlimited band.
 
 Python-Reticulum does not do lawful-by-default; the cap only shapes

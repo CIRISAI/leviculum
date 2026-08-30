@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1316`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1323`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1127-1133`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1134-1140`).
 
 ### When to sync
 
@@ -133,9 +133,9 @@ consequence spelled out, not a config-file default nobody reads.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:1828-1844`); replay via
+  `leviculum-lxmf/src/router.rs:1896-1913`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1302`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1309`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.

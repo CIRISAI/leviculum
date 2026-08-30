@@ -21,16 +21,16 @@ Packet or as a Reticulum Resource (multi-packet transfer). PAPER uses neither.
 ## Selection algorithm
 
 `pack()` sets `method` and `representation` from `desired_method` and the content
-size (`LXMessage.py:387-455`). The normative rules:
+size (`LXMessage.py:390-458`). The normative rules:
 
-1. If no method is desired, default to `DIRECT` (`LXMessage.py:389-390`).
+1. If no method is desired, default to `DIRECT` (`LXMessage.py:392-393`).
 2. **OPPORTUNISTIC** is valid only for SINGLE or PLAIN destinations. If the
    content size exceeds `ENCRYPTED_PACKET_MAX_CONTENT` (295) for a SINGLE
-   destination, the reference falls back to `DIRECT` (`LXMessage.py:394-398`).
-   Otherwise representation is `PACKET` (`LXMessage.py:401-412`). For PLAIN
+   destination, the reference falls back to `DIRECT` (`LXMessage.py:397-401`).
+   Otherwise representation is `PACKET` (`LXMessage.py:404-415`). For PLAIN
    destinations the limit is `PLAIN_PACKET_MAX_CONTENT` (368).
 3. **DIRECT**: if content size `<= LINK_PACKET_MAX_CONTENT` (319), representation
-   is `PACKET`; otherwise `RESOURCE` (`LXMessage.py:414-421`).
+   is `PACKET`; otherwise `RESOURCE` (`LXMessage.py:417-424`).
 4. **PROPAGATED**: the message is wrapped into the propagation envelope (see
    [Propagation](10-propagation.md)); if the envelope size `<=
    LINK_PACKET_MAX_CONTENT` it is a `PACKET`, otherwise a `RESOURCE`

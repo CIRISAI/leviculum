@@ -168,7 +168,7 @@ handoff, and wiring the two together is an explicit goal.
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
 Three layers, all sans-IO: `NodeCore` (Reticulum transport, owned by the
-app), `LxmfNode` (`leviculum-lxmf/src/node.rs:290`, the `lxmf.delivery`
+app), `LxmfNode` (`leviculum-lxmf/src/node.rs:351`, the `lxmf.delivery`
 destination adapter), and `LxmfRouter`
 (`leviculum-lxmf/src/router.rs:442`, the queue, retry scheduler, stamp and
 ticket policy, dedup caches and propagation client). The application builds
@@ -287,8 +287,9 @@ message afterwards, and it cannot offer a retry button.
 
 ### Propagation: what the router does, and what it refuses to do
 
-Setup requires the client to mint a second destination
-(`lxmf.propagation`, `leviculum-lxmf/src/propagation_client.rs:282-292`),
+Setup requires the client to mint a second `lxmf.propagation` destination
+via `PropagationTransport::destination`
+(`leviculum-lxmf/src/propagation_client.rs:282-292`),
 register it, and hand it to `enable_propagation_client`
 (`leviculum-lxmf/src/router.rs:577`); the transport identity must equal the
 router's or you get `RouterError::IdentityMismatch`
@@ -321,19 +322,19 @@ selected one loses its route
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1316`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1323`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
   (`leviculum-lxmf/src/router/propagation_runtime.rs:35-45`), and
   `next_deadline()` returns `None` in every state except `PathRequested`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1127-1133`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1134-1140`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:1828-1844`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:1896-1913`).
   The client must persist and replay them via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1302`). The selected
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1309`). The selected
   node is not snapshotted either.
 - **It does not clamp the transfer limit against the node's advertised
   one.** The download request carries the local
@@ -369,9 +370,9 @@ implementations exist, both in that file: `MemoryLxmfStorage`
 crate is `no_std`.
 
 The router writes exactly one key, `b"lxmf/router-state"`
-(`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:53`), holding the
+(`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:54`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:1828-1844`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:1896-1913`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
@@ -385,14 +386,14 @@ restarts, and must not pretend to.
 
 - **Attachments** (`leviculum-lxmf/src/attachments.rs`): files, one image,
   one audio clip, as `MessageAttachments::into_fields()`
-  (`leviculum-lxmf/src/attachments.rs:49`) / `from_fields()`
-  (`leviculum-lxmf/src/attachments.rs:78`). Attachments are inline bytes in
+  (`leviculum-lxmf/src/attachments.rs:57`) / `from_fields()`
+  (`leviculum-lxmf/src/attachments.rs:86`). Attachments are inline bytes in
   the message, so anything with a real attachment exceeds the packet MDU
   and forces link or Resource delivery (`representation`,
   `leviculum-lxmf/src/node.rs:488-516`).
 - **Paper messages** (`leviculum-lxmf/src/paper.rs`): a message encrypted
   to a destination and rendered as an `lxm://` base64 URI (`to_uri`,
-  `leviculum-lxmf/src/paper.rs:170`), capped at `PAPER_MDU = 2210` bytes
+  `leviculum-lxmf/src/paper.rs:172`), capped at `PAPER_MDU = 2210` bytes
   (`leviculum-lxmf/src/constants.rs:9`). Ingest via
   `router.ingest_paper(uri)`
   (`ingest_paper`, `leviculum-lxmf/src/router/paper_runtime.rs:17`). No QR
@@ -469,7 +470,7 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1383`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1387`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`
@@ -747,7 +748,7 @@ not a list of open work.
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:1828-1844`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:1896-1913`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
    (`leviculum-lxmf/src/stamp.rs:171-182`) and `StampError::Cancelled` is
@@ -761,7 +762,7 @@ not a list of open work.
    (`leviculum-lxmf/src/router.rs:340`), `LxmfNodeError`
    (`leviculum-lxmf/src/node.rs:233`), `PropagationTransportError`
    (`leviculum-lxmf/src/propagation_client.rs:144`), `MessageError`
-   (`leviculum-lxmf/src/message.rs:39`) and `StorageError` have no
+   (`leviculum-lxmf/src/message.rs:40`) and `StorageError` have no
    `Display`. Every user-facing string is the client's to write, and two
    clients will word them differently.
 9. **No typed codecs for reply, thread, reaction or renderer fields**

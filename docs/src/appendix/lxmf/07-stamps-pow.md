@@ -45,7 +45,7 @@ stamp_valid(stamp, target_cost, workblock):
 (`LXStamper.py:42-46`). The digest is interpreted as a big-endian 256-bit
 integer and compared against `target`. `target_cost` is the number of required
 leading zero bits. The stamp itself is 32 random bytes (`STAMP_SIZE`,
-`LXStamper.py:13`).
+`LXStamper.py:15`).
 
 ## Value
 
@@ -126,6 +126,6 @@ not make threads a protocol dependency.
 
 `validate_stamp(target_cost, tickets)` first tries each held inbound ticket: if
 `stamp == truncated_hash(ticket || message_id)` the stamp is accepted with value
-`COST_TICKET` (`LXMessage.py:271-277`). Otherwise it builds the workblock over the
+`COST_TICKET` (`LXMessage.py:274-280`). Otherwise it builds the workblock over the
 message-id and runs `stamp_valid` (`LXMessage.py:284-289`). An implementation
 MUST check tickets before proof-of-work to interoperate with ticketed senders.

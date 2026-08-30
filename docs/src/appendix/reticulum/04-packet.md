@@ -106,5 +106,5 @@ A delivery proof is a PROOF packet over the original packet hash
 (`Packet.get_hashable_part`, `:355`; `validate_proof`, `:498`). Two forms exist:
 explicit (`packet_hash(32) || signature(64)`, `EXPL_LENGTH = 96`) and implicit
 (`signature(64)`, `IMPL_LENGTH = 64`). The reference currently emits explicit
-proofs (`Link.prove_packet`, `Link.py:390`). Whether a destination proves is
+proofs (`Link.prove_packet`, `Link.py:383`). Whether a destination proves is
 governed by its proof strategy (see [Destination](03-destination.md)).

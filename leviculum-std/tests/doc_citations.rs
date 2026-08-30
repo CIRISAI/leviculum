@@ -449,16 +449,55 @@ struct Failure {
     message: String,
 }
 
+/// A resolved identifier citation and how many lines its identifier sits
+/// from the cited span. Zero is exact; anything else is `WINDOW` budget
+/// already spent at landing time, and a citation that lands at the edge
+/// reddens on the next unrelated insertion above it (which is how 33
+/// citations born at +7/+8 in one commit all tipped over when a later
+/// commit added 4 lines).
+struct Offset {
+    where_: String,
+    dist: usize,
+    nearest: usize,
+}
+
 #[derive(Default)]
 struct Counts {
     with_ident: usize,
     bare: usize,
     external: usize,
+    /// One entry per identifier citation that resolved by adjacency.
+    /// Citations that resolve only by enclosure carry no meaningful
+    /// offset (they point at statements inside the named item) and are
+    /// not listed.
+    offsets: Vec<Offset>,
 }
 
 impl Counts {
     fn total(&self) -> usize {
         self.with_ident + self.bare + self.external
+    }
+}
+
+/// The offset histogram for a corpus, plus every non-exact citation by
+/// name. Run with `--nocapture` to see it. A green guard hides how much
+/// drift budget is already spent; this is what makes it visible.
+fn report_offsets(label: &str, counts: &Counts) {
+    let mut hist: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for o in &counts.offsets {
+        *hist.entry(o.dist).or_default() += 1;
+    }
+    let buckets: Vec<String> = hist.iter().map(|(d, n)| format!("+{d}:{n}")).collect();
+    println!(
+        "{label} identifier-citation offsets (lines from cited span to nearest \
+         identifier, +0 = exact, tolerance {WINDOW}): {}",
+        buckets.join(" ")
+    );
+    for o in counts.offsets.iter().filter(|o| o.dist > 0) {
+        println!(
+            "  +{}: {} (identifier at line {})",
+            o.dist, o.where_, o.nearest
+        );
     }
 }
 
@@ -603,6 +642,25 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                     .any(|&span| span_distance(h, span) <= WINDOW || encloses(&lines, h, span.0))
             });
             if resolved {
+                // `resolved` implies at least one hit, and every citation
+                // carries at least one span.
+                let (nearest, dist) = hits
+                    .iter()
+                    .map(|&h| {
+                        (
+                            h,
+                            c.spans.iter().map(|&s| span_distance(h, s)).min().unwrap(),
+                        )
+                    })
+                    .min_by_key(|&(_, d)| d)
+                    .unwrap();
+                if dist <= WINDOW {
+                    counts.offsets.push(Offset {
+                        where_: where_.clone(),
+                        dist,
+                        nearest,
+                    });
+                }
                 passed = true;
                 break;
             }
@@ -1309,6 +1367,7 @@ fn doc_citations_resolve() {
         counts.bare,
         counts.external
     );
+    report_offsets("doc", &counts);
 
     // Tripwire against parser rot, not a coverage target: the corpus has
     // ~800 citations (~70 with identifiers) as of 2026-08. A guard that
@@ -1350,6 +1409,7 @@ fn source_citations_resolve() {
         counts.bare,
         counts.external
     );
+    report_offsets("source", &counts);
 
     // Same tripwire role as the book floors above.
     assert!(

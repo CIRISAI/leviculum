@@ -93,7 +93,7 @@ offer = [ peering_key, [ transient_id, ... ] ]
 
 where `peering_key` is the party's proof-of-work peering key (see below) and the
 list is the transient-ids it offers. The node replies via `offer_response`
-(`LXMPeer.py:396`); the reply is one of: `False` (node already has all),
+(`LXMPeer.py:400`); the reply is one of: `False` (node already has all),
 `True` (node wants all), or a list (the subset the node wants). The wanted
 messages are then pushed as one Resource carrying
 `msgpack([timestamp, [lxmf_data, ...]])` (`LXMPeer.py:462-464`).

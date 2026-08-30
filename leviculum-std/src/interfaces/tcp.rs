@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::InterfaceHandle;
 
-/// Python `TCPServerInterface.BITRATE_GUESS` (TCPInterface.py:452/652), the
+/// Python `TCPServerInterface.BITRATE_GUESS` (TCPInterface.py:453/564), the
 /// bitrate a TCP interface reports when the config sets none.
 pub(crate) const TCP_BITRATE_GUESS: i64 = 10_000_000;
 

@@ -115,7 +115,7 @@ cover them.
 That also bounds who can reach the row at all. Python LXMF refuses an
 incoming delivery Resource larger than `DELIVERY_LIMIT` × 1000, which
 is 1 000 000 bytes
-(`delivery_resource_advertised`, `reference/LXMF/LXMF/LXMRouter.py:1979`)
+(`delivery_resource_advertised`, `reference/LXMF/LXMF/LXMRouter.py:1977`)
 — *below* the segment boundary. So no LXMF transfer that a Python peer
 would accept is ever a two-segment one, and the segment path is reached
 only by a Rust-to-Rust transfer or a non-LXMF core Resource user.
@@ -166,7 +166,7 @@ That figure is consistent with the table above: eight times the
 
 `LxmfRouter` can hand the build out instead, under
 `RouterConfig::defer_resource_builds`
-(`leviculum-lxmf/src/router.rs:112`). What the tick then costs, for one
+(`leviculum-lxmf/src/router.rs:114`). What the tick then costs, for one
 due message, measured the same way:
 
 | payload | deferred tick | composed tick (incompressible) |
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:4612`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:4638`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -271,7 +271,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1305`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1309`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms

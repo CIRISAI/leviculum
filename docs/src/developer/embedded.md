@@ -134,7 +134,7 @@ drains the `EventReceiver`.
 
 ## Building the node
 
-`NodeCoreBuilder` (`leviculum-core/src/node/builder.rs:38`) takes the platform
+`NodeCoreBuilder` (`leviculum-core/src/node/builder.rs:40`) takes the platform
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. From the
 T114 firmware (`leviculum-nrf/src/bin/t114.rs:123-142`):

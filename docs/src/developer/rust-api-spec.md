@@ -36,28 +36,28 @@ when you assemble interfaces in code.
 
 ### `ReticulumNodeBuilder`
 
-The programmatic builder. Defined at `leviculum-std/src/driver/builder.rs:34`;
+The programmatic builder. Defined at `leviculum-std/src/driver/builder.rs:39`;
 re-exported as `leviculum_std::ReticulumNodeBuilder`. Each setter consumes and
 returns `self`.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new() -> Self` — `builder.rs:74` | Builder with defaults |
-| `fn identity(self, identity: Identity) -> Self` — `builder.rs:113` | Pin an explicit identity (else one is generated/persisted) |
-| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:155` | Connect outward to a Reticulum node |
-| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:168` | Listen for inbound connections |
-| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:182` | One datagram per packet |
-| `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:198` | LoRa interface; required radio settings |
-| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:222` | KISS over raw serial |
-| `fn add_auto_interface(self) -> Self` — `builder.rs:246` | IPv6 multicast LAN discovery |
-| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:281` | Act as a relay/forwarder |
-| `fn config(self, config: Config) -> Self` — `builder.rs:129` | Use a pre-loaded `Config` |
-| `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:139` | Load an INI config file |
-| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:147` | Identity / known-destinations / ratchet store dir |
-| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:322` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
-| `fn without_events(self) -> Self` — `builder.rs:105` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:518` | Build the node (not yet running) |
-| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:389` | Same as `build`, outside an async context |
+| `fn new() -> Self` — `builder.rs:93` | Builder with defaults |
+| `fn identity(self, identity: Identity) -> Self` — `builder.rs:207` | Pin an explicit identity (else one is generated/persisted) |
+| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:258` | Connect outward to a Reticulum node |
+| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:311` | Listen for inbound connections |
+| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:372` | One datagram per packet |
+| `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:412` | LoRa interface; required radio settings |
+| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:471` | KISS over raw serial |
+| `fn add_auto_interface(self) -> Self` — `builder.rs:584` | IPv6 multicast LAN discovery |
+| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:627` | Act as a relay/forwarder |
+| `fn config(self, config: Config) -> Self` — `builder.rs:232` | Use a pre-loaded `Config` |
+| `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:242` | Load an INI config file |
+| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:250` | Identity / known-destinations / ratchet store dir |
+| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:668` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
+| `fn without_events(self) -> Self` — `builder.rs:199` | Daemon mode: no application event channel |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:963` | Build the node (not yet running) |
+| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:746` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
 
@@ -89,7 +89,7 @@ The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-st
 hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
 `api::generate_identity()` (`api/mod.rs:35`), `api::version()` (`api/mod.rs:42`),
 `api::version_string()` (`api/mod.rs:51`), and `Node::connect_with_key`
-(`api/mod.rs:459`) / `Node::accept_link` (`api/mod.rs:475`).
+(`api/mod.rs:455`) / `Node::accept_link` (`api/mod.rs:471`).
 
 ### `LinkHandle`
 
@@ -188,9 +188,9 @@ caller must dispatch.
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:1124` | Run periodic maintenance (call at the next deadline) |
 | `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:1155` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
-A node is more often built with `NodeCoreBuilder` (`node/builder.rs:38`), whose
+A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`
-(`node/builder.rs:168`) supplies the platform triple. Setters include
+(`node/builder.rs:215`) supplies the platform triple. Setters include
 `identity`, `proof_strategy`, and `enable_transport`.
 
 ### Core `TickOutput` and `Action`
