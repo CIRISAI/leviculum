@@ -1024,3 +1024,283 @@ async fn test_timing_verbs_fall_back_against_a_daemon_without_them() {
 
     cleanup_config_dir(&client);
 }
+
+// --- The link-table pair under a real relayed link ------------------------
+//
+// `link_count`/`active_link_count` are only interesting when the table is not
+// empty, and the table only fills when the daemon RELAYS a link — a link it
+// terminates itself never enters `Transport.link_table` (Transport.py:1625,
+// the transport-onward branch). Two shared-instance clients of the SAME
+// daemon are the smallest topology that produces one: the announcing client's
+// destination gets a path entry pointing at its local-client interface, and
+// the second client's LINKREQUEST is then relayed across, leaving exactly one
+// entry behind.
+//
+// Drop-in discipline: one pair of scripts, one driver, pointed at either
+// daemon. The daemon is the only variable.
+
+/// Hosts an IN/SINGLE destination on the shared instance and announces it.
+/// Stays alive so the link it accepts stays up while the pair is read.
+const LINK_SERVER_PY: &str = r#"
+import os, sys, time, RNS
+r = RNS.Reticulum(configdir=sys.argv[1])
+print("SERVER shared=%r" % (r.is_connected_to_shared_instance,), flush=True)
+ident = RNS.Identity()
+d = RNS.Destination(ident, RNS.Destination.IN, RNS.Destination.SINGLE, "lnlctest", "peer")
+d.set_proof_strategy(RNS.Destination.PROVE_ALL)
+d.set_link_established_callback(lambda link: print("SERVER established", flush=True))
+print("SERVER dest=%s" % (d.hash.hex(),), flush=True)
+d.announce()
+print("SERVER announced", flush=True)
+while True: time.sleep(0.5)
+"#;
+
+/// Establishes a link to the server's destination through the daemon and holds
+/// it open.
+const LINK_CLIENT_PY: &str = r#"
+import os, sys, time, RNS
+r = RNS.Reticulum(configdir=sys.argv[1])
+print("CLIENT shared=%r" % (r.is_connected_to_shared_instance,), flush=True)
+dh = bytes.fromhex(sys.argv[2])
+if not RNS.Transport.has_path(dh):
+    RNS.Transport.request_path(dh)
+    t0 = time.time()
+    while not RNS.Transport.has_path(dh) and time.time() - t0 < 30: time.sleep(0.1)
+print("CLIENT has_path=%r" % (RNS.Transport.has_path(dh),), flush=True)
+d = RNS.Destination(RNS.Identity.recall(dh), RNS.Destination.OUT,
+                    RNS.Destination.SINGLE, "lnlctest", "peer")
+link = RNS.Link(d)
+t0 = time.time()
+while link.status != RNS.Link.ACTIVE and time.time() - t0 < 40: time.sleep(0.1)
+print("CLIENT active=%r" % (link.status == RNS.Link.ACTIVE,), flush=True)
+while True: time.sleep(0.5)
+"#;
+
+/// The two client processes whose link the daemon relays, killed on drop.
+struct RelayedLink {
+    procs: Vec<std::process::Child>,
+}
+
+impl Drop for RelayedLink {
+    fn drop(&mut self) {
+        for p in self.procs.iter_mut() {
+            let _ = p.kill();
+            let _ = p.wait();
+        }
+    }
+}
+
+/// Spawn a Python helper from `rns_root` against `config_dir`, logging to
+/// `config_dir/<name>.log`.
+fn spawn_link_helper(
+    rns_root: &Path,
+    config_dir: &Path,
+    name: &str,
+    source: &str,
+    extra_arg: Option<&str>,
+) -> std::process::Child {
+    let script = config_dir.join(format!("{name}.py"));
+    std::fs::write(&script, source).expect("write link helper");
+    let log = std::fs::File::create(config_dir.join(format!("{name}.log"))).expect("create log");
+    let log_err = log.try_clone().expect("clone log handle");
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&script).arg(config_dir);
+    if let Some(a) = extra_arg {
+        cmd.arg(a);
+    }
+    cmd.env("PYTHONPATH", rns_root)
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err));
+    leviculum_std::process::spawn_supervised(cmd).unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+}
+
+/// Read `config_dir/<name>.log`.
+fn helper_log(config_dir: &Path, name: &str) -> String {
+    std::fs::read(config_dir.join(format!("{name}.log")))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
+/// Wait for `needle` to appear in a helper's log, or panic with the log.
+async fn await_helper_line(
+    config_dir: &Path,
+    name: &str,
+    needle: &str,
+    timeout: Duration,
+) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let log = helper_log(config_dir, name);
+        if log.contains(needle) {
+            return log;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name} never printed {needle:?} within {timeout:?}; log:\n{log}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Bring up server + client on `config_dir`'s daemon and return once the link
+/// is ACTIVE — at which point the daemon holds exactly one relayed link.
+async fn establish_relayed_link(rns_root: &Path, config_dir: &Path) -> RelayedLink {
+    let server = spawn_link_helper(rns_root, config_dir, "linkserver", LINK_SERVER_PY, None);
+    let mut held = RelayedLink {
+        procs: vec![server],
+    };
+    let log = await_helper_line(
+        config_dir,
+        "linkserver",
+        "SERVER announced",
+        Duration::from_secs(45),
+    )
+    .await;
+    let dest = log
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("SERVER dest="))
+        .unwrap_or_else(|| panic!("server printed no destination:\n{log}"))
+        .trim()
+        .to_string();
+
+    let client = spawn_link_helper(
+        rns_root,
+        config_dir,
+        "linkclient",
+        LINK_CLIENT_PY,
+        Some(&dest),
+    );
+    held.procs.push(client);
+    let log = await_helper_line(
+        config_dir,
+        "linkclient",
+        "CLIENT active=",
+        Duration::from_secs(90),
+    )
+    .await;
+    assert!(
+        log.contains("CLIENT active=True"),
+        "the client never reached an ACTIVE link, so nothing was relayed:\n{log}"
+    );
+    held
+}
+
+/// The trailer line `rnstatus -l` renders for the link table, e.g.
+/// "1 entry in link table (1 active)" — extracted from the Uptime line the
+/// count is appended to (rnstatus.py:709-715, 1.5.2).
+async fn link_table_line(rns_root: &Path, config_dir: &Path) -> String {
+    let output =
+        run_python_tool_from(rns_root, "RNS/Utilities/rnstatus.py", &["-l"], config_dir).await;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "rnstatus -l exited {:?}\n{stdout}\n{stderr}",
+        output.status.code()
+    );
+    stdout
+        .lines()
+        .find(|l| l.contains("in link table"))
+        .unwrap_or_else(|| panic!("rnstatus -l rendered no link-table trailer:\n{stdout}"))
+        // The trailer is appended to the Uptime line as ", <count> entr…"
+        // when the daemon has a transport_id (both do here), and `-l` alone
+        // adds no further comma-separated tail after it.
+        .rsplit_once(", ")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("could not isolate the link-table trailer:\n{stdout}"))
+}
+
+/// The operator-visible pair, measured on both daemons with one relayed link
+/// standing: `rnstatus -l` must render the SAME line, and the verbs must
+/// answer the same `link_count`.
+///
+/// This is the assertion the semantics change exists for. Until it, lnsd
+/// answered `link_count` from the links it TERMINATES — which is 0 in this
+/// topology, because both link ends are Python clients and the daemon only
+/// relays — so `rnstatus -l` read "0 entries in link table" against lnsd and
+/// "1 entry in link table (1 active)" against rnsd for the same mesh state.
+///
+/// `active_link_count` is asserted against lnsd only, and deliberately not
+/// compared across daemons: upstream's `Transport.active_link_count` indexes
+/// `entry[IDX_LT_VALIDATED]` on the link table's KEYS, so rnsd's answer is a
+/// function of the eighth byte of a random link id (non-zero with probability
+/// 255/256) rather than of validation. Asserting equality would be asserting a
+/// coin flip; we assert our own documented meaning instead.
+///
+/// ```text
+/// LEVICULUM_RNS_ROOT=/path/to/Reticulum-1.5.x \
+///   cargo test -p leviculum-std --test rnsd_interop \
+///   test_link_table_pair_parity_across_daemons -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "spawns a Python rnsd and four client processes; needs LEVICULUM_RNS_ROOT"]
+async fn test_link_table_pair_parity_across_daemons() {
+    init_tracing();
+
+    let (rns_root, version) = rns_root_and_version();
+    eprintln!("link-table A/B against RNS {version}");
+
+    let (_node, lnsd_instance, _tcp_addr, lnsd_identity, _storage) =
+        start_rust_daemon_with_rpc().await;
+    let lnsd_client = python_client_ready_from(&rns_root, &lnsd_instance, &lnsd_identity).await;
+
+    let rnsd = start_foreign_rnsd(&rns_root).await;
+    let rnsd_client =
+        python_client_ready_from(&rns_root, &rnsd.instance_name, &rnsd.identity_bytes).await;
+
+    // Idle baseline first: both daemons must agree on the empty table too,
+    // otherwise "they agree on 1" could be luck rather than a shared meaning.
+    let script = write_timing_driver(&lnsd_client);
+    let rnsd_script = write_timing_driver(&rnsd_client);
+    let lnsd_idle = run_timing_driver(&rns_root, &script, &lnsd_client).await;
+    let rnsd_idle = run_timing_driver(&rns_root, &rnsd_script, &rnsd_client).await;
+    assert_eq!(
+        (lnsd_idle.link_count, rnsd_idle.link_count),
+        (0, 0),
+        "an idle daemon relays nothing: lnsd {lnsd_idle:?} rnsd {rnsd_idle:?}"
+    );
+
+    let _lnsd_link = establish_relayed_link(&rns_root, &lnsd_client).await;
+    let _rnsd_link = establish_relayed_link(&rns_root, &rnsd_client).await;
+
+    let lnsd_answers = run_timing_driver(&rns_root, &script, &lnsd_client).await;
+    let rnsd_answers = run_timing_driver(&rns_root, &rnsd_script, &rnsd_client).await;
+    eprintln!("lnsd: {lnsd_answers:?}");
+    eprintln!("rnsd: {rnsd_answers:?}");
+
+    assert_eq!(
+        lnsd_answers.link_count, rnsd_answers.link_count,
+        "the two daemons disagree about how many links they relay, so the \
+         operator line means different things depending on the daemon"
+    );
+    // Positive control: an equal-but-zero pair would satisfy the equality
+    // above while proving neither daemon counted the link that was stood up.
+    assert_eq!(
+        lnsd_answers.link_count, 1,
+        "one link was relayed, so the relay table holds exactly one entry"
+    );
+    assert_eq!(
+        lnsd_answers.active_link_count, 1,
+        "the relayed link validated (the client reached ACTIVE), so it is in \
+         the validated subset"
+    );
+
+    // The rendered line, from the literal 1.5.2 rnstatus, is the surface an
+    // operator actually reads.
+    let lnsd_line = link_table_line(&rns_root, &lnsd_client).await;
+    let rnsd_line = link_table_line(&rns_root, &rnsd_client).await;
+    eprintln!("lnsd rnstatus -l: {lnsd_line:?}\nrnsd rnstatus -l: {rnsd_line:?}");
+    assert_eq!(
+        lnsd_line, rnsd_line,
+        "rnstatus -l renders a different link-table line depending on the daemon"
+    );
+    assert_eq!(
+        lnsd_line, "1 entry in link table (1 active)",
+        "the rendered line must be the upstream one, singular form and all"
+    );
+
+    drop(_lnsd_link);
+    drop(_rnsd_link);
+    cleanup_config_dir(&lnsd_client);
+    cleanup_config_dir(&rnsd_client);
+}

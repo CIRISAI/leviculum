@@ -40,7 +40,7 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 :   Only show interfaces with active bursts.
 
 **-l**, **--link-stats**
-:   Show link statistics (queries `link_count` from the daemon).
+:   Show link statistics: the number of entries in the daemon's transport link table, i.e. the links it relays (queries `link_count` from the daemon, the same value `rnstatus -l` reads).
 
 **-t**, **--totals**
 :   Display traffic totals.

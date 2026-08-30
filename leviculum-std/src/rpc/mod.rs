@@ -987,7 +987,10 @@ mod tests {
         assert!(result.is_err(), "wrong authkey should cause failure");
     }
 
-    /// Test link_count RPC.
+    /// Test link_count RPC. The count is the size of the TRANSPORT link table
+    /// (the relayed links), which a freshly-built core has none of; the
+    /// populated pair is asserted in
+    /// `rpc::handlers::tests::link_count_pair_answers_from_the_transport_link_table`.
     #[tokio::test]
     async fn test_rpc_link_count() {
         let core = make_test_core(false);

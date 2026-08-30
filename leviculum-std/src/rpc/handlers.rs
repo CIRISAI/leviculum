@@ -39,8 +39,30 @@ pub(super) fn handle_request(
             inventory,
             auto_peer_count,
         ),
-        RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
-        RpcRequest::GetActiveLinkCount => pickle_int(core.active_link_count() as i64),
+        // The pair `rnstatus -l` renders as "N entries in link table
+        // (M active)". Both answer from the TRANSPORT link table — the links
+        // this node RELAYS — because that is what the verbs mean upstream:
+        // `Reticulum.get_link_count` returns `Transport.link_count()` ==
+        // `len(Transport.link_table)`, and `get_active_link_count` returns
+        // `Transport.active_link_count()`, its validated subset (Reticulum
+        // 1.5.2, Transport.py:3211-3216). Answering with the count of links
+        // this node TERMINATES, as we did until this batch, put a different
+        // number under the same operator-visible line depending on which
+        // daemon rnstatus was pointed at.
+        RpcRequest::GetLinkCount => pickle_int(core.transport_link_table_entries().len() as i64),
+        // Deliberate deviation, wire- and semantics-preserving: upstream's
+        // `Transport.active_link_count` iterates the link table's KEYS and
+        // indexes `entry[IDX_LT_VALIDATED]` on the 16-byte link id, so it
+        // counts entries whose eighth link-id byte happens to be non-zero
+        // rather than entries that validated (1.5.2, Transport.py:3215-3216).
+        // We answer the documented meaning; mirroring the accident would make
+        // the operator's "(M active)" a function of hash bytes.
+        RpcRequest::GetActiveLinkCount => pickle_int(
+            core.transport_link_table_entries()
+                .iter()
+                .filter(|e| e.validated)
+                .count() as i64,
+        ),
         RpcRequest::GetLinkTable => build_link_table(core),
 
         // The timing pair every path-request client sizes its wait window
@@ -3252,6 +3274,97 @@ mod tests {
             field(&c, "retained"),
             Value::Bool(true),
             "retaining a destination must be visible in the dump"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The `rnstatus -l` pair. Both verbs answer from the TRANSPORT link table
+    // (`len(Transport.link_table)` and its validated subset, Reticulum 1.5.2
+    // Transport.py:3211-3216), because that is the number the operator line
+    // "N entries in link table (M active)" names. Before this test the pair
+    // answered from the LOCAL links instead — a different table, a different
+    // number under the same rendered line depending on the daemon.
+    //
+    // The seeded core terminates no link of its own, so an implementation
+    // still reading the local-link count would answer 0/0 here: the 2/1 below
+    // cannot be produced by the code this replaces.
+    #[test]
+    fn link_count_pair_answers_from_the_transport_link_table() {
+        use crate::clock::SystemClock;
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::LinkEntry;
+        use leviculum_core::traits::Storage as _;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-lcpair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(Default::default()));
+        let online: InterfaceOnlineMap = Arc::new(Mutex::new(Default::default()));
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let ask = |core: &mut StdNodeCore, verb: RpcRequest| -> Value {
+            let bytes = handle_request(
+                &verb,
+                core,
+                std::time::Instant::now(),
+                &stats,
+                &online,
+                &inventory,
+                0,
+                None,
+                Codec::Msgpack,
+            )
+            .expect("handle request");
+            decode_response_msgpack(&bytes).expect("decode response")
+        };
+
+        // Idle: an empty relay table is 0/0, not an error and not a None.
+        assert_eq!(ask(&mut core, RpcRequest::GetLinkCount), Value::I64(0));
+        assert_eq!(
+            ask(&mut core, RpcRequest::GetActiveLinkCount),
+            Value::I64(0)
+        );
+
+        let now = core.now_ms();
+        let entry = |validated: bool| LinkEntry {
+            timestamp_ms: now,
+            next_hop_interface_index: 1,
+            remaining_hops: 2,
+            received_interface_index: 0,
+            hops: 1,
+            validated,
+            proof_timeout_ms: now + 5_000,
+            destination_hash: [0x11u8; 16],
+            peer_signing_key: None,
+        };
+        // The unvalidated id's eighth byte is non-zero and the validated id's
+        // is zero, so upstream's key-indexing accident (Transport.py:3215-3216)
+        // would answer 1 for exactly the wrong entry. Ours reads `validated`.
+        let mut validated_id = [0x44u8; TRUNCATED_HASHBYTES];
+        validated_id[7] = 0x00;
+        let unvalidated_id = [0x55u8; TRUNCATED_HASHBYTES];
+        core.storage_mut().set_link_entry(validated_id, entry(true));
+        core.storage_mut()
+            .set_link_entry(unvalidated_id, entry(false));
+
+        assert_eq!(
+            ask(&mut core, RpcRequest::GetLinkCount),
+            Value::I64(2),
+            "link_count is the size of the relay table, validated or not"
+        );
+        assert_eq!(
+            ask(&mut core, RpcRequest::GetActiveLinkCount),
+            Value::I64(1),
+            "active_link_count is the validated subset — by the `validated` \
+             flag, not by a byte of the link id"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

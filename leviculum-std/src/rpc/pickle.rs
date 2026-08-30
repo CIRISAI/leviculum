@@ -51,10 +51,15 @@ fn detect_codec(data: &[u8]) -> Codec {
 pub(crate) enum RpcRequest {
     // GET commands
     GetInterfaceStats,
+    /// Number of entries in the TRANSPORT link table — the links this node
+    /// relays, not the ones it terminates (`Reticulum.get_link_count` →
+    /// `Transport.link_count()` → `len(Transport.link_table)`, Reticulum
+    /// 1.5.2). `rnstatus -l` renders it as "N entries in link table".
     GetLinkCount,
     /// Local link inventory — Leviculum-only extension; no Python `rnsd`
-    /// precedent (Python only exposes `link_count`). Response is a list of
-    /// dicts; see `LinkTableExport` for the per-row shape.
+    /// precedent (Python only exposes `link_count`, which counts a different
+    /// table: the relayed links, not these terminated ones). Response is a
+    /// list of dicts; see `LinkTableExport` for the per-row shape.
     GetLinkTable,
     GetPathTable {
         max_hops: Option<i64>,
@@ -100,9 +105,15 @@ pub(crate) enum RpcRequest {
     /// (Reticulum 1.5.2 `Transport.medium_path_timeout`). rnprobe,
     /// rnpath and rncp size their wait window with it.
     GetMediumPathTimeout,
-    /// Count of the link-table entries that are validated
+    /// Count of the TRANSPORT link-table entries that are validated
     /// (Reticulum 1.5.2 `Transport.active_link_count`). `rnstatus -l`
     /// renders it as the `(N active)` suffix.
+    ///
+    /// Upstream's implementation does not compute that: it iterates the
+    /// link table's keys and indexes `entry[IDX_LT_VALIDATED]` on the
+    /// 16-byte link id, so it counts ids whose eighth byte is non-zero
+    /// (Transport.py:3215-3216, 1.5.2). We answer the documented meaning —
+    /// see the handler for why.
     GetActiveLinkCount,
     GetBlackholedIdentities,
     /// Membership check against the blackhole set. Python sends

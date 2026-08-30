@@ -325,10 +325,12 @@ async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8
     let _ = writeln!(out);
 
     // link_count (the Python-compat scalar — also available against rnsd).
+    // It counts the TRANSPORT link table: links this node RELAYS, which is a
+    // different set from the `link_table` section below (links it terminates).
     let _ = writeln!(out, "## link_count");
     match leviculum_std::rpc_query(instance_name, authkey, "link_count").await {
         Ok(v) => {
-            let _ = writeln!(out, "active links: {}", pretty_json(&v));
+            let _ = writeln!(out, "relayed links: {}", pretty_json(&v));
         }
         Err(e) => {
             let _ = writeln!(out, "<unavailable: {e}>");
@@ -338,7 +340,8 @@ async fn append_rpc_section(out: &mut String, instance_name: &str, authkey: &[u8
 
     // link_table (Leviculum-only extension; Python rnsd rejects it with an
     // "unknown get command" error, which surfaces here as `<unavailable: …>`.
-    // The `link_count` query above is the Python-compat fallback).
+    // Not the same table as `link_count` above: these are the links this node
+    // TERMINATES, that one counts the links it relays).
     let _ = writeln!(out, "## link_table");
     match leviculum_std::rpc_query(instance_name, authkey, "link_table").await {
         Ok(v) => {

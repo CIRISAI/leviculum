@@ -193,14 +193,16 @@ known paths: 7
 [ ... JSON array of {hash, interface, hops, expires, ...} ... ]
 
 ## link_count
-active links: 0
+relayed links: 0
 
 ## link_table
 links (0):
 
 raw:
-[ ... JSON array of active links; this section is a Leviculum
-  extension and shows <unavailable> against a Python rnsd ... ]
+[ ... JSON array of the links this node TERMINATES; note that
+  `link_count` above counts a different table, the links it RELAYS.
+  This section is a Leviculum extension and shows <unavailable>
+  against a Python rnsd ... ]
 
 ----- System -----
 os: linux  kernel: 6.12.73+deb13-amd64

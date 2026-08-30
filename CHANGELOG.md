@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `rnstatus -l` reads the same link-table line off `lnsd` as it does off
+  `rnsd`. The `link_count` and `active_link_count` RPC verbs answered with
+  the links the daemon terminates; upstream they report the transport link
+  table, i.e. the links it relays. An operator watching a relayed link saw
+  "0 entries in link table" against `lnsd` and "1 entry in link table
+  (1 active)" against `rnsd` for the same mesh state (#329).
+
 - An LNode no longer panics and resets when a phone connects over BLE. The
   event buffer was left at its 128-byte default, and any peer negotiating a
   large ATT MTU overflowed it on its first full-size write (#354).

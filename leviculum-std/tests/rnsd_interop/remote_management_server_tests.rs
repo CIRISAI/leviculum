@@ -134,10 +134,23 @@ async fn test_remote_status_server_allows_and_serves() {
         Some(hex_lower(&server_id_hash).as_str()),
         "transport_id must be the server's transport identity hash"
     );
-    // `-l` requested the link count, so the server appended it (there is at
-    // least the client's own management link).
+    // `-l` requested the link count, so the server appended it. The number is
+    // `len(Transport.link_table)` — the links the server RELAYS
+    // (`Transport.remote_status_handler` → `get_link_count`, Reticulum 1.5.2)
+    // — and the client's management link is not one of them: the client is a
+    // direct TCP neighbour and the server TERMINATES that link, so it lands in
+    // the local-link inventory and never in the relay table. An rnsd in this
+    // topology answers 0 for the same reason.
+    //
+    // Present-but-zero is the whole assertion: it separates "the server
+    // appended the count" from "the server had a relayed link to count", which
+    // an `is_some()` alone would not.
     let lc = link_count.expect("link count must be present when include_lstats is set");
-    assert!(lc >= 1, "expected at least one active link, got {lc}");
+    assert_eq!(
+        lc, 0,
+        "the server relays no link in this two-node topology; a non-zero \
+         count here means the verb is reporting terminated links again"
+    );
 
     server.stop().await.ok();
     client.stop().await.ok();

@@ -306,7 +306,7 @@ known paths: 7
 [ ... JSON array of {hash, via, hops, expires, ...} ... ]
 
 ## link_count
-active links: 0
+relayed links: 0
 
 ----- System -----
 os: linux  kernel: 6.12.73+deb13-amd64

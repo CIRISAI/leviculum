@@ -102,7 +102,10 @@ impl RemoteMgmtResponder {
 
         // Build the same bundle the local `interface_stats` RPC serves, then
         // append the link count when requested (Python appends
-        // get_link_count() only when data[0] == True).
+        // get_link_count() only when data[0] == True). Same number as the
+        // local `link_count` RPC: the size of the TRANSPORT link table, so
+        // `rnstatus -R -l` and `rnstatus -l` against the same node read the
+        // same "N entries in link table".
         let stats = crate::rpc::handlers::build_interface_stats(
             &mut core,
             self.start_time,
@@ -113,7 +116,7 @@ impl RemoteMgmtResponder {
         );
         let mut items = vec![stats];
         if include_lstats {
-            items.push(Value::I64(core.active_link_count() as i64));
+            items.push(Value::I64(core.transport_link_table_entries().len() as i64));
         }
         let response_value = Value::List(items);
 
