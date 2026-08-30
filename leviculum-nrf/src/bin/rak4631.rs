@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select3, select4, Either3, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -404,9 +404,18 @@ async fn main(spawner: Spawner) {
         if let Some(stored) = leviculum_nrf::telemetry::load(rak4631::CONFIG.telemetry_flash_page) {
             reporter.apply_target(&mut node, stored);
         }
+        // A persisted fixed position replaces the sensor from the first
+        // report of this boot on — the pin must not depend on which
+        // record the host set last.
+        if let Some(stored) =
+            leviculum_nrf::telemetry::load_fixed_position(rak4631::CONFIG.telemetry_flash_page)
+        {
+            reporter.apply_fixed_position(Some(stored));
+        }
         reporter.log_banner();
     }
     let telemetry_target_rx = leviculum_nrf::telemetry::inbound_target_receiver();
+    let fixed_position_rx = leviculum_nrf::telemetry::inbound_fixed_position_receiver();
 
     // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
     // a spawned task: the counters live in the node this loop owns.
@@ -420,7 +429,8 @@ async fn main(spawner: Spawner) {
     // 5. GNSS time candidate (until the calendar is seeded once)
     // 6. Host wall-time injection (#238 control envelope)
     // 7. Host telemetry target (#238 control envelope, #236)
-    // 8. Telemetry evaluation tick (only while a target is configured)
+    // 8. Host fixed position (#238 control envelope)
+    // 9. Telemetry evaluation tick (only while a target is configured)
     loop {
         transport_stats.poll(&node);
         // Clamped by the stats deadline so the line is still emitted on a
@@ -473,12 +483,16 @@ async fn main(spawner: Spawner) {
                 Timer::at(deadline),
             ),
             gnss_time_candidate,
-            select(serial.wall_time_rx.receive(), telemetry_target_rx.receive()),
+            select3(
+                serial.wall_time_rx.receive(),
+                telemetry_target_rx.receive(),
+                fixed_position_rx.receive(),
+            ),
             telemetry_tick,
         )
         .await
         {
-            Either4::Third(Either::First(unix_secs)) => {
+            Either4::Third(Either3::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
                 // seam applies the same sanity window as every other time
                 // source; the bool picks the enveloped ack or the named
@@ -498,7 +512,7 @@ async fn main(spawner: Spawner) {
                 // the host's retry covers it.
                 let _ = serial_ctl_tx.try_send(answer);
             }
-            Either4::Third(Either::Second(wire)) => {
+            Either4::Third(Either3::Second(wire)) => {
                 // A host set or cleared the telemetry target (#236). The
                 // serial task already acked the frame; what happens here
                 // is the part that needs the node — the identity lookup
@@ -510,6 +524,26 @@ async fn main(spawner: Spawner) {
                             leviculum_nrf::telemetry::request_save(&wire);
                             reporter.log_banner();
                         }
+                    }
+                }
+            }
+            Either4::Third(Either3::Third(position)) => {
+                // A host set or cleared the fixed position. The serial
+                // task already answered the frame; this is the part that
+                // needs the reporter — the source switch and the
+                // confirmation re-arm — plus the persist.
+                if let Some(reporter) = reporter.as_mut() {
+                    reporter.apply_fixed_position(position);
+                    leviculum_nrf::telemetry::request_save_fixed_position(position);
+                    match position {
+                        Some(p) => log_critical!(
+                            "[TELEMETRY] fixed-position set lat_e6={} lon_e6={} alt_e2={} alt_present={}",
+                            p.latitude_e6,
+                            p.longitude_e6,
+                            p.altitude_e2.unwrap_or(0),
+                            p.altitude_e2.is_some() as u8
+                        ),
+                        None => log_critical!("[TELEMETRY] fixed-position cleared"),
                     }
                 }
             }

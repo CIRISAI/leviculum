@@ -17,7 +17,9 @@ MEMORY
     /* firmware update:                                                      */
     /*   0xEC000  identity          (BoardConfig::identity_flash_page)       */
     /*   0xEB000  radio config      (BoardConfig::radio_config_flash_page)   */
-    /*   0xEA000  telemetry target  (BoardConfig::telemetry_flash_page, #236)*/
+    /*   0xEA000  telemetry target (+0x000, #236) and user-set fixed        */
+    /*            position (+0x100) — layout in leviculum_nrf::telemetry    */
+    /*            (BoardConfig::telemetry_flash_page)                        */
     /* 0xEA000 is USER_FLASH_END itself: the bootloader declines every block  */
     /* AT or above it, so the page is the lowest one still safe from a UF2.  */
     /* Safe app space = the bootloader's window, 0xEA000 - 0x27000 =         */

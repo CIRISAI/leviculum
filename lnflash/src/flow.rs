@@ -912,6 +912,98 @@ fn send_tx_power_to(fd: &crate::sys::Fd, dbm: i8) -> io::Result<TxPowerOutcome> 
     }
 }
 
+/// The `--set-position` / `--clear-position` session: set or clear the
+/// user-set fixed position on every running LNode, no flashing, then
+/// exit. `position` is `None` for the clear.
+///
+/// While set, the fixed position replaces the board's position sensor
+/// entirely in its telemetry reports — the decided semantics: the user's
+/// "this is where this node is" beats a wandering fix — and it survives
+/// resets. The clear returns the board to sensor reporting, which for a
+/// board without a receiver honestly means no position at all.
+pub fn set_fixed_position(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    position: Option<&leviculum_core::envelope::FixedPositionWire>,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-position and --clear-position talk to flashed \
+             boards; a board in its bootloader has no position to configure.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| crate::position::send_configured(&fd, position))
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        report_fixed_position(ui, port, position, reply);
+    }
+    Ok(all_took_it)
+}
+
+/// Say what the board answered to the fixed position, in the same shape
+/// [`report_telemetry`] uses.
+fn report_fixed_position(
+    ui: &mut dyn Ui,
+    port: &str,
+    position: Option<&leviculum_core::envelope::FixedPositionWire>,
+    reply: SessionReply,
+) {
+    match reply {
+        SessionReply::Acked => match position {
+            Some(position) => ui.say(&format!(
+                "{port}: fixed position set — {}. It replaces the position sensor in every \
+                 telemetry report (the board's [TELEMETRY] report line on if00 says \
+                 possrc=fixed) and survives resets; --clear-position returns the board to \
+                 sensor reporting.",
+                crate::position::describe(position)
+            )),
+            None => ui.say(&format!(
+                "{port}: fixed position cleared — the board reports what its position sensor \
+                 says again, which on a board without a receiver is no position at all."
+            )),
+        },
+        SessionReply::Refused(reason) if reason == leviculum_core::envelope::REFUSE_UNSUPPORTED => {
+            ui.say(&format!(
+                "{port}: this board's firmware carries no telemetry reporter — the position was \
+                 refused, not stored. Neither retrying nor rebooting helps; only firmware that \
+                 wires a reporter does."
+            ))
+        }
+        SessionReply::Refused(reason) => ui.say(&format!(
+            "{port}: the board refused the fixed position — {}.",
+            crate::envelope::reason_str(reason)
+        )),
+        SessionReply::NoAnswer => ui.say(&format!(
+            "{port}: the board did not answer the fixed-position frame, so it is still on \
+             whatever position source it had."
+        )),
+        SessionReply::NoEnvelope => ui.say(&format!(
+            "{port}: this firmware predates the control envelope and cannot take a fixed \
+             position. Flash the current bundle first."
+        )),
+        SessionReply::NotAccepted => ui.say(&format!(
+            "{port}: this firmware speaks the envelope but does not accept the fixed-position \
+             frame. Flash the current bundle first."
+        )),
+    }
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a

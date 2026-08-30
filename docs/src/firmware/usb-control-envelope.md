@@ -39,6 +39,8 @@ Commands (host → board):
 | 0x04 | CAPABILITIES     | empty (a query)                                |
 | 0x05 | TELEMETRY_TARGET | see below — set or clear the telemetry target  |
 | 0x06 | TX_SPACING       | on-air transmit spacing in ms, u16 BE (2 B)    |
+| 0x07 | RADIO_QUERY      | empty (a query, #349) — answered with RADIO_REPORT |
+| 0x08 | FIXED_POSITION   | see below — set or clear the user-set position |
 
 Responses (board → host):
 
@@ -47,11 +49,14 @@ Responses (board → host):
 | 0x81 | ACK               | `[acked_type]`                            |
 | 0x82 | REFUSAL           | `[refused_type, reason]`                  |
 | 0x83 | CAPABILITY_REPORT | `[version, accepted types...]`            |
+| 0x84 | RADIO_REPORT      | the RADIO_CONFIG parameter block the radio is running (#349) |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
-refused, `0x04` busy. The version in the capability report (`1`) names
-the envelope framing itself; new frame types extend the accepted list
-without bumping it.
+refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
+type but this binary carries no consumer for it — retrying or rebooting
+cannot help, only different firmware can). The version in the capability
+report (`1`) names the envelope framing itself; new frame types extend
+the accepted list without bumping it.
 
 The wall-time frame calls the calendar seam
 (`set_wall_time_unix_secs(.., TimeSource::Host)`); the seam's sanity
@@ -151,6 +156,49 @@ debug CDC (if00), which `lnflash` holds open only for the post-flash boot
 check — so it is named as the place to read the rest rather than read
 back over a second connection.
 
+### The fixed-position frame
+
+```text
+[set: u8] ([latitude_e6: i32 BE] [longitude_e6: i32 BE]
+           [alt_present: u8] ([altitude_e2: i32 BE]))
+```
+
+A user-set position as the telemetry source. `set` is `0x00` (clear, the
+1-byte payload is the whole command) or `0x01`; `alt_present` follows the
+telemetry target's key-present rule — an explicit flag byte, never
+inferred from the length. Units are the telemetry wire's own scaled
+integers: degrees × 1e6, metres × 1e2, so the coordinates the user typed
+are the coordinates that go on the air. A latitude beyond ±90° or a
+longitude beyond ±180° is refused as malformed.
+
+Semantics (decided 2026-08-30): **while set, the fixed position replaces
+the position sensor entirely, in every profile** — no blending, no
+fallback surprises — and the explicit clear returns the node to sensor
+reporting, which for a GNSS-less binary means no position. The board
+persists it beside the telemetry target (same flash page, so it survives
+resets and UF2 updates), marks the source in its report line as
+`possrc=fixed|gnss`, and puts it on the wire in Sideband's own
+fixed-location shape: accuracy 0.01 m, speed and bearing 0, altitude 0
+when unset (`Location.update_data`, synthesized branch, Sideband
+`2000d81`).
+
+The ack is capability-gated exactly like the telemetry target's: only
+the reporter reads the position, so a binary without one answers the
+`unsupported` refusal rather than acking a pin nothing will ever report.
+
+#### How `lnflash` drives it
+
+| flag                          | effect                                                   |
+|-------------------------------|----------------------------------------------------------|
+| `--set-position LAT,LON[,ALT]`| set it on every running board, then exit; no flash       |
+| `--clear-position`            | back to sensor reporting                                 |
+
+The value is decimal degrees, comma or space separated, sign or
+hemisphere letter (`52.52,13.405,34`, `"52.52N 13.405E"`, `36.85S,73.04W`
+all parse; a letter and a sign together do not). The optional third value
+is the altitude in metres. Degrees/minutes/seconds notation is refused by
+name rather than misparsed.
+
 ## Why an envelope frame can never be a packet
 
 The channel's other occupant is HDLC-framed Reticulum traffic, so every
@@ -164,11 +212,11 @@ control frame must be unmistakable. Three facts hold it:
    envelope — the capability probe, wall time, reset — is shorter than
    the 19-byte minimum Reticulum wire packet, so it cannot be
    packet-shaped at all.
-3. Frames longer than that (radio config at 24 B, telemetry target at up
-   to 87 B) are only sent after a capability report proved the peer is
-   envelope-speaking firmware. This ordering is load-bearing: an
-   envelope speaker must probe before it sends any envelope frame of 19
-   bytes or more.
+3. Frames at that size or beyond (radio config at 24 B, telemetry target
+   at up to 87 B, a set fixed position at exactly 19 B) are only sent
+   after a capability report proved the peer is envelope-speaking
+   firmware. This ordering is load-bearing: an envelope speaker must
+   probe before it sends any envelope frame of 19 bytes or more.
 
 ## Compatibility window, and how it retires
 

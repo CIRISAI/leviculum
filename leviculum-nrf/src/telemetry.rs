@@ -34,20 +34,19 @@ use alloc::vec::Vec;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
-use leviculum_core::envelope::{TelemetryTargetWire, TELEMETRY_PROFILE_OFF};
+use leviculum_core::envelope::{FixedPositionWire, TelemetryTargetWire, TELEMETRY_PROFILE_OFF};
+use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_position};
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeCore;
-use leviculum_core::telemetry_target_store::{
-    decode_telemetry_target, encode_telemetry_target, ENCODED_SIZE_ALIGNED,
-};
+use leviculum_core::telemetry_target_store::{decode_telemetry_target, encode_telemetry_target};
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::{Action, DispatchResult};
 use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{build_report, Battery, Location, Telemetry};
 use leviculum_telemetry_policy::{
-    command_from_wire, EmissionRoute, Fix, Profile, ReportReason, SendPolicy, TargetCommand,
-    TargetState,
+    choose_position, command_from_wire, EmissionRoute, Fix, PositionSource, Profile, ReportReason,
+    SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported so the binaries name the outcome of
@@ -120,15 +119,67 @@ pub fn inbound_target_receiver(
     INBOUND_TARGET.receiver()
 }
 
+/// Fixed positions arriving from the host over the control envelope
+/// (`TYPE_FIXED_POSITION`; `None` is the explicit clear). Same depth-1
+/// replace discipline as [`INBOUND_TARGET`], for the same reason.
+static INBOUND_FIXED_POSITION: Channel<CriticalSectionRawMutex, Option<FixedPositionWire>, 1> =
+    Channel::new();
+
+/// Hand a fixed position (or its clear) from the serial task to the main
+/// loop. Returns whether it was taken; `false` is covered by the host's
+/// retry, exactly like [`deliver_target`].
+pub fn deliver_fixed_position(position: Option<FixedPositionWire>) -> bool {
+    if INBOUND_FIXED_POSITION.try_send(position).is_err() {
+        let _ = INBOUND_FIXED_POSITION.try_receive();
+        INBOUND_FIXED_POSITION.try_send(position).is_ok()
+    } else {
+        true
+    }
+}
+
+/// The main loop's end of [`deliver_fixed_position`].
+pub fn inbound_fixed_position_receiver(
+) -> embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, Option<FixedPositionWire>, 1>
+{
+    INBOUND_FIXED_POSITION.receiver()
+}
+
 // ---------------------------------------------------------------------------
 // Persistence — same two-halves shape as `radio_store`
 // ---------------------------------------------------------------------------
 
-/// Pending save requests. Depth 1 for the same reason as the radio store:
-/// the newest target is the one that must end up on the page.
-static PENDING_SAVE: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> = Channel::new();
+/// The telemetry flash page layout (`BoardConfig::telemetry_flash_page`).
+///
+/// One 4 KiB page carries two independent records, because the page is the
+/// last one the bootloader's `USER_FLASH_END` protects on both boards —
+/// 0xEB000/0xEC000 hold radio config and identity, and 0xED000 upward is
+/// Heltec's license/version band on the T114 (memory.x) — so a second
+/// page was never on offer:
+///
+/// ```text
+/// +0x000  telemetry target record  ("LTTG", telemetry_target_store)
+/// +0x100  fixed position record    ("LFPO", fixed_position_store)
+/// ```
+///
+/// The target keeps offset 0, where every fielded board already has it, so
+/// this layout is what those boards are running the moment they first
+/// persist a fixed position. Erase granularity is the whole page, so the
+/// store task rewrites both records on every save; each record's own
+/// magic + checksum keeps a torn write from becoming a garbage target or a
+/// garbage pin.
+const TARGET_OFFSET: u32 = 0x000;
+/// See [`TARGET_OFFSET`].
+const FIXED_POSITION_OFFSET: u32 = 0x100;
 
-/// Read the persisted telemetry target, or `None` if the page is blank,
+/// Pending save requests. Depth 1 for the same reason as the radio store:
+/// the newest value of each record is the one that must end up on the
+/// page. Two channels rather than one queue so a target save and a fixed
+/// position save can never displace each other.
+static PENDING_SAVE: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> = Channel::new();
+static PENDING_SAVE_FIXED: Channel<CriticalSectionRawMutex, Option<FixedPositionWire>, 1> =
+    Channel::new();
+
+/// Read the persisted telemetry target, or `None` if its record is blank,
 /// corrupt, or written by a different format version — all of which mean
 /// "no target", which is telemetry off, which is the default.
 ///
@@ -136,15 +187,34 @@ static PENDING_SAVE: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> = 
 /// read and is safe at any point in boot, including before
 /// `Softdevice::enable`.
 pub fn load(page: u32) -> Option<TelemetryTargetWire> {
-    decode_telemetry_target(&read_page(page))
+    decode_telemetry_target(&read_target_record(page))
 }
 
-fn read_page(page: u32) -> [u8; ENCODED_SIZE_ALIGNED] {
-    let mut buf = [0u8; ENCODED_SIZE_ALIGNED];
-    // SAFETY: `page` is a flash page address supplied by the board config,
+/// Read the persisted fixed position, or `None` if its record is blank,
+/// corrupt, or an explicit clear — all of which mean sensor reporting,
+/// the default. Same read-safety argument as [`load`].
+pub fn load_fixed_position(page: u32) -> Option<FixedPositionWire> {
+    decode_fixed_position(&read_fixed_record(page))
+}
+
+fn read_target_record(
+    page: u32,
+) -> [u8; leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + TARGET_OFFSET)
+}
+
+fn read_fixed_record(
+    page: u32,
+) -> [u8; leviculum_core::fixed_position_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + FIXED_POSITION_OFFSET)
+}
+
+fn read_record<const N: usize>(addr: u32) -> [u8; N] {
+    let mut buf = [0u8; N];
+    // SAFETY: `addr` is inside a flash page supplied by the board config,
     // outside the linker's FLASH region but inside the 1 MiB flash map
     // (memory.x). Flash is readable as normal memory on this part.
-    let stored = unsafe { core::slice::from_raw_parts(page as *const u8, ENCODED_SIZE_ALIGNED) };
+    let stored = unsafe { core::slice::from_raw_parts(addr as *const u8, N) };
     buf.copy_from_slice(stored);
     buf
 }
@@ -158,10 +228,19 @@ pub fn request_save(target: &TelemetryTargetWire) {
     }
 }
 
-/// 4-byte-aligned page buffer. `sd_flash_write` writes whole 32-bit words
-/// and rejects an unaligned source pointer.
+/// Ask the store task to persist the fixed position (`None` persists the
+/// explicit clear). Never blocks, like [`request_save`].
+pub fn request_save_fixed_position(position: Option<FixedPositionWire>) {
+    if PENDING_SAVE_FIXED.try_send(position).is_err() {
+        let _ = PENDING_SAVE_FIXED.try_receive();
+        let _ = PENDING_SAVE_FIXED.try_send(position);
+    }
+}
+
+/// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
+/// words and rejects an unaligned source pointer.
 #[repr(align(4))]
-struct Aligned([u8; ENCODED_SIZE_ALIGNED]);
+struct Aligned<const N: usize>([u8; N]);
 
 /// How often a failed flash operation is retried; the SoftDevice refuses
 /// flash access while the radio is busy.
@@ -171,16 +250,31 @@ const SAVE_RETRY_MS: u64 = 250;
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
+    use embassy_futures::select::{select, Either};
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
-        let target = PENDING_SAVE.receive().await;
-        let encoded = Aligned(encode_telemetry_target(&target));
+        let request = select(PENDING_SAVE.receive(), PENDING_SAVE_FIXED.receive()).await;
+        // Whichever record the request names, the other one is read back
+        // off the page and rewritten with it: the erase is page-wide, so
+        // a save of one record must carry the other across it.
+        let mut target = Aligned(read_target_record(page));
+        let mut fixed = Aligned(read_fixed_record(page));
+        let what = match request {
+            Either::First(wire) => {
+                target = Aligned(encode_telemetry_target(&wire));
+                "target"
+            }
+            Either::Second(position) => {
+                fixed = Aligned(encode_fixed_position(position.as_ref()));
+                "fixed-position"
+            }
+        };
 
         // Read-compare-write: an unchanged page is never erased. A host
-        // tool that re-sends the same target on every connect must not
+        // tool that re-sends the same value on every connect must not
         // burn a flash cycle for it.
-        if read_page(page) == encoded.0 {
+        if read_target_record(page) == target.0 && read_fixed_record(page) == fixed.0 {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             continue;
         }
@@ -190,7 +284,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             let result = async {
                 let mut flash = flash.lock().await;
                 flash.erase(page, page + 4096).await?;
-                flash.write(page, &encoded.0).await
+                flash.write(page + TARGET_OFFSET, &target.0).await?;
+                flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await
             }
             .await;
             match result {
@@ -210,10 +305,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         }
 
         if written {
-            crate::log::log_fmt(
-                "[TELEMETRY] ",
-                format_args!("persist saved profile={}", target.profile),
-            );
+            crate::log::log_fmt("[TELEMETRY] ", format_args!("persist saved {}", what));
         } else {
             crate::log::log_fmt(
                 "[TELEMETRY] ",
@@ -295,15 +387,12 @@ impl Readings {
         })
     }
 
-    /// The location sensor, or `None` when there is no position to send.
-    ///
-    /// `include_position` is the policy's answer, not this function's: a
-    /// fix that failed the accuracy gate is not a position, and neither
-    /// is a fix seen while presence is not `Fix`.
-    fn location(&self, include_position: bool) -> Option<Location> {
-        if !include_position {
-            return None;
-        }
+    /// The location sensor built from the GNSS readings, or `None` when
+    /// the receiver contributed nothing usable. Whether it goes into the
+    /// report at all is the policy's answer, not this function's — the
+    /// caller ([`Reporter::tick`]) applies that gate and the fixed
+    /// position's precedence before asking for it.
+    fn sensor_location(&self) -> Option<Location> {
         let fix = self.fix()?;
         let accuracy_m = self.hdop? * HORIZONTAL_UERE_M;
         Some(Location::saturating(
@@ -317,11 +406,12 @@ impl Readings {
         ))
     }
 
-    /// Assemble the Telemeter for one report.
-    pub fn telemetry(&self, include_position: bool) -> Telemetry {
+    /// Assemble the Telemeter for one report, with the location the
+    /// caller decided on (`None` for a report that carries no position).
+    pub fn telemetry(&self, location: Option<Location>) -> Telemetry {
         Telemetry {
             time: self.unix_secs.map(|s| s as i64),
-            location: self.location(include_position),
+            location,
             battery: self.battery_percent.map(|percent| Battery {
                 charge_percent: Number::Int(percent as i64),
                 // The baseboard reads a voltage divider, which cannot tell
@@ -332,6 +422,47 @@ impl Readings {
             }),
             ..Telemetry::default()
         }
+    }
+}
+
+/// Wire accuracy of a user-set fixed position: 0.01 m, `accuracy_e2 = 1`.
+///
+/// This is Sideband's own convention for exactly this feature, not our
+/// aesthetics: its fixed-location setting synthesizes the location sensor
+/// (`SidebandCore.update_telemeter_config`, Sideband `2000d81`) and the
+/// synthesized branch of `Location.update_data` (same commit) fills the
+/// unset fields as `altitude = 0.0`, `accuracy = 0.01`, `speed = 0.0`,
+/// `bearing = 0.0` before packing — so a Columba/Sideband renderer already
+/// treats a 0.01 m reading as "a stated location". [`fixed_location`]
+/// reproduces that shape byte for byte.
+pub const FIXED_ACCURACY_E2: u16 = 1;
+
+/// The [`Location`] a user-set fixed position reports.
+///
+/// Speed and bearing are 0 and the altitude defaults to 0 — the
+/// reference's synthesized-location fill-ins (see [`FIXED_ACCURACY_E2`]).
+/// `last_update` is the report's own timebase: the position is a standing
+/// assertion, current as of every report that carries it.
+pub fn fixed_location(wire: &FixedPositionWire, unix_secs: u64) -> Location {
+    Location::saturating(
+        wire.latitude_e6 as i64,
+        wire.longitude_e6 as i64,
+        wire.altitude_e2.unwrap_or(0) as i64,
+        0,
+        0,
+        FIXED_ACCURACY_E2 as i64,
+        unix_secs as i64,
+    )
+}
+
+/// The fixed position as the policy wants it: the coordinates, with the
+/// no-dilution HDOP that passes every profile's accuracy gate by
+/// construction ([`FIXED_POSITION_HDOP_E2`]).
+fn fixed_fix(wire: &FixedPositionWire) -> Fix {
+    Fix {
+        latitude_e6: wire.latitude_e6,
+        longitude_e6: wire.longitude_e6,
+        hdop_e2: Some(FIXED_POSITION_HDOP_E2),
     }
 }
 
@@ -350,6 +481,10 @@ const KEY_REQUEST_INTERVAL_MS: u64 = 60_000;
 pub struct Reporter {
     policy: SendPolicy,
     target: Option<TelemetryTargetWire>,
+    /// The user-set fixed position. While set it replaces the sensor as
+    /// the reported position entirely ([`choose_position`]); the decided
+    /// semantics, not a preference.
+    fixed_position: Option<FixedPositionWire>,
     delivery_hash: DestinationHash,
     /// Monotonic time of the last path request issued while awaiting a
     /// key; `None` before the first one.
@@ -373,6 +508,10 @@ pub struct Reporter {
 struct PendingLine {
     reason: ReportReason,
     include_position: bool,
+    /// Which source the position slot answered from — `fixed` while a
+    /// fixed position is set, `gnss` otherwise, whether or not a position
+    /// was carried. The honest source marker the batch requires.
+    possrc: PositionSource,
     unix_secs: u64,
     /// The interfaces this report's own frames were handed to, which is
     /// what decides whether it went out (#348). The announce that shares
@@ -390,6 +529,7 @@ impl Reporter {
         Self {
             policy: SendPolicy::new(),
             target: None,
+            fixed_position: None,
             delivery_hash,
             last_key_request_ms: None,
             last_withheld: None,
@@ -491,6 +631,25 @@ impl Reporter {
         self.policy.apply(command, key_known)
     }
 
+    /// Apply a fixed position from the host or from flash; `None` is the
+    /// explicit clear, returning the node to sensor reporting.
+    ///
+    /// Both paths — boot load and runtime frame — come through here, like
+    /// the target's `apply_target`. The policy re-arms the immediate
+    /// report when the target is usable, so the operator who changed what
+    /// the node claims about itself sees the confirmation; a boot with a
+    /// persisted position behaves like a boot with a persisted key-bearing
+    /// target, which already reports once on coming up.
+    pub fn apply_fixed_position(&mut self, position: Option<FixedPositionWire>) {
+        self.fixed_position = position;
+        self.policy.note_position_config_changed();
+    }
+
+    /// The user-set fixed position, if one is set.
+    pub fn fixed_position(&self) -> Option<FixedPositionWire> {
+        self.fixed_position
+    }
+
     /// One evaluation step. Returns the packets the caller must dispatch;
     /// an empty vector is the common case.
     ///
@@ -544,18 +703,29 @@ impl Reporter {
             }
         }
 
-        // Only a receiver in presence state Fix may contribute a position.
-        let fix = if presence_has_fix {
+        // Only a receiver in presence state Fix may contribute a sensor
+        // position — and a set fixed position replaces the sensor
+        // entirely, whatever the receiver is doing ([`choose_position`]).
+        let sensor_fix = if presence_has_fix {
             readings.fix()
         } else {
             None
         };
+        let (fix, possrc) =
+            choose_position(self.fixed_position.as_ref().map(fixed_fix), sensor_fix);
         let Some(reason) = self.policy.poll(now_ms, fix) else {
             return actions;
         };
 
         let include_position = fix.map(|f| self.policy.position_is_reportable(f)) == Some(true);
-        let telemetry = readings.telemetry(include_position);
+        let location = match (include_position, possrc, &self.fixed_position) {
+            (false, ..) => None,
+            (true, PositionSource::Fixed, Some(wire)) => {
+                Some(fixed_location(wire, readings.unix_secs.unwrap_or_default()))
+            }
+            (true, ..) => readings.sensor_location(),
+        };
+        let telemetry = readings.telemetry(location);
         let Some(unix_secs) = readings.unix_secs else {
             // The emission timebase is still below the plausibility floor,
             // which means it is uptime seconds and not a calendar estimate
@@ -626,6 +796,7 @@ impl Reporter {
                 self.pending_line = Some(PendingLine {
                     reason,
                     include_position,
+                    possrc,
                     unix_secs,
                     route,
                 });
@@ -695,10 +866,11 @@ impl Reporter {
         crate::log::log_fmt_critical(
             "[INFO!] ",
             format_args!(
-                "[TELEMETRY] report target={:08x} reason={} position={} unix={} src={}",
+                "[TELEMETRY] report target={:08x} reason={} position={} possrc={} unix={} src={}",
                 self.target_short(),
                 line.reason.as_str(),
                 line.include_position as u8,
+                line.possrc.as_str(),
                 line.unix_secs,
                 crate::time_source_str()
             ),

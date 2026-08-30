@@ -255,6 +255,54 @@ pub struct Fix {
     pub hdop_e2: Option<u16>,
 }
 
+/// The HDOP a user-set fixed position carries into the policy
+/// ([`Fix::hdop_e2`]).
+///
+/// Zero, by construction and not as a measurement: the accuracy gate
+/// exists to keep an untrusted *sensor* fix off the air, and a user's
+/// "this is where this node is" is an assertion with no dilution to
+/// gate on. Zero passes every profile's `max_hdop_e2` whatever it is
+/// set to, which is what the decided semantics require — the fixed
+/// position replaces the sensor entirely, in every profile.
+pub const FIXED_POSITION_HDOP_E2: u16 = 0;
+
+/// Which source a reported position came from, for the `possrc=` slot of
+/// the `[TELEMETRY]` report line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionSource {
+    /// A user-set fixed position ([`choose_position`] preferred it).
+    Fixed,
+    /// The GNSS sensor (or nothing at all — an absent position is still
+    /// the sensor's answer while no fixed position is set).
+    Gnss,
+}
+
+impl PositionSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Gnss => "gnss",
+        }
+    }
+}
+
+/// The position-source precedence, stated once and host-tested: a set
+/// fixed position REPLACES the sensor entirely while set — no blending,
+/// no fallback surprises — and clearing it returns the node to sensor
+/// reporting. The sensor fix is not consulted, not even when the fixed
+/// position is somehow unusable: the user's assertion beats a wandering
+/// fix, and "unusable" cannot happen by construction
+/// ([`FIXED_POSITION_HDOP_E2`]).
+pub const fn choose_position(
+    fixed: Option<Fix>,
+    sensor: Option<Fix>,
+) -> (Option<Fix>, PositionSource) {
+    match fixed {
+        Some(fix) => (Some(fix), PositionSource::Fixed),
+        None => (sensor, PositionSource::Gnss),
+    }
+}
+
 /// Metres per degree of latitude on WGS84, at the mean radius. The value
 /// varies by about 1 % between equator and pole; the movement gate is a
 /// threshold on a distance of tens of metres, so a 1 % model error is
@@ -520,6 +568,20 @@ impl SendPolicy {
             true
         } else {
             false
+        }
+    }
+
+    /// The position configuration changed: a fixed position was set or
+    /// cleared. Re-arms the immediate report when the target is usable —
+    /// the operator who just changed what the node claims about itself is
+    /// owed the same confirmation report a newly usable target grants
+    /// (the observability rule), and the attempt floor in
+    /// [`poll`](Self::poll) bounds it like every other emission. In any
+    /// other state this is a no-op: off has nobody to confirm to, and
+    /// awaiting-key arms the immediate on key arrival anyway.
+    pub fn note_position_config_changed(&mut self) {
+        if self.state == TargetState::Ready {
+            self.immediate_pending = true;
         }
     }
 

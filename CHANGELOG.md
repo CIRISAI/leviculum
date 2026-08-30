@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A user can set a fixed position on an LNode — `lnflash --set-position
+  LAT,LON[,ALT]`, envelope frame `0x08` — which replaces the position
+  sensor in its telemetry reports until `--clear-position` returns it to
+  sensor reporting. Persisted beside the telemetry target, applied at
+  boot and at runtime, marked `possrc=fixed|gnss` in the report line,
+  and encoded in Sideband's own fixed-location shape (accuracy 0.01 m).
+
 - The gap the LoRa interface leaves between two packets on the air is
   settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
   frame `0x06`. The default imposes nothing (#345).

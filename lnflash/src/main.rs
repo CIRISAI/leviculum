@@ -95,6 +95,29 @@ struct Cli {
     )]
     set_tx_power: Option<i32>,
 
+    /// Set a fixed position on every running LNode, then exit. No
+    /// flashing. Decimal degrees, latitude,longitude and an optional
+    /// altitude in metres — comma or space separated, sign or hemisphere
+    /// letter (52.52,13.405,34 or "52.52N 13.405E"). While set it replaces
+    /// the position sensor in the board's telemetry reports and survives
+    /// resets; --clear-position undoes it.
+    #[arg(
+        long,
+        value_name = "LAT,LON[,ALT]",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "clear_position"]
+    )]
+    set_position: Option<String>,
+
+    /// Clear the fixed position on every running LNode, then exit: the
+    /// board reports what its position sensor says again (for a board
+    /// without a receiver: no position).
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power"]
+    )]
+    clear_position: bool,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -274,6 +297,13 @@ fn telemetry_plan(cli: &Cli) -> Result<TelemetryPlan, Box<dyn std::error::Error>
 fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let radio = radio_plan(cli)?;
     let telemetry = telemetry_plan(cli)?;
+    // Parsed up front like the radio and telemetry flags: a mistyped
+    // coordinate has to stop the run at the command line, not after a
+    // board has been rebooted or written.
+    let fixed_position = match &cli.set_position {
+        Some(text) => Some(lnflash::position::parse_position(text)?),
+        None => None,
+    };
     // The board catalogue is compiled in and always available. The bundle is
     // located only by the paths that need an image, so a session that merely
     // configures a board that is already running never asks for one
@@ -346,6 +376,20 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_telemetry(&catalogue, &sysfs, ui, &telemetry)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if fixed_position.is_some() || cli.clear_position {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it =
+            flow::set_fixed_position(&catalogue, &sysfs, ui, fixed_position.as_ref())?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -754,6 +798,65 @@ mod tests {
                 "{dbm} dBm"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Fixed position
+    // -----------------------------------------------------------------
+
+    fn position(args: &[&str]) -> Result<(Option<String>, bool), String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok((cli.set_position, cli.clear_position))
+    }
+
+    #[test]
+    fn no_position_flag_means_the_session_does_not_run_at_all() {
+        assert_eq!(position(&[]).unwrap(), (None, false));
+        assert_eq!(position(&["--yes"]).unwrap(), (None, false));
+    }
+
+    /// A southern-hemisphere position starts with `-`, which without
+    /// `allow_hyphen_values` would be read as an unknown flag rather than
+    /// as a coordinate.
+    #[test]
+    fn a_negative_coordinate_is_a_value_not_a_flag() {
+        assert_eq!(
+            position(&["--set-position", "-36.84846,-73.04444"]).unwrap(),
+            (Some("-36.84846,-73.04444".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn setting_and_clearing_the_position_in_one_command_is_a_usage_error() {
+        let err = position(&["--set-position", "52.52,13.40", "--clear-position"]).unwrap_err();
+        assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    #[test]
+    fn the_position_sessions_do_not_combine_with_the_other_configure_sessions() {
+        for args in [
+            vec!["--set-position", "52.52,13.40", "--set-time"],
+            vec!["--set-position", "52.52,13.40", "--set-telemetry"],
+            vec!["--set-position", "52.52,13.40", "--set-tx-spacing", "60"],
+            vec!["--set-position", "52.52,13.40", "--set-tx-power", "14"],
+            vec!["--clear-position", "--set-time"],
+            vec!["--clear-position", "--set-telemetry"],
+        ] {
+            let err = position(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    /// A mistyped coordinate stops the run in `run` before any board is
+    /// touched; the parser itself is proven in `position::tests`. Here:
+    /// the flag's raw text reaches `run` verbatim for that parse.
+    #[test]
+    fn the_position_text_is_carried_verbatim_to_the_parser() {
+        assert_eq!(
+            position(&["--set-position", "52.52N 13.40E 34"]).unwrap(),
+            (Some("52.52N 13.40E 34".to_string()), false)
+        );
     }
 
     /// Out of range is NOT a usage error: the board clamps and says so, which

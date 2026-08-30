@@ -1026,3 +1026,108 @@ fn repeated_loss_entries_decide_the_same_way() {
     assert!(report_route().went_out([REFUSING_IFACE, REFUSING_IFACE]));
     assert!(!report_route().went_out([REFUSING_IFACE, REPORT_IFACE, REFUSING_IFACE]));
 }
+
+// ---------------------------------------------------------------------------
+// Fixed position (user-set position as telemetry source)
+// ---------------------------------------------------------------------------
+
+/// A user-set fixed position in the policy's units, with the HDOP the
+/// firmware hands it ([`FIXED_POSITION_HDOP_E2`]).
+fn fixed_fix() -> Fix {
+    Fix {
+        latitude_e6: 52_520_008,
+        longitude_e6: 13_404_954,
+        hdop_e2: Some(FIXED_POSITION_HDOP_E2),
+    }
+}
+
+/// The decided semantics: while set, the fixed position replaces the
+/// sensor entirely — even a good sensor fix is not consulted.
+#[test]
+fn a_set_fixed_position_beats_the_sensor() {
+    let (fix, source) = choose_position(Some(fixed_fix()), Some(good_fix()));
+    assert_eq!(fix, Some(fixed_fix()));
+    assert_eq!(source, PositionSource::Fixed);
+    // With no sensor fix at all the answer is the same one.
+    let (fix, source) = choose_position(Some(fixed_fix()), None);
+    assert_eq!(fix, Some(fixed_fix()));
+    assert_eq!(source, PositionSource::Fixed);
+}
+
+/// Clearing returns the node to sensor reporting — which for a
+/// sensor-less board means no position, honestly.
+#[test]
+fn clearing_the_fixed_position_returns_to_the_sensor() {
+    let (fix, source) = choose_position(None, Some(good_fix()));
+    assert_eq!(fix, Some(good_fix()));
+    assert_eq!(source, PositionSource::Gnss);
+    let (fix, source) = choose_position(None, None);
+    assert_eq!(fix, None);
+    assert_eq!(source, PositionSource::Gnss);
+}
+
+/// The fixed position passes the accuracy gate in EVERY profile by
+/// construction: the gate keeps untrusted sensor fixes off the air, and a
+/// user assertion has no dilution to gate on.
+#[test]
+fn a_fixed_position_is_reportable_in_every_profile() {
+    for profile in [Profile::Tracker, Profile::Station] {
+        let mut p = SendPolicy::new();
+        p.set_target(profile, true);
+        assert!(
+            p.position_is_reportable(fixed_fix()),
+            "{} refused the fixed position",
+            profile.as_str()
+        );
+    }
+}
+
+/// Setting or clearing a fixed position on a usable target re-arms the
+/// immediate report: the operator is owed the confirmation, and only the
+/// attempt floor stands between them and it.
+#[test]
+fn a_position_config_change_re_arms_the_immediate_report() {
+    let mut p = ready(Profile::Station, 0);
+    // Well before the hourly heartbeat: nothing is due on its own.
+    assert_eq!(p.poll(120_000, Some(fixed_fix())), None);
+    p.note_position_config_changed();
+    assert_eq!(
+        p.poll(120_000, Some(fixed_fix())),
+        Some(ReportReason::Immediate)
+    );
+}
+
+/// In any state but ready the change arms nothing: off has nobody to
+/// confirm to, and awaiting-key fires its immediate on key arrival anyway
+/// — arming here would let a cleared target's confirmation fire later.
+#[test]
+fn a_position_config_change_arms_nothing_off_or_awaiting() {
+    let mut p = SendPolicy::new();
+    p.note_position_config_changed();
+    assert_eq!(p.poll(0, Some(fixed_fix())), None);
+
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Station, false);
+    p.note_position_config_changed();
+    assert_eq!(p.poll(0, Some(fixed_fix())), None);
+    // The immediate that does fire is the key-arrival one, once.
+    assert!(p.note_key_available());
+    assert_eq!(p.poll(1_000, None), Some(ReportReason::Immediate));
+}
+
+/// The attempt floor binds the re-armed immediate exactly like every
+/// other emission: a config change cannot become a transmit storm.
+#[test]
+fn the_attempt_floor_holds_the_re_armed_immediate_back() {
+    let mut p = ready(Profile::Station, 0);
+    p.note_emitted(1_000_000, None);
+    let _ = p.note_dispatch(true);
+    p.note_position_config_changed();
+    // Inside the floor (station: min_interval == 1 h): nothing.
+    assert_eq!(p.poll(1_030_000, Some(fixed_fix())), None);
+    // Past it: the confirmation fires.
+    assert_eq!(
+        p.poll(1_000_000 + 60 * 60_000, Some(fixed_fix())),
+        Some(ReportReason::Immediate)
+    );
+}

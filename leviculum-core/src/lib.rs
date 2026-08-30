@@ -108,6 +108,7 @@ pub(crate) mod destination;
 pub mod discovery;
 pub mod embedded_storage;
 pub mod envelope;
+pub mod fixed_position_store;
 pub mod framing;
 /// Fuzzing-only entry points exposing crate-internal parsers to the detached
 /// cargo-fuzz harness. Compiled only under `--cfg fuzzing` (set by cargo-fuzz).

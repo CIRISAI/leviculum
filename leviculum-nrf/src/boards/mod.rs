@@ -26,12 +26,13 @@ pub struct BoardConfig {
     /// [`identity_flash_page`](Self::identity_flash_page) and, like it,
     /// outside the linker's FLASH region (`memory.x`).
     pub radio_config_flash_page: u32,
-    /// Internal-flash byte address of the page reserved for the persisted
-    /// telemetry target (Codeberg #236, see [`crate::telemetry_store`]).
-    /// Third page in the same band as the two above, chosen for the same
-    /// reason: `0xEA000` is the bootloader's `USER_FLASH_END`, so a UF2
-    /// flash declines every block from there upwards and a configured
-    /// target survives a firmware update.
+    /// Internal-flash byte address of the page holding the persisted
+    /// telemetry target (Codeberg #236) and the user-set fixed position —
+    /// two records, layout named in [`crate::telemetry`]. Third page in
+    /// the same band as the two above, chosen for the same reason:
+    /// `0xEA000` is the bootloader's `USER_FLASH_END`, so a UF2 flash
+    /// declines every block from there upwards and the configuration
+    /// survives a firmware update.
     pub telemetry_flash_page: u32,
     /// SX1262 TCXO voltage select byte for `SetDIO3AsTcxoCtrl`
     /// (0x02 = 1.8 V, see datasheet §13.3.6).

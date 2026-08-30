@@ -104,6 +104,13 @@ pub const TYPE_TX_SPACING: u8 = 0x06;
 /// not a sweep. Five bytes, so firmware from before the envelope drops it
 /// silently and the probe times out, exactly like [`TYPE_CAPABILITIES`].
 pub const TYPE_RADIO_QUERY: u8 = 0x07;
+/// User-set fixed position: latitude, longitude, optional altitude, in the
+/// scaled-integer units the telemetry wire uses. While set it replaces the
+/// GNSS sensor as the reported position entirely — the user's "this is
+/// where this node is" beats a wandering fix — and an explicit clear
+/// returns the node to sensor reporting. Persisted beside the telemetry
+/// target. See [`FixedPositionWire`] for the payload.
+pub const TYPE_FIXED_POSITION: u8 = 0x08;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -417,6 +424,110 @@ pub fn decode_telemetry_target_payload(payload: &[u8]) -> Option<TelemetryTarget
     })
 }
 
+// ---------------------------------------------------------------------------
+// Fixed position (user-set position as telemetry source)
+// ---------------------------------------------------------------------------
+
+/// A user-set fixed position, in the scaled-integer units the telemetry
+/// codec packs (`leviculum_lxmf::telemetry::Location`) and the policy
+/// crate decides on: degrees × 1e6, metres × 1e2. Staying in the integer
+/// domain end to end means the coordinates the user typed are the
+/// coordinates that go on the air, without a float round trip in between.
+///
+/// Payload layout:
+///
+/// ```text
+/// [set: u8] ([latitude_e6: i32 BE] [longitude_e6: i32 BE]
+///            [alt_present: u8] ([altitude_e2: i32 BE]))
+/// ```
+///
+/// `set` is `0x00` (clear, 1-byte payload — the whole command is "back to
+/// the sensor", so nothing else travels) or `0x01` (set). `alt_present`
+/// follows the telemetry target's key-present rule: an explicit flag byte,
+/// never inferred from the length. A latitude outside ±90° or a longitude
+/// outside ±180° is not a coordinate and the payload is malformed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedPositionWire {
+    /// Degrees north, times 1e6. Negative is the southern hemisphere.
+    pub latitude_e6: i32,
+    /// Degrees east, times 1e6. Negative is the western hemisphere.
+    pub longitude_e6: i32,
+    /// Metres above sea level, times 1e2; `None` when the user gave no
+    /// altitude (reported as 0, the reference's own default for a
+    /// synthesized location).
+    pub altitude_e2: Option<i32>,
+}
+
+/// The largest legal `latitude_e6` (90°).
+pub const FIXED_POSITION_MAX_LAT_E6: i32 = 90_000_000;
+/// The largest legal `longitude_e6` (180°).
+pub const FIXED_POSITION_MAX_LON_E6: i32 = 180_000_000;
+
+/// Encode a complete fixed-position frame; `None` is the explicit clear.
+pub fn encode_fixed_position(position: Option<&FixedPositionWire>) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 4 + 4 + 1 + 4);
+    match position {
+        None => payload.push(0x00),
+        Some(pos) => {
+            payload.push(0x01);
+            payload.extend_from_slice(&pos.latitude_e6.to_be_bytes());
+            payload.extend_from_slice(&pos.longitude_e6.to_be_bytes());
+            match pos.altitude_e2 {
+                Some(alt) => {
+                    payload.push(0x01);
+                    payload.extend_from_slice(&alt.to_be_bytes());
+                }
+                None => payload.push(0x00),
+            }
+        }
+    }
+    encode_frame(TYPE_FIXED_POSITION, &payload)
+}
+
+/// Decode a fixed-position payload. The outer `None` is a malformed
+/// payload; the inner `None` is a well-formed clear.
+pub fn decode_fixed_position_payload(payload: &[u8]) -> Option<Option<FixedPositionWire>> {
+    match payload {
+        [0x00] => Some(None),
+        [0x01, rest @ ..] if rest.len() >= 9 => {
+            let latitude_e6 = i32::from_be_bytes(rest[..4].try_into().ok()?);
+            let longitude_e6 = i32::from_be_bytes(rest[4..8].try_into().ok()?);
+            let altitude_e2 = match (rest[8], rest.len()) {
+                (0x00, 9) => None,
+                (0x01, 13) => Some(i32::from_be_bytes(rest[9..].try_into().ok()?)),
+                _ => return None,
+            };
+            if latitude_e6.unsigned_abs() > FIXED_POSITION_MAX_LAT_E6 as u32
+                || longitude_e6.unsigned_abs() > FIXED_POSITION_MAX_LON_E6 as u32
+            {
+                return None;
+            }
+            Some(Some(FixedPositionWire {
+                latitude_e6,
+                longitude_e6,
+                altitude_e2,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// The answer to a fixed-position frame, decided by capability first —
+/// the exact rule [`telemetry_target_answer`] states, because the consumer
+/// is the same one: only the telemetry reporter reads the fixed position,
+/// so a binary without a reporter must refuse rather than ack a position
+/// nothing will ever report. With a reporter, an undelivered frame is a
+/// full channel: [`REFUSE_BUSY`], the host retries.
+pub fn fixed_position_answer(reporter_wired: bool, delivered: bool) -> Vec<u8> {
+    if !reporter_wired {
+        encode_refusal(TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED)
+    } else if delivered {
+        encode_ack(TYPE_FIXED_POSITION)
+    } else {
+        encode_refusal(TYPE_FIXED_POSITION, REFUSE_BUSY)
+    }
+}
+
 /// The answer to a telemetry-target frame, decided by capability first.
 ///
 /// `reporter_wired` is the binary's declaration that it constructs a
@@ -490,6 +601,11 @@ pub enum ControlAction {
     /// `encode_ack(TYPE_TX_SPACING)`. A measurement knob, not persisted:
     /// a reset returns the board to the compiled default.
     TxSpacing(u16),
+    /// Envelope fixed position: set (`Some`) or clear (`None`) the
+    /// user-set position, persist it, answer via
+    /// [`fixed_position_answer`] — the ack is gated on the binary's
+    /// declared reporter exactly like the telemetry target's.
+    FixedPosition(Option<FixedPositionWire>),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -570,6 +686,10 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             Some(spacing_ms) => ControlAction::TxSpacing(spacing_ms),
             None => malformed,
         },
+        TYPE_FIXED_POSITION => match decode_fixed_position_payload(frame.payload) {
+            Some(position) => ControlAction::FixedPosition(position),
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -593,6 +713,7 @@ mod tests {
         TYPE_TELEMETRY_TARGET,
         TYPE_TX_SPACING,
         TYPE_RADIO_QUERY,
+        TYPE_FIXED_POSITION,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -784,6 +905,174 @@ mod tests {
                 refused_type: TYPE_TELEMETRY_TARGET,
                 reason: REFUSE_MALFORMED
             }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Fixed position (user-set position as telemetry source)
+    // -----------------------------------------------------------------
+
+    /// Berlin, with an altitude: the payload that exercises every field.
+    fn berlin() -> FixedPositionWire {
+        FixedPositionWire {
+            latitude_e6: 52_520_008,
+            longitude_e6: 13_404_954,
+            altitude_e2: Some(3_400),
+        }
+    }
+
+    #[test]
+    fn a_fixed_position_round_trips_with_and_without_an_altitude() {
+        for position in [
+            berlin(),
+            FixedPositionWire {
+                altitude_e2: None,
+                ..berlin()
+            },
+            // Southern and western hemispheres, below sea level.
+            FixedPositionWire {
+                latitude_e6: -36_848_460,
+                longitude_e6: -73_044_440,
+                altitude_e2: Some(-43_000),
+            },
+        ] {
+            assert_eq!(
+                classify_control_frame(&encode_fixed_position(Some(&position)), ACCEPTED),
+                ControlAction::FixedPosition(Some(position))
+            );
+        }
+    }
+
+    #[test]
+    fn the_clear_frame_is_one_byte_and_classifies_as_clear() {
+        let bytes = encode_fixed_position(None);
+        assert_eq!(bytes.len(), ENVELOPE_HEADER_LEN + 1);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::FixedPosition(None)
+        );
+    }
+
+    #[test]
+    fn a_coordinate_outside_the_globe_is_refused_as_malformed() {
+        // ±90°/±180° themselves are legal (the poles and the antimeridian
+        // are places); one microdegree beyond is not a coordinate.
+        for (latitude_e6, longitude_e6) in [
+            (90_000_001, 0),
+            (-90_000_001, 0),
+            (0, 180_000_001),
+            (0, -180_000_001),
+            (i32::MAX, i32::MIN),
+        ] {
+            let position = FixedPositionWire {
+                latitude_e6,
+                longitude_e6,
+                altitude_e2: None,
+            };
+            assert_eq!(
+                classify_control_frame(&encode_fixed_position(Some(&position)), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_FIXED_POSITION,
+                    reason: REFUSE_MALFORMED
+                },
+                "lat={latitude_e6} lon={longitude_e6} was accepted"
+            );
+        }
+        for (latitude_e6, longitude_e6) in [(90_000_000, 180_000_000), (-90_000_000, -180_000_000)]
+        {
+            let position = FixedPositionWire {
+                latitude_e6,
+                longitude_e6,
+                altitude_e2: None,
+            };
+            assert_eq!(
+                classify_control_frame(&encode_fixed_position(Some(&position)), ACCEPTED),
+                ControlAction::FixedPosition(Some(position))
+            );
+        }
+    }
+
+    #[test]
+    fn the_alt_present_flag_is_explicit_never_length_guessing() {
+        // Flag says absent but altitude bytes follow: malformed.
+        let mut bytes = encode_fixed_position(Some(&berlin()));
+        bytes[ENVELOPE_HEADER_LEN + 9] = 0x00;
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FIXED_POSITION,
+                reason: REFUSE_MALFORMED
+            }
+        );
+        // Flag says present but the altitude is truncated: malformed.
+        let mut truncated = encode_fixed_position(Some(&berlin()));
+        truncated.pop();
+        truncated[4] -= 1; // keep the strict length header honest
+        assert_eq!(
+            classify_control_frame(&truncated, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FIXED_POSITION,
+                reason: REFUSE_MALFORMED
+            }
+        );
+        // A flag value that is neither 0 nor 1: malformed.
+        let mut flagged = encode_fixed_position(Some(&FixedPositionWire {
+            altitude_e2: None,
+            ..berlin()
+        }));
+        flagged[ENVELOPE_HEADER_LEN + 9] = 0x02;
+        assert_eq!(
+            classify_control_frame(&flagged, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FIXED_POSITION,
+                reason: REFUSE_MALFORMED
+            }
+        );
+        // A set flag that is neither clear nor set: malformed.
+        let mut set_flag = encode_fixed_position(None);
+        set_flag[ENVELOPE_HEADER_LEN] = 0x02;
+        assert_eq!(
+            classify_control_frame(&set_flag, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_FIXED_POSITION,
+                reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    #[test]
+    fn firmware_without_the_fixed_position_refuses_it_by_name() {
+        // A board flashed before the feature answers what is missing
+        // instead of going quiet — the same detection path as #236's.
+        assert_eq!(
+            classify_control_frame(&encode_fixed_position(Some(&berlin())), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_FIXED_POSITION,
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn a_binary_without_a_reporter_refuses_the_position_it_cannot_report() {
+        // Ack honesty, the fc60b95 rule applied to the new frame: only the
+        // reporter reads the fixed position, so a reporter-less binary
+        // answers a named refusal whatever the channel would have taken.
+        for delivered in [false, true] {
+            assert_eq!(
+                decode_refusal_payload(
+                    &fixed_position_answer(false, delivered)[ENVELOPE_HEADER_LEN..]
+                ),
+                Some((TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED))
+            );
+        }
+        assert_eq!(
+            decode_ack_payload(&fixed_position_answer(true, true)[ENVELOPE_HEADER_LEN..]),
+            Some(TYPE_FIXED_POSITION)
+        );
+        assert_eq!(
+            decode_refusal_payload(&fixed_position_answer(true, false)[ENVELOPE_HEADER_LEN..]),
+            Some((TYPE_FIXED_POSITION, REFUSE_BUSY))
         );
     }
 

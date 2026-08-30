@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame, decode_refusal_payload,
-    encode_capability_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
-    encode_wall_time, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
-    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
+    encode_capability_query, encode_fixed_position, encode_radio_config, encode_telemetry_target,
+    encode_tx_spacing, encode_wall_time, FixedPositionWire, TelemetryTargetWire, REFUSE_BUSY,
+    REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
+    TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -275,6 +276,27 @@ pub fn send_telemetry_target(fd: &Fd, target: &TelemetryTargetWire) -> io::Resul
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Set or clear the user-set fixed position (`TYPE_FIXED_POSITION`).
+///
+/// `None` is the explicit clear: the board returns to sensor reporting.
+/// The set frame is 19 bytes — exactly Reticulum's minimum packet size —
+/// so like the radio config it must only be sent through [`probed`];
+/// against older firmware it would be packet-shaped noise rather than a
+/// named refusal.
+pub fn send_fixed_position(
+    fd: &Fd,
+    position: Option<&FixedPositionWire>,
+) -> io::Result<ControlOutcome> {
+    let payload = encode_fixed_position(position);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_FIXED_POSITION),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// Set the on-air transmit spacing (#345, `TYPE_TX_SPACING`).
 ///
 /// A bench instrument: the value is what the board's LoRa interface leaves
@@ -346,9 +368,9 @@ pub(crate) mod testing {
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
-        encode_refusal, telemetry_target_answer, ControlAction, TYPE_CAPABILITIES,
-        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
-        TYPE_WALL_TIME,
+        encode_refusal, fixed_position_answer, telemetry_target_answer, ControlAction,
+        TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET,
+        TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
@@ -373,6 +395,7 @@ pub(crate) mod testing {
         TYPE_TELEMETRY_TARGET,
         TYPE_TX_SPACING,
         TYPE_RADIO_QUERY,
+        TYPE_FIXED_POSITION,
     ];
 
     /// What the scripted board's radio is running.
@@ -424,10 +447,11 @@ pub(crate) mod testing {
                 }),
                 ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
                 ControlAction::RadioQuery => Some(encode_radio_report(&stub_running_config())),
-                // The firmware's own answer function, reporter wired and
+                // The firmware's own answer functions, reporter wired and
                 // the channel taking the frame — the ack direction of the
                 // capability gate.
                 ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(true, true)),
+                ControlAction::FixedPosition(_) => Some(fixed_position_answer(true, true)),
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
                 ControlAction::Refuse {
                     refused_type,
@@ -451,6 +475,7 @@ pub(crate) mod testing {
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
                 ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
                 ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(false, false)),
+                ControlAction::FixedPosition(_) => Some(fixed_position_answer(false, false)),
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -505,6 +530,20 @@ pub(crate) mod testing {
         seen.lock().unwrap().iter().find_map(|f| {
             match classify_control_frame(f, FIRMWARE_ACCEPTS) {
                 ControlAction::RadioConfig(cfg) => Some(cfg),
+                _ => None,
+            }
+        })
+    }
+
+    /// The fixed-position payload the stub decoded, if one reached it.
+    /// The outer `Option` is "did a frame arrive at all", the inner is
+    /// the frame's own set-versus-clear.
+    pub fn fixed_position_frame(
+        seen: &Seen,
+    ) -> Option<Option<leviculum_core::envelope::FixedPositionWire>> {
+        seen.lock().unwrap().iter().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::FixedPosition(position) => Some(position),
                 _ => None,
             }
         })

@@ -59,6 +59,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_TELEMETRY_TARGET,
     envelope::TYPE_TX_SPACING,
     envelope::TYPE_RADIO_QUERY,
+    envelope::TYPE_FIXED_POSITION,
 ];
 
 /// nRF52840 FICR base address
@@ -535,6 +536,20 @@ async fn retic_serial_task(
                                         envelope::telemetry_target_answer(wired, delivered);
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: telemetry answer write failed");
+                                    }
+                                }
+                                ControlAction::FixedPosition(position) => {
+                                    // Same capability gate as the target:
+                                    // only the reporter reads the fixed
+                                    // position, so a reporter-less binary
+                                    // refuses by name rather than acking
+                                    // a pin nothing will ever report.
+                                    let wired = crate::telemetry::reporter_wired();
+                                    let delivered =
+                                        wired && crate::telemetry::deliver_fixed_position(position);
+                                    let answer = envelope::fixed_position_answer(wired, delivered);
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: fixed-position answer write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {
