@@ -1510,6 +1510,49 @@ mod tests {
         assert!(!plain.text.contains('\x1b'));
     }
 
+    #[test]
+    fn a_hostile_page_puts_no_escape_of_its_own_into_the_output() {
+        // Codeberg #281: remote page bytes reach a terminal through this sink,
+        // where a page's `\x1b[` is indistinguishable from ours. The filter
+        // sits in the parser, so this test pins the property at the sink that
+        // the reader actually sees.
+        let hostile = "Balance: 5 EUR\n\x1b[2J\x1b[HBalance: 5000 EUR\n\
+                       \x1b]0;pwned\x07\x1b]52;c;cm0K\x07\u{9b}31m\r overwritten\n\
+                       `=\n\x1b[5mblink\n`=";
+        let d = parse(hostile);
+
+        // --no-color already claims to be escape-free; now it is true of
+        // hostile input too, not just of ours.
+        let plain = render_with_options(&d, 80, true, ColorDepth::Truecolor);
+        assert!(
+            !plain.text.chars().any(|c| c.is_control() && c != '\n'),
+            "no_color output carries a control char: {:?}",
+            plain.text
+        );
+
+        // With colour on, the only escapes present are the SGR sequences this
+        // renderer emits; nothing from the page survives.
+        let colored = render(&d, 80);
+        for seq in colored.text.split('\x1b').skip(1) {
+            assert!(
+                seq.starts_with('['),
+                "a non-SGR escape reached the terminal: {seq:?}"
+            );
+            let body = &seq[1..];
+            let end = body
+                .find('m')
+                .unwrap_or_else(|| panic!("unterminated SGR: {seq:?}"));
+            assert!(
+                body[..end].chars().all(|c| c.is_ascii_digit() || c == ';'),
+                "a non-SGR CSI reached the terminal: {seq:?}"
+            );
+        }
+
+        // The reader still gets the text; only the actions were removed.
+        assert!(colored.text.contains("Balance: 5 EUR"));
+        assert!(colored.text.contains("Balance: 5000 EUR"));
+    }
+
     /// Strip ANSI SGR sequences so tests can reason about visible columns.
     fn strip_sgr(s: &str) -> String {
         let mut out = String::new();

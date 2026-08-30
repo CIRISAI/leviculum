@@ -571,3 +571,148 @@ fn parses_full_readme_without_panicking() {
 fn line_has_link(line: &Line) -> bool {
     line.spans.iter().any(|s| s.link.is_some())
 }
+
+// --- Control-sequence filtering (Codeberg #281) --------------------------
+
+/// Every string a document carries, so a test can assert that nothing hostile
+/// survived anywhere in the model — not just in span text.
+fn all_strings(doc: &leviculum_micron::MicronDocument) -> Vec<String> {
+    fn from_line(line: &Line, out: &mut Vec<String>) {
+        for span in &line.spans {
+            out.push(span.text.clone());
+            if let Some(link) = &span.link {
+                out.push(link.label.clone());
+                out.push(link.target.clone());
+                out.extend(link.fields.iter().cloned());
+            }
+            if let Some(field) = &span.field {
+                out.push(field.name.clone());
+                out.push(field.value.clone());
+                out.push(field.label.clone());
+            }
+            if let Some(anchor) = &span.anchor {
+                out.push(anchor.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for block in &doc.blocks {
+        match block {
+            Block::Heading { line, .. } | Block::Paragraph { line, .. } => {
+                from_line(line, &mut out)
+            }
+            Block::LiteralBlock { lines } => {
+                for line in lines {
+                    from_line(line, &mut out);
+                }
+            }
+            Block::Table { rows, .. } => out.extend(rows.iter().cloned()),
+            Block::Partial { url, fields, .. } => {
+                out.push(url.clone());
+                out.extend(fields.iter().cloned());
+            }
+            Block::Divider { character, .. } => out.push(character.to_string()),
+            Block::Blank => {}
+        }
+    }
+    out.extend(doc.anchors.keys().cloned());
+    out
+}
+
+/// Assert that no string in the document can act on a terminal.
+fn assert_escape_free(doc: &leviculum_micron::MicronDocument, what: &str) {
+    for s in all_strings(doc) {
+        if let Some(c) = s
+            .chars()
+            .find(|c| c.is_control() || ('\u{80}'..='\u{9f}').contains(c))
+        {
+            panic!("{what}: control char U+{:04X} survived in {s:?}", c as u32);
+        }
+    }
+}
+
+#[test]
+fn hostile_csi_sequences_never_reach_the_document() {
+    // Cursor positioning + erase: rewrites scrollback so earlier output lies.
+    let doc = parse("Harmless\n\x1b[2J\x1b[HI am the bank\nMore text");
+    assert_escape_free(&doc, "CSI");
+    // The printable remainder is kept, so the page is still readable.
+    let text: String = all_strings(&doc).join("");
+    assert!(text.contains("Harmless"), "text was lost: {text:?}");
+    assert!(text.contains("I am the bank"), "text was lost: {text:?}");
+    // The sequence's printable tail (`[2J`) stays as inert text rather than
+    // being swallowed: without the ESC it cannot act, and a reader who sees
+    // the residue is told plainly that the page tried something.
+    assert!(
+        text.contains("[2J"),
+        "the inert residue was eaten: {text:?}"
+    );
+}
+
+#[test]
+fn hostile_osc_sequences_never_reach_the_document() {
+    // OSC 0 (window title), OSC 8 (hyperlink anywhere), OSC 52 (clipboard
+    // write on terminals that still honour it).
+    for src in [
+        "title\x1b]0;pwned\x07 rest",
+        "link\x1b]8;;https://evil.example/\x1b\\label\x1b]8;;\x1b\\ rest",
+        "clip\x1b]52;c;cm0gLXJmIH4K\x07 rest",
+    ] {
+        let doc = parse(src);
+        assert_escape_free(&doc, "OSC");
+    }
+}
+
+#[test]
+fn hostile_dcs_and_c1_sequences_never_reach_the_document() {
+    // DCS via ESC P, and the single-byte C1 forms of CSI/OSC/DCS, which a
+    // terminal in an 8-bit mode accepts without any ESC at all.
+    let doc = parse("a\x1bPq#0;2;0;0;0#0~~\x1b\\b\u{9b}31mc\u{9d}0;x\u{9c}d\u{90}e\u{9f}f");
+    assert_escape_free(&doc, "DCS/C1");
+}
+
+#[test]
+fn carriage_return_cannot_rewrite_the_rendered_line() {
+    // CR alone repaints the line the reader already saw. It is dropped, not
+    // treated as a line break: the page keeps one line, with both halves.
+    let doc = parse("You owe 5 EUR\rYou owe 5000 EUR");
+    assert_escape_free(&doc, "CR");
+    assert_eq!(doc.blocks.len(), 1, "CR must not split the line");
+    let text: String = all_strings(&doc).join("");
+    assert_eq!(text, "You owe 5 EURYou owe 5000 EUR");
+}
+
+#[test]
+fn control_chars_are_stripped_inside_literal_blocks_and_tables() {
+    // Literal blocks bypass inline parsing entirely, and table rows are kept
+    // verbatim — both would carry an escape straight to the renderer.
+    let doc = parse("`=\n\x1b[31mred forever\n`=");
+    assert_escape_free(&doc, "literal block");
+    let doc = parse("`t\na\x1b[2J|b\u{9b}0m\n`t");
+    assert_escape_free(&doc, "table row");
+}
+
+#[test]
+fn control_chars_are_stripped_from_link_targets_and_anchors() {
+    let doc = parse("`[La\x1bbel`:/page/\x1b]0;x\x07evil]\n`:anc\x1bhor");
+    assert_escape_free(&doc, "link/anchor");
+}
+
+#[test]
+fn tab_becomes_a_space_so_one_cell_stays_one_column() {
+    let spans = para_spans("col\tumn");
+    assert_eq!(spans[0].text, "col umn");
+}
+
+#[test]
+fn ordinary_text_survives_the_filter_untouched() {
+    // The positive control: the filter must not eat legitimate content.
+    let spans = para_spans("Grüße, 日本語, emoji 🛰, and math ∑ — all fine");
+    assert_eq!(
+        spans[0].text,
+        "Grüße, 日本語, emoji 🛰, and math ∑ — all fine"
+    );
+    // The full README still parses to the same document it did before.
+    let readme = include_str!("../../reference/Reticulum/README.mu");
+    assert_escape_free(&parse(readme), "README.mu");
+}

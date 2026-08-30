@@ -77,12 +77,56 @@ impl State {
     }
 }
 
+/// Strip terminal control characters from untrusted page bytes.
+///
+/// A micron page is content fetched from an arbitrary node in the mesh, and a
+/// renderer writes it to a terminal that emits real escape sequences of its
+/// own for colour — so a remote `\x1b[` is indistinguishable from ours once it
+/// is in the output stream. Filtering here, where untrusted bytes first become
+/// document text, covers every consumer of [`parse`] rather than one renderer:
+/// spans, literal blocks, table rows, link labels and targets, field values
+/// and anchor names all come out of this same input (Codeberg #281).
+///
+/// What survives: everything printable, plus `\n`, which is the format's own
+/// line structure. Dropped: all other C0 controls including `ESC` (CSI/OSC/DCS
+/// introducers), `CR` (rewrites the current line), `BEL`, `SO`/`SI` (charset
+/// switching), `DEL`, and the C1 range `U+0080..=U+009F`, whose members are
+/// single-character forms of the same introducers.
+///
+/// `\t` becomes a single space rather than being dropped: it is whitespace the
+/// content may legitimately carry, but a tab occupies one cell in the model
+/// and eight columns on the terminal, which desynchronises every width the
+/// renderer computed.
+fn strip_control_chars(input: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| c != '\n' && (c.is_control() || ('\u{80}'..='\u{9f}').contains(&c));
+    if !input.chars().any(unsafe_char) {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    std::borrow::Cow::Owned(
+        input
+            .chars()
+            .filter_map(|c| match c {
+                '\t' => Some(' '),
+                c if unsafe_char(c) => None,
+                c => Some(c),
+            })
+            .collect(),
+    )
+}
+
 /// Parse a micron (`.mu`) document into a [`MicronDocument`].
 ///
 /// Stateful and line-oriented: the document is split on `\n` and each line is
 /// processed in turn, with formatting/colour state carried across lines. Never
 /// panics on malformed input.
+///
+/// Terminal control characters are stripped from the input first: no byte a
+/// remote page supplies can reach a terminal as an escape sequence. Everything
+/// printable survives, plus `\n`; `\t` becomes a space. See the private
+/// `strip_control_chars` for the full rule (Codeberg #281).
 pub fn parse(input: &str) -> MicronDocument {
+    let input = strip_control_chars(input);
+    let input: &str = &input;
     let mut state = State::default();
     let mut blocks: Vec<Block> = Vec::new();
     let mut anchors: BTreeMap<String, usize> = BTreeMap::new();
