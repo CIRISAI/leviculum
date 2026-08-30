@@ -33,9 +33,10 @@ use alloc::vec::Vec;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 
 use leviculum_core::envelope::{
-    FixedPositionWire, MediaProfileWire, TelemetryTargetWire, TELEMETRY_PROFILE_OFF,
+    FixedPositionWire, MediaProfileWire, Persist, TelemetryTargetWire, TELEMETRY_PROFILE_OFF,
 };
 use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_position};
 use leviculum_core::identity::Identity;
@@ -49,6 +50,7 @@ use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{
     build_report, celsius_from_quarter_degrees, Battery, Location, Telemetry,
 };
+use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::{
     choose_position, command_from_wire, EmissionRoute, Fix, PositionSource, Profile, ReportReason,
     SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
@@ -270,12 +272,137 @@ const _: () = {
 
 /// Pending save requests. Depth 1 for the same reason as the radio store:
 /// the newest value of each record is the one that must end up on the
-/// page. Two channels rather than one queue so a target save and a fixed
-/// position save can never displace each other.
-static PENDING_SAVE: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> = Channel::new();
-static PENDING_SAVE_FIXED: Channel<CriticalSectionRawMutex, Option<FixedPositionWire>, 1> =
+/// page. Three channels rather than one queue so a target save, a fixed
+/// position save and a media save can never displace each other.
+///
+/// Each item carries the [`SaveTicket`] the requester is waiting on, so
+/// the store task can hand back the outcome of *that* write rather than
+/// of whichever write it happened to finish next (Codeberg #358).
+static PENDING_SAVE: Channel<CriticalSectionRawMutex, (SaveTicket, TelemetryTargetWire), 1> =
     Channel::new();
-static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, MediaProfileWire, 1> = Channel::new();
+static PENDING_SAVE_FIXED: Channel<
+    CriticalSectionRawMutex,
+    (SaveTicket, Option<FixedPositionWire>),
+    1,
+> = Channel::new();
+static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, (SaveTicket, MediaProfileWire), 1> =
+    Channel::new();
+
+/// One record's persist bookkeeping: the [`PersistGate`] that says whether
+/// a given save has reached the page, plus the wake-up that saves the
+/// waiter a polling loop.
+///
+/// The gate is a separate, host-tested crate because the ordering it
+/// encodes is the whole of #358 and the firmware crate runs no host
+/// tests; what stays here is the part that needs Embassy — the wake-up
+/// and the bound on how long a client is made to wait.
+struct PersistSlot {
+    gate: PersistGate,
+    /// Pulsed after every [`PersistGate::finish`]. One waiter at a time
+    /// by construction: the serial task is the only caller of
+    /// [`confirm`], and it answers one control frame at a time.
+    wake: Signal<CriticalSectionRawMutex, ()>,
+}
+
+impl PersistSlot {
+    const fn new() -> Self {
+        Self {
+            gate: PersistGate::new(),
+            wake: Signal::new(),
+        }
+    }
+
+    fn issue(&'static self) -> PendingSave {
+        PendingSave {
+            slot: self,
+            ticket: self.gate.issue(),
+        }
+    }
+
+    fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
+        self.gate.finish(ticket, outcome);
+        self.wake.signal(());
+    }
+}
+
+static TARGET_PERSIST: PersistSlot = PersistSlot::new();
+static FIXED_PERSIST: PersistSlot = PersistSlot::new();
+static MEDIA_PERSIST: PersistSlot = PersistSlot::new();
+
+/// A save the caller may wait for with [`confirm`], returned by every
+/// `request_save*`.
+///
+/// Carries its own record's slot so a caller cannot wait on the wrong
+/// gate — the store task rewrites all three records on every save, but
+/// only the one a request names carries the requester's value.
+#[must_use = "a control-envelope ack on the persist path must wait for this (Codeberg #358)"]
+#[derive(Clone, Copy)]
+pub struct PendingSave {
+    slot: &'static PersistSlot,
+    ticket: SaveTicket,
+}
+
+/// How long a caller waits for the store task before answering the frame
+/// with the truth instead of a promise.
+///
+/// The observed cost of one page write is ~200 ms (#358), and the store
+/// task's own retry budget is [`SAVE_RETRIES`] × [`SAVE_RETRY_MS`] plus
+/// three erase-and-write rounds — call it 1.2 s if the SoftDevice keeps
+/// refusing flash access while the radio is busy. 2.5 s covers that twice
+/// over and still lands inside the 3.5 s window lnflash gives one control
+/// conversation (`lnflash::radio::ACK_WITHIN`), so a board that has to
+/// report a failure gets the report out before the host stops listening.
+const PERSIST_CONFIRM_WITHIN: embassy_time::Duration = embassy_time::Duration::from_millis(2_500);
+
+/// Wait until the store task has settled `save`, and say what a reset
+/// would find (Codeberg #358).
+///
+/// This is what turns the control-envelope ack from "applied" into "a
+/// reset cannot lose this". The wait is bounded: a wedged store task
+/// makes the frame answer [`Persist::Lost`] — the truth — rather than
+/// holding the transport port open forever.
+///
+/// It does block the calling task for the duration, which for the serial
+/// task means it stops servicing the transport CDC — typically ~200 ms,
+/// [`PERSIST_CONFIRM_WITHIN`] at worst. Stated rather than hidden, with
+/// the reasons it is the right trade: the frame being answered is an
+/// explicit reconfiguration and the host that sent it is doing nothing
+/// but waiting for the answer; the same task already awaits the main loop
+/// on the incoming path; and the main loop pushes outbound serial frames
+/// with `try_send` (`crate::interface`), so the stall can cost a dropped
+/// frame on a full depth-8 channel but can never stall the node.
+pub async fn confirm(save: PendingSave) -> Persist {
+    let deadline = embassy_time::Instant::now() + PERSIST_CONFIRM_WITHIN;
+    loop {
+        if let Some(outcome) = save.slot.gate.poll(save.ticket) {
+            return match outcome {
+                Persisted::Durable => Persist::Durable,
+                Persisted::Lost => Persist::Lost,
+            };
+        }
+        if embassy_time::with_deadline(deadline, save.slot.wake.wait())
+            .await
+            .is_err()
+        {
+            // One last look: the store task may have finished between the
+            // poll above and the deadline.
+            return match save.slot.gate.poll(save.ticket) {
+                Some(Persisted::Durable) => Persist::Durable,
+                Some(Persisted::Lost) => Persist::Lost,
+                None => {
+                    crate::log::log_fmt(
+                        "[TELEMETRY] ",
+                        format_args!(
+                            "persist unconfirmed after {} ms",
+                            PERSIST_CONFIRM_WITHIN.as_millis()
+                        ),
+                    );
+                    Persist::Lost
+                }
+            };
+        }
+    }
+}
 
 /// Read the persisted telemetry target, or `None` if its record is blank,
 /// corrupt, or written by a different format version — all of which mean
@@ -334,30 +461,46 @@ fn read_record<const N: usize>(addr: u32) -> [u8; N] {
 }
 
 /// Ask the store task to persist `target`. Never blocks and never writes
-/// flash on the caller's stack.
-pub fn request_save(target: &TelemetryTargetWire) {
-    if PENDING_SAVE.try_send(*target).is_err() {
+/// flash on the caller's stack; the returned [`PendingSave`] is how the
+/// caller finds out when the record is actually on the page ([`confirm`]).
+///
+/// The displace-then-send pair cannot both fail: the executor is
+/// cooperative and single-core, so nothing runs between the `try_receive`
+/// and the `try_send` that could refill a depth-1 channel. If it somehow
+/// did, the ticket would go unanswered and [`confirm`] would time out and
+/// report [`Persist::Lost`] — slow, but still the truth.
+pub fn request_save(target: &TelemetryTargetWire) -> PendingSave {
+    let save = TARGET_PERSIST.issue();
+    if PENDING_SAVE.try_send((save.ticket, *target)).is_err() {
         let _ = PENDING_SAVE.try_receive();
-        let _ = PENDING_SAVE.try_send(*target);
+        let _ = PENDING_SAVE.try_send((save.ticket, *target));
     }
+    save
 }
 
 /// Ask the store task to persist the fixed position (`None` persists the
 /// explicit clear). Never blocks, like [`request_save`].
-pub fn request_save_fixed_position(position: Option<FixedPositionWire>) {
-    if PENDING_SAVE_FIXED.try_send(position).is_err() {
+pub fn request_save_fixed_position(position: Option<FixedPositionWire>) -> PendingSave {
+    let save = FIXED_PERSIST.issue();
+    if PENDING_SAVE_FIXED
+        .try_send((save.ticket, position))
+        .is_err()
+    {
         let _ = PENDING_SAVE_FIXED.try_receive();
-        let _ = PENDING_SAVE_FIXED.try_send(position);
+        let _ = PENDING_SAVE_FIXED.try_send((save.ticket, position));
     }
+    save
 }
 
 /// Ask the store task to persist the media profile. Never blocks, like
 /// [`request_save`].
-pub fn request_save_media_profile(profile: MediaProfileWire) {
-    if PENDING_SAVE_MEDIA.try_send(profile).is_err() {
+pub fn request_save_media_profile(profile: MediaProfileWire) -> PendingSave {
+    let save = MEDIA_PERSIST.issue();
+    if PENDING_SAVE_MEDIA.try_send((save.ticket, profile)).is_err() {
         let _ = PENDING_SAVE_MEDIA.try_receive();
-        let _ = PENDING_SAVE_MEDIA.try_send(profile);
+        let _ = PENDING_SAVE_MEDIA.try_send((save.ticket, profile));
     }
+    save
 }
 
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
@@ -389,29 +532,35 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         let mut target = Aligned(read_target_record(page));
         let mut fixed = Aligned(read_fixed_record(page));
         let mut media = Aligned(read_media_record(page));
-        let what = match request {
-            Either3::First(wire) => {
+        // Which record this request names, its ticket, and the word the
+        // log line uses. The ticket goes back through the slot on every
+        // exit path below — that is what the requester's ack waits on.
+        let (slot, ticket, what) = match request {
+            Either3::First((ticket, wire)) => {
                 target = Aligned(encode_telemetry_target(&wire));
-                "target"
+                (&TARGET_PERSIST, ticket, "target")
             }
-            Either3::Second(position) => {
+            Either3::Second((ticket, position)) => {
                 fixed = Aligned(encode_fixed_position(position.as_ref()));
-                "fixed-position"
+                (&FIXED_PERSIST, ticket, "fixed-position")
             }
-            Either3::Third(profile) => {
+            Either3::Third((ticket, profile)) => {
                 media = Aligned(encode_media_profile(&profile));
-                "media-profile"
+                (&MEDIA_PERSIST, ticket, "media-profile")
             }
         };
 
         // Read-compare-write: an unchanged page is never erased. A host
         // tool that re-sends the same value on every connect must not
-        // burn a flash cycle for it.
+        // burn a flash cycle for it. Durable, not skipped, as far as the
+        // requester is concerned: the value it asked for is on the page,
+        // it simply did not need writing.
         if read_target_record(page) == target.0
             && read_fixed_record(page) == fixed.0
             && read_media_record(page) == media.0
         {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
+            slot.finish(ticket, Persisted::Durable);
             continue;
         }
 
@@ -449,6 +598,16 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 format_args!("persist gave up after retries"),
             );
         }
+        // After the log line and on both paths: the requester is blocked
+        // on this, and what it is owed is the outcome, not silence.
+        slot.finish(
+            ticket,
+            if written {
+                Persisted::Durable
+            } else {
+                Persisted::Lost
+            },
+        );
     }
 }
 

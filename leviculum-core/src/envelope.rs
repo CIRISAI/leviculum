@@ -221,6 +221,18 @@ pub const REFUSE_BUSY: u8 = 0x04;
 /// binary does not have, which is exactly what the T114 did to a
 /// telemetry target before it carried a reporter.
 pub const REFUSE_UNSUPPORTED: u8 = 0x05;
+/// The value was applied but did not reach flash, so a reset would lose
+/// it (Codeberg #358).
+///
+/// The one refusal that is not a rejection: the board took the frame and
+/// is running the new value right now. What it could not promise is the
+/// half the client actually acts on — a scripted `set` followed by a
+/// reset needs the record to be *durable*, and a board that acked while
+/// the write was still owed sent that client into a reboot that lost the
+/// setting. Distinct from [`REFUSE_BUSY`] because a retry is not obviously
+/// the answer (the flash write already exhausted its own retries) and
+/// distinct from [`REFUSE_VALUE`] because the value was fine.
+pub const REFUSE_PERSIST: u8 = 0x06;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -579,19 +591,42 @@ pub fn decode_fixed_position_payload(payload: &[u8]) -> Option<Option<FixedPosit
     }
 }
 
+/// Whether a persisted control record reached flash before the board
+/// answered the frame that set it (Codeberg #358).
+///
+/// The third input to every answer on the persist path, beside the
+/// binary's capability and the frame's delivery. An enum rather than a
+/// third `bool` because the two states are not "worked / did not work":
+/// [`Persist::Lost`] is a board that *is* running the new value and
+/// cannot promise it survives a reboot, which is a different sentence
+/// from either of the other two refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persist {
+    /// The record is on the page: a reset comes back with it. The only
+    /// state that may be acked.
+    Durable,
+    /// Applied in RAM, not written: [`REFUSE_PERSIST`].
+    Lost,
+}
+
 /// The answer to a fixed-position frame, decided by capability first —
 /// the exact rule [`telemetry_target_answer`] states, because the consumer
 /// is the same one: only the telemetry reporter reads the fixed position,
 /// so a binary without a reporter must refuse rather than ack a position
 /// nothing will ever report. With a reporter, an undelivered frame is a
 /// full channel: [`REFUSE_BUSY`], the host retries.
-pub fn fixed_position_answer(reporter_wired: bool, delivered: bool) -> Vec<u8> {
+///
+/// `persist` is the #358 clause: the pin is persisted, so the ack has to
+/// mean the page carries it.
+pub fn fixed_position_answer(reporter_wired: bool, delivered: bool, persist: Persist) -> Vec<u8> {
     if !reporter_wired {
         encode_refusal(TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED)
-    } else if delivered {
+    } else if !delivered {
+        encode_refusal(TYPE_FIXED_POSITION, REFUSE_BUSY)
+    } else if persist == Persist::Durable {
         encode_ack(TYPE_FIXED_POSITION)
     } else {
-        encode_refusal(TYPE_FIXED_POSITION, REFUSE_BUSY)
+        encode_refusal(TYPE_FIXED_POSITION, REFUSE_PERSIST)
     }
 }
 
@@ -749,18 +784,26 @@ pub fn position_source_query_answer(reporter_wired: bool, flags: u8) -> Vec<u8> 
 /// The accepted answer is a [`TYPE_MEDIA_REPORT`], never a bare ack: see
 /// that constant for why the two numbers it carries are the honest reply
 /// to "switch this medium on".
+///
+/// `persist` is the #358 clause, and it bites hardest on this frame: the
+/// report says what a reboot would come up with, so a report written
+/// before the record reached the page is a claim about a reboot that the
+/// reboot itself disproved three times on the rig.
 pub fn media_profile_answer(
     media_wired: bool,
     delivered: bool,
+    persist: Persist,
     running: MediaProfileWire,
     configured: MediaProfileWire,
 ) -> Vec<u8> {
     if !media_wired {
         encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_UNSUPPORTED)
-    } else if delivered {
+    } else if !delivered {
+        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)
+    } else if persist == Persist::Durable {
         encode_media_report(&running, &configured)
     } else {
-        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)
+        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_PERSIST)
     }
 }
 
@@ -788,16 +831,22 @@ pub fn media_query_answer(
 /// and only the reporter can keep it. With a reporter, an undelivered
 /// frame is a full channel: [`REFUSE_BUSY`], the host retries.
 ///
+/// `persist` is the #358 clause: the target is persisted, and the ack is
+/// what a scripted `set`-then-reset acts on, so it may only go out once
+/// the record is on the page.
+///
 /// Pure so the refusal path is provable on the host with a reporter-less
 /// configuration, independent of which BSPs happen to wire a reporter
 /// today.
-pub fn telemetry_target_answer(reporter_wired: bool, delivered: bool) -> Vec<u8> {
+pub fn telemetry_target_answer(reporter_wired: bool, delivered: bool, persist: Persist) -> Vec<u8> {
     if !reporter_wired {
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED)
-    } else if delivered {
+    } else if !delivered {
+        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
+    } else if persist == Persist::Durable {
         encode_ack(TYPE_TELEMETRY_TARGET)
     } else {
-        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
+        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_PERSIST)
     }
 }
 
@@ -1156,25 +1205,47 @@ mod tests {
         // here was the T114's "telemetry on" over a binary with no
         // reporter to honor it.
         for delivered in [false, true] {
-            assert_eq!(
-                decode_refusal_payload(
-                    &telemetry_target_answer(false, delivered)[ENVELOPE_HEADER_LEN..]
-                ),
-                Some((TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED))
-            );
+            for persist in [Persist::Durable, Persist::Lost] {
+                assert_eq!(
+                    decode_refusal_payload(
+                        &telemetry_target_answer(false, delivered, persist)[ENVELOPE_HEADER_LEN..]
+                    ),
+                    Some((TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED))
+                );
+            }
         }
     }
 
     #[test]
     fn a_binary_with_a_reporter_acks_a_delivered_target_and_names_a_full_channel() {
         assert_eq!(
-            decode_ack_payload(&telemetry_target_answer(true, true)[ENVELOPE_HEADER_LEN..]),
+            decode_ack_payload(
+                &telemetry_target_answer(true, true, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+            ),
             Some(TYPE_TELEMETRY_TARGET)
         );
         assert_eq!(
-            decode_refusal_payload(&telemetry_target_answer(true, false)[ENVELOPE_HEADER_LEN..]),
+            decode_refusal_payload(
+                &telemetry_target_answer(true, false, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+            ),
             Some((TYPE_TELEMETRY_TARGET, REFUSE_BUSY))
         );
+    }
+
+    /// Codeberg #358: the ack is what a scripted `set`-then-reset acts
+    /// on, so a target that only ever reached RAM has to come back as a
+    /// refusal the client can tell apart from every other one.
+    #[test]
+    fn a_target_that_did_not_reach_flash_is_refused_by_its_own_name() {
+        assert_eq!(
+            decode_refusal_payload(
+                &telemetry_target_answer(true, true, Persist::Lost)[ENVELOPE_HEADER_LEN..]
+            ),
+            Some((TYPE_TELEMETRY_TARGET, REFUSE_PERSIST))
+        );
+        assert_ne!(REFUSE_PERSIST, REFUSE_BUSY);
+        assert_ne!(REFUSE_PERSIST, REFUSE_VALUE);
+        assert_ne!(REFUSE_PERSIST, REFUSE_UNSUPPORTED);
     }
 
     #[test]
@@ -1345,18 +1416,34 @@ mod tests {
         for delivered in [false, true] {
             assert_eq!(
                 decode_refusal_payload(
-                    &fixed_position_answer(false, delivered)[ENVELOPE_HEADER_LEN..]
+                    &fixed_position_answer(false, delivered, Persist::Durable)
+                        [ENVELOPE_HEADER_LEN..]
                 ),
                 Some((TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED))
             );
         }
         assert_eq!(
-            decode_ack_payload(&fixed_position_answer(true, true)[ENVELOPE_HEADER_LEN..]),
+            decode_ack_payload(
+                &fixed_position_answer(true, true, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+            ),
             Some(TYPE_FIXED_POSITION)
         );
         assert_eq!(
-            decode_refusal_payload(&fixed_position_answer(true, false)[ENVELOPE_HEADER_LEN..]),
+            decode_refusal_payload(
+                &fixed_position_answer(true, false, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+            ),
             Some((TYPE_FIXED_POSITION, REFUSE_BUSY))
+        );
+    }
+
+    /// Codeberg #358 on the second record of the persist path.
+    #[test]
+    fn a_position_that_did_not_reach_flash_is_refused_by_its_own_name() {
+        assert_eq!(
+            decode_refusal_payload(
+                &fixed_position_answer(true, true, Persist::Lost)[ENVELOPE_HEADER_LEN..]
+            ),
+            Some((TYPE_FIXED_POSITION, REFUSE_PERSIST))
         );
     }
 
@@ -1884,6 +1971,7 @@ mod tests {
                     &media_profile_answer(
                         false,
                         delivered,
+                        Persist::Durable,
                         MediaProfileWire::BOTH,
                         MediaProfileWire::BOTH
                     )[ENVELOPE_HEADER_LEN..]
@@ -1906,7 +1994,7 @@ mod tests {
             lora_enabled: true,
             ble_enabled: false,
         };
-        let answer = media_profile_answer(true, true, running, running);
+        let answer = media_profile_answer(true, true, Persist::Durable, running, running);
         let frame = decode_frame(&answer).unwrap();
         assert_eq!(frame.frame_type, TYPE_MEDIA_REPORT);
         assert_eq!(
@@ -1917,9 +2005,29 @@ mod tests {
         // value: the host retries.
         assert_eq!(
             decode_refusal_payload(
-                &media_profile_answer(true, false, running, running)[ENVELOPE_HEADER_LEN..]
+                &media_profile_answer(true, false, Persist::Durable, running, running)
+                    [ENVELOPE_HEADER_LEN..]
             ),
             Some((TYPE_MEDIA_PROFILE, REFUSE_BUSY))
+        );
+    }
+
+    /// Codeberg #358 on the record that caught it. The report is the
+    /// board's statement about what a reboot would come up with, so a
+    /// profile that never reached the page must not be answered with one
+    /// — that report was true about RAM and false about the reboot, three
+    /// times on the rig.
+    #[test]
+    fn a_profile_that_did_not_reach_flash_is_refused_rather_than_reported() {
+        let running = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        };
+        let answer = media_profile_answer(true, true, Persist::Lost, running, running);
+        assert_eq!(decode_frame(&answer).unwrap().frame_type, TYPE_REFUSAL);
+        assert_eq!(
+            decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
+            Some((TYPE_MEDIA_PROFILE, REFUSE_PERSIST))
         );
     }
 

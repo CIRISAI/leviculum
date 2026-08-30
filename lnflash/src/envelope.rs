@@ -24,8 +24,8 @@ use leviculum_core::envelope::{
     encode_capability_query, encode_fixed_position, encode_media_profile, encode_media_query,
     encode_position_source_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
     encode_wall_time, FixedPositionWire, MediaProfileWire, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
-    TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
+    REFUSE_MALFORMED, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE,
+    TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
     TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -139,6 +139,10 @@ pub fn reason_str(reason: u8) -> &'static str {
         REFUSE_VALUE => "the firmware refused the value",
         REFUSE_BUSY => "the firmware is busy",
         REFUSE_UNSUPPORTED => "this binary carries no consumer for the frame",
+        REFUSE_PERSIST => {
+            "the board applied the value but could not write it to flash, \
+                           so a reset would lose it"
+        }
         _ => "an unnamed reason",
     }
 }
@@ -532,9 +536,10 @@ pub(crate) mod testing {
         classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
         encode_refusal, fixed_position_answer, media_profile_answer, media_query_answer,
         position_source_query_answer, telemetry_target_answer, ControlAction, MediaProfileWire,
-        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION,
-        TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG,
-        TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
+        Persist, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES,
+        TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_POSITION_SOURCE_QUERY,
+        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
+        TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
@@ -700,7 +705,9 @@ pub(crate) mod testing {
                 // The firmware's own answer functions, reporter wired and
                 // the channel taking the frame — the ack direction of the
                 // capability gate.
-                ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(true, true)),
+                ControlAction::TelemetryTarget(_) => {
+                    Some(telemetry_target_answer(true, true, Persist::Durable))
+                }
                 // The pin IS a position source, so setting one changes what
                 // the next query answers — the runtime path out of
                 // `state=no-position-source`, reproduced here so the host
@@ -712,7 +719,7 @@ pub(crate) mod testing {
                     } else {
                         *sources &= !POSITION_SOURCE_FIXED;
                     }
-                    Some(fixed_position_answer(true, true))
+                    Some(fixed_position_answer(true, true, Persist::Durable))
                 }
                 ControlAction::PositionSourceQuery => {
                     Some(position_source_query_answer(true, *sources.lock().unwrap()))
@@ -726,6 +733,7 @@ pub(crate) mod testing {
                     Some(media_profile_answer(
                         true,
                         true,
+                        Persist::Durable,
                         media.running(),
                         media.configured,
                     ))
@@ -760,6 +768,7 @@ pub(crate) mod testing {
                 ControlAction::MediaProfile(_) => Some(media_profile_answer(
                     false,
                     false,
+                    Persist::Durable,
                     MediaProfileWire::BOTH,
                     MediaProfileWire::BOTH,
                 )),
@@ -789,8 +798,12 @@ pub(crate) mod testing {
             seen.lock().unwrap().push(frame_bytes.to_vec());
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
                 ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
-                ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(false, false)),
-                ControlAction::FixedPosition(_) => Some(fixed_position_answer(false, false)),
+                ControlAction::TelemetryTarget(_) => {
+                    Some(telemetry_target_answer(false, false, Persist::Durable))
+                }
+                ControlAction::FixedPosition(_) => {
+                    Some(fixed_position_answer(false, false, Persist::Durable))
+                }
                 ControlAction::PositionSourceQuery => Some(position_source_query_answer(false, 0)),
                 ControlAction::Refuse {
                     refused_type,

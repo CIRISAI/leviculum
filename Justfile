@@ -71,9 +71,10 @@ lint-nrf:
     # leviculum-screen, leviculum-sd-policy, leviculum-gnss-time,
     # leviculum-gnss-presence, leviculum-gnss-init, leviculum-telemetry-policy,
     # leviculum-ble-tx, leviculum-queue-budget, leviculum-log-line,
-    # leviculum-tx-spacing and leviculum-rx-arming are the pure, host-testable
-    # crates inside the leviculum-nrf workspace: clippy + tests run on the host
-    # triple (the workspace's .cargo/config defaults to thumbv7em).
+    # leviculum-tx-spacing, leviculum-rx-arming and leviculum-persist-ack are the
+    # pure, host-testable crates inside the leviculum-nrf workspace: clippy +
+    # tests run on the host triple (the workspace's .cargo/config defaults to
+    # thumbv7em).
     #
     # `--all-targets` here, unlike the two embedded feature-set lines above:
     # these crates' whole value is their host test suites, and without the flag
@@ -82,8 +83,8 @@ lint-nrf:
     # invisible to every run of this recipe — the same gap the workspace line in
     # `fast` closed in e27a15e. The embedded lines stay narrow: `--all-targets`
     # there would pull in test/bench harnesses that do not link for thumbv7em.
-    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
-    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming --target $(rustc -vV | sed -n 's/host: //p')
+    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
+    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack --target $(rustc -vV | sed -n 's/host: //p')
 
 # Stack-frame gate for the firmware. The T114 stack grows down into the
 # SoftDevice RAM floor, so one oversized frame eats the whole margin and

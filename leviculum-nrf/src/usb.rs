@@ -392,6 +392,32 @@ async fn apply_radio_config(
     }
 }
 
+/// Persist the record this control frame set, and wait until it is on the
+/// page — the #358 clause of every answer on the persist path.
+///
+/// `took_it` is the frame's own accept decision (capability, and delivery
+/// where a channel is involved). When it is false nothing was applied, so
+/// nothing is owed to flash and no request is made: the answer is already
+/// a refusal on an earlier clause, and this outcome is not what decides
+/// it.
+///
+/// The save is requested *here*, on the task that answers the frame,
+/// rather than on the main loop that applies the node-side half. Both
+/// records used to be persisted from the main loop's arm, unconditionally
+/// and with the same value this task already holds — so moving the request
+/// changes nothing about what reaches the page, and it is what lets the
+/// answer name the outcome of its own write instead of guessing at one it
+/// has no handle on.
+async fn persist_outcome(
+    took_it: bool,
+    request: impl FnOnce() -> crate::telemetry::PendingSave,
+) -> envelope::Persist {
+    if !took_it {
+        return envelope::Persist::Durable;
+    }
+    crate::telemetry::confirm(request()).await
+}
+
 /// Incomplete frame timeout. Python uses 100ms but also sets low_latency mode
 /// so frames arrive as bulk USB packets. Without low_latency, byte-by-byte USB
 /// delivery needs more time. 500ms gives 33x margin for a 167-byte frame at 115200.
@@ -524,19 +550,23 @@ async fn retic_serial_task(
                                 ControlAction::TelemetryTarget(target) => {
                                     // The main loop owns the node, so it is
                                     // the one place a target can be looked
-                                    // up against the identity store and
-                                    // persisted. The ack is gated on the
-                                    // binary's declared reporter: this
-                                    // shared layer must never ack a
-                                    // capability the binary does not have.
-                                    // With a reporter, an undelivered frame
-                                    // is a full channel — refuse audibly,
-                                    // the host retries.
+                                    // up against the identity store. The
+                                    // ack is gated on the binary's declared
+                                    // reporter: this shared layer must never
+                                    // ack a capability the binary does not
+                                    // have. With a reporter, an undelivered
+                                    // frame is a full channel — refuse
+                                    // audibly, the host retries.
                                     let wired = crate::telemetry::reporter_wired();
                                     let delivered =
                                         wired && crate::telemetry::deliver_target(target);
-                                    let answer =
-                                        envelope::telemetry_target_answer(wired, delivered);
+                                    let persist = persist_outcome(delivered, || {
+                                        crate::telemetry::request_save(&target)
+                                    })
+                                    .await;
+                                    let answer = envelope::telemetry_target_answer(
+                                        wired, delivered, persist,
+                                    );
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: telemetry answer write failed");
                                     }
@@ -550,7 +580,12 @@ async fn retic_serial_task(
                                     let wired = crate::telemetry::reporter_wired();
                                     let delivered =
                                         wired && crate::telemetry::deliver_fixed_position(position);
-                                    let answer = envelope::fixed_position_answer(wired, delivered);
+                                    let persist = persist_outcome(delivered, || {
+                                        crate::telemetry::request_save_fixed_position(position)
+                                    })
+                                    .await;
+                                    let answer =
+                                        envelope::fixed_position_answer(wired, delivered, persist);
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: fixed-position answer write failed");
                                     }
@@ -569,10 +604,13 @@ async fn retic_serial_task(
                                     // started now", which is the honest
                                     // answer where an ack would lie.
                                     let wired = crate::media::media_wired();
-                                    let delivered = wired && crate::media::apply(profile);
+                                    let persist =
+                                        persist_outcome(wired, || crate::media::apply(profile))
+                                            .await;
                                     let answer = envelope::media_profile_answer(
                                         wired,
-                                        delivered,
+                                        wired,
+                                        persist,
                                         crate::media::running(),
                                         crate::media::configured(),
                                     );

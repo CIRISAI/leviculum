@@ -987,6 +987,7 @@ dependencies = [
  "leviculum-gnss-time",
  "leviculum-log-line",
  "leviculum-lxmf",
+ "leviculum-persist-ack",
  "leviculum-queue-budget",
  "leviculum-rx-arming",
  "leviculum-screen",
@@ -1001,6 +1002,10 @@ dependencies = [
  "static_cell",
  "tracing-core",
 ]
+
+[[package]]
+name = "leviculum-persist-ack"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-queue-budget"

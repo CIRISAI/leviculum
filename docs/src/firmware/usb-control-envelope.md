@@ -59,9 +59,36 @@ Responses (board → host):
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
 type but this binary carries no consumer for it — retrying or rebooting
-cannot help, only different firmware can). The version in the capability
-report (`1`) names the envelope framing itself; new frame types extend
-the accepted list without bumping it.
+cannot help, only different firmware can), `0x06` not persisted (see
+below). The version in the capability report (`1`) names the envelope
+framing itself; new frame types extend the accepted list without bumping
+it.
+
+### What an answer on the persist path means (#358)
+
+Three frames write a flash record: TELEMETRY_TARGET (0x05),
+FIXED_POSITION (0x08) and MEDIA_PROFILE (0x09). For those three the
+answer carries a durability promise:
+
+> **When the client's call returns, a reset cannot lose the setting.**
+
+The board therefore does not answer them until its store task confirms
+the record is on the page. An ACK — or, for the media profile, a
+MEDIA_REPORT — means written, not merely applied. A write the store task
+gave up on comes back as a refusal with reason `0x06`: the board *is*
+running the value, and cannot promise it survives a reboot. That is a
+different sentence from `busy` (retry) and from `value refused` (the
+value was fine), so a client can tell it apart and say so.
+
+The wait is bounded at 2.5 s, inside the 3.5 s window `lnflash` gives one
+control conversation; a store task that never confirms is reported as
+`0x06` rather than left holding the port. Until #358 the answer went out
+between the RAM apply and the page write, so a scripted `set` followed by
+a reset — periculum's per-scenario media application, `lnflash`, any
+automation — could reboot the board inside the window and lose the
+setting. A sleep in front of the reset does not close it: the store task
+may be working an earlier queued write, and a constant cannot bound a
+queue.
 
 ### The media-profile frames
 

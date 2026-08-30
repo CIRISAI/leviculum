@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -57,6 +57,12 @@ leviculum-tx-spacing = { path = "tx-spacing" }
 # holds the sequence itself, plus the "is the chip listening" state every
 # path that leaves RX consults.
 leviculum-rx-arming = { path = "rx-arming" }
+# When a control-envelope ack may claim the record reached flash (#358).
+# The ordering between the task that answers the frame and the task that
+# writes the page is the whole defect, and the firmware crate runs no host
+# tests — so the gate, and the slow-flash reproduction of the old
+# ordering, live here where they can be asserted.
+leviculum-persist-ack = { path = "persist-ack" }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }

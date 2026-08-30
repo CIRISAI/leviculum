@@ -171,15 +171,15 @@ pub fn configured() -> MediaProfileWire {
 /// one — [`running`] and [`configured`] read back correct the instant
 /// this returns.
 ///
-/// Always `true`: there is no channel that can be full, so the caller's
-/// `delivered` is never in doubt. Returned as a bool anyway so the call
-/// site reads like the telemetry and fixed-position ones and the shared
-/// answer function keeps its shape.
-pub fn apply(profile: MediaProfileWire) -> bool {
+/// The returned [`crate::telemetry::PendingSave`] is the other half of
+/// the answer, and the caller must not write the report before waiting on
+/// it (`crate::telemetry::confirm`, Codeberg #358). The report says what a
+/// reboot would come up with; sent while the page write was still owed,
+/// it was a claim about a reboot that the reboot disproved.
+pub fn apply(profile: MediaProfileWire) -> crate::telemetry::PendingSave {
     CONFIGURED_LORA.store(profile.lora_enabled, Ordering::Relaxed);
     CONFIGURED_BLE.store(profile.ble_enabled, Ordering::Relaxed);
-    crate::telemetry::request_save_media_profile(profile);
-    true
+    crate::telemetry::request_save_media_profile(profile)
 }
 
 /// **The proof line.** One per boot, and re-emitted with the firmware

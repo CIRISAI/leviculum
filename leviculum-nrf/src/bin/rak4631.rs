@@ -548,28 +548,29 @@ async fn main(spawner: Spawner) {
                 let _ = serial_ctl_tx.try_send(answer);
             }
             Either4::Third(Either3::Second(wire)) => {
-                // A host set or cleared the telemetry target (#236). The
-                // serial task already acked the frame; what happens here
-                // is the part that needs the node — the identity lookup
-                // that decides ready vs awaiting-key — plus the persist.
+                // A host set or cleared the telemetry target (#236). What
+                // happens here is the part that needs the node — the
+                // identity lookup that decides ready vs awaiting-key. The
+                // persist and the answer both belong to the serial task
+                // now: the answer may not go out before the record is on
+                // the page (#358), and only the task that requested the
+                // save can wait for it.
                 use leviculum_nrf::telemetry::TargetOutcome;
                 if let Some(reporter) = reporter.as_mut() {
                     match reporter.apply_target(&mut node, wire) {
                         TargetOutcome::Set(_) | TargetOutcome::Cleared => {
-                            leviculum_nrf::telemetry::request_save(&wire);
                             reporter.log_banner();
                         }
                     }
                 }
             }
             Either4::Third(Either3::Third(position)) => {
-                // A host set or cleared the fixed position. The serial
-                // task already answered the frame; this is the part that
-                // needs the reporter — the source switch and the
-                // confirmation re-arm — plus the persist.
+                // A host set or cleared the fixed position. This is the
+                // part that needs the reporter — the source switch and the
+                // confirmation re-arm; the persist is the serial task's,
+                // for the reason above.
                 if let Some(reporter) = reporter.as_mut() {
                     reporter.apply_fixed_position(position);
-                    leviculum_nrf::telemetry::request_save_fixed_position(position);
                     match position {
                         Some(p) => log_critical!(
                             "[TELEMETRY] fixed-position set lat_e6={} lon_e6={} alt_e2={} alt_present={}",
