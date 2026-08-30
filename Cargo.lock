@@ -2039,6 +2039,7 @@ version = "0.8.1"
 dependencies = [
  "bluer",
  "clap",
+ "critical-section",
  "dbus",
  "futures",
  "hex",

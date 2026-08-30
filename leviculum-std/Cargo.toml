@@ -72,12 +72,26 @@ dbus.workspace = true
 # record and the LN-<hex8> name derivation. One implementation on both
 # sides of the rig, per the reuse rule in the #255 seam report.
 leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
+# ble-tx's drain slots are `embassy-sync` Signals, so linking it needs a
+# `critical_section::Impl`. ble-tx supplies one only as a dev-dependency —
+# correct there, because the firmware gets the real one from nrf-softdevice
+# and two impls are a link error. leviculum-std is host-only and is the
+# crate that pulled ble-tx into host binaries, so the host impl is its
+# obligation: without it a single-package build (`cargo build -p
+# leviculum-ffi`, i.e. `just build-ffi`) produces a libleviculum.a with
+# `_critical_section_1_0_acquire/release` undefined, and every static
+# consumer fails to link. `cargo test --workspace` hid this because
+# leviculum-core's dev-dependency on `critical-section/std` unifies into
+# that build. Never reaches the firmware: leviculum-nrf does not depend on
+# leviculum-std.
+critical-section = { version = "1", features = ["std"] }
 
 # md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
 # package name as unused because grepping the sources finds `md5::` but
-# not `md_5::`. `dbus` is a feature-unification-only edge, see above.
+# not `md_5::`. `dbus` is a feature-unification-only edge, see above;
+# `critical-section` is a link-time impl provider with no `use` site.
 [package.metadata.cargo-machete]
-ignored = ["md-5", "dbus"]
+ignored = ["md-5", "dbus", "critical-section"]
 
 [dev-dependencies]
 # `test-util` enables `#[tokio::test(start_paused = true)]`: the duty-lock
