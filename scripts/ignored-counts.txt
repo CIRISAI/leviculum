@@ -38,8 +38,14 @@
 1    -p leviculum-std --doc
 9    -p leviculum-std --test mvr
 
-# 15 in rnsd_interop, of which the three status_parity_tests::* are NOT
+# 20 in rnsd_interop, of which the three status_parity_tests::* are NOT
 # unobserved: `just standard` runs them by name through
 # scripts/run-status-parity.sh (Codeberg #191a). They keep the #[ignore]
 # because they must run serially, apart from the parallel suite.
-15   -p leviculum-std --test rnsd_interop
+#
+# 15 -> 20 (2026-08-30): the five rpc_interop_tests::* that drive a client
+# out of LEVICULUM_RNS_ROOT — an RNS 1.5.2 checkout that is deliberately not
+# vendored, so a fresh clone cannot run them. They run by hand against
+# /home/lew/coding/Reticulum in every batch touching the RPC/compat surface,
+# and before releases.
+20   -p leviculum-std --test rnsd_interop
