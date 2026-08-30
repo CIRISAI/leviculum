@@ -143,8 +143,16 @@ witness_start() {
     local dir="$1" reader="$2"
     local vidpid serial dev out argv started=0
     mkdir -p "$dir"
+    # boards.tsv joins the two halves of the vanish accounting. The device
+    # watchdog knows a vid:pid and no serial (it polls `lsusb -d`); periculum's
+    # BOARD_RESET lines know a serial and no vid:pid. Nothing else on this rig
+    # holds both, and this discovery already does, so it writes the map down
+    # while it has it — after the flash, when the ports are the ports that will
+    # exist for the rest of the run.
+    : > "$dir/boards.tsv"
     while IFS=$'\t' read -r vidpid serial dev; do
         [ -n "$dev" ] || continue
+        printf '%s\t%s\n' "$vidpid" "$serial" >> "$dir/boards.tsv"
         out="$(witness_log_path "$dir" "$vidpid" "$serial")"
         mapfile -t argv < <(witness_reader_argv "$reader" "$out" "$vidpid" "$serial" "$dev")
         "${argv[@]}" </dev/null >>"$dir/reader-stderr.log" 2>&1 &

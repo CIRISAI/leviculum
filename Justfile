@@ -160,6 +160,7 @@ nrf-fw-readback:
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
+        scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-gap-device-name.sh \
@@ -174,8 +175,16 @@ nrf-shellcheck:
 # — plus the verdict-side claim that the RED banner names the resulting file.
 # No board, no periculum, no flash; the reader half runs against a pty that is
 # taken away and given back.
+#
+# scripts/test-device-watchdog.sh joins it because the witness only explains a
+# vanish somebody else decided happened, and that decision was wrong twice: a
+# single failing `lsusb` poll latched a board that never moved, and periculum's
+# own per-scenario board reset — a real USB disconnect we ordered — was counted
+# as a device failure (Codeberg #65). Both are injected there as failures and
+# asserted not to fire.
 hw-witness:
     bash scripts/test-debug-witness.sh
+    bash scripts/test-device-watchdog.sh
     bash scripts/tier3-hw-selftest.sh
 
 # Rustdoc gate: broken intra-doc links fail instead of warning.

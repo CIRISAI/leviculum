@@ -44,10 +44,21 @@
 # controller passthrough: the guest owns the xHCI host controller natively, so
 # the host cannot inject a phantom VM-side USB disconnect. The old qemu usb-host
 # passthrough could drop a board VM-side under load as a pure infrastructure
-# artefact; that class is now impossible. A board that vanishes mid-run is
-# therefore ALWAYS a real device/firmware failure (a self-reset under sustained
-# load, suspected heap exhaustion, Codeberg 65), not an infra glitch, and must
-# read as RED. There is no INFRA_INVALID class: a vanish is never absorbed.
+# artefact; that class is now impossible. There is still no INFRA_INVALID
+# class: an unexplained vanish is never absorbed.
+#
+# What this file used to conclude from that, and got wrong for months, is that
+# a disconnect is therefore always a DEVICE failure. It is not, because we
+# ourselves disconnect boards: periculum reboots every board a scenario binds
+# before the daemons start (periculum/src/runner.rs, `reset_bound_boards`), and
+# an LNode takes that reboot as a full sys_reset, so it leaves the bus for
+# ~0.3 s and returns 1.7-3.2 s later. The watchdog cannot miss that at a
+# 1-second poll, latched it, and turned the 2026-08-27 and 2026-08-30 nightlies
+# RED on boards whose own witness logs show PANIC_COUNT total=0 and two hours
+# of continuous uptime. So the run now ACCOUNTS for disconnects: observed
+# vanishes per board are matched against the resets periculum's own BOARD_RESET
+# lines say it commanded, and only the surplus is RED. See
+# scripts/device-watchdog.sh.
 #
 # DEVICE-VANISH EVIDENCE (Codeberg #353). Detecting the vanish was never the
 # hard part; explaining it was. The board says why it reset — [PANIC_COUNT],
@@ -247,75 +258,32 @@ select_targets() {
 
 # --- Device-vanish watchdog ---
 #
-# The four distinct USB IDs of the five rig boards. The two T-Beams share
-# 1a86:55d4, so that ID's baseline count is 2 and a single T-Beam vanish drops
-# it to 1. Every board, including ones the active scenario silenced, counts:
-# a silenced board that vanishes and returns un-silenced can still interfere
-# with the running scenario, so ANY rig-board disconnect poisons the run.
-RIG_USB_IDS=( "1a86:55d4" "1209:0001" "1209:0002" "303a:1001" )
-
-# Number of currently enumerated USB devices for one vid:pid.
-rig_id_count() { lsusb -d "$1" 2>/dev/null | wc -l | tr -d ' '; }
-
-WATCHDOG_PID=""
-
-# Start a background watchdog for the run's execution window. It snapshots a
-# per-vid:pid baseline count, then polls once a second; the first time any ID's
-# count drops below its baseline it appends one timestamped line to $poison
-# (latched per ID so a long outage does not spam). Non-empty $poison after the
-# window == a rig-board vanished during the run. Pure lsusb poll: no root, no
-# dmesg privilege, robust to ttyACM renumbering (keyed by device identity, not
-# node).
-start_device_watchdog() {
-    local poison="$1" stop="$2"
-    rm -f "$stop"
-    : > "$poison"
-    (
-        set +e
-        declare -A base reported
-        local id
-        for id in "${RIG_USB_IDS[@]}"; do
-            base[$id]=$(rig_id_count "$id")
-            reported[$id]=0
-        done
-        while [[ ! -e "$stop" ]]; do
-            for id in "${RIG_USB_IDS[@]}"; do
-                local cur
-                cur=$(rig_id_count "$id")
-                if (( cur < ${base[$id]} )) && (( reported[$id] == 0 )); then
-                    echo "vanish at=$(date -Iseconds) vid_pid=$id baseline=${base[$id]} now=$cur" >> "$poison"
-                    reported[$id]=1
-                fi
-            done
-            sleep 1
-        done
-        exit 0
-    ) &
-    WATCHDOG_PID=$!
-}
-
-# Stop the watchdog (create the stop sentinel, reap the process).
-stop_device_watchdog() {
-    local stop="$1"
-    : > "$stop"
-    if [[ -n "$WATCHDOG_PID" ]]; then
-        wait "$WATCHDOG_PID" 2>/dev/null || true
-    fi
-    WATCHDOG_PID=""
-    rm -f "$stop"
-}
+# The watchdog itself, its sysfs cross-check and the vanish accounting live in
+# scripts/device-watchdog.sh, sourced here so scripts/test-device-watchdog.sh
+# can drive every decision against a fixture lsusb. That file's header says why
+# a raw `lsusb | wc -l` poll is not a device-presence test and why an observed
+# disconnect is not by itself a failure.
+# shellcheck source=scripts/device-watchdog.sh
+. "$REPO_DIR/scripts/device-watchdog.sh"
 
 # Simulated-vanish hook (test-only, no rig). LEVICULUM_SIMULATE_VANISH=1
-# injects ONE synthetic disconnect into the watchdog so the RED attribution
-# path is exercised without a rig. LEVICULUM_SIMULATE_VANISH_VIDPID overrides
-# the injected board id (default 1a86:55d4) so a selftest can assert the
-# attribution names a specific board, e.g. an LNode 1209:0001.
+# injects ONE synthetic disconnect into the watchdog journal so the RED
+# attribution path is exercised without a rig. LEVICULUM_SIMULATE_VANISH_VIDPID
+# overrides the injected board id (default 1a86:55d4) so a selftest can assert
+# the attribution names a specific board, e.g. an LNode 1209:0001. The injected
+# line is a real journal line, so it goes through the same accounting as a real
+# one — with no commanded reset behind it, it stays unexplained and reads RED.
+# LEVICULUM_SIMULATE_VANISH_COUNT injects more than one, so a selftest can
+# assert the surplus case: N observed disconnects against fewer commanded ones.
 maybe_simulate_vanish() {
-    local poison="$1"
+    local journal="$1"
     [[ -n "${LEVICULUM_SIMULATE_VANISH:-}" ]] || return 0
     local vidpid="${LEVICULUM_SIMULATE_VANISH_VIDPID:-1a86:55d4}"
-    echo "SIMULATED vanish at=$(date -Iseconds) vid_pid=$vidpid (LEVICULUM_SIMULATE_VANISH)" >> "$poison"
-    log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (vid_pid=$vidpid)"
+    local count="${LEVICULUM_SIMULATE_VANISH_COUNT:-1}" i
+    for (( i = 0; i < count; i++ )); do
+        echo "vanish at=$(date -Iseconds) vid_pid=$vidpid baseline=1 now=0 simulated=LEVICULUM_SIMULATE_VANISH" >> "$journal"
+    done
+    log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (vid_pid=$vidpid count=$count)"
 }
 
 # --- Flash the LNodes from HEAD, then verify they really run it ---
@@ -369,23 +337,40 @@ if (( ${#TARGETS[@]} == 0 )); then
 fi
 log "[CI_HW] running periculum over ${#TARGETS[@]} target(s): ${TARGETS[*]}"
 
-POISON=$(mktemp)
+# The watchdog journal lives in the witness dir, next to the board logs it has
+# to be read beside, and is named in the RED banner. It used to be a mktemp
+# file deleted at the end of the verdict block, so the one artefact that says
+# WHEN a board left the bus was gone before anybody looked: the 2026-08-30
+# forensics had to reconstruct the latch time from the run-directory name and
+# got it wrong by two minutes. An unreadable run costs more than a kilobyte.
+WATCHDOG_JOURNAL="$WITNESS_DIR/device-watchdog.log"
 STOP=$(mktemp)
-start_device_watchdog "$POISON" "$STOP"
-maybe_simulate_vanish "$POISON"
+start_device_watchdog "$WATCHDOG_JOURNAL" "$STOP"
+maybe_simulate_vanish "$WATCHDOG_JOURNAL"
 
 # periculum prints its own per-scenario VERDICT lines and the SUMMARY; the
 # machine-readable document goes to $JSON for the verdict block below. The
 # exec redirection at the top already tees everything into $LOG.
+#
+# A SECOND copy goes to $PERICULUM_OUT, and not out of thrift: the vanish
+# accounting has to read periculum's BOARD_RESET lines, and $LOG is written by
+# a `tee` running asynchronously at the far end of a pipe — nothing guarantees
+# the last lines have reached it by the time the verdict block greps. This tee
+# is inside the pipeline, so it has exited and flushed before the next
+# statement runs. `pipefail` is already on, so periculum's exit code still
+# reaches $PERICULUM_RC through it.
+PERICULUM_OUT="$WITNESS_DIR/periculum-output.log"
 PERICULUM_RC=0
 if [[ -n "${LEVICULUM_SELFTEST_PERICULUM:-}" ]]; then
     # Test seam (selftest only): stub periculum. The command emits
     # periculum-style output and exits with a chosen code, so the
     # watchdog/verdict logic is exercised without a rig or a build.
-    bash -c "$LEVICULUM_SELFTEST_PERICULUM" _ "$JSON" "${TARGETS[@]}" || PERICULUM_RC=$?
+    bash -c "$LEVICULUM_SELFTEST_PERICULUM" _ "$JSON" "${TARGETS[@]}" 2>&1 \
+      | tee -a "$PERICULUM_OUT" || PERICULUM_RC=$?
 else
     CARGO_TARGET_DIR="$CACHE_TARGET" \
-      "$PERICULUM_BIN" run --json-out "$JSON" "${TARGETS[@]}" || PERICULUM_RC=$?
+      "$PERICULUM_BIN" run --json-out "$JSON" "${TARGETS[@]}" 2>&1 \
+      | tee -a "$PERICULUM_OUT" || PERICULUM_RC=$?
 fi
 
 stop_device_watchdog "$STOP"
@@ -394,17 +379,34 @@ stop_device_watchdog "$STOP"
 # file quoted in the banner is complete rather than still being appended to.
 witness_stop
 
+# --- Adjudicate what the watchdog saw ---
+#
+# A board that left the bus is not yet a failure: periculum reboots every board
+# a scenario binds, by design, and an LNode reboot IS a USB disconnect. So each
+# observed vanish is matched against the resets periculum says it commanded for
+# that board, and only the surplus — a board that left more often than we told
+# it to, or one we never told at all — is a rig-honesty failure.
 VANISHED_BOARDS=()
-if [[ -s "$POISON" ]]; then
-    log "[CI_HW] WATCHDOG: rig-board vanish during the run:"
-    while IFS= read -r line; do log "[CI_HW]   $line"; done < "$POISON"
-    while IFS= read -r vp; do
+ACCOUNTED_BOARDS=()
+if grep -q '^vanish ' "$WATCHDOG_JOURNAL" 2>/dev/null; then
+    log "[CI_HW] WATCHDOG: rig-board disconnect(s) during the run:"
+    while IFS= read -r line; do log "[CI_HW]   $line"; done \
+        < <(grep -E '^(vanish|return|poll_failed) ' "$WATCHDOG_JOURNAL")
+    while IFS=' ' read -r vp obs cmd verdict; do
         [[ -n "$vp" ]] || continue
-        VANISHED_BOARDS+=( "$vp" )
-    done < <(grep -oE 'vid_pid=[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' "$POISON" \
-             | sed 's/^vid_pid=//' | sort -u)
+        log "[CI_HW]   ACCOUNTING $vp $obs $cmd $verdict"
+        case "$verdict" in
+            verdict=accounted)   ACCOUNTED_BOARDS+=( "$vp" ) ;;
+            *)                   VANISHED_BOARDS+=( "$vp" ) ;;
+        esac
+    done < <(watchdog_adjudicate "$WATCHDOG_JOURNAL" "$WITNESS_DIR/boards.tsv" "$PERICULUM_OUT")
 fi
-rm -f "$POISON"
+# A failed poll never decides anything, but it is not nothing either: a run
+# whose watchdog could not see is a run whose vanish evidence is weaker than it
+# looks, and that has to be visible rather than swallowed by 2>/dev/null.
+if grep -q '^poll_failed ' "$WATCHDOG_JOURNAL" 2>/dev/null; then
+    log "[CI_HW] WATCHDOG: $(grep -c '^poll_failed ' "$WATCHDOG_JOURNAL") failed poll(s) — see $WATCHDOG_JOURNAL"
+fi
 
 # --- Verdict ---
 #
@@ -468,37 +470,66 @@ esac
 
 dedup_ids() { printf '%s\n' "$@" | awk 'NF' | sort -u | paste -sd, -; }
 
-# Board-vanish attribution. Any confirmed rig-board vanish is a real
-# device/firmware failure (suspected firmware self-reset under load, Codeberg
-# 65) and forces RED. The VFIO controller passthrough cannot produce a
-# host-side phantom disconnect, so a vanish is never an infrastructure
+# Boards that left the bus exactly as often as periculum commanded. Logged,
+# never RED: counting our own reset command as a device failure is what turned
+# the 2026-08-27 and 2026-08-30 nightlies red on healthy boards.
+ACCOUNTED_IDS=$(dedup_ids "${ACCOUNTED_BOARDS[@]:-}")
+if [[ -n "$ACCOUNTED_IDS" ]]; then
+    log "[CI_HW] WATCHDOG: board(s) $ACCOUNTED_IDS disconnected only as often as"
+    log "[CI_HW] periculum's own BOARD_RESET lines say it rebooted them (per-scenario"
+    log "[CI_HW] clean-state reset). Accounted for; not a vanish."
+fi
+
+# Board-vanish attribution. An UNACCOUNTED rig-board disconnect — one we did
+# not command, or one more than we commanded — is a real device/firmware
+# failure and forces RED. The VFIO controller passthrough cannot produce a
+# host-side phantom disconnect, so such a vanish is never an infrastructure
 # artefact: it is never absorbed.
 BOARD_VANISH_IDS=$(dedup_ids "${VANISHED_BOARDS[@]:-}")
+VANISH_CAUSE_TOKEN=""
 if [[ -n "$BOARD_VANISH_IDS" ]]; then
     RC=1
     log "[CI_HW] ===================================================================="
-    log "[CI_HW] BOARD VANISH (RED): rig board(s) $BOARD_VANISH_IDS vanished mid-run."
-    log "[CI_HW] Real device/firmware failure, suspected firmware self-reset under"
-    log "[CI_HW] load (Codeberg 65). Forces tier3 RED. Every scenario verdict from"
-    log "[CI_HW] the vanish timestamp above onwards is UNTRUSTED: the rig it ran on"
-    log "[CI_HW] was not the rig the corpus assumes."
+    log "[CI_HW] BOARD VANISH (RED): rig board(s) $BOARD_VANISH_IDS left the USB bus"
+    log "[CI_HW] more often than periculum commanded a reset. Forces tier3 RED. Every"
+    log "[CI_HW] scenario verdict from the vanish timestamp above onwards is UNTRUSTED:"
+    log "[CI_HW] the rig it ran on was not the rig the corpus assumes."
     # Name the file, not the directory. A witness nobody can find is not a
     # witness, and "look in the witness dir" is one guess more than the person
     # reading this banner at 07:00 should have to make. Codeberg #353.
+    #
+    # And say only what that file supports. This banner used to assert
+    # "suspected firmware self-reset under load" on every vanish, including the
+    # ones where the very witness it pointed at recorded PANIC_COUNT total=0
+    # and a host-requested reboot. A cause the evidence contradicts is worse
+    # than no cause: it sent two days of forensics after the firmware.
     log "[CI_HW] WITNESS: what the board said across the reset is in ---"
     for vp in "${VANISHED_BOARDS[@]}"; do
         if witness_out=$(witness_files_for "$WITNESS_DIR" "$vp"); then
             while IFS= read -r wf; do
                 [[ -n "$wf" ]] || continue
                 log "[CI_HW]   $vp -> $wf"
+                log "[CI_HW]      cause per witness: $(watchdog_reset_cause "$wf")"
+                if [[ -z "$VANISH_CAUSE_TOKEN" ]]; then
+                    case "$(watchdog_reset_cause "$wf")" in
+                        host-requested*) VANISH_CAUSE_TOKEN="cause=host_requested_reboot" ;;
+                        firmware\ panic*) VANISH_CAUSE_TOKEN="cause=firmware_panic" ;;
+                        hardware\ watchdog*) VANISH_CAUSE_TOKEN="cause=hw_watchdog" ;;
+                        "CPU lockup"*) VANISH_CAUSE_TOKEN="cause=cpu_lockup" ;;
+                        reset\ pin*) VANISH_CAUSE_TOKEN="cause=reset_pin" ;;
+                        *) VANISH_CAUSE_TOKEN="cause=unknown" ;;
+                    esac
+                fi
             done <<<"$witness_out"
         else
             # No file at all: either the board is not an LNode (an RNode has no
-            # such debug console) or no witness could be started. Say which is
+            # such debug console) or no witness could be started. Which is
             # unknowable here, so say neither and point at the directory.
             log "[CI_HW]   $vp -> no witness file in $WITNESS_DIR (not an LNode, or no reader started)"
+            [[ -n "$VANISH_CAUSE_TOKEN" ]] || VANISH_CAUSE_TOKEN="cause=unknown"
         fi
     done
+    log "[CI_HW] WATCHDOG JOURNAL: $WATCHDOG_JOURNAL"
     log "[CI_HW] ===================================================================="
 fi
 
@@ -523,15 +554,19 @@ fi
 
 # Verdict fields. `expected_marginal` and `skipped` keep their historic
 # spelling and come from periculum's summary (`marginal`, `skipped_infra`); the
-# two rig-honesty causes are added here. A confirmed board vanish names the
-# board(s) and the suspected cause so the line is unmissable, e.g.
-#   tier3 RED (expected_marginal=0 skipped=0 board_vanish=1209:0001 firmware_self_reset_suspected)
+# two rig-honesty causes are added here. An unaccounted board vanish names the
+# board(s) and the cause the WITNESS supports — `cause=unknown` when it
+# supports none — so the ledger line stays a record of what was observed, e.g.
+#   tier3 RED (expected_marginal=0 skipped=0 board_vanish=1209:0001 cause=firmware_panic)
+# The old unconditional `firmware_self_reset_suspected` token is gone: it
+# asserted a firmware failure on every vanish, and on both runs it was ever
+# printed on the board's own witness disproved it.
 # A firmware-unverified LNode (stale/failed flash) is the same honesty class and
 # names its board too, e.g.
 #   tier3 RED (expected_marginal=0 skipped=0 firmware_unverified=1209:0001)
 VERDICT_FIELDS="expected_marginal=$MARGINAL skipped=$SKIPPED"
 if [[ -n "$BOARD_VANISH_IDS" ]]; then
-    VERDICT_FIELDS="$VERDICT_FIELDS board_vanish=$BOARD_VANISH_IDS firmware_self_reset_suspected"
+    VERDICT_FIELDS="$VERDICT_FIELDS board_vanish=$BOARD_VANISH_IDS ${VANISH_CAUSE_TOKEN:-cause=unknown}"
 fi
 if [[ -n "$FW_UNVERIFIED_IDS" ]]; then
     VERDICT_FIELDS="$VERDICT_FIELDS firmware_unverified=$FW_UNVERIFIED_IDS"
