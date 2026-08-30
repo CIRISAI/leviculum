@@ -711,6 +711,51 @@ fn abandon_multi_send_queue(
     );
 }
 
+/// Deregister one vport whose logical interface is gone.
+///
+/// The granularity is the point (#283): only this vport's queued frames are
+/// abandoned and only this vport stops being routed to. The shared serial port
+/// and every other vport on it keep running, so a single torn-down logical
+/// interface no longer bounces the physical radio.
+fn deregister_vport(
+    name: &str,
+    vports: &[VportRuntime],
+    send_queue: &mut VecDeque<(usize, Vec<u8>)>,
+    dead: &mut [bool],
+    subint: usize,
+) {
+    if dead[subint] {
+        return;
+    }
+    dead[subint] = true;
+
+    let mut abandoned = 0usize;
+    send_queue.retain(|(queued, frame)| {
+        if *queued != subint {
+            return true;
+        }
+        abandoned += 1;
+        vports[subint]
+            .counters
+            .tx_queue_drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        vports[subint]
+            .counters
+            .tx_dropped_bytes
+            .fetch_add(frame.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        false
+    });
+
+    tracing::warn!(
+        event = "RNODE_VPORT_DEREGISTERED",
+        iface = %name,
+        vport_iface = %vports[subint].name,
+        vport = vports[subint].vport,
+        frames = abandoned,
+        reason = "incoming_closed",
+    );
+}
+
 /// Bidirectional I/O loop for a configured RNode.
 ///
 /// Returns the `outgoing_rx` on disconnect so the reconnect wrapper can
@@ -1989,6 +2034,16 @@ async fn rnode_multi_io_task<S>(
     let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
     let mut buf = [0u8; IO_READ_BUF];
     let mut selected_vport: u8 = 0;
+    // Vports whose logical interface has been torn down. A dead vport is
+    // deregistered from routing, not a reason to drop the shared radio: the
+    // other vports on the same serial port are still carrying traffic (#283).
+    // Seeded from the channel state so a vport that died during a disconnect
+    // is not rediscovered one lost frame at a time.
+    let mut dead: Vec<bool> = vports.iter().map(|v| v.incoming_tx.is_closed()).collect();
+    if dead.iter().all(|&d| d) {
+        tracing::debug!("{}: no live vport left, io task not starting", name);
+        return;
+    }
     let mut interface_ready = true;
     let mut send_queue: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
@@ -2027,7 +2082,7 @@ async fn rnode_multi_io_task<S>(
                                 }
                                 rnode::CMD_DATA => {
                                     match vport_to_subint.get(&selected_vport) {
-                                        Some(&idx) => {
+                                        Some(&idx) if !dead[idx] => {
                                             let v = &vports[idx];
                                             v.counters.rx_bytes.fetch_add(
                                                 payload.len() as u64,
@@ -2042,13 +2097,32 @@ async fn rnode_multi_io_task<S>(
                                                 .await
                                                 .is_err()
                                             {
-                                                // Event loop shut down for this vport.
-                                                abandon_multi_send_queue(
-                                                    name, vports, &mut send_queue,
-                                                    "incoming_closed",
+                                                // This vport's event loop is gone. Deregister
+                                                // it and keep serving the others: returning
+                                                // here tore down the shared radio, and the
+                                                // reconnect loop then bounced it every five
+                                                // seconds forever, because the next frame for
+                                                // the same dead vport ended it again (#283).
+                                                deregister_vport(
+                                                    name, vports, &mut send_queue, &mut dead, idx,
                                                 );
-                                                return;
+                                                if dead.iter().all(|&d| d) {
+                                                    tracing::debug!(
+                                                        "{}: last vport shut down, ending io task",
+                                                        name
+                                                    );
+                                                    return;
+                                                }
                                             }
+                                        }
+                                        // A vport whose interface is gone: its frames are
+                                        // dropped where they arrive, without touching the
+                                        // radio the live vports share.
+                                        Some(&idx) => {
+                                            tracing::trace!(
+                                                "{}: RX for deregistered vport {} -> {} (dropped)",
+                                                name, selected_vport, vports[idx].name
+                                            );
                                         }
                                         None => {
                                             tracing::warn!(
@@ -2120,6 +2194,15 @@ async fn rnode_multi_io_task<S>(
                         if !vports[tagged.subint].outgoing {
                             tracing::debug!(
                                 "{}: dropping TX on non-outgoing vport {}",
+                                name, vports[tagged.subint].vport
+                            );
+                            continue;
+                        }
+                        // A deregistered vport keeps its hands off the shared
+                        // radio in both directions (#283).
+                        if dead[tagged.subint] {
+                            tracing::debug!(
+                                "{}: dropping TX on deregistered vport {}",
                                 name, vports[tagged.subint].vport
                             );
                             continue;
@@ -3559,6 +3642,167 @@ mod tests {
         );
 
         hub.abort();
+        stub.abort();
+    }
+
+    /// One vport's logical interface going away must not take the shared
+    /// physical radio with it (Codeberg #283).
+    ///
+    /// Before the fix, the send failure on the dead vport's incoming channel
+    /// returned from the whole io task. The reconnect loop then reopened the
+    /// port (its stop condition needs *every* vport closed), the next frame for
+    /// the same dead vport ended it again, and the surviving vports lost the
+    /// radio every five seconds forever.
+    ///
+    /// The connector hands out the duplex port exactly once, so any reconnect
+    /// leaves the surviving vport with a dead radio and the round trip below
+    /// times out — the bounce cannot pass this test quietly.
+    #[tokio::test]
+    async fn test_multi_vport_one_dead_vport_does_not_bounce_the_radio() {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (freq_tx, _freq_rx) = tokio::sync::mpsc::channel::<(u8, u32)>(8);
+        let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(64);
+        let stub = tokio::spawn(rnode_multi_firmware_stub(
+            peer,
+            vec![rnode::CHIP_SX127X, rnode::CHIP_SX128X],
+            freq_tx,
+            data_tx,
+        ));
+
+        let (in0_tx, mut in0_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (in1_tx, mut in1_rx) = mpsc::channel::<IncomingPacket>(16);
+        let vports = vec![
+            VportRuntime {
+                id: InterfaceId(40),
+                name: "multi[low]".to_string(),
+                vport: 0,
+                radio: RadioParams {
+                    frequency: 865_600_000,
+                    bandwidth: 125_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in0_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+            VportRuntime {
+                id: InterfaceId(41),
+                name: "multi[high]".to_string(),
+                vport: 1,
+                radio: RadioParams {
+                    frequency: 2_400_000_000,
+                    bandwidth: 500_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 5,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in1_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+        ];
+
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens_in_task = opens.clone();
+        let port_holder = std::sync::Mutex::new(Some(port));
+        let connect = move || {
+            opens_in_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let taken = port_holder.lock().unwrap().take();
+            async move { taken.ok_or(RNodeError::NotDetected) }
+        };
+
+        let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(16);
+        let hub = tokio::spawn(async move {
+            rnode_multi_reconnect_task(
+                "multi".to_string(),
+                connect,
+                vports,
+                merged_rx,
+                false,
+                None,
+            )
+            .await;
+        });
+
+        // A full round trip on vport 0 proves the io loop is running before
+        // its receiver is dropped — the deregistration must come from the send
+        // failure, not from the state the loop was seeded with.
+        let ping = |subint: usize, data: &'static [u8]| {
+            let merged_tx = merged_tx.clone();
+            async move {
+                merged_tx
+                    .send(TaggedOutgoing {
+                        subint,
+                        packet: OutgoingPacket {
+                            data: data.to_vec(),
+                            high_priority: false,
+                        },
+                    })
+                    .await
+                    .expect("send to hub");
+            }
+        };
+        ping(0, b"warmup").await;
+        let echoed = tokio::time::timeout(Duration::from_secs(5), in0_rx.recv())
+            .await
+            .expect("vport-0 echo within 5s")
+            .expect("in0 open");
+        assert_eq!(echoed.data, b"warmup");
+
+        // vport 0's logical interface is torn down.
+        drop(in0_rx);
+
+        // A frame for the now-dead vport: the send fails and the vport is
+        // deregistered. Before the fix, this returned from the io task.
+        ping(0, b"to-the-dead").await;
+        let (vp, _) = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("firmware sees the vport-0 frame within 5s")
+            .expect("data channel open");
+        assert_eq!(vp, 0);
+
+        // The surviving vport still has the radio. This is the assertion the
+        // bug fails: after a bounce the connector has no port left to hand out.
+        ping(1, b"still-here").await;
+        let alive = tokio::time::timeout(Duration::from_secs(5), in1_rx.recv())
+            .await
+            .expect("vport-1 must keep the radio after vport-0 died")
+            .expect("in1 open");
+        assert_eq!(alive.data, b"still-here");
+
+        // A second frame for the dead vport must be dropped where it arrives,
+        // not rediscovered as a fresh teardown.
+        ping(0, b"still-dead").await;
+        ping(1, b"and-still-here").await;
+        let alive = tokio::time::timeout(Duration::from_secs(5), in1_rx.recv())
+            .await
+            .expect("vport-1 must survive a second frame for the dead vport")
+            .expect("in1 open");
+        assert_eq!(alive.data, b"and-still-here");
+
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the shared radio must be opened once; a reconnect is the #283 bounce"
+        );
+
+        // When the LAST vport goes too, the hub stops on its own rather than
+        // reconnecting forever: the all-closed exit stays reachable.
+        drop(in1_rx);
+        ping(1, b"final").await;
+        tokio::time::timeout(Duration::from_secs(5), hub)
+            .await
+            .expect("hub must stop once every vport is gone")
+            .expect("hub task must not panic");
+
         stub.abort();
     }
 
