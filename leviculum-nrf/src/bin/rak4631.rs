@@ -79,6 +79,14 @@ async fn main(spawner: Spawner) {
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
     leviculum_nrf::telemetry::declare_reporter();
+    // The media profile decides which carriers come up at all, so it is
+    // read before USB and before either carrier: before USB so a host
+    // frame can never be answered against the default while the flash
+    // record is still unread, and before the carriers because the answer
+    // is their spawn decision. A memory-mapped flash read, legal this
+    // early and before `Softdevice::enable`.
+    let (media, media_src) =
+        leviculum_nrf::media::load_at_boot(rak4631::CONFIG.telemetry_flash_page);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
 
@@ -185,7 +193,7 @@ async fn main(spawner: Spawner) {
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
-    spawner.must_spawn(fw_build_banner());
+    spawner.must_spawn(fw_build_banner(media_src));
     spawner.must_spawn(leviculum_nrf::heap_watermark_task());
     spawner.must_spawn(diag_mem_log());
 
@@ -264,12 +272,23 @@ async fn main(spawner: Spawner) {
         }
     };
     let lora_channels = leviculum_nrf::lora::channels();
-    spawner.must_spawn(leviculum_nrf::lora::lora_task(lora, radio_cfg));
+    // `lora=off` means the radio stays down: the task that resets,
+    // configures and keys the SX1262 is never spawned, so the chip is
+    // never brought out of the state `lora::init` left it in. Nothing
+    // transmits and nothing is received — which is the point, since a
+    // reception over the medium under test's neighbour is exactly what
+    // makes a single-medium measurement falsifiable.
+    if media.lora_enabled {
+        spawner.must_spawn(leviculum_nrf::lora::lora_task(lora, radio_cfg));
+    } else {
+        leviculum_nrf::media::log_carrier_held_down("lora");
+    }
 
     // BLE — same Columba v2.2 service the T114 exposes.
     let identity_hash = *node.identity().hash();
     let sd = leviculum_nrf::ble::init(
         &spawner,
+        media.ble_enabled,
         identity_hash,
         vbus,
         p.RTC0,
@@ -294,6 +313,13 @@ async fn main(spawner: Spawner) {
     );
     let ble_channels = leviculum_nrf::ble::channels();
     info!("BLE ready");
+
+    // Both spawn decisions are made: say what actually came up, then
+    // prove it on the debug port. `note_boot_state` is passed what was
+    // really spawned, which is what makes "switching a medium on takes
+    // effect at reboot" a fact the board can state rather than a hope.
+    leviculum_nrf::media::note_boot_state(media.lora_enabled, media.ble_enabled);
+    leviculum_nrf::media::log_banner(media_src);
 
     // Radio-config persistence. Must come after `ble::init`: writing internal
     // flash with the SoftDevice enabled is only legal through its own
@@ -576,6 +602,16 @@ async fn main(spawner: Spawner) {
                 leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
             }
             Either4::First(Either4::Second(data)) => {
+                // A medium switched off at runtime stops carrying traffic
+                // in BOTH directions from the moment the frame was
+                // answered: the interface drops what the core hands it,
+                // this drops what the medium hands up. Without the second
+                // half a "LoRa off" node would still deliver over LoRa,
+                // which is precisely the masking the profile exists to
+                // remove.
+                if !leviculum_nrf::media::lora_active() {
+                    continue;
+                }
                 let output = node.handle_packet(InterfaceId(1), &data);
                 if !output.actions.is_empty() {
                     info!("LORA RX -> {} actions", output.actions.len());
@@ -587,6 +623,11 @@ async fn main(spawner: Spawner) {
             }
             Either4::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
+                // See the LoRa arm: a medium switched off at runtime
+                // delivers nothing upward either.
+                if !leviculum_nrf::media::ble_active() {
+                    continue;
+                }
                 let output = node.handle_packet(InterfaceId(2), &data);
                 if !output.actions.is_empty() {
                     info!("BLE RX -> {} actions", output.actions.len());
@@ -732,12 +773,18 @@ async fn boot_log_repeater(initial_len: usize) {
 /// short boot window. The CI auto-flash verify reads this back. Uses the
 /// embassy time driver (same timing infra the other periodic tasks use);
 /// no SD-reserved peripheral is touched directly.
+///
+/// The `[MEDIA]` line rides along for the same reason and reads the
+/// carriers live, so a runtime change shows up here within five seconds
+/// and a capture attached after the boot window still learns which
+/// carriers this board is on.
 #[embassy_executor::task]
-async fn fw_build_banner() {
+async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
     loop {
         Timer::after(Duration::from_secs(5)).await;
         log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        leviculum_nrf::media::log_banner(media_src);
     }
 }
 

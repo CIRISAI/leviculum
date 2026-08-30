@@ -120,6 +120,7 @@ pub mod identity_store;
 pub mod ifac;
 pub mod known_destinations;
 pub mod link;
+pub mod media_profile_store;
 pub mod memory_storage;
 pub mod node;
 pub mod packet;

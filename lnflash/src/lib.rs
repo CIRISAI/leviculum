@@ -26,6 +26,7 @@ pub mod flow;
 pub mod ihex;
 pub mod infouf2;
 pub mod manifest;
+pub mod media;
 pub mod position;
 pub mod radio;
 pub mod softdevice;

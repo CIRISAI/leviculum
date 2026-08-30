@@ -60,6 +60,8 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_TX_SPACING,
     envelope::TYPE_RADIO_QUERY,
     envelope::TYPE_FIXED_POSITION,
+    envelope::TYPE_MEDIA_PROFILE,
+    envelope::TYPE_MEDIA_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -550,6 +552,46 @@ async fn retic_serial_task(
                                     let answer = envelope::fixed_position_answer(wired, delivered);
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: fixed-position answer write failed");
+                                    }
+                                }
+                                ControlAction::MediaProfile(profile) => {
+                                    // Applied here rather than handed to
+                                    // the main loop: the apply is two
+                                    // atomic stores and a save request,
+                                    // and nothing about it needs the
+                                    // node. So the report written back is
+                                    // the state already in force, not a
+                                    // prediction — and `running` differing
+                                    // from `configured` in it is the
+                                    // board saying "that carrier did not
+                                    // come up this boot and cannot be
+                                    // started now", which is the honest
+                                    // answer where an ack would lie.
+                                    let wired = crate::media::media_wired();
+                                    let delivered = wired && crate::media::apply(profile);
+                                    let answer = envelope::media_profile_answer(
+                                        wired,
+                                        delivered,
+                                        crate::media::running(),
+                                        crate::media::configured(),
+                                    );
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: media answer write failed");
+                                    }
+                                }
+                                ControlAction::MediaQuery => {
+                                    // Read-only, like the radio query:
+                                    // safe to send to a board
+                                    // mid-measurement, which is exactly
+                                    // when a run wants to re-verify what
+                                    // the node declared.
+                                    let answer = envelope::media_query_answer(
+                                        crate::media::media_wired(),
+                                        crate::media::running(),
+                                        crate::media::configured(),
+                                    );
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: media report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

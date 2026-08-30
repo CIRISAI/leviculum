@@ -1034,6 +1034,140 @@ fn report_fixed_position(
     }
 }
 
+/// The `--set-media` session: read, and optionally set, which carriers
+/// every running LNode meshes over. No flashing, then exit.
+///
+/// `spec` is `None` for the read-only form (`--set-media` with no value),
+/// which prints what each board is on. With a spec, each board is read
+/// first and the spec applied on top: a `--set-media ble=off` must not
+/// reset the LoRa carrier to a host-side default, the same
+/// read-modify-write contract [`set_tx_power`] holds for the radio.
+pub fn set_media(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    spec: Option<crate::media::MediaSpec>,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-media talks to flashed boards; a board in its \
+             bootloader has no carriers to configure.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let outcome = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| set_media_on(&fd, spec))
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= outcome.is_ok();
+        report_media(ui, port, spec.is_some(), outcome);
+    }
+    Ok(all_took_it)
+}
+
+/// One board's half of [`set_media`]: read what it is on, then — with a
+/// spec — write the merged profile back and report what the board said
+/// about it.
+fn set_media_on(
+    fd: &crate::sys::Fd,
+    spec: Option<crate::media::MediaSpec>,
+) -> std::io::Result<Result<crate::envelope::MediaState, SessionReply>> {
+    let current = match crate::media::query(fd)? {
+        Ok(state) => state,
+        // A board that cannot report its carriers is a board whose other
+        // carrier we would have to invent, so nothing is written.
+        Err(reply) => return Ok(Err(reply)),
+    };
+    let Some(spec) = spec else {
+        return Ok(Ok(current));
+    };
+    crate::media::send_configured(fd, spec.onto(current.configured))
+}
+
+/// Say what the board answered about its carriers.
+fn report_media(
+    ui: &mut dyn Ui,
+    port: &str,
+    was_a_set: bool,
+    outcome: Result<crate::envelope::MediaState, SessionReply>,
+) {
+    let state = match outcome {
+        Ok(state) => state,
+        Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_UNSUPPORTED =>
+        {
+            return ui.say(&format!(
+                "{port}: this board's firmware carries no media gate — the profile was refused, \
+                 not stored. Neither retrying nor rebooting helps; only firmware that honours \
+                 the profile does. Measurements against this board cannot claim a single medium."
+            ));
+        }
+        Err(SessionReply::Refused(reason)) => {
+            return ui.say(&format!(
+                "{port}: the board refused the media profile — {}.",
+                crate::envelope::reason_str(reason)
+            ));
+        }
+        Err(SessionReply::NoAnswer) => {
+            return ui.say(&format!(
+                "{port}: the board did not answer about its carriers, so it is still on whatever \
+                 media profile it had."
+            ));
+        }
+        Err(SessionReply::NoEnvelope) => {
+            return ui.say(&format!(
+                "{port}: this firmware predates the control envelope and has no media profile. \
+                 Flash the current bundle first."
+            ));
+        }
+        Err(SessionReply::NotAccepted) => {
+            return ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no media profile. Flash the \
+                 current bundle first."
+            ));
+        }
+        // Not reachable through `crate::media`, whose senders only ever
+        // produce a report or one of the failures above — but said rather
+        // than asserted: an `unreachable!` here would turn a future
+        // vocabulary change into a panic on an operator's board, and this
+        // line costs nothing.
+        Err(SessionReply::Acked) => {
+            return ui.say(&format!(
+                "{port}: the board acked the media frame instead of reporting its carriers, so \
+                 what it is running is unknown. Read it back with --set-media before trusting \
+                 any measurement from it."
+            ));
+        }
+    };
+    let note = crate::media::reboot_note(state);
+    if was_a_set {
+        ui.say(&format!(
+            "{port}: media profile set — running {}, configured {}. It survives resets; the \
+             board's own [MEDIA] line on if00 says the same.{note}",
+            crate::media::describe(state.running),
+            crate::media::describe(state.configured),
+        ));
+    } else {
+        ui.say(&format!(
+            "{port}: running {}, configured {}.{note}",
+            crate::media::describe(state.running),
+            crate::media::describe(state.configured),
+        ));
+    }
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a

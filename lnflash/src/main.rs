@@ -118,6 +118,27 @@ struct Cli {
     )]
     clear_position: bool,
 
+    /// Set which carriers every running LNode meshes over, then exit. No
+    /// flashing. `lora=on|off` and/or `ble=on|off`, comma or space
+    /// separated; a carrier not named keeps the board's own setting.
+    /// Given with no value it only reads the boards back.
+    ///
+    /// A node meshing over LoRa and BLE at once cannot be measured on
+    /// either — a delivery over the other medium masks a loss on the one
+    /// under test — so a single-medium measurement declares the profile
+    /// here first. It is persisted, so the reset that ends a run does not
+    /// put the board back on both. Switching a carrier off takes effect at
+    /// once; switching one back on needs a reset if it did not come up
+    /// this boot, and the board says which case it is in.
+    #[arg(
+        long,
+        value_name = "lora=on,ble=off",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position"]
+    )]
+    set_media: Option<String>,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -304,6 +325,14 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Some(text) => Some(lnflash::position::parse_position(text)?),
         None => None,
     };
+    // Same rule for the media profile, with the read-only form
+    // (`--set-media` alone, which clap gives us as an empty string)
+    // distinguished from a spec here rather than deep in the session.
+    let media = match &cli.set_media {
+        Some(text) if text.trim().is_empty() => Some(None),
+        Some(text) => Some(Some(lnflash::media::parse_media(text)?)),
+        None => None,
+    };
     // The board catalogue is compiled in and always available. The bundle is
     // located only by the paths that need an image, so a session that merely
     // configures a board that is already running never asks for one
@@ -376,6 +405,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_telemetry(&catalogue, &sysfs, ui, &telemetry)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(spec) = media {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_media(&catalogue, &sysfs, ui, spec)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -868,5 +910,66 @@ mod tests {
         assert_eq!(txpower(&["--set-tx-power", "37"]).unwrap(), Some(37));
         assert_eq!(txpower(&["--set-tx-power", "-20"]).unwrap(), Some(-20));
         assert!(txpower(&["--set-tx-power", "loud"]).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Media profile
+    // -----------------------------------------------------------------
+
+    fn media(args: &[&str]) -> Result<Option<String>, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok(cli.set_media)
+    }
+
+    #[test]
+    fn no_media_flag_means_the_session_does_not_run_at_all() {
+        assert_eq!(media(&[]).unwrap(), None);
+        assert_eq!(media(&["--yes"]).unwrap(), None);
+    }
+
+    /// The read-only form. `--set-media` with no value has to be
+    /// distinguishable from `--set-media` absent, or asking a board what
+    /// it is on would be impossible without also writing to it.
+    #[test]
+    fn the_bare_flag_is_the_read_only_form_and_not_an_absent_flag() {
+        assert_eq!(media(&["--set-media"]).unwrap(), Some(String::new()));
+        assert_ne!(media(&["--set-media"]).unwrap(), None);
+    }
+
+    #[test]
+    fn the_media_text_is_carried_verbatim_to_the_parser() {
+        // The parse table itself is proven in `media::tests`; here only
+        // that clap hands the text over untouched, spaces included.
+        assert_eq!(
+            media(&["--set-media", "lora=on,ble=off"]).unwrap(),
+            Some("lora=on,ble=off".to_string())
+        );
+        assert_eq!(
+            media(&["--set-media", "lora=on ble=off"]).unwrap(),
+            Some("lora=on ble=off".to_string())
+        );
+    }
+
+    #[test]
+    fn the_media_session_does_not_combine_with_the_other_configure_sessions() {
+        // Each of these ends the run after talking to the boards, so two
+        // of them in one command is a request that cannot be honoured.
+        for args in [
+            vec!["--set-media", "lora=on,ble=off", "--set-time"],
+            vec!["--set-media", "lora=on,ble=off", "--set-telemetry"],
+            vec!["--set-media", "lora=on,ble=off", "--set-tx-spacing", "60"],
+            vec!["--set-media", "lora=on,ble=off", "--set-tx-power", "14"],
+            vec![
+                "--set-media",
+                "lora=on,ble=off",
+                "--set-position",
+                "52.52,13.40",
+            ],
+            vec!["--set-media", "lora=on,ble=off", "--clear-position"],
+        ] {
+            let err = media(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
     }
 }

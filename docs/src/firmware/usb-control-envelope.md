@@ -41,6 +41,8 @@ Commands (host → board):
 | 0x06 | TX_SPACING       | on-air transmit spacing in ms, u16 BE (2 B)    |
 | 0x07 | RADIO_QUERY      | empty (a query, #349) — answered with RADIO_REPORT |
 | 0x08 | FIXED_POSITION   | see below — set or clear the user-set position |
+| 0x09 | MEDIA_PROFILE    | one flag byte (bit0 lora, bit1 ble) — answered with MEDIA_REPORT |
+| 0x0A | MEDIA_QUERY      | empty (a query) — answered with MEDIA_REPORT |
 
 Responses (board → host):
 
@@ -50,6 +52,7 @@ Responses (board → host):
 | 0x82 | REFUSAL           | `[refused_type, reason]`                  |
 | 0x83 | CAPABILITY_REPORT | `[version, accepted types...]`            |
 | 0x84 | RADIO_REPORT      | the RADIO_CONFIG parameter block the radio is running (#349) |
+| 0x85 | MEDIA_REPORT      | `[running_flags, configured_flags]` in the MEDIA_PROFILE flag encoding |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -57,6 +60,26 @@ type but this binary carries no consumer for it — retrying or rebooting
 cannot help, only different firmware can). The version in the capability
 report (`1`) names the envelope framing itself; new frame types extend
 the accepted list without bumping it.
+
+### The media-profile frames
+
+```text
+[flags: u8]   bit0 = lora, bit1 = ble; set means the carrier is enabled
+```
+
+Both media frames are answered with a MEDIA_REPORT rather than an ACK,
+because the two profiles it carries can honestly differ. `running` is
+what the board is carrying traffic on right now; `configured` is what a
+reset would come up with. They part exactly when a carrier that did not
+come up at boot is switched on: the board has no driver task to start,
+and an ack would claim it did. A flag byte with a bit outside the two
+known carriers is `malformed`, never masked down to "that carrier is
+off" — the firmware does not get to invent a reading of a carrier it
+does not know.
+
+The default, for a board with no stored profile, is both carriers on:
+absence of a record must change nothing about a fielded board. Concept
+and semantics: `docs/src/concepts/media-profiles.md`.
 
 The wall-time frame calls the calendar seam
 (`set_wall_time_unix_secs(.., TimeSource::Host)`); the seam's sanity

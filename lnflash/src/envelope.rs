@@ -19,11 +19,13 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
-    decode_ack_payload, decode_capability_report_payload, decode_frame, decode_refusal_payload,
-    encode_capability_query, encode_fixed_position, encode_radio_config, encode_telemetry_target,
-    encode_tx_spacing, encode_wall_time, FixedPositionWire, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
-    TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
+    decode_ack_payload, decode_capability_report_payload, decode_frame,
+    decode_media_report_payload, decode_refusal_payload, encode_capability_query,
+    encode_fixed_position, encode_media_profile, encode_media_query, encode_radio_config,
+    encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
+    MediaProfileWire, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
+    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE,
+    TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -318,6 +320,102 @@ pub fn send_tx_spacing(fd: &Fd, spacing_ms: u16) -> io::Result<ControlOutcome> {
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// What a board said about its media profile: the carriers it is running
+/// right now and the ones a reboot would come up with.
+///
+/// Two values because they honestly differ — see
+/// [`leviculum_core::envelope::TYPE_MEDIA_REPORT`]. `configured` without
+/// `running` is the board saying "that carrier did not come up this boot
+/// and cannot be started now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaState {
+    pub running: MediaProfileWire,
+    pub configured: MediaProfileWire,
+}
+
+impl MediaState {
+    /// Whether a reboot is needed for the configured profile to be the
+    /// running one. Only ever true for a carrier being switched **on**:
+    /// switching one off takes effect at once.
+    pub fn needs_reboot(self) -> bool {
+        self.running != self.configured
+    }
+}
+
+/// The answer classifier the two media conversations share: a media
+/// report, or a named refusal of the frame that was sent. Answers about
+/// other frame types stay unclaimed, exactly like [`command_answer`].
+fn media_answer(sent_type: u8) -> impl Fn(&[u8]) -> Option<Result<MediaState, u8>> {
+    move |data| {
+        let frame = decode_frame(data).ok()?;
+        match frame.frame_type {
+            TYPE_MEDIA_REPORT => {
+                let (running, configured) = decode_media_report_payload(frame.payload)?;
+                Some(Ok(MediaState {
+                    running,
+                    configured,
+                }))
+            }
+            TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                Some((refused, reason)) if refused == sent_type => Some(Err(reason)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Set the media profile — which carriers the node meshes over
+/// (`TYPE_MEDIA_PROFILE`).
+///
+/// Answered with a report rather than an ack on purpose: a carrier
+/// that did not come up at boot cannot start before the next reset, and the report's
+/// `running`/`configured` difference is the board saying so. The frame is
+/// 6 bytes — under the 19-byte Reticulum minimum — so firmware that does
+/// not know the type cannot mistake it for a packet; it still travels
+/// behind [`probed`] on the flow path so an old board is reported as old
+/// rather than as silent.
+pub fn send_media_profile(
+    fd: &Fd,
+    profile: &MediaProfileWire,
+) -> io::Result<Result<MediaState, ControlOutcome>> {
+    let payload = encode_media_profile(profile);
+    Ok(
+        match transact(
+            fd,
+            &payload,
+            CONTROL_TIMING,
+            media_answer(TYPE_MEDIA_PROFILE),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
+/// Ask the board which carriers it meshes over (`TYPE_MEDIA_QUERY`).
+///
+/// `Ok(Err(..))` is "no report came back": firmware without the query, or
+/// a binary that carries no media gate and refused by name. Either way
+/// the caller has no profile, and the one thing it must not do is invent
+/// one — a board whose declared media are guessed at is a board whose
+/// measurements are worthless.
+pub fn query_media_profile(fd: &Fd) -> io::Result<Result<MediaState, ControlOutcome>> {
+    Ok(
+        match transact(
+            fd,
+            &encode_media_query(),
+            CONTROL_TIMING,
+            media_answer(TYPE_MEDIA_QUERY),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
 /// Send the radio configuration as an envelope frame. Only for firmware
 /// whose capability report includes `TYPE_RADIO_CONFIG`: the frame is
 /// longer than the 19-byte Reticulum minimum, so it must never be sent
@@ -368,9 +466,10 @@ pub(crate) mod testing {
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
-        encode_refusal, fixed_position_answer, telemetry_target_answer, ControlAction,
-        TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET,
-        TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
+        encode_refusal, fixed_position_answer, media_profile_answer, media_query_answer,
+        telemetry_target_answer, ControlAction, MediaProfileWire, TYPE_CAPABILITIES,
+        TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_RADIO_CONFIG,
+        TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
@@ -396,7 +495,51 @@ pub(crate) mod testing {
         TYPE_TX_SPACING,
         TYPE_RADIO_QUERY,
         TYPE_FIXED_POSITION,
+        TYPE_MEDIA_PROFILE,
+        TYPE_MEDIA_QUERY,
     ];
+
+    /// The media profile the scripted board boots with, and the one it
+    /// currently runs. A stub-wide cell rather than a constant: a media
+    /// set has to be *visible* to the next query on the same board, which
+    /// is what makes the read-modify-write of a one-sided `--set-media`
+    /// testable at all.
+    ///
+    /// The stub reproduces the firmware's own running-versus-configured
+    /// rule ([`leviculum_nrf::media`]): switching a carrier off takes
+    /// effect at once; a carrier that never came up cannot start, so
+    /// `running` can only ever lose bits relative to what booted.
+    #[derive(Debug, Clone, Copy)]
+    pub struct StubMedia {
+        booted: MediaProfileWire,
+        configured: MediaProfileWire,
+    }
+
+    impl StubMedia {
+        fn running(&self) -> MediaProfileWire {
+            MediaProfileWire {
+                lora_enabled: self.booted.lora_enabled && self.configured.lora_enabled,
+                ble_enabled: self.booted.ble_enabled && self.configured.ble_enabled,
+            }
+        }
+    }
+
+    /// A board that booted on both carriers, which is the default and the
+    /// state every fielded board is in.
+    pub fn media_state() -> Arc<Mutex<StubMedia>> {
+        media_state_booted(MediaProfileWire::BOTH)
+    }
+
+    /// A board that came up on `booted` — the state a board is in after
+    /// being flashed with a profile and reset. A carrier absent from
+    /// `booted` never started this boot and cannot be started before the
+    /// next reset, whatever is configured.
+    pub fn media_state_booted(booted: MediaProfileWire) -> Arc<Mutex<StubMedia>> {
+        Arc::new(Mutex::new(StubMedia {
+            booted,
+            configured: booted,
+        }))
+    }
 
     /// What the scripted board's radio is running.
     ///
@@ -436,6 +579,13 @@ pub(crate) mod testing {
     /// usb.rs accept path would answer, so these tests exercise the same
     /// contract the board implements.
     pub fn envelope_firmware_stub(pty: &Pty, seen: Seen) {
+        envelope_firmware_stub_with_media(pty, seen, media_state());
+    }
+
+    /// [`envelope_firmware_stub`] with the media state handed in, so a
+    /// test can watch a profile change across two conversations on the
+    /// same board — the read-modify-write a one-sided `--set-media` does.
+    pub fn envelope_firmware_stub_with_media(pty: &Pty, seen: Seen, media: Arc<Mutex<StubMedia>>) {
         spawn_stub(pty, move |frame_bytes| {
             seen.lock().unwrap().push(frame_bytes.to_vec());
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
@@ -453,6 +603,56 @@ pub(crate) mod testing {
                 ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(true, true)),
                 ControlAction::FixedPosition(_) => Some(fixed_position_answer(true, true)),
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
+                // The media gate, run exactly as the board runs it: apply,
+                // then answer from the state that is already in force.
+                ControlAction::MediaProfile(profile) => {
+                    let mut media = media.lock().unwrap();
+                    media.configured = profile;
+                    Some(media_profile_answer(
+                        true,
+                        true,
+                        media.running(),
+                        media.configured,
+                    ))
+                }
+                ControlAction::MediaQuery => {
+                    let media = media.lock().unwrap();
+                    Some(media_query_answer(true, media.running(), media.configured))
+                }
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device whose binary never wired the media gate: it
+    /// advertises the frame types (the envelope layer knows them) but its
+    /// answer runs the firmware's own decision function with the
+    /// capability absent, so the profile comes back refused by name.
+    ///
+    /// The fc60b95 rule again, and it matters most here: an ack for a
+    /// profile that is not honoured is what a measurement run would read
+    /// as "this node is single-medium now", and every number it then
+    /// produced would be a lie.
+    pub fn medialess_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::MediaProfile(_) => Some(media_profile_answer(
+                    false,
+                    false,
+                    MediaProfileWire::BOTH,
+                    MediaProfileWire::BOTH,
+                )),
+                ControlAction::MediaQuery => Some(media_query_answer(
+                    false,
+                    MediaProfileWire::BOTH,
+                    MediaProfileWire::BOTH,
+                )),
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -544,6 +744,19 @@ pub(crate) mod testing {
         seen.lock().unwrap().iter().find_map(|f| {
             match classify_control_frame(f, FIRMWARE_ACCEPTS) {
                 ControlAction::FixedPosition(position) => Some(position),
+                _ => None,
+            }
+        })
+    }
+
+    /// The media profile the stub decoded, if a set frame reached it.
+    /// The **last** one, not the first: a read-modify-write session sends
+    /// one frame, but a test that asserts on "what the board ended up
+    /// being told" must not be satisfied by an earlier attempt.
+    pub fn media_frame(seen: &Seen) -> Option<MediaProfileWire> {
+        seen.lock().unwrap().iter().rev().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::MediaProfile(profile) => Some(profile),
                 _ => None,
             }
         })

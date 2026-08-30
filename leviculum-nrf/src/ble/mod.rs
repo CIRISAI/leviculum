@@ -221,9 +221,18 @@ impl Interface for BleInterface {
         564
     }
     fn is_online(&self) -> bool {
-        true
+        crate::media::ble_active()
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
+        // The media profile, applied at the interface — see the LoRa
+        // interface for why this is `Ok` and not `BufferFull`.
+        if !crate::media::ble_active() {
+            crate::log::log_fmt(
+                "[MEDIA] ",
+                format_args!("MEDIA_TX_DROP iface={} len={}", self.name(), data.len()),
+            );
+            return Ok(());
+        }
         self.sender.try_send(data.to_vec()).map_err(|_| {
             // Codeberg #344: same silence as the other two. A phone that
             // stops draining the notify path fills this queue, and the board
@@ -622,9 +631,27 @@ async fn counters_task() -> ! {
 /// Returns the enabled SoftDevice, which anything needing a SoftDevice
 /// syscall after this point has to hold — the flash writes in
 /// [`crate::radio_store`] are the current caller.
+///
+/// # `columba_enabled`
+///
+/// The media profile ([`crate::media`]) decides whether this node meshes
+/// over BLE at all, and the answer is a **spawn decision here** — which is
+/// the acceptance test the #255 phase-A seam was written for, and it
+/// held: `false` skips `columba::spawn` and nothing else changes. No
+/// advertisement, no scan, no GATT service, no connection; the protocol
+/// module is not reached.
+///
+/// The SoftDevice is enabled either way, and deliberately so. It is not
+/// only the BLE stack: `sd_flash_write` is the one legal way to write
+/// internal flash once it is enabled, and both persistence store tasks
+/// ride on it. A board with `ble=off` that could not persist its own
+/// profile could not be put back on BLE, which is the one state this
+/// feature must never be able to reach. Enabling the SoftDevice without
+/// advertising costs idle current and nothing on the air.
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     spawner: &Spawner,
+    columba_enabled: bool,
     identity_hash: [u8; 16],
     vbus: &'static SoftwareVbusDetect,
     _rtc0: Peri<'static, peripherals::RTC0>,
@@ -657,10 +684,17 @@ pub fn init(
     let sd = Softdevice::enable(&sd_config());
     set_gap_device_name(&identity_hash);
 
-    let sd = columba::spawn(spawner, sd, identity_hash);
+    let sd = if columba_enabled {
+        columba::spawn(spawner, sd, identity_hash)
+    } else {
+        crate::media::log_carrier_held_down("ble");
+        sd
+    };
     spawner.must_spawn(softdevice_task(sd, vbus));
     // The outbound fan-out is protocol-neutral machinery, like the
-    // drain table it reads: packets in, one copy per live link out.
+    // drain table it reads: packets in, one copy per live link out. It
+    // runs either way: with no protocol task there is no claimed drain
+    // slot, so it has nothing to fan out to and idles on the channel.
     spawner.must_spawn(tx_fanout_task());
     spawner.must_spawn(counters_task());
 

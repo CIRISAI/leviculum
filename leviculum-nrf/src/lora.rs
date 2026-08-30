@@ -148,9 +148,23 @@ impl Interface for LoRaInterface {
         500
     }
     fn is_online(&self) -> bool {
-        true
+        crate::media::lora_active()
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
+        // The media profile, applied where the medium's quirks belong:
+        // the interface knows its carrier is down, the core does not have
+        // to. `Ok` and not `BufferFull` — a full buffer is a promise the
+        // packet gets another chance, and this one never will, so the
+        // driver must not re-queue it forever. Same shape as the
+        // `radio_silent` drop the TX path already does, one layer up so
+        // the packet is not copied first.
+        if !crate::media::lora_active() {
+            crate::log::log_fmt(
+                "[MEDIA] ",
+                format_args!("MEDIA_TX_DROP iface={} len={}", self.name(), data.len()),
+            );
+            return Ok(());
+        }
         // Two bounds, the reference's shape (`CONFIG_QUEUE_SIZE` /
         // `CONFIG_QUEUE_MAX_LENGTH`), checked before the packet is copied:
         // whichever binds first refuses, and the copy a refused packet would

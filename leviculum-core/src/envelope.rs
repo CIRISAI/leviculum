@@ -111,6 +111,28 @@ pub const TYPE_RADIO_QUERY: u8 = 0x07;
 /// returns the node to sensor reporting. Persisted beside the telemetry
 /// target. See [`FixedPositionWire`] for the payload.
 pub const TYPE_FIXED_POSITION: u8 = 0x08;
+/// Media profile: which carriers this node meshes over. Payload is the
+/// one flag byte of [`MediaProfileWire`], persisted beside the telemetry
+/// target and the fixed position.
+///
+/// The frame exists because a node that meshes over LoRa **and** BLE at
+/// once cannot be measured on either: a packet that arrived over the
+/// other medium masks a loss on the medium under test, so every
+/// single-medium number a dual-carrier node produces is falsifiable. The
+/// profile is the declaration that makes the measurement honest, and it
+/// is persisted so a reboot does not quietly undo it mid-run.
+///
+/// Answered with [`TYPE_MEDIA_REPORT`], not with a bare ack: a carrier
+/// that did not come up at boot cannot be started before the next reset
+/// — its driver task was never spawned — and an ack would claim
+/// otherwise. The report states what is running and what is configured,
+/// and the difference IS the "takes effect at reboot" answer.
+pub const TYPE_MEDIA_PROFILE: u8 = 0x09;
+/// Media-profile query; empty payload. The read direction of
+/// [`TYPE_MEDIA_PROFILE`], answered with [`TYPE_MEDIA_REPORT`]. Five
+/// bytes, so firmware from before the envelope drops it silently and the
+/// probe times out, exactly like [`TYPE_CAPABILITIES`].
+pub const TYPE_MEDIA_QUERY: u8 = 0x0A;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -130,6 +152,20 @@ pub const TYPE_CAPABILITY_REPORT: u8 = 0x83;
 /// between the two encodings would be a place for a value to change while
 /// being copied.
 pub const TYPE_RADIO_REPORT: u8 = 0x84;
+/// Media report; payload is `[running_flags, configured_flags]` in the
+/// [`MediaProfileWire`] flag encoding. The answer to both
+/// [`TYPE_MEDIA_PROFILE`] and [`TYPE_MEDIA_QUERY`].
+///
+/// Two values rather than one because they can honestly differ. Switching
+/// a carrier off always takes effect at once, and switching one back on
+/// does too **as long as it came up at boot** — it was only being
+/// ignored. A carrier that did **not** come up at boot has no driver
+/// task to un-ignore and cannot start before the next reset, and that is
+/// the case where the two values part: `configured` is what a reboot
+/// would come up with, `running` is what the board is doing right now. A
+/// host that sees them differ says "takes effect at reboot" as a fact it
+/// read off the board, not as a guess.
+pub const TYPE_MEDIA_REPORT: u8 = 0x85;
 
 // ---------------------------------------------------------------------------
 // Refusal reasons
@@ -528,6 +564,150 @@ pub fn fixed_position_answer(reporter_wired: bool, delivered: bool) -> Vec<u8> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Media profile (which carriers this node meshes over)
+// ---------------------------------------------------------------------------
+
+/// The LoRa bit of a media-profile flag byte.
+pub const MEDIA_FLAG_LORA: u8 = 0b0000_0001;
+/// The BLE bit of a media-profile flag byte.
+pub const MEDIA_FLAG_BLE: u8 = 0b0000_0010;
+/// Every bit the flag byte currently assigns a meaning to. A byte with a
+/// bit outside this mask was written by a firmware that knows a carrier
+/// this one does not, and is refused rather than silently reinterpreted
+/// as "that carrier is off".
+pub const MEDIA_FLAGS_KNOWN: u8 = MEDIA_FLAG_LORA | MEDIA_FLAG_BLE;
+
+/// Which carriers a node meshes over ([`TYPE_MEDIA_PROFILE`]).
+///
+/// Payload layout: one flag byte, `bit0 = lora`, `bit1 = ble`, set means
+/// enabled. Bits are a byte rather than two bools on the wire because the
+/// two carriers are one *profile* — "LoRa only" is a statement about both
+/// of them, and splitting it into two independently-settable frames would
+/// make a board reachable in a state no one asked for while the second
+/// frame was in flight.
+///
+/// **The default, when no record was ever written, is both on.** That is
+/// today's behaviour, and the absence of a profile must change nothing:
+/// every fielded board is running both carriers, and a firmware update
+/// that read an erased page as "everything off" would take those boards
+/// off the mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaProfileWire {
+    pub lora_enabled: bool,
+    pub ble_enabled: bool,
+}
+
+impl MediaProfileWire {
+    /// The default profile: both carriers on (see the type docs).
+    pub const BOTH: Self = Self {
+        lora_enabled: true,
+        ble_enabled: true,
+    };
+
+    /// This profile as its flag byte.
+    pub const fn flags(self) -> u8 {
+        (if self.lora_enabled {
+            MEDIA_FLAG_LORA
+        } else {
+            0
+        }) | (if self.ble_enabled { MEDIA_FLAG_BLE } else { 0 })
+    }
+
+    /// A flag byte back as a profile, or `None` for a byte carrying a bit
+    /// this firmware assigns no carrier to (see [`MEDIA_FLAGS_KNOWN`]).
+    pub const fn from_flags(flags: u8) -> Option<Self> {
+        if flags & !MEDIA_FLAGS_KNOWN != 0 {
+            return None;
+        }
+        Some(Self {
+            lora_enabled: flags & MEDIA_FLAG_LORA != 0,
+            ble_enabled: flags & MEDIA_FLAG_BLE != 0,
+        })
+    }
+}
+
+/// Encode a complete media-profile frame.
+pub fn encode_media_profile(profile: &MediaProfileWire) -> Vec<u8> {
+    encode_frame(TYPE_MEDIA_PROFILE, &[profile.flags()])
+}
+
+/// Decode a media-profile payload: exactly one flag byte.
+pub fn decode_media_profile_payload(payload: &[u8]) -> Option<MediaProfileWire> {
+    match payload {
+        [flags] => MediaProfileWire::from_flags(*flags),
+        _ => None,
+    }
+}
+
+/// Encode a complete media-profile query.
+pub fn encode_media_query() -> Vec<u8> {
+    encode_frame(TYPE_MEDIA_QUERY, &[])
+}
+
+/// Encode a complete media report: what the board is carrying traffic on
+/// right now, and what a reboot would come up with. See
+/// [`TYPE_MEDIA_REPORT`] for why those are two values.
+pub fn encode_media_report(running: &MediaProfileWire, configured: &MediaProfileWire) -> Vec<u8> {
+    encode_frame(TYPE_MEDIA_REPORT, &[running.flags(), configured.flags()])
+}
+
+/// Decode a media-report payload into `(running, configured)`.
+pub fn decode_media_report_payload(payload: &[u8]) -> Option<(MediaProfileWire, MediaProfileWire)> {
+    match payload {
+        [running, configured] => Some((
+            MediaProfileWire::from_flags(*running)?,
+            MediaProfileWire::from_flags(*configured)?,
+        )),
+        _ => None,
+    }
+}
+
+/// The answer to a media-profile frame or a media query, decided by
+/// capability first — the [`telemetry_target_answer`] rule on a third
+/// frame.
+///
+/// `media_wired` is the binary's declaration that it reads the profile
+/// and gates its carriers on it; `delivered` is whether this frame
+/// actually took effect (for a query: always true, nothing had to be
+/// taken). A binary that never wired the gate answers
+/// [`REFUSE_UNSUPPORTED`] rather than acking a profile it would ignore —
+/// which is the whole point of the profile, since a measurement run
+/// against a board that silently kept both carriers up is a measurement
+/// of nothing.
+///
+/// The accepted answer is a [`TYPE_MEDIA_REPORT`], never a bare ack: see
+/// that constant for why the two numbers it carries are the honest reply
+/// to "switch this medium on".
+pub fn media_profile_answer(
+    media_wired: bool,
+    delivered: bool,
+    running: MediaProfileWire,
+    configured: MediaProfileWire,
+) -> Vec<u8> {
+    if !media_wired {
+        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_UNSUPPORTED)
+    } else if delivered {
+        encode_media_report(&running, &configured)
+    } else {
+        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)
+    }
+}
+
+/// The answer to a media query: the same capability gate, refused under
+/// the query's own type so a host can tell which frame was turned down.
+pub fn media_query_answer(
+    media_wired: bool,
+    running: MediaProfileWire,
+    configured: MediaProfileWire,
+) -> Vec<u8> {
+    if media_wired {
+        encode_media_report(&running, &configured)
+    } else {
+        encode_refusal(TYPE_MEDIA_QUERY, REFUSE_UNSUPPORTED)
+    }
+}
+
 /// The answer to a telemetry-target frame, decided by capability first.
 ///
 /// `reporter_wired` is the binary's declaration that it constructs a
@@ -606,6 +786,15 @@ pub enum ControlAction {
     /// [`fixed_position_answer`] — the ack is gated on the binary's
     /// declared reporter exactly like the telemetry target's.
     FixedPosition(Option<FixedPositionWire>),
+    /// Envelope media profile: apply and persist which carriers this node
+    /// meshes over, answer via [`media_profile_answer`]. Switching a
+    /// medium off takes effect at once; switching one on takes effect at
+    /// the next boot, and the report says which happened.
+    MediaProfile(MediaProfileWire),
+    /// Envelope media query: answer via [`media_query_answer`]. Read-only,
+    /// like [`RadioQuery`](Self::RadioQuery) — safe to send to a board
+    /// mid-measurement.
+    MediaQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -690,6 +879,17 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             Some(position) => ControlAction::FixedPosition(position),
             None => malformed,
         },
+        TYPE_MEDIA_PROFILE => match decode_media_profile_payload(frame.payload) {
+            Some(profile) => ControlAction::MediaProfile(profile),
+            None => malformed,
+        },
+        TYPE_MEDIA_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::MediaQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -714,6 +914,8 @@ mod tests {
         TYPE_TX_SPACING,
         TYPE_RADIO_QUERY,
         TYPE_FIXED_POSITION,
+        TYPE_MEDIA_PROFILE,
+        TYPE_MEDIA_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -1441,6 +1643,237 @@ mod tests {
                 ControlAction::WallTime(1_790_000_000)
             ]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Media profile
+    // -----------------------------------------------------------------
+
+    /// Every profile the two bits can spell, so no test below can pass by
+    /// accident on the one shape that happens to be the default.
+    const EVERY_PROFILE: [MediaProfileWire; 4] = [
+        MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: true,
+        },
+        MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        },
+        MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: true,
+        },
+        MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        },
+    ];
+
+    #[test]
+    fn every_media_profile_round_trips_and_classifies() {
+        for profile in EVERY_PROFILE {
+            let bytes = encode_media_profile(&profile);
+            // Under the 19-byte minimum Reticulum packet, like every other
+            // short command: firmware that does not know the type can
+            // never take it for a packet.
+            assert!(bytes.len() < 19);
+            assert_eq!(
+                classify_control_frame(&bytes, ACCEPTED),
+                ControlAction::MediaProfile(profile)
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_profile_is_both_carriers_on() {
+        // The whole compatibility claim of this feature: absence of a
+        // profile must change nothing about a fielded board.
+        const _: () = {
+            assert!(MediaProfileWire::BOTH.lora_enabled);
+            assert!(MediaProfileWire::BOTH.ble_enabled);
+        };
+        assert_eq!(MediaProfileWire::BOTH.flags(), MEDIA_FLAGS_KNOWN);
+    }
+
+    #[test]
+    fn the_flag_bits_are_the_documented_ones() {
+        // The bit positions are the interface periculum and the store
+        // record both read; a swap here would silently invert a
+        // measurement's declared medium.
+        assert_eq!(
+            MediaProfileWire {
+                lora_enabled: true,
+                ble_enabled: false
+            }
+            .flags(),
+            0b01
+        );
+        assert_eq!(
+            MediaProfileWire {
+                lora_enabled: false,
+                ble_enabled: true
+            }
+            .flags(),
+            0b10
+        );
+    }
+
+    #[test]
+    fn a_flag_byte_with_an_unknown_carrier_is_malformed_not_reinterpreted() {
+        // A frame from a host that knows a third carrier. Masking the
+        // unknown bit away would answer "that carrier is off", which is a
+        // claim about a medium this firmware cannot make.
+        let mut bytes = encode_media_profile(&MediaProfileWire::BOTH);
+        bytes[ENVELOPE_HEADER_LEN] |= 0b0000_0100;
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_MEDIA_PROFILE,
+                reason: REFUSE_MALFORMED
+            }
+        );
+        assert_eq!(decode_media_profile_payload(&[0b1000_0000]), None);
+    }
+
+    #[test]
+    fn a_media_payload_of_the_wrong_length_is_malformed() {
+        for payload in [vec![], vec![0x01, 0x02]] {
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_MEDIA_PROFILE, &payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_MEDIA_PROFILE,
+                    reason: REFUSE_MALFORMED
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_media_query_is_empty_and_classifies_read_only() {
+        assert_eq!(
+            classify_control_frame(&encode_media_query(), ACCEPTED),
+            ControlAction::MediaQuery
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_MEDIA_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_MEDIA_QUERY,
+                reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    #[test]
+    fn the_media_report_carries_running_and_configured_separately() {
+        // The "takes effect at reboot" fact, on the wire: BLE is still up
+        // because its task was spawned at boot, but a reboot would come up
+        // without it.
+        let running = MediaProfileWire::BOTH;
+        let configured = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        };
+        let bytes = encode_media_report(&running, &configured);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_MEDIA_REPORT);
+        assert_eq!(
+            decode_media_report_payload(frame.payload),
+            Some((running, configured))
+        );
+    }
+
+    #[test]
+    fn a_media_report_with_an_unknown_carrier_bit_is_not_decoded() {
+        assert_eq!(decode_media_report_payload(&[0b0000_0100, 0b11]), None);
+        assert_eq!(decode_media_report_payload(&[0b11]), None);
+    }
+
+    #[test]
+    fn a_binary_without_the_media_gate_refuses_the_profile_it_would_ignore() {
+        // The fc60b95 capability rule on the third frame. Acking a profile
+        // a binary does not honour is worse here than anywhere else: the
+        // ack is what a measurement run reads as "this node is now
+        // single-medium", and a masked delivery is exactly what the
+        // profile exists to prevent.
+        for delivered in [false, true] {
+            assert_eq!(
+                decode_refusal_payload(
+                    &media_profile_answer(
+                        false,
+                        delivered,
+                        MediaProfileWire::BOTH,
+                        MediaProfileWire::BOTH
+                    )[ENVELOPE_HEADER_LEN..]
+                ),
+                Some((TYPE_MEDIA_PROFILE, REFUSE_UNSUPPORTED))
+            );
+        }
+        assert_eq!(
+            decode_refusal_payload(
+                &media_query_answer(false, MediaProfileWire::BOTH, MediaProfileWire::BOTH)
+                    [ENVELOPE_HEADER_LEN..]
+            ),
+            Some((TYPE_MEDIA_QUERY, REFUSE_UNSUPPORTED))
+        );
+    }
+
+    #[test]
+    fn an_accepted_media_profile_is_answered_with_the_report_not_an_ack() {
+        let running = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        };
+        let answer = media_profile_answer(true, true, running, running);
+        let frame = decode_frame(&answer).unwrap();
+        assert_eq!(frame.frame_type, TYPE_MEDIA_REPORT);
+        assert_eq!(
+            decode_media_report_payload(frame.payload),
+            Some((running, running))
+        );
+        // An undelivered frame is a full channel, not a refusal of the
+        // value: the host retries.
+        assert_eq!(
+            decode_refusal_payload(
+                &media_profile_answer(true, false, running, running)[ENVELOPE_HEADER_LEN..]
+            ),
+            Some((TYPE_MEDIA_PROFILE, REFUSE_BUSY))
+        );
+    }
+
+    #[test]
+    fn firmware_without_the_media_frames_refuses_them_by_name() {
+        // How a media-aware host detects an older board: named refusals,
+        // not timeouts — the #236 detection path on the new types.
+        for bytes in [
+            encode_media_profile(&MediaProfileWire::BOTH),
+            encode_media_query(),
+        ] {
+            let refused_type = decode_frame(&bytes).unwrap().frame_type;
+            assert_eq!(
+                classify_control_frame(&bytes, ACCEPTED_PRE_236),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason: REFUSE_UNKNOWN_TYPE
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_media_store_record_carries_what_the_wire_carried() {
+        // The boot activation path: what a host set over the envelope is
+        // what the next boot reads back off the page. Two codecs, one
+        // meaning — asserted here because the firmware that joins them is
+        // not host-testable.
+        use crate::media_profile_store::{decode_media_profile, encode_media_profile as store};
+        for profile in EVERY_PROFILE {
+            let arrived = match classify_control_frame(&encode_media_profile(&profile), ACCEPTED) {
+                ControlAction::MediaProfile(p) => p,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(decode_media_profile(&store(&arrived)), Some(profile));
+        }
     }
 
     #[test]

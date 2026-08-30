@@ -210,7 +210,7 @@ reset button (commit `43d25830`).
 ## The SoftDevice
 
 Our firmware links against S140 v7.x and places its application at
-`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:26`). A board
+`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:30`). A board
 carrying S140 6.1.1
 puts the boundary at `0x26000` instead, so the version is not cosmetic.
 

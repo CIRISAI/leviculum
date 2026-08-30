@@ -34,9 +34,12 @@ use alloc::vec::Vec;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
-use leviculum_core::envelope::{FixedPositionWire, TelemetryTargetWire, TELEMETRY_PROFILE_OFF};
+use leviculum_core::envelope::{
+    FixedPositionWire, MediaProfileWire, TelemetryTargetWire, TELEMETRY_PROFILE_OFF,
+};
 use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_position};
 use leviculum_core::identity::Identity;
+use leviculum_core::media_profile_store::{decode_media_profile, encode_media_profile};
 use leviculum_core::node::NodeCore;
 use leviculum_core::telemetry_target_store::{decode_telemetry_target, encode_telemetry_target};
 use leviculum_core::traits::{Clock, Storage};
@@ -157,19 +160,46 @@ pub fn inbound_fixed_position_receiver(
 /// page was never on offer:
 ///
 /// ```text
-/// +0x000  telemetry target record  ("LTTG", telemetry_target_store)
-/// +0x100  fixed position record    ("LFPO", fixed_position_store)
+/// +0x000  telemetry target record  ("LTTG", telemetry_target_store)   24 B
+/// +0x100  fixed position record    ("LFPO", fixed_position_store)      24 B
+/// +0x200  media profile record     ("LMED", media_profile_store)        8 B
 /// ```
 ///
 /// The target keeps offset 0, where every fielded board already has it, so
 /// this layout is what those boards are running the moment they first
-/// persist a fixed position. Erase granularity is the whole page, so the
-/// store task rewrites both records on every save; each record's own
-/// magic + checksum keeps a torn write from becoming a garbage target or a
-/// garbage pin.
+/// persist one of the later records. Erase granularity is the whole page,
+/// so the store task rewrites all three records on every save; each
+/// record's own magic + checksum keeps a torn write from becoming a
+/// garbage target, a garbage pin or a board on the wrong carriers.
+///
+/// The offsets are 0x100 apart and the longest record is 24 bytes, so no
+/// two records overlap and the page (4096 B) has room for thirteen more.
+/// The compile-time assertion below is what keeps that true when a record
+/// grows.
 const TARGET_OFFSET: u32 = 0x000;
 /// See [`TARGET_OFFSET`].
 const FIXED_POSITION_OFFSET: u32 = 0x100;
+/// See [`TARGET_OFFSET`].
+const MEDIA_OFFSET: u32 = 0x200;
+
+/// The page layout's collision check, run by the compiler rather than by
+/// a reviewer reading three offsets: each record must end before the next
+/// one starts, and the last must end inside the 4 KiB page.
+const _: () = {
+    const PAGE_SIZE: u32 = 4096;
+    assert!(
+        TARGET_OFFSET + leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED as u32
+            <= FIXED_POSITION_OFFSET
+    );
+    assert!(
+        FIXED_POSITION_OFFSET + leviculum_core::fixed_position_store::ENCODED_SIZE_ALIGNED as u32
+            <= MEDIA_OFFSET
+    );
+    assert!(
+        MEDIA_OFFSET + leviculum_core::media_profile_store::ENCODED_SIZE_ALIGNED as u32
+            <= PAGE_SIZE
+    );
+};
 
 /// Pending save requests. Depth 1 for the same reason as the radio store:
 /// the newest value of each record is the one that must end up on the
@@ -178,6 +208,7 @@ const FIXED_POSITION_OFFSET: u32 = 0x100;
 static PENDING_SAVE: Channel<CriticalSectionRawMutex, TelemetryTargetWire, 1> = Channel::new();
 static PENDING_SAVE_FIXED: Channel<CriticalSectionRawMutex, Option<FixedPositionWire>, 1> =
     Channel::new();
+static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, MediaProfileWire, 1> = Channel::new();
 
 /// Read the persisted telemetry target, or `None` if its record is blank,
 /// corrupt, or written by a different format version — all of which mean
@@ -197,6 +228,18 @@ pub fn load_fixed_position(page: u32) -> Option<FixedPositionWire> {
     decode_fixed_position(&read_fixed_record(page))
 }
 
+/// Read the persisted media profile, or `None` if its record is blank,
+/// corrupt, or names a carrier this firmware does not know. The caller's
+/// answer to `None` is [`MediaProfileWire::BOTH`] — see
+/// [`crate::media`], which owns that decision and the boot banner that
+/// states which of the two it took. Same read-safety argument as
+/// [`load`], and it matters more here: the profile is read *before*
+/// `Softdevice::enable`, because it decides whether the BLE protocol
+/// tasks are spawned at all.
+pub fn load_media_profile(page: u32) -> Option<MediaProfileWire> {
+    decode_media_profile(&read_media_record(page))
+}
+
 fn read_target_record(
     page: u32,
 ) -> [u8; leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED] {
@@ -207,6 +250,10 @@ fn read_fixed_record(
     page: u32,
 ) -> [u8; leviculum_core::fixed_position_store::ENCODED_SIZE_ALIGNED] {
     read_record(page + FIXED_POSITION_OFFSET)
+}
+
+fn read_media_record(page: u32) -> [u8; leviculum_core::media_profile_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + MEDIA_OFFSET)
 }
 
 fn read_record<const N: usize>(addr: u32) -> [u8; N] {
@@ -237,6 +284,15 @@ pub fn request_save_fixed_position(position: Option<FixedPositionWire>) {
     }
 }
 
+/// Ask the store task to persist the media profile. Never blocks, like
+/// [`request_save`].
+pub fn request_save_media_profile(profile: MediaProfileWire) {
+    if PENDING_SAVE_MEDIA.try_send(profile).is_err() {
+        let _ = PENDING_SAVE_MEDIA.try_receive();
+        let _ = PENDING_SAVE_MEDIA.try_send(profile);
+    }
+}
+
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
 /// words and rejects an unaligned source pointer.
 #[repr(align(4))]
@@ -250,31 +306,44 @@ const SAVE_RETRY_MS: u64 = 250;
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
-    use embassy_futures::select::{select, Either};
+    use embassy_futures::select::{select3, Either3};
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
-        let request = select(PENDING_SAVE.receive(), PENDING_SAVE_FIXED.receive()).await;
-        // Whichever record the request names, the other one is read back
-        // off the page and rewritten with it: the erase is page-wide, so
-        // a save of one record must carry the other across it.
+        let request = select3(
+            PENDING_SAVE.receive(),
+            PENDING_SAVE_FIXED.receive(),
+            PENDING_SAVE_MEDIA.receive(),
+        )
+        .await;
+        // Whichever record the request names, the others are read back off
+        // the page and rewritten with it: the erase is page-wide, so a
+        // save of one record must carry the rest across it.
         let mut target = Aligned(read_target_record(page));
         let mut fixed = Aligned(read_fixed_record(page));
+        let mut media = Aligned(read_media_record(page));
         let what = match request {
-            Either::First(wire) => {
+            Either3::First(wire) => {
                 target = Aligned(encode_telemetry_target(&wire));
                 "target"
             }
-            Either::Second(position) => {
+            Either3::Second(position) => {
                 fixed = Aligned(encode_fixed_position(position.as_ref()));
                 "fixed-position"
+            }
+            Either3::Third(profile) => {
+                media = Aligned(encode_media_profile(&profile));
+                "media-profile"
             }
         };
 
         // Read-compare-write: an unchanged page is never erased. A host
         // tool that re-sends the same value on every connect must not
         // burn a flash cycle for it.
-        if read_target_record(page) == target.0 && read_fixed_record(page) == fixed.0 {
+        if read_target_record(page) == target.0
+            && read_fixed_record(page) == fixed.0
+            && read_media_record(page) == media.0
+        {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             continue;
         }
@@ -285,7 +354,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 let mut flash = flash.lock().await;
                 flash.erase(page, page + 4096).await?;
                 flash.write(page + TARGET_OFFSET, &target.0).await?;
-                flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await
+                flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
+                flash.write(page + MEDIA_OFFSET, &media.0).await
             }
             .await;
             match result {

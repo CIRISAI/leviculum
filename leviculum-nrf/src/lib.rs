@@ -24,6 +24,7 @@ pub mod flash;
 pub mod interface;
 pub mod log;
 pub mod lora;
+pub mod media;
 pub mod radio_store;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's
