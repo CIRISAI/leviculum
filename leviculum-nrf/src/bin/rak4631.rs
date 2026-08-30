@@ -79,6 +79,15 @@ async fn main(spawner: Spawner) {
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
     leviculum_nrf::telemetry::declare_reporter();
+    // Which position sources this board boots with — the second clause of
+    // the telemetry send condition, and a question a host may put before
+    // the reporter exists, so it is answered before USB comes up. The GNSS
+    // task is spawned below under the same feature, so the receiver is
+    // built in and running exactly when this is true.
+    leviculum_nrf::telemetry::declare_position_sources(
+        cfg!(feature = "gnss"),
+        rak4631::CONFIG.telemetry_flash_page,
+    );
     // The media profile decides which carriers come up at all, so it is
     // read before USB and before either carrier: before USB so a host
     // frame can never be answered against the default while the flash
@@ -673,7 +682,7 @@ async fn main(spawner: Spawner) {
                 // back.
                 if let Some(reporter) = reporter.as_mut() {
                     let now_ms = node.now_ms();
-                    let (readings, has_fix) = collect_readings(&node);
+                    let (readings, has_fix) = collect_readings(&node, sd);
                     let actions = reporter.tick(&mut node, now_ms, has_fix, &readings);
                     if !actions.is_empty() {
                         let mut ifaces: [&mut dyn Interface; 3] =
@@ -707,18 +716,25 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// separately rather than having to infer it from the numbers.
 ///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. On a build without them it returns time and nothing
-/// else, which is a legal heartbeat.
+/// peripherals exist. On a build without them it returns time and the die
+/// temperature, which is a legal heartbeat.
+///
+/// The die temperature is not feature-gated: every nRF52840 carries one and
+/// the SoftDevice is enabled on both boards, so it is read through the only
+/// legal path ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]).
 fn collect_readings<R, C, S>(
     node: &leviculum_core::node::NodeCore<R, C, S>,
+    sd: &nrf_softdevice::Softdevice,
 ) -> (leviculum_nrf::telemetry::Readings, bool)
 where
     R: rand_core::CryptoRngCore,
     C: leviculum_core::traits::Clock,
     S: leviculum_core::traits::Storage,
 {
-    // A bare-module build has no sensor to fill in, so nothing mutates it
-    // there; every feature that adds one needs the binding mutable.
+    // A bare-module build has no baseboard sensor to fill in, so nothing
+    // mutates it there; every feature that adds one needs the binding
+    // mutable. The die temperature is set in the initialiser, so it does
+    // not lift the gate.
     #[cfg_attr(
         not(any(feature = "gnss", feature = "battery")),
         allow(unused_mut, clippy::let_and_return)
@@ -731,6 +747,7 @@ where
         unix_secs: node
             .has_plausible_wall_clock()
             .then(|| node.emission_secs()),
+        die_temperature_quarter_c: leviculum_nrf::telemetry::die_temperature_quarter_c(sd),
         ..Default::default()
     };
     #[cfg(not(feature = "gnss"))]

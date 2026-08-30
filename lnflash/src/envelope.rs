@@ -20,12 +20,13 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame,
-    decode_media_report_payload, decode_refusal_payload, encode_capability_query,
-    encode_fixed_position, encode_media_profile, encode_media_query, encode_radio_config,
-    encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
-    MediaProfileWire, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
-    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE,
-    TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_REFUSAL,
+    decode_media_report_payload, decode_position_source_report_payload, decode_refusal_payload,
+    encode_capability_query, encode_fixed_position, encode_media_profile, encode_media_query,
+    encode_position_source_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
+    encode_wall_time, FixedPositionWire, MediaProfileWire, TelemetryTargetWire, REFUSE_BUSY,
+    REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
+    TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
+    TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -416,6 +417,69 @@ pub fn query_media_profile(fd: &Fd) -> io::Result<Result<MediaState, ControlOutc
     )
 }
 
+/// What a board answered about its position sources — the second clause
+/// of the telemetry send condition.
+///
+/// Not a bare bool: "no pin but a receiver" is a node that reports as soon
+/// as it is switched on, and "neither" is a node an operator has to do
+/// something about, so the two must not collapse into one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionSources {
+    pub fixed: bool,
+    pub gnss: bool,
+}
+
+impl PositionSources {
+    fn from_flags(flags: u8) -> Self {
+        Self {
+            fixed: flags & leviculum_core::envelope::POSITION_SOURCE_FIXED != 0,
+            gnss: flags & leviculum_core::envelope::POSITION_SOURCE_GNSS != 0,
+        }
+    }
+
+    /// Whether the board will send telemetry at all once it has a target.
+    pub fn any(self) -> bool {
+        self.fixed || self.gnss
+    }
+}
+
+/// Ask the board whether it has a position source
+/// (`TYPE_POSITION_SOURCE_QUERY`).
+///
+/// `Ok(Err(..))` is "no report came back": firmware without the query, or a
+/// binary with no reporter that refused by name. The caller must then say
+/// nothing about position sources rather than guess — telling an operator
+/// their board will stay silent when it will not is worse than the ack on
+/// its own.
+pub fn query_position_sources(fd: &Fd) -> io::Result<Result<PositionSources, ControlOutcome>> {
+    Ok(
+        match transact(
+            fd,
+            &encode_position_source_query(),
+            CONTROL_TIMING,
+            |data| {
+                let frame = decode_frame(data).ok()?;
+                match frame.frame_type {
+                    TYPE_POSITION_SOURCE_REPORT => Some(Ok(PositionSources::from_flags(
+                        decode_position_source_report_payload(frame.payload)?,
+                    ))),
+                    TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                        Some((refused, reason)) if refused == TYPE_POSITION_SOURCE_QUERY => {
+                            Some(Err(reason))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            },
+        )? {
+            Some(Ok(sources)) => Ok(sources),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
 /// Send the radio configuration as an envelope frame. Only for firmware
 /// whose capability report includes `TYPE_RADIO_CONFIG`: the frame is
 /// longer than the 19-byte Reticulum minimum, so it must never be sent
@@ -467,8 +531,9 @@ pub(crate) mod testing {
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
         encode_refusal, fixed_position_answer, media_profile_answer, media_query_answer,
-        telemetry_target_answer, ControlAction, MediaProfileWire, TYPE_CAPABILITIES,
-        TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_RADIO_CONFIG,
+        position_source_query_answer, telemetry_target_answer, ControlAction, MediaProfileWire,
+        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION,
+        TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG,
         TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
@@ -497,7 +562,24 @@ pub(crate) mod testing {
         TYPE_FIXED_POSITION,
         TYPE_MEDIA_PROFILE,
         TYPE_MEDIA_QUERY,
+        TYPE_POSITION_SOURCE_QUERY,
     ];
+
+    /// The position sources the scripted board has. A cell rather than a
+    /// constant for the same reason [`StubMedia`] is one: setting a fixed
+    /// position has to be *visible* to the next query on the same board,
+    /// which is what makes "set a pin and the board stops being silent"
+    /// testable without a board.
+    pub fn position_sources(flags: u8) -> Arc<Mutex<u8>> {
+        Arc::new(Mutex::new(flags))
+    }
+
+    /// The scripted board's default: a receiver built in, no pin set —
+    /// the RAK with its GNSS task, which is the board that reports out of
+    /// the box.
+    pub fn gnss_board() -> Arc<Mutex<u8>> {
+        position_sources(POSITION_SOURCE_GNSS)
+    }
 
     /// The media profile the scripted board boots with, and the one it
     /// currently runs. A stub-wide cell rather than a constant: a media
@@ -586,6 +668,24 @@ pub(crate) mod testing {
     /// test can watch a profile change across two conversations on the
     /// same board — the read-modify-write a one-sided `--set-media` does.
     pub fn envelope_firmware_stub_with_media(pty: &Pty, seen: Seen, media: Arc<Mutex<StubMedia>>) {
+        envelope_firmware_stub_full(pty, seen, media, gnss_board());
+    }
+
+    /// [`envelope_firmware_stub`] on a board with no position source at
+    /// all: no receiver, no pin. It takes a telemetry target — the target
+    /// is valid configuration — and reports zero sources, which is the
+    /// board `--set-telemetry` owes a consequence sentence.
+    pub fn positionless_firmware_stub(pty: &Pty, seen: Seen) {
+        envelope_firmware_stub_full(pty, seen, media_state(), position_sources(0));
+    }
+
+    /// The scripted board with both cells handed in.
+    pub fn envelope_firmware_stub_full(
+        pty: &Pty,
+        seen: Seen,
+        media: Arc<Mutex<StubMedia>>,
+        sources: Arc<Mutex<u8>>,
+    ) {
         spawn_stub(pty, move |frame_bytes| {
             seen.lock().unwrap().push(frame_bytes.to_vec());
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
@@ -601,7 +701,22 @@ pub(crate) mod testing {
                 // the channel taking the frame — the ack direction of the
                 // capability gate.
                 ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(true, true)),
-                ControlAction::FixedPosition(_) => Some(fixed_position_answer(true, true)),
+                // The pin IS a position source, so setting one changes what
+                // the next query answers — the runtime path out of
+                // `state=no-position-source`, reproduced here so the host
+                // side of it can be driven without a board.
+                ControlAction::FixedPosition(position) => {
+                    let mut sources = sources.lock().unwrap();
+                    if position.is_some() {
+                        *sources |= POSITION_SOURCE_FIXED;
+                    } else {
+                        *sources &= !POSITION_SOURCE_FIXED;
+                    }
+                    Some(fixed_position_answer(true, true))
+                }
+                ControlAction::PositionSourceQuery => {
+                    Some(position_source_query_answer(true, *sources.lock().unwrap()))
+                }
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
                 // The media gate, run exactly as the board runs it: apply,
                 // then answer from the state that is already in force.
@@ -676,6 +791,7 @@ pub(crate) mod testing {
                 ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
                 ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(false, false)),
                 ControlAction::FixedPosition(_) => Some(fixed_position_answer(false, false)),
+                ControlAction::PositionSourceQuery => Some(position_source_query_answer(false, 0)),
                 ControlAction::Refuse {
                     refused_type,
                     reason,

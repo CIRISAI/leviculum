@@ -200,6 +200,15 @@ a reading no current viewer displays costs one map entry and breaks
 nothing. A sensor left out of the encoder, by contrast, needs a new
 design to add later.
 
+Followed through on the boards: **a node reports everything it can
+measure**, so both LNode builds carry the nRF52's die temperature as a
+Temperature reading (SID `0x07`) whether or not a baseboard is fitted.
+The die thermometer belongs to the SoftDevice, so it is read through
+`sd_temp_get` and never off the TEMP registers; its 0.25 °C step is
+already exact at the two decimals Sideband rounds to, so the value goes
+on the wire unrounded. Battery charge stays feature-gated — it needs a
+baseboard that has a gauge — and an absent sensor contributes no key.
+
 ### A reporting message carries no text
 
 A telemetry message sets `content` and `title` to empty. This is a hard
@@ -255,6 +264,31 @@ misconfigured as a station still proves it is alive on the heartbeat,
 where the converse merely costs airtime). Everything else is an expert
 flag underneath a preset, in the same shape as the radio menu.
 
+### Sending the position is the switch for sending everything
+
+Reports go out iff **both** a target is configured **and a position
+source is** — a fixed position set, or a GNSS receiver built into the
+firmware and not switched off (Lew, 2026-08-30). The reading is
+**intent, not possession**: a receiver that has never seen sky still
+counts, because the four use cases behind this feature — tracker,
+sensor node, mobile transport node, quasi-modem — are all nodes whose
+operator meant to say where they are, and a tracker that goes silent in
+a garage is indistinguishable from a dead one. Such a node keeps
+reporting on the heartbeat with the position absent and its other
+sensors fresh, which is the designed behaviour and not a degraded mode.
+GNSS is optional throughout; a fixed position is settable on any board,
+with or without a receiver.
+
+What the rule refuses is the *unconfigured* node: a target and no
+answer of any kind to "where am I". It sends nothing — not a heartbeat,
+not a battery reading — and says why, `state=no-position-source` on the
+same surface and the same cadence rule as `awaiting-key`. Position-less
+telemetry is deliberately **not** a mode: a node that reports readings
+a collector cannot place is a row on a map with nowhere to put it, and
+the operator who wanted one had only to set a position. Setting one, or
+flashing a build that has a receiver, leaves the state at once — it is
+a runtime path, like applying a target, and needs no reboot.
+
 ### The destination hash alone is enough
 
 A user knows the LXMF address. Requiring the public key alongside it
@@ -266,9 +300,12 @@ destination's announce, and the announce carries the identity.
 This creates a state that did not exist when a target implied a key: the
 node holds a perfectly valid target it cannot yet encrypt to. That state
 is **stated, not waited out silently**. A reporting node says which of
-three it is in — `off`, `awaiting-key`, `ready` — on the same surface as
-its clock provenance, and a target that never resolves is then a visible
-condition rather than an absence of packets.
+four it is in — `off`, `no-position-source`, `awaiting-key`, `ready` —
+on the same surface as its clock provenance, and a target that never
+resolves is then a visible condition rather than an absence of packets.
+`no-position-source` outranks `awaiting-key` in that line: a node that
+will not report anyway must not spend airtime chasing a key it has no
+use for.
 
 The consequence for the previous rule is that the immediate report
 fires **on key arrival**, which for a hash-only target is later than the

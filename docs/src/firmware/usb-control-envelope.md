@@ -43,6 +43,7 @@ Commands (host → board):
 | 0x08 | FIXED_POSITION   | see below — set or clear the user-set position |
 | 0x09 | MEDIA_PROFILE    | one flag byte (bit0 lora, bit1 ble) — answered with MEDIA_REPORT |
 | 0x0A | MEDIA_QUERY      | empty (a query) — answered with MEDIA_REPORT |
+| 0x0B | POSITION_SOURCE_QUERY | empty (a query) — answered with POSITION_SOURCE_REPORT |
 
 Responses (board → host):
 
@@ -53,6 +54,7 @@ Responses (board → host):
 | 0x83 | CAPABILITY_REPORT | `[version, accepted types...]`            |
 | 0x84 | RADIO_REPORT      | the RADIO_CONFIG parameter block the radio is running (#349) |
 | 0x85 | MEDIA_REPORT      | `[running_flags, configured_flags]` in the MEDIA_PROFILE flag encoding |
+| 0x86 | POSITION_SOURCE_REPORT | one flag byte (bit0 fixed position set, bit1 GNSS built in and active) |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -174,10 +176,30 @@ users have. Nothing detects a terminal: `Ui::ask` answers "no answer" for
 that as its stated default, so a scripted run cannot block.
 
 What the host reports back is the ack. The node's own
-`[TELEMETRY] target=… state=off|awaiting-key|ready` line goes to the
-debug CDC (if00), which `lnflash` holds open only for the post-flash boot
-check — so it is named as the place to read the rest rather than read
-back over a second connection.
+`[TELEMETRY] target=… state=off|no-position-source|awaiting-key|ready`
+line goes to the debug CDC (if00), which `lnflash` holds open only for
+the post-flash boot check — so it is named as the place to read the rest
+rather than read back over a second connection.
+
+**The consequence sentence.** A target alone does not make a board
+report: sending the position is the switch for sending everything
+(`docs/src/concepts/telemetry.md`), so a board with neither a fixed
+position nor a GNSS receiver stores the target and stays silent. After
+an ack, `--set-telemetry` therefore asks the board itself
+(POSITION_SOURCE_QUERY, on the same open port) and, when the answer is
+"neither", says so:
+
+```text
+3-2.4: target stored; nothing will be sent until a position source
+       exists — set one with --set-position.
+```
+
+Honest, not a refusal: the target is valid configuration and it *is*
+stored. A board that answers with a source is told nothing of the kind,
+and a board that does not answer the query at all — firmware without it,
+or a binary with no reporter, which refuses it by name — is told nothing
+either. Guessing here would put a false warning in front of an operator
+whose board is fine.
 
 ### The fixed-position frame
 

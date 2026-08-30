@@ -64,11 +64,11 @@ you must dispatch.
 The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
-loop (`leviculum-nrf/src/bin/t114.rs:256-307`), here with three interfaces
+loop (`leviculum-nrf/src/bin/t114.rs:266-317`), here with three interfaces
 (serial, LoRa, BLE) selected over with Embassy's `select4`:
 
 ```rust
-// Adapted from leviculum-nrf/src/bin/t114.rs:256
+// Adapted from leviculum-nrf/src/bin/t114.rs:266
 loop {
     let deadline = node
         .next_deadline()
@@ -137,10 +137,10 @@ drains the `EventReceiver`.
 `NodeCoreBuilder` (`leviculum-core/src/node/builder.rs:40`) takes the platform
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. From the
-T114 firmware (`leviculum-nrf/src/bin/t114.rs:123-142`):
+T114 firmware (`leviculum-nrf/src/bin/t114.rs:133-152`):
 
 ```rust
-// Adapted from leviculum-nrf/src/bin/t114.rs:123
+// Adapted from leviculum-nrf/src/bin/t114.rs:133
 let mut builder = NodeCoreBuilder::new()
     .enable_transport(true)
     .max_incoming_resource_size(8 * 1024)

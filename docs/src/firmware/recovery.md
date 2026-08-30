@@ -111,14 +111,14 @@ if id_store.load() => Some(identity)   -> "Identity loaded from flash"
 else                                   -> generate new, then save
 ```
 
-(`leviculum-nrf/src/bin/t114.rs:118-154`,
-`leviculum-nrf/src/bin/rak4631.rs:155-192`. The identity lives on the
+(`leviculum-nrf/src/bin/t114.rs:128-164`,
+`leviculum-nrf/src/bin/rak4631.rs:164-201`. The identity lives on the
 board's `identity_flash_page`, e.g. `0xEC000` on the T114,
 `leviculum-nrf/src/boards/t114.rs:144`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash` and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:170-174`).
+full hash (`leviculum-nrf/src/bin/t114.rs:180-184`).
 
 ## When USB stays dark
 
@@ -141,7 +141,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
    ```
 
    Look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and `[PERSISTENT_LOG]`
-   lines (`leviculum-nrf/src/bin/t114.rs:77-110`;
+   lines (`leviculum-nrf/src/bin/t114.rs:87-120`;
    `leviculum-nrf/README.md:59-60`).
 
 **(All hardware steps: derived from source / project notes — requires the

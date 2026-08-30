@@ -85,14 +85,14 @@ picocom /dev/leviculum-debug -b 115200
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
 every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`leviculum-nrf/src/bin/t114.rs:389-398` for the banner task.) Do
+(`leviculum-nrf/src/bin/t114.rs:399-408` for the banner task.) Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
 
 > **The identity lines are not among them in practice.** The firmware
 > prints `LNode started -- identity: …`, `[IDENTITY] t114_node=…` and
 > `[IDENTITY] t114_probe=…` once during boot
-> (`leviculum-nrf/src/bin/t114.rs:171-189`), but all three go through
+> (`leviculum-nrf/src/bin/t114.rs:181-199`), but all three go through
 > the runtime-gated log path: with no reader attached yet, `log_fmt`
 > counts the line and returns before it reaches either the ring buffer
 > or the persistent tail (`leviculum-nrf/src/log.rs:159-163`). A reader
@@ -246,7 +246,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:131` sets `respond_to_probes` and
+(`leviculum-nrf/src/bin/t114.rs:141` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,

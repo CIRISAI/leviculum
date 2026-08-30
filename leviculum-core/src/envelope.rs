@@ -133,6 +133,20 @@ pub const TYPE_MEDIA_PROFILE: u8 = 0x09;
 /// bytes, so firmware from before the envelope drops it silently and the
 /// probe times out, exactly like [`TYPE_CAPABILITIES`].
 pub const TYPE_MEDIA_QUERY: u8 = 0x0A;
+/// Position-source query; empty payload. Answered with
+/// [`TYPE_POSITION_SOURCE_REPORT`].
+///
+/// The read direction of "does this node have a position source", which is
+/// the second clause of the telemetry send condition
+/// (`docs/src/concepts/telemetry.md`): a node with a target and no fixed
+/// position and no GNSS receiver reports nothing at all. A host that has
+/// just had a telemetry target acked cannot otherwise know that, and would
+/// have to choose between saying nothing (and letting the operator wait for
+/// reports that will never come) and guessing from the board model (wrong
+/// the moment a T114 carries a pin). Five bytes, so firmware from before
+/// the envelope drops it silently and the probe times out, exactly like
+/// [`TYPE_CAPABILITIES`].
+pub const TYPE_POSITION_SOURCE_QUERY: u8 = 0x0B;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -166,6 +180,23 @@ pub const TYPE_RADIO_REPORT: u8 = 0x84;
 /// host that sees them differ says "takes effect at reboot" as a fact it
 /// read off the board, not as a guess.
 pub const TYPE_MEDIA_REPORT: u8 = 0x85;
+/// Position-source report; payload is one flag byte
+/// ([`POSITION_SOURCE_FIXED`], [`POSITION_SOURCE_GNSS`]). The answer to
+/// [`TYPE_POSITION_SOURCE_QUERY`].
+///
+/// Flags rather than a bool because the two sources are not
+/// interchangeable to an operator being told what to do next: "no pin, but
+/// a receiver" is a node that will report as soon as it is outdoors, and
+/// "neither" is a node that needs `--set-position`.
+pub const TYPE_POSITION_SOURCE_REPORT: u8 = 0x86;
+
+/// [`TYPE_POSITION_SOURCE_REPORT`] flag: a user-set fixed position is
+/// stored.
+pub const POSITION_SOURCE_FIXED: u8 = 0x01;
+/// [`TYPE_POSITION_SOURCE_REPORT`] flag: a GNSS receiver is built into the
+/// firmware and active. Set whether or not it currently has a fix — the
+/// send condition is about intent, not possession.
+pub const POSITION_SOURCE_GNSS: u8 = 0x02;
 
 // ---------------------------------------------------------------------------
 // Refusal reasons
@@ -663,6 +694,45 @@ pub fn decode_media_report_payload(payload: &[u8]) -> Option<(MediaProfileWire, 
     }
 }
 
+/// Encode a complete position-source query.
+pub fn encode_position_source_query() -> Vec<u8> {
+    encode_frame(TYPE_POSITION_SOURCE_QUERY, &[])
+}
+
+/// Encode a complete position-source report.
+pub fn encode_position_source_report(flags: u8) -> Vec<u8> {
+    encode_frame(TYPE_POSITION_SOURCE_REPORT, &[flags])
+}
+
+/// Decode a position-source report payload: exactly one flag byte.
+///
+/// Unknown bits are kept rather than refused: a newer board that grows a
+/// third source must not read as malformed to an older host, which only
+/// ever asks "is anything set" and can answer that from any non-zero value.
+pub fn decode_position_source_report_payload(payload: &[u8]) -> Option<u8> {
+    match payload {
+        [flags] => Some(*flags),
+        _ => None,
+    }
+}
+
+/// The answer to a position-source query: the flags, or the same
+/// capability refusal the telemetry target gets.
+///
+/// `reporter_wired` is the binary's declaration that it constructs a
+/// telemetry reporter — the same gate as [`telemetry_target_answer`],
+/// because the question only means anything about a board that reports at
+/// all. A reporter-less binary answering `flags = 0` would be read as "set
+/// a position and it will report", which is exactly the false promise
+/// [`REFUSE_UNSUPPORTED`] exists to prevent.
+pub fn position_source_query_answer(reporter_wired: bool, flags: u8) -> Vec<u8> {
+    if reporter_wired {
+        encode_position_source_report(flags)
+    } else {
+        encode_refusal(TYPE_POSITION_SOURCE_QUERY, REFUSE_UNSUPPORTED)
+    }
+}
+
 /// The answer to a media-profile frame or a media query, decided by
 /// capability first — the [`telemetry_target_answer`] rule on a third
 /// frame.
@@ -795,6 +865,10 @@ pub enum ControlAction {
     /// like [`RadioQuery`](Self::RadioQuery) — safe to send to a board
     /// mid-measurement.
     MediaQuery,
+    /// Envelope position-source query: answer via
+    /// [`position_source_query_answer`]. Read-only, like
+    /// [`MediaQuery`](Self::MediaQuery).
+    PositionSourceQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -890,6 +964,13 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_POSITION_SOURCE_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::PositionSourceQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -916,6 +997,7 @@ mod tests {
         TYPE_FIXED_POSITION,
         TYPE_MEDIA_PROFILE,
         TYPE_MEDIA_QUERY,
+        TYPE_POSITION_SOURCE_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -1886,5 +1968,98 @@ mod tests {
         // First byte keeps the IFAC bit set — the property the legacy
         // magics rely on to stay out of packet space on a no-IFAC channel.
         assert_eq!(ENVELOPE_MAGIC[0] & 0x80, 0x80);
+    }
+    // -----------------------------------------------------------------
+    // Position-source query (the telemetry send condition's second clause)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_position_source_query_is_empty_and_classifies_read_only() {
+        assert_eq!(
+            classify_control_frame(&encode_position_source_query(), ACCEPTED),
+            ControlAction::PositionSourceQuery
+        );
+        // Five bytes, so firmware from before the envelope drops it rather
+        // than reading it as a Reticulum packet.
+        let query = encode_position_source_query();
+        assert_eq!(query.len(), ENVELOPE_HEADER_LEN);
+        // A payload where none belongs is malformed, not ignored.
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_POSITION_SOURCE_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SOURCE_QUERY,
+                reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    #[test]
+    fn a_position_source_report_round_trips_every_flag_combination() {
+        for flags in [
+            0,
+            POSITION_SOURCE_FIXED,
+            POSITION_SOURCE_GNSS,
+            POSITION_SOURCE_FIXED | POSITION_SOURCE_GNSS,
+        ] {
+            let bytes = encode_position_source_report(flags);
+            let frame = decode_frame(&bytes).unwrap();
+            assert_eq!(frame.frame_type, TYPE_POSITION_SOURCE_REPORT);
+            assert_eq!(
+                decode_position_source_report_payload(frame.payload),
+                Some(flags)
+            );
+        }
+    }
+
+    /// A newer board with a third source must not read as malformed to an
+    /// older host: it only ever asks "is anything set", and any non-zero
+    /// value answers that.
+    #[test]
+    fn an_unknown_source_bit_is_carried_through_rather_than_refused() {
+        let report = encode_position_source_report(0b0000_0100);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(
+            decode_position_source_report_payload(frame.payload),
+            Some(0b0000_0100)
+        );
+        assert_eq!(decode_position_source_report_payload(&[]), None);
+        assert_eq!(decode_position_source_report_payload(&[0x01, 0x02]), None);
+    }
+
+    /// A binary with no reporter refuses by name rather than answering
+    /// "no sources" — which would read as a promise that setting one would
+    /// make the board report. The [`telemetry_target_answer`] rule, on the
+    /// query direction.
+    #[test]
+    fn a_reporterless_binary_refuses_the_query_instead_of_answering_zero() {
+        let refusal = position_source_query_answer(false, 0);
+        let frame = decode_frame(&refusal).unwrap();
+        assert_eq!(frame.frame_type, TYPE_REFUSAL);
+        assert_eq!(
+            decode_refusal_payload(frame.payload),
+            Some((TYPE_POSITION_SOURCE_QUERY, REFUSE_UNSUPPORTED))
+        );
+
+        // The control: with a reporter, the same zero is a report.
+        let report = position_source_query_answer(true, 0);
+        let frame = decode_frame(&report).unwrap();
+        assert_eq!(frame.frame_type, TYPE_POSITION_SOURCE_REPORT);
+        assert_eq!(
+            decode_position_source_report_payload(frame.payload),
+            Some(0)
+        );
+    }
+
+    /// Firmware from before the query refuses it by name, which is how a
+    /// host learns to say nothing about position sources at all.
+    #[test]
+    fn a_board_without_the_position_source_query_refuses_it_by_name() {
+        assert_eq!(
+            classify_control_frame(&encode_position_source_query(), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_POSITION_SOURCE_QUERY,
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
     }
 }

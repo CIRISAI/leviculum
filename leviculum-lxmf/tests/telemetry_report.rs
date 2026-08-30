@@ -12,7 +12,9 @@ mod common;
 use leviculum_core::Identity;
 use leviculum_lxmf::constants::FIELD_TELEMETRY;
 use leviculum_lxmf::msgpack::Number;
-use leviculum_lxmf::telemetry::{build_report, Battery, Location, ReportError, Telemetry};
+use leviculum_lxmf::telemetry::{
+    build_report, celsius_from_quarter_degrees, Battery, Location, ReportError, Telemetry,
+};
 use leviculum_lxmf::{DeliveryMethod, Message, Verification};
 
 const FIXTURES: &str = include_str!("../../docs/src/appendix/lxmf/vectors/telemetry_vectors.json");
@@ -208,4 +210,114 @@ fn a_position_report_fits_one_opportunistic_packet() {
         "a position + battery report is {} B on air",
         on_air.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The die-temperature sensor (SID 0x07)
+// ---------------------------------------------------------------------------
+
+/// A reading as it reaches a receiver: through `build_report`, onto the
+/// air, and back out of `Message::unpack`. Nothing here trusts the bytes
+/// the encoder happened to produce — the assertion is on what a peer reads.
+fn round_trip(source: &Identity, reading: &Telemetry) -> Telemetry {
+    let destination = [0xD1u8; 16];
+    let message = build_report(
+        destination,
+        *source.hash(),
+        source,
+        1_790_000_000.0,
+        reading,
+    )
+    .unwrap();
+    let received = Message::unpack(
+        &message.on_air().unwrap(),
+        Some(destination),
+        Some(source),
+        DeliveryMethod::Opportunistic,
+    )
+    .unwrap();
+    assert_eq!(received.verification, Verification::Valid);
+    assert_eq!(received.fields[0].0, FIELD_TELEMETRY);
+    Telemetry::decode_field_value(&received.fields[0].1).unwrap()
+}
+
+/// An LNode reports every sensor it has, and every nRF52840 has a die
+/// thermometer. The reading survives the report as SID 0x07, in degrees
+/// Celsius and not in the raw quarter-degree steps `sd_temp_get` speaks.
+#[test]
+fn a_temperature_reading_reaches_the_report_as_degrees_celsius() {
+    let source = source_identity();
+    // 93 quarter-degree steps = 23.25 °C.
+    let reading = Telemetry {
+        temperature: Some(celsius_from_quarter_degrees(93)),
+        ..columba_reading()
+    };
+    let decoded = round_trip(&source, &reading);
+
+    assert_eq!(decoded.temperature.map(Number::as_f64), Some(23.25));
+    // And it displaced nothing that was already there.
+    assert_eq!(decoded.location, reading.location);
+    assert_eq!(decoded.time, reading.time);
+}
+
+/// **The positive control.** The same message shape from a platform that
+/// reports no temperature contributes no key at all — the concept's
+/// absence encoding — so "did not measure" stays distinguishable from
+/// "measured zero", and the test above cannot be passing on a decoder that
+/// invents a reading.
+#[test]
+fn a_platform_without_a_thermometer_contributes_no_temperature_key() {
+    let source = source_identity();
+    let reading = columba_reading();
+    assert_eq!(reading.temperature, None, "the fixture has no thermometer");
+    assert_eq!(round_trip(&source, &reading).temperature, None);
+}
+
+/// Zero degrees is a reading, not an absence.
+#[test]
+fn zero_degrees_is_a_reading_and_not_a_missing_sensor() {
+    let source = source_identity();
+    let reading = Telemetry {
+        temperature: Some(celsius_from_quarter_degrees(0)),
+        ..columba_reading()
+    };
+    assert_eq!(
+        round_trip(&source, &reading)
+            .temperature
+            .map(Number::as_f64),
+        Some(0.0)
+    );
+}
+
+/// A below-freezing die is a negative number on the wire, which is the one
+/// case a sign-blind conversion would get wrong, and the quarter-degree
+/// step is carried exactly rather than rounded to a whole degree.
+#[test]
+fn a_negative_temperature_keeps_its_sign_and_its_quarter_degree() {
+    let source = source_identity();
+    let reading = Telemetry {
+        temperature: Some(celsius_from_quarter_degrees(-51)),
+        ..columba_reading()
+    };
+    assert_eq!(
+        round_trip(&source, &reading)
+            .temperature
+            .map(Number::as_f64),
+        Some(-12.75)
+    );
+}
+
+/// The conversion mirrors Sideband's `round(temperature, 2)` exactly
+/// rather than approximately: every quarter-degree step lands on a value
+/// that is already two-decimal exact, so rounding it again changes nothing.
+#[test]
+fn every_quarter_degree_step_is_already_two_decimal_exact() {
+    for quarters in -400..=400 {
+        let celsius = celsius_from_quarter_degrees(quarters).as_f64();
+        assert_eq!(
+            (celsius * 100.0).round() / 100.0,
+            celsius,
+            "step {quarters} is not exact at two decimals"
+        );
+    }
 }

@@ -69,6 +69,16 @@ async fn main(spawner: Spawner) {
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
     leviculum_nrf::telemetry::declare_reporter();
+    // Which position sources this board boots with — the second clause of
+    // the telemetry send condition, and a question a host may put before
+    // the reporter exists, so it is answered before USB comes up. No GNSS
+    // receiver on this board yet (#69 is the L76K task), so the only source
+    // a T114 can have is a user-set pin — which is exactly the board the
+    // `state=no-position-source` line was written for.
+    leviculum_nrf::telemetry::declare_position_sources(
+        /* gnss_available */ false,
+        t114::CONFIG.telemetry_flash_page,
+    );
     // The media profile decides which carriers come up at all, so it is
     // read before USB and before either carrier: before USB so a host
     // frame can never be answered against the default while the flash
@@ -498,7 +508,7 @@ async fn main(spawner: Spawner) {
                 // back.
                 if let Some(reporter) = reporter.as_mut() {
                     let now_ms = node.now_ms();
-                    let (readings, has_fix) = collect_readings(&node);
+                    let (readings, has_fix) = collect_readings(&node, sd);
                     let actions = reporter.tick(&mut node, now_ms, has_fix, &readings);
                     if !actions.is_empty() {
                         let mut ifaces: [&mut dyn Interface; 3] =
@@ -583,13 +593,17 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// Read this board's sensors for one telemetry evaluation.
 ///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. The T114 build wires none yet — the L76K GNSS task
-/// is #69's work and the battery ADC has no task — so this returns time
-/// and nothing else, which is a legal heartbeat, and presence is never
-/// `Fix`, so no position is contributed (#240). Time reaches the node via
-/// the host wall-time injection (#238) until #69 lands a GNSS seed.
+/// peripherals exist. The T114 build wires no GNSS and no battery gauge —
+/// the L76K task is #69's work and the ADC has no task — so presence is
+/// never `Fix` and no position is contributed (#240). Time reaches the node
+/// via the host wall-time injection (#238) until #69 lands a GNSS seed.
+///
+/// The die temperature it does have: every nRF52840 carries one and the
+/// SoftDevice is enabled on both boards, so it is read here through the
+/// only legal path ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]).
 fn collect_readings<R, C, S>(
     node: &leviculum_core::node::NodeCore<R, C, S>,
+    sd: &nrf_softdevice::Softdevice,
 ) -> (leviculum_nrf::telemetry::Readings, bool)
 where
     R: rand_core::CryptoRngCore,
@@ -604,6 +618,7 @@ where
         unix_secs: node
             .has_plausible_wall_clock()
             .then(|| node.emission_secs()),
+        die_temperature_quarter_c: leviculum_nrf::telemetry::die_temperature_quarter_c(sd),
         ..Default::default()
     };
     (readings, false)

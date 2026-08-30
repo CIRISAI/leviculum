@@ -46,7 +46,9 @@ use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::{Action, DispatchResult};
 use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
-use leviculum_lxmf::telemetry::{build_report, Battery, Location, Telemetry};
+use leviculum_lxmf::telemetry::{
+    build_report, celsius_from_quarter_degrees, Battery, Location, Telemetry,
+};
 use leviculum_telemetry_policy::{
     choose_position, command_from_wire, EmissionRoute, Fix, PositionSource, Profile, ReportReason,
     SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
@@ -97,6 +99,71 @@ pub fn declare_reporter() {
 /// task's telemetry-target answer is gated on.
 pub fn reporter_wired() -> bool {
     REPORTER_WIRED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Which position sources this node has configured, published for the
+/// serial task's [`leviculum_core::envelope::TYPE_POSITION_SOURCE_QUERY`]
+/// answer.
+///
+/// A static rather than a question put to the main loop, for the same
+/// reason [`crate::media`] keeps its two profiles in atomics: the serial
+/// task must answer a read-only query without waiting on a loop that may
+/// be mid-dispatch, and both writers of this value are one atomic store.
+static POSITION_SOURCES: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// A user-set fixed position is stored ([`Reporter::apply_fixed_position`]).
+pub const POSITION_SOURCE_FIXED: u8 = 0x01;
+/// A GNSS receiver is built into this firmware and not switched off
+/// ([`declare_gnss_source`]).
+pub const POSITION_SOURCE_GNSS: u8 = 0x02;
+
+/// Declare which position sources this node boots with. Call beside
+/// [`declare_reporter`], before `usb::init`.
+///
+/// Both halves are known this early and both must be: the receiver is a
+/// property of the binary, and the stored pin is a memory-mapped flash read
+/// that is legal before `Softdevice::enable` (the argument [`load`] makes).
+/// Declaring them here rather than when the [`Reporter`] is built closes the
+/// window in which a host query would be answered "no position source" by a
+/// board that has one — the same reason the media profile is read before
+/// USB comes up.
+///
+/// `gnss_available` is passed per binary rather than read from a `cfg!`
+/// here: the workspace clippy run builds both board binaries under one
+/// feature set, so a `cfg!(feature = "gnss")` inside this module would have
+/// the T114 claim a receiver it has no task for. The binary knows which
+/// peripherals it actually spawned.
+pub fn declare_position_sources(gnss_available: bool, page: u32) {
+    let mut flags = 0;
+    if gnss_available {
+        flags |= POSITION_SOURCE_GNSS;
+    }
+    if load_fixed_position(page).is_some() {
+        flags |= POSITION_SOURCE_FIXED;
+    }
+    POSITION_SOURCES.store(flags, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The position sources this node has, as the wire flags.
+pub fn position_source_flags() -> u8 {
+    POSITION_SOURCES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether any position source is configured — the second clause of the
+/// send condition (`docs/src/concepts/telemetry.md`).
+pub fn has_position_source() -> bool {
+    position_source_flags() != 0
+}
+
+/// Record whether a fixed position is stored. The GNSS bit is untouched:
+/// clearing the pin on a GNSS board still leaves it a reporting node.
+fn note_fixed_position(present: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if present {
+        POSITION_SOURCES.fetch_or(POSITION_SOURCE_FIXED, Relaxed);
+    } else {
+        POSITION_SOURCES.fetch_and(!POSITION_SOURCE_FIXED, Relaxed);
+    }
 }
 
 /// Targets arriving from the host over the #238 control envelope. Depth 1
@@ -442,6 +509,12 @@ pub struct Readings {
     pub hdop: Option<f32>,
     /// Battery charge, percent.
     pub battery_percent: Option<u8>,
+    /// The nRF52's own die temperature in **quarter-degrees Celsius**, as
+    /// [`die_temperature_quarter_c`] read it. The raw fixed-point unit is
+    /// kept all the way to the codec on purpose — see
+    /// [`Readings::telemetry`] for why turning it into a float early would
+    /// invent precision the sensor does not have.
+    pub die_temperature_quarter_c: Option<i32>,
 }
 
 impl Readings {
@@ -478,10 +551,19 @@ impl Readings {
 
     /// Assemble the Telemeter for one report, with the location the
     /// caller decided on (`None` for a report that carries no position).
+    ///
+    /// The temperature is packed as a bare number in degrees Celsius
+    /// (`SID_TEMPERATURE`), by the codec's own converter — the rounding
+    /// convention is Sideband's and belongs beside the encoder that has to
+    /// match it, which is why the quarter-degrees travel this far
+    /// unconverted.
     pub fn telemetry(&self, location: Option<Location>) -> Telemetry {
         Telemetry {
             time: self.unix_secs.map(|s| s as i64),
             location,
+            temperature: self
+                .die_temperature_quarter_c
+                .map(celsius_from_quarter_degrees),
             battery: self.battery_percent.map(|percent| Battery {
                 charge_percent: Number::Int(percent as i64),
                 // The baseboard reads a voltage divider, which cannot tell
@@ -493,6 +575,29 @@ impl Readings {
             ..Telemetry::default()
         }
     }
+}
+
+/// The nRF52's die temperature in quarter-degrees Celsius, or `None` if
+/// the SoftDevice refused the call.
+///
+/// # The constraint
+///
+/// **The SoftDevice owns the TEMP peripheral.** It is one of the
+/// peripherals handed to [`crate::ble::init`] and never touched again
+/// (`_temp`), because the S140 uses it for its own calibration and blocks
+/// application access: `NRF_TEMP->TASKS_START` from our side while the
+/// stack is enabled reads back garbage or hangs. The one legal path is the
+/// `sd_temp_get` syscall, which is what `nrf_softdevice::temperature_celsius`
+/// wraps (`nrf-softdevice/src/temperature.rs`). Blocks ~50 µs, which is why
+/// it is called once per telemetry evaluation and not per poll.
+///
+/// `I30F2` is Q30.2 — the raw register unit, 0.25 °C per step — and
+/// `to_bits` is those quarter-degrees.
+#[cfg(feature = "softdevice")]
+pub fn die_temperature_quarter_c(sd: &nrf_softdevice::Softdevice) -> Option<i32> {
+    nrf_softdevice::temperature_celsius(sd)
+        .ok()
+        .map(|celsius| celsius.to_bits())
 }
 
 /// Wire accuracy of a user-set fixed position: 0.01 m, `accuracy_e2 = 1`.
@@ -564,6 +669,11 @@ pub struct Reporter {
     /// blocked reporter must be legible in a log tail, which a flood is
     /// not.
     last_withheld: Option<&'static str>,
+    /// The state the last `[TELEMETRY] target=… state=…` line named, so a
+    /// standing state is stated once and not every five seconds. Same
+    /// argument as [`last_withheld`](Self::last_withheld): a blocked
+    /// reporter has to be legible in a log tail, which a flood is not.
+    last_state_line: Option<TargetState>,
     /// What the pending report says once its dispatch is settled: the
     /// reason it was sent, the position it carried and the timebase it
     /// stamped. Held only between [`tick`](Self::tick) and
@@ -595,15 +705,46 @@ impl Reporter {
     /// registered `lxmf.delivery` destination — the one a receiver
     /// verifies our signature against, which is why announcing it is not
     /// optional.
+    ///
+    /// The position sources come from [`declare_position_sources`], which
+    /// the binary called before USB came up — one owner for the fact, so
+    /// the answer a host query already got cannot disagree with the one the
+    /// policy runs on.
     pub fn new(delivery_hash: DestinationHash) -> Self {
+        let mut policy = SendPolicy::new();
+        policy.set_position_source(has_position_source());
         Self {
-            policy: SendPolicy::new(),
+            policy,
             target: None,
             fixed_position: None,
             delivery_hash,
             last_key_request_ms: None,
             last_withheld: None,
+            last_state_line: None,
             pending_line: None,
+        }
+    }
+
+    /// Say what state the target is in, once per change.
+    ///
+    /// The same line [`log_banner`](Self::log_banner) writes, on the same
+    /// cadence rule the awaiting-key line has always had: emitted when the
+    /// state becomes true and not again while it stays true. That rule is
+    /// what makes `state=no-position-source` visible to an operator who
+    /// attached a capture after boot without turning the log into a
+    /// five-second drum.
+    fn note_state(&mut self) {
+        let state = self.policy.state();
+        if self.last_state_line != Some(state) {
+            self.last_state_line = Some(state);
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[TELEMETRY] target={:08x} state={}",
+                    self.target_short(),
+                    state.as_str()
+                ),
+            );
         }
     }
 
@@ -678,6 +819,7 @@ impl Reporter {
     {
         self.last_key_request_ms = None;
         self.last_withheld = None;
+        self.last_state_line = None;
         let command = command_from_wire(wire.profile);
         let key_known = match command {
             TargetCommand::Clear => {
@@ -710,8 +852,14 @@ impl Reporter {
     /// the node claims about itself sees the confirmation; a boot with a
     /// persisted position behaves like a boot with a persisted key-bearing
     /// target, which already reports once on coming up.
+    /// A set pin is also the position source the send condition wants, so
+    /// this is the runtime path out of [`TargetState::NoPositionSource`]
+    /// and — on a board with no receiver — back into it. No reboot either
+    /// way: the state is recomputed here and stated on the next tick.
     pub fn apply_fixed_position(&mut self, position: Option<FixedPositionWire>) {
         self.fixed_position = position;
+        note_fixed_position(position.is_some());
+        self.policy.set_position_source(has_position_source());
         self.policy.note_position_config_changed();
     }
 
@@ -744,17 +892,24 @@ impl Reporter {
         };
         let hash = DestinationHash::new(target.dest_hash);
 
+        // Say where the target stands whenever that changes — which is
+        // what makes both directions of the position-source switch visible
+        // to a log tail, the return trip as much as the block. Deduped, so
+        // a standing state costs one line and not one every five seconds.
+        self.note_state();
+
+        if self.policy.state() == TargetState::NoPositionSource {
+            // A target and no answer to "where am I": the node sends
+            // nothing. Ahead of the key resolution below on purpose — a
+            // path request is airtime spent chasing a key for reports that
+            // will never be built.
+            return actions;
+        }
+
         if self.policy.state() == TargetState::AwaitingKey {
             if node.storage().get_identity(hash.as_bytes()).is_some() {
                 if self.policy.note_key_available() {
-                    crate::log::log_fmt_critical(
-                        "[INFO!] ",
-                        format_args!(
-                            "[TELEMETRY] target={:08x} state={}",
-                            self.target_short(),
-                            self.policy.state().as_str()
-                        ),
-                    );
+                    self.note_state();
                 }
             } else {
                 // Resolve the key over the air. A path request is
@@ -949,13 +1104,19 @@ impl Reporter {
 
     /// The banner line, emitted beside `[TIME_SOURCE]` so a log tail
     /// always carries the current answer.
-    pub fn log_banner(&self) {
+    ///
+    /// Counts as the state having been stated, so the next tick does not
+    /// repeat it: this line already carries `state=`, and two lines for one
+    /// transition is how a log stops being read.
+    pub fn log_banner(&mut self) {
+        let state = self.state();
+        self.last_state_line = Some(state);
         crate::log::log_fmt_critical(
             "[INFO!] ",
             format_args!(
                 "[TELEMETRY] target={:08x} state={} profile={}",
                 self.target_short(),
-                self.state().as_str(),
+                state.as_str(),
                 self.profile().as_str()
             ),
         );

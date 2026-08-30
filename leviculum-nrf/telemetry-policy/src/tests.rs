@@ -26,10 +26,24 @@ fn north_of(from: Fix, metres: i64) -> Fix {
     }
 }
 
+/// A node that HAS a position source — a GNSS build, or a fixed position
+/// set. That is the second clause of the send condition (Lew, 2026-08-30),
+/// and every cadence test below is about a node past it; the nodes without
+/// one have their own section at the end.
+///
+/// Deliberately not the default of [`SendPolicy::new`]: a node that has
+/// never said it can answer "where am I" has not got a position source, and
+/// a policy that assumed one would report from a board that cannot.
+fn reporting_node() -> SendPolicy {
+    let mut p = SendPolicy::new();
+    p.set_position_source(true);
+    p
+}
+
 /// A policy already past the target dance and past its settle window,
 /// with one report on the clock at `t`.
 fn ready(profile: Profile, t: u64) -> SendPolicy {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(profile, true);
     assert_eq!(p.poll(t, Some(good_fix())), Some(ReportReason::Immediate));
     p.note_sent(t, Some(good_fix()));
@@ -76,7 +90,7 @@ fn the_station_profile_has_no_movement_path() {
 
 #[test]
 fn setting_a_target_loads_that_profiles_parameters() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     assert_eq!(p.params(), PolicyParams::TRACKER);
     p.set_target(Profile::Station, true);
@@ -89,7 +103,7 @@ fn setting_a_target_loads_that_profiles_parameters() {
 
 #[test]
 fn no_target_is_the_default_and_sends_nothing() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     assert_eq!(p.state(), TargetState::Off);
     assert_eq!(p.poll(0, Some(good_fix())), None);
     assert_eq!(p.poll(u64::MAX / 2, Some(good_fix())), None);
@@ -97,7 +111,7 @@ fn no_target_is_the_default_and_sends_nothing() {
 
 #[test]
 fn a_hash_only_target_waits_for_the_key_and_says_so() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     assert_eq!(
         p.set_target(Profile::Station, false),
         TargetState::AwaitingKey
@@ -110,7 +124,7 @@ fn a_hash_only_target_waits_for_the_key_and_says_so() {
 
 #[test]
 fn the_immediate_report_fires_when_the_key_arrives_not_when_the_target_is_set() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Station, false);
     assert_eq!(p.poll(1_000, Some(good_fix())), None);
 
@@ -124,7 +138,7 @@ fn the_immediate_report_fires_when_the_key_arrives_not_when_the_target_is_set() 
 
 #[test]
 fn a_target_set_with_a_known_key_is_ready_at_once() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     assert_eq!(p.set_target(Profile::Station, true), TargetState::Ready);
     assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
 }
@@ -296,7 +310,7 @@ fn a_station_never_reports_on_movement() {
 
 #[test]
 fn the_settle_window_suppresses_the_first_movement_report() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     // Immediate report at t=0 with no fix at all, so the settle anchor
     // is the first usable fix that follows.
@@ -321,7 +335,7 @@ fn the_settle_window_suppresses_the_first_movement_report() {
 #[test]
 fn the_settle_window_does_not_hold_back_the_heartbeat() {
     // A cold start must still prove it is alive.
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Station, true);
     assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
     p.note_sent(0, None);
@@ -377,7 +391,7 @@ fn an_inaccurate_fix_neither_reports_nor_moves_the_reference() {
 
 #[test]
 fn a_bad_fix_does_not_start_the_settle_window() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
     p.note_sent(0, None);
@@ -523,7 +537,7 @@ fn a_ready_target_with_nothing_armed_starts_its_clock_at_the_first_poll() {
     // Reachable only if a caller never confirms the immediate report and
     // then disarms it by hand; kept so the heartbeat cannot fire off a
     // zero timestamp inherited from boot.
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Station, true);
     p.note_sent(0, None);
     p.clear_target();
@@ -534,7 +548,7 @@ fn a_ready_target_with_nothing_armed_starts_its_clock_at_the_first_poll() {
 
 #[test]
 fn expert_parameters_override_the_profile_preset() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Station, true);
     p.note_sent(0, None);
     p.set_params(PolicyParams {
@@ -551,7 +565,7 @@ fn expert_parameters_override_the_profile_preset() {
 
 #[test]
 fn a_hash_only_frame_lands_in_awaiting_key_and_sends_nothing() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     let command = command_from_wire(PROFILE_ID_STATION);
     assert_eq!(command, TargetCommand::Set(Profile::Station));
     assert_eq!(
@@ -565,7 +579,7 @@ fn a_hash_only_frame_lands_in_awaiting_key_and_sends_nothing() {
 
 #[test]
 fn the_key_arriving_moves_it_to_ready_and_owes_one_report() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.apply(command_from_wire(PROFILE_ID_STATION), false);
     assert!(p.note_key_available());
     assert_eq!(p.state().as_str(), "ready");
@@ -574,7 +588,7 @@ fn the_key_arriving_moves_it_to_ready_and_owes_one_report() {
 
 #[test]
 fn a_clear_frame_switches_telemetry_off() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.apply(command_from_wire(PROFILE_ID_TRACKER), true);
     p.note_sent(0, None);
     assert_eq!(command_from_wire(PROFILE_ID_OFF), TargetCommand::Clear);
@@ -588,7 +602,7 @@ fn a_clear_frame_switches_telemetry_off() {
 
 #[test]
 fn an_unknown_profile_id_runs_the_default_cadence_rather_than_losing_the_target() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     assert_eq!(
         command_from_wire(0x7F),
         TargetCommand::Set(Profile::DEFAULT)
@@ -603,7 +617,7 @@ fn an_unknown_profile_id_runs_the_default_cadence_rather_than_losing_the_target(
 
 #[test]
 fn a_clear_frame_on_a_node_that_had_no_target_is_still_off() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     assert_eq!(
         p.apply(command_from_wire(PROFILE_ID_OFF), false),
         TargetOutcome::Cleared
@@ -646,7 +660,7 @@ fn a_lost_dispatch_leaves_the_cadence_unconsumed() {
 
 #[test]
 fn a_lost_dispatch_does_not_consume_an_armed_immediate_report() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     assert_eq!(p.poll(0, Some(good_fix())), Some(ReportReason::Immediate));
     p.note_emitted(0, Some(good_fix()));
@@ -756,7 +770,7 @@ fn the_cadence_anchors_at_emission_not_at_settlement() {
 #[test]
 fn two_failed_dispatches_cannot_emit_closer_together_than_the_minimum_interval() {
     let params = Profile::Tracker.params();
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
 
     // The first attempt: the one report a newly usable target owes. It is
@@ -816,13 +830,13 @@ fn control_a_failed_dispatch_still_does_not_consume_the_reading() {
 /// would wait a whole interval for its first reading.
 #[test]
 fn control_the_immediate_report_is_not_held_back_by_the_attempt_floor() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     assert_eq!(p.poll(0, Some(good_fix())), Some(ReportReason::Immediate));
 
     // Same on the hash-only path, where the key — and with it the arming —
     // arrives long after the target was set.
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, false);
     assert_eq!(p.poll(5_000, Some(good_fix())), None);
     assert!(p.note_key_available());
@@ -842,7 +856,7 @@ fn the_attempt_floor_is_the_policys_own_minimum_interval() {
     };
     for params in [Profile::Tracker.params(), Profile::Station.params(), expert] {
         let floor = params.min_interval_ms;
-        let mut p = SendPolicy::new();
+        let mut p = reporting_node();
         p.set_target(Profile::Tracker, true);
         p.set_params(params);
 
@@ -873,7 +887,7 @@ fn the_attempt_floor_is_the_policys_own_minimum_interval() {
 #[test]
 fn a_new_target_does_not_reset_the_attempt_floor() {
     let floor = Profile::Tracker.params().min_interval_ms;
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
     p.note_emitted(0, None);
@@ -944,7 +958,7 @@ fn report_route() -> EmissionRoute {
 /// whose every dispatch loses something on `losses`. Returns the times at
 /// which it emitted a report.
 fn emission_times(window_ms: u64, losses: &[usize]) -> Vec<u64> {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Tracker, true);
     let mut times = Vec::new();
     let mut t = 0;
@@ -1072,7 +1086,7 @@ fn clearing_the_fixed_position_returns_to_the_sensor() {
 #[test]
 fn a_fixed_position_is_reportable_in_every_profile() {
     for profile in [Profile::Tracker, Profile::Station] {
-        let mut p = SendPolicy::new();
+        let mut p = reporting_node();
         p.set_target(profile, true);
         assert!(
             p.position_is_reportable(fixed_fix()),
@@ -1102,11 +1116,11 @@ fn a_position_config_change_re_arms_the_immediate_report() {
 /// — arming here would let a cleared target's confirmation fire later.
 #[test]
 fn a_position_config_change_arms_nothing_off_or_awaiting() {
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.note_position_config_changed();
     assert_eq!(p.poll(0, Some(fixed_fix())), None);
 
-    let mut p = SendPolicy::new();
+    let mut p = reporting_node();
     p.set_target(Profile::Station, false);
     p.note_position_config_changed();
     assert_eq!(p.poll(0, Some(fixed_fix())), None);
@@ -1130,4 +1144,116 @@ fn the_attempt_floor_holds_the_re_armed_immediate_back() {
         p.poll(1_000_000 + 60 * 60_000, Some(fixed_fix())),
         Some(ReportReason::Immediate)
     );
+}
+
+// ---------------------------------------------------------------------------
+// The position-source clause of the send condition (Lew, 2026-08-30)
+// ---------------------------------------------------------------------------
+
+/// A target and nothing that answers "where am I": the node sends nothing
+/// at all, and the state says why instead of leaving the operator to guess.
+#[test]
+fn a_target_without_a_position_source_sends_nothing_and_says_why() {
+    let mut p = SendPolicy::new();
+    assert_eq!(
+        p.set_target(Profile::Station, true),
+        TargetState::NoPositionSource
+    );
+    assert_eq!(p.state().as_str(), "no-position-source");
+    // Not the immediate report, and not the heartbeat either — an hour
+    // later, two hours later, still nothing. "Sends nothing" is literal.
+    assert_eq!(p.poll(0, None), None);
+    assert_eq!(p.poll(60 * 60_000, None), None);
+    assert_eq!(p.poll(2 * 60 * 60_000, None), None);
+}
+
+/// **The positive control for the test above.** The same target, the same
+/// clock, on a node that does have a position source: it reports at once.
+/// Without this the first test would pass just as well against a policy
+/// that had stopped reporting for some other reason.
+#[test]
+fn control_the_same_target_reports_when_a_position_source_exists() {
+    let mut p = reporting_node();
+    assert_eq!(p.set_target(Profile::Station, true), TargetState::Ready);
+    assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
+}
+
+/// A node whose receiver has no fix keeps reporting: the switch is intent,
+/// not possession. The tracker in the garage sends its heartbeat with no
+/// position and a fresh battery reading, which is the designed behaviour.
+#[test]
+fn a_gnss_node_without_a_fix_keeps_reporting_position_less() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Station, true);
+    assert_eq!(p.state(), TargetState::Ready);
+    // No fix at all, ever — and the immediate plus the heartbeat still fire.
+    assert_eq!(p.poll(0, None), Some(ReportReason::Immediate));
+    p.note_sent(0, None);
+    assert_eq!(
+        p.poll(60 * 60_000, None),
+        Some(ReportReason::Heartbeat),
+        "a receiver without sky is not a node without telemetry"
+    );
+}
+
+/// Setting a fixed position on a board that had no source flips it to the
+/// ordinary lifecycle at once — the runtime path, no reboot.
+#[test]
+fn a_position_source_appearing_resumes_the_normal_lifecycle() {
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Station, true);
+    assert_eq!(p.poll(0, None), None);
+
+    assert_eq!(p.set_position_source(true), TargetState::Ready);
+    // The immediate the target armed was never spent, so it is still owed.
+    assert_eq!(p.poll(1_000, None), Some(ReportReason::Immediate));
+}
+
+/// And back the other way: clearing the last source on a running node
+/// stops it and names the reason, without disturbing the key lifecycle
+/// underneath — which is what makes the return trip free.
+#[test]
+fn a_position_source_disappearing_stops_the_node_and_names_the_reason() {
+    let mut p = ready(Profile::Station, 0);
+    assert_eq!(p.set_position_source(false), TargetState::NoPositionSource);
+    assert_eq!(p.poll(60 * 60_000, Some(good_fix())), None);
+
+    assert_eq!(p.set_position_source(true), TargetState::Ready);
+    assert_eq!(
+        p.poll(60 * 60_000, Some(good_fix())),
+        Some(ReportReason::Heartbeat),
+        "the key was never re-resolved, so the heartbeat picks up where it was"
+    );
+}
+
+/// The key lifecycle keeps running underneath, but it is not what the
+/// operator is shown: "no position source" is the reason nothing will be
+/// sent, and the key is not.
+#[test]
+fn no_position_source_outranks_awaiting_key_in_the_reported_state() {
+    let mut p = SendPolicy::new();
+    assert_eq!(
+        p.set_target(Profile::Station, false),
+        TargetState::NoPositionSource
+    );
+    assert!(p.note_key_available(), "the key lifecycle still advances");
+    assert_eq!(p.state(), TargetState::NoPositionSource);
+    assert_eq!(p.set_position_source(true), TargetState::Ready);
+}
+
+/// No target beats no position source: a node nobody asked to report is
+/// simply off, and telling its operator to set a pin would be nonsense.
+#[test]
+fn off_outranks_no_position_source() {
+    let mut p = SendPolicy::new();
+    assert_eq!(p.state(), TargetState::Off);
+    p.set_target(Profile::Station, true);
+    assert_eq!(p.state(), TargetState::NoPositionSource);
+    p.clear_target();
+    assert_eq!(p.state(), TargetState::Off);
+    // Clearing the target does not un-declare the node's own hardware.
+    assert!(!p.has_position_source());
+    p.set_position_source(true);
+    assert_eq!(p.state(), TargetState::Off);
+    assert!(p.has_position_source());
 }

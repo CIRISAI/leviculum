@@ -1208,10 +1208,10 @@ pub fn set_telemetry(
     let mut all_took_it = reachable.unreachable == 0;
     for board in &reachable.boards {
         let port = &board.port;
-        let reply = match open_transport(sysfs, &board.device, &board.tty)
-            .and_then(|fd| telemetry::send_configured(&fd, &target))
+        let (reply, sources) = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| telemetry::send_configured_and_read_sources(&fd, &target))
         {
-            Ok(reply) => reply,
+            Ok(answer) => answer,
             Err(err) => {
                 ui.say(&format!(
                     "{port}: the transport port could not be used ({err})"
@@ -1221,7 +1221,7 @@ pub fn set_telemetry(
             }
         };
         all_took_it &= reply.took_it();
-        report_telemetry(ui, port, &target, reply);
+        report_telemetry(ui, port, &target, reply, sources);
     }
     Ok(all_took_it)
 }
@@ -1237,11 +1237,19 @@ pub fn set_telemetry(
 /// back would be a second connection to a board mid-configuration, so the
 /// ack is what is reported and the operator is told where the node says the
 /// rest.
+///
+/// `sources` is what the board answered to the position-source query, and
+/// `None` is "it did not say" — older firmware, or a binary with no
+/// reporter. A board that says it has none gets the consequence sentence:
+/// the target is valid configuration and is stored, so this is honest
+/// information and not a refusal, but an operator who is not told will wait
+/// for reports that cannot come.
 fn report_telemetry(
     ui: &mut dyn Ui,
     port: &str,
     target: &leviculum_core::envelope::TelemetryTargetWire,
     reply: SessionReply,
+    sources: Option<crate::envelope::PositionSources>,
 ) {
     use leviculum_core::envelope::TELEMETRY_PROFILE_OFF;
     match reply {
@@ -1254,6 +1262,14 @@ fn report_telemetry(
                 "{port}: telemetry on — {}.",
                 telemetry::describe(target)
             ));
+            if sources.is_some_and(|s| !s.any()) {
+                ui.say(&format!(
+                    "{port}: target stored; nothing will be sent until a position source exists \
+                     — set one with --set-position. Sending the position is what switches the \
+                     reports on, so this board reports [TELEMETRY] target=… \
+                     state=no-position-source until it has one."
+                ));
+            }
             if target.public_key.is_none() {
                 ui.say(&format!(
                     "{port}: the node has no key for that address yet, so it asks the mesh for \
@@ -1523,18 +1539,18 @@ fn set_telemetry_on(
         tty.display(),
         telemetry::describe(&target)
     ));
-    let reply = match open_transport(sysfs, app, &tty)
-        .and_then(|fd| telemetry::send_configured(&fd, &target))
+    let (reply, sources) = match open_transport(sysfs, app, &tty)
+        .and_then(|fd| telemetry::send_configured_and_read_sources(&fd, &target))
     {
-        Ok(reply) => reply,
+        Ok(answer) => answer,
         Err(err) => {
             ui.say(&format!(
                 "{port}: the transport port could not be used ({err})"
             ));
-            SessionReply::NoAnswer
+            (SessionReply::NoAnswer, None)
         }
     };
-    report_telemetry(ui, port, &target, reply);
+    report_telemetry(ui, port, &target, reply, sources);
     Ok(Some(TelemetryOutcome { target, reply }))
 }
 
@@ -1909,6 +1925,7 @@ mod tests {
             "ttyACM9",
             &target,
             SessionReply::Refused(leviculum_core::envelope::REFUSE_UNSUPPORTED),
+            None,
         );
         let said = ui.transcript();
         assert!(said.contains("carries no telemetry reporter"), "{said}");
@@ -2858,13 +2875,37 @@ convert = "hex-to-uf2"
         }
     }
 
+    /// A board that answered the position-source query with a receiver and
+    /// no pin — the RAK out of the box, and the board that needs no
+    /// consequence sentence.
+    fn has_gnss() -> crate::envelope::PositionSources {
+        crate::envelope::PositionSources {
+            fixed: false,
+            gnss: true,
+        }
+    }
+
+    /// A board that answered with nothing at all: no receiver, no pin.
+    fn has_no_position_source() -> crate::envelope::PositionSources {
+        crate::envelope::PositionSources {
+            fixed: false,
+            gnss: false,
+        }
+    }
+
     #[test]
     fn an_acked_hash_only_target_is_reported_with_what_the_node_does_next() {
         // The operator wants to know it worked. The ack says the board took
         // the frame; the node's own state line says whether it can send yet,
         // and hash-only means "not until an announce answers".
         let mut ui = crate::ui::testing::Fake::agreeing();
-        report_telemetry(&mut ui, "3-2.4", &station_target(), SessionReply::Acked);
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &station_target(),
+            SessionReply::Acked,
+            Some(has_gnss()),
+        );
         let said = ui.transcript();
         assert!(said.contains("telemetry on"), "{said}");
         assert!(said.contains("profile=station"), "{said}");
@@ -2881,7 +2922,13 @@ convert = "hex-to-uf2"
             public_key: Some([0x5E; 64]),
             ..station_target()
         };
-        report_telemetry(&mut ui, "3-2.4", &with_key, SessionReply::Acked);
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &with_key,
+            SessionReply::Acked,
+            Some(has_gnss()),
+        );
         let said = ui.transcript();
         assert!(said.contains("state=ready"), "{said}");
         assert!(!said.contains("awaiting-key"), "{said}");
@@ -2895,10 +2942,77 @@ convert = "hex-to-uf2"
             "3-2.4",
             &telemetry::clear_target(),
             SessionReply::Acked,
+            None,
         );
         let said = ui.transcript();
         assert!(said.contains("telemetry off"), "{said}");
         assert!(!said.contains("awaiting-key"), "{said}");
+    }
+
+    /// A board with no position source takes the target — it is valid
+    /// configuration — and is told the consequence: nothing will be sent
+    /// until it has one. An ack alone would leave the operator waiting for
+    /// reports that cannot come.
+    #[test]
+    fn an_acked_target_on_a_board_without_a_position_source_names_the_consequence() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &station_target(),
+            SessionReply::Acked,
+            Some(has_no_position_source()),
+        );
+        let said = ui.transcript();
+        // Honest, not a refusal: the target IS stored.
+        assert!(said.contains("telemetry on"), "{said}");
+        assert!(said.contains("target stored"), "{said}");
+        assert!(
+            said.contains("nothing will be sent until a position source exists"),
+            "{said}"
+        );
+        // And it says what to do about it, in the flag that does it.
+        assert!(said.contains("--set-position"), "{said}");
+        assert!(said.contains("state=no-position-source"), "{said}");
+    }
+
+    /// **The positive control.** The same ack on a board that answered with
+    /// a receiver says nothing of the kind — otherwise the sentence above
+    /// would be unconditional boilerplate rather than a fact read off the
+    /// board.
+    #[test]
+    fn control_a_board_with_a_position_source_is_not_told_it_will_stay_silent() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &station_target(),
+            SessionReply::Acked,
+            Some(has_gnss()),
+        );
+        let said = ui.transcript();
+        assert!(said.contains("telemetry on"), "{said}");
+        assert!(!said.contains("nothing will be sent"), "{said}");
+        assert!(!said.contains("--set-position"), "{said}");
+    }
+
+    /// A board that did not answer the query — older firmware, or one with
+    /// no reporter — is told nothing about position sources. Guessing here
+    /// would put a false warning in front of an operator whose board is
+    /// fine.
+    #[test]
+    fn a_board_that_did_not_answer_the_query_is_told_nothing_about_position_sources() {
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &station_target(),
+            SessionReply::Acked,
+            None,
+        );
+        let said = ui.transcript();
+        assert!(said.contains("telemetry on"), "{said}");
+        assert!(!said.contains("nothing will be sent"), "{said}");
     }
 
     #[test]
@@ -2915,7 +3029,7 @@ convert = "hex-to-uf2"
             ),
         ] {
             let mut ui = crate::ui::testing::Fake::agreeing();
-            report_telemetry(&mut ui, "3-2.4", &station_target(), reply);
+            report_telemetry(&mut ui, "3-2.4", &station_target(), reply, None);
             let said = ui.transcript();
             assert!(said.contains(expected), "{reply:?}: {said}");
             assert!(!said.contains("telemetry on"), "{reply:?}: {said}");

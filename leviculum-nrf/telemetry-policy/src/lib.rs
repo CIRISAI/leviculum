@@ -30,6 +30,12 @@
 //! The configured target *is* the on-switch: no target is
 //! [`TargetState::Off`] and that is the default, which removes the
 //! on-without-target and off-with-target states entirely.
+//!
+//! A second switch sits beside it, decided by Lew on 2026-08-30: **sending
+//! the position is what turns on sending everything else**, so a node with
+//! a target and no *position source* reports nothing at all
+//! ([`TargetState::NoPositionSource`]). The reading is intent, not
+//! possession — see [`SendPolicy::set_position_source`].
 
 #![cfg_attr(not(test), no_std)]
 
@@ -188,6 +194,17 @@ impl PolicyParams {
 pub enum TargetState {
     /// No target configured. Telemetry is off; this is the default.
     Off,
+    /// A target is configured but no position source is
+    /// ([`SendPolicy::set_position_source`]). Nothing is sent — not a
+    /// heartbeat, not a battery reading — and the node says so instead of
+    /// going quiet without a word.
+    ///
+    /// Ahead of [`AwaitingKey`](Self::AwaitingKey) on purpose: a node that
+    /// will not report anyway must not spend airtime resolving a key it has
+    /// no use for, and "no position source" is the honest headline while it
+    /// holds. Setting a fixed position (or running a GNSS build) leaves
+    /// this state at once, with no reboot.
+    NoPositionSource,
     /// A target hash is configured but its public key is not known yet.
     /// The node resolves it over the air (path request, or simply hearing
     /// the target's announce). Nothing can be sent from here.
@@ -202,6 +219,7 @@ impl TargetState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::NoPositionSource => "no-position-source",
             Self::AwaitingKey => "awaiting-key",
             Self::Ready => "ready",
         }
@@ -438,7 +456,16 @@ pub enum TargetOutcome {
 pub struct SendPolicy {
     profile: Profile,
     params: PolicyParams,
-    state: TargetState,
+    /// The *key* lifecycle alone: `Off`, `AwaitingKey` or `Ready`. Never
+    /// [`TargetState::NoPositionSource`] — that one is a second axis, and
+    /// [`state`](Self::state) is where the two are combined. Keeping them
+    /// apart is what makes the position source appearing or disappearing a
+    /// pure toggle: the key lifecycle underneath is not disturbed, so a
+    /// node that had already resolved its key does not resolve it again.
+    key_state: TargetState,
+    /// Whether a position source is configured — see
+    /// [`set_position_source`](Self::set_position_source).
+    position_source: bool,
     /// Armed when the target became usable and not yet spent.
     immediate_pending: bool,
     /// When the first fix passing the accuracy gate was seen; the settle
@@ -481,7 +508,8 @@ impl SendPolicy {
         Self {
             profile: Profile::DEFAULT,
             params: Profile::DEFAULT.params(),
-            state: TargetState::Off,
+            key_state: TargetState::Off,
+            position_source: false,
             immediate_pending: false,
             first_fix_ms: None,
             last_report_ms: None,
@@ -491,8 +519,50 @@ impl SendPolicy {
         }
     }
 
+    /// The one state an operator is shown, both axes folded together.
+    ///
+    /// With no target there is nothing to say beyond [`TargetState::Off`].
+    /// With a target and no position source the answer is
+    /// [`TargetState::NoPositionSource`] whatever the key lifecycle is
+    /// doing underneath, because that is the reason nothing will be sent.
     pub const fn state(&self) -> TargetState {
-        self.state
+        match self.key_state {
+            TargetState::Off => TargetState::Off,
+            _ if !self.position_source => TargetState::NoPositionSource,
+            other => other,
+        }
+    }
+
+    /// Declare whether this node has a **position source configured**: a
+    /// user-set fixed position, or a GNSS receiver that is built into this
+    /// firmware and not switched off.
+    ///
+    /// Returns the state the node is now in, so a caller logs the answer
+    /// rather than predicting it.
+    ///
+    /// # Intent, not possession (Lew, 2026-08-30)
+    ///
+    /// The switch is "does this node mean to report where it is", not "does
+    /// it know where it is right now". A GNSS node sitting in a garage with
+    /// no fix keeps reporting on the heartbeat, position absent — a tracker
+    /// that goes silent the moment it loses sky is a tracker that is
+    /// indistinguishable from a dead one, and the aging pin plus fresh
+    /// battery and temperature data is the designed behaviour, not a
+    /// degraded one. What is refused is the *unconfigured* node: a target
+    /// and no answer at all to "where", which is telemetry nobody asked
+    /// for.
+    ///
+    /// It is a runtime path, deliberately: a `--set-position` on a board
+    /// that had none flips it to the ordinary lifecycle without a reboot,
+    /// exactly as applying a target does.
+    pub fn set_position_source(&mut self, present: bool) -> TargetState {
+        self.position_source = present;
+        self.state()
+    }
+
+    /// Whether a position source is configured.
+    pub const fn has_position_source(&self) -> bool {
+        self.position_source
     }
 
     pub const fn profile(&self) -> Profile {
@@ -529,16 +599,16 @@ impl SendPolicy {
         self.last_report_ms = None;
         self.last_reported_fix = None;
         if key_known {
-            self.state = TargetState::Ready;
+            self.key_state = TargetState::Ready;
             self.immediate_pending = true;
         } else {
-            self.state = TargetState::AwaitingKey;
+            self.key_state = TargetState::AwaitingKey;
             // Not armed yet: the immediate report cannot be sent without
             // the key, and arming it here would let it fire on a target
             // that is later cleared before the key ever arrives.
             self.immediate_pending = false;
         }
-        self.state
+        self.state()
     }
 
     /// Apply a control frame's decision in one call: the set/clear split
@@ -562,8 +632,8 @@ impl SendPolicy {
     /// is the moment the immediate report is armed and the event worth
     /// logging.
     pub fn note_key_available(&mut self) -> bool {
-        if self.state == TargetState::AwaitingKey {
-            self.state = TargetState::Ready;
+        if self.key_state == TargetState::AwaitingKey {
+            self.key_state = TargetState::Ready;
             self.immediate_pending = true;
             true
         } else {
@@ -580,7 +650,7 @@ impl SendPolicy {
     /// other state this is a no-op: off has nobody to confirm to, and
     /// awaiting-key arms the immediate on key arrival anyway.
     pub fn note_position_config_changed(&mut self) {
-        if self.state == TargetState::Ready {
+        if self.key_state == TargetState::Ready {
             self.immediate_pending = true;
         }
     }
@@ -588,8 +658,8 @@ impl SendPolicy {
     /// The key went away again (a target changed to one we do not hold).
     /// Only meaningful from [`TargetState::Ready`].
     pub fn note_key_lost(&mut self) -> bool {
-        if self.state == TargetState::Ready {
-            self.state = TargetState::AwaitingKey;
+        if self.key_state == TargetState::Ready {
+            self.key_state = TargetState::AwaitingKey;
             self.immediate_pending = false;
             true
         } else {
@@ -601,7 +671,7 @@ impl SendPolicy {
     /// so a later target does not inherit a stale "last reported" from a
     /// different recipient.
     pub fn clear_target(&mut self) {
-        self.state = TargetState::Off;
+        self.key_state = TargetState::Off;
         self.immediate_pending = false;
         self.last_report_ms = None;
         self.last_reported_fix = None;
@@ -650,7 +720,11 @@ impl SendPolicy {
     /// A node that has emitted nothing yet has no floor to clear, which is
     /// what keeps the immediate report of a newly usable target immediate.
     pub fn poll(&mut self, now_ms: u64, fix: Option<Fix>) -> Option<ReportReason> {
-        if self.state != TargetState::Ready {
+        // `state()` and not `key_state`: a node with no position source is
+        // not [`TargetState::Ready`] however far its key lifecycle got, and
+        // that is the whole of the send condition's second clause. The
+        // heartbeat is included — "sends nothing" means nothing.
+        if self.state() != TargetState::Ready {
             return None;
         }
         let usable = fix.filter(|f| self.position_is_reportable(*f));

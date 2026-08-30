@@ -147,6 +147,26 @@ pub struct PowerProducer {
     pub custom_icon: Option<String>,
 }
 
+/// Degrees Celsius as `SID_TEMPERATURE` wants them, from a reading in
+/// quarter-degree steps.
+///
+/// The nRF52's `sd_temp_get` is one such producer (0.25 °C per step, the
+/// raw TEMP register unit) and it is why this lives here rather than in the
+/// firmware: the packing convention belongs to the codec, and a second copy
+/// of it beside a sensor would drift from this one.
+///
+/// Sideband rounds the sensor to two decimals before packing
+/// (`round(self.android_sensor.temperature, 2)`, `sense.py`
+/// `Temperature.update_data`, Sideband `2000d81`), and `pack` then emits
+/// that number bare. A quarter-degree step is exact at two decimals and
+/// exactly representable as a double, so `× 0.25` **is** that rounding
+/// rather than an approximation of it — which is also why the caller is
+/// asked for quarter-degrees instead of a float it would have to round
+/// without a `libm` to round with.
+pub fn celsius_from_quarter_degrees(quarters: i32) -> Number {
+    Number::Float(quarters as f64 * 0.25)
+}
+
 /// One decoded (or to-be-encoded) Telemeter: the value of `FIELD_TELEMETRY`.
 ///
 /// `None` means "no reading" and encodes as an omitted key. The sensor set

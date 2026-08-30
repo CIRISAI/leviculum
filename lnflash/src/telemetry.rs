@@ -140,6 +140,33 @@ pub fn send_configured(fd: &Fd, target: &TelemetryTargetWire) -> io::Result<Sess
     })
 }
 
+/// Send the target and, when the board took it, read back whether it has a
+/// position source at all.
+///
+/// The read-back is the second clause of the send condition
+/// (`docs/src/concepts/telemetry.md`): a stored target on a board with no
+/// fixed position and no receiver produces no reports, ever, and an ack
+/// that says nothing about that is an ack the operator will misread. It is
+/// asked on the same open port as the target frame — a second open would be
+/// a second connection to a board mid-configuration.
+///
+/// `None` for the sources is "the board did not say": firmware without the
+/// query, or a reporter-less binary refusing by name. The caller then says
+/// nothing about position sources, because inventing the answer here would
+/// be the one failure worse than the silence.
+pub fn send_configured_and_read_sources(
+    fd: &Fd,
+    target: &TelemetryTargetWire,
+) -> io::Result<(SessionReply, Option<envelope::PositionSources>)> {
+    let reply = send_configured(fd, target)?;
+    if !reply.took_it() || target.profile == TELEMETRY_PROFILE_OFF {
+        // A refusal has its own words already, and a cleared target sends
+        // nothing whatever the board can measure.
+        return Ok((reply, None));
+    }
+    Ok((reply, envelope::query_position_sources(fd)?.ok()))
+}
+
 /// The profile a `--telemetry-profile` value names.
 pub fn parse_profile(name: &str) -> Result<u8, String> {
     match name.trim().to_ascii_lowercase().as_str() {
@@ -234,8 +261,8 @@ fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> 
 mod tests {
     use super::*;
     use crate::envelope::testing::{
-        envelope_firmware_stub, old_firmware_stub, pre_236_firmware_stub,
-        reporterless_firmware_stub, seen, telemetry_frame,
+        envelope_firmware_stub, old_firmware_stub, positionless_firmware_stub,
+        pre_236_firmware_stub, reporterless_firmware_stub, seen, telemetry_frame,
     };
     use crate::sys::testpty::Pty;
     use crate::ui::testing::Fake;
@@ -560,5 +587,104 @@ mod tests {
             SessionReply::NotAccepted
         );
         assert_eq!(telemetry_frame(&seen), None);
+    }
+    // -----------------------------------------------------------------
+    // The position source the target depends on (Lew, 2026-08-30)
+    // -----------------------------------------------------------------
+
+    /// A board with a receiver reports its source alongside the ack, on
+    /// the same open port. This is the control for the test after it.
+    #[test]
+    fn a_board_with_a_receiver_reports_that_it_has_a_position_source() {
+        let pty = Pty::open();
+        envelope_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let (reply, sources) =
+            send_configured_and_read_sources(&fd, &station(ADDRESS_BYTES)).unwrap();
+        assert_eq!(reply, SessionReply::Acked);
+        let sources = sources.expect("the board answered the query");
+        assert!(sources.gnss);
+        assert!(!sources.fixed);
+        assert!(sources.any());
+    }
+
+    /// A board with neither a receiver nor a pin takes the target — valid
+    /// configuration — and says it has no position source, which is what
+    /// earns the consequence sentence.
+    #[test]
+    fn a_board_with_neither_source_acks_the_target_and_says_it_has_none() {
+        let pty = Pty::open();
+        let seen = seen();
+        positionless_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let (reply, sources) =
+            send_configured_and_read_sources(&fd, &station(ADDRESS_BYTES)).unwrap();
+        assert_eq!(
+            reply,
+            SessionReply::Acked,
+            "the target is stored, not refused"
+        );
+        assert!(telemetry_frame(&seen).is_some());
+        assert!(!sources.expect("the board answered").any());
+    }
+
+    /// Setting a pin is the runtime path out of it: the same board, asked
+    /// again after a fixed position reaches it, now has a source.
+    #[test]
+    fn setting_a_fixed_position_gives_a_sourceless_board_a_source() {
+        let pty = Pty::open();
+        positionless_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let (_, before) = send_configured_and_read_sources(&fd, &station(ADDRESS_BYTES)).unwrap();
+        assert!(!before.expect("the board answered").any());
+
+        let position = leviculum_core::envelope::FixedPositionWire {
+            latitude_e6: 53_551_086,
+            longitude_e6: 9_993_682,
+            altitude_e2: None,
+        };
+        assert_eq!(
+            crate::envelope::send_fixed_position(&fd, Some(&position)).unwrap(),
+            crate::envelope::ControlOutcome::Acked
+        );
+
+        let after = crate::envelope::query_position_sources(&fd)
+            .unwrap()
+            .expect("the board answered");
+        assert!(after.fixed, "the pin is a position source");
+        assert!(after.any());
+    }
+
+    /// A cleared target is not asked about position sources at all: it
+    /// sends nothing whatever the board can measure, so a warning about
+    /// pins would be noise.
+    #[test]
+    fn clearing_the_target_asks_nothing_about_position_sources() {
+        let pty = Pty::open();
+        positionless_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let (reply, sources) = send_configured_and_read_sources(&fd, &clear_target()).unwrap();
+        assert_eq!(reply, SessionReply::Acked);
+        assert_eq!(sources, None);
+    }
+
+    /// A binary with no reporter refuses the query by name rather than
+    /// answering "no sources", which would read as a promise that setting
+    /// one would help. The caller gets `None` and says nothing.
+    #[test]
+    fn a_reporterless_board_refuses_the_query_instead_of_answering_zero() {
+        let pty = Pty::open();
+        reporterless_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        assert_eq!(
+            crate::envelope::query_position_sources(&fd).unwrap(),
+            Err(crate::envelope::ControlOutcome::Refused {
+                reason: leviculum_core::envelope::REFUSE_UNSUPPORTED
+            })
+        );
     }
 }

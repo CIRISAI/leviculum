@@ -62,6 +62,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_FIXED_POSITION,
     envelope::TYPE_MEDIA_PROFILE,
     envelope::TYPE_MEDIA_QUERY,
+    envelope::TYPE_POSITION_SOURCE_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -592,6 +593,25 @@ async fn retic_serial_task(
                                     );
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: media report write failed");
+                                    }
+                                }
+                                ControlAction::PositionSourceQuery => {
+                                    // Answered here from the published
+                                    // flags rather than by asking the main
+                                    // loop: read-only, and both writers of
+                                    // the value are one atomic store, so
+                                    // what goes back is the state already
+                                    // in force. Same capability gate as
+                                    // the target frame — a binary with no
+                                    // reporter must not answer "no
+                                    // position source", which reads as a
+                                    // promise that setting one would help.
+                                    let answer = envelope::position_source_query_answer(
+                                        crate::telemetry::reporter_wired(),
+                                        crate::telemetry::position_source_flags(),
+                                    );
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: position-source report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {
