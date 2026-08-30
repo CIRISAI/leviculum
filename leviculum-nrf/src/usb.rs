@@ -521,16 +521,18 @@ async fn retic_serial_task(
                                     // The main loop owns the node, so it is
                                     // the one place a target can be looked
                                     // up against the identity store and
-                                    // persisted. A full channel means one is
-                                    // already pending — refuse audibly.
-                                    let answer = if crate::telemetry::deliver_target(target) {
-                                        envelope::encode_ack(envelope::TYPE_TELEMETRY_TARGET)
-                                    } else {
-                                        envelope::encode_refusal(
-                                            envelope::TYPE_TELEMETRY_TARGET,
-                                            envelope::REFUSE_BUSY,
-                                        )
-                                    };
+                                    // persisted. The ack is gated on the
+                                    // binary's declared reporter: this
+                                    // shared layer must never ack a
+                                    // capability the binary does not have.
+                                    // With a reporter, an undelivered frame
+                                    // is a full channel — refuse audibly,
+                                    // the host retries.
+                                    let wired = crate::telemetry::reporter_wired();
+                                    let delivered =
+                                        wired && crate::telemetry::deliver_target(target);
+                                    let answer =
+                                        envelope::telemetry_target_answer(wired, delivered);
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: telemetry answer write failed");
                                     }

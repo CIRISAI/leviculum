@@ -139,6 +139,14 @@ pub const REFUSE_MALFORMED: u8 = 0x02;
 pub const REFUSE_VALUE: u8 = 0x03;
 /// The firmware is momentarily unable to take the frame; retry.
 pub const REFUSE_BUSY: u8 = 0x04;
+/// The frame type is known to the envelope layer, but this binary carries
+/// no consumer that would honor it — retrying or rebooting cannot help,
+/// only different firmware can. Distinct from [`REFUSE_UNKNOWN_TYPE`]
+/// (the type itself is foreign) and from [`REFUSE_BUSY`] (retry works):
+/// the shared control-envelope layer must never ack a capability the
+/// binary does not have, which is exactly what the T114 did to a
+/// telemetry target before it carried a reporter.
+pub const REFUSE_UNSUPPORTED: u8 = 0x05;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -407,6 +415,29 @@ pub fn decode_telemetry_target_payload(payload: &[u8]) -> Option<TelemetryTarget
         dest_hash,
         public_key,
     })
+}
+
+/// The answer to a telemetry-target frame, decided by capability first.
+///
+/// `reporter_wired` is the binary's declaration that it constructs a
+/// telemetry reporter and drains the target channel; `delivered` is
+/// whether this frame actually reached that channel. A binary without a
+/// reporter answers [`REFUSE_UNSUPPORTED`] no matter what the envelope
+/// layer could parse — an ack is a promise the target will be honored,
+/// and only the reporter can keep it. With a reporter, an undelivered
+/// frame is a full channel: [`REFUSE_BUSY`], the host retries.
+///
+/// Pure so the refusal path is provable on the host with a reporter-less
+/// configuration, independent of which BSPs happen to wire a reporter
+/// today.
+pub fn telemetry_target_answer(reporter_wired: bool, delivered: bool) -> Vec<u8> {
+    if !reporter_wired {
+        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED)
+    } else if delivered {
+        encode_ack(TYPE_TELEMETRY_TARGET)
+    } else {
+        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +742,34 @@ mod tests {
         assert_eq!(target.profile, TELEMETRY_PROFILE_OFF);
         assert_eq!(target.dest_hash, [0u8; TRUNCATED_HASHBYTES]);
         assert_eq!(target.public_key, None);
+    }
+
+    #[test]
+    fn a_binary_without_a_reporter_refuses_the_target_it_cannot_honor() {
+        // Ack honesty: the reporter-less configuration answers a named
+        // refusal no matter what the channel would have taken — an ack
+        // here was the T114's "telemetry on" over a binary with no
+        // reporter to honor it.
+        for delivered in [false, true] {
+            assert_eq!(
+                decode_refusal_payload(
+                    &telemetry_target_answer(false, delivered)[ENVELOPE_HEADER_LEN..]
+                ),
+                Some((TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED))
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_with_a_reporter_acks_a_delivered_target_and_names_a_full_channel() {
+        assert_eq!(
+            decode_ack_payload(&telemetry_target_answer(true, true)[ENVELOPE_HEADER_LEN..]),
+            Some(TYPE_TELEMETRY_TARGET)
+        );
+        assert_eq!(
+            decode_refusal_payload(&telemetry_target_answer(true, false)[ENVELOPE_HEADER_LEN..]),
+            Some((TYPE_TELEMETRY_TARGET, REFUSE_BUSY))
+        );
     }
 
     #[test]

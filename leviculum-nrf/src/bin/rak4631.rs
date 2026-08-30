@@ -75,6 +75,10 @@ async fn main(spawner: Spawner) {
     // SPI2, UARTE0). GPIOTE + RTC1 stay P2 per embassy_nrf::config.
     leviculum_nrf::set_irq_priorities();
 
+    // This binary wires a telemetry Reporter into its main loop; declared
+    // before USB comes up so the serial task can never answer a telemetry
+    // target ahead of the declaration (ack honesty, #236).
+    leviculum_nrf::telemetry::declare_reporter();
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
 

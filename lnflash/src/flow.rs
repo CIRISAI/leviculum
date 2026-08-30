@@ -1011,6 +1011,13 @@ fn report_telemetry(
                 ));
             }
         }
+        SessionReply::Refused(reason) if reason == leviculum_core::envelope::REFUSE_UNSUPPORTED => {
+            ui.say(&format!(
+                "{port}: this board's firmware carries no telemetry reporter — the target was \
+                 refused, not stored. Neither retrying nor rebooting helps; only firmware that \
+                 wires a reporter does."
+            ))
+        }
         SessionReply::Refused(reason) => ui.say(&format!(
             "{port}: the board refused the telemetry target — {}.",
             crate::envelope::reason_str(reason)
@@ -1618,6 +1625,29 @@ mod tests {
 
     fn catalogue() -> Catalogue {
         Catalogue::builtin().unwrap()
+    }
+
+    /// The reporter-less refusal is rendered as its own sentence, not as
+    /// the generic reason string: the operator must learn that neither
+    /// retrying nor rebooting helps, only different firmware does.
+    #[test]
+    fn a_reporterless_refusal_names_the_missing_reporter() {
+        use leviculum_core::envelope::{TelemetryTargetWire, TELEMETRY_PROFILE_STATION};
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let target = TelemetryTargetWire {
+            profile: TELEMETRY_PROFILE_STATION,
+            dest_hash: [0xA7; 16],
+            public_key: None,
+        };
+        report_telemetry(
+            &mut ui,
+            "ttyACM9",
+            &target,
+            SessionReply::Refused(leviculum_core::envelope::REFUSE_UNSUPPORTED),
+        );
+        let said = ui.transcript();
+        assert!(said.contains("carries no telemetry reporter"), "{said}");
+        assert!(said.contains("ttyACM9"), "{said}");
     }
 
     /// A one-board bundle, with the real vendored SoftDevice hex so the

@@ -14,7 +14,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::Level;
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -65,6 +65,10 @@ async fn main(spawner: Spawner) {
         t114::PANIC_LED_ACTIVE_LOW,
     );
     leviculum_nrf::set_irq_priorities();
+    // This binary wires a telemetry Reporter into its main loop; declared
+    // before USB comes up so the serial task can never answer a telemetry
+    // target ahead of the declaration (ack honesty, #236).
+    leviculum_nrf::telemetry::declare_reporter();
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
 
@@ -259,10 +263,20 @@ async fn main(spawner: Spawner) {
     // Radio-config persistence. Must come after `ble::init`: writing internal
     // flash with the SoftDevice enabled is only legal through its own
     // `sd_flash_*` syscalls, which need the enabled SoftDevice.
+    let shared_flash = leviculum_nrf::flash::shared_flash(sd);
     leviculum_nrf::radio_store::spawn_store_task(
         &spawner,
-        leviculum_nrf::flash::shared_flash(sd),
+        shared_flash,
         t114::CONFIG.radio_config_flash_page,
+    );
+    // Telemetry-target persistence (#236): its own page (0xEA000, reserved
+    // in memory.x beside identity and radio config, above the linker's
+    // FLASH region and at the bootloader's USER_FLASH_END so it survives a
+    // UF2 update), borrowing the same one-and-only SoftDevice flash handle.
+    leviculum_nrf::telemetry::spawn_store_task(
+        &spawner,
+        shared_flash,
+        t114::CONFIG.telemetry_flash_page,
     );
 
     // ST7789 status display — blind-driven (the panel is write-only, no
@@ -310,17 +324,47 @@ async fn main(spawner: Spawner) {
     }
     led.set_level(Level::High);
 
+    // Telemetry (Codeberg #236). The delivery destination is registered
+    // unconditionally, target or not: it is what a receiver verifies our
+    // LXMF signature against, and it is useful on its own — a node that
+    // announces it can be addressed by name instead of by hex string.
+    let delivery_hash = leviculum_nrf::telemetry::register_delivery_destination(&mut node);
+    if let Some(hash) = delivery_hash.as_ref() {
+        let dh = hash.as_bytes();
+        leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
+            "t114_lxmf_delivery={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            dh[0], dh[1], dh[2], dh[3], dh[4], dh[5], dh[6], dh[7],
+            dh[8], dh[9], dh[10], dh[11], dh[12], dh[13], dh[14], dh[15]
+        ));
+    }
+    let mut reporter = delivery_hash.map(leviculum_nrf::telemetry::Reporter::new);
+    if reporter.is_none() {
+        log_critical!("[TELEMETRY] target=00000000 state=off reason=no-delivery-destination");
+    }
+    if let Some(reporter) = reporter.as_mut() {
+        // A persisted target comes back as awaiting-key unless its key
+        // was persisted with it; the node then resolves it over the air
+        // exactly as it would after a fresh set.
+        if let Some(stored) = leviculum_nrf::telemetry::load(t114::CONFIG.telemetry_flash_page) {
+            reporter.apply_target(&mut node, stored);
+        }
+        reporter.log_banner();
+    }
+    let telemetry_target_rx = leviculum_nrf::telemetry::inbound_target_receiver();
+
     // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
     // a spawned task: the counters live in the node this loop owns.
     let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
 
     log_critical!("[STG] main-loop");
-    // Event-driven main loop, five event sources:
+    // Event-driven main loop, seven event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
     // 3. BLE incoming (defragmented Reticulum packets from phone)
     // 4. Timer deadline (protocol maintenance, announces)
     // 5. Host wall-time injection (#238 control envelope)
+    // 6. Host telemetry target (#238 control envelope, #236)
+    // 7. Telemetry evaluation tick (only while a target is configured)
     loop {
         transport_stats.poll(&node);
         // Clamped by the stats deadline so the line is still emitted on a
@@ -331,18 +375,29 @@ async fn main(spawner: Spawner) {
             .unwrap_or(Instant::MAX)
             .min(transport_stats.deadline());
 
-        match select(
+        // The tick rate is also the retry rate for a report the radio
+        // could not take: the policy re-arms until a send is confirmed.
+        // With no target configured there is nothing to wake up for.
+        let telemetry_tick = async {
+            match reporter.as_ref() {
+                Some(reporter) if !reporter.is_off() => Timer::after(TELEMETRY_TICK_INTERVAL).await,
+                _ => core::future::pending::<()>().await,
+            }
+        };
+
+        match select3(
             select4(
                 serial.incoming_rx.receive(),
                 lora_channels.incoming_rx.receive(),
                 ble_channels.incoming_rx.receive(),
                 Timer::at(deadline),
             ),
-            serial.wall_time_rx.receive(),
+            select(serial.wall_time_rx.receive(), telemetry_target_rx.receive()),
+            telemetry_tick,
         )
         .await
         {
-            Either::Second(unix_secs) => {
+            Either3::Second(Either::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
                 // seam applies the same sanity window as every other time
                 // source; the bool picks the enveloped ack or the named
@@ -362,7 +417,44 @@ async fn main(spawner: Spawner) {
                 // the host's retry covers it.
                 let _ = serial_ctl_tx.try_send(answer);
             }
-            Either::First(Either4::First(data)) => {
+            Either3::Second(Either::Second(wire)) => {
+                // A host set or cleared the telemetry target (#236). The
+                // serial task already answered the frame; what happens here
+                // is the part that needs the node — the identity lookup
+                // that decides ready vs awaiting-key — plus the persist.
+                use leviculum_nrf::telemetry::TargetOutcome;
+                if let Some(reporter) = reporter.as_mut() {
+                    match reporter.apply_target(&mut node, wire) {
+                        TargetOutcome::Set(_) | TargetOutcome::Cleared => {
+                            leviculum_nrf::telemetry::request_save(&wire);
+                            reporter.log_banner();
+                        }
+                    }
+                }
+            }
+            Either3::Third(()) => {
+                // Telemetry evaluation (#236). Everything decided here is
+                // decided in the policy crate; this arm reads the board's
+                // sensors, hands them over, and dispatches whatever came
+                // back.
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    let (readings, has_fix) = collect_readings(&node);
+                    let actions = reporter.tick(&mut node, now_ms, has_fix, &readings);
+                    if !actions.is_empty() {
+                        let mut ifaces: [&mut dyn Interface; 3] =
+                            [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                        let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                        // The reporter settles first: it is the only caller
+                        // that owns a cadence the dispatch's verdict decides
+                        // (#344). `settle` counts and logs afterwards, as at
+                        // every other site.
+                        reporter.note_dispatch(&dispatched);
+                        leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
+                    }
+                }
+            }
+            Either3::First(Either4::First(data)) => {
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
@@ -371,7 +463,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
             }
-            Either::First(Either4::Second(data)) => {
+            Either3::First(Either4::Second(data)) => {
                 let output = node.handle_packet(InterfaceId(1), &data);
                 if !output.actions.is_empty() {
                     info!("LORA RX -> {} actions", output.actions.len());
@@ -381,7 +473,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
-            Either::First(Either4::Third(data)) => {
+            Either3::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(2), &data);
                 if !output.actions.is_empty() {
@@ -392,7 +484,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
             }
-            Either::First(Either4::Fourth(())) => {
+            Either3::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());
@@ -404,6 +496,43 @@ async fn main(spawner: Spawner) {
             }
         }
     }
+}
+
+/// How often the telemetry policy is asked whether a report is due.
+///
+/// This is a *poll* rate, not a cadence: the cadence lives in the profile
+/// and is minutes to hours. Five seconds is fine enough that "report now"
+/// means now to an operator watching a serial log, and coarse enough that
+/// it is invisible next to the tasks already waking on the same period.
+const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Read this board's sensors for one telemetry evaluation.
+///
+/// The per-board part of telemetry is exactly this function: which
+/// peripherals exist. The T114 build wires none yet — the L76K GNSS task
+/// is #69's work and the battery ADC has no task — so this returns time
+/// and nothing else, which is a legal heartbeat, and presence is never
+/// `Fix`, so no position is contributed (#240). Time reaches the node via
+/// the host wall-time injection (#238) until #69 lands a GNSS seed.
+fn collect_readings<R, C, S>(
+    node: &leviculum_core::node::NodeCore<R, C, S>,
+) -> (leviculum_nrf::telemetry::Readings, bool)
+where
+    R: rand_core::CryptoRngCore,
+    C: leviculum_core::traits::Clock,
+    S: leviculum_core::traits::Storage,
+{
+    let readings = leviculum_nrf::telemetry::Readings {
+        // A timebase below the plausibility floor is uptime seconds, not a
+        // calendar estimate — the anchor model's "never ahead" rule has
+        // nothing to work with there. Which arm anchored it is reported
+        // alongside every reading as `[TIME_SOURCE]`.
+        unix_secs: node
+            .has_plausible_wall_clock()
+            .then(|| node.emission_secs()),
+        ..Default::default()
+    };
+    (readings, false)
 }
 
 #[embassy_executor::task]

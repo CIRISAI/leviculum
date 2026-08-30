@@ -22,7 +22,7 @@ use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame, decode_refusal_payload,
     encode_capability_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
     encode_wall_time, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_UNKNOWN_TYPE,
-    REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
+    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::rnode::RadioConfigWire;
@@ -134,6 +134,7 @@ pub fn reason_str(reason: u8) -> &'static str {
         REFUSE_MALFORMED => "the firmware calls the frame malformed",
         REFUSE_VALUE => "the firmware refused the value",
         REFUSE_BUSY => "the firmware is busy",
+        REFUSE_UNSUPPORTED => "this binary carries no consumer for the frame",
         _ => "an unnamed reason",
     }
 }
@@ -345,8 +346,9 @@ pub(crate) mod testing {
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
-        encode_refusal, ControlAction, TYPE_CAPABILITIES, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY,
-        TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
+        encode_refusal, telemetry_target_answer, ControlAction, TYPE_CAPABILITIES,
+        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
+        TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
@@ -422,8 +424,33 @@ pub(crate) mod testing {
                 }),
                 ControlAction::RadioConfig(_) => Some(encode_ack(TYPE_RADIO_CONFIG)),
                 ControlAction::RadioQuery => Some(encode_radio_report(&stub_running_config())),
-                ControlAction::TelemetryTarget(_) => Some(encode_ack(TYPE_TELEMETRY_TARGET)),
+                // The firmware's own answer function, reporter wired and
+                // the channel taking the frame — the ack direction of the
+                // capability gate.
+                ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(true, true)),
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device whose binary never declared a telemetry reporter:
+    /// it advertises the frame type (the envelope layer knows it) but its
+    /// answer runs the firmware's own decision function with the
+    /// capability absent, so the target comes back refused by name — the
+    /// T114's pre-wiring dishonesty, made impossible. Deliberately not a
+    /// board: the mechanism must hold for any reporter-less configuration,
+    /// whichever BSPs happen to wire a reporter today.
+    pub fn reporterless_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(false, false)),
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -647,6 +674,26 @@ mod tests {
             send_telemetry_target(&fd, &target).unwrap(),
             ControlOutcome::Acked
         );
+    }
+
+    #[test]
+    fn a_reporterless_firmware_refuses_the_target_it_cannot_honor() {
+        // Ack honesty (#236): a binary that never wired a reporter answers
+        // a named refusal, not the ack the T114 used to give. The refusal
+        // is distinct from busy (retry helps) and from unknown-type (the
+        // envelope layer knows the type) — only different firmware helps.
+        let pty = Pty::open();
+        let seen = seen();
+        reporterless_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let reply = probed(&fd, TYPE_TELEMETRY_TARGET, |fd| {
+            send_telemetry_target(fd, &hash_only_target())
+        })
+        .unwrap();
+        assert_eq!(reply, SessionReply::Refused(REFUSE_UNSUPPORTED));
+        // took_it() false is what drives the session's non-zero exit.
+        assert!(!reply.took_it());
     }
 
     #[test]

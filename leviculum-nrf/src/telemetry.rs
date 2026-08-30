@@ -75,6 +75,28 @@ const _: () = {
     );
 };
 
+/// Whether this binary wires a [`Reporter`] into its main loop.
+///
+/// The serial control task gates the telemetry-target ack on this
+/// declaration ([`leviculum_core::envelope::telemetry_target_answer`]):
+/// a binary that never constructs a reporter must answer a named refusal,
+/// not an ack for a target nothing will honor. Set once via
+/// [`declare_reporter`] before `usb::init`, so no frame can be answered
+/// before the declaration exists.
+static REPORTER_WIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Declare that this binary constructs a [`Reporter`] and drains
+/// [`inbound_target_receiver`]. Call before `usb::init`.
+pub fn declare_reporter() {
+    REPORTER_WIRED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`declare_reporter`] was called — the capability the serial
+/// task's telemetry-target answer is gated on.
+pub fn reporter_wired() -> bool {
+    REPORTER_WIRED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Targets arriving from the host over the #238 control envelope. Depth 1
 /// and `try_send`: the serial task must never block, and a superseded
 /// target is worthless — the newest one is the one that must take effect.

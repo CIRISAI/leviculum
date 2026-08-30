@@ -234,7 +234,8 @@ fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> 
 mod tests {
     use super::*;
     use crate::envelope::testing::{
-        envelope_firmware_stub, old_firmware_stub, pre_236_firmware_stub, seen, telemetry_frame,
+        envelope_firmware_stub, old_firmware_stub, pre_236_firmware_stub,
+        reporterless_firmware_stub, seen, telemetry_frame,
     };
     use crate::sys::testpty::Pty;
     use crate::ui::testing::Fake;
@@ -526,6 +527,26 @@ mod tests {
             SessionReply::NoEnvelope
         );
         assert_eq!(telemetry_frame(&seen), None);
+    }
+
+    #[test]
+    fn a_reporterless_board_refuses_instead_of_acking_what_nothing_honors() {
+        // The T114's pre-wiring failure shape, proven impossible on the
+        // host: the frame reaches the board, and the answer is a named
+        // refusal — never the "telemetry on" ack of 06:17.
+        let pty = Pty::open();
+        let seen = seen();
+        reporterless_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        let reply = send_configured(&fd, &station(ADDRESS_BYTES)).unwrap();
+        assert_eq!(
+            reply,
+            SessionReply::Refused(leviculum_core::envelope::REFUSE_UNSUPPORTED)
+        );
+        assert!(!reply.took_it(), "took_it drives the non-zero exit");
+        // The frame did go on the wire — the refusal is the firmware's
+        // decision, not the probe's.
+        assert!(telemetry_frame(&seen).is_some());
     }
 
     #[test]
