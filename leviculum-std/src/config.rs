@@ -499,6 +499,30 @@ pub struct InterfaceConfig {
     /// Each becomes one vport logical interface. Empty for every other type.
     #[serde(default)]
     pub subinterfaces: Vec<SubinterfaceConfig>,
+
+    // BLEInterface specific (Columba `ble-reticulum` protocol). Key names
+    // match the reference implementation (`ble-reticulum@07d94130`,
+    // `BLEInterface.py`, config parsing) where its options map cleanly
+    // onto this implementation; the BlueZ adapter is selected with the
+    // existing `device` key (`device = hci0`). Appended at the end of the
+    // struct on purpose: the config-reference tables cite the fields
+    // above by line.
+    /// Simultaneous BLE link cap, both GATT roles counted together
+    /// (reference `max_connections`; our default is 4, the firmware's
+    /// `MAX_LINKS`, not the reference's 7 — see the config reference).
+    pub max_connections: Option<usize>,
+    /// Minimum RSSI in dBm a scanned peer needs before it is dialled
+    /// (reference `min_rssi`, default -85).
+    pub min_rssi: Option<i16>,
+    /// Pause between BLE scan windows in seconds (reference
+    /// `discovery_interval`, default 5).
+    pub discovery_interval: Option<f64>,
+    /// Run the scanning + dialling central role (reference
+    /// `enable_central`, default on).
+    pub enable_central: Option<bool>,
+    /// Run the advertising + GATT-server peripheral role (reference
+    /// `enable_peripheral`, default on).
+    pub enable_peripheral: Option<bool>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -629,6 +653,11 @@ impl Default for InterfaceConfig {
             csma_enabled: None,
             test_drop_direct_ingress: false,
             subinterfaces: Vec::new(),
+            max_connections: None,
+            min_rssi: None,
+            discovery_interval: None,
+            enable_central: None,
+            enable_peripheral: None,
         }
     }
 }

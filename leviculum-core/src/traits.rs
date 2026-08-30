@@ -188,6 +188,7 @@ pub enum InterfaceKind {
     Pipe,
     Channel,
     Auto,
+    Ble,
     #[default]
     Unknown,
 }
@@ -206,6 +207,7 @@ impl InterfaceKind {
             InterfaceKind::Pipe => "pipe",
             InterfaceKind::Channel => "channel",
             InterfaceKind::Auto => "auto",
+            InterfaceKind::Ble => "ble",
             InterfaceKind::Unknown => "unknown",
         }
     }

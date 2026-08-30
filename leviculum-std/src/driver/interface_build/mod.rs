@@ -20,6 +20,7 @@ use leviculum_core::transport::InterfaceId;
 use super::AutoPeerCount;
 
 mod auto;
+mod ble;
 mod i2p;
 mod kiss;
 mod pipe;
@@ -48,6 +49,11 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// Whether transport is enabled, which decides the announce-rate defaults
     /// a listener reports (Reticulum.py:830-833).
     pub transport_enabled: bool,
+    /// The node's 16-byte identity hash. The BLE interface publishes it in
+    /// the Columba Identity characteristic, handshakes with it, and derives
+    /// its advertised `LN-<hex8>` name from it — the same derivation the
+    /// firmware uses (`leviculum_ble_tx::device_name`).
+    pub identity_hash: [u8; 16],
 }
 
 /// Outcome of building one configured interface section.
@@ -110,6 +116,7 @@ pub(super) fn build_interface(
         "PipeInterface" => pipe::build(idx, config, ctx),
         "KISSInterface" | "AX25KISSInterface" => kiss::build(idx, config, ctx),
         "I2PInterface" => i2p::build(idx, config, ctx),
+        "BLEInterface" => ble::build(idx, config, ctx),
         other => {
             tracing::warn!("Unknown interface type: {}", other);
             Ok(Built::SelfManaged)
@@ -155,6 +162,7 @@ mod tests {
                 outbound_socket_hook: None,
                 inventory: self.inventory.clone(),
                 transport_enabled: false,
+                identity_hash: [0u8; 16],
             }
         }
     }

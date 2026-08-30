@@ -91,6 +91,14 @@ libbz2-rs-sys = { version = "0.2", default-features = false, features = ["rust-a
 if-addrs = { version = "0.15", features = ["link-local"] }
 socket2 = { version = "0.6", features = ["all"] }
 
+# BLE (Columba mesh interface in leviculum-std). bluer is the official BlueZ
+# Rust binding; it speaks D-Bus through the libdbus-based `dbus` crate, whose
+# `vendored` feature compiles libdbus from source so the musl-static default
+# target keeps producing self-contained binaries (the same reason rustls-acme
+# rides on ring above).
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd"] }
+dbus = { version = "0.9", features = ["vendored"] }
+
 # Web server (lblogd clearnet side). rustls-acme runs on ring instead of its
 # aws-lc-rs default: ring cross-builds cleanly for the musl-static default
 # target without a cmake toolchain.

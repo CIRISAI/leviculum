@@ -421,8 +421,13 @@ fn default_ifac_size(interface_type: &str) -> usize {
         | "RNodeInterface"
         | "RNodeMultiInterface"
         | "SerialInterface" => leviculum_core::constants::IFAC_DEFAULT_SIZE_SERIAL,
-        "AutoInterface" | "I2PInterface" | "TCPClientInterface" | "TCPServerInterface"
-        | "UDPInterface" => leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK,
+        // BLEInterface: not an upstream RNS class; the reference plugin
+        // pins the network-family value itself (`ble-reticulum@07d94130`
+        // `BLEInterface.py`, `DEFAULT_IFAC_SIZE = 16`).
+        "AutoInterface" | "BLEInterface" | "I2PInterface" | "TCPClientInterface"
+        | "TCPServerInterface" | "UDPInterface" => {
+            leviculum_core::constants::IFAC_DEFAULT_SIZE_NETWORK
+        }
         // Deliberate default, not a fall-through: an unrecognised type is one
         // we do not build (`interface_build::build` warns and self-manages), or
         // a future addition. 16 is the safer of the two — it matches every
@@ -1681,6 +1686,7 @@ impl ReticulumNode {
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
                 inventory: Arc::clone(&self.inventory),
                 transport_enabled: self.is_transport_enabled(),
+                identity_hash: self.identity_hash(),
             };
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
@@ -2154,6 +2160,7 @@ impl ReticulumNode {
             outbound_socket_hook: self.outbound_socket_hook.clone(),
             inventory: Arc::clone(&self.inventory),
             transport_enabled: self.is_transport_enabled(),
+            identity_hash: self.identity_hash(),
         };
 
         let built = {
@@ -5184,6 +5191,7 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "KISSInterface" | "AX25KISSInterface" => InterfaceKind::Kiss,
         "PipeInterface" => InterfaceKind::Pipe,
         "AutoInterface" => InterfaceKind::Auto,
+        "BLEInterface" => InterfaceKind::Ble,
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
         _ => InterfaceKind::Unknown,
     }
@@ -5224,6 +5232,11 @@ mod tests {
             ("RNodeMultiInterface", 8, "RNodeMultiInterface.py:137"),
             ("SerialInterface", 8, "SerialInterface.py:53"),
             ("AutoInterface", 16, "AutoInterface.py:50"),
+            (
+                "BLEInterface",
+                16,
+                "ble-reticulum@07d94130 BLEInterface.py DEFAULT_IFAC_SIZE",
+            ),
             ("I2PInterface", 16, "I2PInterface.py:839"),
             ("TCPClientInterface", 16, "TCPInterface.py:77"),
             ("TCPServerInterface", 16, "TCPInterface.py:454"),

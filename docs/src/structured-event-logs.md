@@ -264,6 +264,24 @@ Current firmware events:
 | `BLE_DRAIN_TABLE_FULL` | `leviculum-nrf/src/ble/columba.rs` | A connection could not claim a per-connection HVN drain slot; `slots=` is the table size.  Expected never: it means more live connections than `ble::MAX_LINKS`. |
 | `SD_RAM_FLOOR` | `leviculum-nrf/src/ble/mod.rs` | One line per boot, before `Softdevice::enable`.  `wanted=` is the app RAM base the S140 says this BLE configuration needs, `floor=` is `ORIGIN(RAM)` from `memory.x` (the flip-link stack floor), `margin=` their signed difference.  `fits=0` never appears — the boot panics instead. |
 | `ADV` | `leviculum-nrf/src/ble/columba.rs` | One line per boot when the advertising payloads are built.  `adv_bytes=`/`scan_bytes=` are the built PDU sizes against `cap=31`, and `peripheral_only=` is the v0.3.0 capability bit (1 until the firmware gains a central role). |
+| `BLE_SCAN_DECISION` | `leviculum-nrf/src/ble/columba.rs` | The scanner saw a Columba peer and applied the v2.2 address sort with the v0.3.0 capability override.  `addr=` is the peer's current address as 12 hex digits, `caps_record=` whether a readable capability record was present (`caps=` is meaningless when 0), `rule=` the decision rule that fired, `initiate=` whether this side dials.  Emitted once per (address, decision) change, not per PDU. |
+| `BLE_CENTRAL_*`, `BLE_LINK_SELF`, `BLE_LINK_DUP` | `leviculum-nrf/src/ble/columba.rs` | Central-role connection lifecycle: `BLE_CENTRAL_ADDR`/`CONNECT`/`FAIL`/`UP`/`DOWN`, plus the two admission rejections — the peer presented our own identity (`BLE_LINK_SELF`) or an identity already live on another link (`BLE_LINK_DUP`). |
+
+### Host-side BLE events
+
+lnsd's Columba BLE interface (`leviculum-std/src/interfaces/ble/`)
+emits `BLE_SCAN_DECISION` **with the same fields as the firmware's
+line of the same name** — `addr=`, `caps_record=`, `caps=`, `rule=`,
+`initiate=` — so a merged rig timeline shows both sides of one
+mutual sighting deciding, and the two `rule=` values must be
+complementary (one `initiate…`, one `wait…`).  Its link lifecycle is
+`BLE_LINK_UP` / `BLE_LINK_DOWN` (with `role=central|peripheral` and
+`peer=<hex8>`, the same hex the firmware logs and the `LN-<hex8>`
+name carries), the admission rejections are the firmware's
+`BLE_LINK_SELF` / `BLE_LINK_DUP` names, and a fan-out drop on a
+congested link is `BLE_TX_FANOUT_DROP`.  These are host events, so
+unlike the firmware's they do appear in `EVENT_CATALOG` and are
+schema-validated.
 
 ### Reading "was the radio listening at instant X"
 

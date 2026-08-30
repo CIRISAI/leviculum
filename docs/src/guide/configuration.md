@@ -89,13 +89,13 @@ a fixed `keepalive_interval`:
 
 Interfaces are ConfigObj subsections under `[interfaces]`, each named in
 double brackets `[[Name]]`. The name is free-form; the `type` key
-selects the interface implementation. Eleven types pass the
-supported-type filter (`interface_type` (`ini_config.rs:192-215`)):
+selects the interface implementation. Twelve types pass the
+supported-type filter (`interface_type` (`ini_config.rs:192-216`)):
 
 `TCPServerInterface`, `TCPClientInterface`, `UDPInterface`,
 `AutoInterface`, `RNodeInterface`, `RNodeMultiInterface`,
 `SerialInterface`, `PipeInterface`, `KISSInterface`,
-`AX25KISSInterface`, `I2PInterface`.
+`AX25KISSInterface`, `I2PInterface`, `BLEInterface`.
 
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
@@ -176,6 +176,45 @@ multicast. No router or DHCP needed; the link must carry multicast.
 | `devices` | string (CSV) | unset | Whitelist of NIC names to use. (`devices` (`ini_config.rs:479`); `InterfaceConfig::devices` (`config.rs:389-390`)) |
 | `ignored_devices` | string (CSV) | unset | Blacklist of NIC names to skip. (`ignored_devices` (`ini_config.rs:480`); `InterfaceConfig::ignored_devices` (`config.rs:391-392`)) |
 | `multicast_loopback` | bool | unset (inherits `true`) | Multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo mechanism. Unset inherits the default `true`, matching Python-RNS; set `no` to opt out. (`multicast_loopback` (`ini_config.rs:481`); `InterfaceConfig::multicast_loopback` (`config.rs:393-396`)) |
+
+### BLE (`BLEInterface`)
+
+Joins the Columba BLE mesh (the `ble-reticulum` protocol, v2.2 wire
+format with the v0.3.0 capability record) as a dual-role BlueZ node: it
+advertises and serves the Columba GATT layout like an LNode board does,
+and it scans for and connects to nearby peers under the same
+connection-direction rule the boards and phones apply. One section is
+one Reticulum interface — a single broadcast domain across all live BLE
+links. Requires a BlueZ (`bluetoothd`) host with a BLE-capable adapter;
+if the adapter is missing or powered off at startup the interface keeps
+retrying rather than failing the daemon.
+
+The interface is off unless a `[[BLE Interface]]` section exists in the
+config; the daemon never brings BLE up on its own. The advertised name
+is derived from the daemon identity as `LN-<hex8>` exactly like the
+firmware's, so scanner listings show lnsd and boards the same way.
+
+Key names follow the reference `ble-reticulum` package where its options
+map onto this implementation:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `device` | string | default adapter | BlueZ adapter to use, e.g. `hci0`. (`device` (`ini_config.rs:377`)) |
+| `max_connections` | usize | `4` | Simultaneous BLE link cap, both GATT roles counted together. The default is the firmware's `MAX_LINKS` (4), not the reference's 7: 3-4 links is the protocol's reliable ceiling. (`max_connections` (`ini_config.rs:541`); `InterfaceConfig::max_connections` (`config.rs:510-513`)) |
+| `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:542`); `InterfaceConfig::min_rssi` (`config.rs:514-516`)) |
+| `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:543`); `InterfaceConfig::discovery_interval` (`config.rs:517-519`)) |
+| `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:544`); `InterfaceConfig::enable_central` (`config.rs:520-522`)) |
+| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:545`); `InterfaceConfig::enable_peripheral` (`config.rs:523-525`)) |
+
+```ini
+[interfaces]
+  [[BLE Interface]]
+    type = BLEInterface
+    enabled = yes
+    # device = hci0
+    # max_connections = 4
+    # min_rssi = -85
+```
 
 ### RNode and Serial (`RNodeInterface`, `SerialInterface`)
 

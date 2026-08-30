@@ -202,7 +202,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             | "PipeInterface"
             | "KISSInterface"
             | "AX25KISSInterface"
-            | "I2PInterface" => true,
+            | "I2PInterface"
+            | "BLEInterface" => true,
             other => {
                 tracing::warn!(
                     "Skipping unsupported interface type '{}' for '{}'",
@@ -531,6 +532,17 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
                 .filter(|&bits| bits >= 8)
                 .map(|bits| bits / 8)
         }
+        // BLEInterface (Columba ble-reticulum): the reference's own key
+        // names (`ble-reticulum@07d94130`, `BLEInterface.py`, config
+        // parsing). The BlueZ adapter is picked with the shared `device`
+        // key above (`device = hci0`). Appended at the end of the match
+        // on purpose: the config-reference tables cite the arms above by
+        // line.
+        "max_connections" => iface.max_connections = value.parse().ok(),
+        "min_rssi" => iface.min_rssi = value.parse().ok(),
+        "discovery_interval" => iface.discovery_interval = value.parse().ok(),
+        "enable_central" => iface.enable_central = Some(parse_bool(value)),
+        "enable_peripheral" => iface.enable_peripheral = Some(parse_bool(value)),
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -774,6 +786,59 @@ mod tests {
         // An unquoted `#` terminates the value like ConfigObj does; only the
         // text before the hash survives.
         assert_eq!(cli.networkname.as_deref(), Some("abc"));
+    }
+
+    /// A `[[BLE Interface]]` section parses with the reference's own key
+    /// names (`ble-reticulum@07d94130` `BLEInterface.py`, config parsing), survives the
+    /// supported-type filter, and leaves every unset key `None` so the
+    /// builder's defaults apply.
+    #[test]
+    fn test_ble_interface_section_parses_with_reference_keys() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[BLE Interface]]
+    type = BLEInterface
+    device = hci0
+    max_connections = 2
+    min_rssi = -70
+    discovery_interval = 2.5
+    enable_central = yes
+    enable_peripheral = no
+"#,
+        )
+        .unwrap();
+
+        let ble = config
+            .interfaces
+            .get("BLE Interface")
+            .expect("kept by the type filter");
+        assert!(ble.enabled, "enabled defaults to true when configured");
+        assert_eq!(ble.interface_type, "BLEInterface");
+        assert_eq!(ble.device.as_deref(), Some("hci0"));
+        assert_eq!(ble.max_connections, Some(2));
+        assert_eq!(ble.min_rssi, Some(-70));
+        assert_eq!(ble.discovery_interval, Some(2.5));
+        assert_eq!(ble.enable_central, Some(true));
+        assert_eq!(ble.enable_peripheral, Some(false));
+
+        // A minimal section leaves the tunables to the builder's defaults.
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[ble]]
+    type = BLEInterface
+    enabled = no
+"#,
+        )
+        .unwrap();
+        let ble = config.interfaces.get("ble").expect("ble");
+        assert!(!ble.enabled);
+        assert_eq!(ble.max_connections, None);
+        assert_eq!(ble.min_rssi, None);
+        assert_eq!(ble.discovery_interval, None);
+        assert_eq!(ble.enable_central, None);
+        assert_eq!(ble.enable_peripheral, None);
     }
 
     #[test]

@@ -1640,6 +1640,9 @@ fn interface_type(kind: InterfaceKind, name: &str) -> String {
         // link-layer concept, and byte-channel names are caller-supplied, so
         // the name heuristic must not get a say here.
         InterfaceKind::Channel => "ByteChannelInterface",
+        // The Columba ble-reticulum protocol; the reference package's own
+        // RNS interface class carries the same name.
+        InterfaceKind::Ble => "BLEInterface",
         InterfaceKind::Unknown => return interface_type_from_name(name),
     }
     .to_string()

@@ -237,6 +237,13 @@ loglevel = 4
   #   enabled = no
   #   target_host = 127.0.0.1
   #   target_port = 4242
+
+  # Join the Columba BLE mesh (LNode boards, phones) as a dual-role
+  # BlueZ node. Needs bluetoothd and a BLE-capable adapter. Off by
+  # default; uncomment and set enabled = yes to use it.
+  # [[BLE Interface]]
+  #   type = BLEInterface
+  #   enabled = no
 "#
 }
 

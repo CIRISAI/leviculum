@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- lnsd joins the Columba BLE mesh: a new `BLEInterface` type
+  (`[[BLE Interface]]` config section) speaks the `ble-reticulum`
+  protocol v2.2 with the v0.3.0 capability record over BlueZ, in both
+  GATT roles at once — it advertises and serves the Columba GATT layout
+  under an `LN-<hex8>` name derived from the daemon identity like the
+  boards do, and it scans for and connects to peers under the same
+  connection-direction rule, so a PC participates in the same BLE mesh
+  as LNodes and phones. One interface is one broadcast domain across
+  all live BLE links; fragmentation and the connection decision reuse
+  the firmware's own host-tested code. Disabled unless configured.
+
 - A user can set a fixed position on an LNode — `lnflash --set-position
   LAT,LON[,ALT]`, envelope frame `0x08` — which replaces the position
   sensor in its telemetry reports until `--clear-position` returns it to

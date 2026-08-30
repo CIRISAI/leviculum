@@ -61,11 +61,23 @@ rmpv.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 
+# The Columba BLE interface (`interfaces::ble`). bluer talks to BlueZ over
+# D-Bus; the direct `dbus` dependency exists only to switch on its `vendored`
+# feature (build libdbus from source) so the musl-static default target links
+# self-contained — feature unification applies it to bluer's own dbus edge.
+bluer.workspace = true
+dbus.workspace = true
+# The pure BLE advertisement/decision logic shared with the firmware:
+# `parse_peer_advertisement`, `should_initiate`, the v0.3.0 capability
+# record and the LN-<hex8> name derivation. One implementation on both
+# sides of the rig, per the reuse rule in the #255 seam report.
+leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
+
 # md-5 is imported as `use md5::Md5`; cargo-machete flags the hyphenated
 # package name as unused because grepping the sources finds `md5::` but
-# not `md_5::`.
+# not `md_5::`. `dbus` is a feature-unification-only edge, see above.
 [package.metadata.cargo-machete]
-ignored = ["md-5"]
+ignored = ["md-5", "dbus"]
 
 [dev-dependencies]
 # `test-util` enables `#[tokio::test(start_paused = true)]`: the duty-lock
@@ -76,11 +88,6 @@ tracing-subscriber.workspace = true
 hex = "0.4"
 regex = "1"
 tempfile = "3"
-# The BLE notification flow-control policy the firmware drives
-# (leviculum-nrf/src/ble/notify.rs::notify_fragments). Dev-only and dependency-free;
-# pulled in so the #255 torn-fragment-stream mvr can drive the exact sender
-# state machine against the vendored Python announce validator.
-leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
 # lnomad is the NomadNet browser backend; its shared-instance fetch path is
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.

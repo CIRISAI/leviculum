@@ -11,6 +11,7 @@
 
 pub(crate) mod airtime;
 pub mod auto_interface;
+pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub use byte_channel::ByteChannelHandle;
 pub mod hdlc;

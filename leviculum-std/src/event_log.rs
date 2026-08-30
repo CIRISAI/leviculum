@@ -331,6 +331,36 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     //                        abandoned, `depth` = 0. One event per return
     //                        path, so a reconnect cannot emit 64 lines at
     //                        once.
+    // The Columba BLE interface (`interfaces::ble`). BLE_SCAN_DECISION
+    // carries the exact fields the firmware's line of the same name does
+    // (leviculum-nrf ble/columba.rs), so a merged rig timeline correlates
+    // the two sides of one decision; the link lifecycle events carry the
+    // same `peer=<hex8>` the firmware logs. Emitted once per
+    // (address, decision) change, not per advertising PDU.
+    EventSchema {
+        name: "BLE_SCAN_DECISION",
+        required_keys: &["addr", "caps", "caps_record", "initiate", "rule"],
+    },
+    EventSchema {
+        name: "BLE_LINK_UP",
+        required_keys: &["iface", "peer", "addr", "role", "mtu"],
+    },
+    EventSchema {
+        name: "BLE_LINK_DOWN",
+        required_keys: &["iface", "peer", "role", "reason"],
+    },
+    EventSchema {
+        name: "BLE_LINK_DUP",
+        required_keys: &["peer", "addr", "action"],
+    },
+    EventSchema {
+        name: "BLE_LINK_SELF",
+        required_keys: &["addr", "action"],
+    },
+    EventSchema {
+        name: "BLE_TX_FANOUT_DROP",
+        required_keys: &["iface", "peer", "len", "depth"],
+    },
     EventSchema {
         name: "RNODE_TX_GATED",
         required_keys: &["iface", "held_ms", "depth"],

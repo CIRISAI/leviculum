@@ -87,8 +87,15 @@ caps at `MAX_CONNECTIONS = 7` and Android allows about 8 BLE connections total
 across all apps; in practice 3 to 4 links are reliable. This protocol therefore
 does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 
-A partial implementation already exists in tree (`leviculum-core/src/framing/ble.rs`,
-`leviculum-nrf/src/ble/`). It is incomplete and needs finishing.
+Three implementations exist in tree: the shared carrier logic
+(`leviculum-core/src/framing/ble.rs`, plus the advertisement/decision
+logic in `leviculum-nrf/ble-tx`), the firmware's dual-role
+implementation (`leviculum-nrf/src/ble/`), and lnsd's dual-role BlueZ
+interface (`leviculum-std/src/interfaces/ble/`, `type = BLEInterface`,
+via `bluer`). The lnsd interface treats all live BLE links as one
+broadcast domain behind one Reticulum interface — which is also the
+only shape BlueZ supports on the peripheral side, where a GATT
+notification reaches every subscribed central at once.
 
 ### Notifications are flow controlled, not fired and forgotten
 
@@ -244,7 +251,7 @@ why a single hybrid interface is not the chosen path here.
 | Protocol | no_std carrier | nRF | lnsd | Phone | Interop with |
 |----------|----------------|-----|------|-------|--------------|
 | RNode over BLE | seam is std today | planned | planned | n/a | Python-RNS, Columba |
-| `ble-reticulum` | partial in core | partial | not yet | Columba | Columba "Protocol v2.2" |
+| `ble-reticulum` | in core + `ble-tx` | yes | yes (`BLEInterface`, via `bluer`) | Columba | Columba "Protocol v2.2" |
 | `ble-leviculum` | planned in core | feasible, spike done | via `bluer` | hardware dependent | leviculum only |
 
 ## Decisions
