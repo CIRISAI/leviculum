@@ -13,20 +13,27 @@
 //! - [`columba`] — **the protocol.** The GATT service layout and its
 //!   UUIDs (`37145b00-…`), the 16-byte identity handshake, the 1-byte
 //!   keepalive, the advertisement contents including the v0.3.0
-//!   capability record, and (phase B) the MAC-sorting connection rule.
+//!   capability record, and (since phase B) the scanner, the MAC-sorting
+//!   connection rule with its v0.3.0 override, and the GATT-client
+//!   central path that mirrors the peripheral one.
 //! - this module and [`notify`] — **protocol-neutral.** SoftDevice
 //!   bring-up and its RAM-floor guard, the `Irqs` binding, the SoC-event
 //!   task, the packet channels and the [`Interface`] implementation, the
-//!   per-connection HVN drain table, and the fragment pump that walks
-//!   [`leviculum_ble_tx::PacketTx`] over a GATT notify handle.
+//!   per-connection HVN drain table (whose claim index doubles as the
+//!   link identity), the per-link outbound queues and the fan-out that
+//!   copies each outbound packet to every live link, and the fragment
+//!   pump that walks [`leviculum_ble_tx::PacketTx`] over a GATT notify
+//!   handle.
 //!
 //! The acceptance test for the split is that a sibling `ble_leviculum`
 //! could be added without touching [`columba`]. What such a sibling
 //! would still have to reach across the seam for is recorded honestly:
 //!
-//! 1. [`init`] spawns the Columba task by name. A second carrier means
-//!    a second spawn here — a one-line edit in the neutral module, not a
-//!    change to the protocol one.
+//! 1. [`init`] spawns the Columba tasks by name (via `columba::spawn`,
+//!    which since phase B spawns both the peripheral and the central
+//!    half behind the one entry point). A second carrier means a second
+//!    spawn here — a one-line edit in the neutral module, not a change
+//!    to the protocol one.
 //! 2. `on_notify_tx_complete` is a method on the `Server` trait, so it
 //!    is implemented on whatever concrete GATT server the protocol
 //!    defines. The *routing* it performs is neutral ([`HVN_DRAIN`]); the
@@ -43,14 +50,17 @@
 //!
 //! # Architecture notes (carried over from the trouble-host migration)
 //!
-//! - Single-task model: `peripheral::advertise_connectable` produces a
-//!   Connection, then `gatt_server::run(&conn, &server, |evt| { ... })`
-//!   drives a callback closure for incoming writes. Outgoing
-//!   notifications use `gatt_server::notify_value(conn, handle, &data)`
-//!   sync, one fragment at a time, flow-controlled against the
-//!   SoftDevice's per-connection HVN queue (see [`notify`]).
-//!   Concurrent inbound + outbound is via embassy_futures::select
-//!   inside the connection lifetime.
+//! - One task per role: the peripheral task's
+//!   `peripheral::advertise_connectable` produces a Connection, then
+//!   `gatt_server::run(&conn, &server, |evt| { ... })` drives a callback
+//!   closure for incoming writes. Outgoing notifications use
+//!   `gatt_server::notify_value(conn, handle, &data)` sync, one fragment
+//!   at a time, flow-controlled against the SoftDevice's per-connection
+//!   HVN queue (see [`notify`]). The central task (phase B) holds the
+//!   same shape with the GATT roles mirrored. Concurrent inbound +
+//!   outbound is via embassy_futures::select inside the connection
+//!   lifetime; each task carries at most one connection, which is what
+//!   holds `conn_count = 2` structurally.
 //! - SoftDevice owns RADIO/TIMER0/RTC0/etc.; we don't bind those.
 //!   USB VBUS detect goes via `SoftwareVbusDetect` fed by SoC events.
 //!
@@ -84,12 +94,13 @@ bind_interrupts!(pub struct Irqs {
 
 /// Concurrent BLE connections the SoftDevice is configured for.
 ///
-/// One today: the phone. Phase B of #255 raises it to 2 (phone plus one
-/// neighbour LNode we initiate to), and the design headroom recorded on
-/// the issue is 4. Every RAM consequence of raising it is already paid —
-/// see the `memory.x` header — so the change is this constant plus the
-/// central role counts below.
-const CONN_COUNT: u8 = 1;
+/// Two (#255 phase B, Ausbaustufe 1): the phone on the peripheral slot
+/// plus ONE neighbour LNode we initiate to on the central slot. The
+/// design headroom recorded on the issue is 4. The RAM consequence was
+/// paid in phase A — see the `memory.x` header, and the A3
+/// `SD_RAM_FLOOR` boot check judges this configuration against the
+/// linked floor on every boot.
+const CONN_COUNT: u8 = 2;
 
 /// Slots in the per-connection HVN drain table ([`HVN_DRAIN`]).
 ///
@@ -110,9 +121,72 @@ const _: () = assert!(MAX_LINKS >= CONN_COUNT as usize);
 /// and its host tests.
 pub static HVN_DRAIN: DrainRouter<MAX_LINKS> = DrainRouter::new();
 
-// Channels between BLE task and the binaries' main loop.
-static BLE_INCOMING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
-static BLE_OUTGOING: Channel<CriticalSectionRawMutex, Vec<u8>, 4> = Channel::new();
+/// The channel depth every BLE packet queue uses.
+const QUEUE_DEPTH: usize = 4;
+
+/// One packet queue, as both the node-facing channels and the per-link
+/// queues use it.
+type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
+
+// Channels between the BLE tasks and the binaries' main loop.
+static BLE_INCOMING: PacketQueue = Channel::new();
+static BLE_OUTGOING: PacketQueue = Channel::new();
+
+/// Per-link outbound queues, indexed by the link's [`HVN_DRAIN`] slot.
+///
+/// A Reticulum interface is a broadcast domain: one `try_send` from the
+/// node core must reach **every** peer on the medium, exactly as one
+/// LoRa transmission reaches every listener. With two live links, two
+/// connection tasks receiving from the single [`BLE_OUTGOING`] channel
+/// would round-robin it instead — each announce reaching one peer and
+/// not the other — so [`tx_fanout_task`] is the only consumer of
+/// [`BLE_OUTGOING`], and it copies each packet into the queue of every
+/// live link. Which links are live is read from [`HVN_DRAIN`]'s claims:
+/// a connection claims its slot for its whole lifetime, so the drain
+/// table is also the link table, and a second registry that could
+/// disagree with it is never built.
+static LINK_OUT: [PacketQueue; MAX_LINKS] = [const { Channel::new() }; MAX_LINKS];
+
+/// This link's private outbound queue (see [`LINK_OUT`]).
+///
+/// Handed to a connection task along with its drain-slot index. Stale
+/// packets from a previous tenancy of the slot are the caller's to
+/// drain at claim time, exactly as [`BLE_OUTGOING`] was drained per
+/// connection before phase B.
+pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
+    &LINK_OUT[slot_index]
+}
+
+/// Fan one outbound packet out to every live link (see [`LINK_OUT`]).
+///
+/// `try_send`, never `send`: a link whose queue is full — a peer that
+/// stopped draining — costs that link the packet and is told so in the
+/// log, but must not stall delivery to the healthy links or wedge the
+/// fan-out. With no live link at all the packet is dropped silently;
+/// that is today's behaviour for an unconnected board, just moved from
+/// the connect-time drain to the moment of sending.
+#[embassy_executor::task]
+async fn tx_fanout_task() -> ! {
+    loop {
+        let packet = BLE_OUTGOING.receive().await;
+        for (index, queue) in LINK_OUT.iter().enumerate() {
+            if HVN_DRAIN.handle_at(index).is_none() {
+                continue;
+            }
+            if queue.try_send(packet.clone()).is_err() {
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!(
+                        "BLE_TX_FANOUT_DROP slot={} len={} depth={}",
+                        index,
+                        packet.len(),
+                        QUEUE_DEPTH
+                    ),
+                );
+            }
+        }
+    }
+}
 
 pub struct BleChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
@@ -214,17 +288,18 @@ const ATTR_TAB_SIZE: raw::ble_gatts_cfg_attr_tab_size_t = raw::ble_gatts_cfg_att
     attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
 };
 
-/// Role counts. `central_role_count: 0` is what phase B raises together
-/// with [`CONN_COUNT`]; until then the node advertises
-/// `PERIPHERAL_ONLY` so a peer knows not to wait for us to initiate
-/// (see [`columba`]).
+/// Role counts. `central_role_count: 1` is the phase-B role flip,
+/// raised together with [`CONN_COUNT`] and with clearing the
+/// `PERIPHERAL_ONLY` advertisement bit in [`columba`] — three spellings
+/// of the one fact "this node can initiate one connection", changed in
+/// the same commit so they cannot drift.
 ///
 /// Not a `const`: bindgen's `new_bitfield_1` is a plain `fn`.
 fn role_count_cfg() -> raw::ble_gap_cfg_role_count_t {
     raw::ble_gap_cfg_role_count_t {
         adv_set_count: 1,
         periph_role_count: 1,
-        central_role_count: 0,
+        central_role_count: 1,
         central_sec_count: 0,
         _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
     }
@@ -545,6 +620,9 @@ pub fn init(
 
     let sd = columba::spawn(spawner, sd, identity_hash);
     spawner.must_spawn(softdevice_task(sd, vbus));
+    // The outbound fan-out is protocol-neutral machinery, like the
+    // drain table it reads: packets in, one copy per live link out.
+    spawner.must_spawn(tx_fanout_task());
 
     sd
 }

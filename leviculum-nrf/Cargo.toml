@@ -165,6 +165,10 @@ softdevice = [
     "nrf-softdevice/nrf52840",
     "nrf-softdevice/s140",
     "nrf-softdevice/ble-peripheral",
+    # The central role (#255 phase B): scanning + initiating, and the
+    # GATT client that drives the peer's server once connected.
+    "nrf-softdevice/ble-central",
+    "nrf-softdevice/ble-gatt-client",
     "nrf-softdevice/ble-gatt-server",
     "nrf-softdevice/critical-section-impl",
     "nrf-softdevice/macros",
