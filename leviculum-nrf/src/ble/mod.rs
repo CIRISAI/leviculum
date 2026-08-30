@@ -575,6 +575,45 @@ fn set_gap_device_name(identity_hash: &[u8; 16]) {
     }
 }
 
+/// How often [`counters_task`] emits its line: the `[TRANSPORT]`
+/// cadence (`transport_stats::PERIOD`), so the periodic counter lines
+/// interleave predictably in a capture.
+const COUNTERS_PERIOD_SECS: u64 = 30;
+
+/// Periodic `BLE_COUNTERS` line on the debug CDC — the
+/// [`crate::transport_stats`]-style surface for the #264/#255 counters,
+/// which until phase B existed only as atomics nothing printed. A
+/// `BLE_TX_DROP` line names each abandoned packet as it happens, but
+/// the *absence* of misrouting is a claim about a counter staying 0,
+/// and an absence needs a heartbeat to be quotable from a log:
+///
+/// ```text
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n>
+/// ```
+///
+/// `links=` is the number of claimed drain slots — live BLE links.
+/// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
+/// off this line: both slots claimed, and every HVN drain edge still
+/// found the link that produced it.
+#[embassy_executor::task]
+async fn counters_task() -> ! {
+    use core::sync::atomic::Ordering;
+    loop {
+        embassy_time::Timer::after_secs(COUNTERS_PERIOD_SECS).await;
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={}",
+                BLE_TX_PACKETS.load(Ordering::Relaxed),
+                BLE_TX_DROPPED.load(Ordering::Relaxed),
+                BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
+                BLE_TX_DRAIN_UNROUTED.load(Ordering::Relaxed),
+                HVN_DRAIN.claimed(),
+            ),
+        );
+    }
+}
+
 /// Bring up S140 + start the BLE task. Peripherals previously owned by
 /// MPSL/SDC (RTC0/TIMER0/PPI/RNG/etc.) are kept in the signature for ABI
 /// compatibility with the binaries; the SoftDevice claims them
@@ -623,6 +662,7 @@ pub fn init(
     // The outbound fan-out is protocol-neutral machinery, like the
     // drain table it reads: packets in, one copy per live link out.
     spawner.must_spawn(tx_fanout_task());
+    spawner.must_spawn(counters_task());
 
     sd
 }
