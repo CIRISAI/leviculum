@@ -22,6 +22,7 @@
 //! With several devices attached, each is resolved individually. "The one
 //! UF2 drive" is an assumption, and it is the assumption that went wrong.
 
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -522,13 +523,24 @@ pub fn run(
     Ok(outcomes)
 }
 
+/// One running board a configure session can talk to: where its transport
+/// port is, and who the board is. The identity travels with the path so the
+/// open can prove, after the fact, that the path still names this board —
+/// a bare tty number resolved earlier can belong to a different board by
+/// the time it is opened (#334 family).
+struct ReachableBoard {
+    port: String,
+    tty: std::path::PathBuf,
+    device: Device,
+}
+
 /// The boards that are already running, and the transport port on each.
 ///
 /// The configure-without-flashing sessions all start here — "activation is
 /// configuration, not firmware" means every one of them talks to a board
 /// that is up, so finding them is written once.
 struct Reachable {
-    ports: Vec<(String, std::path::PathBuf)>,
+    boards: Vec<ReachableBoard>,
     /// Boards found running whose transport port never appeared. Already
     /// reported to the user; counted so the session can still fail.
     unreachable: usize,
@@ -537,7 +549,7 @@ struct Reachable {
 impl Reachable {
     /// True when nothing at all was found — the session has nothing to do.
     fn is_empty(&self) -> bool {
-        self.ports.is_empty() && self.unreachable == 0
+        self.boards.is_empty() && self.unreachable == 0
     }
 }
 
@@ -548,7 +560,7 @@ fn reachable_boards(
 ) -> Result<Reachable, Error> {
     let candidates = find_candidates(catalogue, sysfs)?;
     let mut found = Reachable {
-        ports: Vec::new(),
+        boards: Vec::new(),
         unreachable: 0,
     };
     for candidate in candidates.iter().filter(|c| !c.in_bootloader) {
@@ -559,7 +571,11 @@ fn reachable_boards(
             radio::TRANSPORT_INTERFACE,
             Duration::from_secs(2),
         )? {
-            Some(tty) => found.ports.push((port, tty)),
+            Some(tty) => found.boards.push(ReachableBoard {
+                port,
+                tty,
+                device: candidate.device.clone(),
+            }),
             None => {
                 ui.say(&format!(
                     "{port}: the transport port (if{:02}) never appeared, so nothing was sent.",
@@ -570,6 +586,55 @@ fn reachable_boards(
         }
     }
     Ok(found)
+}
+
+/// Open a board's transport port and prove the binding.
+///
+/// The tty was resolved from a sysfs read that is history by the time this
+/// open happens — on `--set-telemetry` with a prompt in between, arbitrarily
+/// old — and `/dev/ttyACM` numbers are reused across re-enumerations, so
+/// the path alone can name a different physical board by now. That is how a
+/// session once wrote its frames into the void while the intended board's
+/// witness saw zero bytes (#334 family, rig 2026-08-29).
+///
+/// The proof is taken after the open on purpose: an fd stays bound to the
+/// driver instance it opened, so once the check passes, a later
+/// re-enumeration kills the fd with EIO rather than retargeting it. A
+/// by-id path narrows the resolve-to-open window; this closes it.
+fn open_transport(sysfs: &Sysfs, device: &Device, tty: &Path) -> io::Result<crate::sys::Fd> {
+    let fd = crate::sys::Fd::open_serial(tty)?;
+    fd.set_transport_port()?;
+    let Some(current) = sysfs
+        .devices()?
+        .into_iter()
+        .find(|d| d.is_same_board(device))
+    else {
+        return Err(io::Error::other(format!(
+            "{} is no longer on the bus; nothing was sent",
+            device.name
+        )));
+    };
+    let Some(tty_name) = current
+        .interface(radio::TRANSPORT_INTERFACE)
+        .and_then(|i| i.tty.clone())
+    else {
+        return Err(io::Error::other(format!(
+            "{} has no transport port (if{:02}) any more; nothing was sent",
+            current.name,
+            radio::TRANSPORT_INTERFACE
+        )));
+    };
+    let expected = sysfs.dev_path(&tty_name);
+    let expected_rdev = std::os::unix::fs::MetadataExt::rdev(&std::fs::metadata(&expected)?);
+    if fd.rdev()? != expected_rdev {
+        return Err(io::Error::other(format!(
+            "{} re-enumerated: its transport port is {} now, not {}; nothing was sent",
+            current.name,
+            expected.display(),
+            tty.display()
+        )));
+    }
+    Ok(fd)
 }
 
 /// The `--set-time` session (#238, #166 item 2): no flash, no bootloader
@@ -594,8 +659,11 @@ pub fn set_time(
         return Ok(false);
     }
     let mut all_took_it = reachable.unreachable == 0;
-    for (port, tty) in &reachable.ports {
-        let reply = match send_time_to(tty, unix_secs) {
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_time_to(&fd, unix_secs))
+        {
             Ok(reply) => reply,
             Err(err) => {
                 ui.say(&format!(
@@ -630,11 +698,9 @@ pub fn set_time(
     Ok(all_took_it)
 }
 
-fn send_time_to(tty: &Path, unix_secs: u64) -> std::io::Result<SessionReply> {
+fn send_time_to(fd: &crate::sys::Fd, unix_secs: u64) -> io::Result<SessionReply> {
     use crate::envelope;
-    let fd = crate::sys::Fd::open_serial(tty)?;
-    fd.set_transport_port()?;
-    envelope::probed(&fd, leviculum_core::envelope::TYPE_WALL_TIME, |fd| {
+    envelope::probed(fd, leviculum_core::envelope::TYPE_WALL_TIME, |fd| {
         envelope::send_wall_time(fd, unix_secs)
     })
 }
@@ -662,8 +728,11 @@ pub fn set_tx_spacing(
         return Ok(false);
     }
     let mut all_took_it = reachable.unreachable == 0;
-    for (port, tty) in &reachable.ports {
-        let reply = match send_tx_spacing_to(tty, spacing_ms) {
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_tx_spacing_to(&fd, spacing_ms))
+        {
             Ok(reply) => reply,
             Err(err) => {
                 ui.say(&format!(
@@ -706,11 +775,9 @@ pub fn set_tx_spacing(
     Ok(all_took_it)
 }
 
-fn send_tx_spacing_to(tty: &Path, spacing_ms: u16) -> std::io::Result<SessionReply> {
+fn send_tx_spacing_to(fd: &crate::sys::Fd, spacing_ms: u16) -> io::Result<SessionReply> {
     use crate::envelope;
-    let fd = crate::sys::Fd::open_serial(tty)?;
-    fd.set_transport_port()?;
-    envelope::probed(&fd, leviculum_core::envelope::TYPE_TX_SPACING, |fd| {
+    envelope::probed(fd, leviculum_core::envelope::TYPE_TX_SPACING, |fd| {
         envelope::send_tx_spacing(fd, spacing_ms)
     })
 }
@@ -752,8 +819,11 @@ pub fn set_tx_power(
         return Ok(false);
     }
     let mut all_took_it = reachable.unreachable == 0;
-    for (port, tty) in &reachable.ports {
-        match send_tx_power_to(tty, dbm) {
+    for board in &reachable.boards {
+        let port = &board.port;
+        match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_tx_power_to(&fd, dbm))
+        {
             Ok(TxPowerOutcome::Applied { was, now }) => ui.say(&format!(
                 "{port}: transmit power {was} -> {now} dBm requested. The other radio settings \
                  came back off the board and went out again unchanged. The board states what it \
@@ -815,30 +885,28 @@ enum TxPowerOutcome {
     Answered(SessionReply),
 }
 
-fn send_tx_power_to(tty: &Path, dbm: i8) -> std::io::Result<TxPowerOutcome> {
+fn send_tx_power_to(fd: &crate::sys::Fd, dbm: i8) -> io::Result<TxPowerOutcome> {
     use crate::envelope;
     use leviculum_core::envelope::{TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY};
 
-    let fd = crate::sys::Fd::open_serial(tty)?;
-    fd.set_transport_port()?;
     // The probe first, and against BOTH types: the config frame is longer
     // than the 19-byte Reticulum minimum, so sending it on a guess is
     // packet-shaped noise on the transport CDC, and without the query there
     // is nothing to base it on anyway.
-    let Some(caps) = envelope::probe_capabilities(&fd)? else {
+    let Some(caps) = envelope::probe_capabilities(fd)? else {
         return Ok(TxPowerOutcome::Answered(SessionReply::NoEnvelope));
     };
     if !caps.accepts(TYPE_RADIO_QUERY) || !caps.accepts(TYPE_RADIO_CONFIG) {
         return Ok(TxPowerOutcome::Answered(SessionReply::NotAccepted));
     }
-    let Some(mut cfg) = envelope::query_radio_config(&fd)? else {
+    let Some(mut cfg) = envelope::query_radio_config(fd)? else {
         return Ok(TxPowerOutcome::Unreadable);
     };
     let was = cfg.tx_power_dbm;
     // One field. Everything else in `cfg` is the board's own answer, passed
     // straight back — this line is the whole read-modify-write contract.
     cfg.tx_power_dbm = dbm;
-    match SessionReply::from(envelope::send_radio_config(&fd, &cfg)?) {
+    match SessionReply::from(envelope::send_radio_config(fd, &cfg)?) {
         SessionReply::Acked => Ok(TxPowerOutcome::Applied { was, now: dbm }),
         other => Ok(TxPowerOutcome::Answered(other)),
     }
@@ -858,14 +926,12 @@ pub fn set_telemetry(
     ui: &mut dyn Ui,
     plan: &TelemetryPlan,
 ) -> Result<bool, Error> {
-    let reachable = reachable_boards(catalogue, sysfs, ui)?;
-    if reachable.is_empty() {
-        ui.say(
-            "No running LNode on the bus. --set-telemetry talks to flashed boards; a board in \
-             its bootloader has no telemetry to configure.",
-        );
-        return Ok(false);
-    }
+    // The target is decided before any port is resolved. The prompt can
+    // hold this session open for as long as a human takes to find an LXMF
+    // address, and a transport tty resolved before it can be renumbered by
+    // the time it is opened — that stale number is the #334-family shape.
+    // Resolving the plan touches no board, so nothing is lost by asking
+    // first.
     let Some(target) = telemetry::resolve(ui, plan)? else {
         // Answering "no" to a session whose whole purpose was to configure
         // is a clean exit, not a failure: nothing was asked for and nothing
@@ -874,9 +940,21 @@ pub fn set_telemetry(
         return Ok(true);
     };
 
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-telemetry talks to flashed boards; a board in \
+             its bootloader has no telemetry to configure.",
+        );
+        return Ok(false);
+    }
+
     let mut all_took_it = reachable.unreachable == 0;
-    for (port, tty) in &reachable.ports {
-        let reply = match telemetry::send(tty, &target) {
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| telemetry::send_configured(&fd, &target))
+        {
             Ok(reply) => reply,
             Err(err) => {
                 ui.say(&format!(
@@ -1173,7 +1251,9 @@ fn set_telemetry_on(
         tty.display(),
         telemetry::describe(&target)
     ));
-    let reply = match telemetry::send(&tty, &target) {
+    let reply = match open_transport(sysfs, app, &tty)
+        .and_then(|fd| telemetry::send_configured(&fd, &target))
+    {
         Ok(reply) => reply,
         Err(err) => {
             ui.say(&format!(
@@ -1224,7 +1304,9 @@ fn set_radio(
         tty.display(),
         settings.describe()
     ));
-    let acked = match radio::send(&tty, &settings) {
+    let acked = match open_transport(sysfs, app, &tty)
+        .and_then(|fd| radio::send_configured(&fd, &settings))
+    {
         Ok(acked) => acked,
         Err(err) => {
             ui.say(&format!(
@@ -1952,25 +2034,257 @@ convert = "hex-to-uf2"
         // opens the board's transport port, and this suite runs on the host
         // that has the rig attached — a test that got as far as writing a
         // wall-time frame would be writing it to somebody's real board. The
-        // bus is the stub; the port is not stubbed, so it is not reached.
+        // bus is the stub; the dev tree is a stub too, so the host's real
+        // /dev/serial/by-id (which on the rig names real boards) cannot leak
+        // into the resolved paths.
+        let dev = TempDir::new().unwrap();
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
         let mut ui = crate::ui::testing::Fake::agreeing();
-        let found = reachable_boards(&catalogue(), &sysfs(), &mut ui).unwrap();
+        let found = reachable_boards(&catalogue(), &sysfs, &mut ui).unwrap();
         assert_eq!(found.unreachable, 0, "{}", ui.transcript());
-        let ports: Vec<(&str, String)> = found
-            .ports
+        let ports: Vec<(&str, PathBuf)> = found
+            .boards
             .iter()
-            .map(|(port, tty)| (port.as_str(), tty.display().to_string()))
+            .map(|b| (b.port.as_str(), b.tty.clone()))
             .collect();
         assert_eq!(
             ports,
             vec![
-                ("3-2.3.1", "/dev/ttyACM2".to_string()),
-                ("3-2.3.4.4", "/dev/ttyACM4".to_string()),
+                ("3-2.3.1", dev.path().join("ttyACM2")),
+                ("3-2.3.4.4", dev.path().join("ttyACM4")),
             ],
             "both running boards, each on its own transport port (if02)"
         );
         // The bootloader on 3-2.4 has no clock to set and is not addressed.
         assert!(!ports.iter().any(|(port, _)| *port == "3-2.4"));
+        // And each entry carries the identity of the board it was resolved
+        // for, which is what the open will later be checked against.
+        assert_eq!(
+            found.boards[0].device.serial.as_deref(),
+            Some("183004F712B4A7FE")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Port targeting, and the proof taken at open (#334 family)
+    // -----------------------------------------------------------------
+
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    /// A dev tree whose ttys are pseudo-terminals: opening one is safe on
+    /// any host, including the one with the rig attached.
+    fn dev_tree(ttys: &[(&str, &Path)]) -> TempDir {
+        let dev = TempDir::new().unwrap();
+        for (name, target) in ttys {
+            symlink(target, dev.path().join(name)).unwrap();
+        }
+        dev
+    }
+
+    #[test]
+    fn with_udev_present_the_boards_are_addressed_by_id_rather_than_by_number() {
+        // The project rule, asserted at the seam that violated it: a
+        // ttyACM number is an allocation slot the kernel reuses, a by-id
+        // link is the board's own identity, re-pointed by udev across a
+        // re-enumeration. When the link exists, it is the path a session
+        // gets — multi-board included, each board its own link.
+        let dev = TempDir::new().unwrap();
+        let by_id = dev.path().join("serial/by-id");
+        fs::create_dir_all(&by_id).unwrap();
+        symlink("../../ttyACM2", by_id.join("usb-leviculum_T114-if02")).unwrap();
+        symlink("../../ttyACM4", by_id.join("usb-leviculum_RAK4631-if02")).unwrap();
+
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let found = reachable_boards(&catalogue(), &sysfs, &mut ui).unwrap();
+        let ports: Vec<PathBuf> = found.boards.iter().map(|b| b.tty.clone()).collect();
+        assert_eq!(
+            ports,
+            vec![
+                by_id.join("usb-leviculum_T114-if02"),
+                by_id.join("usb-leviculum_RAK4631-if02"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_open_proves_it_landed_on_the_board_the_path_was_resolved_for() {
+        // The happy path of the proof: the tty still belongs to the board,
+        // so the fd's device number matches the node a fresh bus read names.
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM2", &pty.slave_path)]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        let t114 = sysfs
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+        open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap();
+    }
+
+    #[test]
+    fn a_renumbered_port_is_refused_at_open_rather_than_written_into() {
+        // The 2026-08-29 rig failure, host-side: the board re-enumerated
+        // after its tty was resolved, the number was reused, and the frames
+        // went into whatever held it — while the session reported success.
+        // Now the open compares the fd against where the board actually is
+        // and refuses.
+        let tree = TempDir::new().unwrap();
+        crate::sysfs_fixture::materialized_copy(tree.path());
+        let sysfs_before = Sysfs::new(tree.path());
+        let t114 = sysfs_before
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+
+        // The board re-enumerates: its transport tty is ttyACM7 now, and
+        // the freed ttyACM2 belongs to something else (a second pty here).
+        let iface_tty = tree.path().join("3-2.3.1:1.2/tty");
+        fs::rename(iface_tty.join("ttyACM2"), iface_tty.join("ttyACM7")).unwrap();
+        let stale = crate::sys::testpty::Pty::open();
+        let current = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[
+            ("ttyACM2", &stale.slave_path),
+            ("ttyACM7", &current.slave_path),
+        ]);
+        let sysfs = Sysfs::with_dev(tree.path(), dev.path());
+
+        let err = open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("re-enumerated"), "{text}");
+        assert!(text.contains("nothing was sent"), "{text}");
+        // And the path it names as current is the one that would work.
+        assert!(text.contains("ttyACM7"), "{text}");
+
+        // The board's actual port still opens.
+        open_transport(&sysfs, &t114, &dev.path().join("ttyACM7")).unwrap();
+    }
+
+    #[test]
+    fn a_board_that_left_the_bus_is_refused_at_open_rather_than_guessed_at() {
+        let tree = TempDir::new().unwrap();
+        crate::sysfs_fixture::materialized_copy(tree.path());
+        let sysfs_before = Sysfs::new(tree.path());
+        let t114 = sysfs_before
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+
+        let remove_prefix = |prefix: &str| {
+            for entry in fs::read_dir(tree.path()).unwrap().flatten() {
+                let name = entry.file_name().into_string().unwrap();
+                if name.starts_with(prefix) {
+                    fs::remove_dir_all(entry.path()).unwrap();
+                }
+            }
+        };
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM2", &pty.slave_path)]);
+
+        // First the application entry goes: the fixture's 3-2.4 bootloader
+        // is the same physical T114 (word-swapped serial), so the board is
+        // still found — in a mode with no transport port, which is its own
+        // refusal, not a guess.
+        remove_prefix("3-2.3.1");
+        let sysfs = Sysfs::with_dev(tree.path(), dev.path());
+        let err = open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("no transport port"), "{text}");
+        assert!(text.contains("nothing was sent"), "{text}");
+
+        // Then the bootloader too: the board is gone entirely.
+        remove_prefix("3-2.4");
+        let err = open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("no longer on the bus"), "{text}");
+        assert!(text.contains("nothing was sent"), "{text}");
+    }
+
+    #[test]
+    fn a_session_whose_frames_land_in_a_void_fails_instead_of_reporting_success() {
+        // The false-success half of the 2026-08-29 finding, pinned: both
+        // transport ports open fine but swallow every byte (a pty with
+        // nothing scripted on the master side — bytes go in, nothing comes
+        // back). --set-telemetry persists a flash setting; "wrote bytes to
+        // an fd" must not exit as success, only the board's ack may.
+        let t114_pty = crate::sys::testpty::Pty::open();
+        let rak_pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[
+            ("ttyACM2", &t114_pty.slave_path),
+            ("ttyACM4", &rak_pty.slave_path),
+        ]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let plan = TelemetryPlan::Fixed(station_target());
+        let ok = set_telemetry(&catalogue(), &sysfs, &mut ui, &plan).unwrap();
+        assert!(!ok, "silence must fail the session:\n{}", ui.transcript());
+        assert!(
+            !ui.transcript().contains("telemetry on"),
+            "{}",
+            ui.transcript()
+        );
+    }
+
+    #[test]
+    fn a_board_that_acks_the_target_is_a_successful_session() {
+        // The control for the test above: the same wiring with firmware on
+        // the other end, and the session succeeds on the ack. Uses the
+        // scripted stub that runs the firmware's real decision function.
+        let t114_pty = crate::sys::testpty::Pty::open();
+        let rak_pty = crate::sys::testpty::Pty::open();
+        crate::envelope::testing::envelope_firmware_stub(
+            &t114_pty,
+            crate::envelope::testing::seen(),
+        );
+        crate::envelope::testing::envelope_firmware_stub(
+            &rak_pty,
+            crate::envelope::testing::seen(),
+        );
+        let dev = dev_tree(&[
+            ("ttyACM2", &t114_pty.slave_path),
+            ("ttyACM4", &rak_pty.slave_path),
+        ]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let plan = TelemetryPlan::Fixed(station_target());
+        let ok = set_telemetry(&catalogue(), &sysfs, &mut ui, &plan).unwrap();
+        assert!(ok, "{}", ui.transcript());
+        assert!(
+            ui.transcript().contains("telemetry on"),
+            "{}",
+            ui.transcript()
+        );
+    }
+
+    #[test]
+    fn the_target_is_decided_before_any_port_is_resolved() {
+        // The prompt can hold --set-telemetry open for as long as a human
+        // takes, and a tty resolved before it may be renumbered by the time
+        // it is used (#334 family). Answering "no" therefore has to end the
+        // session before the bus is even read: an unreadable sysfs proves
+        // nothing was resolved.
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let ok = set_telemetry(
+            &catalogue(),
+            &Sysfs::new("/nonexistent/sysfs/root"),
+            &mut ui,
+            &TelemetryPlan::default(),
+        )
+        .unwrap();
+        assert!(ok, "answering no is a clean exit");
+        assert!(
+            ui.transcript().contains("Telemetry left as it is"),
+            "{}",
+            ui.transcript()
+        );
     }
 
     #[test]

@@ -136,6 +136,10 @@ pub fn wait_for_application(
 /// can be found, named and confirmed while `/dev/ttyACMn` for its transport
 /// port does not exist yet. Asking once and concluding "no transport port"
 /// would report a healthy board as unreachable.
+///
+/// The path returned is the stable one ([`Sysfs::stable_tty_path`]): the
+/// caller opens it later, and a bare number can name a different board by
+/// then (#334 family).
 pub fn wait_for_interface_tty(
     sysfs: &Sysfs,
     device: &Device,
@@ -150,7 +154,8 @@ pub fn wait_for_interface_tty(
             .devices()?
             .into_iter()
             .find(|d| d.name == device.name && d.id == device.id)
-            .and_then(|d| d.tty(interface));
+            .and_then(|d| d.interface(interface)?.tty.clone())
+            .map(|tty_name| sysfs.stable_tty_path(&tty_name));
         if found.is_some() {
             return Ok(found);
         }

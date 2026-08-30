@@ -16,11 +16,12 @@
 //! envelope, so it is reachable from the flash flow and from a standalone
 //! session alike ([`crate::flow::set_telemetry`]).
 //!
-//! Nothing in this module opens a port except [`send`], so the prompts, the
-//! flags and the bytes that go on the wire are all testable without a board.
+//! Nothing in this module opens a port — the open lives with
+//! [`crate::flow`], which proves it landed on the intended board — so the
+//! prompts, the flags and the bytes that go on the wire are all testable
+//! without a board.
 
 use std::io;
-use std::path::Path;
 
 use leviculum_core::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
 use leviculum_core::envelope::{
@@ -126,21 +127,17 @@ pub fn resolve(ui: &mut dyn Ui, plan: &TelemetryPlan) -> io::Result<Option<Telem
 
 /// Send the target on an already-opened transport port.
 ///
-/// Split from [`send`] so the scripted-pty tests drive the same code the
-/// flash flow runs. The capability probe is not optional: the frame is 23
-/// or 87 bytes and firmware that does not know the type would read it as a
-/// Reticulum packet.
+/// Takes the fd rather than a path on purpose: the open lives with the
+/// caller ([`crate::flow`]'s `open_transport`), which proves the port still
+/// belongs to the board it was resolved for before a frame goes out — and
+/// the scripted-pty tests drive the same code the flash flow runs. The
+/// capability probe is not optional: the frame is 23 or 87 bytes and
+/// firmware that does not know the type would read it as a Reticulum
+/// packet.
 pub fn send_configured(fd: &Fd, target: &TelemetryTargetWire) -> io::Result<SessionReply> {
     envelope::probed(fd, TYPE_TELEMETRY_TARGET, |fd| {
         envelope::send_telemetry_target(fd, target)
     })
-}
-
-/// Open the board's transport port and send the target.
-pub fn send(port: &Path, target: &TelemetryTargetWire) -> io::Result<SessionReply> {
-    let fd = Fd::open_serial(port)?;
-    fd.set_transport_port()?;
-    send_configured(&fd, target)
 }
 
 /// The profile a `--telemetry-profile` value names.

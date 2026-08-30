@@ -105,7 +105,13 @@ impl Fd {
         self.set_termios(&tio)?;
         let bits: libc::c_int = libc::TIOCM_DTR | libc::TIOCM_RTS;
         if unsafe { libc::ioctl(self.0, libc::TIOCMBIS, &bits) } != 0 {
-            return last_error("ioctl(TIOCMBIS, DTR|RTS)");
+            // ENOTTY is a device with no modem lines to raise — a
+            // pseudo-terminal, which is what the scripted-board tests hand
+            // in. A real CDC-ACM port supports the ioctl, so anything else
+            // is still an error.
+            if io::Error::last_os_error().raw_os_error() != Some(libc::ENOTTY) {
+                return last_error("ioctl(TIOCMBIS, DTR|RTS)");
+            }
         }
         Ok(())
     }
@@ -190,6 +196,22 @@ impl Fd {
             }
         }
         Ok(out)
+    }
+
+    /// The device number this descriptor is bound to.
+    ///
+    /// An open fd stays bound to the driver instance it opened — a device
+    /// that re-enumerates afterwards kills the fd with EIO rather than
+    /// retargeting it — so comparing this against the node a fresh sysfs
+    /// read names is a proof of *which physical port* the fd talks to,
+    /// taken after the open and therefore free of the resolve-then-open
+    /// race (#334 family).
+    pub fn rdev(&self) -> io::Result<u64> {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(self.0, &mut st) } != 0 {
+            return last_error("fstat");
+        }
+        Ok(st.st_rdev)
     }
 
     fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {

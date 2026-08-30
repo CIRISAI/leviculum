@@ -31,7 +31,6 @@
 //! firmware would have chosen for itself.
 
 use std::io;
-use std::path::Path;
 use std::time::Duration;
 
 use leviculum_core::framing::hdlc::frame;
@@ -491,21 +490,15 @@ pub enum RadioPlan {
     Skip,
 }
 
-/// Send the configuration and wait for the board's ACK.
-///
-/// `Ok(false)` is "the board did not answer" — a fact for the caller to
-/// report, not a failure of the flash, which has already happened by the
-/// time this runs.
-pub fn send(port: &Path, settings: &RadioSettings) -> io::Result<bool> {
-    let fd = Fd::open_serial(port)?;
-    fd.set_transport_port()?;
-    send_configured(&fd, settings)
-}
-
 /// The dialect decision on an already-opened port (#238): one capability
 /// probe picks between the envelope config frame (firmware that answers
 /// the probe) and the legacy magic (firmware from before the envelope).
-/// Split from [`send`] so the scripted-pty tests drive the same code the
+///
+/// `Ok(false)` is "the board did not answer" — a fact for the caller to
+/// report, not a failure of the flash, which has already happened by the
+/// time this runs. Takes the fd rather than a path so the open lives with
+/// the caller, which proves the port still belongs to the board it was
+/// resolved for — and so the scripted-pty tests drive the same code the
 /// flash flow runs.
 pub fn send_configured(fd: &Fd, settings: &RadioSettings) -> io::Result<bool> {
     use crate::envelope::{self, ControlOutcome};
@@ -915,15 +908,6 @@ mod tests {
         ] {
             assert!(said.contains(expected), "{expected} missing from {said}");
         }
-    }
-
-    #[test]
-    fn a_port_that_is_not_there_is_an_error_rather_than_a_silent_no_ack() {
-        let err = send(Path::new("/dev/ttyNoSuchTransport"), &EU868).unwrap_err();
-        assert!(
-            format!("{err}").contains("/dev/ttyNoSuchTransport"),
-            "{err}"
-        );
     }
 
     #[test]

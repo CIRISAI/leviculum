@@ -28,6 +28,15 @@ pub fn materialized() -> &'static Path {
     })
 }
 
+/// A private copy of the fixture tree, for tests that mutate the bus — a
+/// board re-enumerating, a device disappearing. The shared [`materialized`]
+/// tree must never be mutated: every other test in the process walks it.
+#[allow(dead_code)] // each includer uses its own subset of this module
+pub fn materialized_copy(dst: &Path) {
+    let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
+    copy_decoded(src, dst).expect("materialize private sysfs fixture tree");
+}
+
 fn copy_decoded(src: &Path, dst: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {

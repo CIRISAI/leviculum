@@ -155,10 +155,13 @@ pub fn swap_words(serial: &str) -> Option<String> {
 }
 
 /// A sysfs tree to enumerate. Real at `/sys/bus/usb/devices`, a fixture
-/// directory in tests.
+/// directory in tests. Carries the `/dev` root beside it because the two
+/// answer one question — "where is this board's port" — and a test that can
+/// point the first at a fixture must be able to point the second at one too.
 #[derive(Debug, Clone)]
 pub struct Sysfs {
     root: PathBuf,
+    dev: PathBuf,
 }
 
 impl Default for Sysfs {
@@ -169,11 +172,59 @@ impl Default for Sysfs {
 
 impl Sysfs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            dev: PathBuf::from("/dev"),
+        }
+    }
+
+    /// A tree with its device nodes somewhere other than `/dev`. For tests:
+    /// the fixture bus stays a directory of files, and the ttys it names can
+    /// be symlinks to pseudo-terminals instead of somebody's real board.
+    pub fn with_dev(root: impl Into<PathBuf>, dev: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            dev: dev.into(),
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The device node for a tty name the bus reported.
+    pub fn dev_path(&self, tty_name: &str) -> PathBuf {
+        self.dev.join(tty_name)
+    }
+
+    /// The stable path for a tty name: the `/dev/serial/by-id` symlink that
+    /// currently resolves to it, or the plain node if udev provides none.
+    ///
+    /// The number in `ttyACMn` names an allocation slot, not a board — a
+    /// DTR reset re-enumerates the device and the freed number is handed to
+    /// whatever asks next. A by-id link is named after the device's own
+    /// identity, so udev re-points it across a re-enumeration and an open
+    /// through it lands on the same physical board, or fails honestly with
+    /// a missing file (#334 family; project rule: by-id, never bare
+    /// numbers).
+    pub fn stable_tty_path(&self, tty_name: &str) -> PathBuf {
+        let by_id = self.dev.join("serial/by-id");
+        let mut links: Vec<PathBuf> = std::fs::read_dir(&by_id)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        links.sort();
+        for link in links {
+            let points_here = std::fs::read_link(&link)
+                .ok()
+                .is_some_and(|target| target.file_name().is_some_and(|name| name == tty_name));
+            if points_here {
+                return link;
+            }
+        }
+        self.dev.join(tty_name)
     }
 
     /// Every USB device in the tree, in sysfs name order.
@@ -443,6 +494,50 @@ mod tests {
             .remove(0);
         assert_eq!(hub.serial, None);
         assert!(hub.is_same_board(&hub.clone()));
+    }
+
+    #[test]
+    fn a_tty_is_addressed_through_its_by_id_link_when_udev_offers_one() {
+        // The rig lesson behind the rule: ttyACM numbers are allocation
+        // slots, reused across re-enumerations, so a session that resolved
+        // a number and opens it later can land on a different board. The
+        // by-id link carries the board's identity in its name and follows
+        // the board across a re-enumeration.
+        let dev = tempfile::tempdir().unwrap();
+        let by_id = dev.path().join("serial/by-id");
+        std::fs::create_dir_all(&by_id).unwrap();
+        std::os::unix::fs::symlink(
+            "../../ttyACM2",
+            by_id.join("usb-leviculum_T114_183004F712B4A7FE-if02"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../ttyACM4",
+            by_id.join("usb-leviculum_RAK4631_DEC9947DAD9D2869-if02"),
+        )
+        .unwrap();
+
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        assert_eq!(
+            sysfs.stable_tty_path("ttyACM2"),
+            by_id.join("usb-leviculum_T114_183004F712B4A7FE-if02"),
+            "the link that resolves to this tty, not any link"
+        );
+        assert_eq!(
+            sysfs.stable_tty_path("ttyACM4"),
+            by_id.join("usb-leviculum_RAK4631_DEC9947DAD9D2869-if02")
+        );
+        // A tty no link points at falls back to the plain node.
+        assert_eq!(sysfs.stable_tty_path("ttyACM9"), dev.path().join("ttyACM9"));
+    }
+
+    #[test]
+    fn a_host_without_udev_gets_the_plain_node_rather_than_nothing() {
+        // Containers and minimal initramfs environments have no
+        // /dev/serial/by-id at all; the session still has to run there.
+        let dev = tempfile::tempdir().unwrap();
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        assert_eq!(sysfs.stable_tty_path("ttyACM2"), dev.path().join("ttyACM2"));
     }
 
     #[test]
