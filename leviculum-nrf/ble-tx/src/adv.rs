@@ -9,14 +9,18 @@
 //! # Why the flag exists
 //!
 //! Columba v2.2 breaks the "who initiates?" tie between two nodes that
-//! can both see each other by comparing BLE addresses: the higher
-//! address connects, the lower one waits. A node that has no central
-//! role cannot honour that rule — when the phone's (random, rotating)
-//! address sorts below ours, it waits for us to initiate and we never
-//! do, so the link is never made and neither side reports an error.
-//! Which way a given phone sorts is decided by an address that rotates
-//! every few minutes, so the hole shows up as an intermittent "sometimes
-//! it just doesn't connect".
+//! can both see each other by comparing BLE addresses: the **lower**
+//! address connects, the higher one waits (v2.2 §"Connection Direction
+//! (MAC Sorting)": `if my_mac_int < peer_mac_int: connect_to_peer()`;
+//! an earlier revision of this comment had the direction backwards). A
+//! node that has no central role cannot honour that rule — when its own
+//! address sorts below the peer's, the peer waits for it to initiate
+//! and it never does, so the link is never made and neither side
+//! reports an error. Which way a peer's (random, rotating) address
+//! sorts against a mid-range address re-flips on rotation, so the hole
+//! shows up as an intermittent "sometimes it just doesn't connect".
+//! The full decision rule, and what rotation can and cannot disturb,
+//! lives in [`crate::peer`].
 //!
 //! `PERIPHERAL_ONLY` closes it by saying so in the advertisement: a peer
 //! that sees the bit skips the sort and initiates unconditionally. The

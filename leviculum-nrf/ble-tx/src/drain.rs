@@ -125,18 +125,31 @@ impl<const N: usize> DrainRouter<N> {
     ///
     /// The returned slot starts with no pending edge.
     pub fn claim(&self, handle: u16) -> Option<&DrainSlot> {
+        self.claim_indexed(handle).map(|(_, slot)| slot)
+    }
+
+    /// [`claim`](Self::claim), plus the slot's index in the table.
+    ///
+    /// The index is what makes a claim double as the link's *identity*
+    /// for anything else sized `[_; N]` alongside this table — the
+    /// firmware's per-link outgoing queues are the caller (#255 phase
+    /// B): a connection claims one slot for its whole lifetime, so
+    /// "slot `i` is claimed" and "link `i` is live" are the same fact,
+    /// and a second registry that could drift from this one is not
+    /// built. The index is stable from claim to release.
+    pub fn claim_indexed(&self, handle: u16) -> Option<(usize, &DrainSlot)> {
         if handle == NO_CONN_HANDLE {
             return None;
         }
         // A re-claim of a live handle is the same slot, not a second
         // one: two slots for one connection would split its drain edges
         // between two waiters at random.
-        for slot in &self.slots {
+        for (index, slot) in self.slots.iter().enumerate() {
             if slot.handle.load(Ordering::Acquire) == handle {
-                return Some(slot);
+                return Some((index, slot));
             }
         }
-        for slot in &self.slots {
+        for (index, slot) in self.slots.iter().enumerate() {
             if slot
                 .handle
                 .compare_exchange(NO_CONN_HANDLE, handle, Ordering::AcqRel, Ordering::Acquire)
@@ -145,10 +158,18 @@ impl<const N: usize> DrainRouter<N> {
                 // A handle the SoftDevice reused can carry an edge left
                 // over from the connection that had it before.
                 slot.signal.reset();
-                return Some(slot);
+                return Some((index, slot));
             }
         }
         None
+    }
+
+    /// The connection handle claimed at `index`, `None` when that slot
+    /// is free or `index` is beyond the table. The fan-out over live
+    /// links iterates this.
+    #[must_use]
+    pub fn handle_at(&self, index: usize) -> Option<u16> {
+        self.slots.get(index).and_then(DrainSlot::conn_handle)
     }
 
     /// Free the slot held by `handle`. Idempotent; unknown handles are
@@ -360,6 +381,96 @@ mod tests {
         assert!(router.claim(NO_CONN_HANDLE).is_none());
         assert_eq!(router.claimed(), 0, "the free marker must stay free");
         assert!(!router.drained(NO_CONN_HANDLE));
+    }
+
+    /// The two-slot traffic case #255 phase B makes real: two links,
+    /// each pushing a two-fragment packet through its own [`PacketTx`]
+    /// on a one-deep HVN queue, drains interleaved. Every wait must be
+    /// paid for by the link's OWN drain and booked to its own
+    /// `waits=` counter — the composed form of the routing property,
+    /// with the actual #264 state machine in the loop instead of bare
+    /// waiters.
+    ///
+    /// [`PacketTx`]: crate::PacketTx
+    #[test]
+    fn two_links_interleaved_traffic_each_pays_only_its_own_waits() {
+        use crate::{Action, Event, NotifyOutcome, PacketTx};
+
+        let router: DrainRouter<4> = DrainRouter::new();
+        let link_a = router.claim(0x0000).expect("slot for link A");
+        let link_b = router.claim(0x0001).expect("slot for link B");
+
+        // Both links: fragment 0 accepted, fragment 1 refused (the
+        // S140's one-deep queue), so both machines ask to await drain.
+        let advance = |tx: &mut PacketTx, action: Action, queue_full: bool| match action {
+            Action::Send { index } => {
+                let outcome = if queue_full && index > 0 {
+                    NotifyOutcome::QueueFull
+                } else {
+                    NotifyOutcome::Sent
+                };
+                tx.step(Event::Notify(outcome))
+            }
+            other => other,
+        };
+
+        let (mut tx_a, mut act_a) = PacketTx::start(2);
+        let (mut tx_b, mut act_b) = PacketTx::start(2);
+        act_a = advance(&mut tx_a, act_a, true); // frag 0 sent
+        act_b = advance(&mut tx_b, act_b, true);
+        act_a = advance(&mut tx_a, act_a, true); // frag 1 refused
+        act_b = advance(&mut tx_b, act_b, true);
+        assert!(matches!(act_a, Action::AwaitDrain { index: 1 }));
+        assert!(matches!(act_b, Action::AwaitDrain { index: 1 }));
+
+        let mut wait_a = pin!(link_a.wait());
+        let mut wait_b = pin!(link_b.wait());
+        assert_eq!(poll_once!(wait_a), Poll::Pending);
+        assert_eq!(poll_once!(wait_b), Poll::Pending);
+
+        // Link B's queue drains first. A stays pending, B's machine
+        // re-offers fragment 1 and completes.
+        assert!(router.drained(0x0001));
+        assert_eq!(poll_once!(wait_a), Poll::Pending, "not link A's drain");
+        assert_eq!(poll_once!(wait_b), Poll::Ready(()));
+        act_b = tx_b.step(Event::Drained);
+        assert!(matches!(act_b, Action::Send { index: 1 }));
+        act_b = advance(&mut tx_b, act_b, false);
+        assert!(matches!(act_b, Action::Done));
+
+        // Now link A's. Same completion, and each side booked exactly
+        // the one wait its own queue caused.
+        assert!(router.drained(0x0000));
+        assert_eq!(poll_once!(wait_a), Poll::Ready(()));
+        act_a = tx_a.step(Event::Drained);
+        assert!(matches!(act_a, Action::Send { index: 1 }));
+        act_a = advance(&mut tx_a, act_a, false);
+        assert!(matches!(act_a, Action::Done));
+
+        assert_eq!(tx_a.drain_waits(), 1, "A paid for A's queue");
+        assert_eq!(tx_b.drain_waits(), 1, "B paid for B's queue");
+    }
+
+    /// The index a claim hands out is the link's identity for anything
+    /// sized alongside the table (the per-link outgoing queues, #255
+    /// phase B): stable across re-claims, distinct across links, dead
+    /// after release.
+    #[test]
+    fn the_claim_index_is_stable_distinct_and_dies_with_the_release() {
+        let router: DrainRouter<4> = DrainRouter::new();
+        let (idx_a, _) = router.claim_indexed(0x10).expect("slot A");
+        let (idx_b, _) = router.claim_indexed(0x11).expect("slot B");
+        assert_ne!(idx_a, idx_b);
+        assert_eq!(router.handle_at(idx_a), Some(0x10));
+        assert_eq!(router.handle_at(idx_b), Some(0x11));
+
+        let (again, _) = router.claim_indexed(0x10).expect("re-claim");
+        assert_eq!(again, idx_a, "a re-claim is the same slot");
+
+        router.release(0x10);
+        assert_eq!(router.handle_at(idx_a), None, "released slot reads free");
+        assert_eq!(router.handle_at(idx_b), Some(0x11), "the other lives on");
+        assert_eq!(router.handle_at(999), None, "beyond the table is free");
     }
 
     #[test]
