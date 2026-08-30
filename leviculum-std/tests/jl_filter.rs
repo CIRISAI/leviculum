@@ -158,8 +158,8 @@ fn test_violation_lines_match_event_field() {
     // (matched via EVENT_NAME) and synthetic ones (matched via field).
     let input = "\
 ANN_RX node=alice dst=abc1 hops=0 t=200
-EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1050 t=150
-EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1050 t=160
+EVENT_SCHEMA_VIOLATION event=PKT_RX missing=[hops,len] caller=transport.rs:1074 t=150
+EVENT_FIELD_VIOLATION event=PKT_RX field=note value_problem=whitespace caller=transport.rs:1074 t=160
 ";
     let (out, _err, rc) = run_with_stdin(&["--filter", "event=PKT_RX"], input);
     assert_eq!(rc, 0);

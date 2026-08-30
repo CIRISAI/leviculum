@@ -2469,6 +2469,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_stats()
     }
 
+    /// Bitrate inputs for all registered interfaces, without the
+    /// frequency-deque read side effect of [`Self::interface_stats`]. Backs
+    /// the `lowest_interface_bitrate` / `medium_path_timeout` RPC verbs.
+    pub fn interface_bitrate_entries(&self) -> Vec<crate::transport::InterfaceBitrateEntry> {
+        self.transport.interface_bitrate_entries()
+    }
+
     /// The registered name for an interface id. Pure lookup without the
     /// frequency-deque read side effect of [`Self::interface_stats`].
     pub fn interface_name(&self, id: usize) -> Option<&str> {

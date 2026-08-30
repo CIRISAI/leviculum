@@ -44,7 +44,9 @@ fn detect_codec(data: &[u8]) -> Codec {
 /// Fields are parsed from pickle dicts and logged via `Debug`.
 /// The `until`/`reason` blackhole params are parsed and logged but not yet
 /// acted on (Stage 2 will honor expiry — see handlers.rs).
-#[derive(Debug)]
+// `PartialEq` only: the blackhole `until` is an f64 deadline, so `Eq` is not
+// available on this enum.
+#[derive(Debug, PartialEq)]
 #[allow(dead_code)] // until/reason parsed for the wire contract, not yet acted on
 pub(crate) enum RpcRequest {
     // GET commands
@@ -87,6 +89,21 @@ pub(crate) enum RpcRequest {
     GetPacketQ {
         packet_hash: Vec<u8>,
     },
+    /// Slowest online interface bitrate in bits per second, or `None` when no
+    /// online interface reports one (Reticulum 1.5.2
+    /// `Reticulum.get_lowest_interface_bitrate`, answering from
+    /// `Transport.lowest_interface_bitrate`; the verb postdates our pinned
+    /// 1.3.5 reference, which is why no line citation resolves for it).
+    GetLowestInterfaceBitrate,
+    /// Round-trip estimate for an MTU on the slowest online interface plus per
+    /// hop grace, in seconds; 0 when no bitrate is known
+    /// (Reticulum 1.5.2 `Transport.medium_path_timeout`). rnprobe,
+    /// rnpath and rncp size their wait window with it.
+    GetMediumPathTimeout,
+    /// Count of the link-table entries that are validated
+    /// (Reticulum 1.5.2 `Transport.active_link_count`). `rnstatus -l`
+    /// renders it as the `(N active)` suffix.
+    GetActiveLinkCount,
     GetBlackholedIdentities,
     /// Membership check against the blackhole set. Python sends
     /// `{"get": "is_blackholed", "identity_hash": <16 bytes>}` and expects a
@@ -194,6 +211,9 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                     .ok_or_else(|| RpcError::InvalidFormat("missing packet_hash".into()))?;
                 Ok(RpcRequest::GetPacketQ { packet_hash })
             }
+            "lowest_interface_bitrate" => Ok(RpcRequest::GetLowestInterfaceBitrate),
+            "medium_path_timeout" => Ok(RpcRequest::GetMediumPathTimeout),
+            "active_link_count" => Ok(RpcRequest::GetActiveLinkCount),
             "blackholed_identities" => Ok(RpcRequest::GetBlackholedIdentities),
             "is_blackholed" => {
                 let identity_hash = dict_get_bytes(&dict, "identity_hash")
@@ -565,6 +585,49 @@ mod tests {
         let data = build_get_request("link_count");
         let req = parse_request(&data).unwrap().0;
         assert!(matches!(req, RpcRequest::GetLinkCount));
+    }
+
+    /// The three verbs Codeberg #329 added, in BOTH codecs: a 1.5.2 client
+    /// packs msgpack (`mp.packb` in every `Reticulum.get_*` RPC arm), older
+    /// tooling and our
+    /// own pickle path still speak pickle, and the dispatcher is shared.
+    #[test]
+    fn test_parse_the_timing_verbs_in_both_codecs() {
+        for command in [
+            "lowest_interface_bitrate",
+            "medium_path_timeout",
+            "active_link_count",
+        ] {
+            let (pickled, pickle_codec) = parse_request(&build_get_request(command)).unwrap();
+            assert_eq!(pickle_codec, Codec::Pickle);
+            let (packed, msgpack_codec) = parse_request(&msgpack_get_request(command)).unwrap();
+            assert_eq!(msgpack_codec, Codec::Msgpack);
+            let expected = match command {
+                "lowest_interface_bitrate" => RpcRequest::GetLowestInterfaceBitrate,
+                "medium_path_timeout" => RpcRequest::GetMediumPathTimeout,
+                _ => RpcRequest::GetActiveLinkCount,
+            };
+            assert_eq!(pickled, expected, "pickle arm for {command}");
+            assert_eq!(packed, expected, "msgpack arm for {command}");
+        }
+    }
+
+    /// Positive control for the test above: the dispatcher rejects what it
+    /// does not know, so "it parsed" is evidence the arm exists.
+    /// `profiling_results` is here by intent — it is DECLINED (see the verb
+    /// dispatch in handlers.rs), and this pins that decision.
+    #[test]
+    fn test_declined_and_unknown_get_commands_do_not_parse() {
+        for command in ["profiling_results", "medium_path_timeoutx", "not_a_verb"] {
+            assert!(
+                parse_request(&build_get_request(command)).is_err(),
+                "{command} must not resolve to a request"
+            );
+            assert!(
+                parse_request(&msgpack_get_request(command)).is_err(),
+                "{command} must not resolve to a request (msgpack)"
+            );
+        }
     }
 
     #[test]

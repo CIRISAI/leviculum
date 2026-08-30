@@ -706,6 +706,30 @@ struct HeldAnnounce {
     hops: u8,
 }
 
+/// The bitrate inputs of one interface, without the read side effect of
+/// [`InterfaceStatEntry`].
+///
+/// `lowest_interface_bitrate` has to resolve the same bitrate
+/// `interface_stats` reports, but it is a pure query: producing an
+/// `InterfaceStatEntry` for it would pop decayed frequency samples off the
+/// announce/path-request deques and so change what the NEXT `interface_stats`
+/// call reports. Carries what resolving a bitrate needs and nothing else.
+#[derive(Debug, Clone)]
+pub struct InterfaceBitrateEntry {
+    /// Interface index.
+    pub id: usize,
+    /// Human-readable name (the type fallback reads it).
+    pub name: String,
+    /// Transport medium the interface runs over.
+    pub kind: InterfaceKind,
+    /// Configured bitrate in bits per second, or `None` when unconfigured
+    /// ([`InterfaceStatEntry::configured_bitrate`]).
+    pub configured_bitrate: Option<u32>,
+    /// The interface's own on-air rate, or `None` for a medium that reports
+    /// no link profile ([`InterfaceStatEntry::link_profile`]).
+    pub link_profile_bitrate: Option<u32>,
+}
+
 /// Interface metadata for RPC reporting.
 #[derive(Debug, Clone)]
 pub struct InterfaceStatEntry {
@@ -3546,7 +3570,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2771. A destination with no cached
+    /// link-request path uses at transport.rs:2795. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -4264,7 +4288,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1079 ran in the
+        // Gate on the already-incremented hops (transport.rs:1103 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7411,6 +7435,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     // Public: Interface Stats (for RPC)
+    /// Return the bitrate inputs of all registered interfaces, without the
+    /// deque side effect of [`Self::interface_stats`].
+    ///
+    /// Backs the `lowest_interface_bitrate` / `medium_path_timeout` RPC verbs,
+    /// which must resolve the same per-interface bitrate `interface_stats`
+    /// reports but must not disturb what the next `interface_stats` call sees.
+    pub fn interface_bitrate_entries(&self) -> Vec<InterfaceBitrateEntry> {
+        self.interface_names
+            .iter()
+            .map(|(&id, name)| InterfaceBitrateEntry {
+                id,
+                name: name.clone(),
+                kind: self.interface_kind(id),
+                configured_bitrate: self
+                    .interface_announce_caps
+                    .get(&id)
+                    .map(|cap| cap.bitrate_bps),
+                link_profile_bitrate: self
+                    .interface_link_profiles
+                    .get(&id)
+                    .map(|profile| profile.bitrate_bps),
+            })
+            .collect()
+    }
+
     /// Return metadata for all registered interfaces.
     ///
     /// Used by the RPC server to report interface status to CLI tools.
@@ -7930,7 +7979,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1642`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1666`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -12608,7 +12657,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // transport.rs:3937-3947, a deliberate anti-replay extension — so
+            // transport.rs:3961-3947, a deliberate anti-replay extension — so
             // the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -17447,7 +17496,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1079) before
+        // The inbound path increments hops once (transport.rs:1103) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

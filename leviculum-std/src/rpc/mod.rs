@@ -288,12 +288,13 @@ pub(crate) async fn rpc_client_call(
 /// a [`serde_json::Value`].
 ///
 /// `get_key` must be one of the parameterless RPC keys understood by the daemon:
-/// `"interface_stats"`, `"path_table"`, `"link_count"`, `"link_table"`,
+/// `"interface_stats"`, `"path_table"`, `"link_count"`, `"active_link_count"`,
+/// `"lowest_interface_bitrate"`, `"medium_path_timeout"`, `"link_table"`,
 /// `"rate_table"`, `"blackholed_identities"`, `"transport_tables"`.
-/// `"interface_stats"`, `"path_table"`, `"link_count"`, `"rate_table"` and
-/// `"blackholed_identities"` overlap with Python `rnsd`; `"link_table"` and
-/// `"transport_tables"` are Leviculum-only extensions (Codeberg #174 for the
-/// latter) and degrade to an `Err` against an `rnsd`, which matches no arm
+/// All but `"link_table"` and `"transport_tables"` overlap with Python `rnsd`
+/// (the three timing/link verbs postdate the vendored 1.3.5 reference and were
+/// taken from 1.5.2); those two are Leviculum-only extensions (Codeberg #174
+/// for the latter) and degrade to an `Err` against an `rnsd`, which matches no arm
 /// for them and closes the connection without replying
 /// (Reticulum.py:1213-1260). Callers must treat that error as "this daemon
 /// does not know the question", not as a failed query. Queries that take

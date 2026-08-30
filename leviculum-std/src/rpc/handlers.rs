@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 
 use crate::sync_ext::MutexRecover;
 
-use leviculum_core::constants::{DEFAULT_PER_HOP_TIMEOUT, MTU, TRUNCATED_HASHBYTES};
+use leviculum_core::constants::{
+    DEFAULT_PER_HOP_TIMEOUT, MINIMUM_BITRATE, MTU, TRUNCATED_HASHBYTES,
+};
 use leviculum_core::traits::InterfaceKind;
 use serde_pickle::value::{HashableValue, Value};
 
@@ -38,7 +40,36 @@ pub(super) fn handle_request(
             auto_peer_count,
         ),
         RpcRequest::GetLinkCount => pickle_int(core.active_link_count() as i64),
+        RpcRequest::GetActiveLinkCount => pickle_int(core.active_link_count() as i64),
         RpcRequest::GetLinkTable => build_link_table(core),
+
+        // The timing pair every path-request client sizes its wait window
+        // with (Codeberg #329). Until they existed, an `rnprobe`/`rnpath`/
+        // `rncp` against lnsd took the exception arm of
+        // `Reticulum.get_medium_path_timeout` (Reticulum 1.5.2) and
+        // waited 0 s where the same client against rnsd waits seconds — a
+        // config difference smuggled into every timing A/B.
+        RpcRequest::GetLowestInterfaceBitrate => {
+            match lowest_online_bitrate(core, iface_online_map, inventory) {
+                Some(bps) => pickle_int(bps),
+                None => pickle_none(),
+            }
+        }
+        RpcRequest::GetMediumPathTimeout => pickle_float(medium_path_timeout_secs(
+            lowest_online_bitrate(core, iface_online_map, inventory),
+        )),
+
+        // `profiling_results` is deliberately NOT served (declined in the
+        // #329 remainder batch, 2026-08-30). Upstream fills it from a
+        // profiler we do not run (`Reticulum.get_profiling_results`,
+        // Reticulum 1.5.2), and its only consumer degrades to silence
+        // rather than crashing: `rnstatus --profiling` wraps the call in
+        // `except Exception: pass` and renders nothing when it fails
+        // (`rnstatus --profiling`, 1.5.2). The blast radius is one call: the
+        // client opens a FRESH `multiprocessing.connection.Client` per verb
+        // (`Reticulum.get_rpc_client`), so the closed connection cannot poison
+        // the `interface_stats` read two lines later. Serving a fabricated
+        // shape would be a worse answer than not knowing the question.
         RpcRequest::GetTransportTables => build_transport_tables(core, start_time),
         RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
@@ -1255,6 +1286,94 @@ fn first_hop_timeout_secs(bitrate_bps: Option<u32>) -> f64 {
     }
 }
 
+/// The bitrate of the slowest currently online interface, in bits per second,
+/// or `None` when no online interface reports one.
+///
+/// Python keeps this as a cached class attribute, recomputed whenever the
+/// interface list changes (Reticulum 1.5.2 `Transport.prioritize_interfaces`):
+///
+/// ```text
+/// Transport.lowest_interface_bitrate = min(
+///     interface.bitrate for interface in Transport.interfaces
+///     if interface.online and interface.bitrate)
+/// ```
+///
+/// Two filters, both reproduced here: `interface.online` drops interfaces the
+/// driver has marked down, and the truthiness test on `interface.bitrate`
+/// drops a `None`/`0` rate rather than letting it win the `min`. An empty
+/// generator raises inside Python's `try`, which is how the attribute stays
+/// `None` on a daemon with no online interface; we return `None` outright,
+/// which is the same answer without the stale-value window Python's
+/// keep-the-old-value-on-exception arm leaves open.
+///
+/// The bitrate of each interface is resolved with the SAME precedence
+/// `build_interface_stats` reports in its `bitrate` key — configured overrides
+/// the interface's own rate, which overrides the per-medium `BITRATE_GUESS` —
+/// because a client that reads both must not see them disagree. The inventory
+/// listeners are included for the same reason they appear as rows there
+/// (Codeberg #177): Python holds listeners and routable interfaces in one
+/// `Transport.interfaces` list, and its `min` sees all of them.
+fn lowest_online_bitrate(
+    core: &StdNodeCore,
+    iface_online_map: &InterfaceOnlineMap,
+    inventory: &SharedInventory,
+) -> Option<i64> {
+    let online_map = iface_online_map.lock_recover();
+    let inv = inventory.lock_recover();
+
+    let mut bitrates: Vec<i64> = Vec::new();
+    for entry in core.interface_bitrate_entries() {
+        // Missing entry -> online, matching the `status` key's fallback.
+        if !online_map.get(&entry.id).copied().unwrap_or(true) {
+            continue;
+        }
+        let itype = inv
+            .identity(entry.id)
+            .map(|i| i.type_name.to_string())
+            .unwrap_or_else(|| interface_type(entry.kind, &entry.name));
+        bitrates.push(
+            entry
+                .configured_bitrate
+                .or(entry.link_profile_bitrate)
+                .map(|bps| bps as i64)
+                .unwrap_or_else(|| default_bitrate(&itype)),
+        );
+    }
+    // Listeners report `status: true` unconditionally in the stats rows, so
+    // they are all online here too.
+    bitrates.extend(inv.listeners().map(|(_, listener)| listener.bitrate));
+
+    bitrates.into_iter().filter(|bps| *bps > 0).min()
+}
+
+/// Compute Python's `Transport.medium_path_timeout` in seconds.
+///
+/// Python (Reticulum 1.5.2 `Transport.medium_path_timeout`):
+/// ```text
+/// # A full round trip for an MTU on the slowest online interface
+/// if not Transport.lowest_interface_bitrate: return 0
+/// return 2*(RNS.Reticulum.MTU*8/max(Transport.lowest_interface_bitrate,
+///                                   RNS.Reticulum.MINIMUM_BITRATE)) \
+///        + RNS.Reticulum.DEFAULT_PER_HOP_TIMEOUT
+/// ```
+///
+/// Constants, all from Reticulum 1.5.2 and all already pinned in
+/// `leviculum_core::constants`: `MTU = 500` (Reticulum.py:93),
+/// `MINIMUM_BITRATE = 5` (Reticulum.py:134), `DEFAULT_PER_HOP_TIMEOUT = 6`
+/// (Reticulum.py:142).
+///
+/// `None` (and a non-positive rate, Python's falsy guard) yields 0 — the
+/// documented "timeout is unknown" answer, not a fabricated window.
+fn medium_path_timeout_secs(lowest_bitrate_bps: Option<i64>) -> f64 {
+    match lowest_bitrate_bps {
+        Some(bps) if bps > 0 => {
+            let floored = bps.max(MINIMUM_BITRATE as i64) as f64;
+            2.0 * (MTU as f64 * 8.0 / floored) + DEFAULT_PER_HOP_TIMEOUT as f64
+        }
+        _ => 0.0,
+    }
+}
+
 // Path Lookups (rnpath)
 fn get_next_hop(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
     let hash = match try_into_hash(destination_hash) {
@@ -1591,6 +1710,298 @@ mod tests {
         // Slow LoRa link (1200 bps): 500 * 8 / 1200 + 6 = 9.33333...
         let expected_lora = MTU as f64 * 8.0 / 1200.0 + DEFAULT_PER_HOP_TIMEOUT as f64;
         assert!((first_hop_timeout_secs(Some(1200)) - expected_lora).abs() < 1e-9);
+    }
+
+    // --- The path-timing verb pair (Codeberg #329) ------------------------
+
+    /// Build a core with a temp storage dir, named after the calling test so
+    /// two tests never share a directory.
+    fn timing_core(tag: &str) -> (StdNodeCore, tempfile::TempDir) {
+        use crate::clock::SystemClock;
+        use leviculum_core::node::NodeCoreBuilder;
+
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("rpc-{tag}-"))
+            .tempdir()
+            .expect("temp storage dir");
+        let core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(tmp.path()).expect("storage"),
+        );
+        (core, tmp)
+    }
+
+    fn empty_online_map() -> InterfaceOnlineMap {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
+    /// Mirrors Python `Transport.medium_path_timeout` (Reticulum 1.5.2) with
+    /// the constants MTU=500 (Reticulum.py:93), MINIMUM_BITRATE=5
+    /// (Reticulum.py:134) and DEFAULT_PER_HOP_TIMEOUT=6 (Reticulum.py:142),
+    /// all three unchanged since the vendored 1.3.5.
+    ///
+    /// The zero arm is the one the batch exists for: it is what an lnsd
+    /// without this verb handed every client, and it is NOT the same number as
+    /// the formula's — the positive control below pins the difference.
+    #[test]
+    fn medium_path_timeout_is_the_upstream_formula() {
+        // Unknown / non-positive bitrate -> Python's documented 0.
+        assert_eq!(medium_path_timeout_secs(None), 0.0);
+        assert_eq!(medium_path_timeout_secs(Some(0)), 0.0);
+        assert_eq!(medium_path_timeout_secs(Some(-1)), 0.0);
+
+        // 10 Mbps TCP: 2*(500*8/10_000_000) + 6 = 6.0008
+        let tcp = medium_path_timeout_secs(Some(10_000_000));
+        assert!(
+            (tcp - 6.0008).abs() < 1e-9,
+            "10 Mbps gave {tcp}, want 6.0008"
+        );
+        // Positive control: the formula value is distinguishable from the
+        // no-verb answer, so a test asserting "not 0" is asserting something.
+        assert!(tcp > 0.0);
+
+        // 1200 bps LoRa: 2*(4000/1200) + 6 = 12.6666...
+        let lora = medium_path_timeout_secs(Some(1200));
+        let want_lora = 2.0 * (MTU as f64 * 8.0 / 1200.0) + DEFAULT_PER_HOP_TIMEOUT as f64;
+        assert!((lora - want_lora).abs() < 1e-9, "1200 bps gave {lora}");
+        assert!(lora > tcp, "a slower medium must widen the window");
+
+        // The MINIMUM_BITRATE floor: anything under 5 bps is priced as 5 bps,
+        // which caps the window at 2*(4000/5)+6 = 1606 s instead of growing
+        // without bound.
+        let floored =
+            2.0 * (MTU as f64 * 8.0 / MINIMUM_BITRATE as f64) + DEFAULT_PER_HOP_TIMEOUT as f64;
+        assert!((medium_path_timeout_secs(Some(1)) - floored).abs() < 1e-9);
+        assert!((medium_path_timeout_secs(Some(4)) - floored).abs() < 1e-9);
+        assert!(
+            (medium_path_timeout_secs(Some(MINIMUM_BITRATE as i64)) - floored).abs() < 1e-9,
+            "the floor must be reached, not merely approached, at MINIMUM_BITRATE"
+        );
+        // Positive control on the floor: one bit per second above it is a
+        // strictly narrower window, so the clamp is a clamp and not a constant.
+        assert!(medium_path_timeout_secs(Some(6)) < floored);
+    }
+
+    /// `min` over the ONLINE interfaces, with each interface's bitrate
+    /// resolved exactly as `build_interface_stats` resolves its `bitrate` key
+    /// (Reticulum 1.5.2 `Transport.prioritize_interfaces`).
+    #[test]
+    fn lowest_interface_bitrate_takes_the_min_over_online_interfaces() {
+        use leviculum_core::transport::LinkProfile;
+
+        let (mut core, _tmp) = timing_core("lowest-bitrate");
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let online = empty_online_map();
+
+        // Positive control for the None arm: with no interface at all there
+        // is nothing to take a min over, and Python's generator is empty.
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            None,
+            "a daemon with no interfaces knows no bitrate"
+        );
+
+        // Fast TCP client: no configured bitrate, no profile -> BITRATE_GUESS.
+        core.set_interface_name(0, "tcp_client_0".into());
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(crate::interfaces::tcp::TCP_BITRATE_GUESS)
+        );
+
+        // A radio reporting its own on-air rate is now the slowest.
+        core.set_interface_name(1, "RNodeInterface[/dev/ttyUSB0]".into());
+        core.register_interface_link_profile(
+            1,
+            LinkProfile {
+                bitrate_bps: 2734,
+                tx_jitter_max_ms: Some(2926),
+            },
+        );
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(2734),
+            "the radio's own rate must win the min, not the TCP guess"
+        );
+
+        // Taking the radio offline hands the min back to TCP: the `online`
+        // filter is real, not decorative.
+        online.lock_recover().insert(1, false);
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(crate::interfaces::tcp::TCP_BITRATE_GUESS),
+            "an offline interface must not set the wait window"
+        );
+        online.lock_recover().insert(1, true);
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(2734)
+        );
+
+        // A configured bitrate outranks the profile here for the same reason
+        // it does in the stats row: a client reading both must see one number.
+        core.register_interface_bitrate(1, 9600);
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(9600)
+        );
+    }
+
+    /// Listeners are part of the same one interface list Python takes its
+    /// `min` over (Codeberg #177), and a zero/absent rate is dropped rather
+    /// than winning the min (Python's `and interface.bitrate` truthiness
+    /// filter).
+    #[test]
+    fn lowest_interface_bitrate_covers_listeners_and_drops_zero_rates() {
+        use crate::interfaces::inventory::{InterfaceIdentity, ListenerRow};
+        use leviculum_core::traits::InterfaceMode;
+
+        let (mut core, _tmp) = timing_core("lowest-bitrate-listeners");
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let online = empty_online_map();
+
+        let listener = |name: &str, type_name: &'static str, bitrate: i64| ListenerRow {
+            identity: InterfaceIdentity {
+                name: name.to_string(),
+                short_name: name.to_string(),
+                type_name,
+                parent: None,
+            },
+            bitrate,
+            hw_mtu: 262_144,
+            mode: InterfaceMode::Full,
+            announce_rate: (None, None, None),
+            ifac_size_bits: None,
+            departed_rxb: 0,
+            departed_txb: 0,
+            bound_addr: None,
+        };
+
+        // The shared-instance server alone: 1 Gbps, and it counts.
+        inventory.lock_recover().add_listener(
+            10,
+            listener("Shared Instance", "LocalServerInterface", 1_000_000_000),
+        );
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(1_000_000_000),
+            "a listener-only daemon still reports the rate it has"
+        );
+
+        // A TCP listener at 10 Mbps takes the min from it — the single-TCP
+        // config the A/B parity check runs on.
+        inventory.lock_recover().add_listener(
+            11,
+            listener("Parity TCP Server", "TCPServerInterface", 10_000_000),
+        );
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(10_000_000)
+        );
+
+        // An interface whose configured bitrate is 0 means "no cap", not
+        // "0 bps": Python's truthiness filter drops it, and so must we —
+        // otherwise the whole window collapses to the unknown-answer 0.
+        core.set_interface_name(0, "tcp_client_0".into());
+        core.register_interface_bitrate(0, 0);
+        assert_eq!(
+            lowest_online_bitrate(&core, &online, &inventory),
+            Some(10_000_000),
+            "a 0 bitrate must be dropped, not win the min"
+        );
+    }
+
+    /// The verbs answer over the real dispatch path, in the codec a 1.5.2
+    /// client speaks — the parse arm and the handler arm are separate places
+    /// to get wrong.
+    #[test]
+    fn the_timing_verbs_dispatch_end_to_end() {
+        use crate::interfaces::inventory::{InterfaceIdentity, ListenerRow};
+        use leviculum_core::traits::InterfaceMode;
+
+        let (mut core, _tmp) = timing_core("timing-dispatch");
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let online = empty_online_map();
+        let stats: InterfaceStatsMap =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        inventory.lock_recover().add_listener(
+            10,
+            ListenerRow {
+                identity: InterfaceIdentity {
+                    name: "Parity TCP Server".into(),
+                    short_name: "Parity TCP Server".into(),
+                    type_name: "TCPServerInterface",
+                    parent: None,
+                },
+                bitrate: 10_000_000,
+                hw_mtu: 262_144,
+                mode: InterfaceMode::Full,
+                announce_rate: (None, None, None),
+                ifac_size_bits: None,
+                departed_rxb: 0,
+                departed_txb: 0,
+                bound_addr: None,
+            },
+        );
+
+        let ask = |core: &mut StdNodeCore, verb: &str| -> Value {
+            let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str(verb))]);
+            let encoded = encode_request_msgpack(&request).expect("encode request");
+            let (parsed, codec) = parse_request(&encoded).expect("parse request");
+            assert!(matches!(codec, Codec::Msgpack));
+            let bytes = handle_request(
+                &parsed,
+                core,
+                std::time::Instant::now(),
+                &stats,
+                &online,
+                &inventory,
+                0,
+                None,
+                codec,
+            )
+            .expect("handle request");
+            decode_response_msgpack(&bytes).expect("decode response")
+        };
+
+        assert_eq!(
+            ask(&mut core, "lowest_interface_bitrate"),
+            Value::I64(10_000_000)
+        );
+        match ask(&mut core, "medium_path_timeout") {
+            Value::F64(secs) => assert!(
+                (secs - 6.0008).abs() < 1e-9,
+                "medium_path_timeout answered {secs}, want 6.0008"
+            ),
+            other => panic!("medium_path_timeout must answer a float, got {other:?}"),
+        }
+        assert_eq!(ask(&mut core, "active_link_count"), Value::I64(0));
+
+        // Positive control on the parse arm: an unrelated verb still fails,
+        // so the three arms above are matching their own names and not a
+        // catch-all that would answer anything.
+        let bogus = pickle_dict(vec![(
+            pickle_str_key("get"),
+            pickle_str("medium_path_timeouts"),
+        )]);
+        let encoded = encode_request_msgpack(&bogus).expect("encode");
+        assert!(
+            parse_request(&encoded).is_err(),
+            "a near-miss verb name must not resolve"
+        );
+
+        // `profiling_results` stays declined: it must keep reaching the
+        // unknown-command arm, which is what lets rnstatus --profiling skip
+        // it (`rnstatus --profiling`) instead of rendering a fabrication.
+        let profiling = pickle_dict(vec![(
+            pickle_str_key("get"),
+            pickle_str("profiling_results"),
+        )]);
+        let encoded = encode_request_msgpack(&profiling).expect("encode");
+        assert!(
+            parse_request(&encoded).is_err(),
+            "profiling_results is declined and must stay unimplemented"
+        );
     }
 
     #[test]

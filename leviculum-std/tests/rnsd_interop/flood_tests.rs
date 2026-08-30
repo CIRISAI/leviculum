@@ -365,7 +365,7 @@ async fn test_diamond_originator_echo() {
 
     // Wait for all 3 announce retransmits to complete (~16.5s from announce time).
     // Locally-originated announces are retransmitted 3 times for LoRa reliability
-    // (transport.rs:1165-1191, Rust extension. Python does not retransmit these).
+    // (transport.rs:1189-1191, Rust extension. Python does not retransmit these).
     // Each retransmit increments packets_forwarded via forward_on_all_except().
     // After retries exhaust (retries > PATHFINDER_RETRIES), the entry is removed
     // and no further forwarding occurs.
