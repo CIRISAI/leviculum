@@ -245,7 +245,7 @@ pub async fn heap_watermark_task() {
     }
 }
 
-/// Persistent panic counter (Codeberg #65): lives in `.uninit` next to
+/// Persistent panic counter (Codeberg #65): lives in `.retained` next to
 /// the post-mortems and — unlike them — is NOT cleared by the boot-time
 /// read, so it accumulates across panic/HardFault soft-reset cycles
 /// until power loss. Cold boots start at 0 via the magic check.
@@ -257,7 +257,7 @@ struct PanicCountRaw {
 
 const PANIC_COUNT_MAGIC: u32 = 0xC01D_FACE;
 
-#[link_section = ".uninit"]
+#[link_section = ".retained"]
 static mut PANIC_COUNT: core::mem::MaybeUninit<PanicCountRaw> = core::mem::MaybeUninit::uninit();
 
 /// Increment the persistent panic counter and return the new value.
@@ -293,7 +293,7 @@ pub fn panic_count() -> u32 {
 }
 
 /// Sentinel word `paint_stack` fills the unused stack with. Distinct
-/// from both `.uninit` post-mortem magics, so a stray match cannot be
+/// from both `.retained` post-mortem magics, so a stray match cannot be
 /// mistaken for a valid record.
 const STACK_CANARY: u32 = 0xDEAD_BEEF;
 
@@ -304,14 +304,20 @@ const STACK_CANARY: u32 = 0xDEAD_BEEF;
 /// `.data`/`.bss`, and grows DOWN toward `_stack_end`:
 ///
 /// ```text
-///   _stack_end  = ORIGIN(RAM) = 0x200030e0   <- SoftDevice RAM floor
+///   __sretained = ORIGIN(RETAINED)           <- SoftDevice RAM ceiling
+///        .retained (post-mortems, persistent tail, boot trace)
+///   _stack_end  = ORIGIN(RAM)                <- stack floor
 ///        |  stack, grows DOWN  ^
 ///   _stack_start = __sdata     |             <- SP at reset
-///        .data / .bss
-///   __ebss
-///        .uninit (post-mortems, persistent tail)
-///   RAM end     = 0x20040000
+///        .data / .bss / .uninit (empty)
+///   RAM end     = 0x20040000                 <- bootloader stack top
 /// ```
+///
+/// The cross-boot records live BELOW the stack in their own `RETAINED`
+/// region (memory.x) rather than in `.uninit` above `.bss`: flip-link
+/// packs RAM sections against the top of RAM, and the Adafruit
+/// bootloader — which every reset runs before the app — starts its own
+/// stack at exactly 0x20040000, clobbering whatever lives up there.
 ///
 /// That is the exact inverse of the classic cortex-m-rt layout, where
 /// the stack is at the TOP and `__ebss` is its floor. The pre-flip-link
@@ -666,7 +672,7 @@ const PANIC_PM_MAGIC: u32 = 0xBADD_CAF1;
 /// reflash wipes it.
 const PANIC_PM_MAGIC_SEEN: u32 = 0xBADD_CAF2;
 
-#[link_section = ".uninit"]
+#[link_section = ".retained"]
 static mut PANIC_PM: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
 
 /// Decode the ring-stored record at `p`. Caller has validated the magic.
@@ -846,9 +852,13 @@ const HARDFAULT_PM_MAGIC: u32 = 0xC0FF_EE12;
 /// loss.
 const HARDFAULT_PM_MAGIC_SEEN: u32 = 0xC0FF_EE13;
 
-/// Survives `sys_reset` because `.uninit` is `NOLOAD` in cortex-m-rt's
-/// link.x — values in RAM are not zeroed by the runtime startup.
-#[link_section = ".uninit"]
+/// Survives `sys_reset` because `.retained` (memory.x) is `NOLOAD` —
+/// values in RAM are not zeroed by the runtime startup — and sits below
+/// every RAM address the Adafruit bootloader touches. In `.uninit` this
+/// record occupied the top 36 bytes of RAM, dead centre of the
+/// bootloader's stack; it could not have survived a single reset (see
+/// `boot_trace::BOOT_TRACE` for the full story).
+#[link_section = ".retained"]
 static mut HARDFAULT_PM: core::mem::MaybeUninit<HardfaultPostMortem> =
     core::mem::MaybeUninit::uninit();
 

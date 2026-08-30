@@ -115,8 +115,10 @@ bracketed by `[PM_QUERY] begin` / `[PM_QUERY] done` markers
 This exists because the boot-time replay of the same block is emitted
 exactly once into the 8 KiB log ring: after the 30 s headless fallback
 opens the runtime-drain gate, runtime output laps the ring, so a host
-that attaches later never sees it. The post-mortem records in `.uninit`
-RAM survive the boot read (it marks them seen rather than erasing them)
+that attaches later never sees it. The post-mortem records in retained
+RAM (the `.retained` region in `leviculum-nrf/memory.x`, placed where
+the Adafruit bootloader provably never writes)
+survive the boot read (it marks them seen rather than erasing them)
 and soft resets — power loss wipes them, and a reflash must be assumed
 to — so the query can retrieve the evidence any time after the crash,
 as long as the board stays powered.
@@ -131,8 +133,8 @@ It asserts DTR+RTS (the debug port transmits only with DTR raised),
 sends `p`, and prints the tagged response lines. Exit 0 means a
 complete response was captured; on older firmware without the query
 command it times out with exit 1. **Do not power-cycle a board whose
-evidence you still need** — `.uninit` lives in RAM, and power loss is
-the one thing that wipes it.
+evidence you still need** — the retained region lives in RAM, and power
+loss is the one thing that wipes it.
 
 ## Pointing a daemon at the transport port
 

@@ -1,12 +1,13 @@
 //! Boot-phase breadcrumbs in noinit RAM (ledger local-pocket-dark-d66209e).
 //!
 //! The volatile half of `leviculum-boot-trace`: one fixed-layout
-//! [`RawRecord`] in `.uninit` (NOLOAD in cortex-m-rt's link.x, so soft
-//! and pin resets preserve RAM contents; power loss does not), a phase
-//! byte advanced at named boot milestones, and the boot-time read of the
-//! PREVIOUS record before this boot overwrites it. Everything decodable
-//! or printable lives in the pure crate where it is host-tested; this
-//! module only moves bytes.
+//! [`RawRecord`] in `.retained` (a NOLOAD region in memory.x that the
+//! Adafruit bootloader provably never touches, so soft and pin resets
+//! preserve RAM contents; power loss does not), a phase byte advanced at
+//! named boot milestones, and the boot-time read of the PREVIOUS record
+//! before this boot overwrites it. Everything decodable or printable
+//! lives in the pure crate where it is host-tested; this module only
+//! moves bytes.
 //!
 //! Discipline: [`phase`] is a single volatile byte store — interrupt-safe
 //! (an ARM byte store is atomic), no flash write, no allocation, no
@@ -16,11 +17,16 @@
 pub use leviculum_boot_trace::Phase;
 use leviculum_boot_trace::{PrevBoot, RawRecord, TraceLine, MAGIC};
 
-/// Survives `sys_reset` because `.uninit` is NOLOAD — cortex-m-rt's
-/// startup neither zeroes nor initialises it. Same section as the
-/// post-mortems and the panic counter; under flip-link the painted
-/// stack region is disjoint from `.uninit`.
-#[link_section = ".uninit"]
+/// Survives `sys_reset` because `.retained` (memory.x) is NOLOAD —
+/// cortex-m-rt's startup neither zeroes nor initialises it — AND lies
+/// outside every RAM range the Adafruit bootloader uses on its way to
+/// the app. `.uninit` failed the second condition: flip-link packs it
+/// against the top of RAM, where the bootloader's stack starts
+/// (`__StackTop` = 0x20040000 in its linker script), so every boot
+/// clobbered the record before `capture` could read it — the rig showed
+/// `prev_magic=absent` across commanded resets from a running system.
+/// Same section as the post-mortems and the panic counter.
+#[link_section = ".retained"]
 static mut BOOT_TRACE: core::mem::MaybeUninit<RawRecord> = core::mem::MaybeUninit::uninit();
 
 /// POWER.RESETREAS (0x40000000 + 0x400). embassy-nrf 0.9 keeps its pac
@@ -50,7 +56,7 @@ pub struct Captured {
 /// early.
 pub fn capture() -> Captured {
     use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
-    // SAFETY: single-shot, before any concurrent task exists; `.uninit`
+    // SAFETY: single-shot, before any concurrent task exists; `.retained`
     // reads are of a possibly-never-written record, which is exactly what
     // the magic check in `decode` gates.
     unsafe {

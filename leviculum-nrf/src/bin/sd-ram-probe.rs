@@ -9,11 +9,12 @@
 //! `sd_softdevice_disable`. One boot yields the whole cost curve, and
 //! the BLE stack is never actually initialised.
 //!
-//! Fits-today is judged against the linked RAM ORIGIN (`_stack_end`,
-//! the flip-link stack floor) — NOT `__sdata`, which is what
+//! Fits-today is judged against `__sretained` (= ORIGIN(RETAINED) from
+//! memory.x, the SoftDevice's ceiling: above it sit the cross-boot
+//! records, then the flip-link stack) — NOT `__sdata`, which is what
 //! nrf-softdevice's own enable-time check uses and which sits a whole
 //! stack region higher: by that check a config can "fit" while the
-//! SoftDevice reservation overlaps our stack.
+//! SoftDevice reservation overlaps the retained records or our stack.
 //!
 //! This binary is a measurement instrument, not firmware: it is not
 //! flashed by any recipe, and per the #255 T2 batch instruction it must
@@ -132,13 +133,14 @@ unsafe extern "C" fn fault_handler(id: u32, pc: u32, info: u32) {
     panic!("SD fault id={id} pc={pc:#x} info={info:#x}");
 }
 
-/// The flip-link stack floor, i.e. the linked RAM ORIGIN from memory.x.
+/// The SoftDevice's ceiling: ORIGIN(RETAINED) from memory.x, the floor
+/// of the cross-boot record region (the stack floor sits above that).
 /// This is the address the SoftDevice reservation must stay below.
 fn linked_ram_origin() -> u32 {
     unsafe extern "C" {
-        static _stack_end: u32;
+        static __sretained: u32;
     }
-    core::ptr::addr_of!(_stack_end) as u32
+    core::ptr::addr_of!(__sretained) as u32
 }
 
 fn measure(case: &Case, linked_base: u32) -> Reading {

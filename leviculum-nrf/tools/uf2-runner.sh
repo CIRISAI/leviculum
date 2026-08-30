@@ -165,10 +165,11 @@ fi
 # --- Step 3: ELF → flat binary ----------------------------------------------
 
 echo "==> Converting ELF to binary ($(basename "$OBJCOPY"))"
-# -R .bss -R .uninit: exclude NOBITS sections so the binary only contains FLASH
-# content. Without this, a pre-2020 llvm-objcopy bug could include .bss (VMA in
-# RAM at 0x20003000), producing a ~500 MB binary and wrong UF2 target addresses.
-"$OBJCOPY" -O binary -R .bss -R .uninit "$ELF" "$BIN_FILE"
+# -R .bss -R .uninit -R .retained: exclude NOBITS sections so the binary only
+# contains FLASH content. Without this, a pre-2020 llvm-objcopy bug could
+# include .bss (VMA in RAM at 0x20003000), producing a ~500 MB binary and wrong
+# UF2 target addresses. .retained is the cross-boot record region (memory.x).
+"$OBJCOPY" -O binary -R .bss -R .uninit -R .retained "$ELF" "$BIN_FILE"
 
 # Sanity check: firmware must fit in application region (824K = 0xCE000 bytes).
 # If the binary is larger, something went wrong (e.g. NOBITS leak or wrong ELF).

@@ -240,19 +240,22 @@ macro_rules! log_critical {
     };
 }
 
-// Persistent log tail in `.uninit` — survives sys_reset.
+// Persistent log tail in `.retained` (memory.x) — survives sys_reset.
+// Its former `.uninit` home sat in the top 2 KiB of RAM, inside the
+// Adafruit bootloader's stack; how much of the tail survived a reset
+// depended on how deep that stack got (see `boot_trace::BOOT_TRACE`).
 #[repr(C)]
 pub struct PersistentTail {
     pub magic: u32,
     // Atomic so the byte-range reservation is race-free between a task
     // and the fault/exception path (same treatment as `LogRing`). Same
     // size/layout as a plain `u32`, so it survives `sys_reset` in the
-    // `.uninit` region exactly as before.
+    // `.retained` region exactly as before.
     pub write_pos: AtomicU32,
     pub buf: [u8; PERSISTENT_TAIL_SIZE],
 }
 
-#[link_section = ".uninit"]
+#[link_section = ".retained"]
 static mut PERSISTENT_TAIL_RAW: core::mem::MaybeUninit<PersistentTail> =
     core::mem::MaybeUninit::uninit();
 

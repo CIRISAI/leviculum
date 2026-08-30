@@ -30,9 +30,44 @@ MEMORY
     FLASH : ORIGIN = 0x00027000, LENGTH = 0xC3000
 
     /*
-     * RAM ORIGIN is the SoftDevice's ceiling and, under flip-link, our
-     * stack's FLOOR (`_stack_end`). It is sized from what the S140
-     * itself says it needs, measured with `src/bin/sd-ram-probe.rs`:
+     * RETAINED holds the cross-boot records (boot-trace breadcrumbs,
+     * panic counter, panic/hardfault post-mortems, persistent log
+     * tail — everything `#[link_section = ".retained"]`). They used to
+     * sit in `.uninit`, which flip-link packs against the TOP of RAM —
+     * and the Adafruit nRF52 bootloader, which every reset passes
+     * through before the app runs, starts its own stack exactly there:
+     * its linker script (Adafruit_nRF52_Bootloader linker/nrf_common.ld)
+     * sets `__StackTop = ORIGIN(RAM) + LENGTH(RAM)` with RAM ending at
+     * 0x20040000 (linker/nrf52840.ld), and the shipped RAK4631
+     * bootloader binary's vector table confirms initial SP =
+     * 0x20040000. The bootloader stack therefore clobbered the top of
+     * `.uninit` on every boot — the rig showed `prev_magic=absent`
+     * across commanded resets that provably came from a running system.
+     *
+     * The bootloader's OWN memory map is what makes this band safe: its
+     * RAM region is [0x20008000, 0x20040000) and the only addresses it
+     * touches below that are the double-reset word at 0x20007F7C and
+     * its NOINIT block at [0x20007F80, 0x20008000) (linker/nrf52840.ld:
+     * DBL_RESET and NOINIT regions). [0x20003FC0, 0x20007F7C) is
+     * touched by neither the bootloader nor — below the probed ceiling
+     * documented for RAM ORIGIN below — the SoftDevice. The one caveat:
+     * in OTA-DFU mode the bootloader enables the SD itself, whose RAM
+     * then reaches up to 0x20008000; after a DFU the image changed and
+     * the records are honestly `absent` anyway.
+     *
+     * LENGTH is sized to current content (0xC48 as of 2026-08-31) plus
+     * a little headroom; growing a record past it is a LINK ERROR, and
+     * the answer is to bump LENGTH and RAM ORIGIN here in lockstep.
+     * RAM ORIGIN must equal ORIGIN(RETAINED) + LENGTH(RETAINED),
+     * 32-byte aligned — the ASSERTs below hold both edges.
+     */
+    RETAINED : ORIGIN = 0x20003FC0, LENGTH = 0xC80
+
+    /*
+     * RAM ORIGIN is, under flip-link, our stack's FLOOR (`_stack_end`).
+     * The SoftDevice's ceiling is ORIGIN(RETAINED) just above — RETAINED
+     * sits between the SD and the stack. SD sizing is measured with
+     * `src/bin/sd-ram-probe.rs`:
      * `sd_ble_enable` against a deliberately undersized base answers
      * NRF_ERROR_NO_MEM and writes the exact required base back.
      *
@@ -45,14 +80,17 @@ MEMORY
      * configuration (phone + one neighbour LNode):
      *     wanted_app_ram_base = 0x20003BA8  (15 272 B of SD RAM)
      *     + 0x400 margin      = 0x20003FA8
-     *     rounded up to 32-byte alignment = 0x20003FC0  <- ORIGIN now
+     *     rounded up to 32-byte alignment = 0x20003FC0
+     *         <- the SD ceiling = ORIGIN(RETAINED); ORIGIN(RAM) is that
+     *            plus LENGTH(RETAINED)
      *
      * The 0x400 margin is deliberately kept rather than spent: the
-     * previous ORIGIN carried it, and a configuration that outgrows the
-     * floor is a board that panics at boot (see `assert_sd_fits_below_
-     * the_stack` in src/ble/mod.rs). The alignment round-up preserves
-     * the 32-byte property this file has always had; nothing requires
-     * more than 8 bytes.
+     * previous ceiling carried it, and a configuration that outgrows
+     * the ceiling is a board that panics at boot (see `assert_sd_fits_
+     * below_retained` in src/ble/mod.rs, which compares against
+     * `__sretained` = ORIGIN(RETAINED)). The alignment round-up
+     * preserves the 32-byte property this file has always had; nothing
+     * requires more than 8 bytes.
      *
      * Cost, paid HERE in phase A rather than in phase B, so the stack
      * consequence of the central role is measurable before the role
@@ -73,7 +111,36 @@ MEMORY
      * register access from RawHwRng, fixed in commit f093099). Worth
      * re-running 64 KiB with the f093099 build to confirm.
      *
-     * Leaves 256K - 15.9K = 240.1K (0x3C040) for application.
+     * Leaves 256K - 15.9K SD - 3.1K retained = 236.9K (0x3B3C0) for
+     * application: 0x20004C40 = 0x20003FC0 + 0xC80 (RETAINED), and
+     * 0x20004C40 + 0x3B3C0 = 0x20040000, the top of RAM.
      */
-    RAM   : ORIGIN = 0x20003FC0, LENGTH = 0x3C040
+    RAM   : ORIGIN = 0x20004C40, LENGTH = 0x3B3C0
 }
+
+/* The retained section itself. NOLOAD: no image content, and neither
+ * cortex-m-rt's startup (which touches only .data/.bss) nor the flash
+ * image knows it exists — RAM contents ride through resets untouched.
+ * `__sretained` is the SD ceiling `assert_sd_fits_below_retained`
+ * (src/ble/mod.rs) checks against at boot. */
+SECTIONS
+{
+    .retained (NOLOAD) : ALIGN(4)
+    {
+        *(.retained .retained.*);
+    } > RETAINED
+}
+
+/* Top-level (not inside the section) so the symbols exist even in a
+ * binary that keeps nothing retained, e.g. src/bin/sd-ram-probe.rs,
+ * whose fit verdict compares against __sretained. */
+__sretained = ORIGIN(RETAINED);
+__eretained = ORIGIN(RETAINED) + LENGTH(RETAINED);
+
+/* The band is only bootloader-safe below the double-reset word; and the
+ * stack floor (ORIGIN(RAM)) must sit on top of RETAINED, or the stack
+ * sweeps the records (edge held against future edits of either line). */
+ASSERT(ORIGIN(RETAINED) + LENGTH(RETAINED) <= 0x20007F7C,
+       "RETAINED reaches into the bootloader's DBL_RESET/NOINIT band (>= 0x20007F7C)");
+ASSERT(ORIGIN(RAM) >= ORIGIN(RETAINED) + LENGTH(RETAINED),
+       "app RAM (the flip-link stack floor) must start at or above the end of RETAINED");

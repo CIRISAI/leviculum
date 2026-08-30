@@ -371,13 +371,18 @@ fn sd_config() -> nrf_softdevice::Config {
     }
 }
 
-/// The flip-link stack floor: `ORIGIN(RAM)` from `memory.x`, the lowest
-/// address our stack can reach before it is in the SoftDevice's RAM.
-fn stack_floor() -> u32 {
+/// The SoftDevice's RAM ceiling: `__sretained` = `ORIGIN(RETAINED)` from
+/// `memory.x`. Above it sit first the cross-boot records (`.retained`),
+/// then the flip-link stack floor `ORIGIN(RAM)` — so an SD that stays
+/// below this line touches neither the records nor the stack. Comparing
+/// against `_stack_end` instead would be lenient by exactly the retained
+/// region: an SD landing inside it would pass and silently eat the
+/// post-mortems and boot breadcrumbs.
+fn sd_ceiling() -> u32 {
     extern "C" {
-        static _stack_end: u32;
+        static __sretained: u32;
     }
-    ptr::addr_of!(_stack_end) as u32
+    ptr::addr_of!(__sretained) as u32
 }
 
 /// The SoftDevice's own assertion callback, used only for the RAM probe
@@ -494,7 +499,7 @@ const APP_CONN_CFG_TAG: u8 = 1;
 const PROBE_SETTLE_CYCLES: u32 = 6_400_000;
 
 /// Refuse to enable the SoftDevice if it would take RAM out from under
-/// our stack.
+/// the retained records or our stack.
 ///
 /// nrf-softdevice performs its own version of this check inside
 /// `Softdevice::enable`, and under flip-link that check is a whole stack
@@ -503,25 +508,30 @@ const PROBE_SETTLE_CYCLES: u32 = 6_400_000;
 /// region, not the bottom. The layout is
 ///
 /// ```text
-///   _stack_end = ORIGIN(RAM)   <- the real floor; below it is the SD's
+///   __sretained = ORIGIN(RETAINED) <- the real ceiling; below it is
+///        .retained (cross-boot records)      the SD's
+///   _stack_end = ORIGIN(RAM)
 ///        |  stack, grows DOWN
 ///   __sdata = _stack_start     <- what nrf-softdevice compares against
-///        .data / .bss / .uninit
+///        .data / .bss
 /// ```
 ///
-/// so a configuration whose requirement lands anywhere inside the stack
-/// region passes the crate's check, the SoftDevice takes the bottom of
-/// our stack, and the symptom is not a refusal at boot but an SD
-/// internal assertion under load, once the stack happens to get that
-/// deep. Raising `conn_count` is exactly the change that moves the
-/// requirement, which is why this guard lands in phase A, before the
-/// change that needs it.
+/// so a configuration whose requirement lands anywhere inside the
+/// retained region or the stack passes the crate's check, the SoftDevice
+/// takes it, and the symptom is not a refusal at boot but an SD internal
+/// assertion under load, once the stack happens to get that deep — or,
+/// for the retained region, silently corrupted post-mortems. Raising
+/// `conn_count` is exactly the change that moves the requirement, which
+/// is why this guard lands in phase A, before the change that needs it.
 ///
 /// A violation panics: the post-mortem survives the reset and
 /// `scripts/lnode-panic-query.sh` reads it back, so the board says which
 /// two numbers disagreed instead of dying silently later.
-fn assert_sd_fits_below_the_stack(wanted: u32) {
-    let floor = stack_floor();
+fn assert_sd_fits_below_retained(wanted: u32) {
+    // `floor=` on the wire for continuity: the value is the same address
+    // the pre-RETAINED layout logged (ORIGIN(RETAINED) took over the old
+    // ORIGIN(RAM)), only what sits directly above it changed.
+    let floor = sd_ceiling();
     if wanted == 0 {
         // Inconclusive, not "fits". Loud, but not fatal: refusing to
         // boot over a probe that could not run would trade a possible
@@ -541,9 +551,10 @@ fn assert_sd_fits_below_the_stack(wanted: u32) {
     );
     assert!(
         wanted <= floor,
-        "SoftDevice wants app RAM base {wanted:#010x}, stack floor (ORIGIN(RAM)) is {floor:#010x}: \
-         the SD would own the bottom of our stack. Raise ORIGIN(RAM) in memory.x to {wanted:#010x} \
-         or above and shrink LENGTH by the same amount."
+        "SoftDevice wants app RAM base {wanted:#010x}, its ceiling (ORIGIN(RETAINED)) is \
+         {floor:#010x}: the SD would own the retained records and then the bottom of our stack. \
+         Raise ORIGIN(RETAINED) and ORIGIN(RAM) in memory.x by the shortfall and shrink \
+         LENGTH(RAM) by the same amount."
     );
 }
 
@@ -679,7 +690,7 @@ pub fn init(
     // refused before it can.
     let wanted = required_app_ram_base();
     cortex_m::asm::delay(PROBE_SETTLE_CYCLES);
-    assert_sd_fits_below_the_stack(wanted);
+    assert_sd_fits_below_retained(wanted);
 
     let sd = Softdevice::enable(&sd_config());
     crate::boot_trace::phase(crate::boot_trace::Phase::SdEnabled);
