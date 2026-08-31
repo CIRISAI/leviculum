@@ -43,6 +43,9 @@ pub mod telemetry;
 /// call sites are compiled out.
 pub mod transport_stats;
 pub mod usb;
+/// The T114's switched peripheral rail (VEXT), shared by the display and
+/// the GNSS receiver and therefore owned by neither (Codeberg #69).
+pub mod vext;
 
 // Shared SoftwareVbusDetect, fed by the SoftDevice's SoC POWER events
 // from `ble::softdevice_task` and read by `embassy_nrf::usb::Driver` via

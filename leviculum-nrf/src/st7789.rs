@@ -26,9 +26,12 @@
 //! | VEXT (supply)     | P0.21 | VEXT_ENABLE 21, HIGH| PIN_VEXT_EN 21, HIGH |
 //!
 //! Both references raise VEXT at boot ("turn on the display power",
-//! Meshtastic `main.cpp`); the TFT chain hangs off that rail, so this
-//! task owns VEXT and drives it high. Backlight and VTFT rail are on for
-//! as long as the task runs.
+//! Meshtastic `main.cpp:420-422`) and the TFT chain hangs off that rail
+//! — but so does the L76K GNSS receiver (#69), so the rail is not this
+//! task's to own. The binary raises it before spawning anything that
+//! sits on it and this task waits out the warmup with
+//! [`crate::vext::wait_ready`]; the VTFT rail and the backlight, which
+//! are the panel's alone, stay on for as long as the task runs.
 //!
 //! Rendering: the shared painter (`leviculum-screen`) draws the same
 //! status frame the Pocket V2 shows into a 120×67 mono framebuffer; this
@@ -252,7 +255,6 @@ pub struct TftWiring {
     pub cs: Peri<'static, crate::boards::t114::TftCs>,
     pub dc: Peri<'static, crate::boards::t114::TftDc>,
     pub rst: Peri<'static, crate::boards::t114::TftReset>,
-    pub vext: Peri<'static, crate::boards::t114::VextEnable>,
     pub vtft: Peri<'static, crate::boards::t114::TftPowerEn>,
     pub leda: Peri<'static, crate::boards::t114::TftBacklight>,
 }
@@ -266,14 +268,15 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
         cs,
         dc,
         rst,
-        vext,
         vtft,
         leda,
     } = wiring;
-    // Supply chain first: VEXT high (both references, see module
-    // header), TFT rail on (active low), backlight OFF until the panel
-    // is initialised and cleared — no flash of garbage.
-    let _vext = Output::new(vext, Level::High, OutputDrive::Standard);
+    // Supply chain first: the shared VEXT rail is already high (the
+    // binary raised it; see module header) — wait out what is left of
+    // its warmup, then the TFT rail on (active low) and the backlight
+    // OFF until the panel is initialised and cleared, so no garbage
+    // flashes up.
+    crate::vext::wait_ready().await;
     let _vtft = Output::new(vtft, Level::Low, OutputDrive::Standard);
     let mut leda = Output::new(leda, Level::High, OutputDrive::Standard);
     let mut rst = Output::new(rst, Level::High, OutputDrive::Standard);
@@ -333,16 +336,43 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
         tick = tick.wrapping_add(1);
         let heartbeat = (tick / 5) & 1 != 0; // toggles every 5 seconds
 
+        // The presence tri-state (#240) drives the GPS line exactly as it
+        // does on the V2 (`display.rs`): NoHardware renders "check
+        // wiring", and the fix/search label follows the hysteresis-held
+        // policy state rather than the raw per-sentence receiver flag, so
+        // the panel agrees with what every other consumer of
+        // GNSS_PRESENCE acts on. Read straight off the watches rather
+        // than through receivers — this task only ever wants the latest
+        // value and must not compete for a receiver slot. `bsp-t114`
+        // implies the `gnss` feature (Cargo.toml), so there is no
+        // feature-off arm here.
+        let gnss = match crate::baseboard::GNSS_PRESENCE.try_get() {
+            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
+                GnssStatus::NoHardware
+            }
+            Some(p) => {
+                let f = crate::baseboard::GNSS_FIX
+                    .try_get()
+                    .unwrap_or(crate::baseboard::GnssFix::empty());
+                GnssStatus::Data {
+                    sats: f.sat_in_use,
+                    valid: p.state == crate::baseboard::GnssPresence::Fix,
+                    coords: f.latitude.zip(f.longitude),
+                }
+            }
+            None => GnssStatus::NoData,
+        };
+
         let model = StatusModel {
             title: "leviculum T114",
             id_short: id_short.as_str(),
             rx: crate::lora::LORA_RX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
             tx: crate::lora::LORA_TX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
-            // The t114 binary compiles without the RAK-baseboard battery
-            // and gnss drivers; the shared painter renders the same
-            // "(no feature)" lines the V2 shows in that configuration.
+            // No battery gauge task on this board yet: the ADC divider is
+            // wired but nothing reads it, so the shared painter renders
+            // the "(no feature)" line the V2 shows in that configuration.
             battery: BatteryStatus::FeatureOff,
-            gnss: GnssStatus::FeatureOff,
+            gnss,
             heartbeat,
         };
 

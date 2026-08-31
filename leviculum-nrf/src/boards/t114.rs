@@ -58,17 +58,17 @@ pub type UartRx = peripherals::P0_09;
 /// UART TX (header P1, NFC pin repurposed)
 pub type UartTx = peripherals::P0_10;
 
-// GPS (L76K, powered via VEXT)
-/// GPS UART TX (MCU → GPS)
+// GPS (Quectel L76K, powered via VEXT)
+/// GPS UART TX (MCU → GPS; Meshtastic `GPS_RX_PIN (32+5)`, named from
+/// the module's side there)
 pub type GpsTx = peripherals::P1_05;
-/// GPS UART RX (GPS → MCU)
+/// GPS UART RX (GPS → MCU; Meshtastic `GPS_TX_PIN (32+7)`)
 pub type GpsRx = peripherals::P1_07;
-/// GPS standby control (LOW = sleep, HIGH = wake)
+/// GPS standby control (LOW = allow sleep, HIGH = force wake;
+/// `variant.h:170` with `GPS_STANDBY_ACTIVE LOW`, `GPS.h:22-23`)
 pub type GpsStandby = peripherals::P1_02;
 /// GPS PPS (pulse-per-second) input
 pub type GpsPps = peripherals::P1_04;
-/// GPS UART baud rate
-pub const GPS_BAUD: u32 = 115_200;
 
 // I2C0 (RTC footprint, optional PCF8563TS)
 /// I2C0 SDA (RTC footprint)

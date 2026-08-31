@@ -378,13 +378,19 @@ async fn main(spawner: Spawner) {
     {
         leviculum_nrf::gnss::init(
             &spawner,
-            p.UARTE0,
-            p.TIMER1,       // idle-line detection for read_until_idle
-            p.PPI_CH0,      // RXDRDY → timer clear/start
-            p.PPI_CH1,      // timer compare → RX stop
-            p.P0_15.into(), // RX from ZOE-M8Q TX
-            p.P0_16.into(), // TX to ZOE-M8Q RX
-            p.P0_17.into(), // PPS (configured but unused)
+            leviculum_nrf::gnss::GnssWiring {
+                uarte: p.UARTE0,
+                timer: p.TIMER1,
+                ppi_a: p.PPI_CH0,
+                ppi_b: p.PPI_CH1,
+                rx: p.P0_15.into(), // RX from ZOE-M8Q TX
+                tx: p.P0_16.into(), // TX to ZOE-M8Q RX
+                pps: p.P0_17.into(),
+                // The ZOE-M8Q has no standby pin on this baseboard; it is
+                // woken through UBX (CFG-PMS) instead.
+                standby: None,
+                module: leviculum_nrf::gnss::ModuleKind::UbloxM8,
+            },
         );
         info!("gnss task spawned");
     }

@@ -133,7 +133,7 @@ as antenna switch.
 
 | Product | Level | Note |
 |---|---|---|
-| Heltec Mesh Node T114 | **Verified** | Status display supported |
+| Heltec Mesh Node T114 | **Verified** | Status display and GNSS (L76K) supported |
 | Heltec MeshSolar | **Blocked** | Radio matches, but our status LED sits on the battery controller's emergency-shutdown pin |
 | LILYGO T-Echo | **Do not flash** | Two pin conflicts, see below |
 | LILYGO T-Echo Plus | **Do not flash** | Same as T-Echo |
@@ -256,12 +256,12 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:139` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:133` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:141` |
-| `gnss` | NMEA0183 GNSS on baseboard | `leviculum-nrf/Cargo.toml:142` |
-| `battery` | battery telemetry on baseboard | `leviculum-nrf/Cargo.toml:143` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:144` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS) | `leviculum-nrf/Cargo.toml:224` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:212` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:226` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114) | `leviculum-nrf/Cargo.toml:227` |
+| `battery` | battery telemetry on baseboard | `leviculum-nrf/Cargo.toml:233` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:234` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`

@@ -1,4 +1,5 @@
 use super::*;
+use crate::{AckOutcome, ModuleInit, Output, MAX_FRAME};
 
 // Fixtures computed INDEPENDENTLY of this crate (python3, 8-bit
 // Fletcher over class..payload) — the frame consts must match them
@@ -39,7 +40,7 @@ fn poll(m: &mut UbxInit, locked: bool, sentences: u32, now_ms: u64) -> Vec<Outpu
     out
 }
 
-fn sends(outputs: &[Output]) -> Vec<(Step, &'static [u8])> {
+fn sends(outputs: &[Output]) -> Vec<(&'static str, &'static [u8])> {
     outputs
         .iter()
         .filter_map(|o| match o {
@@ -49,7 +50,7 @@ fn sends(outputs: &[Output]) -> Vec<(Step, &'static [u8])> {
         .collect()
 }
 
-fn acks(outputs: &[Output]) -> Vec<(Step, AckOutcome)> {
+fn acks(outputs: &[Output]) -> Vec<(&'static str, AckOutcome)> {
     outputs
         .iter()
         .filter_map(|o| match o {
@@ -116,7 +117,7 @@ fn no_tx_before_lock() {
     let out = poll(&mut m, true, 20, 20_000);
     assert_eq!(
         sends(&out),
-        vec![(Step::FactoryClear, &FACTORY_CLEAR_FRAME[..])]
+        vec![(Step::FactoryClear.as_str(), &FACTORY_CLEAR_FRAME[..])]
     );
 }
 
@@ -126,7 +127,7 @@ fn no_tx_before_lock() {
 // flow, acknowledging every step. All three ACK frames are fed after
 // each send: only the matching class/id is ever consumed, so this also
 // exercises the non-matching path. Returns the steps in order.
-fn drive_boot_sequence() -> Vec<(Step, &'static [u8])> {
+fn drive_boot_sequence() -> Vec<(&'static str, &'static [u8])> {
     let mut m = UbxInit::new();
     let mut seen = Vec::new();
     for i in 0..600u64 {
@@ -156,9 +157,9 @@ fn boot_path_is_cfg_pms_ant_without_reset() {
     assert_eq!(
         seen,
         vec![
-            (Step::FactoryClear, &FACTORY_CLEAR_FRAME[..]),
-            (Step::FullPower, &FULL_POWER_FRAME[..]),
-            (Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..]),
+            (Step::FactoryClear.as_str(), &FACTORY_CLEAR_FRAME[..]),
+            (Step::FullPower.as_str(), &FULL_POWER_FRAME[..]),
+            (Step::AntennaSupply.as_str(), &ANTENNA_SUPPLY_FRAME[..]),
         ]
     );
 }
@@ -172,14 +173,12 @@ fn cold_start_frame_never_reaches_the_wire_at_boot() {
         assert_ne!(
             frame,
             &COLD_START_FRAME[..],
-            "{} must not send the cold-start frame",
-            step.as_str()
+            "{step} must not send the cold-start frame"
         );
         assert_ne!(
             &frame[2..4],
             &[0x06, 0x04],
-            "{} must not send UBX-CFG-RST",
-            step.as_str()
+            "{step} must not send UBX-CFG-RST"
         );
     }
 }
@@ -197,12 +196,15 @@ fn full_happy_path() {
     let out = poll(&mut m, true, 3, 5_000);
     assert_eq!(
         sends(&out),
-        vec![(Step::FactoryClear, &FACTORY_CLEAR_FRAME[..])]
+        vec![(Step::FactoryClear.as_str(), &FACTORY_CLEAR_FRAME[..])]
     );
 
     // Module ACKs CFG-CFG promptly.
     let out = on_bytes(&mut m, &ACK_CFG, 5_100);
-    assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Ack)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FactoryClear.as_str(), AckOutcome::Ack)]
+    );
 
     // Inside the settle: nothing, even with sentences flowing.
     let out = poll(&mut m, true, 5, 5_600);
@@ -213,12 +215,18 @@ fn full_happy_path() {
     assert_eq!(out.len(), 0, "snapshot poll must not send");
     // A fresh sentence after the snapshot releases CFG-PMS.
     let out = poll(&mut m, true, 7, 5_200 + POST_CFG_SETTLE_MS);
-    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::FullPower.as_str(), &FULL_POWER_FRAME[..])]
+    );
     let pms_t = 5_200 + POST_CFG_SETTLE_MS;
 
     // Module ACKs CFG-PMS.
     let out = on_bytes(&mut m, &ACK_PMS, pms_t + 100);
-    assert_eq!(acks(&out), vec![(Step::FullPower, AckOutcome::Ack)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FullPower.as_str(), AckOutcome::Ack)]
+    );
 
     // Settle after PMS, snapshot, then a fresh sentence releases
     // CFG-ANT.
@@ -229,13 +237,16 @@ fn full_happy_path() {
     let out = poll(&mut m, true, 10, pms_t + 200 + POST_PMS_SETTLE_MS);
     assert_eq!(
         sends(&out),
-        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+        vec![(Step::AntennaSupply.as_str(), &ANTENNA_SUPPLY_FRAME[..])]
     );
     let ant_t = pms_t + 200 + POST_PMS_SETTLE_MS;
 
     // Module ACKs CFG-ANT.
     let out = on_bytes(&mut m, &ACK_ANT, ant_t + 100);
-    assert_eq!(acks(&out), vec![(Step::AntennaSupply, AckOutcome::Ack)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::AntennaSupply.as_str(), AckOutcome::Ack)]
+    );
 
     // One-shot: nothing ever again, whatever flows.
     for i in 0..30u64 {
@@ -256,11 +267,17 @@ fn nak_reports_and_continues() {
     poll(&mut m, true, 3, 1_000);
     let nak_cfg: [u8; 10] = [0xB5, 0x62, 0x05, 0x00, 0x02, 0x00, 0x06, 0x09, 0x16, 0x3B];
     let out = on_bytes(&mut m, &nak_cfg, 1_100);
-    assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Nak)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FactoryClear.as_str(), AckOutcome::Nak)]
+    );
 
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     let out = poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
-    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::FullPower.as_str(), &FULL_POWER_FRAME[..])]
+    );
 }
 
 // An ACK that never arrives times out, is reported, and the sequence
@@ -275,12 +292,18 @@ fn ack_timeout_reports_and_continues() {
     let out = poll(&mut m, true, 3, 999 + CFG_ACK_TIMEOUT_MS);
     assert_eq!(out.len(), 0, "deadline must run its full length");
     let out = poll(&mut m, true, 3, 1_000 + CFG_ACK_TIMEOUT_MS);
-    assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Timeout)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FactoryClear.as_str(), AckOutcome::Timeout)]
+    );
     let timeout_t = 1_000 + CFG_ACK_TIMEOUT_MS;
 
     poll(&mut m, true, 4, timeout_t + POST_CFG_SETTLE_MS);
     let out = poll(&mut m, true, 5, timeout_t + 100 + POST_CFG_SETTLE_MS);
-    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::FullPower.as_str(), &FULL_POWER_FRAME[..])]
+    );
 }
 
 // A NAK'd CFG-PMS does not end the sequence: CFG-ANT still follows
@@ -293,15 +316,21 @@ fn pms_nak_continues_to_ant() {
     poll(&mut m, true, 4, 1_100 + POST_CFG_SETTLE_MS);
     let out = poll(&mut m, true, 5, 1_200 + POST_CFG_SETTLE_MS);
     let pms_t = 1_200 + POST_CFG_SETTLE_MS;
-    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::FullPower.as_str(), &FULL_POWER_FRAME[..])]
+    );
     let out = on_bytes(&mut m, &NAK_PMS, pms_t + 100);
-    assert_eq!(acks(&out), vec![(Step::FullPower, AckOutcome::Nak)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FullPower.as_str(), AckOutcome::Nak)]
+    );
 
     poll(&mut m, true, 6, pms_t + 100 + POST_PMS_SETTLE_MS);
     let out = poll(&mut m, true, 7, pms_t + 200 + POST_PMS_SETTLE_MS);
     assert_eq!(
         sends(&out),
-        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+        vec![(Step::AntennaSupply.as_str(), &ANTENNA_SUPPLY_FRAME[..])]
     );
 }
 
@@ -321,7 +350,10 @@ fn ant_nak_ends_sequence() {
     let ant_t = pms_t + 200 + POST_PMS_SETTLE_MS;
     assert_eq!(sends(&out).len(), 1);
     let out = on_bytes(&mut m, &NAK_ANT, ant_t + 100);
-    assert_eq!(acks(&out), vec![(Step::AntennaSupply, AckOutcome::Nak)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::AntennaSupply.as_str(), AckOutcome::Nak)]
+    );
     assert_eq!(poll(&mut m, true, 50, ant_t + 60_000).len(), 0);
     assert_eq!(poll(&mut m, true, 51, ant_t + 61_000).len(), 0);
 }
@@ -364,7 +396,10 @@ fn pms_gate_needs_settle_and_fresh_sentence_and_lock() {
 
     // Locked again with a fresh sentence: released.
     let out = poll(&mut m, true, 11, gate_t + 12_000);
-    assert_eq!(sends(&out), vec![(Step::FullPower, &FULL_POWER_FRAME[..])]);
+    assert_eq!(
+        sends(&out),
+        vec![(Step::FullPower.as_str(), &FULL_POWER_FRAME[..])]
+    );
 }
 
 // ---- Post-PMS gate: same rules for CFG-ANT ----
@@ -402,7 +437,7 @@ fn ant_gate_needs_settle_and_fresh_sentence_and_lock() {
     let out = poll(&mut m, true, 11, gate_t + 12_000);
     assert_eq!(
         sends(&out),
-        vec![(Step::AntennaSupply, &ANTENNA_SUPPLY_FRAME[..])]
+        vec![(Step::AntennaSupply.as_str(), &ANTENNA_SUPPLY_FRAME[..])]
     );
 }
 
@@ -425,7 +460,10 @@ fn ack_scanner_finds_frame_in_noise_and_across_chunks() {
     let mut chunk2 = ACK_CFG[4..].to_vec();
     chunk2.extend_from_slice(b"$GNGGA,,,,,,0,00,99.99,,,,,,*56\r\n");
     let out = on_bytes(&mut m, &chunk2, 1_200);
-    assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Ack)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FactoryClear.as_str(), AckOutcome::Ack)]
+    );
 }
 
 // Corrupting a checksum byte must kill the frame — the scanner-side
@@ -440,7 +478,10 @@ fn ack_scanner_rejects_corrupt_checksum() {
     assert_eq!(out.len(), 0, "corrupt checksum must not count as ACK");
     // The intact frame right after is still recognised.
     let out = on_bytes(&mut m, &ACK_CFG, 1_200);
-    assert_eq!(acks(&out), vec![(Step::FactoryClear, AckOutcome::Ack)]);
+    assert_eq!(
+        acks(&out),
+        vec![(Step::FactoryClear.as_str(), AckOutcome::Ack)]
+    );
 }
 
 // An ACK for a different message (wrong class/id payload) is not ours.

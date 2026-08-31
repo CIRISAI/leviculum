@@ -77,12 +77,14 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::telemetry::declare_reporter();
     // Which position sources this board boots with — the second clause of
     // the telemetry send condition, and a question a host may put before
-    // the reporter exists, so it is answered before USB comes up. No GNSS
-    // receiver on this board yet (#69 is the L76K task), so the only source
-    // a T114 can have is a user-set pin — which is exactly the board the
-    // `state=no-position-source` line was written for.
+    // the reporter exists, so it is answered before USB comes up. The
+    // GNSS bit says a receiver is *configured*, not that it has a fix:
+    // reports run `position=0` until the L76K acquires and `position=1
+    // possrc=gnss` after (#69, #255). `cfg!` and not a constant, because
+    // the spawn below is under the same gate — the two must not be able
+    // to disagree.
     leviculum_nrf::telemetry::declare_position_sources(
-        /* gnss_available */ false,
+        /* gnss_available */ cfg!(feature = "gnss"),
         t114::CONFIG.telemetry_flash_page,
     );
     // The media profile decides which carriers come up at all, so it is
@@ -138,9 +140,13 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // VEXT (P0.21) is owned by the display task, which drives it HIGH:
-    // both references power the TFT chain from that rail at boot
-    // (Meshtastic main.cpp "turn on the display power"; RNode setup()).
+    // VEXT (P0.21) carries BOTH the TFT chain and the L76K receiver, so
+    // it belongs to neither task; the binary raises it here, as the
+    // references do at board level (Meshtastic main.cpp:420-422 "turn on
+    // the display power"; RNode setup()). Raised as early as the
+    // peripherals exist so its 1 s warmup overlaps the rest of init
+    // instead of delaying a consumer.
+    leviculum_nrf::vext::raise(p.P0_21);
     let mut led = t114::led(p.P1_03);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
@@ -344,13 +350,35 @@ async fn main(spawner: Spawner) {
                 cs: p.P0_11,
                 dc: p.P0_12,
                 rst: p.P0_02,
-                vext: p.P0_21,
                 vtft: p.P0_03,
                 leda: p.P0_15,
             },
             identity_hash,
         );
         info!("display task spawned (ST7789 blind-drive)");
+    }
+
+    // Quectel L76K on UARTE0 (#69). Pin naming is from the MCU's side:
+    // P1.07 is where the module's TX arrives, P1.05 is what it listens
+    // on. P1.02 is the standby control the driver holds high, P1.04 the
+    // unused PPS. Power comes from the VEXT rail raised above.
+    #[cfg(feature = "gnss")]
+    {
+        leviculum_nrf::gnss::init(
+            &spawner,
+            leviculum_nrf::gnss::GnssWiring {
+                uarte: p.UARTE0,
+                timer: p.TIMER1,
+                ppi_a: p.PPI_CH0,
+                ppi_b: p.PPI_CH1,
+                rx: p.P1_07.into(),
+                tx: p.P1_05.into(),
+                pps: p.P1_04.into(),
+                standby: Some(p.P1_02.into()),
+                module: leviculum_nrf::gnss::ModuleKind::QuectelL76k,
+            },
+        );
+        info!("gnss task spawned (L76K)");
     }
 
     let (hu, hf) = leviculum_nrf::heap_stats();
@@ -408,21 +436,38 @@ async fn main(spawner: Spawner) {
     let telemetry_target_rx = leviculum_nrf::telemetry::inbound_target_receiver();
     let fixed_position_rx = leviculum_nrf::telemetry::inbound_fixed_position_receiver();
 
+    // Calendar seeding from GNSS (Codeberg #166 item 1, #69 on this
+    // board): the main loop owns the node, so it is the one place a fix
+    // can reach the wall-time seam. One accepted fix seeds; the monotonic
+    // clock carries the calendar from there — the receiver keeps running
+    // for position only, never as a clock.
+    #[cfg(feature = "gnss")]
+    let mut gnss_rx = {
+        let rx = leviculum_nrf::baseboard::GNSS_FIX.receiver();
+        if rx.is_none() {
+            log_critical!("[TIME_SEED_REFUSED] source=gnss reason=watch_capacity");
+        }
+        rx
+    };
+    #[cfg(feature = "gnss")]
+    let mut time_seed_gate = leviculum_gnss_time::SeedGate::new();
+
     // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
     // a spawned task: the counters live in the node this loop owns.
     let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
 
     log_critical!("[STG] main-loop");
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
-    // Event-driven main loop, seven event sources:
+    // Event-driven main loop, nine event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
     // 3. BLE incoming (defragmented Reticulum packets from phone)
     // 4. Timer deadline (protocol maintenance, announces)
-    // 5. Host wall-time injection (#238 control envelope)
-    // 6. Host telemetry target (#238 control envelope, #236)
-    // 7. Host fixed position (#238 control envelope)
-    // 8. Telemetry evaluation tick (only while a target is configured)
+    // 5. GNSS time candidate (until the calendar is seeded once)
+    // 6. Host wall-time injection (#238 control envelope)
+    // 7. Host telemetry target (#238 control envelope, #236)
+    // 8. Host fixed position (#238 control envelope)
+    // 9. Telemetry evaluation tick (only while a target is configured)
     loop {
         transport_stats.poll(&node);
         // Clamped by the stats deadline so the line is still emitted on a
@@ -432,6 +477,30 @@ async fn main(spawner: Spawner) {
             .map(Instant::from_millis)
             .unwrap_or(Instant::MAX)
             .min(transport_stats.deadline());
+
+        let gnss_time_candidate = async {
+            #[cfg(feature = "gnss")]
+            {
+                if time_seed_gate.is_seeded() {
+                    // Seeded for this boot: nothing left to wait for.
+                    core::future::pending::<u64>().await
+                } else {
+                    match gnss_rx.as_mut() {
+                        Some(rx) => loop {
+                            let fix = rx.changed().await;
+                            if let Some(unix) = time_seed_gate.offer(fix.unix_secs) {
+                                break unix;
+                            }
+                        },
+                        None => core::future::pending::<u64>().await,
+                    }
+                }
+            }
+            #[cfg(not(feature = "gnss"))]
+            {
+                core::future::pending::<u64>().await
+            }
+        };
 
         // The tick rate is also the retry rate for a report the radio
         // could not take: the policy re-arms until a send is confirmed.
@@ -443,13 +512,14 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        match select3(
+        match select4(
             select4(
                 serial.incoming_rx.receive(),
                 lora_channels.incoming_rx.receive(),
                 ble_channels.incoming_rx.receive(),
                 Timer::at(deadline),
             ),
+            gnss_time_candidate,
             select3(
                 serial.wall_time_rx.receive(),
                 telemetry_target_rx.receive(),
@@ -459,7 +529,26 @@ async fn main(spawner: Spawner) {
         )
         .await
         {
-            Either3::Second(Either3::First(unix_secs)) => {
+            Either4::Second(unix) => {
+                // A GNSS fix carrying UTC. The seam applies the same
+                // sanity window as every other time source; a refusal is
+                // surfaced as a structured event, never swallowed.
+                #[cfg(feature = "gnss")]
+                {
+                    use leviculum_core::transport::TimeSource;
+                    if node.set_wall_time_unix_secs(unix, TimeSource::Gnss) {
+                        time_seed_gate.mark_seeded();
+                        leviculum_nrf::set_time_source(TimeSource::Gnss);
+                        log_critical!("[TIME_SEED] source=gnss unix={}", unix);
+                        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    } else {
+                        log_critical!("[TIME_SEED_REFUSED] source=gnss unix={}", unix);
+                    }
+                }
+                #[cfg(not(feature = "gnss"))]
+                let _ = unix;
+            }
+            Either4::Third(Either3::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
                 // seam applies the same sanity window as every other time
                 // source; the bool picks the enveloped ack or the named
@@ -479,7 +568,7 @@ async fn main(spawner: Spawner) {
                 // the host's retry covers it.
                 let _ = serial_ctl_tx.try_send(answer);
             }
-            Either3::Second(Either3::Second(wire)) => {
+            Either4::Third(Either3::Second(wire)) => {
                 // A host set or cleared the telemetry target (#236). What
                 // happens here is the part that needs the node — the
                 // identity lookup that decides ready vs awaiting-key. The
@@ -496,7 +585,7 @@ async fn main(spawner: Spawner) {
                     }
                 }
             }
-            Either3::Second(Either3::Third(position)) => {
+            Either4::Third(Either3::Third(position)) => {
                 // A host set or cleared the fixed position. This is the
                 // part that needs the reporter — the source switch and the
                 // confirmation re-arm; the persist is the serial task's,
@@ -515,7 +604,7 @@ async fn main(spawner: Spawner) {
                     }
                 }
             }
-            Either3::Third(()) => {
+            Either4::Fourth(()) => {
                 // Telemetry evaluation (#236). Everything decided here is
                 // decided in the policy crate; this arm reads the board's
                 // sensors, hands them over, and dispatches whatever came
@@ -537,7 +626,7 @@ async fn main(spawner: Spawner) {
                     }
                 }
             }
-            Either3::First(Either4::First(data)) => {
+            Either4::First(Either4::First(data)) => {
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
@@ -546,7 +635,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
             }
-            Either3::First(Either4::Second(data)) => {
+            Either4::First(Either4::Second(data)) => {
                 // A medium switched off at runtime stops carrying traffic
                 // in BOTH directions from the moment the frame was
                 // answered: the interface drops what the core hands it,
@@ -566,7 +655,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
-            Either3::First(Either4::Third(data)) => {
+            Either4::First(Either4::Third(data)) => {
                 info!("BLE RX {} bytes", data.len());
                 // See the LoRa arm: a medium switched off at runtime
                 // delivers nothing upward either.
@@ -582,7 +671,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
             }
-            Either3::First(Either4::Fourth(())) => {
+            Either4::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());
@@ -606,11 +695,15 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Read this board's sensors for one telemetry evaluation.
 ///
+/// Returns the readings and whether GNSS presence is `Fix` — only that
+/// state may contribute a position (#240), and the policy is told
+/// separately rather than having to infer it from the numbers.
+///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. The T114 build wires no GNSS and no battery gauge —
-/// the L76K task is #69's work and the ADC has no task — so presence is
-/// never `Fix` and no position is contributed (#240). Time reaches the node
-/// via the host wall-time injection (#238) until #69 lands a GNSS seed.
+/// peripherals exist. The T114 has the L76K (#69) and no battery gauge
+/// (the ADC has no task), so a fix contributes position, speed, bearing
+/// and the HDOP the accuracy gate reads, and the battery field stays
+/// empty.
 ///
 /// The die temperature it does have: every nRF52840 carries one and the
 /// SoftDevice is enabled on both boards, so it is read here through the
@@ -624,7 +717,10 @@ where
     C: leviculum_core::traits::Clock,
     S: leviculum_core::traits::Storage,
 {
-    let readings = leviculum_nrf::telemetry::Readings {
+    // Without the gnss feature nothing mutates this; the die temperature
+    // is set in the initialiser, so it does not lift the gate.
+    #[cfg_attr(not(feature = "gnss"), allow(unused_mut, clippy::let_and_return))]
+    let mut readings = leviculum_nrf::telemetry::Readings {
         // A timebase below the plausibility floor is uptime seconds, not a
         // calendar estimate — the anchor model's "never ahead" rule has
         // nothing to work with there. Which arm anchored it is reported
@@ -635,7 +731,25 @@ where
         die_temperature_quarter_c: leviculum_nrf::telemetry::die_temperature_quarter_c(sd),
         ..Default::default()
     };
-    (readings, false)
+    #[cfg(not(feature = "gnss"))]
+    let has_fix = false;
+    #[cfg(feature = "gnss")]
+    let has_fix = {
+        use leviculum_nrf::baseboard::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
+        if let Some(fix) = GNSS_FIX.try_get() {
+            readings.latitude = fix.latitude;
+            readings.longitude = fix.longitude;
+            readings.altitude_m = fix.altitude_m;
+            readings.speed_mps = fix.speed_mps;
+            readings.bearing_deg = fix.bearing_deg;
+            readings.hdop = fix.hdop;
+        }
+        matches!(
+            GNSS_PRESENCE.try_get().map(|p| p.state),
+            Some(GnssPresence::Fix)
+        )
+    };
+    (readings, has_fix)
 }
 
 #[embassy_executor::task]

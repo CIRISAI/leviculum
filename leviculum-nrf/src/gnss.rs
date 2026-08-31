@@ -1,8 +1,15 @@
 //! GNSS driver task: baud sweep, presence tri-state, NMEA fold.
 //!
-//! UARTE0 on P0.15 (RX from chip → MCU) / P0.16 (TX from MCU → chip) on
-//! the WisMesh Pocket V2 (RAK19026 VC baseboard, u-blox ZOE-M8Q). The
-//! `gnss` cargo feature only says the board routes this UART; whether a
+//! One task, two boards, two receivers. UARTE0 on P0.15/P0.16 carries
+//! the WisMesh Pocket V2's u-blox ZOE-M8Q (RAK19026 VC baseboard); on
+//! P1.07/P1.05 it carries the Heltec Mesh Node T114's Quectel L76K
+//! (Codeberg #69). Everything below the module-init step is identical
+//! for both, because nothing in it is module-specific: a baud sweep, a
+//! presence tri-state and an NMEA fold work on sentences, and sentences
+//! are sentences. The two differences are named in [`GnssWiring`] — which
+//! pins, and which [`ModuleKind`] the one-shot init speaks.
+//!
+//! The `gnss` cargo feature only says the board routes this UART; whether a
 //! receiver is attached and delivering is a runtime question with three
 //! answers (Codeberg #240), owned by the pure
 //! [`leviculum_gnss_presence::PresenceMachine`]:
@@ -31,39 +38,105 @@
 //! window lengths, sweep order, hysteresis hold — lives host-tested in
 //! the pure crate.
 //!
-//! One-shot UBX module init (#324): after the first baud lock the task
-//! walks the [`leviculum_gnss_init::UbxInit`] sequence — factory clear
-//! (UBX-CFG-CFG), full power (UBX-CFG-PMS), antenna supply
-//! (UBX-CFG-ANT) — so a persisted Meshtastic-era module configuration
-//! cannot survive into our runtime, and acquisition never depends on a
-//! field module's factory defaults. The byte sequences, gates and ACK
-//! discipline are derived from the Meshtastic reference
-//! (`meshtastic/src/gps/ubx.h`, `GPS.cpp`) and live host-tested in the
-//! pure crate; this task only writes the frames and logs `[GNSS_INIT]`
-//! lines. The sequence deliberately contains no reset: a forced cold
-//! start would wipe the module's assistance data on every boot, and
-//! nothing in the three messages needs a restart to take effect (the
-//! crate docs carry the spec citations). The clear still resets the
-//! module's I/O system, after which it may fall back to its default
-//! baud — the presence machine's sentence-starvation re-sweep recovers
-//! the line, no special-casing here. The rest of the Meshtastic chain
-//! (`_message_NAVX5` tuning, rate and constellation config,
-//! `ubx.h:38-321`) stays deliberately unsent.
+//! One-shot module init (#324 on the V2, #69 on the T114): after the
+//! first baud lock the task walks the sequence its board's
+//! [`leviculum_gnss_init::ModuleInit`] hands out — UBX factory clear /
+//! full power / antenna supply on the ZOE-M8Q, the `$PCAS` probe /
+//! constellations / sentence selection / navigation mode on the L76K —
+//! so a persisted Meshtastic-era module configuration cannot survive
+//! into our runtime, and acquisition never depends on a field module's
+//! factory defaults. Both sequences are derived from the Meshtastic
+//! reference (`meshtastic/src/gps/ubx.h`, `GPS.cpp`) and live
+//! host-tested in the pure crate with the citations; this task only
+//! writes the frames and logs `[GNSS_INIT]` lines. Neither sequence
+//! contains a reset or a baud command: a forced cold start would wipe
+//! the module's assistance data on every boot, and a baud command would
+//! desynchronise the line the driver is talking on. The UBX clear does
+//! reset the module's I/O system, after which it may fall back to its
+//! default baud — the presence machine's sentence-starvation re-sweep
+//! recovers the line, no special-casing here.
 //!
-//! The PPS pin (P0.17) is configured as a pull-down input but not used —
-//! reserved for a future timestamp-capture iteration.
+//! Two things that are not sentences and therefore live here rather
+//! than in the pure crate: the module's **standby pin**, held awake for
+//! the life of the task on a board that has one (the L76K parks in
+//! low power otherwise — the same #324 lesson, one layer down), and the
+//! **shared supply rail**, which the task waits out rather than
+//! switching, because on the T114 the display sits on it too
+//! ([`crate::vext`]).
+//!
+//! The PPS pin (P0.17 on the V2, P1.04 on the T114) is configured as a
+//! pull-down input but not used — reserved for a future
+//! timestamp-capture iteration.
 
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{AnyPin, Input, Pull};
+use embassy_nrf::gpio::{AnyPin, Input, Level, OutputDrive, Pull};
 use embassy_nrf::peripherals;
 use embassy_nrf::uarte::{self, Uarte};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
-use leviculum_gnss_init::UbxInit;
+use leviculum_gnss_init::{L76kInit, ModuleInit, UbxInit};
 use leviculum_gnss_presence::{Output, PresenceMachine};
 
 use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
+
+/// Which receiver is on the other end of the UART, and therefore which
+/// command language the one-shot boot init speaks. The board knows; the
+/// rest of the driver does not care.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleKind {
+    /// u-blox ZOE-M8Q (WisMesh Pocket V2), UBX binary protocol.
+    UbloxM8,
+    /// Quectel L76K (Heltec Mesh Node T114), CASIC `$PCAS` sentences.
+    QuectelL76k,
+}
+
+/// The board-specific half of the driver: which peripherals and pins
+/// carry the receiver, and which module language it speaks.
+pub struct GnssWiring {
+    pub uarte: Peri<'static, peripherals::UARTE0>,
+    /// Idle-line detection for `read_until_idle`.
+    pub timer: Peri<'static, peripherals::TIMER1>,
+    /// RXDRDY → timer clear/start.
+    pub ppi_a: Peri<'static, peripherals::PPI_CH0>,
+    /// Timer compare → RX stop.
+    pub ppi_b: Peri<'static, peripherals::PPI_CH1>,
+    /// RX at the MCU: the module's TX line.
+    pub rx: Peri<'static, AnyPin>,
+    /// TX at the MCU: the module's RX line.
+    pub tx: Peri<'static, AnyPin>,
+    /// PPS, configured and held but not used.
+    pub pps: Peri<'static, AnyPin>,
+    /// Standby control, driven HIGH for the life of the task to keep the
+    /// module awake (L76K: LOW would allow sleep). `None` on a board
+    /// whose receiver has no such pin.
+    pub standby: Option<Peri<'static, AnyPin>>,
+    pub module: ModuleKind,
+}
+
+/// The board's boot init sequencer. An enum rather than a `dyn` object
+/// so the state lives in the task's own frame; the delegation is what
+/// makes [`ModuleInit`] the single surface the loop below drives.
+enum Init {
+    Ubx(UbxInit),
+    L76k(L76kInit),
+}
+
+impl Init {
+    fn new(module: ModuleKind) -> Self {
+        match module {
+            ModuleKind::UbloxM8 => Init::Ubx(UbxInit::new()),
+            ModuleKind::QuectelL76k => Init::L76k(L76kInit::new()),
+        }
+    }
+
+    fn as_mut(&mut self) -> &mut dyn ModuleInit {
+        match self {
+            Init::Ubx(i) => i,
+            Init::L76k(i) => i,
+        }
+    }
+}
 
 /// Act on the init sequencer's outputs: stage the frame into RAM (UBX
 /// frames are flash consts, EasyDMA reads RAM only) and write it, then
@@ -82,17 +155,13 @@ async fn apply_init_output(output: leviculum_gnss_init::Output, uart_tx: &mut ua
             };
             crate::log::log_fmt_critical(
                 "[INFO!] ",
-                format_args!("[GNSS_INIT] step={} {}", step.as_str(), verb),
+                format_args!("[GNSS_INIT] step={} {}", step, verb),
             );
         }
         leviculum_gnss_init::Output::AckResult { step, outcome } => {
             crate::log::log_fmt_critical(
                 "[INFO!] ",
-                format_args!(
-                    "[GNSS_INIT] step={} ack={}",
-                    step.as_str(),
-                    outcome.as_str()
-                ),
+                format_args!("[GNSS_INIT] step={} ack={}", step, outcome.as_str()),
             );
         }
     }
@@ -199,26 +268,46 @@ fn apply_output(output: Output, latest: &mut GnssFix, pending_baud: &mut Option<
 /// Pump UART bytes through the presence machine; publish presence
 /// transitions via `GNSS_PRESENCE` and fix snapshots via `GNSS_FIX`.
 #[embassy_executor::task]
-#[allow(clippy::too_many_arguments)]
-pub async fn gnss_task(
-    mut uarte0: Peri<'static, peripherals::UARTE0>,
-    mut timer1: Peri<'static, peripherals::TIMER1>,
-    mut ppi_a: Peri<'static, peripherals::PPI_CH0>,
-    mut ppi_b: Peri<'static, peripherals::PPI_CH1>,
-    mut rx: Peri<'static, AnyPin>,
-    mut tx: Peri<'static, AnyPin>,
-    pps: Peri<'static, AnyPin>,
-) {
+pub async fn gnss_task(wiring: GnssWiring) {
+    let GnssWiring {
+        mut uarte,
+        mut timer,
+        mut ppi_a,
+        mut ppi_b,
+        mut rx,
+        mut tx,
+        pps,
+        standby,
+        module,
+    } = wiring;
+
     // Hold the PPS pin low-impedance enough that no spurious capture fires
     // before we wire it up. Drop returns it to its reset state on task exit
     // (which never happens for this task, but the convention is clear).
     let _pps = Input::new(pps, Pull::Down);
 
+    // Force the module awake and keep it that way. A receiver parked in
+    // standby by whatever firmware ran before ours streams nothing, and
+    // the presence machine would report `no-hardware` on perfectly good
+    // wiring — the #324 failure mode with a different cause. Held for
+    // the life of the task: dropping it returns the pin to its reset
+    // state, which on the T114 is "sleep allowed".
+    let _standby = standby.map(|pin| {
+        crate::log::log_fmt("[GNSS] ", format_args!("standby pin held high (wake)"));
+        embassy_nrf::gpio::Output::new(pin, Level::High, OutputDrive::Standard)
+    });
+
+    // The receiver's supply may be a rail the binary raised for several
+    // peripherals at once (T114: VEXT, shared with the display). Waiting
+    // for its warmup is free on a board without one.
+    crate::vext::wait_ready().await;
+
     let mut machine = PresenceMachine::new(Instant::now().as_millis());
 
-    // One-shot module init (#324): constructed once per boot, silent
-    // until the machine locks a baud, silent again forever once done.
-    let mut init = UbxInit::new();
+    // One-shot module init (#324, #69): constructed once per boot,
+    // silent until the machine locks a baud, silent again forever once
+    // done.
+    let mut init = Init::new(module);
 
     // Rolling GnssFix snapshot across sentences. RMC owns "is the
     // receiver happy" (mode is_valid()); GGA owns "how many sats".
@@ -243,14 +332,14 @@ pub async fn gnss_task(
         let mut config = uarte::Config::default();
         config.baudrate = baudrate_of(configured_baud);
         let uart = Uarte::new(
-            uarte0.reborrow(),
+            uarte.reborrow(),
             rx.reborrow(),
             tx.reborrow(),
             GnssIrqs,
             config,
         );
         let (mut uart_tx, mut uart_rx) =
-            uart.split_with_idle(timer1.reborrow(), ppi_a.reborrow(), ppi_b.reborrow());
+            uart.split_with_idle(timer.reborrow(), ppi_a.reborrow(), ppi_b.reborrow());
 
         // 256-byte chunk: a full 1 Hz NMEA burst (RMC+GGA+GSA — the
         // GSV tail may split) fits, and the idle detector ends each
@@ -337,6 +426,7 @@ pub async fn gnss_task(
                     }
                 };
                 let init_now = Instant::now().as_millis();
+                let init = init.as_mut();
                 init.on_bytes(&buf[..chunk_len], init_now, &mut emit);
                 init.poll(
                     machine.locked(),
@@ -356,16 +446,6 @@ pub async fn gnss_task(
 }
 
 /// Convenience wrapper invoked from the bin file.
-#[allow(clippy::too_many_arguments)]
-pub fn init(
-    spawner: &Spawner,
-    uarte0: Peri<'static, peripherals::UARTE0>,
-    timer1: Peri<'static, peripherals::TIMER1>,
-    ppi_a: Peri<'static, peripherals::PPI_CH0>,
-    ppi_b: Peri<'static, peripherals::PPI_CH1>,
-    rx: Peri<'static, AnyPin>,
-    tx: Peri<'static, AnyPin>,
-    pps: Peri<'static, AnyPin>,
-) {
-    spawner.must_spawn(gnss_task(uarte0, timer1, ppi_a, ppi_b, rx, tx, pps));
+pub fn init(spawner: &Spawner, wiring: GnssWiring) {
+    spawner.must_spawn(gnss_task(wiring));
 }

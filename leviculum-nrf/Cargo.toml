@@ -215,7 +215,13 @@ bsp-rak4631 = ["softdevice"]
 # impossible, and both references (Meshtastic, RNode firmware) drive it
 # blind. One t114 UF2 therefore serves panel-equipped and panel-less
 # boards alike; on the latter the SPI writes go nowhere, harmlessly.
-bsp-t114 = ["softdevice", "dep:leviculum-screen"]
+#
+# It also pulls `gnss` unconditionally, for the same universal-build
+# reason: the Quectel L76K is soldered to every T114, not an optional
+# baseboard part, and a receiver that is absent or unpowered reports
+# itself as `no-hardware` at runtime rather than needing its own UF2
+# (#69, #240).
+bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
 gnss = [
