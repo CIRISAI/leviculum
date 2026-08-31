@@ -179,7 +179,21 @@ impl ScanTask {
             tracing::warn!("BLE {}: discovery filter rejected: {e}", self.iface);
         }
         loop {
-            match self.adapter.discover_devices().await {
+            // `discover_devices_with_changes`, not `discover_devices`:
+            // plain `DeviceAdded` fires only when bluetoothd CREATES a
+            // device object. For a device it already holds (stored after
+            // an earlier connect, or created by a previous window), the
+            // stream opens with a synthetic `DeviceAdded` carrying no
+            // RSSI — BlueZ drops RSSI outside discovery, so the receiver
+            // discards it as a cache entry — and the adv reports that
+            // then land in the window only update properties, which the
+            // plain stream never surfaces. Every window after the first
+            // was blind to every known peer (BLE path hunt round 2,
+            // 2026-08-31). The `_with_changes` stream re-emits
+            // `DeviceAdded` on each property change, so the first adv
+            // report of the window re-offers the device with its RSSI
+            // set.
+            match self.adapter.discover_devices_with_changes().await {
                 Ok(events) => {
                     let mut events = std::pin::pin!(events);
                     let window_end = tokio::time::Instant::now() + SCAN_WINDOW;
