@@ -4861,6 +4861,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         DropReason::NoPath,
                     );
                     self.stats.record_drop(DropReason::NoPath);
+                    self.solicit_path_after_relay_no_path(&dest_hash, interface_index);
                     return Ok(());
                 };
 
@@ -5913,39 +5914,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         truncated_hash: [u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
         // Read path data into locals (releases immutable borrow)
-        let (target_iface, needs_relay, next_hop) =
-            if let Some(path) = self.storage.get_path(&packet.destination_hash) {
-                crate::tracing::debug!(
-                    event = "PATH_LOOKUP",
-                    dst = %HexShort(&packet.destination_hash),
-                    found = true,
-                    hops = path.hops,
-                    iface = %self.iface_name(path.interface_index),
-                );
-                (path.interface_index, path.needs_relay(), path.next_hop)
-            } else {
-                crate::tracing::debug!(
-                    "Cannot forward packet for <{}>, no path known, dropping",
-                    HexShort(&packet.destination_hash)
-                );
-                crate::tracing::debug!(
-                    event = "PATH_LOOKUP",
-                    dst = %HexShort(&packet.destination_hash),
-                    found = false,
-                );
-                crate::tracing::debug!(
-                    target: PKT_EVENT_TARGET,
-                    event = "PKT_DROP",
-                    ph = %HexShort(&truncated_hash[..PKT_PH_BYTES]),
-                    dst = %HexShort(&packet.destination_hash),
-                    r#type = ?packet.flags.packet_type,
-                    hops = packet.hops,
-                    iface_in = %self.iface_name(source_interface_index),
-                    reason = DropReason::NoPath.kebab(),
-                );
-                self.stats.record_drop(DropReason::NoPath);
-                return Ok(());
-            };
+        let (target_iface, needs_relay, next_hop) = if let Some(path) =
+            self.storage.get_path(&packet.destination_hash)
+        {
+            crate::tracing::debug!(
+                event = "PATH_LOOKUP",
+                dst = %HexShort(&packet.destination_hash),
+                found = true,
+                hops = path.hops,
+                iface = %self.iface_name(path.interface_index),
+            );
+            (path.interface_index, path.needs_relay(), path.next_hop)
+        } else {
+            crate::tracing::debug!(
+                "Cannot forward packet for <{}>, no path known, dropping",
+                HexShort(&packet.destination_hash)
+            );
+            crate::tracing::debug!(
+                event = "PATH_LOOKUP",
+                dst = %HexShort(&packet.destination_hash),
+                found = false,
+            );
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_DROP",
+                ph = %HexShort(&truncated_hash[..PKT_PH_BYTES]),
+                dst = %HexShort(&packet.destination_hash),
+                r#type = ?packet.flags.packet_type,
+                hops = packet.hops,
+                iface_in = %self.iface_name(source_interface_index),
+                reason = DropReason::NoPath.kebab(),
+            );
+            self.stats.record_drop(DropReason::NoPath);
+            self.solicit_path_after_relay_no_path(&packet.destination_hash, source_interface_index);
+            return Ok(());
+        };
 
         crate::tracing::debug!(
             "Forwarding packet for <{}> from {} to {}, {} hops",
@@ -6329,6 +6332,52 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Get the well-known path request destination hash
     pub fn path_request_hash(&self) -> &[u8; TRUNCATED_HASHBYTES] {
         &self.path_request_hash
+    }
+
+    /// A transport node just dropped a packet it was the DESIGNATED hop for
+    /// (relayed Data forward or LinkRequest) because its path table holds no
+    /// entry for the destination — the state a rebooted relay is in while its
+    /// neighbours still hold topologically correct routes through it.
+    /// Python-RNS stays silent here and recovery waits for the destination's
+    /// next periodic announce; on the rig that turned a 1.3 s board reboot
+    /// into 100% probe loss for the full 120 s window (ble_reconnect v10,
+    /// 2026-08-31, ledger ble_reconnect-reboot-relay-amnesia). Solicit the
+    /// missing path instead: an ordinary hops=0 path-request broadcast on ALL
+    /// interfaces — including the arrival one, which on a single-interface
+    /// BLE or LoRa board is also the only way to reach the neighbour that can
+    /// answer. Deviation-rule justified (see the #117 re-origination block in
+    /// `handle_path_request`): wire- and semantically compatible — Python
+    /// peers answer path requests from their tables, and the 48-byte
+    /// transport form carries our id so the upstream requestor-is-next-hop
+    /// guard breaks the loop of being handed back the route through
+    /// ourselves. `request_path` rate-limits per destination
+    /// (PATH_REQUEST_MIN_INTERVAL_MS), so retry cadences do not multiply
+    /// into broadcast storms. Only for packets entrusted to us from the
+    /// network: local-client traffic keeps Python's division of labour where
+    /// the client raises its own path requests.
+    fn solicit_path_after_relay_no_path(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        source_interface_index: usize,
+    ) {
+        if !self.config.enable_transport || self.is_local_client(source_interface_index) {
+            return;
+        }
+        // Deterministic tag from clock + dest, same scheme as the
+        // link-timeout path request below (`handle_link_timeouts`).
+        let now = self.clock.now_ms();
+        let mut tag = [0u8; TRUNCATED_HASHBYTES];
+        tag[..8].copy_from_slice(&now.to_be_bytes());
+        tag[8..16].copy_from_slice(&dest_hash[..8]);
+        crate::tracing::debug!(
+            event = "PATH_SOLICIT",
+            dst = %HexShort(dest_hash),
+            iface_in = %self.iface_name(source_interface_index),
+            reason = "relay-no-path",
+        );
+        if let Err(e) = self.request_path(dest_hash, None, &tag) {
+            crate::tracing::debug!(%e, "relay path solicit failed (best-effort)");
+        }
     }
 
     // Public: Announce Bandwidth Cap API

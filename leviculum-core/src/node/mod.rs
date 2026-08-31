@@ -94,6 +94,8 @@ mod mvr_pending_local_path_requests;
 #[cfg(test)]
 mod mvr_proof_activity;
 #[cfg(test)]
+mod mvr_reboot_relay_nopath_solicit;
+#[cfg(test)]
 mod mvr_request_response_pins;
 #[cfg(test)]
 mod mvr_resource_offlock_phases;
