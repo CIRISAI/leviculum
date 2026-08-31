@@ -63,6 +63,18 @@ for cmd in nomadnet; do
     fi
 done
 
+# Optional rig dependency: uhubctl cuts and restores power on a single USB
+# hub port, which is how a board that stopped enumerating gets recovered
+# without touching it (scripts/install-usbhub-helper.sh wires the
+# passwordless sudo the runner needs; scripts/run-tier3-hw.sh uses it between
+# profiles). Only the hardware host has a hub to drive, so warn rather than
+# fail — a VM runner has nothing to power-cycle.
+if ! command -v uhubctl >/dev/null 2>&1; then
+    echo "[install-ci] Note: optional rig dependency 'uhubctl' not found"
+    echo "[install-ci] Hint: sudo apt install uhubctl"
+    echo "[install-ci]       (needed only to power-cycle a hung board's hub port)"
+fi
+
 # Optional test dependency: cargo-fuzz (+ nightly) drives the wire-format
 # parser fuzz harness under leviculum-core/fuzz (Codeberg #23). Not part of
 # `just standard` — the regression tests for any crash it finds live in the
