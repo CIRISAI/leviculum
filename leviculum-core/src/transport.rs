@@ -4631,8 +4631,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     .is_some();
 
             // Update announce table (skipped when rate-blocked or rate-limited to
-            // prevent rebroadcast; path table was already updated above)
-            if (!rate_blocked && !rate_limited) || forwards_pending_response {
+            // prevent rebroadcast; path table was already updated above).
+            //
+            // PATH_RESPONSE announces insert NO entry unless they satisfy a
+            // pending forward, exactly like the reference (Transport.py:1886
+            // gates the insertion on `context != PATH_RESPONSE`, :1910 is the
+            // pending-forward exception). An entry here — even an inert one
+            // with no retransmit — seeds the per-destination rate window, and
+            // a Python shared-instance client registers destinations by
+            // announcing them with path_response=True 250 ms after
+            // registration (Transport.py:2429-2434): the client's REAL
+            // announce, arriving within ANNOUNCE_RATE_LIMIT_MS of that, was
+            // judged rate-limited and never egressed, leaving the
+            // destination unreachable beyond this daemon (#255,
+            // ble_lxmf_delivery).
+            if (!rate_blocked && !rate_limited && !is_path_response) || forwards_pending_response {
                 self.storage.set_announce(
                     dest_hash,
                     AnnounceEntry {
@@ -4677,11 +4690,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         receiving_interface_index: interface_index,
                         target_interface: None,
                         local_rebroadcasts: 0,
-                        // The pending forward goes out as a PLAIN announce:
-                        // the reference leaves block_rebroadcasts False in
-                        // its pending branch (Transport.py:1871/:1910-1930),
-                        // so the scheduler stamps context NONE (:596-597).
-                        block_rebroadcasts: is_path_response && !forwards_pending_response,
+                        // Both arms that reach here emit plain announces: the
+                        // pending forward goes out as a PLAIN announce (the
+                        // reference leaves block_rebroadcasts False in its
+                        // pending branch, Transport.py:1871/:1910-1930, so
+                        // the scheduler stamps context NONE at :596-597), and
+                        // every other PATH_RESPONSE is filtered by the gate
+                        // above.
+                        block_rebroadcasts: false,
                     },
                 );
 
@@ -12021,10 +12037,10 @@ mod tests {
             transport.process_incoming(0, &raw).unwrap();
             transport.drain_events();
 
-            // Should have no retransmit scheduled for PATH_RESPONSE context
-            let entry = transport.storage().get_announce(&dest_hash).unwrap();
-            assert!(entry.retransmit_at_ms.is_none());
-            assert!(entry.block_rebroadcasts);
+            // No announce-table entry at all for PATH_RESPONSE context
+            // (Transport.py:1886): nothing to retransmit, and no rate state
+            // that could swallow a later real announce for the destination.
+            assert!(transport.storage().get_announce(&dest_hash).is_none());
         }
 
         /// Path request response must be sent to ALL interfaces, including the one
@@ -17499,6 +17515,82 @@ mod tests {
             );
         }
 
+        #[test]
+        fn mvr_local_client_announce_after_registration_path_response() {
+            // ble_lxmf_delivery red (#255 run 12): a Python shared-instance
+            // client announces every registered SINGLE destination with
+            // path_response=True 250 ms after registration (reference
+            // Transport.py:2429-2434), and the application's real announce
+            // typically follows within the 2 s ANNOUNCE_RATE_LIMIT_MS window.
+            // The reference inserts NO announce-table entry for PATH_RESPONSE
+            // context (Transport.py:1886), so the registration announce leaves
+            // its rate state untouched and the real announce goes out. An
+            // entry here seeds the rate window instead, the real announce is
+            // judged rate-limited, and the destination never becomes
+            // reachable beyond this daemon.
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("local", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("net", 2)));
+            transport.set_local_client(0, true);
+
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["regannounce"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+
+            // Registration announce: PATH_RESPONSE context, wire hops 0.
+            // The context byte is not part of the announce signature, so it
+            // can be stamped onto the packed packet directly.
+            let emission = TEST_TIME_MS / 1000;
+            let raw = make_announce_raw_with_random_hash(
+                &dest,
+                0,
+                &make_random_hash([0x0A; 5], emission),
+            );
+            let mut pr_packet = Packet::unpack(&raw).unwrap();
+            pr_packet.context = PacketContext::PathResponse;
+            let mut buf = [0u8; 500];
+            let len = pr_packet.pack(&mut buf).unwrap();
+            transport.process_incoming(0, &buf[..len]).unwrap();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+
+            assert!(
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "a registration PATH_RESPONSE must not seed the announce table"
+            );
+
+            // The real announce, 1 s later (inside the rate window), with a
+            // newer emission timestamp — the lxmf_announce step of the cell.
+            transport.clock.advance(1_000);
+            let raw = make_announce_raw_with_random_hash(
+                &dest,
+                0,
+                &make_random_hash([0x0B; 5], emission + 1),
+            );
+            transport.process_incoming(0, &raw).unwrap();
+            let _ = transport.drain_events();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "the client's real announce must egress to the network"
+            );
+        }
+
         // Helper: Build announce for a specific destination
         /// Build a raw announce packet for a given destination at a specific
         /// hop count. Each call produces a new random_hash (different timestamp
@@ -21306,10 +21398,10 @@ mod tests {
                 "PATH_RESPONSE announces should not be rate-tracked"
             );
 
-            // Should be in announce table
+            // ...and no announce-table entry either (Transport.py:1886).
             assert!(
-                transport.storage().get_announce(&dest_hash).is_some(),
-                "PATH_RESPONSE announce should be in announce table"
+                transport.storage().get_announce(&dest_hash).is_none(),
+                "PATH_RESPONSE announce must not enter the announce table"
             );
         }
 
