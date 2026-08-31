@@ -123,6 +123,26 @@ and soft resets — power loss wipes them, and a reflash must be assumed
 to — so the query can retrieve the evidence any time after the crash,
 as long as the board stays powered.
 
+That "retained RAM" is younger than the feature it carries. Until
+9b4d82a (2026-08-31) the same five cross-boot records lived in
+`.uninit`, which flip-link packs against the top of RAM — and the top
+of RAM is where the Adafruit bootloader starts its stack
+(`__StackTop = 0x20040000`, `nrf_common.ld`, confirmed by the initial
+SP in the shipped bootloader's vector table). Every reset runs that
+bootloader before our reset handler, so the hardfault post-mortem (top
+36 B) and the boot trace (top 48 B) were overwritten on **every** boot
+and could never have been read back; the panic post-mortem, the panic
+counter (Codeberg #65) and the persistent log tail sat lower in the
+same 3.1 KiB and survived only as far as the bootloader's stack
+happened not to reach on a given boot. The evidence was a live positive
+control on the rig: three consecutive commanded resets out of a running
+system, with the reset cause latched as `sreq=1`, still read
+`prev_magic=absent prev_boot=0`. The fix was placement, not logic — a
+dedicated `RETAINED` region below the bootloader's stack floor and
+outside every region it declares, held there by two link-time
+`ASSERT`s. Read a `[PANIC_COUNT]` or `[PM_QUERY]` result from firmware
+older than 9b4d82a as unreliable rather than as a zero.
+
 The committed helper drives the whole exchange:
 
 ```sh
