@@ -122,11 +122,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Reticulum daemon running");
 
-    // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on SIGUSR1
+    // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on
+    // SIGUSR1, command a firmware reset on SIGUSR2.
+    //
+    // SIGUSR2 joins an existing surface rather than inventing one: SIGUSR1
+    // is already how this daemon is asked to do something out of band, and
+    // a signal needs no socket, no authentication story and no wire format
+    // to work identically for a daemon in a container (`docker kill
+    // --signal=USR2`) and one on the host. The alternative was a verb on
+    // the RPC server, which speaks Python `multiprocessing.connection` for
+    // rnstatus/rnpath compatibility — a protocol whose whole point is that
+    // it mirrors Python-RNS, and which would gain a verb Python-RNS has
+    // no idea about.
+    //
+    // What it does: every firmware board this daemon holds gets the
+    // commanded-reset frame on its data port. The daemon is the only
+    // process that CAN send it, because it holds the port exclusively for
+    // its whole run (periculum #255).
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
+        let mut sigusr2 = signal(SignalKind::user_defined2())?;
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { info!("Received SIGINT"); break; }
@@ -134,6 +151,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ = sigusr1.recv() => {
                     let dump = rns.diagnostic_dump();
                     eprint!("{}", dump);
+                }
+                _ = sigusr2.recv() => {
+                    let reached = leviculum_std::interfaces::request_firmware_reset();
+                    // Said out loud in both directions: a daemon holding
+                    // no board is a caller that signalled the wrong node,
+                    // and silence would read as a reset that happened.
+                    info!("Received SIGUSR2: commanded firmware reset on {reached} serial interface(s)");
                 }
             }
         }

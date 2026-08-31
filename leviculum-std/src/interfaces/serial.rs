@@ -40,6 +40,47 @@ const FRAME_TIMEOUT: Duration = Duration::from_millis(100);
 /// Reconnect interval after serial port loss
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
+// ---------------------------------------------------------------------------
+// Commanded firmware reset, on request
+// ---------------------------------------------------------------------------
+
+/// Broadcast of "send the commanded-reset frame on every attached board".
+///
+/// The daemon holds each firmware board's data port for its whole run, and
+/// the serial crate opens it `TIOCEXCL`, so nothing else on the host can
+/// open it while the daemon is up. That is the right default — two writers
+/// interleaving mid-frame is a corrupted link — but it leaves no way to
+/// reboot a board that a running daemon is attached to. A harness that
+/// measures whether a mesh re-forms after a node goes away has to take the
+/// BOARD out, and the only process that can speak to it is this one
+/// (periculum #255).
+///
+/// Broadcast rather than addressed because the request arrives as a
+/// process signal, which is addressed to the process and not to one
+/// interface. A daemon holds the boards of one node; "every board this
+/// daemon has" is the same set either way, and an addressed variant would
+/// need a name mapping that nothing else in this file has.
+///
+/// The frame put on the wire is byte-identical to the one an unattached
+/// reset writes ([`leviculum_core::rnode::RADIO_RESET_FRAME`], HDLC-framed
+/// exactly as an outgoing packet is), so a board rebooted through here
+/// comes back from the same defined state — which is what makes the two
+/// resets comparable at all.
+static FIRMWARE_RESET_REQUESTS: std::sync::OnceLock<tokio::sync::broadcast::Sender<()>> =
+    std::sync::OnceLock::new();
+
+fn firmware_reset_channel() -> &'static tokio::sync::broadcast::Sender<()> {
+    FIRMWARE_RESET_REQUESTS.get_or_init(|| tokio::sync::broadcast::channel(4).0)
+}
+
+/// Ask every serial interface in this process to send the commanded-reset
+/// frame to the board behind it. Returns the number of interfaces that were
+/// listening — 0 means this daemon holds no firmware board, which is a
+/// finding for the caller rather than an error here.
+pub fn request_firmware_reset() -> usize {
+    firmware_reset_channel().send(()).unwrap_or(0)
+}
+
 /// Radio configuration to send to LNode firmware over serial (test infrastructure).
 pub(crate) struct SerialRadioConfig {
     pub frequency: u64,
@@ -474,6 +515,10 @@ where
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
+    // Subscribed here rather than at spawn: a reset requested while the
+    // port was down is not a reset of the board that just came back, and
+    // acting on it would reboot a board nobody asked about.
+    let mut reset_requests = firmware_reset_channel().subscribe();
 
     loop {
         // Compute timeout: if mid-frame, use FRAME_TIMEOUT; otherwise wait indefinitely
@@ -552,6 +597,48 @@ where
                     None => {
                         tracing::debug!("Serial interface {} outgoing channel closed", name);
                         return outgoing_rx;
+                    }
+                }
+            }
+
+            // Commanded firmware reset, requested out of band.
+            //
+            // Written on the same port, from the same task, as every
+            // outgoing packet: nothing else may hold this port, so nothing
+            // else can send it, and doing it here rather than from the
+            // signal handler's task is what keeps it from interleaving
+            // with a frame already half-written.
+            //
+            // The board answers RADIO_RESET_ACK and then reboots, taking
+            // its USB device with it; the ACK arrives on the read path
+            // above as a 3-byte frame the transport will not recognise and
+            // discards, and the read then errors, which is the port loss
+            // the reconnect task already knows how to handle. So there is
+            // no wait for the ACK here — the reboot IS the outcome, and
+            // the caller watches for it on the bus.
+            recv = reset_requests.recv() => {
+                match recv {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        tracing::info!(
+                            "Serial {}: commanded firmware reset requested, sending reset frame",
+                            name
+                        );
+                        frame(&leviculum_core::rnode::RADIO_RESET_FRAME, &mut frame_buf);
+                        if let Err(e) = port.write_all(&frame_buf).await {
+                            tracing::warn!("Serial {}: reset frame write failed: {}", name, e);
+                            return outgoing_rx;
+                        }
+                        if let Err(e) = port.flush().await {
+                            tracing::warn!("Serial {}: reset frame flush failed: {}", name, e);
+                            return outgoing_rx;
+                        }
+                        tracing::info!("Serial {}: reset frame sent", name);
+                    }
+                    // The sender is a `OnceLock` static that is never
+                    // dropped, so this is unreachable; stopping the select
+                    // arm rather than spinning on it is the safe reading.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("Serial {}: reset request channel closed", name);
                     }
                 }
             }
@@ -1183,5 +1270,70 @@ mod tests {
                 "small follow-up after SF7→SF10 reconfig should succeed"
             );
         }
+    }
+
+    /// The commanded reset, end to end through the task that owns the
+    /// port: a request goes in, and what comes out of the port is the
+    /// SAME bytes an unattached reset writes.
+    ///
+    /// This is the property the harness depends on. `periculum`'s direct
+    /// reset opens the port itself and writes `frame(RADIO_RESET_FRAME)`;
+    /// mid-scenario it cannot, because this daemon holds the port
+    /// exclusively, so it asks the daemon instead. If the two ever put
+    /// different bytes on the wire, "the board came back from a defined
+    /// state" stops being true of one of them and the two measurements
+    /// stop being comparable — which is exactly the kind of drift a
+    /// re-formation cell would report as a mesh finding.
+    #[tokio::test]
+    async fn a_reset_request_puts_the_unattached_reset_bytes_on_the_port() {
+        let (near, mut far) = tokio::io::duplex(1024);
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(serial_io_task(
+            "test0".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            counters,
+            false,
+        ));
+
+        // The subscribe happens inside the task; give it a turn to run
+        // before the request, or the broadcast has no receiver yet.
+        let reached = loop {
+            tokio::task::yield_now().await;
+            let reached = request_firmware_reset();
+            if reached > 0 {
+                break reached;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(reached, 1, "one attached interface, one request delivered");
+
+        let mut expected = Vec::new();
+        frame(&leviculum_core::rnode::RADIO_RESET_FRAME, &mut expected);
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), far.read_exact(&mut got))
+            .await
+            .expect("the reset frame is written promptly")
+            .expect("the port receives it");
+        assert_eq!(
+            got, expected,
+            "the daemon-routed reset must be byte-identical to the direct one"
+        );
+
+        drop(outgoing_tx);
+        drop(far);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    /// A daemon holding no firmware board reports that it reached none,
+    /// rather than reporting a reset it did not perform. The caller needs
+    /// the difference: signalling the wrong node is a scenario error, and
+    /// a silent 0 would read as a board that rebooted.
+    #[test]
+    fn a_request_with_no_attached_interface_reaches_nothing() {
+        assert_eq!(request_firmware_reset(), 0);
     }
 }
