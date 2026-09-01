@@ -289,9 +289,19 @@ fn mgmt_announce_path_live_bytes_flat() {
     // Non-vacuous: an announce must fire every measured tick, reach the serial
     // interface, and populate the announce cache, or a flat result proves
     // nothing.
+    //
+    // TWO broadcasts per tick, not one: a management announce is emitted once
+    // directly and once more by the announce-retry scheduler
+    // (`Transport::schedule_own_announce_retry`, the reference's local-client
+    // shape). Each tick steps a full `MGMT_ANNOUNCE_INTERVAL_MS`, so the
+    // pending retry and the fresh announce both fall inside it. The leak
+    // question is unchanged and sharper: the retry parks a copy of the
+    // announce in the announce table, so a per-iteration cost here would now
+    // catch a retry entry that fails to retire as well.
     assert_eq!(
-        outcome.announces, iters,
-        "every measured tick must broadcast exactly one management announce"
+        outcome.announces,
+        2 * iters,
+        "every measured tick must broadcast the two-step management announce ladder"
     );
     assert!(
         outcome.serial_accepted >= iters,

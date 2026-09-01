@@ -1958,6 +1958,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .storage_mut()
                         .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
                     self.transport.send_on_all_interfaces(&buf[..len]);
+                    // One emission is all `send_on_all_interfaces` does, and
+                    // the next management announce is 2 h away: a single lost
+                    // LoRa window used to cost the destination the whole
+                    // interval (the residual ble_lora_transport reds of
+                    // 2026-09-01). Schedule the reference's second emission —
+                    // see `Transport::schedule_own_announce_retry` for the
+                    // Python citation and the duty math.
+                    self.transport
+                        .schedule_own_announce_retry(dest_hash.into_bytes(), &buf[..len]);
                     // INFO with the destination hash: rig scenarios narrow
                     // RUST_LOG to transport/interfaces targets, which made
                     // this emission invisible to `periculum trace` and cost
@@ -3373,6 +3382,97 @@ mod tests {
                 .get_announce_cache(hide.as_bytes())
                 .is_some(),
             "after clearing policy the destination announces"
+        );
+    }
+
+    /// mvr — a node's own management announce goes out exactly once and is
+    /// never retried, so one lost carrier window costs the destination the
+    /// whole `MGMT_ANNOUNCE_INTERVAL_MS` (2 h).
+    ///
+    /// Measured shape of the residual `ble_lora_transport` reds (2026-09-01,
+    /// runs finishing 11:48:47Z and 13:11:40Z): the far node logged
+    /// `MGMT_ANN_TX` for its probe destination and pushed exactly one
+    /// 167-byte packet to its interface; no peer ever logged an `ANN_RX` for
+    /// that hash; nothing re-emitted it. Every RELAYED announce in the same
+    /// runs fired its full two-step ladder (`retries=0` then `retries=1`)
+    /// and propagated — the gap was on the ORIGIN side only.
+    ///
+    /// Acceptance: red before the fix (one emission, `announce_keys` empty
+    /// afterwards), green with it (two emissions, then the entry retires and
+    /// no third ever fires).
+    #[test]
+    fn mvr_own_mgmt_announce_is_retried_once() {
+        /// Is `raw` an announce (flags bits 0..2 == 0b01) for `dest`?
+        fn is_announce_for(raw: &[u8], dest: &DestinationHash) -> bool {
+            raw.len() >= 18 && raw[0] & 0b11 == 0b01 && &raw[2..18] == dest.as_bytes()
+        }
+        fn count_emissions(output: &crate::transport::TickOutput, dest: &DestinationHash) -> usize {
+            output
+                .actions
+                .iter()
+                .filter(|a| match a {
+                    crate::transport::Action::Broadcast { data, .. } => is_announce_for(data, dest),
+                    crate::transport::Action::SendPacket { data, .. } => {
+                        is_announce_for(data, dest)
+                    }
+                })
+                .count()
+        }
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+
+        let dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "rnstransport",
+            &["probe"],
+        )
+        .unwrap();
+        let hash = *dest.hash();
+        node.register_destination(dest);
+        node.mgmt_destinations.push(hash);
+
+        // The management timer fires: first (and, before the fix, only)
+        // emission.
+        node.next_mgmt_announce_ms = Some(TEST_TIME_MS);
+        let first = node.handle_timeout();
+        assert_eq!(
+            count_emissions(&first, &hash),
+            1,
+            "the management timer emits the announce once"
+        );
+
+        // With no interfaces registered the jitter ceiling is the
+        // PATHFINDER_RW_MS floor, so PATHFINDER_G + PATHFINDER_RW covers the
+        // whole scheduled window.
+        let step = crate::constants::PATHFINDER_G_MS + crate::constants::PATHFINDER_RW_MS;
+        node.transport.clock().advance(step);
+        let second = node.handle_timeout();
+        assert_eq!(
+            count_emissions(&second, &hash),
+            1,
+            "the reference's second emission must follow one PATHFINDER_G later \
+             (Transport.py:2361-2372 inserts with retries=PATHFINDER_R, \
+             Transport.py:765-782 fires it once)"
+        );
+
+        // ...and exactly one. The entry retires; nothing fires again, and the
+        // next announce is the 2 h management interval.
+        node.transport.clock().advance(step);
+        let third = node.handle_timeout();
+        assert_eq!(
+            count_emissions(&third, &hash),
+            0,
+            "the ladder is two emissions, not an unbounded stream"
+        );
+        assert!(
+            node.transport
+                .storage()
+                .get_announce(hash.as_bytes())
+                .is_none(),
+            "the announce entry retires after its single retry"
         );
     }
 

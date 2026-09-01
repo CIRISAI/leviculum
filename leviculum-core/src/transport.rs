@@ -2789,9 +2789,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Matches Python Reticulum's Transport.outbound one-shot semantics:
     /// Destination.announce at Destination.py:322 calls Packet.send exactly
     /// once, and Packet.send at Packet.py:273-299 invokes Transport.outbound
-    /// once. Locally-originated announces are not inserted into announce_table
-    /// and have no retries; the Transport keepalive at check_mgmt_announces
-    /// re-emits on the configured 2-hour interval.
+    /// once. This call therefore puts the packet on air exactly once; a caller
+    /// announcing one of its own destinations pairs it with
+    /// [`Self::schedule_own_announce_retry`] for the second emission the
+    /// reference gives the same shape.
     pub fn send_on_all_interfaces(&mut self, data: &[u8]) {
         // Cache outbound packet hash so echoes returning via redundant paths
         // are dropped by the dedup check in process_incoming().
@@ -2822,6 +2823,78 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         };
 
         self.push_broadcast(data.to_vec(), None, exclude_ifaces, Some(ph8(&cache_hash)));
+    }
+
+    /// Give an announce this node just originated for one of its OWN
+    /// destinations the reference's second emission.
+    ///
+    /// [`Self::send_on_all_interfaces`] puts the announce on air once. On a
+    /// lossy carrier that single frame is the destination's entire chance
+    /// until the next management interval: one lost LoRa window costs
+    /// `MGMT_ANNOUNCE_INTERVAL_MS` (2 h) of unreachability. That is the
+    /// mechanism behind the residual `ble_lora_transport` reds measured on
+    /// 2026-09-01 (runs finishing 11:48:47Z and 13:11:40Z) — in both, the
+    /// far node emitted its probe announce exactly once (`MGMT_ANN_TX`, one
+    /// 167-byte serial egress), no peer logged an `ANN_RX` for it, and
+    /// nothing re-emitted it for the remaining ~6 minutes of the run, while
+    /// every RELAYED announce in the same runs fired its full two-step
+    /// ladder and propagated.
+    ///
+    /// Reference-first, on the same shape: an announce reaching `rnsd` from
+    /// a shared-instance client is inserted into the announce table with
+    /// `retries = PATHFINDER_R` (Transport.py:2361-2372) and the job loop
+    /// fires it once more (Transport.py:765-782) — two emissions. Only an
+    /// announce originated *inside* the transport process misses out
+    /// (Transport.py:1183 calls `destination.announce()` and stops there).
+    /// Our management destinations live inside the daemon, so they took the
+    /// one-shot path; this gives them the client shape instead.
+    ///
+    /// Deviation rule: wire format is untouched (the retry is the same
+    /// announce bytes, re-emitted), semantics are untouched (a peer sees a
+    /// duplicate announce, which its packet-hash dedup already absorbs), and
+    /// the P1 gain is measured — this cell's residual loss rate. Duty cost is
+    /// bounded twice over: at most one extra announce per management
+    /// destination per 2 h, and the retry is cancelled outright as soon as a
+    /// neighbour is heard passing the announce on (the `local_rebroadcasts`
+    /// handling in `handle_announce`, Python Transport.py:1584-1590), so a
+    /// healthy mesh pays nothing.
+    pub fn schedule_own_announce_retry(
+        &mut self,
+        dest_hash: [u8; TRUNCATED_HASHBYTES],
+        raw: &[u8],
+    ) {
+        let now = self.clock.now_ms();
+        let jitter = self.deterministic_jitter_ms(&dest_hash, self.announce_jitter_max_ms());
+        self.storage.set_announce(
+            dest_hash,
+            AnnounceEntry {
+                timestamp_ms: now,
+                // Locally originated: the retry stays Header Type 1 at hops 0
+                // and bypasses the per-interface announce cap, exactly like
+                // the first emission.
+                hops: 0,
+                // Exactly one further firing: `check_announce_rebroadcasts`
+                // retires an entry once `retries > PATHFINDER_RETRIES`, so
+                // starting AT the limit buys one retransmission and no more.
+                retries: PATHFINDER_RETRIES,
+                retransmit_at_ms: Some(now + PATHFINDER_G_MS + jitter),
+                raw_packet: raw.to_vec(),
+                // No receiving interface — this announce originated here. The
+                // sentinel matches no interface index, so the retry's
+                // frequency accounting covers every interface the first
+                // emission used.
+                receiving_interface_index: usize::MAX,
+                target_interface: None,
+                local_rebroadcasts: 0,
+                block_rebroadcasts: false,
+            },
+        );
+        crate::tracing::debug!(
+            "own announce retry scheduled dest=<{}> retries={} next_at_ms={}",
+            HexShort(&dest_hash),
+            PATHFINDER_RETRIES,
+            now + PATHFINDER_G_MS + jitter,
+        );
     }
 
     /// Send a packet to a destination via its known path
@@ -3058,13 +3131,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             update(deadline);
         }
 
-        // Announce rebroadcast deadlines
-        if self.config.enable_transport {
-            for key in self.storage.announce_keys() {
-                if let Some(entry) = self.storage.get_announce(&key) {
-                    if let Some(retransmit_at) = entry.retransmit_at_ms {
-                        update(retransmit_at);
-                    }
+        // Announce rebroadcast deadlines. Deliberately NOT gated on
+        // `enable_transport`: `check_announce_rebroadcasts` runs on a
+        // non-transport node too, because such a node still has to re-emit
+        // announces that originated here — its own management destinations
+        // (`schedule_own_announce_retry`) and its local clients'. Gating the
+        // deadline but not the scheduler let those entries fire only when
+        // some unrelated timer happened to wake the driver first.
+        for key in self.storage.announce_keys() {
+            if let Some(entry) = self.storage.get_announce(&key) {
+                if let Some(retransmit_at) = entry.retransmit_at_ms {
+                    update(retransmit_at);
                 }
             }
         }
