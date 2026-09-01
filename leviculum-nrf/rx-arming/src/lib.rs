@@ -561,6 +561,14 @@ pub enum RxEvent<'a, E> {
 /// The `at=` an adoption's failed status read reports.
 pub const ADOPT_SITE: &str = "adopt";
 
+/// The `site=` a re-arm's teardown reports.
+///
+/// The driver spells the same tag as `RxTeardownBy::Arm`, and it has to stay
+/// the same word: [`ensure_armed`] now issues that teardown itself on the
+/// branch where it has already read the latch, and a capture must not be able
+/// to tell which of the two paths emitted the line.
+pub const RE_ARM_SITE: &str = "arm";
+
 /// A standing window, as the adoption decision and the teardown instrument
 /// need to see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +614,23 @@ pub trait RxWindowProbe: RxPort {
         &mut self,
         buf: &mut [u8],
     ) -> Result<Option<(u8, Self::Meta)>, Self::Error>;
+
+    /// Whether this window ends on its own, without anybody standing it down.
+    ///
+    /// True for a window programmed with a hardware timeout: it concludes at
+    /// that bound at the latest, whatever is or is not on the air. False for
+    /// the single-mode window, which listens until a frame arrives and can
+    /// therefore stand indefinitely.
+    ///
+    /// The one thing [`ensure_armed`] needs to know before it keeps a window
+    /// the caller did not ask for: a self-terminating window costs the caller
+    /// at most the remainder of a bound it can name, an open-ended one could
+    /// cost it forever. Answered by the port because the boundedness is a
+    /// property of the `SetRx` the port programmed, and this crate does not
+    /// look inside `Window`.
+    ///
+    /// Touches no bus.
+    fn window_ends_itself(&self, window: &Self::Window) -> bool;
 
     /// How much longer the standing window's reception may still need, given
     /// what it has latched — or `None` to stand the window down now.
@@ -679,11 +704,74 @@ pub enum Arming {
 /// [`await_window`] takes immediately rather than waiting for. So the worst
 /// case is a window that ends earlier than the caller asked and a loop that
 /// comes round again — against a teardown that ends a frame mid-air.
+///
+/// **A window the caller did not ask for is adopted too, when it is holding a
+/// reception and it ends by itself.** That argument is the one directly above,
+/// and it does not depend on the parameters matching: the cost of keeping a
+/// window is at most the remainder of its own bound, the cost of replacing one
+/// mid-frame is the frame. The mismatch case is not hypothetical — it is the
+/// loop's ordinary shape. `receive_and_hand_up` re-arms provisionally with the
+/// window that just fired (an ack window, bounded), the main loop's next
+/// decision is the queue-empty idle window (single mode), and the two differ.
+/// Every frame arriving in that seam used to be stood down at the arming's own
+/// head, which the capture reported as
+/// `[SX_RX_TEARDOWN] site=arm preamble=1 header=1` — a lost frame by this
+/// crate's own definition ([`RxLatch::caught_something`]). On a back-to-back
+/// LoRa burst the seam falls between consecutive frames every time, so the
+/// loss is systematic rather than occasional: on the rig it cost the second
+/// airing of an announce and, with it, the path
+/// (`ble_lora_transport`, 2026-09-01T16:01Z).
+///
+/// Bounded by [`RxWindowProbe::window_ends_itself`] and not by the latch
+/// alone. Keeping a *single-mode* window because a preamble latched would park
+/// the caller on an edge that a noise burst need never produce, and the caller
+/// that asked for a bounded window is usually about to transmit. So the
+/// adoption runs only where the window names its own end: the direction that
+/// loses frames today (bounded standing, unbounded wanted), never its inverse.
 pub async fn ensure_armed<R>(radio: &mut R, window: R::Window) -> Result<Arming, R::Error>
 where
     R: RxWindowProbe,
 {
     match radio.standing_window() {
+        // Different parameters, but the standing window is holding a
+        // reception and will end by itself: keep it. The status read is the
+        // one `stand_down` would have taken inside `arm` a moment later, so
+        // the decision costs no extra bus traffic on either branch — the
+        // teardown below is handed the latch it already read.
+        Some(standing)
+            if standing.window != window && radio.window_ends_itself(&standing.window) =>
+        {
+            let latch = match radio.latched().await {
+                Ok(latch) => latch,
+                // A lost sample, not a lost window — and with the read gone
+                // there is no honest basis to keep a window the caller did not
+                // ask for, so this falls back to exactly what it did before.
+                Err(e) => {
+                    radio.report(RxEvent::ProbeFailed {
+                        at: ADOPT_SITE,
+                        error: &e,
+                    });
+                    radio.arm(window).await?;
+                    return Ok(Arming::Armed);
+                }
+            };
+            if !latch.caught_something() {
+                // An empty window the caller does not want: this is half
+                // duplex working, and it is stood down where it always was.
+                // `tear_down` rather than `arm`'s own head, so the latch is
+                // read once and the line is the same one the capture has
+                // always carried.
+                tear_down(radio, RE_ARM_SITE, standing, latch).await?;
+                radio.arm(window).await?;
+                return Ok(Arming::Armed);
+            }
+            let adopt = RxAdopt {
+                latch,
+                stood_ms: standing.stood_ms,
+            };
+            radio.report(RxEvent::Adopted(&adopt));
+            Ok(Arming::Adopted)
+        }
         Some(standing) if standing.window == window => {
             // Read before anything else, and never cleared: on an adopted
             // window this status IS the reception, and the awaiting half is
@@ -1149,6 +1237,12 @@ mod tests {
             })
         }
 
+        /// Same rule as the driver's: zero is single mode and never
+        /// concludes, anything else is a hardware timeout.
+        fn window_ends_itself(&self, window: &Window) -> bool {
+            window.timeout_ms != 0
+        }
+
         async fn latched(&mut self) -> Result<RxLatch, ()> {
             self.log.push(Op::ProbeIrq);
             if self.fail_probe {
@@ -1457,6 +1551,136 @@ mod tests {
             _ => None,
         });
         assert_eq!(line, "site=arm preamble=1 header=1 rxdone=0 armed_ms=214");
+    }
+
+    // The seam between the provisional re-arm and the loop's next window.
+
+    /// **The mvr.** The loop's ordinary shape, on the air the rig runs.
+    ///
+    /// `receive_and_hand_up` re-arms provisionally with the bounded window
+    /// that just fired; the main loop's next decision is the unbounded idle
+    /// window; a back-to-back burst puts the next frame's preamble and header
+    /// in the chip exactly in between. Before this batch that arming's own
+    /// head stood the window down — `[SX_RX_TEARDOWN] site=arm preamble=1
+    /// header=1`, a lost frame by [`RxLatch::caught_something`]'s own words —
+    /// and on the rig it cost the second airing of the T114 daemon's announce,
+    /// so the host never learned the path and `ble_lora_transport` went red
+    /// (run 2026-09-01T16:01:13Z, pocket board `t=27134`).
+    ///
+    /// Red before the fix on the teardown count, not on a timing: nothing here
+    /// is a duration.
+    #[test]
+    fn a_mismatched_window_holding_a_reception_is_kept() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        // The provisional re-arm: bounded, and the loop wants a different one.
+        block_on(port.arm(CSMA)).expect("provisional re-arm");
+        // The next frame of the burst, already arriving.
+        port.latch = RxLatch {
+            raw: 0x0014,
+            preamble: true,
+            header: true,
+            rxdone: false,
+        };
+        port.now += 3;
+        let before = log.ops().len();
+
+        let arming = block_on(ensure_armed(&mut port, IDLE)).expect("keep the reception");
+
+        assert_eq!(arming, Arming::Adopted);
+        let after = &log.ops()[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::Teardown(_) | Op::Disarm | Op::Arm(_)))
+                .count(),
+            0,
+            "the reception in progress must survive the loop's next window, after={after:?}"
+        );
+        assert_eq!(
+            port.standing_window().expect("standing").window,
+            CSMA,
+            "the window holding the frame is the one still listening"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Adopt(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "latched=0x0014 preamble=1 header=1 rxdone=0 stood_ms=3",
+            "the capture says a mismatched window was kept, and what it held"
+        );
+    }
+
+    /// **The control.** An empty window the caller does not want is still
+    /// stood down, on the same branch: half duplex is not what this batch
+    /// changed, and a fix that kept every window would show up here.
+    #[test]
+    fn a_mismatched_window_holding_nothing_is_still_replaced() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(port.arm(CSMA)).expect("first arm");
+        port.now += 40;
+        let before = log.ops().len();
+
+        let arming = block_on(ensure_armed(&mut port, IDLE)).expect("re-arm");
+
+        assert_eq!(arming, Arming::Armed);
+        let after = &log.ops()[before..];
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::Disarm).count(),
+            1,
+            "exactly one standby, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| matches!(op, Op::Arm(_))).count(),
+            1,
+            "after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::ProbeIrq).count(),
+            1,
+            "the latch is read once, not once per path, after={after:?}"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=arm preamble=0 header=0 rxdone=0 armed_ms=40",
+            "the line the capture has always carried, from the branch that now issues it"
+        );
+        assert_eq!(port.standing_window().expect("standing").window, IDLE);
+    }
+
+    /// **The bound.** A single-mode window is never kept for a caller that
+    /// asked for a bounded one, whatever it has latched: it concludes only on
+    /// a frame, and a preamble a noise burst produced would park a transmit
+    /// that has no deadline of its own.
+    #[test]
+    fn an_open_ended_window_is_not_kept_for_a_bounded_caller() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(port.arm(IDLE)).expect("first arm");
+        port.latch = RxLatch {
+            raw: 0x0004,
+            preamble: true,
+            header: false,
+            rxdone: false,
+        };
+        port.now += 9;
+
+        let arming = block_on(ensure_armed(&mut port, CSMA)).expect("re-arm");
+
+        assert_eq!(arming, Arming::Armed);
+        assert_eq!(port.standing_window().expect("standing").window, CSMA);
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=arm preamble=1 header=0 rxdone=0 armed_ms=9"
+        );
     }
 
     /// The hazard. On an adopted window the terminating IRQ may have fired

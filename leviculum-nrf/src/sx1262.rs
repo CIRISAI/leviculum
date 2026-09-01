@@ -1203,6 +1203,13 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
         })
     }
 
+    /// A `SetRx` duration of zero is single mode: the chip listens until a
+    /// frame arrives and the window never concludes on its own. Every other
+    /// duration is a hardware timeout, so the window names its own end.
+    fn window_ends_itself(&self, window: &(u32, leviculum_core::sx126x::RxSite)) -> bool {
+        window.0 != 0
+    }
+
     async fn latched(&mut self) -> Result<leviculum_rx_arming::RxLatch, Error> {
         // `GetIrqStatus` reads; `ClearIrqStatus` is a separate opcode and is
         // deliberately not issued here. The window's latch mask is
