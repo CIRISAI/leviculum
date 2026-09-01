@@ -969,6 +969,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-media-state"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-nrf"
 version = "0.4.0"
 dependencies = [
@@ -997,6 +1001,7 @@ dependencies = [
  "leviculum-gnss-time",
  "leviculum-log-line",
  "leviculum-lxmf",
+ "leviculum-media-state",
  "leviculum-persist-ack",
  "leviculum-queue-budget",
  "leviculum-rx-arming",

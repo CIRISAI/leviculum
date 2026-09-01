@@ -91,6 +91,16 @@ have said "done" to a request the board cannot honour yet, and a
 measurement run reading that ack would believe it had a BLE link that
 does not exist.
 
+Because "configured on, not running" is a *terminal* statement — the
+host prints "Reset the board" for it — the board must not be able to say
+it while it is merely still booting. USB comes up before the carriers by
+design, so the serial task answers frames during a window in which
+nothing has been spawned yet; in that window the board reports the
+declared profile as running, and narrows it to what really started as
+soon as both spawn decisions are made. Without that, a set-then-reset
+script that connects the moment the tty appears reads "did not come up"
+off a board that came up perfectly (seen on the rig, #255).
+
 ## The proof line
 
 Every boot, on the debug CDC, before anything can have moved:
@@ -117,6 +127,7 @@ runtime change shows up within five seconds.
 | Flash record | `leviculum-core/src/media_profile_store.rs` (`"LMED"`) |
 | Page layout and the store task | `leviculum-nrf/src/telemetry.rs` (`+0x200` on `BoardConfig::telemetry_flash_page`) |
 | Runtime state, the gate and the banner | `leviculum-nrf/src/media.rs` |
+| Running/configured state machine, boot window, drop-run reporting (host tests) | `leviculum-nrf/media-state/` |
 | Boot spawn decisions | `leviculum-nrf/src/bin/{t114,rak4631}.rs`, `leviculum-nrf/src/ble/mod.rs` |
 | Host flag | `lnflash/src/media.rs`, `lnflash/src/flow.rs` |
 

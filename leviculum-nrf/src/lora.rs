@@ -127,13 +127,20 @@ pub fn config_sender() -> Sender<'static, CriticalSectionRawMutex, RadioConfig, 
 // LoRaInterface for NodeCore dispatch
 pub struct LoRaInterface {
     sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
+    /// What this interface has thrown away since its carrier went down,
+    /// so the drops are logged as a run and not as one line per packet
+    /// (see `try_send`).
+    drops: leviculum_media_state::DropRun,
 }
 
 impl LoRaInterface {
     pub fn new(
         sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
     ) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            drops: leviculum_media_state::DropRun::new(),
+        }
     }
 }
 
@@ -159,11 +166,20 @@ impl Interface for LoRaInterface {
         // `radio_silent` drop the TX path already does, one layer up so
         // the packet is not copied first.
         if !crate::media::lora_active() {
-            crate::log::log_fmt(
-                "[MEDIA] ",
-                format_args!("MEDIA_TX_DROP iface={} len={}", self.name(), data.len()),
-            );
+            // Logged as a run rather than per packet: every log line also
+            // writes the 2 KiB post-crash tail, and a carrier that is off
+            // drops one packet per announce, so per-packet lines empty the
+            // tail of the boot and fault diagnostics it exists for — in
+            // exactly the single-carrier measurement runs where a crash
+            // most needs explaining (#255). Same rule as `dispatch::settle`
+            // and `Reporter::note_state`: the transition is the signal.
+            if let Some(run) = self.drops.dropped(data.len()) {
+                crate::media::log_tx_drop(self.name(), run);
+            }
             return Ok(());
+        }
+        if let Some(run) = self.drops.resumed() {
+            crate::media::log_tx_resumed(self.name(), run);
         }
         // Two bounds, the reference's shape (`CONFIG_QUEUE_SIZE` /
         // `CONFIG_QUEUE_MAX_LENGTH`), checked before the packet is copied:

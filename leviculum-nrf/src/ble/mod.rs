@@ -202,11 +202,17 @@ pub fn channels() -> BleChannels {
 
 pub struct BleInterface {
     sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    /// The carrier-off drop run — see the LoRa interface for why these
+    /// are counted rather than logged one line per packet.
+    drops: leviculum_media_state::DropRun,
 }
 
 impl BleInterface {
     pub fn new(sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            drops: leviculum_media_state::DropRun::new(),
+        }
     }
 }
 
@@ -227,11 +233,13 @@ impl Interface for BleInterface {
         // The media profile, applied at the interface — see the LoRa
         // interface for why this is `Ok` and not `BufferFull`.
         if !crate::media::ble_active() {
-            crate::log::log_fmt(
-                "[MEDIA] ",
-                format_args!("MEDIA_TX_DROP iface={} len={}", self.name(), data.len()),
-            );
+            if let Some(run) = self.drops.dropped(data.len()) {
+                crate::media::log_tx_drop(self.name(), run);
+            }
             return Ok(());
+        }
+        if let Some(run) = self.drops.resumed() {
+            crate::media::log_tx_resumed(self.name(), run);
         }
         self.sender.try_send(data.to_vec()).map_err(|_| {
             // Codeberg #344: same silence as the other two. A phone that

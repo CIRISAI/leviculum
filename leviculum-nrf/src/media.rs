@@ -39,6 +39,15 @@
 //! running", never with an ack that would claim otherwise. See
 //! [`leviculum_core::envelope::TYPE_MEDIA_REPORT`].
 //!
+//! Because that answer is terminal — `lnflash` prints "Reset the board"
+//! for it — it must not be reachable while the boot is merely still on
+//! its way to the carriers. USB comes up before them by design, so the
+//! serial task answers frames during a window in which nothing has been
+//! spawned yet; [`load_at_boot`] seeds the boot state with the profile
+//! so that window answers "running what you configured", and
+//! [`note_boot_state`] narrows it to what really started. Rationale and
+//! host tests in [`leviculum_media_state`].
+//!
 //! # Teardown semantics of a runtime OFF
 //!
 //! Switching a medium off at runtime stops it carrying Reticulum traffic
@@ -53,30 +62,36 @@
 //! Stated rather than papered over: an operator who needs radio silence
 //! reboots, and the `[MEDIA]` banner then proves it.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use leviculum_core::envelope::MediaProfileWire;
+use leviculum_media_state::{Carriers, MediaState};
 
-/// Whether this binary reads the profile and gates its carriers on it —
-/// the capability the serial task's media answers are gated on
-/// ([`leviculum_core::envelope::media_profile_answer`]). Set once via
-/// [`load_at_boot`], which every binary calls before `usb::init`, so no
-/// frame can be answered before the declaration exists.
+/// The whole state this module answers from: the declaration gate, the
+/// configured profile and what the boot brought up. In
+/// [`leviculum_media_state`] rather than here because its bugs are
+/// ordering bugs — the boot window between [`load_at_boot`] and
+/// [`note_boot_state`] most of all — and the firmware crate cross-
+/// compiles, so nothing in it can be driven by a host test.
 ///
-/// The same ack-honesty rule as the telemetry reporter's, and it bites
-/// harder here: an ack is what a measurement run reads as "this node is
-/// now single-medium", so a binary that acked without gating would make
-/// every number that run produced a lie.
-static MEDIA_WIRED: AtomicBool = AtomicBool::new(false);
+/// The gate ([`media_wired`]) carries the same ack-honesty rule as the
+/// telemetry reporter's, and it bites harder here: an ack is what a
+/// measurement run reads as "this node is now single-medium", so a
+/// binary that acked without gating would make every number that run
+/// produced a lie.
+static STATE: MediaState = MediaState::new();
 
-/// What a reboot would come up with.
-static CONFIGURED_LORA: AtomicBool = AtomicBool::new(true);
-static CONFIGURED_BLE: AtomicBool = AtomicBool::new(true);
+const fn carriers(profile: MediaProfileWire) -> Carriers {
+    Carriers {
+        lora: profile.lora_enabled,
+        ble: profile.ble_enabled,
+    }
+}
 
-/// What this boot actually started. A carrier whose tasks were never
-/// spawned can never become running again before the next reset.
-static BOOTED_LORA: AtomicBool = AtomicBool::new(false);
-static BOOTED_BLE: AtomicBool = AtomicBool::new(false);
+const fn wire(carriers: Carriers) -> MediaProfileWire {
+    MediaProfileWire {
+        lora_enabled: carriers.lora,
+        ble_enabled: carriers.ble,
+    }
+}
 
 /// Where the configured profile came from, for the boot banner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,13 +124,18 @@ impl Source {
 /// memory-mapped flash read and is safe at any point in boot, including
 /// before `Softdevice::enable`.
 pub fn load_at_boot(page: u32) -> (MediaProfileWire, Source) {
-    MEDIA_WIRED.store(true, Ordering::Relaxed);
     let (profile, source) = match crate::telemetry::load_media_profile(page) {
         Some(profile) => (profile, Source::Flash),
         None => (MediaProfileWire::BOTH, Source::Default),
     };
-    CONFIGURED_LORA.store(profile.lora_enabled, Ordering::Relaxed);
-    CONFIGURED_BLE.store(profile.ble_enabled, Ordering::Relaxed);
+    // Declaring seeds the boot state with the profile as well, because
+    // USB comes up in the next statement and the carriers only after
+    // several awaited SPI transactions: a frame answered in that window
+    // would otherwise read `configured=on running=off`, which the frame's
+    // own contract defines as "did not come up, cannot start before the
+    // next reset". Observed on the rig, run 4 of the BLE acceptance
+    // (#255). `note_boot_state` narrows the seed to what really started.
+    STATE.declare(carriers(profile));
     (profile, source)
 }
 
@@ -125,40 +145,36 @@ pub fn load_at_boot(page: u32) -> (MediaProfileWire, Source) {
 /// "a carrier that did not come up cannot be started" a fact the board
 /// states instead of a hope.
 pub fn note_boot_state(lora_started: bool, ble_started: bool) {
-    BOOTED_LORA.store(lora_started, Ordering::Relaxed);
-    BOOTED_BLE.store(ble_started, Ordering::Relaxed);
+    STATE.note_boot_state(Carriers {
+        lora: lora_started,
+        ble: ble_started,
+    });
 }
 
 /// Whether [`load_at_boot`] was called — the capability the serial task's
 /// media answers are gated on.
 pub fn media_wired() -> bool {
-    MEDIA_WIRED.load(Ordering::Relaxed)
+    STATE.wired()
 }
 
 /// Whether LoRa is carrying Reticulum traffic right now.
 pub fn lora_active() -> bool {
-    BOOTED_LORA.load(Ordering::Relaxed) && CONFIGURED_LORA.load(Ordering::Relaxed)
+    STATE.lora_active()
 }
 
 /// Whether BLE is carrying Reticulum traffic right now.
 pub fn ble_active() -> bool {
-    BOOTED_BLE.load(Ordering::Relaxed) && CONFIGURED_BLE.load(Ordering::Relaxed)
+    STATE.ble_active()
 }
 
 /// What this boot is carrying traffic on (see the module docs).
 pub fn running() -> MediaProfileWire {
-    MediaProfileWire {
-        lora_enabled: lora_active(),
-        ble_enabled: ble_active(),
-    }
+    wire(STATE.running())
 }
 
 /// What a reboot would come up with (see the module docs).
 pub fn configured() -> MediaProfileWire {
-    MediaProfileWire {
-        lora_enabled: CONFIGURED_LORA.load(Ordering::Relaxed),
-        ble_enabled: CONFIGURED_BLE.load(Ordering::Relaxed),
-    }
+    wire(STATE.configured())
 }
 
 /// Apply a profile a host sent: take effect where that is possible, and
@@ -177,8 +193,7 @@ pub fn configured() -> MediaProfileWire {
 /// reboot would come up with; sent while the page write was still owed,
 /// it was a claim about a reboot that the reboot disproved.
 pub fn apply(profile: MediaProfileWire) -> crate::telemetry::PendingSave {
-    CONFIGURED_LORA.store(profile.lora_enabled, Ordering::Relaxed);
-    CONFIGURED_BLE.store(profile.ble_enabled, Ordering::Relaxed);
+    STATE.set_configured(carriers(profile));
     crate::telemetry::request_save_media_profile(profile)
 }
 
@@ -217,6 +232,44 @@ const fn on_off(enabled: bool) -> &'static str {
     } else {
         "off"
     }
+}
+
+/// Report a run of packets a down carrier threw away.
+///
+/// Called by the interfaces on the first drop of a run and at every
+/// decade after it, never per packet: the reasoning, and the host tests,
+/// are in [`leviculum_media_state::DropRun`]. `packets=` is the run's
+/// count at the moment of the line, so the last such line is a lower
+/// bound on the run within a factor of ten, and
+/// [`log_tx_resumed`] states the exact total when the carrier comes back.
+///
+/// ```text
+/// [MEDIA] MEDIA_TX_DROP iface=ble packets=10 bytes=450 reason=carrier-off
+/// ```
+pub fn log_tx_drop(iface: &str, run: leviculum_media_state::Swallowed) {
+    crate::log::log_fmt(
+        "[MEDIA] ",
+        format_args!(
+            "MEDIA_TX_DROP iface={} packets={} bytes={} reason=carrier-off",
+            iface, run.packets, run.bytes
+        ),
+    );
+}
+
+/// Close a drop run: the carrier took a packet again, and this is the
+/// only line carrying the run's untruncated totals.
+///
+/// ```text
+/// [MEDIA] MEDIA_TX_RESUMED iface=ble packets=37 bytes=1665
+/// ```
+pub fn log_tx_resumed(iface: &str, run: leviculum_media_state::Swallowed) {
+    crate::log::log_fmt(
+        "[MEDIA] ",
+        format_args!(
+            "MEDIA_TX_RESUMED iface={} packets={} bytes={}",
+            iface, run.packets, run.bytes
+        ),
+    );
 }
 
 /// Say that a carrier was held down at boot because the profile said so.
