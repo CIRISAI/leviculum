@@ -123,6 +123,8 @@ pub mod link;
 pub mod media_profile_store;
 pub mod memory_storage;
 pub mod node;
+pub mod node_name;
+pub mod node_name_store;
 pub mod packet;
 pub mod packet_hash_store;
 pub mod radio_config_store;

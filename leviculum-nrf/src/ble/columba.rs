@@ -27,9 +27,8 @@ use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, device_name, manufacturer_data, parse_peer_advertisement, should_initiate,
-    ConnectDecision, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_LEN,
+    addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
+    ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -208,15 +207,26 @@ async fn ble_task(
             )
             .build(),
     );
-    // Individual per-node name, `LN-<hex8>` from the identity hash
-    // (#255) — same hex as the LXMF display name Columba shows, see
-    // `leviculum_ble_tx::device_name`. Hex output is ASCII, so the
-    // `from_utf8` fallback arm is unreachable. It rides in the SCAN
-    // RESPONSE, a second 31-byte PDU, so it does not compete with the
+    // Individual per-node name: the operator's (#235) if one is set,
+    // `LN-<hex8>` from the identity hash otherwise (#255) — the same
+    // value `crate::ble::set_gap_device_name` writes into the GAP
+    // attribute, taken from `crate::name::boot_gap_name` so the two BLE
+    // surfaces cannot disagree, and the same name the LXMF announce
+    // carries on the mesh (truncated here to `DEVICE_NAME_LEN`, visibly
+    // and on a codepoint boundary). It rides in the SCAN RESPONSE, a
+    // second 31-byte PDU, so it does not compete with the
     // advertisement's budget.
-    let name = device_name(&identity_hash);
-    let name = core::str::from_utf8(&name).unwrap_or("LN-invalid");
-    let scan = SCAN_DATA.init(LegacyAdvertisementBuilder::new().full_name(name).build());
+    //
+    // Built once, into a `StaticCell` the SoftDevice holds a `&'static`
+    // to for the life of the advertising loop below: that is why a name
+    // set at runtime reaches BLE only at the next boot, and why the
+    // control frame's report says so rather than implying otherwise.
+    let name = crate::name::boot_gap_name();
+    let scan = SCAN_DATA.init(
+        LegacyAdvertisementBuilder::new()
+            .full_name(name.as_str())
+            .build(),
+    );
 
     // The measured bytes, not the computed ones: if the builder ever
     // disagrees with `ADV_BYTES_USED`, the capture says so.

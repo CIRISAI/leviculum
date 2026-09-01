@@ -139,6 +139,34 @@ struct Cli {
     )]
     set_media: Option<String>,
 
+    /// Set the name every running LNode is known by, then exit. No
+    /// flashing. Given with no value it only reads the boards back;
+    /// --clear-name goes back to the names derived from the identity.
+    ///
+    /// The name replaces both derived names at once: the mesh display
+    /// name Columba lists (LNode-<hex8>) and the Bluetooth device name a
+    /// phone shows (LN-<hex8>). At most 32 bytes of UTF-8 — the name
+    /// travels in every announce, so the bound is airtime — and a name
+    /// longer than 11 bytes is shortened for Bluetooth and left whole on
+    /// the mesh. The mesh name takes effect at once; the Bluetooth one at
+    /// the next reset, and the board says which case it is in.
+    #[arg(
+        long,
+        value_name = "NAME",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "clear_name"]
+    )]
+    set_name: Option<String>,
+
+    /// Clear the name on every running LNode, then exit: the board is
+    /// known by the names derived from its identity again.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media"]
+    )]
+    clear_name: bool,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -333,6 +361,18 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Some(text) => Some(Some(lnflash::media::parse_media(text)?)),
         None => None,
     };
+    // And the name, with the same three-way shape: absent, the read-only
+    // form (`--set-name` with no value), or a name. `--clear-name` is the
+    // fourth state and joins them here so the session below takes one
+    // value. A name a board would have to display differently from how it
+    // was typed is refused at the command line, before any board is
+    // touched.
+    let name = match (&cli.set_name, cli.clear_name) {
+        (Some(text), _) if text.trim().is_empty() => Some(None),
+        (Some(text), _) => Some(Some(Some(lnflash::name::parse_name(text)?))),
+        (None, true) => Some(Some(None)),
+        (None, false) => None,
+    };
     // The board catalogue is compiled in and always available. The bundle is
     // located only by the paths that need an image, so a session that merely
     // configures a board that is already running never asks for one
@@ -418,6 +458,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_media(&catalogue, &sysfs, ui, spec)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(chosen) = name {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_name(&catalogue, &sysfs, ui, chosen)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -969,6 +1022,77 @@ mod tests {
             vec!["--set-media", "lora=on,ble=off", "--clear-position"],
         ] {
             let err = media(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Node name
+    // -----------------------------------------------------------------
+
+    fn name_flags(args: &[&str]) -> Result<(Option<String>, bool), String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok((cli.set_name, cli.clear_name))
+    }
+
+    #[test]
+    fn no_name_flag_means_the_session_does_not_run_at_all() {
+        assert_eq!(name_flags(&[]).unwrap(), (None, false));
+        assert_eq!(name_flags(&["--yes"]).unwrap(), (None, false));
+    }
+
+    /// The read-only form, as for `--set-media`: asking a board what it is
+    /// called must be possible without also writing to it.
+    #[test]
+    fn the_bare_name_flag_is_the_read_only_form_and_not_an_absent_flag() {
+        assert_eq!(
+            name_flags(&["--set-name"]).unwrap(),
+            (Some(String::new()), false)
+        );
+        assert_ne!(name_flags(&["--set-name"]).unwrap().0, None);
+    }
+
+    #[test]
+    fn the_name_text_is_carried_verbatim_to_the_parser() {
+        // Spaces included, and no shell-level trimming: the rules are
+        // `node_name`'s and they refuse rather than trim, which only
+        // works if clap hands the text over untouched.
+        for typed in ["Balkon-Nord", "Balkon Nord", "Küche", " leading"] {
+            assert_eq!(
+                name_flags(&["--set-name", typed]).unwrap().0,
+                Some(typed.to_string()),
+                "{typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_is_its_own_flag_and_not_an_empty_name() {
+        // `--set-name ""` is the read-only form, so the clear needs a
+        // flag of its own — otherwise "go back to the derived name" would
+        // be unsayable.
+        assert_eq!(name_flags(&["--clear-name"]).unwrap(), (None, true));
+        let err = name_flags(&["--set-name", "Balkon", "--clear-name"]).unwrap_err();
+        assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    #[test]
+    fn the_name_session_does_not_combine_with_the_other_configure_sessions() {
+        // Each of these ends the run after talking to the boards, so two
+        // of them in one command is a request that cannot be honoured.
+        for args in [
+            vec!["--set-name", "Balkon", "--set-time"],
+            vec!["--set-name", "Balkon", "--set-telemetry"],
+            vec!["--set-name", "Balkon", "--set-tx-spacing", "60"],
+            vec!["--set-name", "Balkon", "--set-tx-power", "14"],
+            vec!["--set-name", "Balkon", "--set-position", "52.52,13.40"],
+            vec!["--set-name", "Balkon", "--clear-position"],
+            vec!["--set-name", "Balkon", "--set-media", "lora=on"],
+            vec!["--clear-name", "--set-media", "lora=on"],
+            vec!["--clear-name", "--set-time"],
+        ] {
+            let err = name_flags(&args).unwrap_err();
             assert!(err.contains("cannot be used with"), "{args:?}: {err}");
         }
     }

@@ -63,6 +63,8 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_MEDIA_PROFILE,
     envelope::TYPE_MEDIA_QUERY,
     envelope::TYPE_POSITION_SOURCE_QUERY,
+    envelope::TYPE_NODE_NAME,
+    envelope::TYPE_NODE_NAME_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -650,6 +652,60 @@ async fn retic_serial_task(
                                     );
                                     if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
                                         log("SER: position-source report write failed");
+                                    }
+                                }
+                                ControlAction::NodeName(chosen) => {
+                                    // Applied here rather than handed to
+                                    // the main loop, like the media
+                                    // profile: the apply is one guarded
+                                    // store and a save request, and
+                                    // nothing about it needs the node. So
+                                    // the report written back describes
+                                    // the state already in force — the
+                                    // mesh name the next announce will
+                                    // carry — and its `ble_pending` flag
+                                    // is the board saying "the
+                                    // advertisement was built with the
+                                    // old name and cannot be rebuilt
+                                    // before the next reset", which is
+                                    // the honest answer where an ack
+                                    // would claim both surfaces followed.
+                                    let wired = crate::name::name_wired();
+                                    // A board that cannot yet state the
+                                    // result must not apply the frame
+                                    // either, or the host's `busy` retry
+                                    // would be a second write of a name
+                                    // already stored.
+                                    let ready = wired && crate::name::report().is_some();
+                                    let persist =
+                                        persist_outcome(ready, || crate::name::apply(chosen)).await;
+                                    let report = crate::name::report();
+                                    let answer = envelope::node_name_answer(
+                                        wired,
+                                        persist,
+                                        report
+                                            .as_ref()
+                                            .map(|(flags, mesh, ble)| (*flags, mesh, ble)),
+                                    );
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: node-name answer write failed");
+                                    }
+                                }
+                                ControlAction::NodeNameQuery => {
+                                    // Read-only, like the media query:
+                                    // safe to send to a board
+                                    // mid-measurement, and the way a host
+                                    // learns both effective names without
+                                    // having to derive either itself.
+                                    let report = crate::name::report();
+                                    let answer = envelope::node_name_query_answer(
+                                        crate::name::name_wired(),
+                                        report
+                                            .as_ref()
+                                            .map(|(flags, mesh, ble)| (*flags, mesh, ble)),
+                                    );
+                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                        log("SER: node-name report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

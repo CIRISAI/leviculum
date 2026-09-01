@@ -94,6 +94,11 @@ async fn main(spawner: Spawner) {
     // is their spawn decision. A memory-mapped flash read, legal this
     // early and before `Softdevice::enable`.
     let (media, media_src) = leviculum_nrf::media::load_at_boot(t114::CONFIG.telemetry_flash_page);
+    // The node's name, read on the same page and for the same reason the
+    // profile is: before USB, so a host frame is never answered against
+    // the derived default while the record is still unread, and before
+    // the first announce and `ble::init`, which both display it.
+    leviculum_nrf::name::load_at_boot(t114::CONFIG.telemetry_flash_page);
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
@@ -288,6 +293,12 @@ async fn main(spawner: Spawner) {
     // BLE — full init restored. RAM ORIGIN bumped to 40K (memory.x) to give
     // Softdevice::enable headroom for our config (att_mtu=256, …).
     let identity_hash = *node.identity().hash();
+    // Freeze the BLE name for this boot, before the SoftDevice is
+    // enabled and before the advertisement is built: both read it, and a
+    // name that changed between them would put two different strings on
+    // the two BLE surfaces. This also publishes the identity hash the
+    // control-envelope report derives its defaults from.
+    leviculum_nrf::name::note_boot_name(&identity_hash);
     log_critical!("[STG] ble-init");
     let sd = leviculum_nrf::ble::init(
         &spawner,
@@ -323,6 +334,7 @@ async fn main(spawner: Spawner) {
     // effect at reboot" a fact the board can state rather than a hope.
     leviculum_nrf::media::note_boot_state(media.lora_enabled, media.ble_enabled);
     leviculum_nrf::media::log_banner(media_src);
+    leviculum_nrf::name::log_banner();
 
     // Radio-config persistence. Must come after `ble::init`: writing internal
     // flash with the SoftDevice enabled is only legal through its own
@@ -777,10 +789,10 @@ async fn boot_log_repeater(initial_len: usize) {
 /// embassy time driver (same timing infra the other periodic tasks use);
 /// no SD-reserved peripheral is touched directly.
 ///
-/// The `[MEDIA]` line rides along for the same reason and reads the
-/// carriers live, so a runtime change shows up here within five seconds
-/// and a capture attached after the boot window still learns which
-/// carriers this board is on.
+/// The `[MEDIA]` and `[NAME ]` lines ride along for the same reason and
+/// read their state live, so a runtime change shows up here within five
+/// seconds and a capture attached after the boot window still learns
+/// which carriers this board is on and what it is called.
 #[embassy_executor::task]
 async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
     loop {
@@ -788,5 +800,6 @@ async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
         log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
         leviculum_nrf::media::log_banner(media_src);
+        leviculum_nrf::name::log_banner();
     }
 }

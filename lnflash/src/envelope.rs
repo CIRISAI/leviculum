@@ -20,15 +20,19 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame,
-    decode_media_report_payload, decode_position_source_report_payload, decode_refusal_payload,
-    encode_capability_query, encode_fixed_position, encode_media_profile, encode_media_query,
-    encode_position_source_query, encode_radio_config, encode_telemetry_target, encode_tx_spacing,
-    encode_wall_time, FixedPositionWire, MediaProfileWire, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE,
-    TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
-    TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
+    decode_media_report_payload, decode_node_name_report_payload,
+    decode_position_source_report_payload, decode_refusal_payload, encode_capability_query,
+    encode_fixed_position, encode_media_profile, encode_media_query, encode_node_name,
+    encode_node_name_query, encode_position_source_query, encode_radio_config,
+    encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
+    MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED,
+    REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
+    TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
+    TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
+    TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_core::node_name::NodeName;
 use leviculum_core::rnode::RadioConfigWire;
 
 use crate::sys::Fd;
@@ -449,6 +453,98 @@ pub fn query_media_profile(fd: &Fd) -> io::Result<Result<MediaState, ControlOutc
     )
 }
 
+/// The answer classifier the two node-name conversations share: a name
+/// report, or a named refusal of the frame that was sent.
+///
+/// `expect` is the correlation an ack gets for free and this report
+/// cannot: `TYPE_NODE_NAME_REPORT` carries no "in reply to" field, so a
+/// report is only recognisable as *this* conversation's by what it says.
+/// After a set it must state the mesh name that was sent — the board
+/// applies before it answers, and only answers once the record is durable
+/// — so a report saying anything else is a leftover from before the write
+/// and is left unclaimed for the next attempt. This is the media report's
+/// rule (`media_answer`) on a second unaddressed report, and it is the
+/// same bug it was written for: a stale frame taken as this one's tells
+/// the operator the board carries a name it does not.
+///
+/// A *clear* has nothing to correlate against — the host cannot compute
+/// the board's derived default, which is the whole reason the report
+/// carries resolved names — so it passes `None` and relies on
+/// [`transact`] draining the port first.
+fn node_name_answer(
+    sent_type: u8,
+    expect: Option<&NodeName>,
+) -> impl Fn(&[u8]) -> Option<Result<NodeNameState, u8>> + '_ {
+    move |data| {
+        let frame = decode_frame(data).ok()?;
+        match frame.frame_type {
+            TYPE_NODE_NAME_REPORT => {
+                let state = decode_node_name_report_payload(frame.payload)?;
+                if expect.is_some_and(|expected| *expected != state.mesh) {
+                    return None;
+                }
+                Some(Ok(state))
+            }
+            TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                Some((refused, reason)) if refused == sent_type => Some(Err(reason)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// Set the node's name — `None` clears it back to the derived default
+/// (`TYPE_NODE_NAME`, Codeberg #235).
+///
+/// Answered with a report rather than an ack on purpose: the two name
+/// surfaces do not adopt it at the same moment. The mesh name is in force
+/// for the next announce; the BLE advertisement was built at boot and
+/// says so through the report's `ble_pending` flag. The frame is at most
+/// 38 bytes, so it travels behind [`probed`] on the flow path — over the
+/// 19-byte Reticulum minimum, it must never be sent on a guess.
+pub fn send_node_name(
+    fd: &Fd,
+    name: Option<&NodeName>,
+) -> io::Result<Result<NodeNameState, ControlOutcome>> {
+    let payload = encode_node_name(name);
+    Ok(
+        match transact(
+            fd,
+            &payload,
+            CONTROL_TIMING,
+            node_name_answer(TYPE_NODE_NAME, name),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
+/// Ask the board what it is called (`TYPE_NODE_NAME_QUERY`).
+///
+/// `Ok(Err(..))` is "no report came back": firmware without the query, a
+/// binary that carries no name gate and refused by name, or a board still
+/// in the boot window before its identity is known (`REFUSE_BUSY`).
+/// Either way the caller has no names, and the one thing it must not do
+/// is invent them — the derived defaults are two different strings built
+/// from a hash this side never sees.
+pub fn query_node_name(fd: &Fd) -> io::Result<Result<NodeNameState, ControlOutcome>> {
+    Ok(
+        match transact(
+            fd,
+            &encode_node_name_query(),
+            CONTROL_TIMING,
+            node_name_answer(TYPE_NODE_NAME_QUERY, None),
+        )? {
+            Some(Ok(state)) => Ok(state),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
 /// What a board answered about its position sources — the second clause
 /// of the telemetry send condition.
 ///
@@ -563,12 +659,15 @@ pub(crate) mod testing {
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_media_report,
         encode_radio_report, encode_refusal, fixed_position_answer, media_profile_answer,
-        media_query_answer, position_source_query_answer, telemetry_target_answer, ControlAction,
-        MediaProfileWire, Persist, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES,
-        TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_POSITION_SOURCE_QUERY,
+        media_query_answer, node_name_answer, node_name_query_answer, position_source_query_answer,
+        telemetry_target_answer, ControlAction, MediaProfileWire, Persist,
+        NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED, POSITION_SOURCE_FIXED,
+        POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE,
+        TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY,
         TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
         TYPE_WALL_TIME,
     };
+    use leviculum_core::node_name::{truncate_on_char_boundary, NodeName, BLE_NAME_MAX_LEN};
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -597,6 +696,8 @@ pub(crate) mod testing {
         TYPE_MEDIA_PROFILE,
         TYPE_MEDIA_QUERY,
         TYPE_POSITION_SOURCE_QUERY,
+        TYPE_NODE_NAME,
+        TYPE_NODE_NAME_QUERY,
     ];
 
     /// The position sources the scripted board has. A cell rather than a
@@ -638,6 +739,106 @@ pub(crate) mod testing {
                 ble_enabled: self.booted.ble_enabled && self.configured.ble_enabled,
             }
         }
+    }
+
+    /// The scripted board's name state: the identity hash its derived
+    /// defaults are built from, the name stored on its flash page, and
+    /// the BLE name the current boot came up on.
+    ///
+    /// A cell rather than a constant for the same reason [`StubMedia`] is
+    /// one: setting a name has to be *visible* to the next query on the
+    /// same board, and the BLE name has to stay stuck at what the boot
+    /// built — which is the whole behaviour the report exists to state.
+    #[derive(Debug, Clone)]
+    pub struct StubName {
+        identity_hash: [u8; 16],
+        stored: Option<NodeName>,
+        booted_ble: String,
+    }
+
+    impl StubName {
+        /// The firmware's own rule, reproduced: the mesh name follows the
+        /// stored name at once, the BLE name is whatever the boot built.
+        fn mesh(&self) -> NodeName {
+            match &self.stored {
+                Some(name) => *name,
+                None => NodeName::decode(derived_mesh(&self.identity_hash).as_bytes())
+                    .expect("derived names are graphic ASCII"),
+            }
+        }
+
+        fn ble(&self) -> NodeName {
+            NodeName::decode(self.booted_ble.as_bytes()).expect("a boot name is displayable")
+        }
+
+        /// What a reset would put on the BLE surfaces, given what is
+        /// stored right now.
+        fn pending_ble(&self) -> String {
+            match &self.stored {
+                Some(name) => {
+                    truncate_on_char_boundary(name.as_str(), BLE_NAME_MAX_LEN).to_string()
+                }
+                None => derived_ble(&self.identity_hash),
+            }
+        }
+
+        fn flags(&self) -> u8 {
+            let stored = if self.stored.is_some() {
+                NODE_NAME_FLAG_STORED
+            } else {
+                0
+            };
+            let pending = if self.booted_ble == self.pending_ble() {
+                0
+            } else {
+                NODE_NAME_FLAG_BLE_PENDING
+            };
+            stored | pending
+        }
+    }
+
+    /// `LNode-<hex8>` — the mesh default (`leviculum_nrf::name::mesh_name`).
+    fn derived_mesh(hash: &[u8; 16]) -> String {
+        format!("LNode-{}", hex8(hash))
+    }
+
+    /// `LN-<hex8>` — the BLE default (`leviculum_ble_tx::device_name`).
+    /// Deliberately a *different* string from the mesh default, which is
+    /// why `ble_pending` is a flag the board sets rather than something
+    /// the host derives.
+    fn derived_ble(hash: &[u8; 16]) -> String {
+        format!("LN-{}", hex8(hash))
+    }
+
+    fn hex8(hash: &[u8; 16]) -> String {
+        hash[..4].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The scripted board's hash. Not all-zero: a derived name built from
+    /// the wrong hash has to look wrong.
+    pub const STUB_IDENTITY_HASH: [u8; 16] = [
+        0xa1, 0xb2, 0xc3, 0xd4, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55,
+        0x44,
+    ];
+
+    /// A board that booted unnamed — the state every fielded board is in.
+    pub fn name_state() -> Arc<Mutex<StubName>> {
+        name_state_booted(None)
+    }
+
+    /// A board that came up carrying `booted` — the state a board is in
+    /// after being named and reset.
+    pub fn name_state_booted(booted: Option<&str>) -> Arc<Mutex<StubName>> {
+        let stored = booted.map(|n| NodeName::parse(n.as_bytes()).expect("a valid fixture name"));
+        let booted_ble = match booted {
+            Some(n) => truncate_on_char_boundary(n, BLE_NAME_MAX_LEN).to_string(),
+            None => derived_ble(&STUB_IDENTITY_HASH),
+        };
+        Arc::new(Mutex::new(StubName {
+            identity_hash: STUB_IDENTITY_HASH,
+            stored,
+            booted_ble,
+        }))
     }
 
     /// A board that booted on both carriers, which is the default and the
@@ -698,6 +899,13 @@ pub(crate) mod testing {
         envelope_firmware_stub_with_media(pty, seen, media_state());
     }
 
+    /// [`envelope_firmware_stub`] with the name state handed in, so a
+    /// test can watch a name change across two conversations on the same
+    /// board — and watch the BLE half stay stuck at what the boot built.
+    pub fn envelope_firmware_stub_with_name(pty: &Pty, seen: Seen, name: Arc<Mutex<StubName>>) {
+        envelope_firmware_stub_full_named(pty, seen, media_state(), gnss_board(), name);
+    }
+
     /// [`envelope_firmware_stub`] with the media state handed in, so a
     /// test can watch a profile change across two conversations on the
     /// same board — the read-modify-write a one-sided `--set-media` does.
@@ -719,6 +927,17 @@ pub(crate) mod testing {
         seen: Seen,
         media: Arc<Mutex<StubMedia>>,
         sources: Arc<Mutex<u8>>,
+    ) {
+        envelope_firmware_stub_full_named(pty, seen, media, sources, name_state());
+    }
+
+    /// The scripted board with all three cells handed in.
+    pub fn envelope_firmware_stub_full_named(
+        pty: &Pty,
+        seen: Seen,
+        media: Arc<Mutex<StubMedia>>,
+        sources: Arc<Mutex<u8>>,
+        name: Arc<Mutex<StubName>>,
     ) {
         spawn_stub(pty, move |frame_bytes| {
             seen.lock().unwrap().push(frame_bytes.to_vec());
@@ -771,6 +990,26 @@ pub(crate) mod testing {
                     let media = media.lock().unwrap();
                     Some(media_query_answer(true, media.running(), media.configured))
                 }
+                // The name gate, run exactly as the board runs it: apply,
+                // then answer from the state that is already in force —
+                // including the BLE half, which stays at what the boot
+                // built until the board is reset.
+                ControlAction::NodeName(chosen) => {
+                    let mut name = name.lock().unwrap();
+                    name.stored = chosen;
+                    Some(node_name_answer(
+                        true,
+                        Persist::Durable,
+                        Some((name.flags(), &name.mesh(), &name.ble())),
+                    ))
+                }
+                ControlAction::NodeNameQuery => {
+                    let name = name.lock().unwrap();
+                    Some(node_name_query_answer(
+                        true,
+                        Some((name.flags(), &name.mesh(), &name.ble())),
+                    ))
+                }
                 ControlAction::Refuse {
                     refused_type,
                     reason,
@@ -778,6 +1017,60 @@ pub(crate) mod testing {
                 _ => None,
             }
         });
+    }
+
+    /// A scripted device whose binary never wired the name gate: it
+    /// advertises the frame types (the envelope layer knows them) but its
+    /// answer runs the firmware's own decision function with the
+    /// capability absent, so the name comes back refused by name.
+    pub fn nameless_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::NodeName(_) => Some(node_name_answer(false, Persist::Durable, None)),
+                ControlAction::NodeNameQuery => Some(node_name_query_answer(false, None)),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// A scripted device still in its boot window: it knows the frames but
+    /// its identity hash is not published yet, so it cannot state the
+    /// derived names and says `busy` rather than reporting a name built
+    /// from sixteen zero bytes.
+    pub fn booting_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::NodeName(_) => Some(node_name_answer(true, Persist::Durable, None)),
+                ControlAction::NodeNameQuery => Some(node_name_query_answer(true, None)),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
+    }
+
+    /// The node name the stub decoded, if a set frame reached it. The
+    /// **last** one, like [`media_frame`]: a read-modify-write session
+    /// must not be satisfied by an earlier attempt. The outer `Option` is
+    /// "did a frame arrive at all", the inner is the frame's own
+    /// set-versus-clear.
+    pub fn node_name_frame(seen: &Seen) -> Option<Option<NodeName>> {
+        seen.lock().unwrap().iter().rev().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::NodeName(name) => Some(name),
+                _ => None,
+            }
+        })
     }
 
     /// A scripted board that is still repeating an earlier media report

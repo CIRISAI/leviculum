@@ -912,6 +912,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "embassy-sync 0.7.2",
+ "leviculum-core",
 ]
 
 [[package]]

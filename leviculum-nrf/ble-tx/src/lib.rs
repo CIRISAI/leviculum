@@ -118,6 +118,12 @@ pub const DEVICE_NAME_LEN: usize = 11;
 /// SoftDevice. See [`DEVICE_NAME_LEN`].
 pub const GAP_DEVNAME_DEFAULT_LEN: usize = 31;
 
+/// The drift guard for [`leviculum_core::node_name::BLE_NAME_MAX_LEN`],
+/// which mirrors [`DEVICE_NAME_LEN`] so a host tool can shorten a name
+/// exactly as this crate does. A `const` block, so the two parting
+/// company fails the build rather than one test run.
+const _: () = assert!(DEVICE_NAME_LEN == leviculum_core::node_name::BLE_NAME_MAX_LEN);
+
 /// The node's individual BLE name: `LN-<hex8>` (#255).
 ///
 /// `<hex8>` is the leading 4 bytes of the identity hash — the same
@@ -139,6 +145,43 @@ pub fn device_name(identity_hash: &[u8; 16]) -> [u8; DEVICE_NAME_LEN] {
         name[4 + 2 * i] = HEX[usize::from(byte & 0x0F)];
     }
     name
+}
+
+/// The BLE name this node advertises: the operator's name if one is set,
+/// the derived [`device_name`] otherwise (#235).
+///
+/// Returns the buffer and how much of it is in use — the derived name is
+/// always [`DEVICE_NAME_LEN`] bytes, an operator's name is whatever fits.
+///
+/// **One name, both surfaces.** The value handed in here is the same one
+/// the LXMF announce carries as its display name, so a board listed as
+/// `Balkon-Nord` in Columba is listed as `Balkon-Nord` in a phone's
+/// Bluetooth settings too. Where the mesh name does not fit
+/// [`DEVICE_NAME_LEN`], BLE gets a **visibly shortened** prefix rather
+/// than a different name: see
+/// [`leviculum_core::node_name::truncate_on_char_boundary`] for the two
+/// rules that shortening obeys.
+///
+/// The derived default is deliberately *not* run through the truncation:
+/// `LN-<hex8>` is exactly `DEVICE_NAME_LEN` bytes by construction, and
+/// it is a different string from the mesh default `LNode-<hex8>` rather
+/// than a prefix of it, because 11 bytes of `LNode-<hex8>` would drop
+/// half the hex that makes the board identifiable.
+#[must_use]
+pub fn gap_name(
+    identity_hash: &[u8; 16],
+    configured: Option<&str>,
+) -> ([u8; DEVICE_NAME_LEN], usize) {
+    let mut buf = [0u8; DEVICE_NAME_LEN];
+    match configured {
+        None => (device_name(identity_hash), DEVICE_NAME_LEN),
+        Some(name) => {
+            let fitted =
+                leviculum_core::node_name::truncate_on_char_boundary(name, DEVICE_NAME_LEN);
+            buf[..fitted.len()].copy_from_slice(fitted.as_bytes());
+            (buf, fitted.len())
+        }
+    }
 }
 
 /// The result of one `sd_ble_gatts_hvx` call, as the driver saw it.
@@ -748,5 +791,75 @@ mod tests {
             assert!(name.iter().all(|c| c.is_ascii_graphic()));
             assert!(core::str::from_utf8(&name).is_ok());
         }
+    }
+
+    #[test]
+    fn an_unnamed_board_advertises_its_derived_name() {
+        // The property that makes this feature invisible to a board
+        // nobody names: the derived default must stay exactly what it is
+        // today, hex and all.
+        let hash = [
+            0xa1, 0xb2, 0xc3, 0xd4, 0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66,
+            0x55, 0x44,
+        ];
+        let (name, len) = gap_name(&hash, None);
+        assert_eq!(&name[..len], b"LN-a1b2c3d4");
+        assert_eq!(len, DEVICE_NAME_LEN);
+    }
+
+    #[test]
+    fn a_short_name_is_advertised_whole() {
+        let (name, len) = gap_name(&[0u8; 16], Some("Balkon"));
+        assert_eq!(&name[..len], b"Balkon");
+        assert_eq!(len, 6);
+    }
+
+    #[test]
+    fn a_long_name_is_shortened_visibly_rather_than_replaced() {
+        // The mesh keeps the whole name; BLE gets a prefix an operator
+        // can recognise as the same board, not a different string.
+        let (name, len) = gap_name(&[0u8; 16], Some("Balkon-Nord-Solarknoten"));
+        assert_eq!(core::str::from_utf8(&name[..len]).unwrap(), "Balkon-Nord");
+        assert_eq!(len, DEVICE_NAME_LEN);
+    }
+
+    #[test]
+    fn a_multibyte_name_is_cut_on_a_codepoint_boundary() {
+        // `Küchenschrank` is 14 bytes; a byte-wise cut at 11 would land
+        // mid-character only if the multibyte one straddled the bound, so
+        // the interesting fixture puts one there deliberately.
+        let (name, len) = gap_name(&[0u8; 16], Some("Kücheeeeeeüberall"));
+        let text = core::str::from_utf8(&name[..len]).expect("still valid UTF-8");
+        assert!(len <= DEVICE_NAME_LEN);
+        assert_eq!(text, "Kücheeeeee");
+        // The rule, stated as a property over every prefix length: no
+        // truncation may produce something that is not a &str.
+        for max in 0..=20 {
+            let cut =
+                leviculum_core::node_name::truncate_on_char_boundary("Kücheeeeeeüberall", max);
+            assert!(cut.len() <= max, "{max}");
+            assert!("Kücheeeeeeüberall".starts_with(cut), "{max}");
+        }
+    }
+
+    #[test]
+    fn a_shortened_name_never_ends_on_a_space() {
+        // A trailing space is invisible: the operator would compare the
+        // two names by eye, find them equal, and be wrong.
+        let (name, len) = gap_name(&[0u8; 16], Some("Hallo Welt Nord"));
+        assert_eq!(core::str::from_utf8(&name[..len]).unwrap(), "Hallo Welt");
+        assert_eq!(
+            leviculum_core::node_name::truncate_on_char_boundary("ab   cd", 5),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn a_name_that_exactly_fits_is_not_shortened() {
+        let exact = "0123456789A";
+        assert_eq!(exact.len(), DEVICE_NAME_LEN);
+        let (name, len) = gap_name(&[0u8; 16], Some(exact));
+        assert_eq!(core::str::from_utf8(&name[..len]).unwrap(), exact);
+        assert_eq!(len, DEVICE_NAME_LEN);
     }
 }

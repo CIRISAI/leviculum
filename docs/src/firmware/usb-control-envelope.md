@@ -44,6 +44,8 @@ Commands (host → board):
 | 0x09 | MEDIA_PROFILE    | one flag byte (bit0 lora, bit1 ble) — answered with MEDIA_REPORT |
 | 0x0A | MEDIA_QUERY      | empty (a query) — answered with MEDIA_REPORT |
 | 0x0B | POSITION_SOURCE_QUERY | empty (a query) — answered with POSITION_SOURCE_REPORT |
+| 0x0C | NODE_NAME        | see below — set or clear the operator-chosen name |
+| 0x0D | NODE_NAME_QUERY  | empty (a query) — answered with NODE_NAME_REPORT |
 
 Responses (board → host):
 
@@ -55,6 +57,7 @@ Responses (board → host):
 | 0x84 | RADIO_REPORT      | the RADIO_CONFIG parameter block the radio is running (#349) |
 | 0x85 | MEDIA_REPORT      | `[running_flags, configured_flags]` in the MEDIA_PROFILE flag encoding |
 | 0x86 | POSITION_SOURCE_REPORT | one flag byte (bit0 fixed position set, bit1 GNSS built in and active) |
+| 0x87 | NODE_NAME_REPORT  | `[flags, mesh_len, mesh…, ble_len, ble…]` — see below |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
@@ -64,17 +67,70 @@ below). The version in the capability report (`1`) names the envelope
 framing itself; new frame types extend the accepted list without bumping
 it.
 
+### NODE_NAME (0x0C) and NODE_NAME_REPORT (0x87)
+
+The name an operator chooses for a board, replacing **both** derived
+defaults at once — the LXMF announce's display name (`LNode-<hex8>`, what
+Columba lists) and the BLE device name (`LN-<hex8>`, what a phone shows in
+its Bluetooth settings). A board answering to two different names in two
+places would be worse than the hex it replaced. The name is display only:
+it never touches the identity, so two boards may carry the same name and
+stay distinguishable everywhere it matters.
+
+Set payload, the FIXED_POSITION set/clear shape on a variable-length
+value:
+
+```text
+[set: u8] ([name: 1..=32 bytes of UTF-8])
+```
+
+`set` is `0x00` (clear, back to the derived defaults; 1-byte payload) or
+`0x01`. No length byte — the envelope header already carries the frame
+length. The 32-byte bound is **airtime policy, not a wire limit**: the
+name rides in every announce, so `leviculum_core::node_name` derives it
+from the announce's on-air cost and `leviculum-lxmf/tests/
+announce_name_airtime.rs` pins every number in that derivation. Invalid
+UTF-8, control characters, surrounding whitespace and an over-long name
+are all refused as malformed rather than silently shortened: a name that
+arrives different from the one that was typed is worse than an error.
+
+The report answers both frames:
+
+```text
+[flags: u8] [mesh_len: u8] [mesh…] [ble_len: u8] [ble…]
+```
+
+`flags` bit0 is "a name is stored" (as opposed to both names being
+derived) and bit1 is "the BLE surfaces are one reset behind". Unknown bits
+are kept, not refused.
+
+The two names are the **effective** ones, not the stored record, because a
+host cannot derive either: the two defaults are different strings built
+from an identity hash the host never sees, and the BLE name is
+additionally shortened to `leviculum_ble_tx::DEVICE_NAME_LEN` (11 bytes)
+on a codepoint boundary. They also adopt the name at different moments —
+the mesh name is in force for the next announce, while the advertisement
+was built once at boot and cannot be rebuilt under a live SoftDevice — and
+bit1 is the board saying so. That is the MEDIA_REPORT
+running-versus-configured argument on a second feature.
+
+A board that has not yet published its identity hash (USB comes up several
+statements into the firmware's `main`, the node only after the LoRa
+bring-up's awaited SPI transactions) answers `busy` and applies nothing,
+so the host's retry is a real retry. `unsupported` is reserved for a
+binary that carries no name gate at all.
+
 ### What an answer on the persist path means (#358)
 
-Three frames write a flash record: TELEMETRY_TARGET (0x05),
-FIXED_POSITION (0x08) and MEDIA_PROFILE (0x09). For those three the
-answer carries a durability promise:
+Four frames write a flash record: TELEMETRY_TARGET (0x05),
+FIXED_POSITION (0x08), MEDIA_PROFILE (0x09) and NODE_NAME (0x0C). For
+those four the answer carries a durability promise:
 
 > **When the client's call returns, a reset cannot lose the setting.**
 
 The board therefore does not answer them until its store task confirms
-the record is on the page. An ACK — or, for the media profile, a
-MEDIA_REPORT — means written, not merely applied. A write the store task
+the record is on the page. An ACK — or, for the media profile and the
+node name, their report — means written, not merely applied. A write the store task
 gave up on comes back as a refusal with reason `0x06`: the board *is*
 running the value, and cannot promise it survives a reboot. That is a
 different sentence from `busy` (retry) and from `value refused` (the

@@ -1930,6 +1930,7 @@ name = "leviculum-ble-tx"
 version = "0.1.0"
 dependencies = [
  "embassy-sync",
+ "leviculum-core",
 ]
 
 [[package]]

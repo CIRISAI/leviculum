@@ -80,7 +80,7 @@ use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
-use leviculum_ble_tx::{device_name, DrainRouter, DEVICE_NAME_LEN};
+use leviculum_ble_tx::{DrainRouter, DEVICE_NAME_LEN};
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use nrf_softdevice::{raw, SocEvent, Softdevice};
@@ -566,8 +566,17 @@ fn assert_sd_fits_below_retained(wanted: u32) {
     );
 }
 
-/// Write this node's individual GAP device name, `LN-<hex8>` of the
-/// identity hash (#255), into the SoftDevice's attribute table.
+/// Write this node's GAP device name into the SoftDevice's attribute
+/// table: the operator's name (#235) if one is set, `LN-<hex8>` of the
+/// identity hash otherwise (#255).
+///
+/// The name comes from [`crate::name::boot_gap_name`], which
+/// [`crate::name::note_boot_name`] filled in just before
+/// [`init`] — the same value the advertisement's Complete Local Name is
+/// built from in [`columba::spawn`], so the two BLE surfaces cannot show
+/// different names. A name longer than [`DEVICE_NAME_LEN`] arrives here
+/// already shortened on a codepoint boundary
+/// (`leviculum_ble_tx::gap_name`).
 ///
 /// This is the runtime half of [`gap_device_name_cfg`]: the config
 /// reserves `DEVICE_NAME_LEN` bytes with a NULL `p_value` — the only
@@ -582,22 +591,28 @@ fn assert_sd_fits_below_retained(wanted: u32) {
 /// the whole node and takes the log with it. `e52dba1` is exactly that
 /// failure, and the lesson is not only "hand it the right pointer" but
 /// "never let the name be able to stop the boot".
-fn set_gap_device_name(identity_hash: &[u8; 16]) {
-    let name = device_name(identity_hash);
-    // No write access: the name is derived from the identity, a peer has
-    // no business changing it. Same permission the config carries.
+///
+/// An operator-set name is written here and nowhere else, though this
+/// call would take one at runtime — the SoftDevice copies the bytes, so
+/// unlike the advertisement payload there is no aliasing problem. What
+/// stops it is [`columba::spawn`]'s scan response, which cannot be
+/// rebuilt under a live stack: updating only the attribute would leave
+/// the board advertising one name and answering with another. Both wait
+/// for the reset together, and the control frame's report says so
+/// (`crate::name`).
+fn set_gap_device_name() {
+    let name = crate::name::boot_gap_name();
+    // No write access: the name is ours to publish, a peer has no
+    // business changing it. Same permission the config carries.
     let write_perm: raw::ble_gap_conn_sec_mode_t = unsafe { mem::zeroed() };
     // SAFETY: the SoftDevice is enabled (the caller just returned from
     // `Softdevice::enable`), both pointers are valid for the duration of
     // the call, and `len` is the true length of `name`.
     let ret = unsafe {
-        raw::sd_ble_gap_device_name_set(&write_perm, name.as_ptr(), DEVICE_NAME_LEN as u16)
+        raw::sd_ble_gap_device_name_set(&write_perm, name.as_bytes().as_ptr(), name.len() as u16)
     };
     if ret == raw::NRF_SUCCESS {
-        crate::info!(
-            "BLE: gap device name set to {}",
-            core::str::from_utf8(&name).unwrap_or("<non-utf8>")
-        );
+        crate::info!("BLE: gap device name set to {}", name.as_str());
     } else {
         crate::warn!("BLE: gap device name set failed err={}", ret);
     }
@@ -702,7 +717,7 @@ pub fn init(
 
     let sd = Softdevice::enable(&sd_config());
     crate::boot_trace::phase(crate::boot_trace::Phase::SdEnabled);
-    set_gap_device_name(&identity_hash);
+    set_gap_device_name();
 
     let sd = if columba_enabled {
         columba::spawn(spawner, sd, identity_hash)

@@ -47,6 +47,7 @@
 use alloc::vec::Vec;
 
 use crate::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
+use crate::node_name::{NodeName, NODE_NAME_MAX_LEN};
 use crate::rnode::{
     parse_radio_config, RadioConfigWire, RADIO_CONFIG_FRAME_LEN, RADIO_CONFIG_MAGIC,
     RADIO_RESET_FRAME,
@@ -147,6 +148,34 @@ pub const TYPE_MEDIA_QUERY: u8 = 0x0A;
 /// the envelope drops it silently and the probe times out, exactly like
 /// [`TYPE_CAPABILITIES`].
 pub const TYPE_POSITION_SOURCE_QUERY: u8 = 0x0B;
+/// Node name (Codeberg #235): the display name an operator chooses for
+/// this board, replacing the derived `LNode-<hex8>` / `LN-<hex8>` pair.
+/// Payload is a set/clear flag byte and, when set, the name's UTF-8
+/// bytes; see [`encode_node_name`]. Persisted beside the telemetry
+/// target, the fixed position and the media profile.
+///
+/// **One name, both surfaces.** The mesh display name (the LXMF
+/// announce's `app_data`, what Columba lists) and the BLE GAP device
+/// name (what a phone shows in its Bluetooth settings) are the same
+/// value: a board that answered to two different names in two places
+/// would be worse than one that answers to a hex string in both.
+///
+/// The name is **display only**. It never touches the identity, so two
+/// boards may carry the same name and stay distinguishable — the hash
+/// remains the addressing and disambiguation mechanism everywhere.
+///
+/// Answered with [`TYPE_NODE_NAME_REPORT`], not with a bare ack, for
+/// the [`TYPE_MEDIA_PROFILE`] reason: the two surfaces do not adopt the
+/// name at the same moment. The mesh name is in force for the next
+/// announce; the BLE name is baked into the advertisement at boot and
+/// follows at the next reset. The report states both, and the
+/// difference IS the "takes effect at reboot" answer.
+pub const TYPE_NODE_NAME: u8 = 0x0C;
+/// Node-name query; empty payload. The read direction of
+/// [`TYPE_NODE_NAME`], answered with [`TYPE_NODE_NAME_REPORT`]. Five
+/// bytes, so firmware from before the envelope drops it silently and the
+/// probe times out, exactly like [`TYPE_CAPABILITIES`].
+pub const TYPE_NODE_NAME_QUERY: u8 = 0x0D;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -189,6 +218,34 @@ pub const TYPE_MEDIA_REPORT: u8 = 0x85;
 /// a receiver" is a node that will report as soon as it is outdoors, and
 /// "neither" is a node that needs `--set-position`.
 pub const TYPE_POSITION_SOURCE_REPORT: u8 = 0x86;
+/// Node-name report; payload is `[flags, mesh_len, mesh…, ble_len, ble…]`
+/// (see [`encode_node_name_report`]). The answer to both
+/// [`TYPE_NODE_NAME`] and [`TYPE_NODE_NAME_QUERY`].
+///
+/// The two names are the **effective** ones, not the stored record: what
+/// the next announce will carry, and what the BLE advertisement is
+/// carrying right now. Effective rather than stored because the two
+/// derived defaults differ (`LNode-<hex8>` on the mesh, `LN-<hex8>` on
+/// BLE) and the BLE name is additionally truncated to
+/// `leviculum_ble_tx::DEVICE_NAME_LEN` — so a host handed the record
+/// alone could not print either string, and would have to guess at what
+/// an operator is about to go looking for on a phone.
+pub const TYPE_NODE_NAME_REPORT: u8 = 0x87;
+
+/// [`TYPE_NODE_NAME_REPORT`] flag: an operator-set name is stored, so
+/// the names in the report are that name rather than the derived
+/// defaults.
+pub const NODE_NAME_FLAG_STORED: u8 = 0x01;
+/// [`TYPE_NODE_NAME_REPORT`] flag: the BLE surfaces are not yet showing
+/// the configured name and will pick it up at the next boot.
+///
+/// The board decides this, not the host: only the board knows what its
+/// advertisement was built with, and only it knows that the derived BLE
+/// default (`LN-<hex8>`) is a different string from the derived mesh
+/// default (`LNode-<hex8>`) rather than a truncation of it. A host that
+/// compared the two names itself would call a freshly cleared board
+/// "pending" forever.
+pub const NODE_NAME_FLAG_BLE_PENDING: u8 = 0x02;
 
 /// [`TYPE_POSITION_SOURCE_REPORT`] flag: a user-set fixed position is
 /// stored.
@@ -821,6 +878,178 @@ pub fn media_query_answer(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Node name (the operator-chosen display name, Codeberg #235)
+// ---------------------------------------------------------------------------
+
+/// Encode a complete node-name frame; `None` is the explicit clear, back
+/// to the derived default.
+///
+/// Payload layout, the fixed position's set/clear shape on a
+/// variable-length value:
+///
+/// ```text
+/// [set: u8] ([name: 1..=NODE_NAME_MAX_LEN bytes of UTF-8])
+/// ```
+///
+/// No length byte: the envelope header already carries the frame length,
+/// and a second, redundant count is a second thing that can disagree with
+/// the first. `set` is `0x00` (clear, 1-byte payload) or `0x01`.
+pub fn encode_node_name(name: Option<&NodeName>) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + NODE_NAME_MAX_LEN);
+    match name {
+        None => payload.push(0x00),
+        Some(name) => {
+            payload.push(0x01);
+            payload.extend_from_slice(name.as_bytes());
+        }
+    }
+    encode_frame(TYPE_NODE_NAME, &payload)
+}
+
+/// Decode a node-name payload. The outer `None` is a malformed payload;
+/// the inner `None` is a well-formed clear.
+///
+/// The name is validated with [`NodeName::parse`], the same rule the host
+/// applies before sending: a board must not store a name it would then
+/// have to render differently from how it arrived, whatever a host chose
+/// to put on the wire.
+pub fn decode_node_name_payload(payload: &[u8]) -> Option<Option<NodeName>> {
+    match payload {
+        [0x00] => Some(None),
+        [0x01, name @ ..] => Some(Some(NodeName::parse(name).ok()?)),
+        _ => None,
+    }
+}
+
+/// Encode a complete node-name query.
+pub fn encode_node_name_query() -> Vec<u8> {
+    encode_frame(TYPE_NODE_NAME_QUERY, &[])
+}
+
+/// Encode a complete node-name report: the flags, the name the next
+/// announce will carry, and the name the BLE advertisement is carrying
+/// right now. See [`TYPE_NODE_NAME_REPORT`] for why both travel.
+///
+/// ```text
+/// [flags: u8] [mesh_len: u8] [mesh: mesh_len bytes] [ble_len: u8] [ble: ble_len bytes]
+/// ```
+///
+/// Length-prefixed here where the set frame is not, because this payload
+/// carries two variable-length values and the envelope header can only
+/// delimit one.
+pub fn encode_node_name_report(flags: u8, mesh: &NodeName, ble: &NodeName) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(3 + mesh.len() + ble.len());
+    payload.push(flags);
+    payload.push(mesh.len() as u8);
+    payload.extend_from_slice(mesh.as_bytes());
+    payload.push(ble.len() as u8);
+    payload.extend_from_slice(ble.as_bytes());
+    encode_frame(TYPE_NODE_NAME_REPORT, &payload)
+}
+
+/// What a board said about its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeNameState {
+    /// Whether an operator-set name is stored, as opposed to both names
+    /// being derived from the identity.
+    pub stored: bool,
+    /// Whether the BLE surfaces still carry the previous name and will
+    /// pick this one up at the next boot.
+    pub ble_pending: bool,
+    /// The display name the next LXMF announce will carry — what Columba
+    /// lists. In force now.
+    pub mesh: NodeName,
+    /// The GAP/advertised name a scanner sees right now. Possibly
+    /// truncated relative to [`mesh`](Self::mesh), and possibly still the
+    /// previous name; see [`ble_pending`](Self::ble_pending).
+    pub ble: NodeName,
+}
+
+/// Decode a node-name report payload.
+///
+/// Names are decoded with [`NodeName::decode`], not `parse`: a truncated
+/// GAP name and a derived default are legitimate answers that the input
+/// rules would refuse. Unknown flag bits are kept rather than refused —
+/// a newer board that grows a third name surface must not read as
+/// malformed to an older host, which only asks about the two bits it
+/// knows.
+pub fn decode_node_name_report_payload(payload: &[u8]) -> Option<NodeNameState> {
+    let (&flags, rest) = payload.split_first()?;
+    let (mesh, rest) = take_length_prefixed(rest)?;
+    let (ble, rest) = take_length_prefixed(rest)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(NodeNameState {
+        stored: flags & NODE_NAME_FLAG_STORED != 0,
+        ble_pending: flags & NODE_NAME_FLAG_BLE_PENDING != 0,
+        mesh: NodeName::decode(mesh).ok()?,
+        ble: NodeName::decode(ble).ok()?,
+    })
+}
+
+/// One `[len][bytes]` field of a node-name report, and what follows it.
+fn take_length_prefixed(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&len, rest) = data.split_first()?;
+    let len = usize::from(len);
+    if rest.len() < len {
+        return None;
+    }
+    Some(rest.split_at(len))
+}
+
+/// What a board is able to say about its names right now: the report's
+/// flags, the mesh name in force, and the BLE name on the air.
+///
+/// `None` is not "no names" — it is "not yet": the derived defaults are
+/// built from the identity hash, and USB comes up before the node does.
+/// Passing `None` makes the answer [`REFUSE_BUSY`], which is the truth
+/// about a boot-order window a retry gets past.
+pub type NodeNameReport<'a> = Option<(u8, &'a NodeName, &'a NodeName)>;
+
+/// The answer to a node-name frame, decided by capability first — the
+/// [`media_profile_answer`] rule on a fourth frame.
+///
+/// `name_wired` is the binary's declaration that it reads the name record
+/// and feeds both display surfaces from it. A binary that never wired
+/// that answers [`REFUSE_UNSUPPORTED`] rather than acking a name it would
+/// ignore: an operator who was told the board is now `Balkon-Nord` and
+/// then cannot find it under that name on either surface has been lied
+/// to, and no retry or reboot fixes it.
+///
+/// `report` is the readiness clause described on [`NodeNameReport`]; a
+/// board that cannot state the result must not have applied the frame
+/// either, so a `None` here means the host's retry is a real retry.
+///
+/// The accepted answer is a [`TYPE_NODE_NAME_REPORT`], never a bare ack:
+/// see that constant for why the two names it carries are the honest
+/// reply to "call this board X".
+///
+/// `persist` is the #358 clause: the name is persisted, and a report
+/// written before the record reached the page is a claim about the next
+/// boot that the next boot would disprove.
+pub fn node_name_answer(name_wired: bool, persist: Persist, report: NodeNameReport) -> Vec<u8> {
+    match (name_wired, report) {
+        (false, _) => encode_refusal(TYPE_NODE_NAME, REFUSE_UNSUPPORTED),
+        (true, None) => encode_refusal(TYPE_NODE_NAME, REFUSE_BUSY),
+        (true, Some(_)) if persist != Persist::Durable => {
+            encode_refusal(TYPE_NODE_NAME, REFUSE_PERSIST)
+        }
+        (true, Some((flags, mesh, ble))) => encode_node_name_report(flags, mesh, ble),
+    }
+}
+
+/// The answer to a node-name query: the same two gates, refused under the
+/// query's own type so a host can tell which frame was turned down.
+pub fn node_name_query_answer(name_wired: bool, report: NodeNameReport) -> Vec<u8> {
+    match (name_wired, report) {
+        (false, _) => encode_refusal(TYPE_NODE_NAME_QUERY, REFUSE_UNSUPPORTED),
+        (true, None) => encode_refusal(TYPE_NODE_NAME_QUERY, REFUSE_BUSY),
+        (true, Some((flags, mesh, ble))) => encode_node_name_report(flags, mesh, ble),
+    }
+}
+
 /// The answer to a telemetry-target frame, decided by capability first.
 ///
 /// `reporter_wired` is the binary's declaration that it constructs a
@@ -918,6 +1147,15 @@ pub enum ControlAction {
     /// [`position_source_query_answer`]. Read-only, like
     /// [`MediaQuery`](Self::MediaQuery).
     PositionSourceQuery,
+    /// Envelope node name (Codeberg #235): set (`Some`) or clear
+    /// (`None`) the operator-chosen display name, persist it, answer via
+    /// [`node_name_answer`]. The mesh name is in force for the next
+    /// announce; the BLE name follows at the next boot, and the report
+    /// says so.
+    NodeName(Option<NodeName>),
+    /// Envelope node-name query: answer via [`node_name_query_answer`].
+    /// Read-only, like [`MediaQuery`](Self::MediaQuery).
+    NodeNameQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1020,6 +1258,17 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_NODE_NAME => match decode_node_name_payload(frame.payload) {
+            Some(name) => ControlAction::NodeName(name),
+            None => malformed,
+        },
+        TYPE_NODE_NAME_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::NodeNameQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1047,6 +1296,8 @@ mod tests {
         TYPE_MEDIA_PROFILE,
         TYPE_MEDIA_QUERY,
         TYPE_POSITION_SOURCE_QUERY,
+        TYPE_NODE_NAME,
+        TYPE_NODE_NAME_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -2169,5 +2420,260 @@ mod tests {
                 reason: REFUSE_UNKNOWN_TYPE
             }
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Node name (Codeberg #235)
+    // -----------------------------------------------------------------
+
+    fn name(text: &str) -> NodeName {
+        NodeName::parse(text.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_node_name_round_trips_and_classifies() {
+        for text in ["Balkon-Nord", "Küche", "a", &"x".repeat(NODE_NAME_MAX_LEN)] {
+            let n = name(text);
+            let bytes = encode_node_name(Some(&n));
+            let frame = decode_frame(&bytes).unwrap();
+            assert_eq!(frame.frame_type, TYPE_NODE_NAME);
+            assert_eq!(decode_node_name_payload(frame.payload), Some(Some(n)));
+            assert_eq!(
+                classify_control_frame(&bytes, ACCEPTED),
+                ControlAction::NodeName(Some(n)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clear_is_its_own_encoding_and_not_an_empty_name() {
+        // "Back to the derived default" has to be sayable, and it must
+        // not be spelled as a zero-length name: the board would then have
+        // to guess whether a blank means "clear" or "a name I could not
+        // read".
+        let bytes = encode_node_name(None);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.payload, &[0x00]);
+        assert_eq!(decode_node_name_payload(frame.payload), Some(None));
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::NodeName(None)
+        );
+    }
+
+    #[test]
+    fn a_name_the_board_could_not_render_is_refused_rather_than_stored() {
+        // The host validates first, but the board is what a *different*
+        // host talks to. Over-long, non-UTF-8, control characters and
+        // surrounding whitespace are all malformed on the wire, so a
+        // board never stores a name it would have to display differently
+        // from how it arrived.
+        for payload in [
+            [&[0x01u8][..], &[b'x'; NODE_NAME_MAX_LEN + 1][..]].concat(),
+            vec![0x01, b'a', 0xFF],
+            vec![0x01, b'a', b'\n'],
+            vec![0x01, b' ', b'a'],
+            vec![0x01],       // set with no name
+            vec![0x02, b'a'], // a flag byte that is neither
+            vec![],           // no flag byte at all
+        ] {
+            assert_eq!(
+                decode_node_name_payload(&payload),
+                None,
+                "payload {payload:02x?} was accepted"
+            );
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_NODE_NAME, &payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_NODE_NAME,
+                    reason: REFUSE_MALFORMED
+                },
+                "payload {payload:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_name_query_is_empty_and_classifies() {
+        let bytes = encode_node_name_query();
+        assert_eq!(bytes.len(), ENVELOPE_HEADER_LEN);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::NodeNameQuery
+        );
+        // A query with a payload is malformed, like every other query.
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_NODE_NAME_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_NODE_NAME_QUERY,
+                reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_carries_both_surfaces_and_their_flags() {
+        // The whole point of the report: the two names differ, because
+        // the BLE one is truncated and adopted a boot later.
+        let mesh = name("Balkon-Nord-Solar");
+        let ble = NodeName::decode(b"Balkon-Nord").unwrap();
+        let bytes = encode_node_name_report(
+            NODE_NAME_FLAG_STORED | NODE_NAME_FLAG_BLE_PENDING,
+            &mesh,
+            &ble,
+        );
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_NODE_NAME_REPORT);
+        let state = decode_node_name_report_payload(frame.payload).unwrap();
+        assert_eq!(
+            state,
+            NodeNameState {
+                stored: true,
+                ble_pending: true,
+                mesh,
+                ble,
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_of_the_derived_defaults_says_nothing_is_stored() {
+        // The two derived defaults are different strings, not a
+        // truncation of one another — which is why `ble_pending` is a
+        // flag the board sets and not something a host can compute.
+        let bytes = encode_node_name_report(
+            0,
+            &NodeName::decode(b"LNode-a1b2c3d4").unwrap(),
+            &NodeName::decode(b"LN-a1b2c3d4").unwrap(),
+        );
+        let state = decode_node_name_report_payload(decode_frame(&bytes).unwrap().payload).unwrap();
+        assert!(!state.stored);
+        assert!(!state.ble_pending);
+        assert_eq!(state.mesh.as_str(), "LNode-a1b2c3d4");
+        assert_eq!(state.ble.as_str(), "LN-a1b2c3d4");
+    }
+
+    #[test]
+    fn an_unknown_report_flag_is_kept_rather_than_refused() {
+        // A newer board that grows a third name surface must not read as
+        // malformed to this host, which only asks about two bits.
+        let bytes = encode_node_name_report(
+            NODE_NAME_FLAG_STORED | 0b1000_0000,
+            &name("Balkon"),
+            &name("Balkon"),
+        );
+        let state = decode_node_name_report_payload(decode_frame(&bytes).unwrap().payload).unwrap();
+        assert!(state.stored);
+        assert!(!state.ble_pending);
+    }
+
+    #[test]
+    fn a_truncated_or_overlong_report_is_refused() {
+        let good = encode_node_name_report(0, &name("ab"), &name("cd"));
+        let payload = decode_frame(&good).unwrap().payload.to_vec();
+        for bad in [
+            &payload[..payload.len() - 1], // one byte of the ble name missing
+            &payload[..1],                 // flags only
+            &[][..],                       // nothing at all
+        ] {
+            assert_eq!(decode_node_name_report_payload(bad), None, "{bad:02x?}");
+        }
+        // Trailing bytes past the second name are not a name this host
+        // can place, so the frame is refused rather than half-read.
+        let mut long = payload.clone();
+        long.push(0x00);
+        assert_eq!(decode_node_name_report_payload(&long), None);
+    }
+
+    #[test]
+    fn a_binary_without_the_name_gate_refuses_instead_of_acking() {
+        // The fc60b95 capability rule on a fifth frame. An operator told
+        // "the board is now Balkon-Nord" who then cannot find it under
+        // that name on either surface has been lied to, and no retry
+        // fixes it.
+        let ab = name("ab");
+        for answer in [
+            node_name_answer(false, Persist::Durable, Some((0, &ab, &ab))),
+            node_name_query_answer(false, Some((0, &ab, &ab))),
+        ] {
+            let frame = decode_frame(&answer).unwrap();
+            assert_eq!(frame.frame_type, TYPE_REFUSAL);
+            assert_eq!(frame.payload[1], REFUSE_UNSUPPORTED);
+        }
+        // Each frame is refused under its own type, so a host can tell
+        // which of the two conversations was turned down.
+        assert_eq!(
+            decode_refusal_payload(
+                decode_frame(&node_name_answer(
+                    false,
+                    Persist::Durable,
+                    Some((0, &ab, &ab))
+                ))
+                .unwrap()
+                .payload
+            ),
+            Some((TYPE_NODE_NAME, REFUSE_UNSUPPORTED))
+        );
+        assert_eq!(
+            decode_refusal_payload(
+                decode_frame(&node_name_query_answer(false, Some((0, &ab, &ab))))
+                    .unwrap()
+                    .payload
+            ),
+            Some((TYPE_NODE_NAME_QUERY, REFUSE_UNSUPPORTED))
+        );
+    }
+
+    #[test]
+    fn a_board_that_cannot_state_its_names_yet_says_busy_and_not_unsupported() {
+        // The boot-order window: USB is up several statements into main,
+        // the identity only after the LoRa bring-up's awaited SPI
+        // transactions, and the derived defaults are built from the
+        // identity hash. `busy` is a retry; `unsupported` would tell the
+        // host to go and flash different firmware.
+        assert_eq!(
+            decode_refusal_payload(
+                decode_frame(&node_name_answer(true, Persist::Durable, None))
+                    .unwrap()
+                    .payload
+            ),
+            Some((TYPE_NODE_NAME, REFUSE_BUSY))
+        );
+        assert_eq!(
+            decode_refusal_payload(
+                decode_frame(&node_name_query_answer(true, None))
+                    .unwrap()
+                    .payload
+            ),
+            Some((TYPE_NODE_NAME_QUERY, REFUSE_BUSY))
+        );
+    }
+
+    #[test]
+    fn a_name_that_did_not_reach_flash_is_not_reported_as_set() {
+        // #358 on the name: the report says what the next boot brings up
+        // on both surfaces, so it may not go out before the record is on
+        // the page.
+        let ab = name("ab");
+        let answer = node_name_answer(true, Persist::Lost, Some((0, &ab, &ab)));
+        assert_eq!(
+            decode_refusal_payload(decode_frame(&answer).unwrap().payload),
+            Some((TYPE_NODE_NAME, REFUSE_PERSIST))
+        );
+    }
+
+    #[test]
+    fn a_board_without_the_name_frames_refuses_them_by_name() {
+        for bytes in [encode_node_name(None), encode_node_name_query()] {
+            let refused = match classify_control_frame(&bytes, ACCEPTED_PRE_236) {
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => (refused_type, reason),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(refused.1, REFUSE_UNKNOWN_TYPE);
+        }
     }
 }

@@ -1168,6 +1168,135 @@ fn report_media(
     }
 }
 
+/// The `--set-name` / `--clear-name` session: read, and optionally set,
+/// what every running LNode is called. No flashing, then exit.
+///
+/// `name` is `None` for the read-only form (`--set-name` with no value),
+/// which prints what each board is called on both surfaces;
+/// `Some(None)` is `--clear-name`, back to the derived defaults; and
+/// `Some(Some(..))` sets the name.
+///
+/// No read-modify-write here, unlike [`set_media`]: a name is one value,
+/// not a profile with a carrier the caller might not have meant to touch,
+/// so there is nothing to merge and nothing a host could wrongly
+/// substitute a default for.
+///
+/// The same name goes to every board found. That is deliberate and it is
+/// also why the transcript prints the port beside each answer: naming a
+/// two-board bench in one command is a mistake an operator makes once, and
+/// the two identical `mesh=` lines are what tells them so.
+pub fn set_name(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    name: Option<Option<leviculum_core::node_name::NodeName>>,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-name talks to flashed boards; a board in its \
+             bootloader has no name to configure.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let outcome =
+            match open_transport(sysfs, &board.device, &board.tty).and_then(|fd| match name {
+                None => crate::name::query(&fd),
+                Some(chosen) => crate::name::send(&fd, chosen.as_ref()),
+            }) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    ui.say(&format!(
+                        "{port}: the transport port could not be used ({err})"
+                    ));
+                    all_took_it = false;
+                    continue;
+                }
+            };
+        all_took_it &= outcome.is_ok();
+        report_name(ui, port, name, outcome);
+    }
+    Ok(all_took_it)
+}
+
+/// Say what the board answered about its name.
+fn report_name(
+    ui: &mut dyn Ui,
+    port: &str,
+    asked: Option<Option<leviculum_core::node_name::NodeName>>,
+    outcome: Result<leviculum_core::envelope::NodeNameState, SessionReply>,
+) {
+    let state = match outcome {
+        Ok(state) => state,
+        Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_UNSUPPORTED =>
+        {
+            return ui.say(&format!(
+                "{port}: this board's firmware carries no node name — the name was refused, not \
+                 stored. Neither retrying nor rebooting helps; only firmware that honours it \
+                 does. The board stays on its derived LNode-/LN- names."
+            ));
+        }
+        Err(SessionReply::Refused(reason)) if reason == leviculum_core::envelope::REFUSE_BUSY => {
+            return ui.say(&format!(
+                "{port}: the board is still coming up and cannot say what it is called yet. \
+                 Nothing was written; run the command again in a second."
+            ));
+        }
+        Err(SessionReply::Refused(reason)) => {
+            return ui.say(&format!(
+                "{port}: the board refused the name — {}.",
+                crate::envelope::reason_str(reason)
+            ));
+        }
+        Err(SessionReply::NoAnswer) => {
+            return ui.say(&format!(
+                "{port}: the board did not answer about its name, so it is still called whatever \
+                 it was."
+            ));
+        }
+        Err(SessionReply::NoEnvelope) => {
+            return ui.say(&format!(
+                "{port}: this firmware predates the control envelope and has no settable name. \
+                 Flash the current bundle first."
+            ));
+        }
+        Err(SessionReply::NotAccepted) => {
+            return ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no settable name. Flash the \
+                 current bundle first."
+            ));
+        }
+        // Not reachable through `crate::name`, whose senders only ever
+        // produce a report or one of the failures above — but said rather
+        // than asserted, like the media session's arm: an `unreachable!`
+        // here would turn a future vocabulary change into a panic on an
+        // operator's board.
+        Err(SessionReply::Acked) => {
+            return ui.say(&format!(
+                "{port}: the board acked the name frame instead of reporting its names, so what \
+                 it is called is unknown. Read it back with --set-name."
+            ));
+        }
+    };
+    let note = crate::name::reboot_note(&state);
+    let described = crate::name::describe(&state);
+    match asked {
+        None => ui.say(&format!("{port}: {described}.{note}")),
+        Some(None) => ui.say(&format!(
+            "{port}: name cleared — {described}. The board is back to the names derived from its \
+             identity.{note}"
+        )),
+        Some(Some(_)) => ui.say(&format!(
+            "{port}: name set — {described}. It survives resets; the board's own [NAME ] line on \
+             if00 says the same.{note}"
+        )),
+    }
+}
+
 /// The `--set-telemetry` session (#236 scope item 5): the same telemetry
 /// configuration the flash flow offers, without flashing anything.
 /// Activation is configuration, so a board that is already running takes a

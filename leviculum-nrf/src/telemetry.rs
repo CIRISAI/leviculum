@@ -42,6 +42,8 @@ use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_p
 use leviculum_core::identity::Identity;
 use leviculum_core::media_profile_store::{decode_media_profile, encode_media_profile};
 use leviculum_core::node::NodeCore;
+use leviculum_core::node_name::NodeName;
+use leviculum_core::node_name_store::{decode_node_name, encode_node_name};
 use leviculum_core::telemetry_target_store::{decode_telemetry_target, encode_telemetry_target};
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::{Action, DispatchResult};
@@ -222,9 +224,9 @@ pub fn inbound_fixed_position_receiver(
 
 /// The telemetry flash page layout (`BoardConfig::telemetry_flash_page`).
 ///
-/// One 4 KiB page carries two independent records, because the page is the
-/// last one the bootloader's `USER_FLASH_END` protects on both boards —
-/// 0xEB000/0xEC000 hold radio config and identity, and 0xED000 upward is
+/// One 4 KiB page carries four independent records, because the page is
+/// the last one the bootloader's `USER_FLASH_END` protects on both boards
+/// — 0xEB000/0xEC000 hold radio config and identity, and 0xED000 upward is
 /// Heltec's license/version band on the T114 (memory.x) — so a second
 /// page was never on offer:
 ///
@@ -232,17 +234,19 @@ pub fn inbound_fixed_position_receiver(
 /// +0x000  telemetry target record  ("LTTG", telemetry_target_store)   24 B
 /// +0x100  fixed position record    ("LFPO", fixed_position_store)      24 B
 /// +0x200  media profile record     ("LMED", media_profile_store)        8 B
+/// +0x300  node name record         ("LNAM", node_name_store)          44 B
 /// ```
 ///
 /// The target keeps offset 0, where every fielded board already has it, so
 /// this layout is what those boards are running the moment they first
 /// persist one of the later records. Erase granularity is the whole page,
-/// so the store task rewrites all three records on every save; each
+/// so the store task rewrites all four records on every save; each
 /// record's own magic + checksum keeps a torn write from becoming a
-/// garbage target, a garbage pin or a board on the wrong carriers.
+/// garbage target, a garbage pin, a board on the wrong carriers or a
+/// board announcing a name nobody set.
 ///
-/// The offsets are 0x100 apart and the longest record is 24 bytes, so no
-/// two records overlap and the page (4096 B) has room for thirteen more.
+/// The offsets are 0x100 apart and the longest record is 44 bytes, so no
+/// two records overlap and the page (4096 B) has room for twelve more.
 /// The compile-time assertion below is what keeps that true when a record
 /// grows.
 const TARGET_OFFSET: u32 = 0x000;
@@ -250,6 +254,8 @@ const TARGET_OFFSET: u32 = 0x000;
 const FIXED_POSITION_OFFSET: u32 = 0x100;
 /// See [`TARGET_OFFSET`].
 const MEDIA_OFFSET: u32 = 0x200;
+/// See [`TARGET_OFFSET`].
+const NAME_OFFSET: u32 = 0x300;
 
 /// The page layout's collision check, run by the compiler rather than by
 /// a reviewer reading three offsets: each record must end before the next
@@ -266,14 +272,18 @@ const _: () = {
     );
     assert!(
         MEDIA_OFFSET + leviculum_core::media_profile_store::ENCODED_SIZE_ALIGNED as u32
-            <= PAGE_SIZE
+            <= NAME_OFFSET
+    );
+    assert!(
+        NAME_OFFSET + leviculum_core::node_name_store::ENCODED_SIZE_ALIGNED as u32 <= PAGE_SIZE
     );
 };
 
 /// Pending save requests. Depth 1 for the same reason as the radio store:
 /// the newest value of each record is the one that must end up on the
-/// page. Three channels rather than one queue so a target save, a fixed
-/// position save and a media save can never displace each other.
+/// page. Four channels rather than one queue so a target save, a fixed
+/// position save, a media save and a name save can never displace each
+/// other.
 ///
 /// Each item carries the [`SaveTicket`] the requester is waiting on, so
 /// the store task can hand back the outcome of *that* write rather than
@@ -286,6 +296,8 @@ static PENDING_SAVE_FIXED: Channel<
     1,
 > = Channel::new();
 static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, (SaveTicket, MediaProfileWire), 1> =
+    Channel::new();
+static PENDING_SAVE_NAME: Channel<CriticalSectionRawMutex, (SaveTicket, Option<NodeName>), 1> =
     Channel::new();
 
 /// One record's persist bookkeeping: the [`PersistGate`] that says whether
@@ -328,12 +340,13 @@ impl PersistSlot {
 static TARGET_PERSIST: PersistSlot = PersistSlot::new();
 static FIXED_PERSIST: PersistSlot = PersistSlot::new();
 static MEDIA_PERSIST: PersistSlot = PersistSlot::new();
+static NAME_PERSIST: PersistSlot = PersistSlot::new();
 
 /// A save the caller may wait for with [`confirm`], returned by every
 /// `request_save*`.
 ///
 /// Carries its own record's slot so a caller cannot wait on the wrong
-/// gate — the store task rewrites all three records on every save, but
+/// gate — the store task rewrites all four records on every save, but
 /// only the one a request names carries the requester's value.
 #[must_use = "a control-envelope ack on the persist path must wait for this (Codeberg #358)"]
 #[derive(Clone, Copy)]
@@ -434,6 +447,18 @@ pub fn load_media_profile(page: u32) -> Option<MediaProfileWire> {
     decode_media_profile(&read_media_record(page))
 }
 
+/// Read the persisted node name, or `None` if its record is blank,
+/// corrupt, an explicit clear, or carries a name this firmware cannot
+/// display. Every one of those means "no operator-set name", which is the
+/// derived `LNode-<hex8>` / `LN-<hex8>` pair — see [`crate::name`], which
+/// owns that decision. Same read-safety argument as [`load`], and it
+/// matters here for the same reason it does for the media profile: the
+/// name is read *before* `Softdevice::enable`, because it decides what
+/// the BLE advertisement is built with.
+pub fn load_node_name(page: u32) -> Option<NodeName> {
+    decode_node_name(&read_name_record(page))
+}
+
 fn read_target_record(
     page: u32,
 ) -> [u8; leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED] {
@@ -448,6 +473,10 @@ fn read_fixed_record(
 
 fn read_media_record(page: u32) -> [u8; leviculum_core::media_profile_store::ENCODED_SIZE_ALIGNED] {
     read_record(page + MEDIA_OFFSET)
+}
+
+fn read_name_record(page: u32) -> [u8; leviculum_core::node_name_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + NAME_OFFSET)
 }
 
 fn read_record<const N: usize>(addr: u32) -> [u8; N] {
@@ -503,6 +532,18 @@ pub fn request_save_media_profile(profile: MediaProfileWire) -> PendingSave {
     save
 }
 
+/// Ask the store task to persist the node name (`None` persists the
+/// explicit clear, back to the derived default). Never blocks, like
+/// [`request_save`].
+pub fn request_save_node_name(name: Option<NodeName>) -> PendingSave {
+    let save = NAME_PERSIST.issue();
+    if PENDING_SAVE_NAME.try_send((save.ticket, name)).is_err() {
+        let _ = PENDING_SAVE_NAME.try_receive();
+        let _ = PENDING_SAVE_NAME.try_send((save.ticket, name));
+    }
+    save
+}
+
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
 /// words and rejects an unaligned source pointer.
 #[repr(align(4))]
@@ -516,14 +557,15 @@ const SAVE_RETRY_MS: u64 = 250;
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
-    use embassy_futures::select::{select3, Either3};
+    use embassy_futures::select::{select4, Either4};
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
-        let request = select3(
+        let request = select4(
             PENDING_SAVE.receive(),
             PENDING_SAVE_FIXED.receive(),
             PENDING_SAVE_MEDIA.receive(),
+            PENDING_SAVE_NAME.receive(),
         )
         .await;
         // Whichever record the request names, the others are read back off
@@ -532,21 +574,26 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         let mut target = Aligned(read_target_record(page));
         let mut fixed = Aligned(read_fixed_record(page));
         let mut media = Aligned(read_media_record(page));
+        let mut name = Aligned(read_name_record(page));
         // Which record this request names, its ticket, and the word the
         // log line uses. The ticket goes back through the slot on every
         // exit path below — that is what the requester's ack waits on.
         let (slot, ticket, what) = match request {
-            Either3::First((ticket, wire)) => {
+            Either4::First((ticket, wire)) => {
                 target = Aligned(encode_telemetry_target(&wire));
                 (&TARGET_PERSIST, ticket, "target")
             }
-            Either3::Second((ticket, position)) => {
+            Either4::Second((ticket, position)) => {
                 fixed = Aligned(encode_fixed_position(position.as_ref()));
                 (&FIXED_PERSIST, ticket, "fixed-position")
             }
-            Either3::Third((ticket, profile)) => {
+            Either4::Third((ticket, profile)) => {
                 media = Aligned(encode_media_profile(&profile));
                 (&MEDIA_PERSIST, ticket, "media-profile")
+            }
+            Either4::Fourth((ticket, chosen)) => {
+                name = Aligned(encode_node_name(chosen.as_ref()));
+                (&NAME_PERSIST, ticket, "node-name")
             }
         };
 
@@ -558,6 +605,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         if read_target_record(page) == target.0
             && read_fixed_record(page) == fixed.0
             && read_media_record(page) == media.0
+            && read_name_record(page) == name.0
         {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             slot.finish(ticket, Persisted::Durable);
@@ -571,7 +619,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 flash.erase(page, page + 4096).await?;
                 flash.write(page + TARGET_OFFSET, &target.0).await?;
                 flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
-                flash.write(page + MEDIA_OFFSET, &media.0).await
+                flash.write(page + MEDIA_OFFSET, &media.0).await?;
+                flash.write(page + NAME_OFFSET, &name.0).await
             }
             .await;
             match result {
@@ -1285,26 +1334,25 @@ impl Reporter {
 /// The `lxmf.delivery` announce payload: a display name, so a receiver
 /// shows a name instead of a hex string.
 ///
-/// The default is derived from the identity — `LNode-<8 hex>` — because a
-/// node that has never been named still has to be distinguishable from the
-/// next one on the bench. Making it configurable is #235 (remote
-/// management) and #238 (the control envelope), which own the config
-/// surface; this is the value they will override.
+/// The name is whatever [`crate::name::mesh_name`] says it is — the one
+/// an operator set over the control envelope (#235/#238), or the derived
+/// `LNode-<8 hex>` for a board nobody has named, because such a board
+/// still has to be distinguishable from the next one on the bench. Read
+/// on every announce rather than captured once, so a name set at runtime
+/// is on the air from the next announce and not from the next boot.
+///
+/// The name's length is airtime: this payload is `5 + name` bytes and it
+/// rides in every announce. `leviculum_core::node_name` derives the
+/// bound from that cost and
+/// `leviculum-lxmf/tests/announce_name_airtime.rs` pins the numbers.
 pub fn announce_app_data(identity: &Identity) -> Vec<u8> {
     use leviculum_lxmf::announce::DeliveryAnnounce;
-    let hash = identity.hash();
-    let mut name = alloc::vec::Vec::with_capacity(14);
-    name.extend_from_slice(b"LNode-");
-    for byte in &hash[..4] {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        name.push(HEX[(byte >> 4) as usize]);
-        name.push(HEX[(byte & 0x0F) as usize]);
-    }
+    let name = crate::name::mesh_name(identity.hash());
     // Stamp cost 0: the node mines nothing (the `pow` feature is off), so
     // advertising a cost it cannot pay itself would be a lie to every
     // peer that reads it.
     DeliveryAnnounce {
-        display_name: Some(name),
+        display_name: Some(name.as_bytes().to_vec()),
         stamp_cost: None,
         compression_supported: false,
     }
