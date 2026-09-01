@@ -4294,6 +4294,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "vectors-verify"
+version = "0.8.1"
+dependencies = [
+ "hex",
+ "leviculum-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
