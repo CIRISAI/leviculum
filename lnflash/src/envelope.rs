@@ -166,6 +166,12 @@ impl Capabilities {
 ///
 /// One deframer across all attempts: a late answer to a previous attempt
 /// is still an answer, and resetting would drop a frame mid-arrival.
+///
+/// Anything the board said *before* this frame went out is dropped first
+/// ([`Fd::drain_input`]). Within one transaction a late answer is still
+/// an answer; across two it is a leftover, and a classifier that cannot
+/// tell which frame a reply belongs to — the media report names none —
+/// would take it for this one.
 pub fn transact<T>(
     fd: &Fd,
     payload: &[u8],
@@ -174,6 +180,7 @@ pub fn transact<T>(
 ) -> io::Result<Option<T>> {
     let mut framed = Vec::new();
     frame(payload, &mut framed);
+    fd.drain_input()?;
     let mut deframer = Deframer::new();
     for _ in 0..timing.attempts {
         fd.write_all(&framed, Instant::now() + WRITE_WITHIN)?;
@@ -350,12 +357,28 @@ impl MediaState {
 /// The answer classifier the two media conversations share: a media
 /// report, or a named refusal of the frame that was sent. Answers about
 /// other frame types stay unclaimed, exactly like [`command_answer`].
-fn media_answer(sent_type: u8) -> impl Fn(&[u8]) -> Option<Result<MediaState, u8>> {
+///
+/// `expect_configured` is the correlation an ack gets for free and this
+/// report cannot: `TYPE_MEDIA_REPORT` carries no "in reply to" field, so
+/// a report is only recognisable as *this* conversation's by what it
+/// says. After a set it must state the profile that was sent — the board
+/// applies it before it answers, and only reports once the record is
+/// durable — so a report saying anything else is a leftover from before
+/// the write and is left unclaimed for the next attempt. A query has
+/// nothing to correlate against and passes `None`; there, the stale
+/// frame is handled by draining the port in [`transact`].
+fn media_answer(
+    sent_type: u8,
+    expect_configured: Option<MediaProfileWire>,
+) -> impl Fn(&[u8]) -> Option<Result<MediaState, u8>> {
     move |data| {
         let frame = decode_frame(data).ok()?;
         match frame.frame_type {
             TYPE_MEDIA_REPORT => {
                 let (running, configured) = decode_media_report_payload(frame.payload)?;
+                if expect_configured.is_some_and(|expected| expected != configured) {
+                    return None;
+                }
                 Some(Ok(MediaState {
                     running,
                     configured,
@@ -380,6 +403,11 @@ fn media_answer(sent_type: u8) -> impl Fn(&[u8]) -> Option<Result<MediaState, u8
 /// not know the type cannot mistake it for a packet; it still travels
 /// behind [`probed`] on the flow path so an old board is reported as old
 /// rather than as silent.
+///
+/// The accepted report has to state the profile that was just written:
+/// the board applies before it answers, so any other report is a leftover
+/// from before the write, and taking it would tell the operator the board
+/// is on the profile the set was meant to replace.
 pub fn send_media_profile(
     fd: &Fd,
     profile: &MediaProfileWire,
@@ -390,7 +418,7 @@ pub fn send_media_profile(
             fd,
             &payload,
             CONTROL_TIMING,
-            media_answer(TYPE_MEDIA_PROFILE),
+            media_answer(TYPE_MEDIA_PROFILE, Some(*profile)),
         )? {
             Some(Ok(state)) => Ok(state),
             Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
@@ -412,7 +440,7 @@ pub fn query_media_profile(fd: &Fd) -> io::Result<Result<MediaState, ControlOutc
             fd,
             &encode_media_query(),
             CONTROL_TIMING,
-            media_answer(TYPE_MEDIA_QUERY),
+            media_answer(TYPE_MEDIA_QUERY, None),
         )? {
             Some(Ok(state)) => Ok(state),
             Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
@@ -530,19 +558,20 @@ pub fn query_radio_config(fd: &Fd) -> io::Result<Option<RadioConfigWire>> {
 /// firmware, so they talk to the same stub.
 #[cfg(test)]
 pub(crate) mod testing {
-    use crate::sys::testpty::{spawn_stub, Pty};
+    use crate::sys::testpty::{spawn_stub, spawn_stub_delayed, Pty};
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
-        classify_control_frame, encode_ack, encode_capability_report, encode_radio_report,
-        encode_refusal, fixed_position_answer, media_profile_answer, media_query_answer,
-        position_source_query_answer, telemetry_target_answer, ControlAction, MediaProfileWire,
-        Persist, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES,
+        classify_control_frame, encode_ack, encode_capability_report, encode_media_report,
+        encode_radio_report, encode_refusal, fixed_position_answer, media_profile_answer,
+        media_query_answer, position_source_query_answer, telemetry_target_answer, ControlAction,
+        MediaProfileWire, Persist, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES,
         TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_POSITION_SOURCE_QUERY,
         TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
         TYPE_WALL_TIME,
     };
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     /// Every frame the stub was handed, for tests that assert on the bytes
     /// that actually reached the device.
@@ -751,6 +780,66 @@ pub(crate) mod testing {
         });
     }
 
+    /// A scripted board that is still repeating an earlier media report
+    /// while the host has moved on to its next frame.
+    ///
+    /// The board answers everything correctly and, twenty milliseconds
+    /// after each capability probe, puts one more copy of a *stale*
+    /// report on the wire — the answer to a frame whose window had
+    /// already run down, which `transact` retried. A real board does this
+    /// whenever it is slower than `CONTROL_TIMING.window`; the delay is
+    /// what makes the leftover land in the host's *next* transaction
+    /// instead of being dropped with the current one's deframer.
+    ///
+    /// `stale` is deliberately a profile the board is not on, so a host
+    /// that mistakes the leftover for its own answer reports a profile
+    /// the board is not running.
+    pub fn late_report_firmware_stub(
+        pty: &Pty,
+        seen: Seen,
+        media: Arc<Mutex<StubMedia>>,
+        stale: MediaProfileWire,
+    ) {
+        spawn_stub_delayed(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => vec![
+                    (Duration::ZERO, encode_capability_report(FIRMWARE_ACCEPTS)),
+                    (
+                        Duration::from_millis(20),
+                        encode_media_report(&stale, &stale),
+                    ),
+                ],
+                ControlAction::MediaProfile(profile) => {
+                    let mut media = media.lock().unwrap();
+                    media.configured = profile;
+                    vec![(
+                        Duration::ZERO,
+                        media_profile_answer(
+                            true,
+                            true,
+                            Persist::Durable,
+                            media.running(),
+                            media.configured,
+                        ),
+                    )]
+                }
+                ControlAction::MediaQuery => {
+                    let media = media.lock().unwrap();
+                    vec![(
+                        Duration::ZERO,
+                        media_query_answer(true, media.running(), media.configured),
+                    )]
+                }
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => vec![(Duration::ZERO, encode_refusal(refused_type, reason))],
+                _ => Vec::new(),
+            }
+        });
+    }
+
     /// A scripted device whose binary never wired the media gate: it
     /// advertises the frame types (the envelope layer knows them) but its
     /// answer runs the firmware's own decision function with the
@@ -908,7 +997,8 @@ mod tests {
     use super::*;
     use crate::sys::testpty::Pty;
     use leviculum_core::envelope::{
-        TELEMETRY_PROFILE_STATION, TYPE_TELEMETRY_TARGET, TYPE_WALL_TIME,
+        encode_media_report, encode_refusal, TELEMETRY_PROFILE_STATION, TYPE_TELEMETRY_TARGET,
+        TYPE_WALL_TIME,
     };
 
     /// Short budgets so the negative tests do not sit out field windows.
@@ -1289,6 +1379,102 @@ mod tests {
         assert_eq!(
             probed(&fd, TYPE_WALL_TIME, |fd| send_wall_time(fd, 1_790_000_000)).unwrap(),
             SessionReply::Acked
+        );
+    }
+
+    /// A media report names no frame, so a leftover one is indistinguish-
+    /// able from an answer by its type alone. A query has nothing to
+    /// correlate against either — its only defence is that bytes which
+    /// were already in the port before the query went out cannot be its
+    /// answer.
+    #[test]
+    fn a_report_left_in_the_port_is_not_read_as_the_answer_to_a_query() {
+        let pty = Pty::open();
+        // The board is on both carriers, and says so when asked.
+        envelope_firmware_stub_with_media(&pty, seen(), media_state());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        // A leftover from an earlier conversation: a report about a board
+        // with both carriers down, sitting in the port before we ask.
+        pty.inject(&encode_media_report(
+            &MediaProfileWire {
+                lora_enabled: false,
+                ble_enabled: false,
+            },
+            &MediaProfileWire {
+                lora_enabled: false,
+                ble_enabled: false,
+            },
+        ));
+
+        let read = query_media_profile(&fd)
+            .unwrap()
+            .expect("the board answers");
+        assert_eq!(
+            read.configured,
+            MediaProfileWire::BOTH,
+            "the leftover report was read as this query's answer"
+        );
+        assert_eq!(read.running, MediaProfileWire::BOTH);
+    }
+
+    /// The set direction, where being wrong is worse: `set_media_on`
+    /// queries and then writes on the same fd, so a board that is still
+    /// repeating an earlier report has one in the line exactly when the
+    /// set is waiting for its own. Reading it reports the profile the
+    /// board was on BEFORE the write.
+    #[test]
+    fn a_report_about_another_profile_is_not_read_as_this_sets_answer() {
+        let pty = Pty::open();
+        let stale = MediaProfileWire::BOTH;
+        let media = media_state();
+        late_report_firmware_stub(&pty, seen(), media, stale);
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let lora_only = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        };
+        // The probe inside `send_configured` is what the stub trails its
+        // stale report behind, so the leftover is in the line while the
+        // set frame waits for its answer.
+        let state = crate::media::send_configured(&fd, lora_only)
+            .unwrap()
+            .expect("the board answers the set");
+        assert_eq!(
+            state.configured, lora_only,
+            "the stale report was read as the answer to the set"
+        );
+        assert_eq!(state.running, lora_only);
+    }
+
+    /// The classifier itself, without timing: a report that does not
+    /// state the profile just written cannot be this conversation's, and
+    /// a refusal of the frame that was sent still is.
+    #[test]
+    fn the_set_classifier_only_claims_a_report_of_the_profile_it_sent() {
+        let lora_only = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        };
+        let classify = media_answer(TYPE_MEDIA_PROFILE, Some(lora_only));
+        assert!(
+            classify(&encode_media_report(
+                &MediaProfileWire::BOTH,
+                &MediaProfileWire::BOTH
+            ))
+            .is_none(),
+            "a report about a profile we did not send is not our answer"
+        );
+        assert_eq!(
+            classify(&encode_media_report(&lora_only, &lora_only)),
+            Some(Ok(MediaState {
+                running: lora_only,
+                configured: lora_only,
+            }))
+        );
+        assert_eq!(
+            classify(&encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)),
+            Some(Err(REFUSE_BUSY))
         );
     }
 }

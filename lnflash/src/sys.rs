@@ -198,6 +198,29 @@ impl Fd {
         Ok(out)
     }
 
+    /// Throw away whatever the board has already said but nobody has
+    /// read — the input queue the kernel has buffered for this port.
+    ///
+    /// Called at the start of every control transaction. A frame sitting
+    /// in that queue before a frame of ours has even been written cannot
+    /// be an answer to it; it is a leftover from an earlier conversation,
+    /// most often a slow board's answer that arrived after our window had
+    /// run down and our retry had already gone out. Left in place, the
+    /// next transaction reads it as its own answer — and for the media
+    /// report, which unlike an ack does not name the frame it answers,
+    /// that means a `--set-media` reporting the profile the board was on
+    /// *before* the write (#255).
+    ///
+    /// `TCIFLUSH` rather than a read loop on purpose: one syscall that
+    /// cannot spin, where a loop against a board that is talking
+    /// continuously (a debug banner on the same port) has no bound.
+    pub fn drain_input(&self) -> io::Result<()> {
+        if unsafe { libc::tcflush(self.0, libc::TCIFLUSH) } != 0 {
+            return last_error("tcflush");
+        }
+        Ok(())
+    }
+
     /// The device number this descriptor is bound to.
     ///
     /// An open fd stays bound to the driver instance it opened — a device
@@ -354,6 +377,7 @@ pub(crate) mod testpty {
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 
@@ -406,10 +430,48 @@ pub(crate) mod testpty {
         }
     }
 
+    impl Pty {
+        /// Put a frame on the wire from the device side without the
+        /// device having been asked for it.
+        ///
+        /// What a leftover answer from an earlier conversation looks like
+        /// to the host: bytes already in the port's input queue when the
+        /// next transaction begins.
+        pub fn inject(&self, payload: &[u8]) {
+            let mut framed = Vec::new();
+            frame(payload, &mut framed);
+            self.master
+                .try_clone()
+                .expect("cloning the pty master")
+                .write_all(&framed)
+                .expect("writing the injected frame");
+        }
+    }
+
     /// Run `script` as the device: for every deframed HDLC frame the host
     /// writes, `Some(answer)` is HDLC-framed back, `None` is scripted
     /// silence. The thread ends when the pty goes away with the test.
     pub fn spawn_stub(pty: &Pty, script: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + 'static) {
+        spawn_stub_delayed(pty, move |data| {
+            script(data)
+                .map(|answer| vec![(Duration::ZERO, answer)])
+                .unwrap_or_default()
+        });
+    }
+
+    /// [`spawn_stub`] for a device that answers with more than one frame,
+    /// each after its own delay.
+    ///
+    /// The delay is the point: a leftover answer only survives into the
+    /// host's *next* transaction if it arrives after the current one has
+    /// been satisfied. Written without one, it would land in the same
+    /// read as the answer it trails and be dropped with that
+    /// transaction's deframer — which is a different, milder bug than the
+    /// one being reproduced.
+    pub fn spawn_stub_delayed(
+        pty: &Pty,
+        script: impl Fn(&[u8]) -> Vec<(Duration, Vec<u8>)> + Send + 'static,
+    ) {
         let mut master = pty.master.try_clone().expect("cloning the pty master");
         std::thread::spawn(move || {
             let mut deframer = Deframer::new();
@@ -421,7 +483,8 @@ pub(crate) mod testpty {
                 };
                 for result in deframer.process(&buf[..n]) {
                     if let DeframeResult::Frame(data) = result {
-                        if let Some(answer) = script(&data) {
+                        for (after, answer) in script(&data) {
+                            std::thread::sleep(after);
                             let mut framed = Vec::new();
                             frame(&answer, &mut framed);
                             if master.write_all(&framed).is_err() {
