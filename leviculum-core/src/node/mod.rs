@@ -92,6 +92,8 @@ mod mvr_path_response_retries;
 #[cfg(test)]
 mod mvr_pending_local_path_requests;
 #[cfg(test)]
+mod mvr_probe_announce_phase;
+#[cfg(test)]
 mod mvr_proof_activity;
 #[cfg(test)]
 mod mvr_reboot_relay_nopath_solicit;
@@ -145,6 +147,25 @@ use crate::constants::MGMT_ANNOUNCE_INTERVAL_MS;
 /// Delay before the first management announce after startup.
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
 const MGMT_ANNOUNCE_INITIAL_DELAY_MS: u64 = 15 * 1000;
+
+/// Random extra delay on top of [`MGMT_ANNOUNCE_INITIAL_DELAY_MS`], drawn
+/// per node from its own RNG.
+///
+/// Daemons started by one orchestrator register their probe destinations
+/// within milliseconds of each other; a sharp 15 s constant then puts every
+/// node's first announce onto the shared channel in the same instant. On a
+/// half-duplex medium without carrier sense the rebroadcasts collide
+/// burst-for-burst, retries included, and the destination stays unknown
+/// until the 2-hour interval — measured on ble_lora_transport (#255,
+/// runs 2026-08-31T21-44-18Z and the 22:44 firmware-bisect run: every LoRa
+/// transmission of the t114 probe announce overlapped a pocket-board
+/// transmission to within tens of milliseconds, on both green-era and
+/// HEAD firmware). Python fires just as sharply (Transport.py:283 seeds
+/// `last_mgmt_announce` to start−interval+15, the :963 job loop fires it)
+/// but rides on RNode-firmware CSMA; LNode boards run without carrier
+/// sense, so the daemon de-phases at the source instead. Timing-only
+/// deviation: wire format and announce semantics are untouched.
+const MGMT_ANNOUNCE_INITIAL_JITTER_MS: u64 = 5 * 1000;
 
 /// Request and response Resources are currently correlated as one transfer.
 /// Python splits payloads above this limit, but accepting or emitting those
@@ -576,9 +597,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.probe_dest_hash = Some(hash);
         self.mgmt_destinations.push(hash);
 
-        // Schedule first announce 15s after startup
-        let now_ms = self.transport.clock().now_ms();
-        self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS);
+        // Schedule first announce ~15s after startup (jittered per node)
+        self.schedule_initial_mgmt_announce();
 
         crate::tracing::info!("Probe responder at <{}> active", hash);
         crate::tracing::info!(
@@ -643,11 +663,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.remote_mgmt_dest_hash = Some(hash);
         self.mgmt_destinations.push(hash);
 
-        // Schedule first announce 15s after startup (shared mgmt schedule).
-        let now_ms = self.transport.clock().now_ms();
-        if self.next_mgmt_announce_ms.is_none() {
-            self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS);
-        }
+        // Schedule first announce ~15s after startup (shared mgmt schedule).
+        self.schedule_initial_mgmt_announce();
 
         crate::tracing::info!("Remote management responder at <{}> active", hash);
     }
@@ -1879,6 +1896,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.destinations.get(dest_hash)?.export_decryptor()
     }
 
+    /// Schedule the first management announce, once: base delay plus a
+    /// per-node random offset (see [`MGMT_ANNOUNCE_INITIAL_JITTER_MS`] for
+    /// why co-started daemons must not announce in the same instant).
+    /// Idempotent so probe responder and remote management share one slot.
+    fn schedule_initial_mgmt_announce(&mut self) {
+        if self.next_mgmt_announce_ms.is_none() {
+            let now_ms = self.transport.clock().now_ms();
+            let jitter = u64::from(self.rng.next_u32()) % MGMT_ANNOUNCE_INITIAL_JITTER_MS;
+            self.next_mgmt_announce_ms = Some(now_ms + MGMT_ANNOUNCE_INITIAL_DELAY_MS + jitter);
+        }
+    }
+
     /// Send management announces if their timer has expired.
     ///
     /// Announces each destination in `mgmt_destinations` (probe, etc.)
@@ -1929,7 +1958,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         .storage_mut()
                         .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
                     self.transport.send_on_all_interfaces(&buf[..len]);
-                    crate::tracing::debug!("Management announce sent for <{}>", dest_hash);
+                    // INFO with the destination hash: rig scenarios narrow
+                    // RUST_LOG to transport/interfaces targets, which made
+                    // this emission invisible to `periculum trace` and cost
+                    // a misdiagnosis (#255, 2026-08-31: "the daemon never
+                    // announced" — it had, at +15.002 s, in every red run).
+                    crate::tracing::info!(
+                        event = "MGMT_ANN_TX",
+                        dst = %dest_hash,
+                        iface = "all",
+                    );
 
                     // Sender self-remember for management destinations
                     if let Some(rp) = ratchet_pub {

@@ -454,7 +454,9 @@ mod tests {
             ProofStrategy::All
         );
         assert!(node.remote_mgmt_dest_hash().is_some());
-        assert_eq!(node.next_deadline(), Some(TEST_TIME_MS + 15_000));
+        // 15s base plus per-node jitter (mvr_probe_announce_phase pins why).
+        let deadline = node.next_deadline().expect("mgmt announce deadline");
+        assert!((TEST_TIME_MS + 15_000..TEST_TIME_MS + 20_000).contains(&deadline));
     }
 
     #[test]
@@ -473,13 +475,18 @@ mod tests {
             .respond_to_probes(true)
             .build(OsRng, clock, NoStorage);
 
-        // Should have a next_deadline for the mgmt announce (15s after startup)
+        // Should have a next_deadline for the mgmt announce: 15s after
+        // startup plus per-node jitter (mvr_probe_announce_phase pins why
+        // the instant must not be a sharp shared constant).
         let deadline = node.next_deadline();
         assert!(
             deadline.is_some(),
             "mgmt announce should schedule a deadline"
         );
-        let expected = TEST_TIME_MS + 15_000;
-        assert_eq!(deadline.unwrap(), expected);
+        let deadline = deadline.unwrap();
+        assert!(
+            (TEST_TIME_MS + 15_000..TEST_TIME_MS + 20_000).contains(&deadline),
+            "mgmt announce deadline {deadline} outside 15s+jitter window"
+        );
     }
 }
