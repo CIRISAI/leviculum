@@ -267,7 +267,18 @@ async fn main(spawner: Spawner) {
     // reception over the medium under test's neighbour is exactly what
     // makes a single-medium measurement falsifiable.
     if media.lora_enabled {
-        spawner.must_spawn(leviculum_nrf::lora::lora_task(lora, radio_cfg));
+        // Per-board entropy for the TX channel-access randomness: a fixed
+        // seed here would make co-booted boards draw identical pre-TX
+        // jitter and collide anyway (see `lora_task`).
+        let channel_seed = {
+            use rand_core::RngCore as _;
+            leviculum_nrf::rng::RawHwRng::new().next_u32()
+        };
+        spawner.must_spawn(leviculum_nrf::lora::lora_task(
+            lora,
+            radio_cfg,
+            channel_seed,
+        ));
         leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
     } else {
         leviculum_nrf::media::log_carrier_held_down("lora");

@@ -506,7 +506,7 @@ fn receiver_arming_line_parses() {
 
 /// The two windows a capture must be able to tell apart carry different tags.
 ///
-/// The five sites are the loop's five listening windows. Their timeouts
+/// The six sites are the loop's six listening windows. Their timeouts
 /// overlap — the airtime hold and the ack window are the same length by
 /// construction — so the tag is the only thing distinguishing them.
 #[test]
@@ -542,7 +542,7 @@ fn the_arming_line_is_not_mistaken_for_another_line() {
 }
 
 /// The firmware still emits the arming line, at the `SetRx` and nowhere else,
-/// and from every one of the five windows.
+/// and from every one of the six windows.
 ///
 /// Three separate facts, and the middle one is the load-bearing one: a line
 /// logged anywhere but immediately after the `SET_RX` command would carry a
@@ -585,10 +585,10 @@ fn the_firmware_still_emits_the_receiver_arming_line() {
         "the window end is recorded before the DIO1 wait, so dark_ms would \
          span a window rather than the gap between two"
     );
-    // All five windows are tagged, and each exactly once: two windows sharing
+    // All six windows are tagged, and each exactly once: two windows sharing
     // a tag is a capture nobody can read back apart.
     let lora = nrf_source("lora.rs");
-    for site in ["Idle", "Ack", "Csma", "Hold", "Yield"] {
+    for site in ["Idle", "Ack", "Csma", "Jitter", "Hold", "Yield"] {
         assert_eq!(
             lora.matches(&format!("RxSite::{site}")).count(),
             1,

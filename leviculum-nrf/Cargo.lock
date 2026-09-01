@@ -919,6 +919,10 @@ name = "leviculum-boot-trace"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-channel-access"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-core"
 version = "0.8.1"
 dependencies = [
@@ -986,6 +990,7 @@ dependencies = [
  "heapless 0.9.3",
  "leviculum-ble-tx",
  "leviculum-boot-trace",
+ "leviculum-channel-access",
  "leviculum-core",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",

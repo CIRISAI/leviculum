@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -51,6 +51,11 @@ leviculum-log-line = { path = "log-line" }
 # of the next. Host-testable against a fake clock, which the firmware
 # crate itself cannot be.
 leviculum-tx-spacing = { path = "tx-spacing" }
+# Pure LoRa channel-access policy: the seeded acquisition jitter and the
+# CAD retry gate around every key-up. Host-testable against scripted CAD
+# outcomes, which the firmware crate itself cannot be. Parameters mirror
+# the RNode firmware's CSMA (citations in the crate docs).
+leviculum-channel-access = { path = "channel-access" }
 # The order in which the receive path arms the radio and hands a frame
 # upward. The re-arm has to precede the hand-off, and the firmware crate
 # cannot assert an order of operations against a fake radio — this crate

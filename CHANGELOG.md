@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The LNode LoRa transmit path runs channel access on every key-up
+  instead of only when a host set `csma_enabled`: a randomised, listened
+  pre-TX jitter (the RNode firmware's idle-channel CSMA draw, DIFS plus
+  0-13 slots) de-tiles senders whose transmissions share a trigger, and
+  CAD listen-before-talk with the bounded retry gate runs regardless of
+  the flag, whose backward-compat default of `false` had been switching
+  all collision avoidance off. The jitter and backoff randomness is now
+  seeded per board from the hardware RNG — the previous fixed seed made
+  co-booted boards draw identical backoffs. The flag is still parsed and
+  reported; the transmit path no longer obeys it.
+
 - A TCP interface signals the hardware MTU `rnsd` signals, 16384, instead
   of the 262144 class constant. Python derives it from the interface
   bitrate at interface post-init, so the class value never reaches the

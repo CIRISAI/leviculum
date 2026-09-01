@@ -229,6 +229,15 @@ pub struct RadioConfig {
     pub preamble_len: u16,
     pub bw_hz: u32,   // human-readable bandwidth in Hz (for logging)
     pub cr_denom: u8, // human-readable coding rate denominator 5-8 (for logging)
+    /// Parsed from the wire and reported back (#349), but no longer
+    /// consulted by the transmit path: channel access (acquisition jitter
+    /// and CAD listen-before-talk) is unconditional, because the reference
+    /// firmware offers no host-visible way to disable its CSMA either
+    /// (`tx_queue_handler`, RNode_Firmware.ino:1623) and the flag's
+    /// backward-compat default of `false` (absent byte, and the test
+    /// runner's unset default) was silently switching all collision
+    /// avoidance off — the mechanism behind the
+    /// ble_lora_transport-probe-announce-collision ledger.
     pub csma_enabled: bool,
     /// When true, drop every outgoing LoRa packet at the driver boundary.    /// the radio keeps listening but never transmits. Used by the
     /// integration-test runner to neutralize T114s it does not bind, so the
@@ -406,15 +415,9 @@ pub fn running_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
     RUNNING_CONFIG.lock(|slot| slot.get())
 }
 
-// CSMA/CA constants
-/// Max CSMA attempts before forcing a TX even though the channel appears busy.
-const CSMA_MAX_RETRIES: u8 = 8;
-/// Initial contention window (slots). Matches the RNode firmware. Starting at
-/// 2 guarantees a non-zero-slot random choice on the first retry so two nodes
-/// that simultaneously detect traffic desynchronize meaningfully.
-const CSMA_CW_INITIAL: u8 = 2;
-/// Maximum contention window (slots) after exponential back-off.
-const CSMA_CW_MAX: u8 = 64;
+// CSMA/CA constants. The retry gate itself (attempt budget, contention
+// window, forced give-up) lives in `leviculum_channel_access`, where a host
+// test can drive it against scripted CAD outcomes.
 /// Floor for slot time, matches the 24ms slot used by the RNode firmware.
 const CSMA_SLOT_MS_MIN: u64 = 24;
 
@@ -955,8 +958,14 @@ pub async fn init(
 }
 
 // LoRa async task
+//
+// `channel_seed` feeds the channel-access randomness (acquisition jitter,
+// CAD backoff, split-frame sequence nibbles) and must come from per-board
+// entropy: two boards seeded identically draw identical jitter at identical
+// draw counts, which re-creates exactly the phase lock the jitter exists to
+// break. The previous fixed `0xDEAD_BEEF` seed did precisely that.
 #[embassy_executor::task]
-pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
+pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32) {
     let outgoing_rx = LORA_OUTGOING.receiver();
     let incoming_tx = LORA_INCOMING.sender();
     let config_rx = LORA_CONFIG.receiver();
@@ -1002,13 +1011,24 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
 
     let mut rx_buf = [0u8; 255];
     let mut rx_timeout_count: u32 = 0;
-    let mut rng_state: u32 = 0xDEAD_BEEF; // xorshift32 seed
+    // Split-frame sequence nibbles. Derived from the per-board seed (the
+    // xor keeps it from replaying the channel-access stream); the zero
+    // guard is xorshift32's fixed point.
+    let mut rng_state: u32 = match channel_seed ^ 0xDEAD_BEEF {
+        0 => 0xDEAD_BEEF,
+        s => s,
+    };
     let mut reassembler = leviculum_core::rnode::SplitReassembler::new();
 
-    // CSMA state (only used when config.csma_enabled)
+    // Channel access: the seeded acquisition jitter and the CAD retry
+    // gate. Unconditional for every key-up — this interface knows its
+    // carrier is a shared half-duplex channel, and whether it talks over
+    // a peer is not a host policy (the host `csma_enabled` flag is
+    // parsed and reported, no longer obeyed; see `RadioConfig`).
+    let mut access = leviculum_channel_access::ChannelAccess::new(channel_seed);
+    access.set_phy(config.bw_hz, config.sf, config.cr_denom);
+
     let mut pending_tx: Option<Vec<u8>> = None;
-    let mut csma_attempt: u8 = 0;
-    let mut csma_cw: u8 = CSMA_CW_INITIAL;
     let mut slot_ms: u64 = compute_slot_ms(&config);
     // Count of consecutive post-TX ack windows that expired with no reception.
     // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
@@ -1064,6 +1084,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     config = new_cfg;
                     publish_running_config(&config);
                     slot_ms = compute_slot_ms(&config);
+                    access.set_phy(config.bw_hz, config.sf, config.cr_denom);
                     apply_airtime_limits(&mut airtime, &config);
                 }
                 Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
@@ -1081,8 +1102,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     drop(data);
                 } else {
                     pending_tx = Some(data);
-                    csma_attempt = 0;
-                    csma_cw = CSMA_CW_INITIAL;
+                    access.begin_packet();
                 }
             }
         }
@@ -1132,61 +1152,78 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 config.preamble_len,
             );
 
-            if !config.csma_enabled {
-                transmit_all_frames(
+            // Acquisition jitter: the first key-up after a channel release
+            // waits a randomised, listened-through window (reference band-1
+            // draw, see leviculum_channel_access) before it probes. CAD
+            // alone cannot de-tile two senders whose transmissions share a
+            // trigger — co-started probe announces, rebroadcasts of the
+            // same received frame — because both probe a channel neither
+            // has keyed yet. Spent in `rx_once`, so a peer that keys inside
+            // the window is received, not talked over; burst continuations
+            // (same acquisition) owe nothing and skip this entirely.
+            let jitter_ms = access.acquisition_jitter_ms();
+            if jitter_ms > 0 {
+                crate::log::log_fmt(
+                    "[LORA_JITTER] ",
+                    format_args!("wait_ms={} slot_ms={}", jitter_ms, access.jitter_slot()),
+                );
+                let rx_ms = jitter_ms.clamp(1, 10_000) as u32;
+                reassembler.check_timeout(rx_timeout_count, 10);
+                if rx_once(
                     &mut radio,
-                    data,
-                    &mut rng_state,
-                    &config,
-                    &mut airtime,
-                    &mut spacer,
+                    &mut rx_buf,
+                    rx_ms,
+                    leviculum_core::sx126x::RxSite::Jitter,
+                    &mut reassembler,
+                    &incoming_tx,
+                    &mut rx_timeout_count,
                 )
-                .await;
-                pending_tx = None;
-                frames_since_yield += 1;
-                airtime_since_yield_ms += tx_cost_ms;
-            } else {
-                match radio.cad(config.sf).await {
-                    Ok(false) => {
-                        // Channel clear, send the whole packet (both split
-                        // frames back-to-back, no CAD between them).
-                        crate::log::log_fmt(
-                            "[LORA_CAD] ",
-                            format_args!("busy=false attempt={}", csma_attempt),
-                        );
-                        crate::log::log_fmt(
-                            "[LORA_CSMA_TX] ",
-                            format_args!(
-                                "retries={} forced=false slot_ms={}",
-                                csma_attempt, slot_ms
-                            ),
-                        );
-                        transmit_all_frames(
-                            &mut radio,
-                            data,
-                            &mut rng_state,
-                            &config,
-                            &mut airtime,
-                            &mut spacer,
-                        )
-                        .await;
-                        pending_tx = None;
-                        frames_since_yield += 1;
-                        airtime_since_yield_ms += tx_cost_ms;
-                    }
-                    Ok(true) => {
-                        crate::log::log_fmt(
-                            "[LORA_CAD] ",
-                            format_args!("busy=true attempt={}", csma_attempt),
-                        );
-                        csma_attempt += 1;
-                        if csma_attempt >= CSMA_MAX_RETRIES {
+                .await
+                {
+                    consecutive_empty_acks = 0;
+                }
+                continue;
+            }
+
+            match radio.cad(config.sf).await {
+                Ok(false) => {
+                    // Channel clear, send the whole packet (both split
+                    // frames back-to-back, no CAD between them).
+                    crate::log::log_fmt(
+                        "[LORA_CAD] ",
+                        format_args!("busy=false attempt={}", access.retries()),
+                    );
+                    crate::log::log_fmt(
+                        "[LORA_CSMA_TX] ",
+                        format_args!(
+                            "retries={} forced=false slot_ms={}",
+                            access.retries(),
+                            slot_ms
+                        ),
+                    );
+                    transmit_all_frames(
+                        &mut radio,
+                        data,
+                        &mut rng_state,
+                        &config,
+                        &mut airtime,
+                        &mut spacer,
+                    )
+                    .await;
+                    pending_tx = None;
+                    frames_since_yield += 1;
+                    airtime_since_yield_ms += tx_cost_ms;
+                }
+                Ok(true) => {
+                    crate::log::log_fmt(
+                        "[LORA_CAD] ",
+                        format_args!("busy=true attempt={}", access.retries()),
+                    );
+                    match access.cad_busy() {
+                        leviculum_channel_access::Verdict::Transmit { retries, .. } => {
                             crate::log::log_fmt(
                                 "[LORA_CSMA_TX] ",
-                                format_args!(
-                                    "retries={} forced=true slot_ms={}",
-                                    csma_attempt, slot_ms
-                                ),
+                                format_args!("retries={} forced=true slot_ms={}", retries, slot_ms),
                             );
                             transmit_all_frames(
                                 &mut radio,
@@ -1200,10 +1237,9 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             pending_tx = None;
                             frames_since_yield += 1;
                             airtime_since_yield_ms += tx_cost_ms;
-                        } else {
-                            let slots = (xorshift32(&mut rng_state) as u64) % (csma_cw as u64);
+                        }
+                        leviculum_channel_access::Verdict::Backoff { slots } => {
                             let backoff_ms = slots * slot_ms;
-                            csma_cw = core::cmp::min(csma_cw.saturating_mul(2), CSMA_CW_MAX);
                             // RX during the backoff so incoming packets aren't lost.
                             // Clamp to >=1ms, the SX1262 needs a non-zero timeout.
                             let rx_ms = backoff_ms.clamp(1, 10_000) as u32;
@@ -1223,39 +1259,38 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                             }
                             continue;
                         }
+                        leviculum_channel_access::Verdict::Retry => continue,
                     }
-                    Err(e) => {
+                }
+                Err(e) => {
+                    crate::log::log_fmt(
+                        "[LORA_CAD] ",
+                        format_args!("err={:?} attempt={}", e, access.retries()),
+                    );
+                    if let leviculum_channel_access::Verdict::Transmit { retries, .. } =
+                        access.cad_error()
+                    {
                         crate::log::log_fmt(
-                            "[LORA_CAD] ",
-                            format_args!("err={:?} attempt={}", e, csma_attempt),
+                            "[LORA_CSMA_TX] ",
+                            format_args!("retries={} forced=true slot_ms={}", retries, slot_ms),
                         );
-                        csma_attempt += 1;
-                        if csma_attempt >= CSMA_MAX_RETRIES {
-                            crate::log::log_fmt(
-                                "[LORA_CSMA_TX] ",
-                                format_args!(
-                                    "retries={} forced=true slot_ms={}",
-                                    csma_attempt, slot_ms
-                                ),
-                            );
-                            transmit_all_frames(
-                                &mut radio,
-                                data,
-                                &mut rng_state,
-                                &config,
-                                &mut airtime,
-                                &mut spacer,
-                            )
-                            .await;
-                            pending_tx = None;
-                            // This forced-TX path skips the ack window below
-                            // (pre-existing continue); still account its
-                            // airtime so the burst bounds stay accurate.
-                            frames_since_yield += 1;
-                            airtime_since_yield_ms += tx_cost_ms;
-                        }
-                        continue;
+                        transmit_all_frames(
+                            &mut radio,
+                            data,
+                            &mut rng_state,
+                            &config,
+                            &mut airtime,
+                            &mut spacer,
+                        )
+                        .await;
+                        pending_tx = None;
+                        // This forced-TX path skips the ack window below
+                        // (pre-existing continue); still account its
+                        // airtime so the burst bounds stay accurate.
+                        frames_since_yield += 1;
+                        airtime_since_yield_ms += tx_cost_ms;
                     }
+                    continue;
                 }
             }
             // TX just completed. Before draining the next outgoing item, give
@@ -1286,8 +1321,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                         true
                     } else {
                         pending_tx = Some(next);
-                        csma_attempt = 0;
-                        csma_cw = CSMA_CW_INITIAL;
+                        access.begin_packet();
                         false
                     }
                 }
@@ -1359,9 +1393,13 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                 consecutive_empty_acks = 0;
             }
             // A yield ran (ack window, plus backstop if it triggered): the
-            // channel was handed back, restart the burst accounting.
+            // channel was handed back, restart the burst accounting — and
+            // the next acquisition owes fresh jitter, because whatever
+            // transmits after a shared listening window is again a
+            // candidate for phase lock with its peers.
             frames_since_yield = 0;
             airtime_since_yield_ms = 0;
+            access.channel_released();
             continue;
         }
 
@@ -1455,8 +1493,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig) {
                     drop(data);
                 } else {
                     pending_tx = Some(data);
-                    csma_attempt = 0;
-                    csma_cw = CSMA_CW_INITIAL;
+                    access.begin_packet();
                 }
             }
         }

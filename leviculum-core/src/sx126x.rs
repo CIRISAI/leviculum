@@ -655,6 +655,9 @@ pub enum RxSite {
     /// Listening through a CSMA backoff, after CAD reported the channel
     /// busy (`[LORA_CAD] busy=true`).
     Csma,
+    /// Listening through the randomised acquisition jitter before the
+    /// first CAD of a channel acquisition (`[LORA_JITTER]`).
+    Jitter,
     /// Listening while the regulatory airtime lock holds a queued frame
     /// (`[LORA_AIRTIME_LOCK] ... holding`).
     Hold,
@@ -671,6 +674,7 @@ impl RxSite {
             RxSite::Idle => "idle",
             RxSite::Ack => "ack",
             RxSite::Csma => "csma",
+            RxSite::Jitter => "jitter",
             RxSite::Hold => "hold",
             RxSite::Yield => "yield",
         }
@@ -1844,6 +1848,7 @@ mod rx_arm_tests {
         assert_eq!(RxSite::Idle.tag(), "idle");
         assert_eq!(RxSite::Ack.tag(), "ack");
         assert_eq!(RxSite::Csma.tag(), "csma");
+        assert_eq!(RxSite::Jitter.tag(), "jitter");
         assert_eq!(RxSite::Hold.tag(), "hold");
         assert_eq!(RxSite::Yield.tag(), "yield");
         // Distinct, or two windows are indistinguishable in a capture.

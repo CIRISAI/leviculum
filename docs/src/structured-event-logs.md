@@ -302,9 +302,9 @@ per receive window:
 - `dark_ms` is the gap back to the previous window's end, computed on
   the board.  The boot arm has no previous window and says
   `dark_ms=first` rather than a digit.
-- `site` is which of the loop's five listening windows this is —
-  `idle`, `ack`, `csma`, `hold`, `yield` — because their timeouts
-  overlap and the length alone does not identify them.
+- `site` is which of the loop's six listening windows this is —
+  `idle`, `ack`, `csma`, `jitter`, `hold`, `yield` — because their
+  timeouts overlap and the length alone does not identify them.
 
 The two together close the span: window *n* was listening from its
 own `t=` until `t(n+1) - dark_ms(n+1)`.  Everything outside those
