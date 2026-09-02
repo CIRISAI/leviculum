@@ -66,8 +66,8 @@ const char *lev_version_string(void);
 uint32_t    lev_version_number(void);
 ```
 
-- `lev_version_string` returns the version (for example `"0.7.0"`) as a static,
-  never-freed string.
+- `lev_version_string` returns the workspace version from `Cargo.toml` as a
+  static, never-freed string.
 - `lev_version_number` packs it as `(major << 16) | (minor << 8) | patch`, a
   host-byte-order integer for in-process comparison only.
 

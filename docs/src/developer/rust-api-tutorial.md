@@ -18,7 +18,8 @@ Add the dependency and tokio. The crates are not on crates.io, so use a path
 
 ```toml
 [dependencies]
-leviculum-std = { path = "../libreticulum/leviculum-std" }
+# Adjust the path to wherever, and under whatever name, you cloned the repository
+leviculum-std = { path = "../leviculum/leviculum-std" }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
 ```

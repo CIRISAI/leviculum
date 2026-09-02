@@ -19,12 +19,13 @@ use a path or git:
 
 ```toml
 [dependencies]
-leviculum-core = { path = "../libreticulum/leviculum-core", default-features = false }
+# Adjust the path to wherever, and under whatever name, you cloned the repository
+leviculum-core = { path = "../leviculum/leviculum-core", default-features = false }
 ```
 
 No `std`, no tokio. You bring your own executor (Embassy, RTIC, a bare loop) and
-your own allocator. The reference firmware `leviculum-nrf` is version `0.4.0`,
-targets `thumbv7em-none-eabihf`, and uses [Embassy](https://embassy.dev).
+your own allocator. The reference firmware `leviculum-nrf` targets
+`thumbv7em-none-eabihf` and uses [Embassy](https://embassy.dev).
 
 ## The sans-IO contract
 

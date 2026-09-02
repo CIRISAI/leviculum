@@ -81,7 +81,7 @@ they are the C counterpart to this Rust documentation.
 
 `leviculum-nrf` is standalone firmware for nRF52 boards (the T114 and RAK4631
 LoRa nodes), built with the [Embassy](https://embassy.dev) async embedded
-framework. It is version `0.4.0`, targets `thumbv7em-none-eabihf`, and depends on
+framework. It targets `thumbv7em-none-eabihf` and depends on
 `leviculum-core` directly with `default-features = false` — no `std`, no tokio.
 It is both a usable firmware and the worked reference for how to drive the
 sans-IO core on bare metal; the [embedded chapter](embedded.md) walks through its
@@ -109,21 +109,23 @@ None of these crates are published on crates.io. Depend on them by path (in a
 workspace checkout) or by git. For a `leviculum-std` application:
 
 ```toml
-# Path, when your crate lives next to the libreticulum checkout
+# By path — adjust to wherever, and under whatever name, you cloned the
+# repository; this example assumes a sibling directory named `leviculum`
 [dependencies]
-leviculum-std = { path = "../libreticulum/leviculum-std" }
+leviculum-std = { path = "../leviculum/leviculum-std" }
 tokio = { version = "1", features = ["full"] }
 
 # Or by git
-# leviculum-std = { git = "https://codeberg.org/…/libreticulum" }
+# leviculum-std = { git = "https://codeberg.org/Lew_Palm/leviculum" }
 ```
 
 For embedded work depend on `leviculum-core` instead, with default features off:
 
 ```toml
 [dependencies]
-leviculum-core = { path = "../libreticulum/leviculum-core", default-features = false }
+leviculum-core = { path = "../leviculum/leviculum-core", default-features = false }
 ```
 
-The workspace is edition 2021, version `0.7.0` (the `leviculum-nrf` firmware
-tracks its own `0.4.0`), and licensed AGPL-3.0-or-later.
+The workspace is edition 2021 and licensed AGPL-3.0-or-later. Version numbers
+are the crate manifests' to state, not this page's — read them from
+`Cargo.toml` (`leviculum-nrf` versions independently of the workspace).
