@@ -99,11 +99,15 @@ See the [installation guide](https://codeberg.org/Lew_Palm/leviculum/src/branch/
 
 #### Flashing LoRa hardware (optional)
 
-For the embedded LNode firmware (Heltec T114, RAK4631), add the embedded
-target once, then flash attached devices over USB:
+For the embedded LNode firmware (Heltec T114, RAK4631), install the embedded
+toolchain once — the target itself, `flip-link` (the firmware's linker), and
+`llvm-tools` (provides the `llvm-objcopy` the UF2 flasher uses) — then flash
+attached devices over USB:
 
 ```sh
 rustup target add thumbv7em-none-eabihf
+rustup component add llvm-tools
+cargo install --locked flip-link
 just flash            # every attached T114
 just flash-rak4631    # every attached RAK4631
 ```
