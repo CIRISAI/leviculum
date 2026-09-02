@@ -82,7 +82,7 @@ git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
 git submodule update --init reference/Reticulum
 cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest
-./target/x86_64-unknown-linux-musl/release/lnsd -v
+./target/x86_64-unknown-linux-musl/release/lnsd --version
 ```
 
 The workspace pins `x86_64-unknown-linux-musl` as its build target (see

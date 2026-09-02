@@ -43,13 +43,20 @@ The workspace pins `x86_64-unknown-linux-musl` as its build target (see the
 comments in `.cargo/config.toml` for why), so the binaries are in
 `target/x86_64-unknown-linux-musl/release/`, not `target/release/`.
 
+Verify the build; the output carries the version and the build commit:
+
+```sh
+./target/x86_64-unknown-linux-musl/release/lnsd --version
+```
+
 ## Running the daemon
 
 ```sh
-./target/x86_64-unknown-linux-musl/release/lnsd -v
+./target/x86_64-unknown-linux-musl/release/lnsd
 ```
 
 Reads its config from `~/.reticulum/config`, the same location as Python Reticulum.
+Add `-v` (debug) or `-vv` (trace) for more verbose logging.
 
 ## Development
 
