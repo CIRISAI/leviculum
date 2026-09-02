@@ -39,12 +39,14 @@ cd leviculum
 cargo build --release --bin lnsd --bin lnstest --bin lncp
 ```
 
-The binaries are in `target/release/`.
+The workspace pins `x86_64-unknown-linux-musl` as its build target (see the
+comments in `.cargo/config.toml` for why), so the binaries are in
+`target/x86_64-unknown-linux-musl/release/`, not `target/release/`.
 
 ## Running the daemon
 
 ```sh
-./target/release/lnsd -v
+./target/x86_64-unknown-linux-musl/release/lnsd -v
 ```
 
 Reads its config from `~/.reticulum/config`, the same location as Python Reticulum.

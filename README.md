@@ -82,10 +82,13 @@ git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
 git submodule update --init reference/Reticulum
 cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest
-./target/release/lnsd -v
+./target/x86_64-unknown-linux-musl/release/lnsd -v
 ```
 
-No system C libraries are linked into the daemon. Run the test tiers:
+The workspace pins `x86_64-unknown-linux-musl` as its build target (see
+`.cargo/config.toml` for why), so the binaries land under
+`target/x86_64-unknown-linux-musl/release/`, not `target/release/`. No
+system C libraries are linked into the daemon. Run the test tiers:
 
 ```sh
 cargo test-core      # unit tests
