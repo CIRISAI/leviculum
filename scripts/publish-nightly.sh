@@ -24,13 +24,17 @@ set -euo pipefail
 : "${CI_REPO:?CI_REPO not set}"
 : "${CI_COMMIT_SHA:?CI_COMMIT_SHA not set}"
 : "${CODEBERG_TOKEN:?CODEBERG_TOKEN not set}"
+# The tag push at the end reads the token from the environment via a git
+# credential helper; Woodpecker exports it, a manual caller might not.
+export CODEBERG_TOKEN
 
 TAG="nightly"
 API="https://codeberg.org/api/v1"
 AUTH_HEADER="Authorization: token ${CODEBERG_TOKEN}"
 BUILD_ID="${LEVICULUM_BUILD_ID:-unknown}"
 
-DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DIST="$ROOT/dist"
 [ -d "$DIST" ] || { echo "dist/ not found — run collect-nightly-debs.sh first"; exit 1; }
 
 RELEASE_BODY=$(cat <<EOF
@@ -121,7 +125,9 @@ if [ -z "$release_id" ]; then
         | curl -sS -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases" -d @-)
     release_id=$(echo "$release_json" | jq -r '.id')
-    [ -n "$release_id" ] && [ "$release_id" != "null" ] || { echo "[publish] create failed: $release_json"; exit 1; }
+    if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+        echo "[publish] create failed: $release_json"; exit 1
+    fi
     echo "[publish] created release id=${release_id}"
 else
     echo "[publish] found release id=${release_id}, refreshing body"
@@ -156,6 +162,33 @@ for f in "$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256; do
         -F "attachment=@${f}" \
         "$API/repos/$CI_REPO/releases/$release_id/assets?name=${name}" >/dev/null
 done
+
+# The release rolls, so the git tag must roll with it. Forgejo points the
+# tag at a commit only when the release is CREATED (the branch above);
+# refreshing an existing release never moves the ref. That left `nightly`
+# frozen at its creation commit (05a17675, 2026-05-06) while the assets
+# beside it moved on nightly — the release page's "Source code" links
+# served months-old source next to current binaries. Force-push the tag to
+# the commit this run actually built, after the assets are up so a failed
+# upload never moves it. The commit is already on the remote (CI builds
+# pushed commits), so this transfers no objects, only the ref.
+#
+# The push authenticates through a one-shot credential helper, never a
+# token-in-URL remote: when a push fails, git prints the full remote URL
+# into the error message, and this log is public. The helper string is
+# single-quoted on purpose — git expands the variable when it invokes
+# the helper, reading the environment (exported above), so the token
+# appears in no URL and in no process argument. The empty helper first
+# clears any inherited helpers so ours is the only one consulted.
+# Everything else in this script authenticates via header for the same
+# no-token-in-URL reason.
+echo "[publish] pointing tag ${TAG} at ${CI_COMMIT_SHA}"
+# shellcheck disable=SC2016
+git -C "$ROOT" \
+    -c credential.helper= \
+    -c credential.helper='!f() { echo "username=oauth2"; echo "password=${CODEBERG_TOKEN}"; }; f' \
+    push "https://codeberg.org/${CI_REPO}.git" \
+    "+${CI_COMMIT_SHA}:refs/tags/${TAG}"
 
 echo "[publish] done"
 echo "[publish] latest: https://codeberg.org/${CI_REPO}/releases/tag/${TAG}"

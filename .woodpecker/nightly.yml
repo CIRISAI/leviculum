@@ -238,6 +238,9 @@ steps:
       CODEBERG_TOKEN:
         from_secret: codeberg_token
     commands:
-      - apt-get update && apt-get install -y curl jq
+      # git: publish-nightly.sh force-pushes the `nightly` tag to the
+      # built commit at the end — the API refresh path never moves the
+      # git ref, only release creation does.
+      - apt-get update && apt-get install -y curl jq git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/publish-nightly.sh
