@@ -345,53 +345,131 @@ fn log_u32(msg: &str, val: u32) {
 /// Serial HW_MTU (matches Python SerialInterface)
 const SERIAL_HW_MTU: usize = 564;
 
+/// Write one packet on the transport CDC without letting an absent host
+/// wedge the task.
+///
+/// A CDC IN write only completes when the host polls the endpoint, and
+/// the host only polls while a process holds the port open. A plain
+/// `write_packet().await` therefore blocks forever once the host closes
+/// the port — and because this task services reads and writes from one
+/// select loop, a wedged write also stops the OUT endpoint being read:
+/// the board goes deaf on if02 while everything else keeps running. The
+/// debug port has guarded against this (DTR check plus timeout) since it
+/// existed; the transport port did not, and one unread control answer or
+/// one announce queued while no host was attached was enough.
+///
+/// The guard: never start a write while DTR is down, and while a write
+/// is pending, wake on control-line changes (`ControlChanged::changed`
+/// latches, so a drop between the check and the select is still seen)
+/// and abandon the frame when DTR went away. A pending write is never
+/// re-issued after an unrelated control change unless DTR is still up,
+/// so a present host cannot receive a duplicate packet from this path.
+async fn write_packet_host_gated(
+    tx: &mut cdc_acm::Sender<'static, UsbDriver>,
+    control: &cdc_acm::ControlChanged<'static>,
+    chunk: &[u8],
+) -> bool {
+    loop {
+        if !tx.dtr() {
+            return false;
+        }
+        match select(tx.write_packet(chunk), control.control_changed()).await {
+            Either::First(Ok(())) => return true,
+            Either::First(Err(_)) => return false,
+            // Control lines changed mid-write: loop to re-check DTR. If
+            // the host is still there the write is simply retried; if it
+            // closed the port the frame is abandoned.
+            Either::Second(()) => {}
+        }
+    }
+}
+
 /// HDLC-frame `payload` into `frame_buf` and write it out in 64-byte
 /// chunks, with a ZLP when the framed length lands exactly on the packet
-/// size. Returns `false` on a USB write error.
+/// size. Returns `false` on a USB write error or when no host is reading
+/// the port (see [`write_packet_host_gated`]).
 async fn write_framed(
-    cdc: &mut CdcAcmClass<'static, UsbDriver>,
+    tx: &mut cdc_acm::Sender<'static, UsbDriver>,
+    control: &cdc_acm::ControlChanged<'static>,
     payload: &[u8],
     frame_buf: &mut Vec<u8>,
 ) -> bool {
     frame(payload, frame_buf);
     for chunk in frame_buf.chunks(64) {
-        if cdc.write_packet(chunk).await.is_err() {
+        if !write_packet_host_gated(tx, control, chunk).await {
             return false;
         }
     }
     if !frame_buf.is_empty()
         && frame_buf.len().is_multiple_of(64)
-        && cdc.write_packet(&[]).await.is_err()
+        && !write_packet_host_gated(tx, control, &[]).await
     {
         return false;
     }
     true
 }
 
+/// What became of a host radio config (see [`apply_radio_config`]).
+#[derive(PartialEq)]
+enum ConfigDelivery {
+    /// Handed to the LoRa task and persisted.
+    Applied,
+    /// A config whose bandwidth or coding rate has no SX1262 register code.
+    Invalid,
+    /// The config channel would not take it within the grace period. On a
+    /// board whose boot held LoRa down this is the steady state: the task
+    /// that would drain the channel was never spawned, so the first config
+    /// parks in the depth-1 channel forever and every later one is
+    /// undeliverable.
+    Undeliverable,
+}
+
+/// How long a radio config may wait for the LoRa task to drain the
+/// previous one before it is refused. A running LoRa task polls the
+/// channel every loop turn, so a live consumer clears it in milliseconds;
+/// only a consumer that does not exist (LoRa held down at boot) or is
+/// itself stuck runs the clock out. Well inside lnflash's 3.5 s answer
+/// window so the refusal still reaches the host.
+const CONFIG_DELIVER_WITHIN: Duration = Duration::from_millis(500);
+
 /// Hand a parsed radio configuration to the LoRa task and persist it.
-/// Returns whether the driver could take it — `false` is a config whose
-/// bandwidth or coding rate has no SX1262 register code.
+///
+/// The handoff is bounded (local-4modem-wedge): `config_tx` is a depth-1
+/// channel whose only consumer is the LoRa task, and a board booted with
+/// `lora=off` never spawned it. An unbounded `send` there blocks this
+/// task forever once the channel holds one config — which took the whole
+/// transport port deaf until the next reboot, with the write side and
+/// main loop running on as if nothing happened. Undeliverable is answered
+/// as busy, the same contract [`crate::lora::deliver_tx_spacing`] already
+/// has for its consumerless channel.
 async fn apply_radio_config(
     config_tx: &Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
     wire: leviculum_core::rnode::RadioConfigWire,
-) -> bool {
-    match crate::lora::RadioConfig::from_wire_config(wire) {
-        Some(cfg) => {
-            log("SER: radio config received");
-            config_tx.send(cfg).await;
-            // Persist what we just applied, so a reset comes back on the
-            // host's frequency instead of the compiled default.
-            // Non-blocking: the store task does the read-compare-write and
-            // skips flash entirely if nothing changed (lnsd re-sends this
-            // frame on every connect).
-            crate::radio_store::request_save(&wire);
-            true
-        }
-        None => {
-            log("SER: invalid config frame");
-            false
+) -> ConfigDelivery {
+    let Some(cfg) = crate::lora::RadioConfig::from_wire_config(wire) else {
+        log("SER: invalid config frame");
+        return ConfigDelivery::Invalid;
+    };
+    if let Err(embassy_sync::channel::TrySendError::Full(cfg)) = config_tx.try_send(cfg) {
+        // Full channel: give a live LoRa task one grace period to drain
+        // the previous config before refusing. A timed-out `send` drops
+        // the value with the future, so a refusal can never also deliver.
+        if with_timeout(CONFIG_DELIVER_WITHIN, config_tx.send(cfg))
+            .await
+            .is_err()
+        {
+            log("SER: radio config undeliverable, refused");
+            return ConfigDelivery::Undeliverable;
         }
     }
+    log("SER: radio config received");
+    // Persist what we just applied, so a reset comes back on the
+    // host's frequency instead of the compiled default.
+    // Non-blocking: the store task does the read-compare-write and
+    // skips flash entirely if nothing changed (lnsd re-sends this
+    // frame on every connect).
+    crate::radio_store::request_save(&wire);
+    ConfigDelivery::Applied
 }
 
 /// Persist the record this control frame set, and wait until it is on the
@@ -431,7 +509,7 @@ const FRAME_TIMEOUT_MS: u64 = 500;
 /// Write path: NodeCore → outgoing channel → HDLC frame → CDC write
 #[embassy_executor::task]
 async fn retic_serial_task(
-    mut cdc: CdcAcmClass<'static, UsbDriver>,
+    cdc: CdcAcmClass<'static, UsbDriver>,
     incoming_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
     outgoing_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 8>,
     config_tx: Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
@@ -440,9 +518,15 @@ async fn retic_serial_task(
     let mut read_buf = [0u8; 64];
     let mut frame_buf = Vec::with_capacity(1200);
 
+    // Split so writes can watch the control lines: every write on this
+    // port goes through `write_packet_host_gated`, because an unguarded
+    // CDC write pends forever once the host stops reading, and a wedged
+    // write here takes the read side down with it.
+    let (mut tx, mut rx, control) = cdc.split_with_control();
+
     loop {
         log("SER: wait_connection");
-        cdc.wait_connection().await;
+        rx.wait_connection().await;
         log("SER: connected");
         deframer.reset();
 
@@ -455,7 +539,7 @@ async fn retic_serial_task(
             };
 
             match select(
-                with_timeout(timeout_dur, cdc.read_packet(&mut read_buf)),
+                with_timeout(timeout_dur, rx.read_packet(&mut read_buf)),
                 outgoing_rx.receive(),
             )
             .await
@@ -483,14 +567,15 @@ async fn retic_serial_task(
                                     );
                                     let acked = if action == ControlAction::LegacyReset {
                                         write_framed(
-                                            &mut cdc,
+                                            &mut tx,
+                                            &control,
                                             &crate::lora::RESET_ACK,
                                             &mut frame_buf,
                                         )
                                         .await
                                     } else {
                                         let ack = envelope::encode_ack(envelope::TYPE_RESET);
-                                        write_framed(&mut cdc, &ack, &mut frame_buf).await
+                                        write_framed(&mut tx, &control, &ack, &mut frame_buf).await
                                     };
                                     if !acked {
                                         log("SER: reset ACK write failed");
@@ -507,8 +592,10 @@ async fn retic_serial_task(
                                     // take. Audible refusals begin with the
                                     // envelope.
                                     if apply_radio_config(&config_tx, wire).await
+                                        == ConfigDelivery::Applied
                                         && !write_framed(
-                                            &mut cdc,
+                                            &mut tx,
+                                            &control,
                                             &crate::lora::CONFIG_ACK,
                                             &mut frame_buf,
                                         )
@@ -518,15 +605,22 @@ async fn retic_serial_task(
                                     }
                                 }
                                 ControlAction::RadioConfig(wire) => {
-                                    let answer = if apply_radio_config(&config_tx, wire).await {
-                                        envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
-                                    } else {
-                                        envelope::encode_refusal(
+                                    let answer = match apply_radio_config(&config_tx, wire).await {
+                                        ConfigDelivery::Applied => {
+                                            envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
+                                        }
+                                        ConfigDelivery::Invalid => envelope::encode_refusal(
                                             envelope::TYPE_RADIO_CONFIG,
                                             envelope::REFUSE_VALUE,
-                                        )
+                                        ),
+                                        ConfigDelivery::Undeliverable => envelope::encode_refusal(
+                                            envelope::TYPE_RADIO_CONFIG,
+                                            envelope::REFUSE_BUSY,
+                                        ),
                                     };
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: config answer write failed");
                                     }
                                 }
@@ -544,7 +638,14 @@ async fn retic_serial_task(
                                             envelope::TYPE_WALL_TIME,
                                             envelope::REFUSE_BUSY,
                                         );
-                                        if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
+                                        if !write_framed(
+                                            &mut tx,
+                                            &control,
+                                            &refusal,
+                                            &mut frame_buf,
+                                        )
+                                        .await
+                                        {
                                             log("SER: wall-time refusal write failed");
                                         }
                                     }
@@ -569,7 +670,9 @@ async fn retic_serial_task(
                                     let answer = envelope::telemetry_target_answer(
                                         wired, delivered, persist,
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: telemetry answer write failed");
                                     }
                                 }
@@ -588,7 +691,9 @@ async fn retic_serial_task(
                                     .await;
                                     let answer =
                                         envelope::fixed_position_answer(wired, delivered, persist);
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: fixed-position answer write failed");
                                     }
                                 }
@@ -616,7 +721,9 @@ async fn retic_serial_task(
                                         crate::media::running(),
                                         crate::media::configured(),
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: media answer write failed");
                                     }
                                 }
@@ -631,7 +738,9 @@ async fn retic_serial_task(
                                         crate::media::running(),
                                         crate::media::configured(),
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: media report write failed");
                                     }
                                 }
@@ -650,7 +759,9 @@ async fn retic_serial_task(
                                         crate::telemetry::reporter_wired(),
                                         crate::telemetry::position_source_flags(),
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: position-source report write failed");
                                     }
                                 }
@@ -687,7 +798,9 @@ async fn retic_serial_task(
                                             .as_ref()
                                             .map(|(flags, mesh, ble)| (*flags, mesh, ble)),
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: node-name answer write failed");
                                     }
                                 }
@@ -704,7 +817,9 @@ async fn retic_serial_task(
                                             .as_ref()
                                             .map(|(flags, mesh, ble)| (*flags, mesh, ble)),
                                     );
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: node-name report write failed");
                                     }
                                 }
@@ -726,14 +841,18 @@ async fn retic_serial_task(
                                             envelope::REFUSE_BUSY,
                                         )
                                     };
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: tx-spacing answer write failed");
                                     }
                                 }
                                 ControlAction::CapabilityQuery => {
                                     let report =
                                         envelope::encode_capability_report(ACCEPTED_CONTROL_TYPES);
-                                    if !write_framed(&mut cdc, &report, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &report, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: capability report write failed");
                                     }
                                 }
@@ -755,7 +874,9 @@ async fn retic_serial_task(
                                             envelope::REFUSE_BUSY,
                                         ),
                                     };
-                                    if !write_framed(&mut cdc, &answer, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: radio report write failed");
                                     }
                                 }
@@ -768,7 +889,9 @@ async fn retic_serial_task(
                                         refused_type as u32,
                                     );
                                     let refusal = envelope::encode_refusal(refused_type, reason);
-                                    if !write_framed(&mut cdc, &refusal, &mut frame_buf).await {
+                                    if !write_framed(&mut tx, &control, &refusal, &mut frame_buf)
+                                        .await
+                                    {
                                         log("SER: refusal write failed");
                                     }
                                 }
@@ -815,17 +938,21 @@ async fn retic_serial_task(
                     log_u32("SER: TX", data.len() as u32);
                     frame(&data, &mut frame_buf);
                     log_u32("SER: HDLC framed", frame_buf.len() as u32);
+                    // Host-gated like every other write on this port: a
+                    // frame queued while no host reads if02 (an announce
+                    // after the port was closed) is dropped here instead
+                    // of pending forever and deafening the read side.
                     let mut write_ok = true;
                     for chunk in frame_buf.chunks(64) {
-                        if cdc.write_packet(chunk).await.is_err() {
-                            log("SER: write_packet failed");
+                        if !write_packet_host_gated(&mut tx, &control, chunk).await {
+                            log("SER: TX dropped, no host reading");
                             write_ok = false;
                             break;
                         }
                     }
                     // ZLP if last chunk was exactly 64 bytes
                     if write_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0 {
-                        let _ = cdc.write_packet(&[]).await;
+                        let _ = write_packet_host_gated(&mut tx, &control, &[]).await;
                     }
                 }
             }
