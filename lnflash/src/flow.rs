@@ -715,9 +715,10 @@ pub fn set_time(
             SessionReply::NoAnswer => ui.say(&format!(
                 "{port}: the board did not answer the wall-time frame."
             )),
-            SessionReply::NoEnvelope => ui.say(&format!(
-                "{port}: this firmware predates the control envelope and cannot take a wall \
-                 time. Flash the current bundle first."
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so no wall time was \
+                 sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
             )),
             SessionReply::NotAccepted => ui.say(&format!(
                 "{port}: this firmware speaks the envelope but does not accept the wall-time \
@@ -792,9 +793,10 @@ pub fn set_tx_spacing(
                 "{port}: the board did not answer the transmit-spacing frame, so it is still on \
                  whatever spacing it had."
             )),
-            SessionReply::NoEnvelope => ui.say(&format!(
-                "{port}: this firmware predates the control envelope and has no transmit-spacing \
-                 knob. Flash the current bundle first."
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so no spacing was \
+                 sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
             )),
             SessionReply::NotAccepted => ui.say(&format!(
                 "{port}: this firmware speaks the envelope but has no transmit-spacing knob. \
@@ -883,9 +885,10 @@ pub fn set_tx_power(
                         "{port}: the board did not answer the radio-config frame, so it is still \
                          on whatever power it had."
                     )),
-                    SessionReply::NoEnvelope => ui.say(&format!(
-                        "{port}: this firmware predates the control envelope. Flash the current \
-                         bundle first."
+                    SessionReply::ProbeSilent => ui.say(&format!(
+                        "{port}: the board did not answer the capability probe, so the power \
+                         was not changed. {}",
+                        crate::envelope::PROBE_SILENCE_HINT
                     )),
                     SessionReply::NotAccepted => ui.say(&format!(
                         "{port}: this firmware speaks the envelope but takes no radio \
@@ -924,7 +927,7 @@ fn send_tx_power_to(fd: &crate::sys::Fd, dbm: i8) -> io::Result<TxPowerOutcome> 
     // packet-shaped noise on the transport CDC, and without the query there
     // is nothing to base it on anyway.
     let Some(caps) = envelope::probe_capabilities(fd)? else {
-        return Ok(TxPowerOutcome::Answered(SessionReply::NoEnvelope));
+        return Ok(TxPowerOutcome::Answered(SessionReply::ProbeSilent));
     };
     if !caps.accepts(TYPE_RADIO_QUERY) || !caps.accepts(TYPE_RADIO_CONFIG) {
         return Ok(TxPowerOutcome::Answered(SessionReply::NotAccepted));
@@ -1023,9 +1026,10 @@ fn report_fixed_position(
             "{port}: the board did not answer the fixed-position frame, so it is still on \
              whatever position source it had."
         )),
-        SessionReply::NoEnvelope => ui.say(&format!(
-            "{port}: this firmware predates the control envelope and cannot take a fixed \
-             position. Flash the current bundle first."
+        SessionReply::ProbeSilent => ui.say(&format!(
+            "{port}: the board did not answer the capability probe, so no position was \
+             sent. {}",
+            crate::envelope::PROBE_SILENCE_HINT
         )),
         SessionReply::NotAccepted => ui.say(&format!(
             "{port}: this firmware speaks the envelope but does not accept the fixed-position \
@@ -1126,10 +1130,11 @@ fn report_media(
                  media profile it had."
             ));
         }
-        Err(SessionReply::NoEnvelope) => {
+        Err(SessionReply::ProbeSilent) => {
             return ui.say(&format!(
-                "{port}: this firmware predates the control envelope and has no media profile. \
-                 Flash the current bundle first."
+                "{port}: the board did not answer the capability probe, so its media profile \
+                 was left alone. {}",
+                crate::envelope::PROBE_SILENCE_HINT
             ));
         }
         Err(SessionReply::NotAccepted) => {
@@ -1258,10 +1263,11 @@ fn report_name(
                  it was."
             ));
         }
-        Err(SessionReply::NoEnvelope) => {
+        Err(SessionReply::ProbeSilent) => {
             return ui.say(&format!(
-                "{port}: this firmware predates the control envelope and has no settable name. \
-                 Flash the current bundle first."
+                "{port}: the board did not answer the capability probe, so its name was left \
+                 alone. {}",
+                crate::envelope::PROBE_SILENCE_HINT
             ));
         }
         Err(SessionReply::NotAccepted) => {
@@ -1427,9 +1433,10 @@ fn report_telemetry(
             "{port}: the board did not answer the telemetry frame, so it is still on whatever \
              target it had stored."
         )),
-        SessionReply::NoEnvelope => ui.say(&format!(
-            "{port}: this firmware predates the control envelope and cannot take a telemetry \
-             target. Flash the current bundle first."
+        SessionReply::ProbeSilent => ui.say(&format!(
+            "{port}: the board did not answer the capability probe, so no telemetry target was \
+             sent. {}",
+            crate::envelope::PROBE_SILENCE_HINT
         )),
         SessionReply::NotAccepted => ui.say(&format!(
             "{port}: this firmware speaks the envelope but has no telemetry consumer. Flash \
@@ -3149,7 +3156,10 @@ convert = "hex-to-uf2"
         // Three different facts, three different sentences: the operator has
         // to know whether to reflash, to retry, or to fix the value.
         for (reply, expected) in [
-            (SessionReply::NoEnvelope, "predates the control envelope"),
+            (
+                SessionReply::ProbeSilent,
+                "did not answer the capability probe",
+            ),
             (SessionReply::NotAccepted, "no telemetry consumer"),
             (SessionReply::NoAnswer, "did not answer"),
             (
@@ -3163,6 +3173,32 @@ convert = "hex-to-uf2"
             assert!(said.contains(expected), "{reply:?}: {said}");
             assert!(!said.contains("telemetry on"), "{reply:?}: {said}");
         }
+    }
+
+    #[test]
+    fn probe_silence_names_both_of_its_causes() {
+        // local-4modem-wedge: a live board whose transport port had stopped
+        // being serviced answered the probe with silence, and the transcript
+        // asserted "this firmware predates the control envelope" about a
+        // board that had taken envelope commands the day before. Silence
+        // does not identify old firmware, so the line must hand the
+        // operator both readings and the reset that separates them —
+        // never the age diagnosis alone.
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        report_telemetry(
+            &mut ui,
+            "3-2.4",
+            &station_target(),
+            SessionReply::ProbeSilent,
+            None,
+        );
+        let said = ui.transcript();
+        assert!(said.contains("predates the control envelope"), "{said}");
+        assert!(
+            said.contains("transport port has stopped answering"),
+            "{said}"
+        );
+        assert!(said.contains("reset it and retry"), "{said}");
     }
 
     #[test]

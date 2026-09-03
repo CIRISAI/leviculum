@@ -88,7 +88,7 @@ pub fn describe(state: &NodeNameState) -> String {
 /// without the frame is reported as such rather than written to blind.
 pub fn query(fd: &Fd) -> io::Result<Result<NodeNameState, SessionReply>> {
     let Some(caps) = envelope::probe_capabilities(fd)? else {
-        return Ok(Err(SessionReply::NoEnvelope));
+        return Ok(Err(SessionReply::ProbeSilent));
     };
     if !caps.accepts(TYPE_NODE_NAME_QUERY) {
         return Ok(Err(SessionReply::NotAccepted));
@@ -105,7 +105,7 @@ pub fn query(fd: &Fd) -> io::Result<Result<NodeNameState, SessionReply>> {
 /// never sees, and the BLE name may be a shortened form of what was sent.
 pub fn send(fd: &Fd, name: Option<&NodeName>) -> io::Result<Result<NodeNameState, SessionReply>> {
     let Some(caps) = envelope::probe_capabilities(fd)? else {
-        return Ok(Err(SessionReply::NoEnvelope));
+        return Ok(Err(SessionReply::ProbeSilent));
     };
     if !caps.accepts(TYPE_NODE_NAME) {
         return Ok(Err(SessionReply::NotAccepted));
@@ -381,9 +381,9 @@ mod tests {
 
         assert_eq!(
             send(&fd, Some(&name("Balkon"))).unwrap().unwrap_err(),
-            SessionReply::NoEnvelope
+            SessionReply::ProbeSilent
         );
-        assert_eq!(query(&fd).unwrap().unwrap_err(), SessionReply::NoEnvelope);
+        assert_eq!(query(&fd).unwrap().unwrap_err(), SessionReply::ProbeSilent);
         assert_eq!(node_name_frame(&seen), None, "nothing may go on the wire");
     }
 

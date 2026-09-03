@@ -551,7 +551,7 @@ mod tests {
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
         assert_eq!(
             send_configured(&fd, &station(ADDRESS_BYTES)).unwrap(),
-            SessionReply::NoEnvelope
+            SessionReply::ProbeSilent
         );
         assert_eq!(telemetry_frame(&seen), None);
     }

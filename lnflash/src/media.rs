@@ -146,7 +146,7 @@ fn on_off(enabled: bool) -> &'static str {
 /// without the frame is reported as such rather than written to blind.
 pub fn query(fd: &Fd) -> io::Result<Result<MediaState, SessionReply>> {
     let Some(caps) = envelope::probe_capabilities(fd)? else {
-        return Ok(Err(SessionReply::NoEnvelope));
+        return Ok(Err(SessionReply::ProbeSilent));
     };
     if !caps.accepts(TYPE_MEDIA_QUERY) {
         return Ok(Err(SessionReply::NotAccepted));
@@ -166,7 +166,7 @@ pub fn send_configured(
     profile: MediaProfileWire,
 ) -> io::Result<Result<MediaState, SessionReply>> {
     let Some(caps) = envelope::probe_capabilities(fd)? else {
-        return Ok(Err(SessionReply::NoEnvelope));
+        return Ok(Err(SessionReply::ProbeSilent));
     };
     if !caps.accepts(TYPE_MEDIA_PROFILE) {
         return Ok(Err(SessionReply::NotAccepted));
@@ -456,9 +456,9 @@ mod tests {
 
         assert_eq!(
             send_configured(&fd, LORA_ONLY).unwrap().unwrap_err(),
-            SessionReply::NoEnvelope
+            SessionReply::ProbeSilent
         );
-        assert_eq!(query(&fd).unwrap().unwrap_err(), SessionReply::NoEnvelope);
+        assert_eq!(query(&fd).unwrap().unwrap_err(), SessionReply::ProbeSilent);
         assert_eq!(media_frame(&seen), None, "nothing may go on the wire");
     }
 

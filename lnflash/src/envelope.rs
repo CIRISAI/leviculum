@@ -88,8 +88,14 @@ pub enum SessionReply {
     Refused(u8),
     /// The window closed without an answer.
     NoAnswer,
-    /// No capability report: firmware from before the #238 envelope.
-    NoEnvelope,
+    /// No capability report. Firmware from before the #238 envelope
+    /// answers the probe with nothing — but so does a board whose
+    /// transport port has stopped being serviced, and from silence the
+    /// two cannot be told apart (local-4modem-wedge: a live, counting
+    /// board answered nothing here and was reported as old firmware).
+    /// Messages for this reply must name both readings, never assert
+    /// the firmware's age.
+    ProbeSilent,
     /// A capability report that does not list this frame type.
     NotAccepted,
 }
@@ -102,6 +108,15 @@ impl SessionReply {
         matches!(self, Self::Acked)
     }
 }
+
+/// The one honest reading of [`SessionReply::ProbeSilent`], shared by
+/// every transcript line that reports it: silence does not identify old
+/// firmware, so the operator is handed both causes and the cheap test
+/// that separates them.
+pub const PROBE_SILENCE_HINT: &str =
+    "Either this firmware predates the control envelope, or the transport port has stopped \
+     answering. A board that took envelope commands before is the second case: reset it and \
+     retry. Only a board that never spoke the envelope needs the current bundle flashed.";
 
 impl From<ControlOutcome> for SessionReply {
     fn from(outcome: ControlOutcome) -> Self {
@@ -127,7 +142,7 @@ pub fn probed(
     send: impl FnOnce(&Fd) -> io::Result<ControlOutcome>,
 ) -> io::Result<SessionReply> {
     let Some(caps) = probe_capabilities(fd)? else {
-        return Ok(SessionReply::NoEnvelope);
+        return Ok(SessionReply::ProbeSilent);
     };
     if !caps.accepts(frame_type) {
         return Ok(SessionReply::NotAccepted);
@@ -1638,7 +1653,7 @@ mod tests {
             send_telemetry_target(fd, &hash_only_target())
         })
         .unwrap();
-        assert_eq!(reply, SessionReply::NoEnvelope);
+        assert_eq!(reply, SessionReply::ProbeSilent);
         assert!(!reply.took_it());
         assert_eq!(telemetry_frame(&seen), None, "nothing may go on the wire");
     }

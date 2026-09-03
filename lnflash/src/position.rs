@@ -370,7 +370,7 @@ mod tests {
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
         assert_eq!(
             send_configured(&fd, Some(&berlin())).unwrap(),
-            SessionReply::NoEnvelope
+            SessionReply::ProbeSilent
         );
         assert_eq!(fixed_position_frame(&seen), None);
     }
