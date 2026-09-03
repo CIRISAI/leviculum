@@ -17752,9 +17752,18 @@ mod tests {
                 0,
                 &make_random_hash([0x1B; 5], emission + 1),
             );
+            // The claim is the egress below and holds in both feature
+            // builds; the captured decision line is diagnosis for the red
+            // case only, so only the capture is gated on `tracing`.
+            #[cfg(feature = "tracing")]
             let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
                 transport.process_incoming(0, &raw).unwrap();
             });
+            #[cfg(not(feature = "tracing"))]
+            let logs = {
+                transport.process_incoming(0, &raw).unwrap();
+                ""
+            };
             let _ = transport.drain_events();
 
             transport
@@ -17765,7 +17774,11 @@ mod tests {
             let decision = logs
                 .lines()
                 .find(|l| l.contains("announce rebroadcast decision"))
-                .unwrap_or("<no rebroadcast decision event>");
+                .unwrap_or(if cfg!(feature = "tracing") {
+                    "<no rebroadcast decision event>"
+                } else {
+                    "<log capture needs the tracing feature>"
+                });
             assert!(
                 actions
                     .iter()
