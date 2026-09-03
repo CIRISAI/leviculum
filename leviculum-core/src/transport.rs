@@ -4418,6 +4418,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // stuck on suboptimal paths. Python's rate limiting (announce_rate_target)
         // is inside the `if should_add:` block and only affects rebroadcast
         // scheduling, not path table updates.
+        // The reference never rate-accounts announces from local shared-
+        // instance clients: LocalInterface pins announce_rate_target = None
+        // (LocalInterface.py:127/:428), so Transport.py:1838 skips the whole
+        // rate block, and the only remaining gate on a re-announce is the
+        // emission-timebase/random-blob dedup (Transport.py:1765-1774, one-
+        // second resolution from Destination.py:282). Our 2 s window applied
+        // to local clients swallowed a client's second REAL announce (#255
+        // residual); local-client announces bypass it, over-the-air announces
+        // keep it (anti-flood, deviation rule).
+        let from_local = self.is_local_client(interface_index);
         let mut rate_limited = false;
         if let Some(existing) = self.storage.get_announce_mut(&dest_hash) {
             let elapsed = now.saturating_sub(existing.timestamp_ms);
@@ -4451,7 +4461,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     );
                 }
 
-                rate_limited = true;
+                rate_limited = !from_local;
             }
         }
 
@@ -4506,7 +4516,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Refresh local client tracking timestamp unconditionally.
         // Even when the path table isn't updated (same emission, same hops),
         // the client is still alive and its expiry timer should reset.
-        if self.is_local_client(interface_index) {
+        if from_local {
             self.storage.set_local_client_known_dest(dest_hash, now);
         }
 
@@ -4631,7 +4641,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // local_client_known_dests timestamp is refreshed unconditionally
             // above (before should_update check) so clients stay alive even when
             // path table doesn't change.
-            let from_local = self.is_local_client(interface_index);
             let is_new_local_client_dest = if from_local {
                 self.storage
                     .add_local_client_dest(interface_index, dest_hash)
@@ -4733,8 +4742,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // fire twice from the scheduler (bounded by
                         // LOCAL_REBROADCASTS_MAX=2); local-client announces
                         // start at retries=PATHFINDER_R=1 and fire exactly
-                        // once. See docs/src/architecture-broadcast-python-parity.md.
-                        retries: if delay_for_local_registration || forwards_pending_response {
+                        // once — EVERY announce from a local client, not just
+                        // the first registration ("announced immediately, but
+                        // only one time", Transport.py:1891-1895).
+                        // See docs/src/architecture-broadcast-python-parity.md.
+                        retries: if from_local || forwards_pending_response {
                             PATHFINDER_RETRIES
                         } else {
                             0
@@ -9188,6 +9200,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// The config values are in seconds (Python units); this converts the
     /// target and penalty to the millisecond epoch the rate table stores.
     fn effective_announce_rate(&self, iface_index: usize) -> Option<(u64, u8, u64)> {
+        // Local client interfaces are never rate-accounted in the reference:
+        // LocalInterface hard-sets announce_rate_target = None
+        // (LocalInterface.py:127/:428), and the transport-enabled default
+        // fill (Reticulum.py:831) only runs for config-created network
+        // interfaces, so a shared-instance client's announces bypass the
+        // rate scheme entirely.
+        if self.is_local_client(iface_index) {
+            return None;
+        }
         let (target_s, penalty_s, grace) = Self::resolve_announce_rate(
             self.interface_announce_rate_configs.get(&iface_index),
             self.config.enable_transport,
@@ -17665,6 +17686,107 @@ mod tests {
                     .iter()
                     .any(|a| matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
                 "the client's real announce must egress to the network"
+            );
+        }
+
+        #[test]
+        fn mvr_second_real_local_client_announce_within_two_seconds() {
+            // Residual from the #255 ledger (ble_lxmf_delivery): two REAL
+            // local-client announces less than 2 s apart — the second was
+            // swallowed by the ANNOUNCE_RATE_LIMIT_MS window. The reference
+            // has no such window for local clients: LocalInterface pins
+            // announce_rate_target = None (LocalInterface.py:127), so the
+            // rate block (Transport.py:1838) never runs, and the second
+            // announce is forwarded whenever its emission second is newer
+            // than the stored path timebase and its random blob is unheard
+            // (Transport.py:1765-1774, blob built at Destination.py:282
+            // with int(time.time()) seconds resolution). It then replaces
+            // the announce-table entry and fires immediately, exactly once
+            // (Transport.py:1886-1908, 1891-1895).
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("local", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("net", 2)));
+            transport.set_local_client(0, true);
+
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["reannounce"],
+            )
+            .unwrap();
+
+            // First REAL announce (path_response=false, wire hops 0).
+            let emission = TEST_TIME_MS / 1000;
+            let raw = make_announce_raw_with_random_hash(
+                &dest,
+                0,
+                &make_random_hash([0x1A; 5], emission),
+            );
+            transport.process_incoming(0, &raw).unwrap();
+            let _ = transport.drain_events();
+
+            // First registration defers by LOCAL_CLIENT_ANNOUNCE_DELAY_MS;
+            // let it fire.
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "the first real announce must egress"
+            );
+
+            // Second REAL announce ~1.3 s after the first, newer emission
+            // second, fresh random blob — Python forwards this
+            // (Transport.py:1772: announce_emitted > path_timebase).
+            transport.clock.advance(550);
+            let raw = make_announce_raw_with_random_hash(
+                &dest,
+                0,
+                &make_random_hash([0x1B; 5], emission + 1),
+            );
+            let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.process_incoming(0, &raw).unwrap();
+            });
+            let _ = transport.drain_events();
+
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 1);
+            transport.poll();
+            let actions = transport.drain_actions();
+            let decision = logs
+                .lines()
+                .find(|l| l.contains("announce rebroadcast decision"))
+                .unwrap_or("<no rebroadcast decision event>");
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "the second real announce must egress: the reference applies no \
+                 rate window to local clients (LocalInterface.py:127); decision was: {decision}"
+            );
+
+            // And exactly once: a local-client announce is announced
+            // immediately, but only one time (Transport.py:1891-1895).
+            transport
+                .clock
+                .advance(PATHFINDER_G_MS + 8 * transport.announce_jitter_max_ms() + 1);
+            transport.poll();
+            transport.poll();
+            let actions = transport.drain_actions();
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Broadcast { .. } | Action::SendPacket { .. })),
+                "a local-client announce fires exactly once (Transport.py:1891-1895)"
             );
         }
 
