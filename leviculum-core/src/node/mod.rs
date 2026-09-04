@@ -53,6 +53,8 @@ mod mvr_announce_hold;
 mod mvr_app_proof_ingress_iface;
 #[cfg(test)]
 mod mvr_bidir_transfer;
+#[cfg(test)]
+mod mvr_ble_peer_loss_reroute;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]
@@ -2381,6 +2383,52 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Emit the InterfaceDown event
         self.events.push(NodeEvent::InterfaceDown(iface_idx));
+
+        let next_deadline_ms = self.next_deadline();
+        crate::transport::TickOutput {
+            actions: Vec::new(),
+            events: core::mem::take(&mut self.events),
+            next_deadline_ms,
+        }
+    }
+
+    /// Notify core that one peer link inside a multi-peer interface has
+    /// died (sans-I/O, Codeberg #365).
+    ///
+    /// A BLE interface is one broadcast domain carrying several peer
+    /// links; when a single peer walks out of range the interface stays
+    /// up, so [`handle_interface_down`](Self::handle_interface_down) is
+    /// the wrong tool — it would drop every path on the domain. The
+    /// interface (the only layer that knows the link died) reports the
+    /// peer's identity hash from the Columba handshake, and core drops
+    /// exactly the path entries whose next hop is that peer on that
+    /// interface — the per-peer analog of the reference's culling of
+    /// paths whose receiving interface no longer exists
+    /// (Transport.py:784-785; see `Transport::drop_paths_via_peer`).
+    ///
+    /// Without this, a stale 1-hop path keeps winning against the still
+    /// working relayed route (one entry per destination), and traffic is
+    /// handed for ever to a carrier that cannot deliver it — the field
+    /// mechanism of #365.
+    pub fn handle_interface_peer_lost(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        peer: [u8; TRUNCATED_HASHBYTES],
+    ) -> crate::transport::TickOutput {
+        let lost_paths = self.transport.drop_paths_via_peer(iface.0, &peer);
+
+        crate::tracing::debug!(
+            "Peer <{}> lost on {}, removed {} paths",
+            HexShort(&peer),
+            self.transport.iface_name(iface.0),
+            lost_paths.len()
+        );
+
+        for hash in &lost_paths {
+            self.events.push(NodeEvent::PathLost {
+                destination_hash: crate::destination::DestinationHash::new(*hash),
+            });
+        }
 
         let next_deadline_ms = self.next_deadline();
         crate::transport::TickOutput {

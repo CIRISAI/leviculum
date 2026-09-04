@@ -647,6 +647,12 @@ struct EventLoopChannels {
     /// Runtime interface-removal requests. An id fired here is torn down through
     /// the same path as a channel-close disconnect (see [`recv_any`]).
     remove_iface_rx: mpsc::Receiver<InterfaceId>,
+    /// Per-peer loss reports from multi-peer interfaces (Codeberg #365):
+    /// `(interface, peer identity hash)` when a peer's last link on that
+    /// broadcast domain died. The loop culls the paths whose next hop is
+    /// that peer on that interface — the per-peer analog of the
+    /// `Disconnected` cleanup. Currently fed by the BLE interface only.
+    peer_lost_rx: mpsc::Receiver<(InterfaceId, [u8; 16])>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -956,6 +962,10 @@ pub struct ReticulumNode {
     /// they initiate the synthesize handshake like config interfaces (Codeberg
     /// #64). `Some` after `start()`.
     tunnel_notify_tx: Option<mpsc::Sender<InterfaceId>>,
+    /// Peer-loss sender handed to runtime-attached multi-peer interfaces
+    /// (BLE) so their per-peer path culling works like config interfaces
+    /// (Codeberg #365). `Some` after `start()`.
+    peer_lost_tx: Option<mpsc::Sender<(InterfaceId, [u8; 16])>>,
     /// Runtime interface-removal sender. [`remove_interface`](Self::remove_interface)
     /// fires an id here; the event loop tears the interface down through the
     /// same path as a channel-close disconnect. `Some` after `start()`.
@@ -1097,6 +1107,7 @@ impl ReticulumNode {
             iface_id_counter: None,
             reconnect_tx: None,
             tunnel_notify_tx: None,
+            peer_lost_tx: None,
             remove_iface_tx: None,
             storage_path: None,
             autoconnect_max: 0,
@@ -1334,6 +1345,11 @@ impl ReticulumNode {
         // event loop tears it down through the shared disconnect path.
         let (remove_iface_tx, remove_iface_rx) = mpsc::channel::<InterfaceId>(16);
 
+        // Per-peer loss reports from multi-peer interfaces (Codeberg #365).
+        // The BLE interface fires (id, peer identity hash) here when a peer's
+        // last link died; the event loop culls the paths via that peer.
+        let (peer_lost_tx, peer_lost_rx) = mpsc::channel::<(InterfaceId, [u8; 16])>(16);
+
         // Retain clones so the node can attach and detach interfaces at runtime
         // (hot-plug), not just at construction. Used by `spawn_interface` /
         // `remove_interface` and `spawn_rnode_channel_interface`.
@@ -1342,6 +1358,7 @@ impl ReticulumNode {
         self.reconnect_tx = Some(reconnect_tx.clone());
         self.tunnel_notify_tx = Some(tunnel_notify_tx.clone());
         self.remove_iface_tx = Some(remove_iface_tx);
+        self.peer_lost_tx = Some(peer_lost_tx.clone());
 
         // Initialize interfaces, the driver owns them, NOT NodeCore.
         // Interface init is the one fallible step after the runtime exists
@@ -1354,6 +1371,7 @@ impl ReticulumNode {
             &new_iface_tx,
             &reconnect_tx,
             &tunnel_notify_tx,
+            &peer_lost_tx,
         ) {
             Ok(registry) => registry,
             Err(e) => {
@@ -1606,6 +1624,7 @@ impl ReticulumNode {
                     reconnect_rx,
                     tunnel_notify_rx,
                     remove_iface_rx,
+                    peer_lost_rx,
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
@@ -1651,6 +1670,7 @@ impl ReticulumNode {
         new_iface_tx: &mpsc::Sender<InterfaceHandle>,
         reconnect_tx: &mpsc::Sender<InterfaceId>,
         tunnel_notify_tx: &mpsc::Sender<InterfaceId>,
+        peer_lost_tx: &mpsc::Sender<(InterfaceId, [u8; 16])>,
     ) -> Result<InterfaceRegistry, Error> {
         if self.share_instance_name.is_some() && self.connect_instance_name.is_some() {
             return Err(Error::Config(
@@ -1681,6 +1701,7 @@ impl ReticulumNode {
                 new_iface_tx,
                 reconnect_tx,
                 tunnel_notify_tx,
+                peer_lost_tx,
                 corrupt_every: self.corrupt_every,
                 storage_path: self.storage_path.clone(),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
@@ -2145,6 +2166,7 @@ impl ReticulumNode {
         let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
         let reconnect_tx = self.reconnect_tx.as_ref().ok_or(Error::NotRunning)?;
         let tunnel_notify_tx = self.tunnel_notify_tx.as_ref().ok_or(Error::NotRunning)?;
+        let peer_lost_tx = self.peer_lost_tx.as_ref().ok_or(Error::NotRunning)?;
 
         // A runtime interface draws a fresh base id so it never collides with a
         // config-index id; fan-out children draw more.
@@ -2155,6 +2177,7 @@ impl ReticulumNode {
             new_iface_tx,
             reconnect_tx,
             tunnel_notify_tx,
+            peer_lost_tx,
             corrupt_every: self.corrupt_every,
             storage_path: self.storage_path.clone(),
             outbound_socket_hook: self.outbound_socket_hook.clone(),
@@ -3640,6 +3663,7 @@ async fn run_event_loop(
     let mut reconnect_rx = channels.reconnect_rx;
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut remove_iface_rx = channels.remove_iface_rx;
+    let mut peer_lost_rx = channels.peer_lost_rx;
     // A removal can arrive before the event loop has registered its interface
     // (a detach racing a just-accepted add); held here, applied on arrival.
     let mut pending_removals: std::collections::HashSet<InterfaceId> =
@@ -4216,6 +4240,21 @@ async fn run_event_loop(
                 let output = {
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
+                };
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+            }
+
+            // Branch 6c: Per-peer loss on a multi-peer interface (Codeberg
+            // #365). The BLE interface reports the identity hash of a peer
+            // whose last link on its broadcast domain died; core culls the
+            // path entries whose next hop is that peer on that interface
+            // (the per-peer analog of the Disconnected cleanup above,
+            // Transport.py:784-785 semantics). The interface itself stays
+            // up — other peers keep their links and paths.
+            Some((iface_id, peer)) = peer_lost_rx.recv() => {
+                let output = {
+                    let mut core = inner.lock_recover();
+                    core.handle_interface_peer_lost(iface_id, peer)
                 };
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
             }
@@ -7977,6 +8016,7 @@ mod tests {
         let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
         let (remove_tx, remove_rx) = mpsc::channel(1);
+        let (_peer_lost_tx, peer_lost_rx) = mpsc::channel(1);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let loop_handle = tokio::spawn(run_event_loop(
@@ -7989,6 +8029,7 @@ mod tests {
                 reconnect_rx,
                 tunnel_notify_rx: tunnel_rx,
                 remove_iface_rx: remove_rx,
+                peer_lost_rx,
                 shutdown: shutdown_rx,
             },
             Arc::new(Mutex::new(BTreeMap::new())),

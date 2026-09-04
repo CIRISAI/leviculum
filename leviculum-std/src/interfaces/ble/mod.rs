@@ -139,6 +139,7 @@ pub(crate) fn spawn_ble_interface(
     name: String,
     opts: BleOptions,
     identity_hash: IdentityHash,
+    peer_lost_tx: mpsc::Sender<(InterfaceId, IdentityHash)>,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(BLE_BUFFER_SIZE);
     let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(BLE_BUFFER_SIZE);
@@ -161,10 +162,12 @@ pub(crate) fn spawn_ble_interface(
     };
 
     let task = BleTask {
+        id,
         name,
         opts,
         identity_hash,
         incoming_tx,
+        peer_lost_tx,
         counters: Arc::clone(&counters),
         ready: Arc::clone(&ready),
     };
@@ -181,10 +184,16 @@ pub(crate) fn spawn_ble_interface(
 }
 
 struct BleTask {
+    id: InterfaceId,
     name: String,
     opts: BleOptions,
     identity_hash: IdentityHash,
     incoming_tx: mpsc::Sender<IncomingPacket>,
+    /// Peer-loss reports toward the driver loop (Codeberg #365): the
+    /// identity hash of a peer whose LAST link on this broadcast domain
+    /// is gone. The loop culls the path entries whose next hop is that
+    /// peer on this interface (`NodeCore::handle_interface_peer_lost`).
+    peer_lost_tx: mpsc::Sender<(InterfaceId, IdentityHash)>,
     counters: Arc<InterfaceCounters>,
     ready: Arc<ReadySignal>,
 }
@@ -328,6 +337,7 @@ impl BleTask {
                         central_pipes.remove(&addr);
                         disconnect_quietly(&adapter, addr).await;
                         backoff_until.insert(addr, now + SESSION_BACKOFF_MS);
+                        self.report_peer_lost(&table, identity).await;
                     }
                     for addr in expired.pending {
                         tracing::debug!(
@@ -481,6 +491,7 @@ impl BleTask {
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
                     self.log_link_down(&identity, role, "disconnected");
+                    self.report_peer_lost(table, identity).await;
                 }
                 let until = backoff_until.entry(addr.0).or_insert(0);
                 *until = (*until).max(now + SESSION_BACKOFF_MS);
@@ -552,6 +563,24 @@ impl BleTask {
 
     async fn deliver(&self, packet: Vec<u8>) {
         let _ = self.incoming_tx.send(IncomingPacket { data: packet }).await;
+    }
+
+    /// Report a peer loss to the driver loop, unless the identity still
+    /// owns another live link — `LinkTable::knows_identity` is the
+    /// single decision point (Codeberg #365). Called at the timeout and
+    /// disconnect removal sites; the displacement sites are exempt by
+    /// construction (a displaced link is replaced by a live link with
+    /// the SAME identity, so the peer was never lost).
+    async fn report_peer_lost(&self, table: &LinkTable, identity: IdentityHash) {
+        if table.knows_identity(&identity) {
+            return;
+        }
+        tracing::info!(
+            event = "BLE_PEER_LOST",
+            iface = %self.name,
+            peer = %hex8(&identity),
+        );
+        let _ = self.peer_lost_tx.send((self.id, identity)).await;
     }
 
     fn log_link_up(&self, identity: &IdentityHash, addr: &Addr, role: Role, mtu: usize) {

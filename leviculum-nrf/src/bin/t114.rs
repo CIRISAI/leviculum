@@ -14,14 +14,14 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select3, select4, Either3, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::Level;
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
 use leviculum_core::ifac::IfacConfig;
-use leviculum_core::node::NodeCoreBuilder;
+use leviculum_core::node::{NodeCoreBuilder, NodeEvent};
 use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
@@ -552,7 +552,10 @@ async fn main(spawner: Spawner) {
             select4(
                 serial.incoming_rx.receive(),
                 lora_channels.incoming_rx.receive(),
-                ble_channels.incoming_rx.receive(),
+                select(
+                    ble_channels.incoming_rx.receive(),
+                    ble_channels.peer_lost_rx.receive(),
+                ),
                 Timer::at(deadline),
             ),
             gnss_time_candidate,
@@ -691,7 +694,7 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
-            Either4::First(Either4::Third(data)) => {
+            Either4::First(Either4::Third(Either::First(data))) => {
                 info!("BLE RX {} bytes", data.len());
                 // See the LoRa arm: a medium switched off at runtime
                 // delivers nothing upward either.
@@ -706,6 +709,27 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
+            }
+            Either4::First(Either4::Third(Either::Second(peer))) => {
+                // A BLE peer's last link died (Codeberg #365): cull the
+                // paths whose next hop is that peer so the next report
+                // re-resolves over a carrier that can still deliver. Not
+                // gated on media::ble_active — this is state cleanup, not
+                // traffic, and a medium switched off mid-run must shed
+                // its peers' paths too.
+                let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
+                info!(
+                    "BLE peer lost, {} paths culled",
+                    output
+                        .events
+                        .iter()
+                        .filter(|e| matches!(e, NodeEvent::PathLost { .. }))
+                        .count()
+                );
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("ble-peer-lost", &mut node, &dispatched);
             }
             Either4::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();

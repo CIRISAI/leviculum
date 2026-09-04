@@ -229,6 +229,16 @@ impl LinkTable {
         self.links.iter().any(|l| &l.addr == addr) || self.pending.iter().any(|p| &p.addr == addr)
     }
 
+    /// Whether `identity` still owns a live link (Codeberg #365).
+    ///
+    /// Decides whether a link removal is a real peer loss the transport
+    /// must hear about (drop the paths via that peer) or a same-identity
+    /// churn — a zombie displaced by its own reconnect — where the peer
+    /// is still reachable and the paths must stay.
+    pub(crate) fn knows_identity(&self, identity: &IdentityHash) -> bool {
+        self.links.iter().any(|l| &l.identity == identity)
+    }
+
     /// Admission check + insert, shared by both roles.
     ///
     /// Duplicate handling is identity-keyed, never address-keyed, because
@@ -556,6 +566,40 @@ mod tests {
         assert_eq!(
             local_name(&hash).as_bytes(),
             leviculum_ble_tx::device_name(&hash)
+        );
+    }
+
+    /// The peer-loss report decision (Codeberg #365): a removal that
+    /// leaves the identity without any live link is a real loss; a
+    /// zombie displaced by its own reconnect is not.
+    #[test]
+    fn knows_identity_separates_peer_loss_from_same_identity_churn() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Peripheral, 100, 0);
+        assert_eq!(adm, Admission::Accept);
+        assert!(t.knows_identity(&ID_A));
+        assert!(!t.knows_identity(&ID_B));
+
+        // Same identity reappears on a fresh address after the old link
+        // went zombie: displaced, but the peer is still linked — no
+        // peer-loss report.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, ZOMBIE_TIMEOUT_MS + 1);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(
+            displaced.map(|(id, addr, _)| (id, addr)),
+            Some((ID_A, ADDR_1))
+        );
+        assert!(
+            t.knows_identity(&ID_A),
+            "displacement is churn, not loss: the identity still owns a link"
+        );
+
+        // The real loss: the only link goes away.
+        let removed = t.remove_by_addr(&ADDR_2);
+        assert_eq!(removed.map(|(id, ..)| id), Some(ID_A));
+        assert!(
+            !t.knows_identity(&ID_A),
+            "after the last link is gone the loss must be reportable"
         );
     }
 

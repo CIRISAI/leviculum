@@ -425,8 +425,24 @@ fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
     LIVE_PEERS.lock(|peers| peers.borrow_mut()[slot_index] = Some(peer_id));
 }
 
+/// Clear a slot's registry entry and, when that took the peer's LAST
+/// link, report the loss to the main loop so the transport culls the
+/// paths via that peer (Codeberg #365). A same-identity link on another
+/// slot (the zombie-displacement window) means the peer is still
+/// reachable: registry churn, not a loss, so no report.
 fn peer_link_down(slot_index: usize) {
-    LIVE_PEERS.lock(|peers| peers.borrow_mut()[slot_index] = None);
+    let lost = LIVE_PEERS.lock(|peers| {
+        let mut peers = peers.borrow_mut();
+        let identity = peers[slot_index].take()?;
+        peers
+            .iter()
+            .flatten()
+            .all(|id| *id != identity)
+            .then_some(identity)
+    });
+    if let Some(identity) = lost {
+        super::report_peer_lost(identity);
+    }
 }
 
 fn peer_already_linked(peer_id: &[u8; 16]) -> bool {

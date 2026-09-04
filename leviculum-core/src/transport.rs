@@ -3629,6 +3629,63 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         count
     }
 
+    /// Remove every path entry whose next hop is peer `peer` on
+    /// `interface_index` (Codeberg #365). Returns the destination hashes
+    /// of the removed paths.
+    ///
+    /// The reference culls a path whose receiving interface no longer
+    /// exists (Transport.py:784-785) and expires paths on roaming /
+    /// access-point interfaces early (Transport.py:773-779:
+    /// `ROAMING_PATH_TIME` 6 h, `AP_PATH_TIME` 24 h, default
+    /// `DESTINATION_TIMEOUT` 7 d; the timeout check itself is :780).
+    /// Python has no multi-peer interface, so the unit that comes and
+    /// goes there is the whole interface; on a BLE broadcast domain it
+    /// is one peer link inside the interface. Same semantics, finer
+    /// grain: a path whose carrier can no longer reach its next hop is
+    /// stale. Only the interface knows the link died (interface
+    /// isolation); it reports the peer's identity hash and this method
+    /// does the culling.
+    ///
+    /// An entry is "via `peer`" when that peer is the neighbour we
+    /// would hand the packet to:
+    /// - relayed entries name the relaying transport in `next_hop` —
+    ///   the same identity hash the peer presents in the Columba
+    ///   handshake and stamps as `transport_id` on announces it relays;
+    /// - direct entries (`next_hop == None`) belong to the announcing
+    ///   identity itself, recalled from the cached announce
+    ///   (`recall_identity_hash`). A direct entry whose announce has
+    ///   been evicted from the cache cannot be attributed and is left
+    ///   to ordinary expiry.
+    pub fn drop_paths_via_peer(
+        &mut self,
+        interface_index: usize,
+        peer: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
+        let to_remove: Vec<[u8; TRUNCATED_HASHBYTES]> = self
+            .storage
+            .path_entries()
+            .into_iter()
+            .filter(|(hash, entry)| {
+                entry.interface_index == interface_index
+                    && match entry.next_hop {
+                        Some(next_hop) => next_hop == *peer,
+                        None => self.recall_identity_hash(hash) == Some(*peer),
+                    }
+            })
+            .map(|(hash, _)| hash)
+            .collect();
+        for hash in &to_remove {
+            self.storage.remove_path(hash);
+            crate::tracing::debug!(
+                "Path to <{}> was removed since peer <{}> on {} is gone",
+                HexShort(hash),
+                HexShort(peer),
+                self.iface_name(interface_index)
+            );
+        }
+        to_remove
+    }
+
     // Blackholed identities (Codeberg #67)
     //
     // Mirrors the Python `RNS.Transport` blackhole API. The set is authoritative
