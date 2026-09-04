@@ -85,6 +85,15 @@ Three conditions, any one of which is sufficient:
 Convenience, code tidiness, and "it would be cleaner to separate them"
 are not on this list.
 
+**A frequency region is not on it either.** The compiled default is the
+eu868 community profile, but the radio configuration is data, chosen at
+flash time: `lnflash` ends every flash with a preset menu — eu868,
+us915, au915, or a custom five-number entry — and stores the choice on
+the board (see [Flashing an LNode](lnode-flashing.md), "The radio
+configuration belongs to the flash"). The presets are the settings each
+regional Reticulum community has converged on; a default, not legal
+advice.
+
 ## The limit that bites
 
 Universality reaches exactly as far as the identification does. A build
