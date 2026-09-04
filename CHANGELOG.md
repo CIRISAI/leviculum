@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference. The per-probe timeout asks the daemon for its first-hop
   timeout like `rnprobe` does, so probes over slow media wait longer by
   default.
+- A board says which hashes to probe: one `[IDENTITY]
+  identity=… probe=… lxmf=…` line on the boot-critical log path (both
+  BSPs), repeated in the periodic banner so a reader attached later
+  still sees it — and the same three hashes over a new control-envelope
+  identity query (frame `0x0E`), which `lnflash --set-name` prints in
+  its read-back, so no debug-port reader is needed.
+
 - lnsd joins the Columba BLE mesh: a new `BLEInterface` type
   (`[[BLE Interface]]` config section) speaks the `ble-reticulum`
   protocol v2.2 with the v0.3.0 capability record over BlueZ, in both

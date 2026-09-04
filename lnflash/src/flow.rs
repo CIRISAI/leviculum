@@ -1207,24 +1207,66 @@ pub fn set_name(
     let mut all_took_it = reachable.unreachable == 0;
     for board in &reachable.boards {
         let port = &board.port;
-        let outcome =
-            match open_transport(sysfs, &board.device, &board.tty).and_then(|fd| match name {
-                None => crate::name::query(&fd),
-                Some(chosen) => crate::name::send(&fd, chosen.as_ref()),
-            }) {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    ui.say(&format!(
-                        "{port}: the transport port could not be used ({err})"
-                    ));
-                    all_took_it = false;
-                    continue;
-                }
-            };
+        let fd = match open_transport(sysfs, &board.device, &board.tty) {
+            Ok(fd) => fd,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        let outcome = match match name {
+            None => crate::name::query(&fd),
+            Some(chosen) => crate::name::send(&fd, chosen.as_ref()),
+        } {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
         all_took_it &= outcome.is_ok();
         report_name(ui, port, name, outcome);
+        report_identity(ui, port, &fd);
     }
     Ok(all_took_it)
+}
+
+/// Say what the board reported about its identity hashes, on the same
+/// port the name session used.
+///
+/// Informational — a prober's shortcut to the hashes without a
+/// debug-port reader — so nothing here touches the session's success:
+/// firmware from before the query still names itself fine, and is told
+/// how to get the hashes rather than handed derived ones the board never
+/// confirmed.
+fn report_identity(ui: &mut dyn Ui, port: &str, fd: &crate::sys::Fd) {
+    use leviculum_core::envelope::REFUSE_BUSY;
+    match crate::name::identity(fd) {
+        Ok(Ok(report)) => ui.say(&format!(
+            "{port}: {}.",
+            crate::name::describe_identity(&report)
+        )),
+        Ok(Err(SessionReply::NotAccepted)) => ui.say(&format!(
+            "{port}: this firmware does not report its identity hashes; flash the current \
+             bundle to read them here, or read the [IDENTITY] line on the debug port."
+        )),
+        Ok(Err(SessionReply::Refused(reason))) if reason == REFUSE_BUSY => ui.say(&format!(
+            "{port}: the board cannot state its identity hashes yet; run the command again in \
+             a second."
+        )),
+        // Refused otherwise, silent, or a dead port: the name outcome
+        // above already told the operator what this board is; the hash
+        // line is the only thing missing.
+        Ok(Err(_)) | Err(_) => ui.say(&format!(
+            "{port}: the board did not answer about its identity hashes."
+        )),
+    }
 }
 
 /// Say what the board answered about its name.

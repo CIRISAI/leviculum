@@ -20,16 +20,16 @@ use std::time::{Duration, Instant};
 
 use leviculum_core::envelope::{
     decode_ack_payload, decode_capability_report_payload, decode_frame,
-    decode_media_report_payload, decode_node_name_report_payload,
+    decode_identity_report_payload, decode_media_report_payload, decode_node_name_report_payload,
     decode_position_source_report_payload, decode_refusal_payload, encode_capability_query,
-    encode_fixed_position, encode_media_profile, encode_media_query, encode_node_name,
-    encode_node_name_query, encode_position_source_query, encode_radio_config,
+    encode_fixed_position, encode_identity_query, encode_media_profile, encode_media_query,
+    encode_node_name, encode_node_name_query, encode_position_source_query, encode_radio_config,
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
-    MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY, REFUSE_MALFORMED,
-    REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
-    TYPE_CAPABILITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT,
-    TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
-    TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
+    IdentityReportWire, MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY,
+    REFUSE_MALFORMED, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE,
+    TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT,
+    TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
+    TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::node_name::NodeName;
@@ -560,6 +560,34 @@ pub fn query_node_name(fd: &Fd) -> io::Result<Result<NodeNameState, ControlOutco
     )
 }
 
+/// Ask the board for its identity hashes (`TYPE_IDENTITY_QUERY`).
+///
+/// `Ok(Err(..))` is "no report came back": firmware from before the
+/// query refuses it by name (`REFUSE_UNKNOWN_TYPE`), a board still in
+/// the boot window before its node exists answers `REFUSE_BUSY`, and
+/// pre-envelope firmware never answers at all. The caller must not
+/// derive the hashes itself — the board reports what it actually
+/// registered, including "no probe responder".
+pub fn query_identity(fd: &Fd) -> io::Result<Result<IdentityReportWire, ControlOutcome>> {
+    Ok(
+        match transact(fd, &encode_identity_query(), CONTROL_TIMING, |data| {
+            let frame = decode_frame(data).ok()?;
+            match frame.frame_type {
+                TYPE_IDENTITY_REPORT => Some(Ok(decode_identity_report_payload(frame.payload)?)),
+                TYPE_REFUSAL => match decode_refusal_payload(frame.payload) {
+                    Some((refused, reason)) if refused == TYPE_IDENTITY_QUERY => Some(Err(reason)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })? {
+            Some(Ok(report)) => Ok(report),
+            Some(Err(reason)) => Err(ControlOutcome::Refused { reason }),
+            None => Err(ControlOutcome::NoAnswer),
+        },
+    )
+}
+
 /// What a board answered about its position sources — the second clause
 /// of the telemetry send condition.
 ///
@@ -673,14 +701,14 @@ pub(crate) mod testing {
     use leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
     use leviculum_core::envelope::{
         classify_control_frame, encode_ack, encode_capability_report, encode_media_report,
-        encode_radio_report, encode_refusal, fixed_position_answer, media_profile_answer,
-        media_query_answer, node_name_answer, node_name_query_answer, position_source_query_answer,
-        telemetry_target_answer, ControlAction, MediaProfileWire, Persist,
-        NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED, POSITION_SOURCE_FIXED,
-        POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_MEDIA_PROFILE,
-        TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY,
-        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
-        TYPE_WALL_TIME,
+        encode_radio_report, encode_refusal, fixed_position_answer, identity_query_answer,
+        media_profile_answer, media_query_answer, node_name_answer, node_name_query_answer,
+        position_source_query_answer, telemetry_target_answer, ControlAction, IdentityReportWire,
+        MediaProfileWire, Persist, NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED,
+        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION,
+        TYPE_IDENTITY_QUERY, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_NODE_NAME,
+        TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY,
+        TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::node_name::{truncate_on_char_boundary, NodeName, BLE_NAME_MAX_LEN};
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
@@ -713,6 +741,20 @@ pub(crate) mod testing {
         TYPE_POSITION_SOURCE_QUERY,
         TYPE_NODE_NAME,
         TYPE_NODE_NAME_QUERY,
+        TYPE_IDENTITY_QUERY,
+    ];
+
+    /// The scripted board's probe and LXMF destination hashes. Distinct
+    /// from [`STUB_IDENTITY_HASH`] and from each other, so a host that
+    /// printed one hash under another's label shows up as a changed
+    /// value rather than as a coincidence.
+    pub const STUB_PROBE_HASH: [u8; 16] = [
+        0x0c, 0x21, 0x92, 0xe5, 0x00, 0x75, 0x3e, 0xb4, 0x2e, 0x1e, 0x42, 0x2f, 0xe3, 0x32, 0x2a,
+        0x1d,
+    ];
+    pub const STUB_LXMF_HASH: [u8; 16] = [
+        0x9b, 0x42, 0x1c, 0x5a, 0x9c, 0x86, 0x20, 0x2b, 0x3d, 0x7a, 0x59, 0xd4, 0xd3, 0x4a, 0x3c,
+        0x8b,
     ];
 
     /// The position sources the scripted board has. A cell rather than a
@@ -1024,6 +1066,15 @@ pub(crate) mod testing {
                         true,
                         Some((name.flags(), &name.mesh(), &name.ble())),
                     ))
+                }
+                // The identity gate, run exactly as the board runs it:
+                // the hashes the boot published, all three registered.
+                ControlAction::IdentityQuery => {
+                    Some(identity_query_answer(Some(&IdentityReportWire {
+                        identity: STUB_IDENTITY_HASH,
+                        probe: Some(STUB_PROBE_HASH),
+                        lxmf: Some(STUB_LXMF_HASH),
+                    })))
                 }
                 ControlAction::Refuse {
                     refused_type,

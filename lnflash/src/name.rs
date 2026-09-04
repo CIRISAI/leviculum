@@ -50,7 +50,9 @@
 
 use std::io;
 
-use leviculum_core::envelope::{NodeNameState, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY};
+use leviculum_core::envelope::{
+    IdentityReportWire, NodeNameState, TYPE_IDENTITY_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
+};
 use leviculum_core::node_name::NodeName;
 
 use crate::envelope::{self, SessionReply};
@@ -94,6 +96,46 @@ pub fn query(fd: &Fd) -> io::Result<Result<NodeNameState, SessionReply>> {
         return Ok(Err(SessionReply::NotAccepted));
     }
     Ok(envelope::query_node_name(fd)?.map_err(SessionReply::from))
+}
+
+/// Read the board's identity hashes on an already-opened transport port
+/// — what `--set-name`'s transcript prints beside the names, so an
+/// operator gets the probe destination without a debug-port reader.
+///
+/// Behind the capability probe like [`query`]; firmware from before the
+/// frame comes back [`SessionReply::NotAccepted`] and the caller says so
+/// instead of deriving hashes the board never confirmed.
+pub fn identity(fd: &Fd) -> io::Result<Result<IdentityReportWire, SessionReply>> {
+    let Some(caps) = envelope::probe_capabilities(fd)? else {
+        return Ok(Err(SessionReply::ProbeSilent));
+    };
+    if !caps.accepts(TYPE_IDENTITY_QUERY) {
+        return Ok(Err(SessionReply::NotAccepted));
+    }
+    Ok(envelope::query_identity(fd)?.map_err(SessionReply::from))
+}
+
+/// One line with the three hashes a prober needs, for the transcript and
+/// for grep. The same `key=value` shape — and the same keys — as the
+/// board's own `[IDENTITY]` banner on the debug port, so comparing the
+/// two is comparing identical text. `none` marks a destination this
+/// boot did not register.
+pub fn describe_identity(report: &IdentityReportWire) -> String {
+    fn hex(hash: &[u8; 16]) -> String {
+        hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn maybe(hash: &Option<[u8; 16]>) -> String {
+        match hash {
+            Some(hash) => hex(hash),
+            None => "none".to_string(),
+        }
+    }
+    format!(
+        "identity={} probe={} lxmf={}",
+        hex(&report.identity),
+        maybe(&report.probe),
+        maybe(&report.lxmf)
+    )
 }
 
 /// Set the board's name, or clear it back to the derived default
@@ -323,6 +365,61 @@ mod tests {
         assert_eq!(state.mesh.as_str(), "LNode-a1b2c3d4");
         assert_eq!(state.ble.as_str(), "LN-a1b2c3d4");
         assert_eq!(node_name_frame(&seen), None, "read-only: no set frame");
+    }
+
+    // -----------------------------------------------------------------
+    // The identity hashes riding along on the same port
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_identity_query_reports_the_three_hashes_the_board_registered() {
+        use crate::envelope::testing::{STUB_LXMF_HASH, STUB_PROBE_HASH};
+
+        let pty = Pty::open();
+        envelope_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let report = identity(&fd).unwrap().unwrap();
+        assert_eq!(
+            report.identity,
+            crate::envelope::testing::STUB_IDENTITY_HASH
+        );
+        assert_eq!(report.probe, Some(STUB_PROBE_HASH));
+        assert_eq!(report.lxmf, Some(STUB_LXMF_HASH));
+
+        // The transcript line uses the debug-port banner's exact keys,
+        // so grep hits both with one pattern.
+        let line = describe_identity(&report);
+        assert!(line.starts_with("identity=a1b2c3d4"), "{line}");
+        assert!(line.contains(" probe=0c2192e5"), "{line}");
+        assert!(line.contains(" lxmf=9b421c5a"), "{line}");
+    }
+
+    #[test]
+    fn an_unregistered_destination_prints_as_none_not_as_zeroes() {
+        let report = IdentityReportWire {
+            identity: [0x11; 16],
+            probe: None,
+            lxmf: None,
+        };
+        let line = describe_identity(&report);
+        assert!(line.contains("probe=none"), "{line}");
+        assert!(line.contains("lxmf=none"), "{line}");
+    }
+
+    #[test]
+    fn firmware_from_before_the_identity_query_is_reported_not_derived() {
+        // The pre-#236 board advertises a list without the query; the
+        // host must say "cannot read them here" rather than derive
+        // hashes the board never confirmed.
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(
+            identity(&fd).unwrap().unwrap_err(),
+            SessionReply::NotAccepted
+        );
     }
 
     // -----------------------------------------------------------------
