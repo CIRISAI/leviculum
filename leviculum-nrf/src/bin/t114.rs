@@ -441,6 +441,13 @@ async fn main(spawner: Spawner) {
             dh[8], dh[9], dh[10], dh[11], dh[12], dh[13], dh[14], dh[15]
         ));
     }
+    // All three hashes a prober needs, on one boot-critical line (and
+    // from here on in the periodic banner and the identity query).
+    leviculum_nrf::identity::note_boot_identity(
+        *node.identity().hash(),
+        node.probe_dest_hash().map(|h| *h.as_bytes()),
+        delivery_hash.as_ref().map(|h| *h.as_bytes()),
+    );
     let mut reporter = delivery_hash.map(leviculum_nrf::telemetry::Reporter::new);
     if reporter.is_none() {
         log_critical!("[TELEMETRY] target=00000000 state=off reason=no-delivery-destination");
@@ -807,5 +814,6 @@ async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
         leviculum_nrf::media::log_banner(media_src);
         leviculum_nrf::name::log_banner();
+        leviculum_nrf::identity::log_banner();
     }
 }

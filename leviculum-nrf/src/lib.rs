@@ -22,6 +22,7 @@ pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
 pub mod flash;
+pub mod identity;
 pub mod interface;
 pub mod log;
 pub mod lora;

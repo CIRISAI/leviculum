@@ -65,6 +65,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_POSITION_SOURCE_QUERY,
     envelope::TYPE_NODE_NAME,
     envelope::TYPE_NODE_NAME_QUERY,
+    envelope::TYPE_IDENTITY_QUERY,
 ];
 
 /// nRF52840 FICR base address
@@ -821,6 +822,20 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: node-name report write failed");
+                                    }
+                                }
+                                ControlAction::IdentityQuery => {
+                                    // Read-only. `None` is the boot-order
+                                    // window before the node published its
+                                    // hashes: REFUSE_BUSY, the host
+                                    // retries — the node-name query's
+                                    // readiness clause.
+                                    let report = crate::identity::report();
+                                    let answer = envelope::identity_query_answer(report.as_ref());
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: identity report write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {
