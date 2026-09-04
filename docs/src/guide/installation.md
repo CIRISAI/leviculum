@@ -55,7 +55,16 @@ Verify the build; the output carries the version and the build commit:
 ./target/x86_64-unknown-linux-musl/release/lnsd
 ```
 
-Reads its config from `~/.reticulum/config`, the same location as Python Reticulum.
+The daemon resolves its config directory in the same order as Python
+Reticulum (`configdir`, `RNS/Reticulum.py:231`), implemented in
+`default_config_dir` (`leviculum-std/src/config.rs:773`):
+
+1. `/etc/reticulum` — if `/etc/reticulum/config` exists. This is what
+   the `.deb` package sets up.
+2. `~/.config/reticulum` — if that directory's `config` exists.
+3. `~/.reticulum` — the fallback, and where a source build with no
+   prior config ends up.
+
 Add `-v` (debug) or `-vv` (trace) for more verbose logging.
 
 ## Development
