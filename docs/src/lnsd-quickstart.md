@@ -31,7 +31,8 @@ sudo apt install ./leviculum-nightly-amd64.deb       # or -arm64
 
 The package:
 
-- Installs `lnsd`, `lnstest`, and `lncp` under `/usr/bin/`.
+- Installs `lnsd`, `lnstest`, `lncp`, and `lnstatus` under `/usr/bin/`,
+  with a man page for each.
 - Creates a system user `leviculum` and a group of the same name.
 - Drops a default config file at `/etc/reticulum/config` (mode 644)
   and creates the config directory `/etc/reticulum` mode 2775
@@ -39,7 +40,7 @@ The package:
   `leviculum` group).
 - Enables and starts the `lnsd.service` systemd unit.
 
-For the native tools (`lnstest`, `lncp`) and Python tools (`rnstatus`,
+For the native tools (`lnstest`, `lncp`, `lnstatus`) and Python tools (`rnstatus`,
 `rnpath`, `rnprobe`, Sideband, Nomadnet, …) to talk to the running
 daemon, your user has to be in the `leviculum` group:
 
@@ -270,8 +271,9 @@ python3 -m venv ~/.rns-venv
 
 Python tools auto-detect `/etc/reticulum/config` and connect to the
 running `lnsd` through the same shared-instance socket. No extra flags
-are needed. (`lnstest` has no network-status command; use `rnstatus` or
-the daemon-view section of `lnstest diag`.)
+are needed. (The native `lnstatus` from the `.deb` covers the same
+ground as `rnstatus`; the Python install is only needed for `rnpath`,
+`rnprobe`, Sideband, and friends.)
 
 ## Connect to the wider mesh
 
@@ -370,8 +372,9 @@ not running".
   ```
 - Confirm both client and daemon are using the same config directory.
   The client defaults to `/etc/reticulum` if it exists, then
-  `~/.config/reticulum`, then `~/.reticulum`. `lnstest diag --config
-  /etc/reticulum` is explicit.
+  `~/.config/reticulum`, then `~/.reticulum` — the full resolution
+  order is in [Installation](guide/installation.md). `lnstest diag
+  --config /etc/reticulum` is explicit.
 
 ### Submitting a bug report
 
@@ -403,8 +406,9 @@ lnsd`, which is enough.
 
 ## See also
 
-- `lnsd --help`, `lnstest --help`, `lncp --help` for the full command
-  and option reference (the `.deb` does not install man pages).
+- `lnsd --help`, `lnstest --help`, `lncp --help`, `lnstatus --help` for
+  the full command and option reference; the `.deb` also installs a man
+  page for each (`man lnsd`, …).
 - [Configuration](guide/configuration.md) for the format reference.
 - [Installation](guide/installation.md) for the source-build path.
 - The upstream [Reticulum Manual](https://reticulum.network/manual/)
