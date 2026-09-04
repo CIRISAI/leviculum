@@ -382,9 +382,15 @@ async fn main(spawner: Spawner) {
     }
 
     // Quectel L76K on UARTE0 (#69). Pin naming is from the MCU's side:
-    // P1.07 is where the module's TX arrives, P1.05 is what it listens
-    // on. P1.02 is the standby control the driver holds high, P1.04 the
-    // unused PPS. Power comes from the VEXT rail raised above.
+    // the MCU receives on P1.05 and transmits on P1.07. Beware the
+    // Meshtastic reference (variants/nrf52840/heltec_mesh_node_t114/
+    // variant.h): the comments on GPS_TX_PIN/GPS_RX_PIN (lines 177/178)
+    // describe the opposite of what the code does — effective are lines
+    // 182/183, `PIN_SERIAL1_RX = GPS_RX_PIN` (P1.05) as the CPU's RX and
+    // `PIN_SERIAL1_TX = GPS_TX_PIN` (P1.07) as the CPU's TX. Follow the
+    // code, not the comments. P1.02 is the standby control the driver
+    // holds high, P1.04 the unused PPS. Power comes from the VEXT rail
+    // raised above.
     #[cfg(feature = "gnss")]
     {
         leviculum_nrf::gnss::init(
@@ -394,8 +400,8 @@ async fn main(spawner: Spawner) {
                 timer: p.TIMER1,
                 ppi_a: p.PPI_CH0,
                 ppi_b: p.PPI_CH1,
-                rx: p.P1_07.into(),
-                tx: p.P1_05.into(),
+                rx: p.P1_05.into(),
+                tx: p.P1_07.into(),
                 pps: p.P1_04.into(),
                 standby: Some(p.P1_02.into()),
                 module: leviculum_nrf::gnss::ModuleKind::QuectelL76k,
