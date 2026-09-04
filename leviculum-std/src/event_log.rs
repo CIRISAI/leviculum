@@ -311,6 +311,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "forward_max_hops",
             "blackholed_announce",
             "single_decrypt_fail",
+            "group_decrypt_fail",
             "unknown_context",
             "no_such_interface",
             "total",
