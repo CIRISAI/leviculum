@@ -22,8 +22,10 @@ the rule itself is in
 workspace lib tests, and the submodule, citation and commit-trailer
 gates), `just standard` before pushing anything that touches a core
 type. Protocol- or daemon-touching changes add `periculum run
-conformance`, 31/31 green. See [CLAUDE.md](CLAUDE.md) for the tiers and
-what each one owes.
+conformance`, every scenario green — the corpus grows, so `periculum
+list` prints the live count rather than this file. See
+[Testing](docs/src/development-testing.md) for the tiers and what each
+one owes.
 
 Do not commit while tests are red, and do not carry a red test forward
 as a known issue.
