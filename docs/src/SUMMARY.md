@@ -43,6 +43,7 @@
 - [Manual page: lnstest(1)](man/lnstest.1.md)
 - [Manual page: lncp(1)](man/lncp.1.md)
 - [Manual page: lnstatus(1)](man/lnstatus.1.md)
+- [Manual page: lnprobe(1)](man/lnprobe.1.md)
 - [Manual page: lnomad(1)](man/lnomad.1.md)
 - [Manual page: lblogd(1)](man/lblogd.1.md)
 

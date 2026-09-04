@@ -24,7 +24,7 @@ per reference tool. The honest current state, as of 2026-08:
 | `rnsd` | `lnsd` | Shipped. Drop-in at IPC and config level; see [Python-RNS Compatibility](python-rns-compatibility.md). |
 | `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1392`), the reported inventory by `status_inventory_parity_across_daemons` (`status_parity_tests.rs:2087`); Periculum wiring is Codeberg #174. |
 | `rncp` | `lncp` | Shipped (send, fetch, listen). |
-| `rnprobe` | — | Missing; filed as Codeberg #173. |
+| `rnprobe` | `lnprobe` | Shipped. Same command line, output, and exit codes; proven against both `lnsd` and `rnsd` over the shared instance. |
 | `rnpath` | — | Missing; filed as Codeberg #173. |
 | `rnid` | — | Missing, not yet filed. |
 | `rnx` | — | Missing, not yet filed. |

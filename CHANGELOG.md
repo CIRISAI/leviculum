@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnprobe`, a drop-in for Python's `rnprobe`: probes a destination
+  through a running `lnsd` **or** `rnsd` over the shared instance,
+  reporting round-trip time, hop count and packet loss from delivery
+  proofs — the same command line, output and exit codes as the
+  reference. The per-probe timeout asks the daemon for its first-hop
+  timeout like `rnprobe` does, so probes over slow media wait longer by
+  default.
 - lnsd joins the Columba BLE mesh: a new `BLEInterface` type
   (`[[BLE Interface]]` config section) speaks the `ble-reticulum`
   protocol v2.2 with the v0.3.0 capability record over BlueZ, in both

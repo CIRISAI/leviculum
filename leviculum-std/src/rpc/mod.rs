@@ -338,6 +338,41 @@ pub async fn rpc_query(
     Ok(pickle_value_to_json(&response))
 }
 
+/// Issue a `get` query that takes a single hash parameter (`next_hop`,
+/// `next_hop_if_name`, `first_hop_timeout`, `packet_rssi`, `packet_snr`,
+/// `packet_q`) against a running shared-instance daemon's RPC socket.
+///
+/// `param_key` names the parameter the daemon's parser reads for `get_key`
+/// (`"destination_hash"` for the path verbs, `"packet_hash"` for the packet
+/// verbs); `param` is the raw hash bytes, sent as msgpack `bin` exactly as
+/// Python's client sends them (Reticulum.py:1331 region). Same authkey,
+/// codec, and JSON decoding rules as [`rpc_query`]; same caveat that an
+/// unanswered verb closes the connection and surfaces as `Err`.
+pub async fn rpc_query_hash_param(
+    instance_name: &str,
+    authkey: &[u8; 32],
+    get_key: &str,
+    param_key: &str,
+    param: &[u8],
+) -> Result<serde_json::Value, crate::Error> {
+    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let entries = vec![
+        (pickle::pickle_str_key("get"), pickle::pickle_str(get_key)),
+        (
+            pickle::pickle_str_key(param_key),
+            pickle::pickle_bytes(param),
+        ),
+    ];
+    let request = pickle::pickle_dict(entries);
+    let response = rpc_client_call(&abstract_name, authkey, &request)
+        .await
+        .map_err(|e| match e {
+            RpcError::Io(io) => crate::Error::Io(io),
+            other => crate::Error::Config(format!("shared-instance RPC error: {other}")),
+        })?;
+    Ok(pickle_value_to_json(&response))
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes

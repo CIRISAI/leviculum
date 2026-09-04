@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Reticulum network stack daemon (lnsd), test tool (lnstest), and file-transfer client (lncp)"
+description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), and probe tool (lnprobe)"
 
 [[bin]]
 name = "lnsd"
@@ -22,6 +22,10 @@ path = "src/lncp.rs"
 [[bin]]
 name = "lnstatus"
 path = "src/lnstatus.rs"
+
+[[bin]]
+name = "lnprobe"
+path = "src/lnprobe.rs"
 
 [[bin]]
 name = "auto-crossmachine-test"
@@ -56,11 +60,12 @@ extended-description = """\
 Leviculum is a Rust implementation of the Reticulum network stack,
 wire-compatible with the Python reference implementation.
 
-This package installs four binaries:
+This package installs five binaries:
   lnsd     — the Reticulum daemon (drop-in replacement for Python rnsd)
   lnstest  — the test and diagnostics tool (selftest, diag, identity, connect)
   lncp     — the file-transfer tool (drop-in for rncp)
   lnstatus — the network status tool (drop-in for rnstatus)
+  lnprobe  — the reachability probe tool (drop-in for rnprobe)
 
 lnsd is configured as a systemd service running under a dedicated
 'leviculum' user, with its config directory at /etc/reticulum. Python
@@ -86,6 +91,7 @@ assets = [
     ["target/release/lnstest", "usr/bin/", "755"],
     ["target/release/lncp", "usr/bin/", "755"],
     ["target/release/lnstatus", "usr/bin/", "755"],
+    ["target/release/lnprobe", "usr/bin/", "755"],
     # Source must NOT be named `config`, even though the destination is:
     # `maintainer-scripts` below points at the same directory, and
     # cargo-deb picks up a file named `config` there as the debconf
@@ -100,6 +106,7 @@ assets = [
     ["../target/man/lnstest.1", "usr/share/man/man1/lnstest.1", "644"],
     ["../target/man/lncp.1", "usr/share/man/man1/lncp.1", "644"],
     ["../target/man/lnstatus.1", "usr/share/man/man1/lnstatus.1", "644"],
+    ["../target/man/lnprobe.1", "usr/share/man/man1/lnprobe.1", "644"],
     # Documented overrides for the two lintian tags that a
     # musl-static binary always trips; the file explains why each
     # is a deliberate deviation rather than a defect.
