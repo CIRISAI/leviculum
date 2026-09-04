@@ -65,6 +65,8 @@ mod mvr_explicit_hash_no_announce;
 mod mvr_first_path_request;
 #[cfg(test)]
 mod mvr_generated_field_pins;
+#[cfg(test)]
+mod mvr_group_decrypt_delivery;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_hop_asymmetry;
 #[cfg(test)]
@@ -905,6 +907,49 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::packet::{
             HeaderType, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
         };
+
+        // A locally registered GROUP destination is the one case the
+        // identity path below cannot serve: group destinations never
+        // announce, so there is no remembered identity and no path entry
+        // for them. Python reaches the same wire shape through the generic
+        // machinery — Packet.pack encrypts via destination.encrypt
+        // (Packet.py:214-216), get_packed_flags carries destination.type
+        // (Packet.py:174), and Transport.outbound broadcasts a pathless
+        // packet on all interfaces.
+        if let Some(dest) = self.destinations.get(dest_hash) {
+            if dest.dest_type() == DestinationType::Group {
+                let payload = dest
+                    .encrypt(data, None, &mut self.rng)
+                    .map_err(|_| send::SendError::EncryptionFailed)?;
+
+                let packet = crate::packet::Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type: HeaderType::Type1,
+                        context_flag: false,
+                        transport_type: TransportType::Broadcast,
+                        dest_type: DestinationType::Group,
+                        packet_type: PacketType::Data,
+                    },
+                    hops: 0,
+                    transport_id: None,
+                    destination_hash: dest_hash.into_bytes(),
+                    context: PacketContext::None,
+                    data: PacketData::Owned(payload),
+                };
+                let mut buf = [0u8; crate::constants::MTU];
+                let len = packet
+                    .pack(&mut buf)
+                    .map_err(|_| send::SendError::TooLarge)?;
+
+                self.transport.send_on_all_interfaces(&buf[..len]);
+                let packet_hash = self
+                    .transport
+                    .create_receipt(&buf[..len], dest_hash.into_bytes());
+                let output = self.process_events_and_actions();
+                return Ok((packet_hash, len, output));
+            }
+        }
 
         let payload = self.encrypt_for_destination(dest_hash, data)?;
 
@@ -2989,7 +3034,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     let now_ms = self.transport.clock().now_ms();
                     self.process_link_packet(&packet, &raw, now_ms, interface_index);
                 } else {
-                    // Regular packet, decrypt if Single destination
+                    // Regular packet: decrypt per destination type (Single via
+                    // identity/ratchets, Group via the shared token, Plain
+                    // passes through), like Python's Destination.receive ->
+                    // decrypt dispatch (Destination.py:403-410).
                     let dest_hash_typed = DestinationHash::new(destination_hash);
                     // Off-lock decrypt memo (leviculum#29): use the plaintext
                     // the driver already produced for THIS packet, guarded by
@@ -3005,48 +3053,76 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     };
                     let plaintext = if let Some(dest) = self.destinations.get(&dest_hash_typed) {
-                        if dest.dest_type() == crate::destination::DestinationType::Single {
-                            if let Some(m) = memo_plaintext {
-                                // Enforcement is applied LIVE, never from the
-                                // snapshot: a decryptor exported before
-                                // `set_enforce_ratchets(true)` must not
-                                // deliver what the in-lock decrypt would drop.
-                                if dest.enforces_ratchets() && !m.ratchet_used {
-                                    crate::tracing::trace!(
-                                        dest = %HexShort(destination_hash.as_ref()),
-                                        "Dropped packet, ratchet enforcement"
-                                    );
-                                    return;
+                        match dest.dest_type() {
+                            crate::destination::DestinationType::Single => {
+                                if let Some(m) = memo_plaintext {
+                                    // Enforcement is applied LIVE, never from the
+                                    // snapshot: a decryptor exported before
+                                    // `set_enforce_ratchets(true)` must not
+                                    // deliver what the in-lock decrypt would drop.
+                                    if dest.enforces_ratchets() && !m.ratchet_used {
+                                        crate::tracing::trace!(
+                                            dest = %HexShort(destination_hash.as_ref()),
+                                            "Dropped packet, ratchet enforcement"
+                                        );
+                                        return;
+                                    }
+                                    m.plaintext
+                                } else {
+                                    match dest.decrypt(packet.data.as_slice()) {
+                                        Ok(data) => data,
+                                        Err(_) => {
+                                            // A packet addressed to us that no
+                                            // retained ratchet and not the identity
+                                            // key could decrypt. Count + journey-log
+                                            // it: this drop used to be invisible to
+                                            // every diagnostic, which let a
+                                            // post-ratchet-rotation loss hide in
+                                            // two full rig runs (2026-08-21).
+                                            self.transport.record_node_layer_drop(
+                                                raw_hash.as_ref(),
+                                                &packet,
+                                                interface_index,
+                                                crate::transport::DropReason::SingleDecryptFail,
+                                            );
+                                            crate::tracing::trace!(
+                                                dest = %HexShort(destination_hash.as_ref()),
+                                                "Dropped packet, decryption failed"
+                                            );
+                                            return;
+                                        }
+                                    }
                                 }
-                                m.plaintext
-                            } else {
+                            }
+                            // GROUP decrypts with the shared token, exactly
+                            // like Python's Destination.receive, which routes
+                            // every non-LINKREQUEST packet through decrypt()
+                            // (Destination.py:403-410; GROUP branch at
+                            // 645-651). A miss is counted like the Single
+                            // path's: Python drops it silently (receive
+                            // returns False), we name the drop.
+                            crate::destination::DestinationType::Group => {
                                 match dest.decrypt(packet.data.as_slice()) {
                                     Ok(data) => data,
                                     Err(_) => {
-                                        // A packet addressed to us that no
-                                        // retained ratchet and not the identity
-                                        // key could decrypt. Count + journey-log
-                                        // it: this drop used to be invisible to
-                                        // every diagnostic, which let a
-                                        // post-ratchet-rotation loss hide in
-                                        // two full rig runs (2026-08-21).
                                         self.transport.record_node_layer_drop(
                                             raw_hash.as_ref(),
                                             &packet,
                                             interface_index,
-                                            crate::transport::DropReason::SingleDecryptFail,
+                                            crate::transport::DropReason::GroupDecryptFail,
                                         );
                                         crate::tracing::trace!(
                                             dest = %HexShort(destination_hash.as_ref()),
-                                            "Dropped packet, decryption failed"
+                                            "Dropped packet, group decryption failed"
                                         );
                                         return;
                                     }
                                 }
                             }
-                        } else {
-                            // Plain destination, pass through
-                            packet.data.as_slice().to_vec()
+                            // Plain destination, pass through (Python's
+                            // decrypt returns PLAIN bytes unchanged,
+                            // Destination.py:618-619).
+                            _ => packet.data.as_slice().to_vec(),
                         }
                     } else {
                         crate::tracing::trace!(

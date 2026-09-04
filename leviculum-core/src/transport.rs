@@ -1114,6 +1114,7 @@ pub struct TransportStats {
     pub(crate) drops_forward_max_hops: u64,
     pub(crate) drops_blackholed_announce: u64,
     pub(crate) drops_single_decrypt_fail: u64,
+    pub(crate) drops_group_decrypt_fail: u64,
     pub(crate) drops_unknown_context: u64,
     pub(crate) drops_no_such_interface: u64,
 }
@@ -1184,6 +1185,17 @@ pub enum DropReason {
     /// undetected (2026-08-21). Python drops this silently too
     /// (`Identity.decrypt` returns None, Destination.py:520 just logs debug).
     SingleDecryptFail,
+    /// Group-destination Data packet that reached its registered destination
+    /// but did not decrypt under the shared group token (wrong key,
+    /// corruption, or a peer sending plaintext where the token is mandatory).
+    /// Kept apart from [`DropReason::SingleDecryptFail`]: that one names a
+    /// ratchet/identity miss and feeds rotation diagnostics, this one names a
+    /// shared-key mismatch, and the operator responses differ (rotate vs.
+    /// re-distribute the group key). Python drops this silently too
+    /// (`Destination.decrypt` catches the Token error and returns None,
+    /// Destination.py:645-651; `receive` then returns False without invoking
+    /// the callback, Destination.py:410).
+    GroupDecryptFail,
     /// A packet addressed to us (a registered destination or one of our own
     /// links) whose context byte this implementation assigns no meaning to.
     ///
@@ -1268,13 +1280,14 @@ impl DropReason {
             DropReason::ForwardMaxHops => "forward-max-hops",
             DropReason::BlackholedAnnounce => "blackholed-announce",
             DropReason::SingleDecryptFail => "single-decrypt-fail",
+            DropReason::GroupDecryptFail => "group-decrypt-fail",
             DropReason::UnknownContext => "unknown-context",
             DropReason::NoSuchInterface => "no-such-interface",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 17] = [
+    pub const ALL: [DropReason; 18] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -1290,6 +1303,7 @@ impl DropReason {
         DropReason::ForwardMaxHops,
         DropReason::BlackholedAnnounce,
         DropReason::SingleDecryptFail,
+        DropReason::GroupDecryptFail,
         DropReason::UnknownContext,
         DropReason::NoSuchInterface,
     ];
@@ -1404,6 +1418,12 @@ impl TransportStats {
         self.drops_single_decrypt_fail
     }
 
+    /// Group-destination packets that reached their destination but failed
+    /// to decrypt under the shared group token.
+    pub fn drops_group_decrypt_fail(&self) -> u64 {
+        self.drops_group_decrypt_fail
+    }
+
     /// Packets addressed to us that carry a context byte we assign no meaning
     /// to, and were therefore not interpreted locally (Codeberg #332).
     /// Relaying of such packets is unaffected and not counted here.
@@ -1437,6 +1457,7 @@ impl TransportStats {
             + self.drops_forward_max_hops
             + self.drops_blackholed_announce
             + self.drops_single_decrypt_fail
+            + self.drops_group_decrypt_fail
             + self.drops_unknown_context
             + self.drops_no_such_interface
     }
@@ -1465,6 +1486,7 @@ impl TransportStats {
             DropReason::ForwardMaxHops => self.drops_forward_max_hops += 1,
             DropReason::BlackholedAnnounce => self.drops_blackholed_announce += 1,
             DropReason::SingleDecryptFail => self.drops_single_decrypt_fail += 1,
+            DropReason::GroupDecryptFail => self.drops_group_decrypt_fail += 1,
             DropReason::UnknownContext => self.drops_unknown_context += 1,
             DropReason::NoSuchInterface => self.drops_no_such_interface += 1,
         }
@@ -3082,6 +3104,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 forward_max_hops = self.stats.drops_forward_max_hops,
                 blackholed_announce = self.stats.drops_blackholed_announce,
                 single_decrypt_fail = self.stats.drops_single_decrypt_fail,
+                group_decrypt_fail = self.stats.drops_group_decrypt_fail,
                 unknown_context = self.stats.drops_unknown_context,
                 no_such_interface = self.stats.drops_no_such_interface,
                 total = self.stats.packets_dropped,
