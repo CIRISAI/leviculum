@@ -131,6 +131,14 @@ cargo install cargo-zigbuild cargo-deb
 pip install --user ziglang
 ```
 
+## Bugs and contributions
+
+Report bugs and ask questions at
+<https://codeberg.org/Lew_Palm/leviculum/issues>. When the daemon is
+involved, attach the output of `lnstest diag` (see the
+[quickstart](docs/src/lnsd-quickstart.md) for the exact command). For
+patches, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.
