@@ -20,7 +20,7 @@ person what to do. This one is about the cases where the person forgot.
 | the sx1262 RX-extend guard tested IRQ flags its own latch mask had disabled (#144, fixed 26ce3a0) | **neither** — no test at all, and `exclude` (`Cargo.toml:39`) puts `leviculum-nrf` outside the workspace |
 | `status_parity` `#[ignore]`d with a reason naming a procedure no script implements; never executed by any gate (#189) | **B** |
 | 14 further ignored tests in `rnsd_interop` executed by nothing (#189) | **B** |
-| 20 scenario steps produced a delivery figure no step asserted; GREEN at 70-90 % (#188, Periculum #25) | **neither** — scenario steps |
+| scenario steps across the corpus produced a delivery figure no step asserted; GREEN at 70-90 % (#188, Periculum #25) | **neither** — scenario steps |
 | the status-parity volume guard compared one interface, so a whole-inventory divergence stayed green (#177) | **A**, only if the author's negative control covers the whole inventory rather than the one interface they compared |
 | drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:6`), sixteen across the whole book on the guard's first automated run | **C** |
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
@@ -242,9 +242,10 @@ fail open or closed — it fails into `--no-verify`, and takes the checks
 that worked with it.
 
 Two reach limits: tier-3 hardware manifests and the release-only
-92-scenario corpus are produced on another host on a per-release
-cadence, so either their transport is specified or the guarantee is
-scoped to host-runnable gates. And `nextest` cannot run doctests, of
+hardware corpus (`periculum list hardware` prints the live count; it
+grows) are produced on another host on a per-release cadence, so
+either their transport is specified or the guarantee is scoped to
+host-runnable gates. And `nextest` cannot run doctests, of
 which `scripts/ignored-counts.txt` tracks two units (`leviculum-core
 --doc` and `leviculum-std --doc`) — whichever runner is used, the
 doctest gap is explicit.
