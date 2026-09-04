@@ -176,6 +176,18 @@ pub const TYPE_NODE_NAME: u8 = 0x0C;
 /// bytes, so firmware from before the envelope drops it silently and the
 /// probe times out, exactly like [`TYPE_CAPABILITIES`].
 pub const TYPE_NODE_NAME_QUERY: u8 = 0x0D;
+/// Identity query; empty payload. Answered with
+/// [`TYPE_IDENTITY_REPORT`] — the three hashes a prober needs before it
+/// can address this board: the node identity hash, the
+/// `rnstransport.probe` responder destination, and the LXMF delivery
+/// destination.
+///
+/// The board reports the hashes it actually registered rather than the
+/// host deriving them from the identity hash: derivation would encode
+/// this firmware's application names into every host, and a report that
+/// says "no probe responder" is an answer a derivation cannot give.
+/// Read-only, safe mid-measurement like [`TYPE_MEDIA_QUERY`].
+pub const TYPE_IDENTITY_QUERY: u8 = 0x0E;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -231,6 +243,24 @@ pub const TYPE_POSITION_SOURCE_REPORT: u8 = 0x86;
 /// alone could not print either string, and would have to guess at what
 /// an operator is about to go looking for on a phone.
 pub const TYPE_NODE_NAME_REPORT: u8 = 0x87;
+/// Identity report; payload is `[flags, identity(16), probe(16),
+/// lxmf(16)]`, 49 bytes fixed. The answer to [`TYPE_IDENTITY_QUERY`].
+///
+/// Fixed-length with validity flags rather than variable-length fields:
+/// a destination a board did not register still occupies its 16 zeroed
+/// bytes, and the flag says so. That keeps the parse a length check and
+/// lets a future fourth hash extend the payload without ambiguity —
+/// hosts reject only payloads *shorter* than they know
+/// ([`decode_identity_report_payload`]), so an older lnflash keeps
+/// reading the first three hashes from a longer report.
+pub const TYPE_IDENTITY_REPORT: u8 = 0x88;
+
+/// [`TYPE_IDENTITY_REPORT`] flag: the probe hash field is a registered
+/// `rnstransport.probe` responder destination.
+pub const IDENTITY_REPORT_PROBE: u8 = 0x01;
+/// [`TYPE_IDENTITY_REPORT`] flag: the lxmf hash field is a registered
+/// LXMF delivery destination.
+pub const IDENTITY_REPORT_LXMF: u8 = 0x02;
 
 /// [`TYPE_NODE_NAME_REPORT`] flag: an operator-set name is stored, so
 /// the names in the report are that name rather than the derived
@@ -1080,6 +1110,76 @@ pub fn telemetry_target_answer(reporter_wired: bool, delivered: bool, persist: P
 }
 
 // ---------------------------------------------------------------------------
+// Identity report (lnprobe batch — the hashes a prober addresses)
+// ---------------------------------------------------------------------------
+
+/// The three hashes a [`TYPE_IDENTITY_REPORT`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityReportWire {
+    /// The node identity hash (truncated, 16 bytes).
+    pub identity: [u8; 16],
+    /// The `rnstransport.probe` responder destination, when registered.
+    pub probe: Option<[u8; 16]>,
+    /// The LXMF delivery destination, when registered.
+    pub lxmf: Option<[u8; 16]>,
+}
+
+/// Encode an identity query (empty payload).
+pub fn encode_identity_query() -> Vec<u8> {
+    encode_frame(TYPE_IDENTITY_QUERY, &[])
+}
+
+/// Encode an identity report: `[flags, identity(16), probe(16), lxmf(16)]`.
+pub fn encode_identity_report(report: &IdentityReportWire) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(49);
+    let mut flags = 0u8;
+    if report.probe.is_some() {
+        flags |= IDENTITY_REPORT_PROBE;
+    }
+    if report.lxmf.is_some() {
+        flags |= IDENTITY_REPORT_LXMF;
+    }
+    payload.push(flags);
+    payload.extend_from_slice(&report.identity);
+    payload.extend_from_slice(&report.probe.unwrap_or([0u8; 16]));
+    payload.extend_from_slice(&report.lxmf.unwrap_or([0u8; 16]));
+    encode_frame(TYPE_IDENTITY_REPORT, &payload)
+}
+
+/// Decode an identity-report payload.
+///
+/// Accepts payloads *longer* than 49 bytes (see [`TYPE_IDENTITY_REPORT`]
+/// for why a future extension must not read as malformed here), refuses
+/// shorter ones.
+pub fn decode_identity_report_payload(payload: &[u8]) -> Option<IdentityReportWire> {
+    if payload.len() < 49 {
+        return None;
+    }
+    let flags = payload[0];
+    let field = |start: usize| -> [u8; 16] {
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&payload[start..start + 16]);
+        buf
+    };
+    Some(IdentityReportWire {
+        identity: field(1),
+        probe: (flags & IDENTITY_REPORT_PROBE != 0).then(|| field(17)),
+        lxmf: (flags & IDENTITY_REPORT_LXMF != 0).then(|| field(33)),
+    })
+}
+
+/// The answer to an identity query. `None` is the boot-order window in
+/// which the node — and with it the hashes — does not exist yet:
+/// [`REFUSE_BUSY`], the host retries, exactly the
+/// [`node_name_query_answer`] readiness clause.
+pub fn identity_query_answer(report: Option<&IdentityReportWire>) -> Vec<u8> {
+    match report {
+        None => encode_refusal(TYPE_IDENTITY_QUERY, REFUSE_BUSY),
+        Some(report) => encode_identity_report(report),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Control-plane classification (the firmware accept path, testable on host)
 // ---------------------------------------------------------------------------
 
@@ -1156,6 +1256,9 @@ pub enum ControlAction {
     /// Envelope node-name query: answer via [`node_name_query_answer`].
     /// Read-only, like [`MediaQuery`](Self::MediaQuery).
     NodeNameQuery,
+    /// Envelope identity query: answer via [`identity_query_answer`].
+    /// Read-only, like [`MediaQuery`](Self::MediaQuery).
+    IdentityQuery,
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1269,6 +1372,13 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_IDENTITY_QUERY => {
+            if frame.payload.is_empty() {
+                ControlAction::IdentityQuery
+            } else {
+                malformed
+            }
+        }
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1298,6 +1408,7 @@ mod tests {
         TYPE_POSITION_SOURCE_QUERY,
         TYPE_NODE_NAME,
         TYPE_NODE_NAME_QUERY,
+        TYPE_IDENTITY_QUERY,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -2566,6 +2677,98 @@ mod tests {
         let state = decode_node_name_report_payload(decode_frame(&bytes).unwrap().payload).unwrap();
         assert!(state.stored);
         assert!(!state.ble_pending);
+    }
+
+    #[test]
+    fn an_identity_query_is_empty_and_classifies() {
+        let bytes = encode_identity_query();
+        assert_eq!(bytes.len(), ENVELOPE_HEADER_LEN);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::IdentityQuery
+        );
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_IDENTITY_QUERY, &[0x00]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_IDENTITY_QUERY,
+                reason: REFUSE_MALFORMED
+            }
+        );
+        // Firmware from before this type refuses it by name — how a host
+        // detects an old board and prints nothing instead of guessing.
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_IDENTITY_QUERY,
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn an_identity_report_round_trips_with_every_flag_shape() {
+        let full = IdentityReportWire {
+            identity: [0x11; 16],
+            probe: Some([0x22; 16]),
+            lxmf: Some([0x33; 16]),
+        };
+        let bytes = encode_identity_report(&full);
+        let frame = decode_frame(&bytes).unwrap();
+        assert_eq!(frame.frame_type, TYPE_IDENTITY_REPORT);
+        assert_eq!(frame.payload.len(), 49);
+        assert_eq!(decode_identity_report_payload(frame.payload), Some(full));
+
+        // A board without a probe responder or LXMF destination still
+        // reports its identity; the absent hashes come back as None
+        // regardless of what the zeroed field bytes contain.
+        let bare = IdentityReportWire {
+            identity: [0x44; 16],
+            probe: None,
+            lxmf: None,
+        };
+        let frame_bytes = encode_identity_report(&bare);
+        let decoded =
+            decode_identity_report_payload(decode_frame(&frame_bytes).unwrap().payload).unwrap();
+        assert_eq!(decoded, bare);
+    }
+
+    #[test]
+    fn an_identity_report_tolerates_longer_payloads_but_not_shorter() {
+        let report = IdentityReportWire {
+            identity: [0x55; 16],
+            probe: Some([0x66; 16]),
+            lxmf: None,
+        };
+        let bytes = encode_identity_report(&report);
+        let payload = decode_frame(&bytes).unwrap().payload.to_vec();
+
+        // A future firmware that appends a fourth hash must keep reading
+        // here (see TYPE_IDENTITY_REPORT).
+        let mut longer = payload.clone();
+        longer.extend_from_slice(&[0x77; 16]);
+        assert_eq!(decode_identity_report_payload(&longer), Some(report));
+
+        let shorter = &payload[..48];
+        assert_eq!(decode_identity_report_payload(shorter), None);
+    }
+
+    #[test]
+    fn an_identity_query_before_the_node_exists_is_busy_not_zeroes() {
+        let refusal = identity_query_answer(None);
+        let frame = decode_frame(&refusal).unwrap();
+        assert_eq!(frame.frame_type, TYPE_REFUSAL);
+        assert_eq!(frame.payload, &[TYPE_IDENTITY_QUERY, REFUSE_BUSY]);
+
+        let report = IdentityReportWire {
+            identity: [0x01; 16],
+            probe: Some([0x02; 16]),
+            lxmf: Some([0x03; 16]),
+        };
+        let answer = identity_query_answer(Some(&report));
+        assert_eq!(
+            decode_frame(&answer).unwrap().frame_type,
+            TYPE_IDENTITY_REPORT
+        );
     }
 
     #[test]
