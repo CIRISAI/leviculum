@@ -217,6 +217,15 @@ pub struct PlaneStats {
     pub recent_outcomes: usize,
     /// Recent-terminal-outcomes ring capacity.
     pub recent_outcomes_capacity: usize,
+    /// Packets queued for retry across all interfaces (leviculum#63). This
+    /// is the number that climbs before drops begin — an interface that
+    /// cannot drain as fast as it is handed packets shows here first.
+    pub retry_queued: usize,
+    /// Per-interface retry-queue cap. Reaching it discards the oldest
+    /// queued packet for that interface.
+    pub retry_queue_cap: usize,
+    /// Packets discarded by a full retry queue since the node started.
+    pub retry_dropped_total: u64,
 }
 
 impl PlaneStats {
@@ -236,6 +245,12 @@ impl PlaneStats {
 pub(crate) struct PlaneCounters {
     control_dropped: AtomicU64,
     data_dropped: AtomicU64,
+    /// Packets discarded because a per-interface retry queue hit its cap
+    /// (leviculum#63).
+    retry_dropped: AtomicU64,
+    /// Packets currently queued for retry across all interfaces — the
+    /// number that climbs *before* drops start.
+    retry_queued: AtomicUsize,
 }
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
@@ -2213,6 +2228,7 @@ impl ReticulumNode {
         let completions = Arc::clone(&self.completions);
         let ifac_rotation = self.ifac_rotation.clone();
         let max_assembled_resource_size = self.max_assembled_resource_size;
+        let plane_counters = Arc::clone(&self.plane_counters);
 
         // Spawn the runner
         let runner_handle = tokio::spawn(async move {
@@ -2251,6 +2267,7 @@ impl ReticulumNode {
                 completions,
                 ifac_rotation,
                 max_assembled_resource_size,
+                plane_counters,
             )
             .await;
         });
@@ -2593,6 +2610,15 @@ impl ReticulumNode {
             live_link_envelope: completions::ESTABLISHED_MIRROR_CAP,
             recent_outcomes: self.completions.recent_len(),
             recent_outcomes_capacity: completions::RECENT_OUTCOMES_CAP,
+            retry_queued: self
+                .plane_counters
+                .retry_queued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            retry_queue_cap: RETRY_QUEUE_CAP,
+            retry_dropped_total: self
+                .plane_counters
+                .retry_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -4520,6 +4546,7 @@ async fn run_event_loop(
     completions: Arc<CompletionRegistry>,
     ifac_rotation: IfacRotation,
     max_assembled_resource_size: usize,
+    plane_counters: Arc<PlaneCounters>,
 ) {
     // A slot rather than the bare box: a panicking hook is detached from
     // inside its own call frame, several `dispatch_output` frames down from
@@ -4701,6 +4728,7 @@ async fn run_event_loop(
                 &mut discovery_heard_ifac,
                 &completions,
                 &mut assembler,
+                &plane_counters,
                 core_processor.as_mut(),
             );
             tighten_next_poll(&mut next_poll, processor_delay);
@@ -4841,6 +4869,7 @@ async fn run_event_loop(
                             &mut discovery_heard_ifac,
                             &completions,
             &mut assembler,
+            &plane_counters,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -4897,6 +4926,7 @@ async fn run_event_loop(
                                     &mut discovery_heard_ifac,
                                     &completions,
             &mut assembler,
+            &plane_counters,
                                     core_processor.as_mut(),
                                 ));
                             }
@@ -4938,6 +4968,7 @@ async fn run_event_loop(
                     &mut discovery_heard_ifac,
                     &completions,
             &mut assembler,
+            &plane_counters,
                     core_processor.as_mut(),
                 );
                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -5003,6 +5034,7 @@ async fn run_event_loop(
                     &mut discovery_heard_ifac,
                     &completions,
             &mut assembler,
+            &plane_counters,
                     core_processor.as_mut(),
                 );
                 // The processor's periodic output goes out on the driver's own
@@ -5027,6 +5059,7 @@ async fn run_event_loop(
                             &mut discovery_heard_ifac,
                             &completions,
             &mut assembler,
+            &plane_counters,
                             None,
                         );
                     }
@@ -5068,6 +5101,7 @@ async fn run_event_loop(
                             &mut discovery_heard_ifac,
                             &completions,
             &mut assembler,
+            &plane_counters,
                             core_processor.as_mut(),
                         );
                     }
@@ -5198,7 +5232,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
-                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
+                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
                 }
             }
 
@@ -5219,7 +5253,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
             // Branch 6b: the shared instance this node is a client of went
@@ -5240,7 +5274,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_shared_instance_disconnected(iface_id)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
             // Branch 6c: Per-peer transitions on a multi-peer interface
@@ -5299,7 +5333,7 @@ async fn run_event_loop(
                         }
                     }
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -5313,7 +5347,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet
@@ -5449,6 +5483,7 @@ async fn run_event_loop(
                             &mut discovery_heard_ifac,
                             &completions,
             &mut assembler,
+            &plane_counters,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -5532,6 +5567,7 @@ async fn run_event_loop(
                                     &mut discovery_heard_ifac,
                                     &completions,
             &mut assembler,
+            &plane_counters,
                                     core_processor.as_mut(),
                                 );
                                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -5806,6 +5842,7 @@ fn dispatch_output(
     discovery_heard_ifac: &mut HeardIfacMap,
     completions: &CompletionRegistry,
     assembler: &mut SegmentAssembler,
+    plane_counters: &PlaneCounters,
     core_processor: Option<&mut processor::ProcessorSlot>,
 ) -> Option<Duration> {
     // Drain retry queues before dispatching new actions
@@ -5877,14 +5914,22 @@ fn dispatch_output(
         let queue = retry_queues.entry(iface_idx).or_default();
         if queue.len() >= RETRY_QUEUE_CAP {
             queue.pop_front();
+            plane_counters
+                .retry_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
-                "Retry queue full for iface {}, dropping oldest packet",
-                iface_idx,
+                iface = iface_idx,
+                peer = registry.name_of(InterfaceId(iface_idx)),
+                cap = RETRY_QUEUE_CAP,
+                "retry queue full — dropping the oldest queued packet for this \
+                 peer. The queue reached its cap, so any max-depth line below \
+                 the cap understates the peak"
             );
         }
         push_retry_with_warn(
             queue,
             iface_idx,
+            registry.name_of(InterfaceId(iface_idx)),
             retry.data,
             retry_queue_warned,
             retry_queue_max_depth,
@@ -5895,6 +5940,14 @@ fn dispatch_output(
     // Transport reads per-interface readiness from the
     // interface_next_slot_ms backchannel.
     retry_queues.retain(|_, queue| !queue.is_empty());
+
+    // Publish the live retry depth (leviculum#63) so an operator can watch it
+    // climb through `plane_stats()` instead of learning about it from the
+    // first dropped packet.
+    plane_counters.retry_queued.store(
+        retry_queues.values().map(VecDeque::len).sum(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // Clear the per-queue warned flag when the queue drops back
     // below RETRY_QUEUE_DEPTH_WARN so a future re-crossing re-emits
@@ -6052,6 +6105,7 @@ fn dispatch_output(
             discovery_heard_ifac,
             completions,
             assembler,
+            plane_counters,
             // The `/status` response is the driver's own; it is not the
             // processor's business and must not re-enter the tap.
             None,
@@ -6084,6 +6138,7 @@ fn dispatch_output(
             discovery_heard_ifac,
             completions,
             assembler,
+            plane_counters,
             None,
         );
     }
@@ -6210,13 +6265,20 @@ fn forget_interface_retry_state(
     retry_queues.remove(&iface_idx)
 }
 
-/// Append `data` to the per-interface retry queue. Emit a single
-/// tracing::warn when the queue depth first crosses
-/// `RETRY_QUEUE_DEPTH_WARN`; update the monotonic max-depth high-
-/// watermark and log at info! whenever it increases.
+/// Append `data` to the per-interface retry queue, warning once when the
+/// depth first crosses `RETRY_QUEUE_DEPTH_WARN` and tracking the monotonic
+/// high-watermark.
+///
+/// `peer` names the interface the way the accept line did (leviculum#63):
+/// every later line used to reference an interface by index alone, so
+/// diagnosing a drop meant finding the `Accepted connection` line that
+/// mapped index → peer — and in the field a downstream log-dedup layer had
+/// suppressed exactly those lines. Carrying the name here means the warning
+/// identifies its own peer and no mapping is needed.
 fn push_retry_with_warn(
     queue: &mut VecDeque<Vec<u8>>,
     iface_idx: usize,
+    peer: &str,
     data: Vec<u8>,
     warned: &mut std::collections::BTreeSet<usize>,
     max_depth: &mut BTreeMap<usize, usize>,
@@ -6229,21 +6291,35 @@ fn push_retry_with_warn(
     {
         tracing::warn!(
             iface = iface_idx,
+            peer,
             depth = queue.len(),
-            "retry queue depth high, first-order backpressure may be mis-tuned"
+            cap = RETRY_QUEUE_CAP,
+            "retry queue depth high: this interface cannot drain as fast as it \
+             is being handed packets; drops begin at the cap"
         );
         warned.insert(iface_idx);
     }
-    // E2: monotonic max-depth watermark. Log at info! only when the
-    // watermark actually advances, benchmarks can grep for this.
+    // Monotonic max-depth watermark. Logged on a DOUBLING LADDER rather than
+    // on every increment (leviculum#63): the old form emitted one line per
+    // unit of growth — depth 1, 2, 3 … 1024 — which is hundreds of lines per
+    // interface per episode for what is a curve, not an event, and it was a
+    // large share of the volume a dedup layer then hid. The ladder keeps the
+    // shape of the growth visible while a single episode costs ~10 lines.
     let prev = max_depth.get(&iface_idx).copied().unwrap_or(0);
-    if queue.len() > prev {
-        max_depth.insert(iface_idx, queue.len());
-        tracing::info!(
-            iface = iface_idx,
-            max_depth = queue.len(),
-            "retry_queue max depth increased"
-        );
+    let depth = queue.len();
+    if depth > prev {
+        max_depth.insert(iface_idx, depth);
+        // Report at 1 and then each power of two, plus the cap itself, so the
+        // last line before drops begin is always emitted.
+        if depth.is_power_of_two() || depth == RETRY_QUEUE_CAP {
+            tracing::info!(
+                iface = iface_idx,
+                peer,
+                max_depth = depth,
+                cap = RETRY_QUEUE_CAP,
+                "retry_queue max depth increased"
+            );
+        }
     }
 }
 
@@ -7379,6 +7455,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
     }
@@ -7472,6 +7549,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
 
@@ -8108,20 +8186,41 @@ mod tests {
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         // Fill up to one below the warn threshold → never warns.
         for _ in 0..(RETRY_QUEUE_DEPTH_WARN - 1) {
-            push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                1,
+                "test-peer",
+                vec![0u8; 8],
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(
             !warned.contains(&1),
             "below-threshold depth must not trigger warn"
         );
         // Push one more → crosses threshold.
-        push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            1,
+            "test-peer",
+            vec![0u8; 8],
+            &mut warned,
+            &mut max_depth,
+        );
         assert!(
             warned.contains(&1),
             "reaching RETRY_QUEUE_DEPTH_WARN must trigger warn"
         );
         // Push past threshold → already warned, set membership unchanged (idempotent).
-        push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            1,
+            "test-peer",
+            vec![0u8; 8],
+            &mut warned,
+            &mut max_depth,
+        );
         assert!(warned.contains(&1));
         assert_eq!(warned.len(), 1, "no duplicate entries");
     }
@@ -8135,7 +8234,14 @@ mod tests {
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         for _ in 0..RETRY_QUEUE_DEPTH_WARN {
-            push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                2,
+                "test-peer",
+                vec![0u8; 8],
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(warned.contains(&2));
         // Drain below the warn threshold (simulate: clear queue,
@@ -8150,7 +8256,14 @@ mod tests {
         assert!(!warned.contains(&2));
         // Rebuild to threshold → warn re-emitted.
         for _ in 0..RETRY_QUEUE_DEPTH_WARN {
-            push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                2,
+                "test-peer",
+                vec![0u8; 8],
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(warned.contains(&2));
     }
@@ -8163,17 +8276,38 @@ mod tests {
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         for _ in 0..5 {
-            push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                3,
+                "test-peer",
+                vec![0u8; 4],
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert_eq!(max_depth.get(&3), Some(&5));
         // Drain the queue manually; max_depth must NOT regress.
         q.clear();
         // A single push after drain puts len=1, watermark stays at 5.
-        push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            3,
+            "test-peer",
+            vec![0u8; 4],
+            &mut warned,
+            &mut max_depth,
+        );
         assert_eq!(max_depth.get(&3), Some(&5), "watermark must be monotonic");
         // Re-fill past the old watermark → grows.
         for _ in 0..10 {
-            push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                3,
+                "test-peer",
+                vec![0u8; 4],
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert_eq!(max_depth.get(&3), Some(&11));
     }
@@ -9049,6 +9183,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9118,6 +9253,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9167,6 +9303,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9217,6 +9354,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9287,6 +9425,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9367,6 +9506,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         )
         .expect("the tap asked for a deadline; the driver must be told");
@@ -9429,6 +9569,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
 
@@ -9486,6 +9627,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
         std::panic::set_hook(previous_hook);
@@ -9531,6 +9673,7 @@ mod tests {
             &mut BTreeMap::new(),
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             Some(&mut slot),
         );
         assert!(
@@ -9761,6 +9904,7 @@ mod tests {
             CompletionRegistry::new(),
             IfacRotation::default(),
             segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE,
+            Arc::new(PlaneCounters::default()),
         ));
 
         FlushLoopHarness {
@@ -10033,6 +10177,7 @@ mod tests {
             &mut BTreeMap::new(),
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
 
@@ -10081,6 +10226,7 @@ mod tests {
             &mut BTreeMap::new(),
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
 
@@ -10180,6 +10326,7 @@ mod tests {
             &mut BTreeMap::new(),
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
 
@@ -10223,6 +10370,7 @@ mod tests {
             &mut BTreeMap::new(),
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
 
@@ -10457,6 +10605,7 @@ mod tests {
             &mut BTreeMap::new(),
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
         assert!(
@@ -10490,6 +10639,7 @@ mod tests {
             &mut BTreeMap::new(),
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
