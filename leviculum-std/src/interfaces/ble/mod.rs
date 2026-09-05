@@ -184,6 +184,9 @@ pub(crate) fn spawn_ble_interface(
         frame_turnaround_ms: None,
         ifac: None,
         mode: InterfaceMode::default(),
+        // leviculum#51: relay-by-default, like every other interface type;
+        // an operator scopes transit per interface via config.
+        transit: true,
         kind: InterfaceKind::Ble,
         ingress_control: None,
     };
