@@ -2776,6 +2776,23 @@ impl ReticulumNode {
     }
 
     /// Check if a path to a destination is known
+    /// # Sealing needs a dwell after activating
+    ///
+    /// `install` and `activate` are make-before-break: both keys are accepted
+    /// while the window is open, so neither can lose a packet. **`seal` is the
+    /// breaking phase** — it retires the old key for inbound as well, so any
+    /// packet still masked with it is rejected on arrival: bytes sitting in a
+    /// socket, in this driver's retry queue, or in the peer's receive buffer.
+    ///
+    /// A caller must therefore leave a dwell between `activate` and `seal`,
+    /// long enough for traffic masked with the retired key to drain. Sealing
+    /// immediately after activating strands that in-flight traffic — measured
+    /// on `scoped_transit::s6_live_links_survive_rotation`, which lost the
+    /// packet it sent across a zero-dwell rotation in ~50% of runs, with the
+    /// peer's `drops_ifac` incrementing exactly once each time. Every phase is
+    /// an explicit operator call precisely so that dwell is the operator's to
+    /// choose; nothing here imposes one.
+    ///
     /// leviculum#52 — IFAC membership-key rotation, phase 1 of 3: derive a
     /// new access-code config from `(netname, passphrase, ifac_size)` and
     /// install it as the ACCEPT-ONLY alternate on every IFAC'd interface.
@@ -4095,6 +4112,31 @@ async fn run_event_loop(
         std::sync::Arc<leviculum_core::SingleDestDecryptor>,
     > = std::collections::HashMap::new();
 
+    // leviculum#52: a rotation phase bumped the generation — re-clone the
+    // loop-local IFAC map so outbound masking and the precompute skip see the
+    // rotated keys. One relaxed load per check otherwise.
+    //
+    // This MUST run immediately before dispatch, not only at the top of the
+    // loop. A phase call bumps the generation while this loop is parked in
+    // `select!`; the send that wakes it is then dispatched inside an iteration
+    // whose top-of-loop refresh already ran, i.e. against the pre-rotation
+    // map. That masks the packet with the key the peer has just sealed away,
+    // and the peer drops it on IFAC — delivery survives only if something
+    // retransmits later. Measured on `s6_live_links_survive_rotation`: the
+    // relay's `drops_ifac` incremented on the sent packet and the test failed
+    // ~60% of runs; checking here holds it at 0/10.
+    macro_rules! refresh_ifac {
+        () => {{
+            let gen = ifac_rotation
+                .generation
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if gen != last_ifac_generation {
+                last_ifac_generation = gen;
+                ifac_configs = inner.lock_recover().clone_ifac_configs();
+            }
+        }};
+    }
+
     macro_rules! apply_inbound {
         ($prepared:expr) => {{
             let prepared: PreparedRx = $prepared;
@@ -4118,6 +4160,7 @@ async fn run_event_loop(
                     next_poll = wake_at;
                 }
             }
+            refresh_ifac!();
             let processor_delay = dispatch_output(
                 output,
                 &mut registry,
@@ -4141,18 +4184,7 @@ async fn run_event_loop(
     }
 
     loop {
-        // leviculum#52: a rotation phase bumped the generation — re-clone
-        // the loop-local IFAC map so outbound masking and the precompute
-        // skip see the rotated keys. One relaxed load per wake otherwise.
-        {
-            let gen = ifac_rotation
-                .generation
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if gen != last_ifac_generation {
-                last_ifac_generation = gen;
-                ifac_configs = inner.lock_recover().clone_ifac_configs();
-            }
-        }
+        refresh_ifac!();
 
         // Auto-connect poll wake — only armed while the feature is enabled.
         let autoconnect_wake = autoconnect.as_ref().map(|_| next_autoconnect);
@@ -4257,6 +4289,7 @@ async fn run_event_loop(
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
+                        refresh_ifac!();
                         let processor_delay = dispatch_output(
                             output,
                             &mut registry,
@@ -4306,6 +4339,7 @@ async fn run_event_loop(
                                     count: purged.len(),
                                     reason: FrameDropReason::RetryQueuePurged,
                                 });
+                                refresh_ifac!();
                                 tighten_next_poll(&mut next_poll, dispatch_output(
                                     purge_output,
                                     &mut registry,
@@ -4355,6 +4389,7 @@ async fn run_event_loop(
             // Branch 2: Dispatch TickOutput from outside the event loop
             // (connect, send_on_link, close_link, announce send here)
             Some(output) = action_dispatch_rx.recv() => {
+                refresh_ifac!();
                 let processor_delay = dispatch_output(
                     output,
                     &mut registry,
@@ -4421,6 +4456,7 @@ async fn run_event_loop(
                     output.next_deadline_ms,
                     tick_output.as_ref().and_then(|o| o.next_deadline_ms),
                 );
+                refresh_ifac!();
                 let tap_delay = dispatch_output(
                     output,
                     &mut registry,
@@ -4446,6 +4482,7 @@ async fn run_event_loop(
                         // No return value to fold in: the tap is detached on
                         // this call, so nothing here can ask for a deadline.
                         // `on_tick`'s own deadline is already in `next` above.
+                        refresh_ifac!();
                         let _ = dispatch_output(
                             tick_output,
                             &mut registry,
@@ -4488,6 +4525,7 @@ async fn run_event_loop(
                     // event riding in the same output — which is the #77 loss.
                     while let Ok(output) = action_dispatch_rx.try_recv() {
                         // Shutting down; there is no next poll to bring forward.
+                        refresh_ifac!();
                         let _ = dispatch_output(
                             output,
                             &mut registry,
@@ -4611,6 +4649,7 @@ async fn run_event_loop(
                         let mut core = inner.lock_recover();
                         core.handle_interface_up(iface_idx)
                     };
+                    refresh_ifac!();
                     tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
                 }
             }
@@ -4632,6 +4671,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
                 };
+                refresh_ifac!();
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
@@ -4647,6 +4687,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.handle_interface_peer_lost(iface_id, peer)
                 };
+                refresh_ifac!();
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
@@ -4661,6 +4702,7 @@ async fn run_event_loop(
                     let mut core = inner.lock_recover();
                     core.send_tunnel_synthesize(iface_id.0)
                 };
+                refresh_ifac!();
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
             }
 
@@ -4741,6 +4783,7 @@ async fn run_event_loop(
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
                         };
+                        refresh_ifac!();
                         let processor_delay = dispatch_output(
                             output,
                             &mut registry,
@@ -4824,6 +4867,7 @@ async fn run_event_loop(
                                     label,
                                     app_data.len(),
                                 );
+                                refresh_ifac!();
                                 let processor_delay = dispatch_output(
                                     output,
                                     &mut registry,
