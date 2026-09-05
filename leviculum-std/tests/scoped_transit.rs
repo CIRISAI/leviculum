@@ -68,6 +68,11 @@ fn next_port() -> u16 {
 const NETNAME: &str = "ciris-transit";
 const KEY1: &str = "harness-key-one";
 const KEY2: &str = "harness-key-two";
+/// Dwell between activating a new IFAC key and sealing the old one out.
+/// Long enough for in-flight traffic masked with the retired key to drain on
+/// loopback; a real deployment wants far more.
+const IFAC_ROTATION_DWELL: Duration = Duration::from_millis(500);
+
 const IFAC_SIZE: usize = 16;
 
 struct TestNode {
@@ -471,6 +476,13 @@ async fn s6_live_links_survive_rotation() {
     );
     assert!(r.node.ifac_activate_next() > 0);
     assert!(a.node.ifac_activate_next() > 0);
+    // Let the activate window drain before sealing. Sealing retires the old
+    // key for INBOUND too, so anything still masked with it — in the socket,
+    // in a retry queue, in the peer's receive buffer — is rejected on arrival.
+    // Without this dwell the relay logged exactly one `drops_ifac` and this
+    // test failed ~50% of runs; the dwell is the operator's obligation, not a
+    // test convenience, and it is documented on `ifac_seal_rotation`.
+    tokio::time::sleep(IFAC_ROTATION_DWELL).await;
     assert!(r.node.ifac_seal_rotation() > 0);
     assert!(a.node.ifac_seal_rotation() > 0);
 
