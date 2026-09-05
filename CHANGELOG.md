@@ -38,6 +38,47 @@ being absorbed by the queue is unchanged and still open: the warning says it
 may be mis-tuned and the evidence agrees, but that is a design change, and it
 wants the measurement these gauges now make possible.
 
+### Fixed — BLE is Linux-only, so its dependencies must be too (leviculum#64)
+
+The catch-up below brought upstream's BLE interface in with `bluer` and `dbus`
+declared unconditionally. Both pull `libdbus-sys`, which does not build on
+macOS or Windows, so `leviculum-std` stopped building on either. That reaches
+a consumer rather than only a CI lane: CIRISEdge's darwin and win_amd64 wheels
+resolve this crate as a git dependency and would have failed at build time.
+
+The dependencies are now target-gated and the two modules using them
+cfg-gated. Configuring a `BLEInterface` off Linux returns a typed `Config`
+error naming the reason (it needs BlueZ over D-Bus) instead of failing to
+compile. Worth offering upstream: it makes their crate buildable off Linux.
+
+### Fixed — a live link survives a rotation, and sealing states its price (leviculum#52)
+
+`s6_live_links_survive_rotation` was failing ~50% of runs. Measuring it found
+one real defect and one wrong assumption in the test.
+
+- **The driver masked with a key the peer had already retired.** The event
+  loop refreshed its IFAC map at the top of each iteration, then parked in
+  `select!`. A rotation phase bumps the generation while the loop is parked,
+  so the send that wakes it was dispatched inside an iteration whose refresh
+  had already run. The map is now refreshed immediately before every
+  dispatch, which is where masking actually happens.
+- **Sealing is the breaking phase, and that is by design.** `install` and
+  `activate` are make-before-break — both keys are accepted, so neither can
+  lose a packet. `seal` retires the old key for inbound too, so anything
+  still masked with it is rejected on arrival: bytes in a socket, in a retry
+  queue, or in the peer's receive buffer. Sealing with no dwell after
+  activating strands that in-flight traffic. The obligation to leave a dwell
+  is now documented on the rotation API, and the test performs the rotation
+  the way an operator must.
+
+Evidence for the split: with the rotation removed the test passed 6/6; with
+install alone 5/5; with install+activate 5/5; only sealing failed, and every
+failing run showed exactly one `drops_ifac` at the peer while no passing run
+showed any. Stress after both fixes: 0/12 failures, was 4/8.
+
+Nothing imposes a dwell in the library. Each phase is an explicit operator
+call precisely so the cutover moment stays theirs to choose.
+
 ### Changed — catch-up to upstream master @ `28de8362` (+92)
 
 Mostly LNode firmware, a **BLE interface**, `lnprobe` (probing a destination
