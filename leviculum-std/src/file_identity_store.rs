@@ -90,6 +90,15 @@ impl IdentityStore for FileIdentityStore {
 
         // Directory fsync: the rename itself is only durable once the parent
         // directory's entry is on disk.
+        //
+        // Unix only. Windows cannot open a directory as a file at all —
+        // `File::open` on one fails with `ERROR_ACCESS_DENIED` (os error 5),
+        // so this line did not merely skip the flush there, it failed the
+        // save and took every builder test with it. There is no portable
+        // equivalent to reach for: NTFS commits the rename's metadata as part
+        // of the rename, and the durability this line buys on Unix is not
+        // something a handle can ask for on Windows.
+        #[cfg(unix)]
         if let Some(dir) = self.path.parent() {
             std::fs::File::open(dir)?.sync_all()?;
         }
