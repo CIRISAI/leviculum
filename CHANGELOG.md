@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.25.0+ciris.1] — CIRIS fork
+
+### Changed — catch-up to upstream master @ `28de8362` (+92)
+
+Mostly LNode firmware, a **BLE interface**, `lnprobe` (probing a destination
+through either daemon), identity-hash readback in `lnflash --set-name`, a
+control-envelope identity query, and a large body of docs and rnsd-interop
+RPC coverage. Rebase was clean; every carried feature symbol-audited after.
+
+Two places where upstream's new code met this fork's carry, both mechanical:
+
+- the new BLE interface constructs `InterfaceInfo`, which the fork extends
+  with the declared-transit flag (leviculum#51) — it takes `transit: true`,
+  relay-by-default like every other interface type, scoped per interface by
+  config;
+- upstream added a `dispatch_output` call site for BLE peer-loss
+  (`handle_interface_peer_lost`), which the fork's signature threads the
+  multi-segment assembler through (leviculum#62).
+
 ## [0.24.0+ciris.1] — CIRIS fork
 
 ### Added — a transfer of any size is one delivery (leviculum#62)
