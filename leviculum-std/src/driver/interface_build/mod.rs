@@ -20,6 +20,7 @@ use leviculum_core::transport::InterfaceId;
 use super::AutoPeerCount;
 
 mod auto;
+#[cfg(target_os = "linux")]
 mod ble;
 mod i2p;
 mod kiss;
@@ -38,7 +39,10 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub reconnect_tx: &'a mpsc::Sender<InterfaceId>,
     pub tunnel_notify_tx: &'a mpsc::Sender<InterfaceId>,
     /// Per-peer loss reports from multi-peer interfaces (Codeberg #365);
-    /// today only the BLE builder hands it to its interface task.
+    /// today only the BLE builder hands it to its interface task — and that
+    /// builder is Linux-only (it needs BlueZ over D-Bus), so off Linux this
+    /// field has no reader and `-D warnings` would fail the lane.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub peer_lost_tx: &'a mpsc::Sender<(InterfaceId, [u8; 16])>,
     /// Test-only frame-corruption cadence.
     pub corrupt_every: Option<u64>,
@@ -56,6 +60,7 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// the Columba Identity characteristic, handshakes with it, and derives
     /// its advertised `LN-<hex8>` name from it — the same derivation the
     /// firmware uses (`leviculum_ble_tx::device_name`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub identity_hash: [u8; 16],
 }
 
@@ -119,7 +124,14 @@ pub(super) fn build_interface(
         "PipeInterface" => pipe::build(idx, config, ctx),
         "KISSInterface" | "AX25KISSInterface" => kiss::build(idx, config, ctx),
         "I2PInterface" => i2p::build(idx, config, ctx),
+        #[cfg(target_os = "linux")]
         "BLEInterface" => ble::build(idx, config, ctx),
+        // A BLE section in a config file on a non-Linux host is a
+        // configuration error worth naming, not a silent no-op.
+        #[cfg(not(target_os = "linux"))]
+        "BLEInterface" => Err(crate::Error::Config(
+            "BLEInterface is supported on Linux only (it requires BlueZ over D-Bus)".to_string(),
+        )),
         other => {
             tracing::warn!("Unknown interface type: {}", other);
             Ok(Built::SelfManaged)
