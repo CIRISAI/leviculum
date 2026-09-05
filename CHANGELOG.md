@@ -11,6 +11,33 @@ git tag, not the version string. -->
 
 ## [0.25.0+ciris.1] — CIRIS fork
 
+### Fixed — the retry queue is diagnosable and quiet (leviculum#63)
+
+Reported from the live canonical, where the retry queue climbed past its
+warning threshold and began discarding traffic while the log read as quiet.
+
+- **The warnings name their peer.** Interfaces were named only at accept
+  time, so a drop line said `iface=7` and mapping that to a peer meant
+  finding the accept line — which a downstream log-dedup layer had
+  suppressed. Every retry-queue warning now carries the interface name.
+- **The depth log is a ladder, not a per-increment stream.** The watermark
+  logged depth 1, 2, 3 … 1024 — hundreds of lines per interface per episode
+  for what is a curve. It now reports on powers of two plus the cap, so the
+  last line before drops is always emitted and an episode costs ~10 lines.
+- **The reported peak no longer understates.** Because of the flood, the
+  observed watermarks were the last lines to survive dedup, not the true
+  peaks; a drop only fires at the cap, so anything that dropped reached it.
+  The drop warning now says so.
+- **`plane_stats()` gains `retry_queued`, `retry_queue_cap` and
+  `retry_dropped_total`**, so the depth is watchable as it climbs rather
+  than announced by the first discard — the treatment the control plane got
+  in leviculum#60.
+
+Whether first-order backpressure should propagate to the producer instead of
+being absorbed by the queue is unchanged and still open: the warning says it
+may be mis-tuned and the evidence agrees, but that is a design change, and it
+wants the measurement these gauges now make possible.
+
 ### Changed — catch-up to upstream master @ `28de8362` (+92)
 
 Mostly LNode firmware, a **BLE interface**, `lnprobe` (probing a destination
