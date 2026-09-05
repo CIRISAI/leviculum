@@ -272,6 +272,15 @@ async fn plane_stats_report_limits_and_track_the_live_set() {
     assert_eq!(idle.live_links, 0, "no links yet");
     assert_eq!(idle.control_dropped_total, 0, "a quiet node drops nothing");
     assert_eq!(idle.live_link_envelope, 1024);
+    // leviculum#63: the retry queue is readable before it drops anything —
+    // an interface that cannot drain as fast as it is handed packets shows
+    // up here first, rather than in the log line announcing a discard.
+    assert_eq!(idle.retry_queued, 0, "a quiet node queues no retries");
+    assert_eq!(idle.retry_dropped_total, 0, "and drops none");
+    assert!(
+        idle.retry_queue_cap > 0,
+        "the cap is readable, not implicit"
+    );
     assert!(idle.control_utilization() < 0.5);
 
     let (dest, sk, hash) = make_destination("stats");
