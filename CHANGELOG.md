@@ -51,6 +51,23 @@ cfg-gated. Configuring a `BLEInterface` off Linux returns a typed `Config`
 error naming the reason (it needs BlueZ over D-Bus) instead of failing to
 compile. Worth offering upstream: it makes their crate buildable off Linux.
 
+### Fixed — a directory fsync is a Unix move, not a portable one (leviculum#65)
+
+Upstream's `cf0e24cc` added a parent-directory fsync after the identity save's
+rename, so the rename is durable. Correct on Unix; on Windows `File::open`
+cannot open a directory at all, failing with `ERROR_ACCESS_DENIED`, so the
+line did not skip the flush there — it failed the save and returned
+`Storage("failed to save identity: Access is denied. (os error 5)")`.
+
+That took every test that builds a node with it: 20+ failures across
+`driver::builder::tests` plus `api::tests::node_lifecycle_without_interfaces`,
+one root cause. `leviculum-core` was unaffected.
+
+The fsync is now `#[cfg(unix)]`. NTFS commits the rename's metadata as part of
+the rename, and the durability this buys on Unix is not something a Windows
+handle can ask for. Upstream's CI is Linux-only, so this was invisible to
+them; offering it back.
+
 ### Fixed — a live link survives a rotation, and sealing states its price (leviculum#52)
 
 `s6_live_links_survive_rotation` was failing ~50% of runs. Measuring it found
