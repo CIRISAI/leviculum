@@ -102,6 +102,8 @@ mod mvr_proof_activity;
 #[cfg(test)]
 mod mvr_reboot_relay_nopath_solicit;
 #[cfg(test)]
+mod mvr_relay_pr_from_next_hop;
+#[cfg(test)]
 mod mvr_request_response_pins;
 #[cfg(test)]
 mod mvr_resource_offlock_phases;
