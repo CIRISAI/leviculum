@@ -26,7 +26,7 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
-use leviculum_nrf::ble::BleInterface;
+use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::t114;
 use leviculum_nrf::clock::EmbassyClock;
 use leviculum_nrf::interface::EmbeddedInterface;
@@ -554,7 +554,7 @@ async fn main(spawner: Spawner) {
                 lora_channels.incoming_rx.receive(),
                 select(
                     ble_channels.incoming_rx.receive(),
-                    ble_channels.peer_lost_rx.receive(),
+                    ble_channels.peer_event_rx.receive(),
                 ),
                 Timer::at(deadline),
             ),
@@ -710,26 +710,39 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
             }
-            Either4::First(Either4::Third(Either::Second(peer))) => {
-                // A BLE peer's last link died (Codeberg #365): cull the
+            Either4::First(Either4::Third(Either::Second(event))) => {
+                // A BLE peer transition (Codeberg #365). Lost: cull the
                 // paths whose next hop is that peer so the next report
-                // re-resolves over a carrier that can still deliver. Not
-                // gated on media::ble_active — this is state cleanup, not
-                // traffic, and a medium switched off mid-run must shed
-                // its peers' paths too.
-                let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
-                info!(
-                    "BLE peer lost, {} paths culled",
-                    output
-                        .events
-                        .iter()
-                        .filter(|e| matches!(e, NodeEvent::PathLost { .. }))
-                        .count()
-                );
+                // re-resolves over a carrier that can still deliver.
+                // Up: pull the peer's delivery path over the fresh link
+                // (Columba answers a path request but announces on
+                // neither connect nor reconnect). Not gated on
+                // media::ble_active — the cull is state cleanup, and a
+                // pull for a medium switched off mid-run dies in the
+                // interface's carrier-off drop like any other packet.
+                let (label, output) = match event {
+                    BlePeerEvent::Lost(peer) => {
+                        let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
+                        info!(
+                            "BLE peer lost, {} paths culled",
+                            output
+                                .events
+                                .iter()
+                                .filter(|e| matches!(e, NodeEvent::PathLost { .. }))
+                                .count()
+                        );
+                        ("ble-peer-lost", output)
+                    }
+                    BlePeerEvent::Up(peer) => {
+                        let output = node.handle_interface_peer_up(InterfaceId(2), peer);
+                        info!("BLE peer up, {} pull actions", output.actions.len());
+                        ("ble-peer-up", output)
+                    }
+                };
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("ble-peer-lost", &mut node, &dispatched);
+                leviculum_nrf::dispatch::settle(label, &mut node, &dispatched);
             }
             Either4::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();

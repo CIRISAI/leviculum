@@ -46,6 +46,7 @@ pub struct NodeCoreBuilder {
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     max_incoming_resource_size: usize,
     resource_window_policy: WindowPolicy,
+    peer_up_pull_names: Option<Vec<alloc::string::String>>,
 }
 
 impl Default for NodeCoreBuilder {
@@ -66,7 +67,18 @@ impl NodeCoreBuilder {
             remote_management_allowed: Vec::new(),
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
             resource_window_policy: WindowPolicy::default(),
+            peer_up_pull_names: None,
         }
+    }
+
+    /// Replace the full destination names the peer-up pull derives per-peer
+    /// destinations from (Codeberg #365). Default: `["lxmf.delivery"]` —
+    /// see `NodeCore::handle_interface_peer_up` for the mechanism and the
+    /// field doc on `NodeCore` for why that default. An empty list disables
+    /// the pull.
+    pub fn peer_up_pull_names(mut self, names: Vec<alloc::string::String>) -> Self {
+        self.peer_up_pull_names = Some(names);
+        self
     }
 
     /// Set the node's identity
@@ -243,6 +255,10 @@ impl NodeCoreBuilder {
             node.enable_remote_management(self.remote_management_allowed);
         }
 
+        if let Some(names) = self.peer_up_pull_names {
+            node.set_peer_up_pull_names(names);
+        }
+
         node
     }
 
@@ -294,6 +310,10 @@ impl NodeCoreBuilder {
 
         if self.remote_management {
             node.enable_remote_management(self.remote_management_allowed);
+        }
+
+        if let Some(names) = self.peer_up_pull_names {
+            node.set_peer_up_pull_names(names);
         }
 
         node

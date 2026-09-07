@@ -374,6 +374,28 @@ pub(crate) struct IncomingPacket {
     pub data: Vec<u8>,
 }
 
+/// A peer-link transition on a multi-peer broadcast-domain interface
+/// (Codeberg #365), reported by the interface that owns the link — only
+/// it knows a single peer inside the domain came or went while the
+/// interface itself stayed up. Today only the BLE interface reports;
+/// the identity hash is the value the Columba handshake exchanges.
+///
+/// Both variants travel on ONE ordered channel on purpose: a link flap
+/// is a `Lost` followed by an `Up`, and the loop must cull the stale
+/// direct path (`Lost`) BEFORE it decides whether to pull a fresh one
+/// (`Up`) — on separate channels the `Up` could win the race, see the
+/// still-standing direct entry, skip the pull, and then have the `Lost`
+/// cull re-arm exactly the trap the pull exists to clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerEvent {
+    /// The identity gained its FIRST link on the interface; the loop
+    /// pulls the peer's delivery path (`NodeCore::handle_interface_peer_up`).
+    Up([u8; 16]),
+    /// The identity's LAST link on the interface died; the loop culls
+    /// the paths via that peer (`NodeCore::handle_interface_peer_lost`).
+    Lost([u8; 16]),
+}
+
 /// TEST-ONLY range emulation for co-located rigs (the 3-node relay
 /// scenario): with `test_drop_direct_ingress` on a LoRa-capable interface,
 /// every deframed frame whose wire hops byte is 0 is dropped on ingress,

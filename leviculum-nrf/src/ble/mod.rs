@@ -132,26 +132,54 @@ type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
 static BLE_INCOMING: PacketQueue = Channel::new();
 static BLE_OUTGOING: PacketQueue = Channel::new();
 
-/// Peer-loss reports toward the main loop (Codeberg #365): the 16-byte
-/// identity hash of a peer whose LAST link on this interface died. The
-/// main loop hands each one to `NodeCore::handle_interface_peer_lost`,
-/// which culls the path entries whose next hop is that peer — without
-/// it a stale 1-hop BLE path keeps swallowing traffic after the peer
-/// walked out of range. Fed by [`columba`]'s link teardown (both
-/// roles); protocol-neutral, so a sibling carrier reports here too.
-static BLE_PEER_LOST: Channel<CriticalSectionRawMutex, [u8; 16], 4> = Channel::new();
+/// A peer-link transition report toward the main loop (Codeberg #365).
+/// Only the interface knows a single peer inside its broadcast domain
+/// came or went while the interface itself stayed up; the identity hash
+/// is the value the Columba handshake exchanges.
+#[derive(Clone, Copy)]
+pub enum PeerEvent {
+    /// The identity's FIRST link on this interface is up. The main loop
+    /// hands it to `NodeCore::handle_interface_peer_up`, which pulls the
+    /// peer's delivery path over the new link — Columba answers a path
+    /// request but announces on neither connect nor reconnect, so
+    /// without the pull a relay that lost its direct entry stays blind
+    /// until the peer's periodic announce.
+    Up([u8; 16]),
+    /// The identity's LAST link on this interface died. The main loop
+    /// hands it to `NodeCore::handle_interface_peer_lost`, which culls
+    /// the path entries whose next hop is that peer — without it a
+    /// stale 1-hop BLE path keeps swallowing traffic after the peer
+    /// walked out of range.
+    Lost([u8; 16]),
+}
 
-/// Report a peer as gone (see [`BLE_PEER_LOST`]). `try_send`: with the
-/// 4-deep queue full the oldest pending report wins and this one is
-/// dropped — the paths then age out via ordinary expiry, the pre-#365
-/// behaviour, rather than blocking a connection task.
-pub(crate) fn report_peer_lost(identity: [u8; 16]) {
-    if BLE_PEER_LOST.try_send(identity).is_err() {
+/// Peer-event reports toward the main loop (Codeberg #365). Fed by
+/// [`columba`]'s link registry (both GATT roles); protocol-neutral, so
+/// a sibling carrier reports here too. `Up` and `Lost` share this ONE
+/// ordered channel on purpose: a link flap is a `Lost` followed by an
+/// `Up`, and the cull must land before the pull decision looks at the
+/// path table — on separate channels the `Up` could win the race, see
+/// the still-standing direct entry, skip the pull, and then have the
+/// `Lost` cull re-arm exactly the trap the pull exists to clear.
+static BLE_PEER_EVENTS: Channel<CriticalSectionRawMutex, PeerEvent, 4> = Channel::new();
+
+/// Report a peer transition (see [`BLE_PEER_EVENTS`]). `try_send`: with
+/// the 4-deep queue full the oldest pending report wins and this one is
+/// dropped — the affected node then falls back to the pre-#365
+/// behaviour (a dropped `Lost` ages the paths out via ordinary expiry,
+/// a dropped `Up` waits for the peer's periodic announce) rather than
+/// blocking a connection task.
+pub(crate) fn report_peer_event(event: PeerEvent) {
+    if BLE_PEER_EVENTS.try_send(event).is_err() {
+        let (kind, identity) = match event {
+            PeerEvent::Up(id) => ("up", id),
+            PeerEvent::Lost(id) => ("lost", id),
+        };
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_PEER_LOST_DROPPED peer={:02x}{:02x}{:02x}{:02x}",
-                identity[0], identity[1], identity[2], identity[3]
+                "BLE_PEER_EVENT_DROPPED kind={} peer={:02x}{:02x}{:02x}{:02x}",
+                kind, identity[0], identity[1], identity[2], identity[3]
             ),
         );
     }
@@ -216,16 +244,18 @@ async fn tx_fanout_task() -> ! {
 pub struct BleChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
-    /// Identity hashes of peers whose last link died (Codeberg #365);
-    /// the main loop feeds each to `handle_interface_peer_lost`.
-    pub peer_lost_rx: Receiver<'static, CriticalSectionRawMutex, [u8; 16], 4>,
+    /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
+    /// `handle_interface_peer_lost` and `Up` to
+    /// `handle_interface_peer_up`. See [`BLE_PEER_EVENTS`] for why both
+    /// ride one ordered channel.
+    pub peer_event_rx: Receiver<'static, CriticalSectionRawMutex, PeerEvent, 4>,
 }
 
 pub fn channels() -> BleChannels {
     BleChannels {
         incoming_rx: BLE_INCOMING.receiver(),
         outgoing_tx: BLE_OUTGOING.sender(),
-        peer_lost_rx: BLE_PEER_LOST.receiver(),
+        peer_event_rx: BLE_PEER_EVENTS.receiver(),
     }
 }
 

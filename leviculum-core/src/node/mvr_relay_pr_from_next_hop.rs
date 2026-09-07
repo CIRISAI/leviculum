@@ -1,6 +1,6 @@
 //! mvr: a relay whose next hop toward D IS the requestor swallows the
-//! path request — no answer, no forward, no recovery (Codeberg #365,
-//! walk 2 and walk 5).
+//! path request (Codeberg #365, walk 2 and walk 5) — and the peer-up
+//! pull recovers the cell.
 //!
 //! ## The field failure this reproduces
 //!
@@ -24,7 +24,7 @@
 //! relay only as the Pocket's LoRa rebroadcast — installed into the
 //! void as next_hop = Pocket (`handle_announce`, new-destination arm).
 //!
-//! ## Reference semantics
+//! ## Reference semantics, and the closure
 //!
 //! Python has the identical dead end, and knows it: the
 //! requestor-is-next-hop branch (Transport.py:2958-2966) drops the
@@ -33,21 +33,30 @@
 //! chain means the discovery/forward branches are unreachable while any
 //! path entry exists. Our `handle_path_request` mirrors that shape
 //! (transport.rs, `next_hop_is_requestor` early return before cases
-//! 2b/3). So this is a semantic gap shared with the reference; closing
-//! it (e.g. treating the request as the invalidation signal upstream's
-//! TODO asks for, then re-originating discovery) is a deviation-rule
-//! decision — which is why this mvr pins the failure and no fix ships
-//! with it.
+//! 2b/3), and this mvr pins that the guard itself stays untouched.
+//!
+//! The recovery goes around the guard instead of through it: the M1
+//! measurement (ledger 365, 2026-09-07) showed Columba answers a path
+//! request for its own delivery destination in under a second, so the
+//! relay can PULL the phone's announce over its own BLE link the moment
+//! the peer comes up (`NodeCore::handle_interface_peer_up`; mechanism
+//! pinned in `mvr_peer_up_pull`). The direct announce that comes back
+//! displaces the stale via-the-requestor route (fewer hops win), and
+//! the next path request from behind the relay is answered normally.
+//! Wire-compatible both ways: the pull is the ordinary 48-byte path
+//! request, the answer the ordinary announce.
 //!
 //! ## Shape
 //!
 //! 2 nodes (both the boards' exact storage type), deterministic,
 //! sub-second. A (the Pocket) learns D direct on BLE, loses the peer,
 //! culls, and emits the real 48-byte path request. R (the T114) holds D
-//! via A. The request is piped into R; R must react on SOME carrier —
-//! an answer or a re-originated request — and today it does neither.
-//! The control pins the same harness green with the healthy relay state
-//! (D held direct), so a red here is the mechanism, not the rig.
+//! via A. The request is piped into R and dies in the guard (pinned
+//! red-era behaviour, still asserted); then the phone's peer-up lands
+//! on R's BLE interface, R pulls, the phone's direct announce comes
+//! back, and A's NEXT request IS answered. The control pins the same
+//! harness green with the healthy relay state (D held direct), so the
+//! answer detection is the rig's, not the fix's.
 
 extern crate std;
 
@@ -57,7 +66,9 @@ use std::vec::Vec;
 
 use rand_core::OsRng;
 
-use crate::constants::{MTU, PATH_REQUEST_GRACE_MS, TRUNCATED_HASHBYTES};
+use crate::constants::{
+    MTU, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS, TRUNCATED_HASHBYTES,
+};
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::embedded_storage::EmbeddedStorage;
 use crate::identity::Identity;
@@ -86,23 +97,25 @@ fn add_iface(node: &mut EmbeddedNode, name: &'static str, id: u8) -> usize {
     idx
 }
 
-/// The phone: identity + destination + announce packers (same helper
-/// shape as `mvr_ble_peer_loss_reroute`).
+/// The phone: identity + its `lxmf.delivery` destination + announce
+/// packers. The real aspect matters here — the peer-up pull derives
+/// exactly this destination from the identity hash, so the field chain
+/// only closes if the mvr's phone carries the name the pull guesses.
 struct Peer {
     identity_hash: [u8; TRUNCATED_HASHBYTES],
     dest_hash: crate::DestinationHash,
     dest: Destination,
 }
 
-fn make_peer(app: &'static str) -> Peer {
+fn make_peer() -> Peer {
     let identity = Identity::generate(&mut OsRng);
     let identity_hash = *identity.hash();
     let dest = Destination::new(
         Some(identity),
         Direction::In,
         DestinationType::Single,
-        "mvrapp",
-        &[app],
+        "lxmf",
+        &["delivery"],
     )
     .unwrap();
     let dest_hash = *dest.hash();
@@ -162,7 +175,7 @@ fn announces_for(out: &TickOutput, dest: &[u8; TRUNCATED_HASHBYTES]) -> usize {
 }
 
 /// Path requests naming `dest` in this output — the shape of a
-/// re-originated / forwarded discovery.
+/// re-originated / forwarded discovery, and of the peer-up pull.
 fn path_requests_for(
     out: &TickOutput,
     pr_hash: &[u8; TRUNCATED_HASHBYTES],
@@ -183,19 +196,18 @@ fn path_requests_for(
         .count()
 }
 
-/// Walk the Pocket half of the chain for real: D learned direct on BLE,
-/// the peer-lost cull, then the path request the board actually puts on
-/// the wire. Returns the raw 48-byte-payload request packet.
-fn pocket_emits_path_request(phone: &mut Peer) -> Vec<u8> {
-    let mut pocket = make_node();
-    let ble = add_iface(&mut pocket, "ble_nrf", 0);
-    let _lora = add_iface(&mut pocket, "lora_sx1262", 1);
+/// The Pocket half of the chain, walked for real: D learned direct on
+/// BLE, the peer-lost cull, then the path request the board actually
+/// puts on the wire. The Pocket stays alive so the trap test can make
+/// it re-request later. Returns the raw 48-byte-payload request.
+fn pocket_emits_path_request(pocket: &mut EmbeddedNode, phone: &mut Peer) -> Vec<u8> {
+    let ble = InterfaceId(0);
     let pocket_id = *pocket.identity().hash();
     let pr_hash = *pocket.transport().path_request_hash();
 
-    let _ = pocket.handle_packet(InterfaceId(ble), &phone.direct_announce(TEST_TIME_MS));
+    let _ = pocket.handle_packet(ble, &phone.direct_announce(TEST_TIME_MS));
     assert!(pocket.has_path(&phone.dest_hash), "direct path installed");
-    let _ = pocket.handle_interface_peer_lost(InterfaceId(ble), phone.identity_hash);
+    let _ = pocket.handle_interface_peer_lost(ble, phone.identity_hash);
     assert!(
         !pocket.has_path(&phone.dest_hash),
         "the cull must fire first — otherwise this is mechanism 1/2, not 3"
@@ -224,12 +236,19 @@ fn pocket_emits_path_request(phone: &mut Peer) -> Vec<u8> {
     request
 }
 
-/// Run the relay's scheduler dry BEFORE the request goes in. The
-/// relayed announce received during setup arms an ordinary rebroadcast
-/// in the announce_table; in compressed mvr time that rebroadcast would
-/// fire inside the observation window and read as an "answer". In the
-/// field it fired seconds after the announce, ~40 minutes before the
-/// walk's BLE loss — setup traffic, not a reaction to the request.
+/// Build the Pocket with the interface pair the boards carry.
+fn make_pocket() -> Box<EmbeddedNode> {
+    let mut pocket = make_node();
+    let _ble = add_iface(&mut pocket, "ble_nrf", 0);
+    let _lora = add_iface(&mut pocket, "lora_sx1262", 1);
+    pocket
+}
+
+/// Run the relay's scheduler dry. Every announce received during setup
+/// arms an ordinary rebroadcast in the announce_table; in compressed
+/// mvr time that rebroadcast would fire inside an observation window
+/// and read as an "answer". In the field it fired seconds after the
+/// announce — setup traffic, not a reaction to the request.
 fn drain_scheduler(relay: &mut EmbeddedNode) {
     for _ in 0..12 {
         let next = relay.transport().clock().now_ms() + 10_000;
@@ -254,12 +273,13 @@ fn relay_reaction(relay: &mut EmbeddedNode, lora: usize, request: &[u8]) -> Vec<
 /// Positive control: the healthy walk-5 start state. The relay holds D
 /// DIRECT (its own BLE link to the phone), the request arrives over
 /// LoRa from a third party — the relay answers with its cached announce
-/// after the grace. Green today; pins that the harness would see an
-/// answer if one were given.
+/// after the grace. Pins that the harness would see an answer if one
+/// were given.
 #[test]
 fn control_relay_with_direct_path_answers_the_request() {
-    let mut phone = make_peer("prswallow");
-    let request = pocket_emits_path_request(&mut phone);
+    let mut phone = make_peer();
+    let mut pocket = make_pocket();
+    let request = pocket_emits_path_request(&mut pocket, &mut phone);
 
     let mut relay = make_node();
     let ble = add_iface(&mut relay, "ble_nrf", 0);
@@ -285,47 +305,28 @@ fn control_relay_with_direct_path_answers_the_request() {
     );
 }
 
-/// THE walk-2/walk-5 mechanism: the relay holds D via the requestor.
-/// Refusing to ANSWER is correct — that route leads back through the
-/// requestor — but the request, which is itself the signal that the
-/// route via the requestor is dead, must not die silently at the only
-/// node that could recover the cell: the relay must react on some
-/// carrier (re-originate/forward the discovery toward its other
-/// interfaces, or invalidate and answer once a real path exists).
-/// Today it does neither, here and in the reference (Transport.py:2958
-/// TODO), and the cell stays dark until the phone happens to announce.
+/// THE walk-2/walk-5 mechanism, closed: the relay holds D via the
+/// requestor, so the Pocket's request dies in the requestor guard —
+/// still, and deliberately (refusing that answer is correct, and the
+/// guard is reference-identical). Then the phone's peer-up lands on the
+/// relay's BLE interface: the relay pulls the phone's delivery path
+/// over its own link, the phone's direct announce displaces the stale
+/// via-the-requestor route, and the Pocket's next request IS answered.
+/// Green closure of mechanism 3 (formerly `#[ignore]`d red as
+/// `relay_holding_the_requestor_as_next_hop_swallows_the_request`).
 #[test]
-#[ignore = "Codeberg #365: relay drops a path request from its own next hop \
-            (reference-identical, Transport.py:2958 TODO); fix direction \
-            awaits the phone measurement — deliberately red until decided"]
-fn relay_holding_the_requestor_as_next_hop_swallows_the_request() {
-    let mut phone = make_peer("prswallow");
-
-    // The Pocket half, walked for real; its identity is the transport
-    // id inside the request AND the next hop the relay holds.
-    let mut pocket = make_node();
-    let p_ble = add_iface(&mut pocket, "ble_nrf", 0);
-    let _ = add_iface(&mut pocket, "lora_sx1262", 1);
+fn peer_up_pull_recovers_the_relay_from_the_requestor_next_hop_trap() {
+    let mut phone = make_peer();
+    let mut pocket = make_pocket();
     let pocket_id = *pocket.identity().hash();
+    let request = pocket_emits_path_request(&mut pocket, &mut phone);
     let pr_hash = *pocket.transport().path_request_hash();
-    let _ = pocket.handle_packet(InterfaceId(p_ble), &phone.direct_announce(TEST_TIME_MS));
-    let _ = pocket.handle_interface_peer_lost(InterfaceId(p_ble), phone.identity_hash);
-    let pocket_out = pocket.request_path(&phone.dest_hash);
-    let request = wire_out(&pocket_out)
-        .into_iter()
-        .map(|(_, data)| data)
-        .find(|data| {
-            Packet::unpack(data)
-                .map(|p| p.destination_hash == pr_hash)
-                .unwrap_or(false)
-        })
-        .expect("the culled Pocket must solicit the path");
 
     // The relay's trap state: D via the Pocket (walk 2: rebooted relay
     // + Columba silent on reconnect; post-28de836 also reachable via
     // the relay's own cull on a BLE flap).
     let mut relay = make_node();
-    let _ble = add_iface(&mut relay, "ble_nrf", 0);
+    let ble = add_iface(&mut relay, "ble_nrf", 0);
     let lora = add_iface(&mut relay, "lora_sx1262", 1);
     let _ = relay.handle_packet(
         InterfaceId(lora),
@@ -349,6 +350,7 @@ fn relay_holding_the_requestor_as_next_hop_swallows_the_request() {
         "the relay holds the cached announce it could answer with"
     );
 
+    // Part 1, the guard is untouched: the request still dies silently.
     drain_scheduler(&mut relay);
     let reactions = relay_reaction(&mut relay, lora, &request);
     let answers: usize = reactions
@@ -359,13 +361,63 @@ fn relay_holding_the_requestor_as_next_hop_swallows_the_request() {
         .iter()
         .map(|out| path_requests_for(out, &pr_hash, phone.dest_hash.as_bytes()))
         .sum();
+    assert_eq!(
+        answers + forwards,
+        0,
+        "the requestor guard must keep dropping the request itself — the \
+         recovery goes around it, not through it"
+    );
+
+    // Part 2, the recovery: the phone links to the relay (walk 5's BLE
+    // reconnect) and the interface reports peer-up. The relay holds D
+    // only VIA the requestor, so the pull fires on the BLE link.
+    let pull = relay.handle_interface_peer_up(InterfaceId(ble), phone.identity_hash);
+    let relay_pr_hash = *relay.transport().path_request_hash();
+    assert_eq!(
+        path_requests_for(&pull, &relay_pr_hash, phone.dest_hash.as_bytes()),
+        1,
+        "peer-up with only a stale relayed entry must pull the delivery path"
+    );
+
+    // The phone's measured M1 behaviour: it answers the pull with an
+    // ordinary direct announce over the same link.
+    let ts = relay.transport().clock().now_ms();
+    let _ = relay.handle_packet(InterfaceId(ble), &phone.direct_announce(ts));
+    let entry = relay
+        .transport
+        .get_path_clone(phone.dest_hash.as_bytes())
+        .expect("relay still holds D");
+    assert_eq!(
+        entry.next_hop, None,
+        "the direct announce displaces the via-the-requestor route"
+    );
+
+    // Retire the rebroadcast the fresh announce armed, so the answer we
+    // assert next cannot be setup traffic.
+    drain_scheduler(&mut relay);
+
+    // The Pocket asks again (its per-minute cadence in walk 2) — and
+    // this time the relay answers. This is the former red assertion.
+    let now = pocket.transport().clock().now_ms() + PATH_REQUEST_MIN_INTERVAL_MS + 1_000;
+    pocket.transport().clock().set(now);
+    let out = pocket.request_path(&phone.dest_hash);
+    let request2 = wire_out(&out)
+        .into_iter()
+        .map(|(_, data)| data)
+        .find(|data| {
+            Packet::unpack(data)
+                .map(|p| p.destination_hash == pr_hash)
+                .unwrap_or(false)
+        })
+        .expect("the Pocket re-requests on its cadence");
+    let answered: usize = relay_reaction(&mut relay, lora, &request2)
+        .iter()
+        .map(|out| announces_for(out, phone.dest_hash.as_bytes()))
+        .sum();
     assert!(
-        answers + forwards > 0,
-        "the relay swallowed the path request: no answer (correct — the \
-         route leads back through the requestor) but also no forwarded or \
-         re-originated discovery on any other carrier; the requestor can \
-         never recover and the cell stays dark until the destination \
-         happens to announce (walk 2: rx +24, fwd 0; walk 5: nothing \
-         over LoRa after the BLE loss)"
+        answered > 0,
+        "after the peer-up pull the relay holds D direct and the Pocket's \
+         next path request is answered — the cell recovers without waiting \
+         for the phone's periodic announce"
     );
 }

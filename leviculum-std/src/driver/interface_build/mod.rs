@@ -37,9 +37,10 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub new_iface_tx: &'a mpsc::Sender<InterfaceHandle>,
     pub reconnect_tx: &'a mpsc::Sender<InterfaceId>,
     pub tunnel_notify_tx: &'a mpsc::Sender<InterfaceId>,
-    /// Per-peer loss reports from multi-peer interfaces (Codeberg #365);
-    /// today only the BLE builder hands it to its interface task.
-    pub peer_lost_tx: &'a mpsc::Sender<(InterfaceId, [u8; 16])>,
+    /// Per-peer transition reports (loss + arrival) from multi-peer
+    /// interfaces (Codeberg #365); today only the BLE builder hands it
+    /// to its interface task.
+    pub peer_event_tx: &'a mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
     /// Test-only frame-corruption cadence.
     pub corrupt_every: Option<u64>,
     /// Storage root; I2P persists its per-interface keyfile under it.
@@ -137,7 +138,7 @@ mod tests {
         new_iface_tx: mpsc::Sender<InterfaceHandle>,
         reconnect_tx: mpsc::Sender<InterfaceId>,
         tunnel_notify_tx: mpsc::Sender<InterfaceId>,
-        peer_lost_tx: mpsc::Sender<(InterfaceId, [u8; 16])>,
+        peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
         inventory: crate::interfaces::inventory::SharedInventory,
     }
 
@@ -152,14 +153,14 @@ mod tests {
             let (new_iface_tx, new_iface_rx) = mpsc::channel(capacity);
             let (reconnect_tx, _reconnect_rx) = mpsc::channel(4);
             let (tunnel_notify_tx, _tunnel_notify_rx) = mpsc::channel(4);
-            let (peer_lost_tx, _peer_lost_rx) = mpsc::channel(4);
+            let (peer_event_tx, _peer_event_rx) = mpsc::channel(4);
             (
                 Self {
                     next_id: Arc::new(AtomicUsize::new(100)),
                     new_iface_tx,
                     reconnect_tx,
                     tunnel_notify_tx,
-                    peer_lost_tx,
+                    peer_event_tx,
                     inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
                 },
                 new_iface_rx,
@@ -172,7 +173,7 @@ mod tests {
                 new_iface_tx: &self.new_iface_tx,
                 reconnect_tx: &self.reconnect_tx,
                 tunnel_notify_tx: &self.tunnel_notify_tx,
-                peer_lost_tx: &self.peer_lost_tx,
+                peer_event_tx: &self.peer_event_tx,
                 corrupt_every: None,
                 storage_path: None,
                 outbound_socket_hook: None,

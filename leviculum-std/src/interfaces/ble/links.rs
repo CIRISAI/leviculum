@@ -603,6 +603,51 @@ mod tests {
         );
     }
 
+    /// The peer-up report decision (Codeberg #365), the mirror of the
+    /// loss side above: `admit` displaces same-identity links only, so
+    /// an `Accept` with `displaced == None` is exactly the moment an
+    /// identity gains its FIRST link — `knows_identity` flips true and
+    /// the orchestrator starts counting the link as known. That is the
+    /// condition the interface reports peer-up on; an `Accept` that
+    /// carries a displacement is the phone's random-address relink
+    /// (churn), and reporting it would spray one pull per ~60 s.
+    #[test]
+    fn admit_without_displacement_is_the_peer_up_report_point() {
+        let mut t = table();
+
+        assert!(!t.knows_identity(&ID_A));
+        let (adm, displaced) = t.admit(ID_A, ADDR_1, Role::Peripheral, 100, 0);
+        assert_eq!(adm, Admission::Accept);
+        assert!(
+            displaced.is_none(),
+            "first link: no displacement — this admission is reported as peer-up"
+        );
+        assert!(
+            t.knows_identity(&ID_A),
+            "the report point IS the moment the identity becomes known"
+        );
+
+        // The relink: same identity, fresh random address, old link gone
+        // zombie. Accepted, but with a displacement — churn, no report.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, ZOMBIE_TIMEOUT_MS + 1);
+        assert_eq!(adm, Admission::Accept);
+        assert!(
+            displaced.is_some(),
+            "same-identity relink carries the displacement — not a peer-up"
+        );
+
+        // After a real loss the next admission is a first link again and
+        // must be reported, or the flap-recovery pull never fires.
+        let _ = t.remove_by_addr(&ADDR_2);
+        assert!(!t.knows_identity(&ID_A));
+        let (adm, displaced) = t.admit(ID_A, ADDR_1, Role::Central, 100, 2 * ZOMBIE_TIMEOUT_MS);
+        assert_eq!(adm, Admission::Accept);
+        assert!(
+            displaced.is_none(),
+            "reconnect after a loss is a first link again: peer-up reported"
+        );
+    }
+
     /// The v2.2 §Connection Direction worked example, through the
     /// display-order conversion: `B8:27:EB:A8:A7:22` reads as
     /// 0xB827EBA8A722 and the lower Pi initiates.

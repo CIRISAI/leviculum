@@ -94,6 +94,8 @@ mod mvr_path_response_hops;
 #[cfg(test)]
 mod mvr_path_response_retries;
 #[cfg(test)]
+mod mvr_peer_up_pull;
+#[cfg(test)]
 mod mvr_pending_local_path_requests;
 #[cfg(test)]
 mod mvr_probe_announce_phase;
@@ -415,6 +417,19 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// with the destination hash; consumed take-once at the Single-destination
     /// decrypt site and always cleared before the call returns.
     pending_single_dest_plaintext: Option<SingleDestPlaintext>,
+    /// Full destination names whose per-identity hash a peer-up report pulls
+    /// a path for (Codeberg #365); see
+    /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
+    ///
+    /// Default `["lxmf.delivery"]`: the Columba mesh is the current
+    /// user-visible goal, and its phones answer a path request for their
+    /// delivery destination with an announce while announcing on neither
+    /// connect nor reconnect (M1 measurement, ledger 365). A peer without
+    /// that destination simply does not answer — the cost of a wrong guess
+    /// is one 48-byte packet on one interface. Configurable so a second
+    /// well-known aspect can be added without a code change
+    /// ([`NodeCoreBuilder::peer_up_pull_names`]).
+    peer_up_pull_names: Vec<String>,
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
@@ -470,7 +485,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
+            peer_up_pull_names: alloc::vec![String::from("lxmf.delivery")],
         }
+    }
+
+    /// Replace the peer-up pull list (see [`Self::handle_interface_peer_up`]
+    /// and the `peer_up_pull_names` field for what the default is and why).
+    /// An empty list disables the pull.
+    pub fn set_peer_up_pull_names(&mut self, names: Vec<String>) {
+        self.peer_up_pull_names = names;
     }
 
     // Destination Management
@@ -2438,6 +2461,83 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             events: core::mem::take(&mut self.events),
             next_deadline_ms,
         }
+    }
+
+    /// Notify core that a direct peer with identity `peer` has come up on a
+    /// multi-peer interface (sans-I/O, Codeberg #365) — the mirror of
+    /// [`handle_interface_peer_lost`](Self::handle_interface_peer_lost).
+    ///
+    /// For each name in `peer_up_pull_names` the peer's derived destination
+    /// `D = truncated_hash(sha256(name)[..10] || peer)` is computed, and
+    /// unless a DIRECT entry for `D` on this interface already exists, one
+    /// ordinary path request for `D` is sent on this interface only — the
+    /// same 48-byte packet [`Transport::request_path`] always emits, so a
+    /// Python peer sees nothing new. The answer, if any, is an ordinary
+    /// announce; the existing announce handling installs the direct entry
+    /// (fewer hops beat a stale relayed route) and rebroadcasts it.
+    ///
+    /// Why pull at all: a peer that answers path requests for its own
+    /// destinations but does not announce on (re)connect — Columba's
+    /// measured behaviour — leaves a relay that lost its direct entry
+    /// (reboot, or the peer-lost cull after a link flap) holding the
+    /// destination via a third node. A path request from that third node
+    /// then dies in the requestor-is-next-hop guard, reference-identically
+    /// (Transport.py:2958), and the cell stays dark until the peer happens
+    /// to announce. Pulling on peer-up recovers both ways into that trap
+    /// with one packet per event: no retry loop, a missing answer is the
+    /// peer's business.
+    ///
+    /// The direct-entry guard keeps link churn quiet: a relink that never
+    /// culled the path (same-identity displacement is not even reported as
+    /// peer-up by the interfaces) or a peer-up arriving while the direct
+    /// entry still stands produces no request.
+    pub fn handle_interface_peer_up(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        peer: [u8; TRUNCATED_HASHBYTES],
+    ) -> crate::transport::TickOutput {
+        let derived: Vec<DestinationHash> = self
+            .peer_up_pull_names
+            .iter()
+            .map(|name| {
+                let full = crate::crypto::sha256(name.as_bytes());
+                let mut name_hash = [0u8; crate::constants::NAME_HASHBYTES];
+                name_hash.copy_from_slice(&full[..crate::constants::NAME_HASHBYTES]);
+                Destination::compute_destination_hash(&name_hash, &peer)
+            })
+            .collect();
+
+        let now_ms = self.transport.clock().now_ms();
+        for dest in derived {
+            // An entry past its expiry no longer counts as held: the
+            // periodic cleaner just has not swept it yet, and silently
+            // trusting it would re-arm the very blindness the pull clears.
+            let direct_here = self.transport.path(dest.as_bytes()).is_some_and(|entry| {
+                entry.is_direct() && entry.interface_index == iface.0 && entry.expires_ms > now_ms
+            });
+            if direct_here {
+                continue;
+            }
+            let mut tag = [0u8; TRUNCATED_HASHBYTES];
+            self.rng.fill_bytes(&mut tag);
+            match self
+                .transport
+                .request_path(dest.as_bytes(), Some(iface.0), &tag)
+            {
+                Ok(()) => crate::tracing::debug!(
+                    "Peer <{}> up on {}, pulling path for <{}>",
+                    HexShort(&peer),
+                    self.transport.iface_name(iface.0),
+                    HexShort(dest.as_bytes())
+                ),
+                Err(e) => crate::tracing::debug!(
+                    "Failed to build peer-up pull for <{}>: {}",
+                    HexShort(dest.as_bytes()),
+                    e
+                ),
+            }
+        }
+        self.process_events_and_actions()
     }
 
     /// Notify core that a non-local interface has come online (sans-I/O).

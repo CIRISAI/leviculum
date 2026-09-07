@@ -421,8 +421,22 @@ async fn gatt_events(
 static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<[Option<[u8; 16]>; MAX_LINKS]>> =
     BlockingMutex::new(RefCell::new([None; MAX_LINKS]));
 
+/// Register a slot's peer and, when this is the identity's FIRST link,
+/// report the arrival to the main loop so the transport pulls the
+/// peer's delivery path over the new link (Codeberg #365) — the mirror
+/// of [`peer_link_down`]'s last-link rule. A same-identity link on
+/// another slot (the zombie-displacement window) means the peer was
+/// never gone: registry churn, not an arrival, so no report.
 fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
-    LIVE_PEERS.lock(|peers| peers.borrow_mut()[slot_index] = Some(peer_id));
+    let first = LIVE_PEERS.lock(|peers| {
+        let mut peers = peers.borrow_mut();
+        let first = peers.iter().flatten().all(|id| *id != peer_id);
+        peers[slot_index] = Some(peer_id);
+        first
+    });
+    if first {
+        super::report_peer_event(super::PeerEvent::Up(peer_id));
+    }
 }
 
 /// Clear a slot's registry entry and, when that took the peer's LAST
@@ -441,7 +455,7 @@ fn peer_link_down(slot_index: usize) {
             .then_some(identity)
     });
     if let Some(identity) = lost {
-        super::report_peer_lost(identity);
+        super::report_peer_event(super::PeerEvent::Lost(identity));
     }
 }
 

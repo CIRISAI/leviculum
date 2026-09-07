@@ -50,7 +50,7 @@ pub(super) fn build(
         iface_name,
         opts.clone(),
         ctx.identity_hash,
-        ctx.peer_lost_tx.clone(),
+        ctx.peer_event_tx.clone(),
     );
     tracing::info!(
         "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm)",
@@ -75,7 +75,7 @@ mod tests {
         new_iface_tx: mpsc::Sender<crate::interfaces::InterfaceHandle>,
         reconnect_tx: mpsc::Sender<InterfaceId>,
         tunnel_notify_tx: mpsc::Sender<InterfaceId>,
-        peer_lost_tx: mpsc::Sender<(InterfaceId, [u8; 16])>,
+        peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
         inventory: crate::interfaces::inventory::SharedInventory,
     }
 
@@ -84,13 +84,13 @@ mod tests {
             let (new_iface_tx, _) = mpsc::channel(4);
             let (reconnect_tx, _) = mpsc::channel(4);
             let (tunnel_notify_tx, _) = mpsc::channel(4);
-            let (peer_lost_tx, _) = mpsc::channel(4);
+            let (peer_event_tx, _) = mpsc::channel(4);
             Self {
                 next_id: Arc::new(AtomicUsize::new(100)),
                 new_iface_tx,
                 reconnect_tx,
                 tunnel_notify_tx,
-                peer_lost_tx,
+                peer_event_tx,
                 inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             }
         }
@@ -101,7 +101,7 @@ mod tests {
                 new_iface_tx: &self.new_iface_tx,
                 reconnect_tx: &self.reconnect_tx,
                 tunnel_notify_tx: &self.tunnel_notify_tx,
-                peer_lost_tx: &self.peer_lost_tx,
+                peer_event_tx: &self.peer_event_tx,
                 corrupt_every: None,
                 storage_path: None,
                 outbound_socket_hook: None,

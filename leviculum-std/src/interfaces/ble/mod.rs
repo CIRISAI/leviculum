@@ -40,7 +40,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::{
-    IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, ReadySignal,
+    IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, PeerEvent,
+    ReadySignal,
 };
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
@@ -139,7 +140,7 @@ pub(crate) fn spawn_ble_interface(
     name: String,
     opts: BleOptions,
     identity_hash: IdentityHash,
-    peer_lost_tx: mpsc::Sender<(InterfaceId, IdentityHash)>,
+    peer_event_tx: mpsc::Sender<(InterfaceId, PeerEvent)>,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(BLE_BUFFER_SIZE);
     let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(BLE_BUFFER_SIZE);
@@ -167,7 +168,7 @@ pub(crate) fn spawn_ble_interface(
         opts,
         identity_hash,
         incoming_tx,
-        peer_lost_tx,
+        peer_event_tx,
         counters: Arc::clone(&counters),
         ready: Arc::clone(&ready),
     };
@@ -189,11 +190,12 @@ struct BleTask {
     opts: BleOptions,
     identity_hash: IdentityHash,
     incoming_tx: mpsc::Sender<IncomingPacket>,
-    /// Peer-loss reports toward the driver loop (Codeberg #365): the
-    /// identity hash of a peer whose LAST link on this broadcast domain
-    /// is gone. The loop culls the path entries whose next hop is that
-    /// peer on this interface (`NodeCore::handle_interface_peer_lost`).
-    peer_lost_tx: mpsc::Sender<(InterfaceId, IdentityHash)>,
+    /// Peer transitions toward the driver loop (Codeberg #365): `Lost`
+    /// when an identity's LAST link on this broadcast domain died (the
+    /// loop culls the paths via that peer), `Up` when an identity
+    /// gained its FIRST link (the loop pulls the peer's delivery path).
+    /// One ordered channel for both — see [`PeerEvent`].
+    peer_event_tx: mpsc::Sender<(InterfaceId, PeerEvent)>,
     counters: Arc<InterfaceCounters>,
     ready: Arc<ReadySignal>,
 }
@@ -381,12 +383,16 @@ impl BleTask {
                         identity,
                         displaced,
                     } => {
+                        let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
                             central_pipes.remove(&old_addr);
                             disconnect_quietly(adapter, old_addr).await;
                         }
                         self.log_link_up(&identity, &addr.0, Role::Peripheral, mtu);
+                        if first_link {
+                            self.report_peer_up(identity).await;
+                        }
                     }
                     Inbound::HandshakeRejected(admission) => {
                         self.log_rejection(admission, &data, &addr.0);
@@ -452,6 +458,7 @@ impl BleTask {
                 let (admission, displaced) = table.admit(identity, addr.0, Role::Central, mtu, now);
                 match admission {
                     Admission::Accept => {
+                        let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
                             central_pipes.remove(&old_addr);
@@ -459,6 +466,9 @@ impl BleTask {
                         }
                         central_pipes.insert(addr.0, CentralPipe { frames });
                         self.log_link_up(&identity, &addr.0, Role::Central, mtu);
+                        if first_link {
+                            self.report_peer_up(identity).await;
+                        }
                         let _ = ack.send(true);
                     }
                     other => {
@@ -580,7 +590,31 @@ impl BleTask {
             iface = %self.name,
             peer = %hex8(&identity),
         );
-        let _ = self.peer_lost_tx.send((self.id, identity)).await;
+        let _ = self
+            .peer_event_tx
+            .send((self.id, PeerEvent::Lost(identity)))
+            .await;
+    }
+
+    /// Report a peer's arrival to the driver loop (Codeberg #365) — the
+    /// mirror of [`report_peer_lost`](Self::report_peer_lost). Called at
+    /// the two link-up sites (peripheral handshake completion, central
+    /// admission) exactly when the admission carried no displacement:
+    /// `admit` displaces same-identity links only, so `displaced == None`
+    /// on an Accept means the identity gained its FIRST link — the moment
+    /// `knows_identity` starts returning true. A displacement relink (the
+    /// phone's ~60 s random-address rotation) is churn, not an arrival,
+    /// and must not spray pull requests.
+    async fn report_peer_up(&self, identity: IdentityHash) {
+        tracing::info!(
+            event = "BLE_PEER_UP",
+            iface = %self.name,
+            peer = %hex8(&identity),
+        );
+        let _ = self
+            .peer_event_tx
+            .send((self.id, PeerEvent::Up(identity)))
+            .await;
     }
 
     fn log_link_up(&self, identity: &IdentityHash, addr: &Addr, role: Role, mtu: usize) {
