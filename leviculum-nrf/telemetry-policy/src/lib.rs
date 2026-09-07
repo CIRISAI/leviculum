@@ -435,6 +435,34 @@ pub enum TargetOutcome {
     Cleared,
 }
 
+/// What became of an on-air telemetry request (Codeberg #371) — the
+/// caller's log line names this outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    /// Accepted: the immediate report is armed and goes out on the next
+    /// poll past the attempt floor, exactly like a target write's.
+    Armed,
+    /// Inside the request window: less than `min_interval_ms` since the
+    /// last accepted request. Logged and dropped, nothing armed.
+    RateLimited,
+    /// The target is not [`TargetState::Ready`] — off, awaiting its key,
+    /// or without a position source. Nothing is armed and nothing is
+    /// owed: a node that cannot answer must not bank a report that would
+    /// fire long after the requester stopped waiting.
+    NotReady,
+}
+
+impl RequestOutcome {
+    /// Stable log token for the `[TELEMETRY] request` event.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Armed => "immediate",
+            Self::RateLimited => "rate-limited",
+            Self::NotReady => "not-ready",
+        }
+    }
+}
+
 /// The send policy and target lifecycle of one node.
 ///
 /// Drive it with [`set_target`](Self::set_target) /
@@ -482,6 +510,12 @@ pub struct SendPolicy {
     /// A report handed to transport whose dispatch has not been settled
     /// yet. See [`note_emitted`](Self::note_emitted).
     pending: Option<PendingReport>,
+    /// When the last on-air request was accepted
+    /// ([`note_report_request`](Self::note_report_request)); the request
+    /// window is measured from here. Like the attempt floor it survives
+    /// target changes: airtime is airtime whoever asks, and a requester
+    /// cannot widen its budget by having the operator retarget the node.
+    last_request_ms: Option<u64>,
 }
 
 /// A report that is out of the reporter's hands but not yet on the air.
@@ -516,6 +550,7 @@ impl SendPolicy {
             last_attempt_ms: None,
             last_reported_fix: None,
             pending: None,
+            last_request_ms: None,
         }
     }
 
@@ -653,6 +688,37 @@ impl SendPolicy {
         if self.key_state == TargetState::Ready {
             self.immediate_pending = true;
         }
+    }
+
+    /// An authenticated peer asked for a report over the air (Sideband's
+    /// `TELEMETRY_REQUEST`, Codeberg #371). The caller has already decided
+    /// the sender is allowed and the signature holds — this method owns
+    /// only the policy half: state and rate.
+    ///
+    /// An accepted request arms the same immediate report a target write
+    /// arms, so everything already true of that report stays true here —
+    /// it is owed until actually sent, and the attempt floor in
+    /// [`poll`](Self::poll) bounds it. On top of that sits the request
+    /// window: at most one accepted request per `min_interval_ms` of the
+    /// active profile, so a peer that asks in a loop costs the channel no
+    /// more than the profile already allows. A request inside the window
+    /// is dropped, not queued — the next report answers the next request.
+    ///
+    /// Anything short of [`TargetState::Ready`] (the folded state, so
+    /// `no-position-source` included) is [`RequestOutcome::NotReady`]:
+    /// nothing armed, nothing owed, and the window untouched.
+    pub fn note_report_request(&mut self, now_ms: u64) -> RequestOutcome {
+        if self.state() != TargetState::Ready {
+            return RequestOutcome::NotReady;
+        }
+        if let Some(last) = self.last_request_ms {
+            if now_ms.saturating_sub(last) < self.params.min_interval_ms {
+                return RequestOutcome::RateLimited;
+            }
+        }
+        self.last_request_ms = Some(now_ms);
+        self.immediate_pending = true;
+        RequestOutcome::Armed
     }
 
     /// The key went away again (a target changed to one we do not hold).

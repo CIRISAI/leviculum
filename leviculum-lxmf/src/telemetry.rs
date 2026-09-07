@@ -659,3 +659,136 @@ pub fn build_report(
     )
     .map_err(ReportError::Message)
 }
+
+// ---------------------------------------------------------------------------
+// Telemetry requests (Codeberg #371)
+// ---------------------------------------------------------------------------
+
+/// Sideband's command id for "send me your telemetry since this timebase",
+/// carried inside `FIELD_COMMANDS` (`reference/LXMF/LXMF/LXMF.py:16`).
+///
+/// ASSUMPTION to verify against a captured request: Sideband's source is
+/// not in `reference/`, so the id (`Commands.TELEMETRY_REQUEST` in
+/// Sideband core) and the value shape below are taken from Sideband's
+/// documented behaviour, not from a citable line. The shape implemented:
+/// the field value is a list of command maps, a request is
+/// `[{0x01: <timebase>}]` with the timebase in unix seconds. Tolerated on
+/// read: the timebase as any msgpack number, as the first element of a
+/// list, or nil (read as 0, "everything you have").
+pub const COMMAND_TELEMETRY_REQUEST: i64 = 0x01;
+
+/// Find a telemetry request among a message's fields.
+///
+/// Returns the request's timebase, or `None` when no well-formed
+/// `FIELD_COMMANDS` entry carries [`COMMAND_TELEMETRY_REQUEST`]. Unknown
+/// command ids and non-map list entries are skipped, the same tolerance
+/// the Telemeter codec applies to unknown sensors; a malformed field
+/// yields `None` rather than an error, because "not a request" is all a
+/// consumer can do about it either way.
+pub fn telemetry_request_timebase(fields: &[crate::Field]) -> Option<i64> {
+    let (_, raw) = fields
+        .iter()
+        .find(|(key, _)| *key == crate::constants::FIELD_COMMANDS)?;
+    let d = raw.as_slice();
+    let mut p = 0;
+    let commands = msgpack::array_len(d, &mut p).ok()?;
+    for _ in 0..commands {
+        let entries = match msgpack::map_len(d, &mut p) {
+            Ok(entries) => entries,
+            // Not a command map; skip the value and keep scanning.
+            Err(_) => {
+                msgpack::skip(d, &mut p).ok()?;
+                continue;
+            }
+        };
+        for _ in 0..entries {
+            let id = msgpack::read_int(d, &mut p).ok()?;
+            if id != COMMAND_TELEMETRY_REQUEST {
+                msgpack::skip(d, &mut p).ok()?;
+                continue;
+            }
+            return match msgpack::peek_kind(d, p).ok()? {
+                // `[timebase, ...]`: trailing elements (Sideband adds a
+                // collector flag) do not change what is asked of a node
+                // that only ever answers with its own current reading.
+                Kind::Array => {
+                    let n = msgpack::array_len(d, &mut p).ok()?;
+                    if n == 0 {
+                        return None;
+                    }
+                    Some(timebase_secs(msgpack::read_number(d, &mut p).ok()?))
+                }
+                Kind::Nil => Some(0),
+                _ => Some(timebase_secs(msgpack::read_number(d, &mut p).ok()?)),
+            };
+        }
+    }
+    None
+}
+
+/// A timebase as unix seconds, whatever numeric family the wire used —
+/// Python's `time.time()` is a float.
+fn timebase_secs(number: Number) -> i64 {
+    match number {
+        Number::Int(v) => v,
+        Number::Float(v) => v as i64,
+    }
+}
+
+/// What one inbound delivery-destination packet is, as far as the
+/// telemetry-request feature is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryRequestVerdict {
+    /// Not an LXMF message, or one without a telemetry request: none of
+    /// this feature's business, whoever sent it.
+    NotARequest,
+    /// A telemetry request from a sender that is not the allowed one.
+    NotAllowed { source: [u8; 16] },
+    /// A request naming the allowed sender, screened without that
+    /// sender's identity — the caller holds no key to verify against.
+    Unverifiable { source: [u8; 16] },
+    /// A request naming the allowed sender whose signature does not
+    /// verify against that sender's identity.
+    BadSignature { source: [u8; 16] },
+    /// A verified telemetry request from the allowed sender.
+    Request { source: [u8; 16], timebase: i64 },
+}
+
+/// Screen one opportunistic packet delivered to `delivery_hash` for a
+/// telemetry request from the one allowed sender.
+///
+/// `allowed_source` is the sender reports are configured to go to —
+/// `None` when no target is set, in which case every request is
+/// [`TelemetryRequestVerdict::NotAllowed`]. `allowed_identity` is that
+/// sender's identity when the caller holds it; without it a request can
+/// be attributed but not verified. The order is deliberate: what the
+/// packet *is* first, who sent it second, whether the signature holds
+/// last — so a caller's rejection line can name the most specific reason.
+pub fn screen_telemetry_request(
+    on_air: &[u8],
+    delivery_hash: [u8; 16],
+    allowed_source: Option<[u8; 16]>,
+    allowed_identity: Option<&leviculum_core::identity::Identity>,
+) -> TelemetryRequestVerdict {
+    use crate::message::{DeliveryMethod, Message, Verification};
+    let Ok(message) = Message::unpack(
+        on_air,
+        Some(delivery_hash),
+        allowed_identity,
+        DeliveryMethod::Opportunistic,
+    ) else {
+        return TelemetryRequestVerdict::NotARequest;
+    };
+    let Some(timebase) = telemetry_request_timebase(&message.fields) else {
+        return TelemetryRequestVerdict::NotARequest;
+    };
+    let source = message.source_hash;
+    if allowed_source != Some(source) {
+        return TelemetryRequestVerdict::NotAllowed { source };
+    }
+    match message.verification {
+        Verification::Valid => TelemetryRequestVerdict::Request { source, timebase },
+        Verification::Invalid => TelemetryRequestVerdict::BadSignature { source },
+        Verification::Unverified => TelemetryRequestVerdict::Unverifiable { source },
+    }
+}

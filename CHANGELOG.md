@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An LNode now answers a Sideband telemetry request: an LXMF message
+  from the configured target carrying the `TELEMETRY_REQUEST` command
+  triggers an immediate report, rate-limited to one request-triggered
+  report per profile minimum interval. Requests from any other sender
+  are ignored and logged.
+
 - `lnstatus --identities` (`-N`) lists every identity the daemon has
   learned from announces — identity hash, announced destination, name
   (only for aspects the daemon registered itself), hops, via and last

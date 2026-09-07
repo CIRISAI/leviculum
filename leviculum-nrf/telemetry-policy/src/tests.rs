@@ -1375,3 +1375,79 @@ fn off_outranks_no_position_source() {
     assert_eq!(p.state(), TargetState::Off);
     assert!(p.has_position_source());
 }
+
+// ---------------------------------------------------------------------------
+// On-air report requests (#371)
+// ---------------------------------------------------------------------------
+
+/// The concept's on-demand rule: an allowed peer's request in state
+/// `ready` arms the same immediate report a target write arms.
+#[test]
+fn a_request_in_ready_arms_the_immediate_report() {
+    let mut p = ready(Profile::Station, 0);
+    let t = PolicyParams::STATION.min_interval_ms + 1;
+    assert_eq!(p.note_report_request(t), RequestOutcome::Armed);
+    assert_eq!(p.poll(t, Some(good_fix())), Some(ReportReason::Immediate));
+}
+
+/// In awaiting-key nothing is armed and nothing banked: a report that
+/// fired on key arrival hours later would answer a question nobody is
+/// still asking — and key arrival owes an immediate report anyway.
+#[test]
+fn a_request_in_awaiting_key_arms_nothing() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Station, false);
+    assert_eq!(p.note_report_request(1_000), RequestOutcome::NotReady);
+    assert_eq!(p.poll(1_100, Some(good_fix())), None);
+    // The refusal did not consume the request window: the first request
+    // after the key arrives is accepted at once.
+    assert!(p.note_key_available());
+    p.note_sent(2_000, Some(good_fix()));
+    let t = 2_000 + PolicyParams::STATION.min_interval_ms;
+    assert_eq!(p.note_report_request(t), RequestOutcome::Armed);
+}
+
+/// Off and no-position-source refuse the same way — the folded state
+/// decides, not the key lifecycle alone.
+#[test]
+fn a_request_with_no_target_or_no_position_source_is_not_ready() {
+    let mut p = reporting_node();
+    assert_eq!(p.note_report_request(0), RequestOutcome::NotReady);
+    let mut p = SendPolicy::new();
+    p.set_target(Profile::Station, true);
+    assert_eq!(p.state(), TargetState::NoPositionSource);
+    assert_eq!(p.note_report_request(0), RequestOutcome::NotReady);
+}
+
+/// One request-triggered report per `min_interval_ms` of the active
+/// profile: the second request inside the window is dropped, the first
+/// one past it is accepted.
+#[test]
+fn a_second_request_inside_the_window_is_dropped() {
+    let mut p = ready(Profile::Tracker, 0);
+    let window = PolicyParams::TRACKER.min_interval_ms;
+    assert_eq!(p.note_report_request(window), RequestOutcome::Armed);
+    assert_eq!(
+        p.note_report_request(2 * window - 1),
+        RequestOutcome::RateLimited
+    );
+    // A dropped request is dropped, not queued: it moved no clock.
+    assert_eq!(p.note_report_request(2 * window), RequestOutcome::Armed);
+}
+
+/// The accepted request rides the ordinary immediate machinery, so the
+/// attempt floor bounds it exactly as it bounds a target write's report.
+#[test]
+fn a_request_triggered_report_still_honours_the_attempt_floor() {
+    let mut p = ready(Profile::Tracker, 0);
+    let window = PolicyParams::TRACKER.min_interval_ms;
+    p.note_emitted(window, Some(good_fix()));
+    assert!(p.note_dispatch(true));
+    assert_eq!(p.note_report_request(window + 1), RequestOutcome::Armed);
+    assert_eq!(p.poll(window + 2, Some(good_fix())), None, "floor holds");
+    assert_eq!(
+        p.poll(2 * window, Some(good_fix())),
+        Some(ReportReason::Immediate),
+        "owed until sent, emitted once the floor clears"
+    );
+}

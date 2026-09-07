@@ -329,6 +329,44 @@ cannot receive is a report nobody can verify, so the node announces its
 own delivery destination before sending — the announce is what puts our
 public key in the receiver's hands.
 
+### A request from the target triggers one report
+
+Sideband lets a peer ask for telemetry on demand: an LXMF message whose
+`FIELD_COMMANDS` field (`reference/LXMF/LXMF/LXMF.py:16`) carries the
+`TELEMETRY_REQUEST` command with a timebase. A reporting node answers
+one such request with an immediate report — the same report a target
+write arms, subject to the same rules (owed until sent, announce first,
+attempt floor). That gives the operator a position on demand instead of
+at the profile's cadence, and gives a field test a way to force the
+whole chain — path request, answer, data — at a known moment.
+
+The gate is authentication, not reachability: the request must name the
+configured target as its source *and* carry a signature that verifies
+against the target's identity. **The target is the only allowed sender
+for now**; a general allow list is a later step and will follow the
+collector rule above — explicit, empty by default, set only off-radio.
+A request from anyone else is answered with nothing but a debug line,
+because an unauthenticated trigger for a radio transmission is a remote
+airtime primitive.
+
+Requests are rate-limited to one accepted request per `min_interval_ms`
+of the active profile; a request inside the window is logged and
+dropped, not queued. The request's timebase is read but does not change
+the answer: a node keeps no history, so the current reading is the
+answer to every timebase.
+
+Sideband's own source is not vendored under `reference/`, so the
+command id (0x01) and the value shape (a list of command maps,
+`[{0x01: <timebase>}]`) are a **documented assumption** — recorded at
+`COMMAND_TELEMETRY_REQUEST` (`leviculum-lxmf/src/telemetry.rs:678`) —
+to be verified against a captured Columba/Sideband request and then
+pinned as a fixture.
+
+On the host side, `lnsd` neither registers an `lxmf.delivery`
+destination nor runs a telemetry policy today, so there is nothing for
+a request to trigger there; the screen in `leviculum-lxmf` is the seam
+a host-side consumer will reuse when that changes.
+
 ### Fan-out is the expensive shape; collection is the cheaper one
 
 Telemetry to *n* recipients is *n* individually addressed and

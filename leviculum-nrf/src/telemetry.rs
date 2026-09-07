@@ -41,7 +41,7 @@ use leviculum_core::envelope::{
 use leviculum_core::fixed_position_store::{decode_fixed_position, encode_fixed_position};
 use leviculum_core::identity::Identity;
 use leviculum_core::media_profile_store::{decode_media_profile, encode_media_profile};
-use leviculum_core::node::NodeCore;
+use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::node_name::NodeName;
 use leviculum_core::node_name_store::{decode_node_name, encode_node_name};
 use leviculum_core::telemetry_target_store::{decode_telemetry_target, encode_telemetry_target};
@@ -50,12 +50,13 @@ use leviculum_core::transport::{Action, DispatchResult};
 use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{
-    build_report, celsius_from_quarter_degrees, Battery, Location, Telemetry,
+    build_report, celsius_from_quarter_degrees, screen_telemetry_request, Battery, Location,
+    Telemetry, TelemetryRequestVerdict,
 };
 use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::{
     choose_position, command_from_wire, EmissionRoute, Fix, PositionSource, Profile, ReportReason,
-    SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
+    RequestOutcome, SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported so the binaries name the outcome of
@@ -1299,6 +1300,77 @@ impl Reporter {
             }
         }
         actions
+    }
+
+    /// Act on the events one inbound dispatch produced: a Sideband
+    /// `TELEMETRY_REQUEST` delivered to our own `lxmf.delivery`
+    /// destination arms the immediate report (Codeberg #371).
+    ///
+    /// The gate is the configured target and nothing else for now — the
+    /// requester the feature exists for *is* the target, and a general
+    /// allow list is a later step (`docs/src/concepts/telemetry.md`). The
+    /// screen is `leviculum_lxmf`'s: the sender's hash must match and the
+    /// message's signature must verify against the target's identity, so
+    /// a spoofed source hash buys nothing. The request's timebase is
+    /// ignored: a node holds no history, and its answer is the current
+    /// reading either way.
+    ///
+    /// Nothing is sent from here. An accepted request arms the policy's
+    /// immediate report and the ordinary [`tick`](Self::tick) emits it,
+    /// which is what subjects it to every existing rule — attempt floor,
+    /// announce-first, dispatch settlement. The policy also rate-limits:
+    /// one request-triggered report per `min_interval_ms` of the active
+    /// profile, a request inside the window is logged and dropped.
+    pub fn handle_inbound_events<R, C, S>(
+        &mut self,
+        node: &NodeCore<R, C, S>,
+        events: &[NodeEvent],
+        now_ms: u64,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        for event in events {
+            let NodeEvent::PacketReceived {
+                destination, data, ..
+            } = event
+            else {
+                continue;
+            };
+            if *destination != self.delivery_hash {
+                continue;
+            }
+            let allowed = self.target.map(|t| t.dest_hash);
+            let identity = allowed.and_then(|hash| node.storage().get_identity(&hash));
+            let verdict =
+                screen_telemetry_request(data, self.delivery_hash.into_bytes(), allowed, identity);
+            let (source, accepted, reason) = match verdict {
+                // Ordinary inbound traffic — none of this feature's
+                // business, and not worth a line.
+                TelemetryRequestVerdict::NotARequest => continue,
+                TelemetryRequestVerdict::NotAllowed { source } => (source, false, "not-allowed"),
+                // No key for the target yet: the request cannot be
+                // authenticated, and the policy is awaiting-key anyway.
+                TelemetryRequestVerdict::Unverifiable { source } => (source, false, "not-ready"),
+                TelemetryRequestVerdict::BadSignature { source } => {
+                    (source, false, "bad-signature")
+                }
+                TelemetryRequestVerdict::Request { source, .. } => {
+                    let outcome = self.policy.note_report_request(now_ms);
+                    (source, outcome == RequestOutcome::Armed, outcome.as_str())
+                }
+            };
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[TELEMETRY] request from={:08x} {} reason={}",
+                    u32::from_be_bytes([source[0], source[1], source[2], source[3]]),
+                    if accepted { "accepted" } else { "rejected" },
+                    reason
+                ),
+            );
+        }
     }
 
     /// Settle the report `tick` handed over against what the dispatch did

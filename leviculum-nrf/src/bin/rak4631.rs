@@ -665,6 +665,11 @@ async fn main(spawner: Spawner) {
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
+                // An inbound TELEMETRY_REQUEST may ride any carrier (#371).
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
@@ -685,6 +690,10 @@ async fn main(spawner: Spawner) {
                 if !output.actions.is_empty() {
                     info!("LORA RX -> {} actions", output.actions.len());
                 }
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
@@ -700,6 +709,10 @@ async fn main(spawner: Spawner) {
                 let output = node.handle_packet(InterfaceId(2), &data);
                 if !output.actions.is_empty() {
                     info!("BLE RX -> {} actions", output.actions.len());
+                }
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
                 }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
