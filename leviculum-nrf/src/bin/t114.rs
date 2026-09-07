@@ -455,7 +455,10 @@ async fn main(spawner: Spawner) {
     if let Some(reporter) = reporter.as_mut() {
         // A persisted target comes back as awaiting-key unless its key
         // was persisted with it; the node then resolves it over the air
-        // exactly as it would after a fresh set.
+        // exactly as it would after a fresh set. The reporter rewrites a
+        // hash-only record with the key once it is resolved (#370), so
+        // after one successful resolution a reboot restores ready and
+        // owes the immediate report.
         if let Some(stored) = leviculum_nrf::telemetry::load(t114::CONFIG.telemetry_flash_page) {
             reporter.apply_target(&mut node, stored);
         }

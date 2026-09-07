@@ -1042,6 +1042,124 @@ fn repeated_loss_entries_decide_the_same_way() {
 }
 
 // ---------------------------------------------------------------------------
+// #370: what a reboot leaves the policy to work with
+// ---------------------------------------------------------------------------
+//
+// Walk 6 (2026-09-07): a Pocket V2 with a persisted tracker target was power
+// cycled, then walked 100 m and stood outside for 30 minutes with a good fix,
+// and sent nothing at all until the target was re-applied. The two tests
+// named `..reboot..` model the two boots a node can wake into: one where the
+// key came back with the flash record, and one where it did not — because the
+// record was hash-only and the identity store is RAM, which is what every
+// lnflash-configured board woke into before the record started carrying the
+// resolved key.
+
+/// The walk of the field scenario: first usable fix at `t=0`, 100 m due
+/// north over the next five minutes, standing still from then on.
+fn walk_fix(t_ms: u64) -> Option<Fix> {
+    let metres = (t_ms.min(300_000) / 3_000) as i64;
+    Some(north_of(good_fix(), metres))
+}
+
+/// Drive the policy exactly as the firmware's main loop does — one poll per
+/// tick, every emission delivered — and collect the reports it produces.
+fn reports_over(
+    p: &mut SendPolicy,
+    to_ms: u64,
+    fix_at: impl Fn(u64) -> Option<Fix>,
+) -> Vec<(u64, ReportReason)> {
+    let mut out = Vec::new();
+    let mut t = 0;
+    while t <= to_ms {
+        let fix = fix_at(t);
+        if let Some(reason) = p.poll(t, fix) {
+            p.note_emitted(t, fix.filter(|f| p.position_is_reportable(*f)));
+            assert!(p.note_dispatch(true));
+            out.push((t, reason));
+        }
+        t += TICK_MS;
+    }
+    out
+}
+
+/// A reboot whose flash record carried the key restores a usable target,
+/// and a usable target owes the immediate report at the first poll — the
+/// observability rule does not wait for movement or the heartbeat.
+#[test]
+fn a_reboot_that_restores_the_key_owes_the_immediate_report_at_once() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, true);
+    let reports = reports_over(&mut p, 25 * 60_000, walk_fix);
+    assert_eq!(reports.first(), Some(&(0, ReportReason::Immediate)));
+    assert!(
+        reports.iter().any(|(_, r)| *r == ReportReason::Movement),
+        "the walk itself must also report: {reports:?}"
+    );
+}
+
+/// **The #370 mechanism.** A reboot that loses the key lands in
+/// awaiting-key with nothing armed, and the policy is silent there by
+/// design — nothing can be encrypted to a target whose key is unknown, so
+/// no immediate, no movement, no heartbeat, however far the node walks and
+/// however good its fix. The walk-6 silence is this state: the flash
+/// record was hash-only (lnflash sends no key) and the identity store is
+/// RAM, so the power cycle forgot the key the target had already resolved.
+/// The repair is therefore not in this crate: the firmware persists the
+/// resolved key with the target record, so the next boot takes the test
+/// above's path instead of this one's.
+#[test]
+fn a_reboot_that_loses_the_key_reports_nothing_however_far_it_walks() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, false);
+    let reports = reports_over(&mut p, 25 * 60_000, walk_fix);
+    assert_eq!(
+        reports,
+        vec![],
+        "awaiting-key must stay silent — a report here would be unencryptable"
+    );
+    assert_eq!(p.state(), TargetState::AwaitingKey);
+}
+
+/// The second field boot: the fix arrives only after the walk. The
+/// immediate report goes out position-less at once, and the node proves it
+/// is alive within one heartbeat of the fix arriving — the report the
+/// operator waits for outdoors.
+#[test]
+fn a_first_fix_arriving_after_the_walk_still_heartbeats_within_the_maximum_interval() {
+    let fix_at_ms: u64 = 300_000;
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, true);
+    let reports = reports_over(&mut p, 25 * 60_000, |t| (t >= fix_at_ms).then(good_fix));
+    assert_eq!(reports.first(), Some(&(0, ReportReason::Immediate)));
+    let max = PolicyParams::TRACKER.max_interval_ms;
+    assert!(
+        reports
+            .iter()
+            .any(|(t, _)| *t > fix_at_ms && *t <= fix_at_ms + max),
+        "no report within {max} ms of the first fix: {reports:?}"
+    );
+}
+
+/// Q4 of the #370 audit, pinned: losing the fix does not restart the
+/// settle window. A receiver flickering in a pocket cannot hold the
+/// movement path shut — the anchor is the first usable fix of the boot,
+/// set once.
+#[test]
+fn the_settle_window_does_not_restart_when_the_fix_flickers() {
+    let mut p = ready(Profile::Tracker, 0);
+    let settle = PolicyParams::TRACKER.settle_ms;
+    let min = PolicyParams::TRACKER.min_interval_ms;
+    // The fix goes away for a moment right at the end of the window...
+    assert_eq!(p.poll(min.max(settle) + 5_000, None), None);
+    // ...and the next usable fix decides against the original anchor, not
+    // against a restarted one.
+    assert_eq!(
+        p.poll(min.max(settle) + 10_000, Some(north_of(good_fix(), 500))),
+        Some(ReportReason::Movement)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Fixed position (user-set position as telemetry source)
 // ---------------------------------------------------------------------------
 

@@ -889,6 +889,21 @@ pub struct Reporter {
     /// there, not here, because until then it is not known whether there
     /// is a report to write a line about.
     pending_line: Option<PendingLine>,
+    /// The flash record still lacks the target's public key, and the
+    /// record must gain it once the key is known (Codeberg #370). Armed by
+    /// every hash-only [`apply_target`](Self::apply_target), spent by the
+    /// first tick that finds the target usable.
+    ///
+    /// The rule this carries: **a resolved key survives the reboot.** The
+    /// host sends hash-only targets (the #236 UX decision — users know the
+    /// LXMF address, not the key) and the identity store is RAM, so a
+    /// power cycle used to forget the key the node had already resolved
+    /// and land every restored target back in awaiting-key, silent until
+    /// the target's next announce happened to reach it — thirty-seven
+    /// minutes of nothing on walk 6. Rewriting the record with the key
+    /// makes the next boot restore `ready`, which owes the immediate
+    /// report like any other newly usable target.
+    key_persist_owed: bool,
 }
 
 /// The report line of a report that has been handed to transport.
@@ -930,6 +945,7 @@ impl Reporter {
             last_withheld: None,
             last_state_line: None,
             pending_line: None,
+            key_persist_owed: false,
         }
     }
 
@@ -1029,6 +1045,14 @@ impl Reporter {
         self.last_withheld = None;
         self.last_state_line = None;
         let command = command_from_wire(wire.profile);
+        // A hash-only frame leaves a hash-only record on the page, and the
+        // record is owed the key once it is known ([`key_persist_owed`]
+        // (Self::key_persist_owed)) — whether that is on the next tick (a
+        // re-applied target whose key is already held) or when it arrives
+        // over the air. A frame that carried its key owes nothing: the
+        // serial task persists it as sent.
+        self.key_persist_owed =
+            matches!(command, TargetCommand::Set(_)) && wire.public_key.is_none();
         let key_known = match command {
             TargetCommand::Clear => {
                 self.target = None;
@@ -1133,6 +1157,38 @@ impl Reporter {
                     actions.extend(node.request_path(&hash).actions);
                 }
                 return actions;
+            }
+        }
+
+        // The target is usable from here on. If the flash record is still
+        // hash-only, rewrite it with the key, so the next boot restores
+        // `ready` instead of an awaiting-key that has forgotten what this
+        // boot resolved (#370, [`key_persist_owed`](Self::key_persist_owed)).
+        // On a tick rather than inside `apply_target`: the serial task
+        // persists the host's own hash-only frame and blocks on that save
+        // before answering, so a save requested here — at least one tick
+        // later — lands after it and is the one the page keeps.
+        if self.key_persist_owed {
+            if let Some(identity) = node.storage().get_identity(hash.as_bytes()) {
+                let enriched = TelemetryTargetWire {
+                    public_key: Some(identity.public_key_bytes()),
+                    ..target
+                };
+                self.target = Some(enriched);
+                self.key_persist_owed = false;
+                // Nobody acks this save: it is owed to the next boot, not
+                // to a waiting host, so the ticket is dropped rather than
+                // confirmed. A lost write degrades to the old behaviour —
+                // one more over-the-air resolution — and the next
+                // transition to usable retries it.
+                let _ = request_save(&enriched);
+                crate::log::log_fmt(
+                    "[TELEMETRY] ",
+                    format_args!(
+                        "target={:08x} key resolved, persisting with record",
+                        self.target_short()
+                    ),
+                );
             }
         }
 
