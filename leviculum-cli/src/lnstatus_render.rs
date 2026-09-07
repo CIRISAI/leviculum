@@ -373,10 +373,13 @@ pub fn render_identities(list: &Value, now_epoch: f64) -> String {
         return out;
     }
 
+    // Explicit single-space separators on top of the padding, so a value
+    // wider than its column (a long interface name in `via`) overflows into
+    // extra width instead of fusing with the next column.
     pln(
         &mut out,
         &format!(
-            "{:<34}{:<34}{:<20}{:<6}{:<24}{}",
+            "{:<33} {:<33} {:<19} {:<5} {:<23} {}",
             "identity", "announced destination", "name", "hops", "via", "last seen"
         ),
     );
@@ -409,7 +412,9 @@ pub fn render_identities(list: &Value, now_epoch: f64) -> String {
         };
         pln(
             &mut out,
-            &format!("{identity_hex:<34}{dest_hex:<34}{name:<20}{hops:<6}{via:<24}{last_seen}"),
+            &format!(
+                "{identity_hex:<33} {dest_hex:<33} {name:<19} {hops:<5} {via:<23} {last_seen}"
+            ),
         );
         if let Some(identity) = hex_to_bytes(identity_hex) {
             let derived: Vec<String> = DERIVED_NAMES
