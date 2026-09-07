@@ -389,7 +389,11 @@ pub(crate) struct IncomingPacket {
 /// (`Up`) — on separate channels the `Up` could win the race, see the
 /// still-standing direct entry, skip the pull, and then have the `Lost`
 /// cull re-arm exactly the trap the pull exists to clear.
+///
+/// Only the BLE interface constructs the variants, and it is Linux-only
+/// (it needs BlueZ over D-Bus), so off Linux they have no constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum PeerEvent {
     /// The identity gained its FIRST link on the interface; the loop
     /// pulls the peer's delivery path (`NodeCore::handle_interface_peer_up`).
