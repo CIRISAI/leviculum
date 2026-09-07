@@ -62,6 +62,16 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
     causes the key to be omitted, with a note on stderr and exit status 0.
     See **TRANSPORT TABLES** below.
 
+**-N**, **--identities**
+:   List every identity the daemon has learned from announces, one row per
+    announced destination, plus a `derived:` line with the `lxmf.delivery`
+    and `rnstransport.probe` destinations computed from the identity hash.
+    Leviculum extension — `rnstatus` has no counterpart, and a daemon that
+    does not implement the query (a Python `rnsd`, or an older `lnsd`)
+    causes an error and exit status 2. With **-j** the raw response is
+    printed instead. Not available with **-R**, **-d**/**-D**, **--tables**
+    or **-m**. See **IDENTITY LISTING** below.
+
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.
 
@@ -128,6 +138,32 @@ Emit machine-readable JSON:
 Emit JSON with the transport's tables included:
 
     lnstatus -j --tables
+
+List the identities heard from announces, with derived destinations ready to
+paste into **lnprobe**:
+
+    lnstatus -N
+
+## IDENTITY LISTING
+
+`rnpath -t` shows destination hashes only, but probing a remote transport node
+needs its `rnstransport.probe` destination, which is derived from its identity
+hash — and the daemon knows that identity, because the announce carried the
+public key. **-N** exposes it: one row per announced destination the daemon
+still holds, with the identity hash, the announced destination hash, the name
+(only when it matches an aspect the daemon registered itself; `?` otherwise —
+never guessed), and the live path toward it (`hops`, `via` as
+interface/next-hop, `last seen`). Columns without a live path show `-`.
+
+Under each row a `derived:` line prints the destinations computed from the
+identity hash as `sha256(sha256(name)[:10] + identity_hash)[:16]` for the two
+names that matter in practice: `lxmf.delivery` and `rnstransport.probe`.
+Hashes are printed in full so they can be pasted into `lnprobe` or `rnprobe`.
+
+The inventory is the daemon's announce cache (Python's equivalent store is
+`Identity.known_destinations`), which is bounded by the announce-cache
+cleaning the daemon already performs; an identity whose cached announce has
+been evicted no longer appears.
 
 ## TRANSPORT TABLES
 

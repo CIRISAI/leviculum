@@ -564,3 +564,107 @@ fn merge_transport_tables_leaves_a_non_object_response_alone() {
     merge_transport_tables(&mut stats, Some(serde_json::json!({"path_table": []})));
     assert_eq!(stats, Value::Array(vec![Value::from(1)]));
 }
+
+// ---------------------------------------------------------------------------
+// --identities: derivation and rendering
+// ---------------------------------------------------------------------------
+
+/// The derivation pinned against the two identity/destination pairs measured
+/// on the rig (bug ledger #365 / field finding 2026-09-04): the T114 and the
+/// Pocket, each verified with rnprobe against the live board.
+#[test]
+fn derive_destination_matches_the_two_known_rig_pairs() {
+    let pairs = [
+        // (identity, rnstransport.probe, lxmf.delivery)
+        (
+            "b2a8bea123f668be63e85be2374e26e5",
+            "6a1ab9ea64747f298c1f205dfcf0f5a3",
+            "be26233976540d7d9e10faf5c396558a",
+        ),
+        (
+            "1d48253ff2dddd5f95e6ef6ce8302a62",
+            "d8dd8f1d749a36f71c74a662eb7d531e",
+            "2f9a770aa734a6ab02c7e845583cf206",
+        ),
+    ];
+    for (identity_hex, probe_hex, lxmf_hex) in pairs {
+        let identity: Vec<u8> = (0..identity_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&identity_hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            hex_lower16(&derive_destination("rnstransport.probe", &identity)),
+            probe_hex,
+            "probe destination for identity {identity_hex}"
+        );
+        assert_eq!(
+            hex_lower16(&derive_destination("lxmf.delivery", &identity)),
+            lxmf_hex,
+            "lxmf delivery destination for identity {identity_hex}"
+        );
+    }
+}
+
+/// One full row plus its derived line; the honest placeholders for the
+/// pathless/unnamed case (`?` name, `-` columns); the empty listing.
+#[test]
+fn render_identities_rows_and_placeholders() {
+    let list = serde_json::json!([
+        {
+            "identity_hash": "1d48253ff2dddd5f95e6ef6ce8302a62",
+            "destination_hash": "2f9a770aa734a6ab02c7e845583cf206",
+            "name": null,
+            "hops": 2,
+            "interface": "lora0",
+            "via": "b2a8bea123f668be63e85be2374e26e5",
+            "last_seen": 820.0,
+        },
+        {
+            "identity_hash": "b2a8bea123f668be63e85be2374e26e5",
+            "destination_hash": "6a1ab9ea64747f298c1f205dfcf0f5a3",
+            "name": "rnstransport.probe",
+            "hops": null,
+            "interface": null,
+            "via": null,
+            "last_seen": null,
+        },
+    ]);
+    let out = render_identities(&list, 1000.0);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("identity"), "header first: {out}");
+
+    // Row 1: relayed path, unknown name.
+    assert!(lines[1].starts_with("1d48253ff2dddd5f95e6ef6ce8302a62"));
+    assert!(lines[1].contains("2f9a770aa734a6ab02c7e845583cf206"));
+    assert!(lines[1].contains(" ? "), "unknown name shows ?: {out}");
+    assert!(
+        lines[1].contains("lora0/b2a8bea1"),
+        "via is iface/hop: {out}"
+    );
+    assert!(
+        lines[1].contains("3m ago"),
+        "180s ago renders compact: {out}"
+    );
+    assert!(
+        lines[2].contains("derived: lxmf.delivery=2f9a770aa734a6ab02c7e845583cf206"),
+        "derived lxmf line: {out}"
+    );
+    assert!(
+        lines[2].contains("rnstransport.probe=d8dd8f1d749a36f71c74a662eb7d531e"),
+        "derived probe line: {out}"
+    );
+
+    // Row 2: no live path -> `-` columns, known name printed.
+    assert!(lines[3].contains("rnstransport.probe"));
+    assert!(lines[3].contains(" - "), "pathless columns show -: {out}");
+    assert!(
+        lines[4].contains("rnstransport.probe=6a1ab9ea64747f298c1f205dfcf0f5a3"),
+        "derived line under the second row too: {out}"
+    );
+
+    let empty = render_identities(&serde_json::json!([]), 1000.0);
+    assert!(
+        empty.contains("No identities"),
+        "empty listing says so: {empty}"
+    );
+}

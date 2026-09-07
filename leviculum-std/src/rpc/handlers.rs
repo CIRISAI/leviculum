@@ -91,6 +91,7 @@ pub(super) fn handle_request(
         // the `interface_stats` read two lines later. Serving a fabricated
         // shape would be a worse answer than not knowing the question.
         RpcRequest::GetTransportTables => build_transport_tables(core, start_time),
+        RpcRequest::GetIdentityTable => build_identity_table(core, start_time),
         RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
         RpcRequest::GetRateTable => build_rate_table(core, start_time),
@@ -1252,6 +1253,82 @@ fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) ->
         (pickle_str_key("tunnels"), pickle_list(tunnels)),
         (pickle_str_key("local_links"), build_link_table(core)),
     ])
+}
+
+// Identity listing (lnstatus --identities) — a Leviculum-only verb; see
+// `RpcRequest::GetIdentityTable` for the unknown-daemon behaviour. Response is
+// a list of dicts, one per identity learned from a received announce:
+//
+//   * `identity_hash` (16 bytes) — truncated hash of the announced public key,
+//     the input every destination derivation starts from.
+//   * `destination_hash` (16 bytes) — the destination the announce named.
+//   * `name` (str or None) — the dotted destination name, only when the
+//     announce's name hash matches an aspect this daemon registered itself;
+//     None for every other foreign announce.
+//   * `hops` (int or None), `interface` (str or None), `via` (16 bytes or
+//     None, the next relay hop), `last_seen` (Unix seconds float or None) —
+//     the live path toward the destination; all None when no path exists.
+//
+// Unlike the reference-shaped tables, `via` here is honestly None for a direct
+// path instead of repeating the destination hash: this listing has no Python
+// consumer to stay byte-compatible with, and the client renders direct as the
+// bare interface name.
+fn build_identity_table(core: &StdNodeCore, start_time: std::time::Instant) -> Value {
+    let epoch_base = epoch_base_secs(start_time);
+    let now_mono_ms = core.now_ms();
+    let to_epoch = |mono_ms: u64| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, mono_ms));
+
+    let rows = core
+        .identity_table_entries()
+        .iter()
+        .map(|e| {
+            pickle_dict(vec![
+                (
+                    pickle_str_key("identity_hash"),
+                    pickle_bytes(&e.identity_hash),
+                ),
+                (
+                    pickle_str_key("destination_hash"),
+                    pickle_bytes(&e.destination_hash),
+                ),
+                (
+                    pickle_str_key("name"),
+                    match &e.name {
+                        Some(n) => pickle_str(n),
+                        None => pickle_none(),
+                    },
+                ),
+                (
+                    pickle_str_key("hops"),
+                    match e.hops {
+                        Some(h) => pickle_int(h as i64),
+                        None => pickle_none(),
+                    },
+                ),
+                (
+                    pickle_str_key("interface"),
+                    match e.interface_index {
+                        // Name lookup only; interface_stats() would pop
+                        // frequency samples.
+                        Some(i) => pickle_str(core.interface_name(i).unwrap_or("unknown")),
+                        None => pickle_none(),
+                    },
+                ),
+                (
+                    pickle_str_key("via"),
+                    match &e.next_hop {
+                        Some(h) => pickle_bytes(h),
+                        None => pickle_none(),
+                    },
+                ),
+                (
+                    pickle_str_key("last_seen"),
+                    e.last_seen_ms.map(to_epoch).unwrap_or_else(pickle_none),
+                ),
+            ])
+        })
+        .collect();
+    pickle_list(rows)
 }
 
 // Rate Table (rnpath -r)
@@ -3418,6 +3495,147 @@ mod tests {
                     "{codec:?}: {key} must survive as a list"
                 );
             }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The identities listing (lnstatus --identities): a peer identity learned
+    // from a received announce comes back with its identity hash, the
+    // announced destination, the path columns — and the name ONLY when the
+    // announce's name hash matches an aspect this daemon registered itself
+    // (here: rnstransport.probe, via respond_to_probes). The foreign-named
+    // announce of the SAME peer identity is the control: same identity hash,
+    // name None. Both codecs.
+    #[test]
+    fn identity_table_lists_learned_identities_with_registered_names_only() {
+        use crate::clock::SystemClock;
+        use crate::interfaces::InterfaceStatsMap;
+        use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
+        use leviculum_core::constants::MTU;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::transport::InterfaceId;
+        use leviculum_core::{Destination, DestinationType, Direction, Identity};
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = std::env::temp_dir().join(format!("rpc-identity-table-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new()
+            .enable_transport(true)
+            .respond_to_probes(true)
+            .build(
+                rand_core::OsRng,
+                SystemClock::new(),
+                crate::storage::Storage::new(&tmp).unwrap(),
+            );
+        core.set_interface_name(0, "tcp0".into());
+
+        // One peer identity, two announced destinations: the probe aspect this
+        // node itself registered, and a foreign app name it has never seen.
+        let peer = Identity::generate(&mut rand_core::OsRng);
+        let peer_hash = *peer.hash();
+        let now_ms = core.now_ms();
+        let announce_raw = |dest: &mut Destination| -> Vec<u8> {
+            let ann = dest
+                .announce(None, &mut rand_core::OsRng, now_ms, now_ms / 1000)
+                .unwrap();
+            let mut buf = [0u8; MTU];
+            let len = ann.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        };
+        let mut probe_dest = Destination::new(
+            Some(peer.clone()),
+            Direction::In,
+            DestinationType::Single,
+            "rnstransport",
+            &["probe"],
+        )
+        .unwrap();
+        let mut foreign_dest = Destination::new(
+            Some(peer),
+            Direction::In,
+            DestinationType::Single,
+            "someforeignapp",
+            &["delivery"],
+        )
+        .unwrap();
+        let probe_hash = *probe_dest.hash();
+        let foreign_hash = *foreign_dest.hash();
+        let _ = core.handle_packet(InterfaceId(0), &announce_raw(&mut probe_dest));
+        let _ = core.handle_packet(InterfaceId(0), &announce_raw(&mut foreign_dest));
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        for codec in [Codec::Pickle, Codec::Msgpack] {
+            let bytes = handle_request(
+                &RpcRequest::GetIdentityTable,
+                &mut core,
+                std::time::Instant::now(),
+                &stats,
+                &crate::interfaces::inventory::InterfaceInventory::shared(),
+                0,
+                None,
+                codec,
+            )
+            .expect("identities must serialize");
+            let decoded = match codec {
+                Codec::Pickle => {
+                    serde_pickle::value_from_slice(&bytes, Default::default()).unwrap()
+                }
+                Codec::Msgpack => decode_response_msgpack(&bytes).unwrap(),
+            };
+            let Value::List(rows) = decoded else {
+                panic!("{codec:?}: identities must decode to a list")
+            };
+            assert_eq!(rows.len(), 2, "{codec:?}: both announces listed");
+
+            let field = |row: &Value, key: &str| -> Value {
+                let Value::Dict(d) = row else {
+                    panic!("{codec:?}: row must be a dict")
+                };
+                d.get(&HashableValue::String(key.into()))
+                    .unwrap_or_else(|| panic!("{codec:?}: row missing key {key}"))
+                    .clone()
+            };
+            let row_for = |dest: &[u8; 16]| -> &Value {
+                rows.iter()
+                    .find(|r| matches!(field(r, "destination_hash"), Value::Bytes(b) if b == dest))
+                    .unwrap_or_else(|| panic!("{codec:?}: no row for the announced destination"))
+            };
+
+            let probe_row = row_for(probe_hash.as_bytes());
+            assert_eq!(
+                field(probe_row, "identity_hash"),
+                Value::Bytes(peer_hash.to_vec()),
+                "{codec:?}: identity hash is the truncated hash of the announced key"
+            );
+            assert_eq!(
+                field(probe_row, "name"),
+                Value::String("rnstransport.probe".into()),
+                "{codec:?}: an aspect this node registered itself is named"
+            );
+            assert_eq!(field(probe_row, "hops"), Value::I64(1));
+            assert_eq!(field(probe_row, "interface"), Value::String("tcp0".into()));
+            assert_eq!(
+                field(probe_row, "via"),
+                Value::None,
+                "{codec:?}: direct path, no relay hop"
+            );
+            assert!(
+                matches!(field(probe_row, "last_seen"), Value::F64(t) if t > 0.0),
+                "{codec:?}: last_seen carries the path timestamp"
+            );
+
+            let foreign_row = row_for(foreign_hash.as_bytes());
+            assert_eq!(
+                field(foreign_row, "identity_hash"),
+                Value::Bytes(peer_hash.to_vec()),
+                "{codec:?}: same peer identity behind the foreign name"
+            );
+            assert_eq!(
+                field(foreign_row, "name"),
+                Value::None,
+                "{codec:?}: a name this node never registered stays unknown, not guessed"
+            );
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }

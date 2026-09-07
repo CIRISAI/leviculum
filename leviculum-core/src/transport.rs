@@ -972,6 +972,35 @@ pub struct AnnounceCacheExport {
     pub last_used_ms: Option<u64>,
 }
 
+/// Exported identity-table row for RPC reporting: one identity learned from a
+/// received announce, joined with the live path toward its announced
+/// destination when one exists. Built by `NodeCore::identity_table_entries`
+/// (the name lookup needs the node's registered destinations); the inventory
+/// is the announce cache, the same recall source as
+/// `Transport::recall_identity_hash` — Python's equivalent store is
+/// `Identity.known_destinations`. Served by no reference RPC.
+#[derive(Debug, Clone)]
+pub struct IdentityTableExport {
+    /// Identity hash (16 bytes): `truncated_hash` of the announced 64-byte
+    /// combined public key.
+    pub identity_hash: [u8; TRUNCATED_HASHBYTES],
+    /// The announced destination hash (16 bytes) — the announce-cache key.
+    pub destination_hash: [u8; TRUNCATED_HASHBYTES],
+    /// The dotted destination name, known only when the announce's name hash
+    /// matches an aspect this node itself registered; `None` for every other
+    /// foreign announce (never guessed).
+    pub name: Option<String>,
+    /// Hop count from the path table, `None` when no live path exists.
+    pub hops: Option<u8>,
+    /// Interface index the path was learned on, `None` without a path.
+    pub interface_index: Option<usize>,
+    /// Next relay hop toward the destination; `None` when direct or pathless.
+    pub next_hop: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// When the path was last refreshed (ms since clock epoch) — the closest
+    /// honest "last seen"; `None` without a path.
+    pub last_seen_ms: Option<u64>,
+}
+
 /// Exported tunnel-table entry for RPC reporting.
 ///
 /// Python's `Transport.tunnels[tunnel_id] = [tunnel_id, interface, paths,

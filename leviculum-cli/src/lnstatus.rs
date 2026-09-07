@@ -88,6 +88,22 @@ struct Args {
     )]
     tables: bool,
 
+    /// list identities learned from announces, with their derived destinations
+    ///
+    /// Additive Leviculum extension: `rnstatus` has no counterpart, and the
+    /// short form -N collides with none of its letters. Renders one row per
+    /// identity the daemon has heard announce, plus the `lxmf.delivery` and
+    /// `rnstransport.probe` destinations derived from the identity hash, so a
+    /// remote board can be probed without computing its probe destination by
+    /// hand. With -j the raw RPC response is printed instead.
+    #[arg(
+        short = 'N',
+        long = "identities",
+        default_value_t = false,
+        conflicts_with_all = ["remote", "discovered", "discovered_details", "tables", "monitor"]
+    )]
+    identities: bool,
+
     /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
@@ -262,6 +278,12 @@ async fn main() {
         return;
     }
 
+    // --- Identity listing (-N/--identities): its own mode, like -d. ---
+    if args.identities {
+        run_identities(&args, &config_dir, loaded_config.as_ref(), &instance_name).await;
+        return;
+    }
+
     // --- Local mode: resolve authkey and drive the shared-instance RPC. ---
     let authkey = match resolve_authkey(&config_dir, loaded_config.as_ref()) {
         Ok(k) => k,
@@ -345,6 +367,47 @@ async fn run_discovered(
             "{}",
             lnstatus_render::render_discovered(&list, details, args.filter.as_deref(), now)
         );
+    }
+}
+
+/// `-N/--identities`: fetch the `identities` listing over the shared-instance
+/// RPC and render it (see `lnstatus_render::render_identities`). A daemon that
+/// does not know the verb (Python `rnsd`, or an older `lnsd`) closes the
+/// connection without a reply; unlike the additive `--tables` key there is no
+/// other output to fall back to here, so that is a hard error, exit 2 — the
+/// same exit the status query uses when the daemon cannot be reached.
+async fn run_identities(
+    args: &Args,
+    config_dir: &Path,
+    config: Option<&Config>,
+    instance_name: &str,
+) {
+    let authkey = match resolve_authkey(config_dir, config) {
+        Ok(k) => k,
+        Err(msg) => {
+            eprintln!("No shared RNS instance available to get status from");
+            eprintln!("(cannot derive RPC authkey: {msg})");
+            std::process::exit(1);
+        }
+    };
+
+    let list = match leviculum_std::rpc_query(instance_name, &authkey, "identities").await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Could not get identity list from the daemon");
+            eprintln!("({e})");
+            std::process::exit(2);
+        }
+    };
+
+    if args.json {
+        println!("{}", lnstatus_render::render_json(&list));
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        print!("{}", lnstatus_render::render_identities(&list, now));
     }
 }
 
@@ -643,6 +706,25 @@ mod cli_tests {
         );
         assert!(Args::try_parse_from(["lnstatus", "-j", "--tables", "-d"]).is_err());
         assert!(Args::try_parse_from(["lnstatus", "-j", "--tables", "-D"]).is_err());
+    }
+
+    // -N/--identities is its own local-transport mode: off by default,
+    // reachable by short and long form, refused in the modes that answer from
+    // a different source (remote, discovered) and alongside --tables/-m.
+    #[test]
+    fn identities_flag_modes_and_conflicts() {
+        assert!(!parse(&[]).identities, "off by default");
+        assert!(parse(&["-N"]).identities);
+        assert!(parse(&["--identities"]).identities);
+        assert!(parse(&["-N", "-j"]).json, "-j selects the raw RPC output");
+        assert!(
+            Args::try_parse_from(["lnstatus", "-N", "-R", &"a".repeat(32)]).is_err(),
+            "remote mode answers from elsewhere"
+        );
+        assert!(Args::try_parse_from(["lnstatus", "-N", "-d"]).is_err());
+        assert!(Args::try_parse_from(["lnstatus", "-N", "-D"]).is_err());
+        assert!(Args::try_parse_from(["lnstatus", "-N", "-j", "--tables"]).is_err());
+        assert!(Args::try_parse_from(["lnstatus", "-N", "-m"]).is_err());
     }
 
     #[test]

@@ -2800,6 +2800,55 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.announce_cache_entries()
     }
 
+    /// Every identity this node has learned from a received announce, joined
+    /// with the live path toward its announced destination (`lnstatus
+    /// --identities`).
+    ///
+    /// Inventory: the announce cache — the same recall source Python's
+    /// `Identity.recall` answers from (`known_destinations`), and the one
+    /// `Transport::recall_identity_hash` already reads. A cached announce that
+    /// no longer parses is skipped, matching a `None` recall. The name column
+    /// is filled only when the announce's name hash equals the name hash of an
+    /// aspect this node itself registered; a foreign name hash stays `None`
+    /// rather than being guessed.
+    pub fn identity_table_entries(&self) -> Vec<crate::transport::IdentityTableExport> {
+        let paths: BTreeMap<[u8; TRUNCATED_HASHBYTES], crate::transport::PathTableExport> = self
+            .transport
+            .path_table_entries()
+            .into_iter()
+            .map(|e| (e.hash, e))
+            .collect();
+        let names: BTreeMap<&[u8; crate::constants::NAME_HASHBYTES], &str> = self
+            .destinations
+            .values()
+            .map(|d| (d.name_hash(), d.full_name()))
+            .collect();
+
+        let mut rows = Vec::new();
+        for dest_hash in self.transport.storage().announce_cache_keys() {
+            let Some(raw) = self.transport.storage().get_announce_cache(&dest_hash) else {
+                continue;
+            };
+            let Ok(packet) = crate::packet::Packet::unpack(raw) else {
+                continue;
+            };
+            let Ok(announce) = crate::announce::ReceivedAnnounce::from_packet(&packet) else {
+                continue;
+            };
+            let path = paths.get(&dest_hash);
+            rows.push(crate::transport::IdentityTableExport {
+                identity_hash: announce.computed_identity_hash(),
+                destination_hash: dest_hash,
+                name: names.get(announce.name_hash()).map(|n| String::from(*n)),
+                hops: path.map(|p| p.hops),
+                interface_index: path.map(|p| p.interface_index),
+                next_hop: path.and_then(|p| p.next_hop),
+                last_seen_ms: path.map(|p| p.timestamp_ms),
+            });
+        }
+        rows
+    }
+
     /// Return all tunnel-table entries for RPC export.
     pub fn tunnel_table_entries(&self) -> Vec<crate::transport::TunnelTableExport> {
         self.transport.tunnel_table_entries()

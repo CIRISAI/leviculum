@@ -271,6 +271,12 @@ pub struct Destination {
     hash: DestinationHash,
     /// Name hash (truncated hash of app_name.aspects)
     name_hash: [u8; NAME_HASHBYTES],
+    /// The dotted full name (`app_name.aspect1.aspect2...`) the name hash was
+    /// computed from. Python keeps it as `Destination.name` (`expand_name`,
+    /// Destination.py:96-110); we keep it so a name_hash seen in a foreign
+    /// announce can be labelled when it matches an aspect this node itself
+    /// registered (the identity listing RPC) — never by guessing.
+    full_name: String,
     /// Associated identity (optional for PLAIN destinations)
     identity: Option<Identity>,
     /// Destination type
@@ -360,6 +366,11 @@ impl Destination {
         }
 
         let name_hash = Self::compute_name_hash(app_name, aspects);
+        let mut full_name = String::from(app_name);
+        for aspect in aspects {
+            full_name.push('.');
+            full_name.push_str(aspect);
+        }
 
         let hash = match &identity {
             Some(id) => Self::compute_destination_hash(&name_hash, id.hash()),
@@ -373,6 +384,7 @@ impl Destination {
         Ok(Self {
             hash,
             name_hash,
+            full_name,
             identity,
             dest_type,
             direction,
@@ -457,6 +469,12 @@ impl Destination {
     /// Get the name hash
     pub fn name_hash(&self) -> &[u8; NAME_HASHBYTES] {
         &self.name_hash
+    }
+
+    /// The dotted full name (`app_name.aspect1.aspect2...`), Python's
+    /// `Destination.name`.
+    pub fn full_name(&self) -> &str {
+        &self.full_name
     }
 
     /// Get the destination type

@@ -238,9 +238,9 @@ IFAC wrapping handled in core, so every driver gets it for free.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new(identity: Option<Identity>, direction: Direction, dest_type: DestinationType, app_name: &str, aspects: &[&str]) -> Result<Self, DestinationError>` — `destination.rs:285` | Construct a destination |
-| `fn hash(&self) -> &DestinationHash` — `destination.rs:336` | Its 16-byte hash |
-| `fn direction(&self) -> Direction` — `destination.rs:351` | In / Out |
+| `fn new(identity: Option<Identity>, direction: Direction, dest_type: DestinationType, app_name: &str, aspects: &[&str]) -> Result<Self, DestinationError>` — `destination.rs:291` | Construct a destination |
+| `fn hash(&self) -> &DestinationHash` — `destination.rs:342` | Its 16-byte hash |
+| `fn direction(&self) -> Direction` — `destination.rs:357` | In / Out |
 
 `DestinationHash` — a 16-byte address (newtype, `destination.rs:158`):
 `fn new(bytes: [u8; TRUNCATED_HASHBYTES]) -> Self` (`destination.rs:162`),

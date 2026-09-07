@@ -199,7 +199,7 @@ reader drift together.
 The worked example of getting this right is the announce-signature
 pin from the #159 audit,
 `announce_signature_covers_reference_byte_order_on_the_wire`
-(`leviculum-core/src/destination.rs:2248`). It takes the raw wire
+(`leviculum-core/src/destination.rs:2266`). It takes the raw wire
 bytes of a packed announce, rebuilds the signed data in the exact
 order the reference composes it (`Destination.py:297-298`:
 `hash + public_key + name_hash + random_hash + ratchet [+ app_data]`),
@@ -215,7 +215,7 @@ each other forever — exactly the #155 class, one layer up.
 Where a reference value is computable offline, pin it as a known-
 answer test with the reference's own output (the name-hash and
 destination-hash KATs in the same audit tranche,
-`destination.rs:1884`).
+`destination.rs:1902`).
 
 ## Deliberate non-behaviours get pins too
 

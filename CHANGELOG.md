@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnstatus --identities` (`-N`) lists every identity the daemon has
+  learned from announces — identity hash, announced destination, name
+  (only for aspects the daemon registered itself), hops, via and last
+  seen — plus the `lxmf.delivery` and `rnstransport.probe` destinations
+  derived from each identity hash, ready to paste into `lnprobe`. Until
+  now that derivation had to be done by hand from `rnpath -t` output.
+  Served by a new additive `identities` RPC verb on the shared-instance
+  socket; a daemon without it (Python `rnsd`, older `lnsd`) closes the
+  connection and the tool reports the error.
+
 - `lnprobe`, a drop-in for Python's `rnprobe`: probes a destination
   through a running `lnsd` **or** `rnsd` over the shared instance,
   reporting round-trip time, hop count and packet loss from delivery

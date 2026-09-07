@@ -71,6 +71,14 @@ pub(crate) enum RpcRequest {
     /// transport error, never a hang. Response shape: see
     /// `build_transport_tables`.
     GetTransportTables,
+    /// Identity listing (`lnstatus --identities`) — a Leviculum-only extension
+    /// with no Python `rnsd` precedent: every identity the daemon has learned
+    /// from announces, with the announced destination and the live path toward
+    /// it. Like `transport_tables`, Python's `rpc_loop` matches no arm for it
+    /// and closes the connection without a reply, so a client asking an `rnsd`
+    /// sees a transport error, never a hang. Response shape: see
+    /// `build_identity_table`.
+    GetIdentityTable,
     /// Discovered-interface registry query (Codeberg #32). Response is a list of
     /// per-record dicts (see `build_discovered_interfaces`), mirroring Python
     /// `RNS.Discovery.InterfaceDiscovery.list_discovered_interfaces`.
@@ -190,6 +198,7 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 Ok(RpcRequest::GetPathTable { max_hops })
             }
             "transport_tables" => Ok(RpcRequest::GetTransportTables),
+            "identities" => Ok(RpcRequest::GetIdentityTable),
             "discovered_interfaces" => Ok(RpcRequest::GetDiscoveredInterfaces),
             "rate_table" => Ok(RpcRequest::GetRateTable),
             "next_hop" => {
@@ -621,6 +630,18 @@ mod tests {
             assert_eq!(pickled, expected, "pickle arm for {command}");
             assert_eq!(packed, expected, "msgpack arm for {command}");
         }
+    }
+
+    /// The identities listing verb (`lnstatus --identities`), in both codecs;
+    /// the negative-control test below is what makes "it parsed" meaningful.
+    #[test]
+    fn test_parse_identities_in_both_codecs() {
+        let (pickled, pickle_codec) = parse_request(&build_get_request("identities")).unwrap();
+        assert_eq!(pickle_codec, Codec::Pickle);
+        assert_eq!(pickled, RpcRequest::GetIdentityTable);
+        let (packed, msgpack_codec) = parse_request(&msgpack_get_request("identities")).unwrap();
+        assert_eq!(msgpack_codec, Codec::Msgpack);
+        assert_eq!(packed, RpcRequest::GetIdentityTable);
     }
 
     /// Positive control for the test above: the dispatcher rejects what it

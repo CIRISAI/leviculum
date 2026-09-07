@@ -330,6 +330,116 @@ pub fn merge_transport_tables(stats: &mut Value, tables: Option<Value>) {
 }
 
 // ---------------------------------------------------------------------------
+// -N / --identities  identities learned from announces (Leviculum extension)
+// ---------------------------------------------------------------------------
+
+/// Derive a destination hash from a dotted destination name and a 16-byte
+/// identity hash:
+///
+/// `dest = sha256(sha256(name)[:10] || identity_hash)[:16]`
+///
+/// The inner truncation is the 10-byte name hash (`RNS.Destination.hash`,
+/// Destination.py:114-122); the outer is the usual 16-byte truncated hash.
+/// This is what turns the identity hash an announce reveals into the
+/// `rnstransport.probe` / `lxmf.delivery` destination a prober needs.
+pub fn derive_destination(full_name: &str, identity_hash: &[u8]) -> [u8; 16] {
+    use sha2::Digest;
+    let name_hash = sha2::Sha256::digest(full_name.as_bytes());
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&name_hash[..10]);
+    hasher.update(identity_hash);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// The destinations worth deriving for every listed identity: the probe
+/// responder every transport node runs, and the LXMF delivery destination.
+const DERIVED_NAMES: [&str; 2] = ["lxmf.delivery", "rnstransport.probe"];
+
+/// `--identities`: render the `identities` RPC response (a list of dicts, see
+/// `build_identity_table` in leviculum-std) as one row per learned identity
+/// plus a `derived:` line with the destinations computed from its identity
+/// hash. Hashes are printed in full so they can be pasted into `lnprobe`.
+/// Columns the daemon could not fill honestly show `-`; an unknown name shows
+/// `?` (the daemon only knows names for aspects it registered itself).
+pub fn render_identities(list: &Value, now_epoch: f64) -> String {
+    let mut out = String::new();
+    let empty = Vec::new();
+    let rows = list.as_array().unwrap_or(&empty);
+    if rows.is_empty() {
+        pln(&mut out, "No identities have been learned from announces");
+        return out;
+    }
+
+    pln(
+        &mut out,
+        &format!(
+            "{:<34}{:<34}{:<20}{:<6}{:<24}{}",
+            "identity", "announced destination", "name", "hops", "via", "last seen"
+        ),
+    );
+    for rec in rows {
+        let identity_hex = js(rec, "identity_hash").unwrap_or("-");
+        let dest_hex = js(rec, "destination_hash").unwrap_or("-");
+        let name = js(rec, "name").unwrap_or("?");
+        let hops = ji(rec, "hops")
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        // Relayed: interface/next-hop-prefix; direct: the interface alone;
+        // no live path: "-".
+        let via = match js(rec, "interface") {
+            Some(iface) => match js(rec, "via") {
+                Some(hop) => format!("{iface}/{}", &hop[..hop.len().min(8)]),
+                None => iface.to_string(),
+            },
+            None => "-".to_string(),
+        };
+        let last_seen = match jf(rec, "last_seen") {
+            Some(t) => {
+                let diff = (now_epoch - t).max(0.0);
+                if diff < 60.0 {
+                    "Just now".to_string()
+                } else {
+                    format!("{} ago", prettytime_compact(diff))
+                }
+            }
+            None => "-".to_string(),
+        };
+        pln(
+            &mut out,
+            &format!("{identity_hex:<34}{dest_hex:<34}{name:<20}{hops:<6}{via:<24}{last_seen}"),
+        );
+        if let Some(identity) = hex_to_bytes(identity_hex) {
+            let derived: Vec<String> = DERIVED_NAMES
+                .iter()
+                .map(|n| format!("{n}={}", hex_lower16(&derive_destination(n, &identity))))
+                .collect();
+            pln(&mut out, &format!("  derived: {}", derived.join(" ")));
+        }
+    }
+    out
+}
+
+/// Parse a 32-hex-char hash into 16 bytes; `None` on any other input.
+fn hex_to_bytes(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = core::str::from_utf8(chunk).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn hex_lower16(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
 // -d / -D  discovered interfaces (rnstatus.py:182-306, Codeberg #32)
 // ---------------------------------------------------------------------------
 
