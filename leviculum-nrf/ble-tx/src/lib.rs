@@ -37,6 +37,7 @@
 pub mod adv;
 pub mod drain;
 pub mod peer;
+pub mod registry;
 
 pub use adv::{
     ad_structure_len, manufacturer_data, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, COMPANY_ID,
@@ -46,6 +47,7 @@ pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
 };
+pub use registry::PeerRegistry;
 
 /// Upper bound on a single wait for the SoftDevice's
 /// `BLE_GATTS_EVT_HVN_TX_COMPLETE`, in milliseconds.

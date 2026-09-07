@@ -21,14 +21,14 @@
 use core::cell::{Cell, RefCell};
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
-    ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN,
+    PeerRegistry, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -44,7 +44,7 @@ use nrf_softdevice::Softdevice;
 use static_cell::StaticCell;
 
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
-use super::{BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
+use super::{CarrierWaiter, BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
 
 /// The two data characteristics are 251 bytes wide, which is also the
 /// largest GATTS write event the SoftDevice can hand us (251 bytes of data
@@ -244,13 +244,35 @@ async fn ble_task(
     let incoming_tx = BLE_INCOMING.sender();
 
     loop {
+        // The runtime carrier gate: a profile switched to `ble=off`
+        // holds the task here, so nothing is on the air — no
+        // advertisement, no acceptable connection. Off→on (the carrier
+        // came up at boot, it was only gated) falls through and resumes
+        // advertising. Logged only when it actually gates, once per
+        // gated period, not once per connection.
+        if !crate::media::ble_active() {
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_GATE role=peripheral state=off"),
+            );
+            super::carrier_on(CarrierWaiter::Peripheral).await;
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_GATE role=peripheral state=on"),
+            );
+        }
         let config = peripheral::Config::default();
         let advertisement = peripheral::ConnectableAdvertisement::ScannableUndirected {
             adv_data: adv.as_ref(),
             scan_data: scan.as_ref(),
         };
-        match peripheral::advertise_connectable(sd, advertisement, &config).await {
-            Ok(conn) => {
+        match select(
+            peripheral::advertise_connectable(sd, advertisement, &config),
+            super::carrier_off(CarrierWaiter::Peripheral),
+        )
+        .await
+        {
+            Either::First(Ok(conn)) => {
                 crate::info!("BLE: connected");
                 gatt_events(&conn, server, &incoming_tx).await;
                 // The ATT MTU the peer and we settled on, reported here
@@ -263,9 +285,14 @@ async fn ble_task(
                 // answered by reading crate source.
                 crate::info!("BLE: disconnected att_mtu={}", conn.att_mtu());
             }
-            Err(_) => {
+            Either::First(Err(_)) => {
                 Timer::after_millis(1000).await;
             }
+            // Carrier switched off while advertising: dropping the
+            // advertise future is what stops the advertisement (the
+            // SoftDevice cancels it on drop). The gate above then holds
+            // the loop.
+            Either::Second(()) => {}
         }
     }
 }
@@ -396,7 +423,24 @@ async fn gatt_events(
         }
     };
 
-    let _ = select(inbound, outbound).await;
+    // The third arm is the runtime carrier switch (`--set-media
+    // ble=off`): the link is disconnected exactly as if the peer had
+    // walked out of range — the teardown below reports the loss through
+    // the same `peer_link_down`, so the core's cull is identical.
+    if let Either3::Third(()) = select3(
+        inbound,
+        outbound,
+        super::carrier_off(CarrierWaiter::Peripheral),
+    )
+    .await
+    {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!("BLE_CARRIER_DROP role=peripheral slot={}", slot_index),
+        );
+        // Already-disconnected is fine; the teardown is the same.
+        let _ = conn.disconnect();
+    }
 
     // Registry entry first, then the slot: a slot that reads free while
     // the identity still reads linked would refuse a legitimate
@@ -418,8 +462,12 @@ async fn gatt_events(
 /// the post-connect closure of that hole: the central path reads the
 /// peer's Identity characteristic first and drops the connection if
 /// that identity is already live ([`BLE_LINK_DUP`] in the log).
-static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<[Option<[u8; 16]>; MAX_LINKS]>> =
-    BlockingMutex::new(RefCell::new([None; MAX_LINKS]));
+///
+/// The first/last-link rules live host-tested in
+/// [`leviculum_ble_tx::registry`]; this is the one firmware instance,
+/// behind the critical-section mutex the host crate cannot need.
+static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<PeerRegistry<MAX_LINKS>>> =
+    BlockingMutex::new(RefCell::new(PeerRegistry::new()));
 
 /// Register a slot's peer and, when this is the identity's FIRST link,
 /// report the arrival to the main loop so the transport pulls the
@@ -428,12 +476,7 @@ static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<[Option<[u8; 1
 /// another slot (the zombie-displacement window) means the peer was
 /// never gone: registry churn, not an arrival, so no report.
 fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
-    let first = LIVE_PEERS.lock(|peers| {
-        let mut peers = peers.borrow_mut();
-        let first = peers.iter().flatten().all(|id| *id != peer_id);
-        peers[slot_index] = Some(peer_id);
-        first
-    });
+    let first = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_up(slot_index, peer_id));
     if first {
         super::report_peer_event(super::PeerEvent::Up(peer_id));
     }
@@ -445,22 +488,14 @@ fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
 /// slot (the zombie-displacement window) means the peer is still
 /// reachable: registry churn, not a loss, so no report.
 fn peer_link_down(slot_index: usize) {
-    let lost = LIVE_PEERS.lock(|peers| {
-        let mut peers = peers.borrow_mut();
-        let identity = peers[slot_index].take()?;
-        peers
-            .iter()
-            .flatten()
-            .all(|id| *id != identity)
-            .then_some(identity)
-    });
+    let lost = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_down(slot_index));
     if let Some(identity) = lost {
         super::report_peer_event(super::PeerEvent::Lost(identity));
     }
 }
 
 fn peer_already_linked(peer_id: &[u8; 16]) -> bool {
-    LIVE_PEERS.lock(|peers| peers.borrow().iter().flatten().any(|id| id == peer_id))
+    LIVE_PEERS.lock(|peers| peers.borrow().is_linked(peer_id))
 }
 
 /// The Columba service from the client side — the same three
@@ -889,7 +924,22 @@ async fn run_central_session(
         }
     };
 
-    let _ = select(inbound, outbound).await;
+    // Third arm: the runtime carrier switch, as on the peripheral side —
+    // disconnect, and let [`central_link`]'s teardown report the loss
+    // through the same `peer_link_down` that range loss takes.
+    if let Either3::Third(()) = select3(
+        inbound,
+        outbound,
+        super::carrier_off(CarrierWaiter::Central),
+    )
+    .await
+    {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!("BLE_CARRIER_DROP role=central slot={}", slot_index),
+        );
+        let _ = conn.disconnect();
+    }
 }
 
 /// The scanner/initiator task: the peripheral task's counterpart, one
@@ -910,8 +960,28 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
 
     let mut duplicates = RecentDuplicates::new();
     loop {
-        match find_peer_to_initiate(sd, own_addr_value, &duplicates).await {
-            Ok(peer) => {
+        // The runtime carrier gate, as at the top of the peripheral
+        // loop: `ble=off` holds the task here, so a switched-off
+        // carrier neither scans nor initiates; off→on falls through
+        // and resumes scanning.
+        if !crate::media::ble_active() {
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_GATE role=central state=off"),
+            );
+            super::carrier_on(CarrierWaiter::Central).await;
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_GATE role=central state=on"),
+            );
+        }
+        match select(
+            find_peer_to_initiate(sd, own_addr_value, &duplicates),
+            super::carrier_off(CarrierWaiter::Central),
+        )
+        .await
+        {
+            Either::First(Ok(peer)) => {
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!(
@@ -921,9 +991,13 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 );
                 central_link(sd, &identity_hash, peer, &mut duplicates).await;
             }
-            Err(err) => {
+            Either::First(Err(err)) => {
                 crate::warn!("BLE: scan pass failed err={:?}", err);
             }
+            // Carrier switched off mid-scan: dropping the scan future
+            // stops the scan. Straight back to the gate, no backoff —
+            // there is nothing to pace against while off.
+            Either::Second(()) => continue,
         }
         Timer::after_millis(CENTRAL_RETRY_BACKOFF_MS).await;
     }

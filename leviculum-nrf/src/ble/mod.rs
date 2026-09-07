@@ -80,6 +80,7 @@ use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_sync::signal::Signal;
 use leviculum_ble_tx::{DrainRouter, DEVICE_NAME_LEN};
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
@@ -182,6 +183,71 @@ pub(crate) fn report_peer_event(event: PeerEvent) {
                 kind, identity[0], identity[1], identity[2], identity[3]
             ),
         );
+    }
+}
+
+/// The runtime half of the media profile's BLE switch — the boot half
+/// is [`init`]'s `columba_enabled`, which decides whether the protocol
+/// tasks exist at all.
+///
+/// A runtime `ble=off` used to be a mute: [`BleInterface::try_send`]
+/// dropped outbound packets and the binaries' RX arms dropped inbound
+/// ones, but the SoftDevice links stayed connected and the
+/// advertisement kept going — a phone still showed the board as
+/// connected, and no `PeerEvent::Lost` ever fired, so the #365 cull
+/// never ran. Off now means off on the air: each protocol task holds
+/// one of these latches, [`note_media_changed`] pokes them all, and the
+/// woken task re-reads [`crate::media::ble_active`] — a live session
+/// disconnects its link (through the same teardown a peer walking out
+/// of range takes, so the `Lost` report and the cull are identical),
+/// and the advertise/scan futures are dropped and not re-entered until
+/// the carrier reads on again.
+///
+/// One latch per task, not one shared: `Signal::wait` consumes the
+/// latch, so a shared one would wake whichever task polled first and
+/// starve the other. Within a task only one of [`carrier_on`] /
+/// [`carrier_off`] is ever awaited at a time, and both re-check the
+/// media state after every wake, so a stale latched wake (a LoRa-only
+/// profile change, a flip-and-back while the task was busy) is a no-op.
+static CARRIER_WAKES: [Signal<CriticalSectionRawMutex, ()>; 2] = [Signal::new(), Signal::new()];
+
+/// A protocol task's handle on its carrier-wake latch (see
+/// [`CARRIER_WAKES`]). The discriminant is the latch index.
+#[derive(Clone, Copy)]
+pub(crate) enum CarrierWaiter {
+    Peripheral = 0,
+    Central = 1,
+}
+
+/// Wake every BLE protocol task to re-read the media profile. Called by
+/// [`crate::media::apply`] after the new profile is already in force,
+/// so a woken task cannot read the old state. Before the tasks exist —
+/// or on a boot that never spawned them — this just latches the wakes,
+/// which is the required no-op: with `ble=off` at boot no link, no
+/// advertisement and no scan exist to stop.
+pub fn note_media_changed() {
+    for wake in &CARRIER_WAKES {
+        wake.signal(());
+    }
+}
+
+/// Resolve when the BLE carrier reads off. Selected against a live
+/// session or an advertise/scan future; never resolves while the
+/// carrier stays on.
+pub(crate) async fn carrier_off(waiter: CarrierWaiter) {
+    let wake = &CARRIER_WAKES[waiter as usize];
+    while crate::media::ble_active() {
+        wake.wait().await;
+    }
+}
+
+/// Resolve when the BLE carrier reads on — the gate at the top of each
+/// protocol task's loop, so a switched-off carrier neither advertises
+/// nor scans nor accepts.
+pub(crate) async fn carrier_on(waiter: CarrierWaiter) {
+    let wake = &CARRIER_WAKES[waiter as usize];
+    while !crate::media::ble_active() {
+        wake.wait().await;
     }
 }
 

@@ -128,8 +128,11 @@ struct Cli {
     /// under test — so a single-medium measurement declares the profile
     /// here first. It is persisted, so the reset that ends a run does not
     /// put the board back on both. Switching a carrier off takes effect at
-    /// once; switching one back on needs a reset if it did not come up
-    /// this boot, and the board says which case it is in.
+    /// once, and ble=off means off the air: the board disconnects every
+    /// live Bluetooth link (a connected phone sees it go, as if it left
+    /// range) and stops advertising and scanning. Switching a carrier
+    /// back on needs a reset if it did not come up this boot, and the
+    /// board says which case it is in.
     #[arg(
         long,
         value_name = "lora=on,ble=off",

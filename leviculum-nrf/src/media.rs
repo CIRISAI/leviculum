@@ -29,10 +29,15 @@
 //! * **running** — what this boot is actually carrying traffic on:
 //!   `configured AND booted_with`.
 //!
-//! Switching a carrier off always takes effect at once, and switching one
-//! back on does too **as long as it came up at boot** — it was only being
-//! ignored, its task is still there. A carrier that did *not* come up at
-//! boot has no task to un-ignore: an embassy task cannot be spawned from
+//! Switching a carrier off always takes effect at once — and for BLE,
+//! off means off: every live link is disconnected (a phone sees the
+//! board go, the way it would if the board left range), advertising and
+//! scanning stop, and each dropped link's `PeerEvent::Lost` runs the
+//! same path cull that range loss runs (see §Teardown semantics below).
+//! Switching one back on takes effect at once too **as long as it came
+//! up at boot** — its tasks are still there, gated, and resume
+//! advertising and scanning. A carrier that did *not* come up at boot
+//! has no task to un-gate: an embassy task cannot be spawned from
 //! nothing after the fact, so it cannot start before the next reset.
 //!
 //! That case is answered with a report saying "configured, still not
@@ -54,13 +59,25 @@
 //! in **both** directions and does so immediately: the interface drops
 //! what the core hands it, and the binary's RX arm drops what the medium
 //! hands up, so nothing crosses in either direction from the moment the
-//! frame is answered. What it does *not* do is take the carrier off the
-//! air — a live BLE connection stays connected and the advertisement
-//! keeps going, and the LoRa task keeps listening. Those need the boot
-//! path (which never starts them), which is why the rig acceptance for
-//! "no advertisement on air" is flash-set-reboot and not a runtime set.
-//! Stated rather than papered over: an operator who needs radio silence
-//! reboots, and the `[MEDIA]` banner then proves it.
+//! frame is answered.
+//!
+//! For **BLE** the runtime off also takes the carrier off the air:
+//! [`apply`] wakes the BLE protocol tasks (`crate::ble`), which
+//! disconnect every live link — central and peripheral role — and drop
+//! their advertise and scan futures. Each disconnect unwinds through
+//! the same per-link teardown a peer walking out of range takes, so the
+//! main loop receives one `PeerEvent::Lost` per peer and culls its
+//! paths identically; on off→on the tasks resume advertising and
+//! scanning, and the reconnect produces the ordinary `PeerEvent::Up`
+//! and path pull. This is what makes the #365 BLE-loss fallback desk-
+//! testable: before it, a runtime off was a mute — packets to a still-
+//! connected phone died silently in the interface and nothing
+//! re-resolved over LoRa until the phone really left range.
+//!
+//! **LoRa** keeps the weaker semantics: its task keeps listening (RX is
+//! dropped upward, nothing is transmitted), so LoRa radio silence still
+//! needs the boot path — the rig acceptance for it is flash-set-reboot,
+//! and the `[MEDIA]` banner then proves it.
 
 use leviculum_core::envelope::MediaProfileWire;
 use leviculum_media_state::{Carriers, MediaState};
@@ -194,6 +211,14 @@ pub fn configured() -> MediaProfileWire {
 /// it was a claim about a reboot that the reboot disproved.
 pub fn apply(profile: MediaProfileWire) -> crate::telemetry::PendingSave {
     STATE.set_configured(carriers(profile));
+    // After the stores, never before: the woken BLE tasks re-read
+    // `ble_active`, and waking them against the old state would let a
+    // just-switched-off carrier advertise on. On an on→off edge the
+    // tasks disconnect every live link and stop advertising and
+    // scanning; each dropped link reports `PeerEvent::Lost` through the
+    // same teardown as range loss, so the core's cull is identical (see
+    // the module docs and `crate::ble`).
+    crate::ble::note_media_changed();
     crate::telemetry::request_save_media_profile(profile)
 }
 

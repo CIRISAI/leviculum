@@ -65,19 +65,27 @@ back on BLE — the one state this feature must never be able to reach.
 
 **At runtime**, switching a carrier off stops it carrying Reticulum
 traffic in both directions immediately: the interface drops what the core
-hands it and the binary's receive arm drops what the medium hands up. It
-does **not** take the carrier off the air — a live BLE connection stays
-connected, the advertisement keeps going, the LoRa task keeps listening.
-Radio silence needs the boot path, which is why the acceptance for "no
-advertisement on air" is set-then-reset and not a runtime set.
+hands it and the binary's receive arm drops what the medium hands up.
+
+For BLE the runtime off also takes the carrier off the air: the Columba
+tasks disconnect every live link, central and peripheral role — a
+connected phone sees the board go, exactly as if it had left range — and
+stop advertising and scanning. Each dropped link unwinds through the
+same per-link teardown as range loss, so the core receives the same
+peer-lost report and culls its paths identically.
+
+For LoRa it does not: the LoRa task keeps listening (nothing is
+transmitted, and what it hears is dropped before the core sees it). LoRa
+radio silence needs the boot path, which is why the acceptance for LoRa
+silence is set-then-reset and not a runtime set.
 
 ## What "on" means, and when it needs a reset
 
-Switching a carrier back on is immediate **if it came up at boot** — it
-was only being ignored, and its task is still there. A carrier that did
-*not* come up has no task to un-ignore, and an embassy task cannot be
-spawned from nothing after the fact, so it cannot start before the next
-reset.
+Switching a carrier back on is immediate **if it came up at boot** — its
+tasks are still there, gated, and for BLE they resume advertising and
+scanning at once. A carrier that did *not* come up has no task to
+un-gate, and an embassy task cannot be spawned from nothing after the
+fact, so it cannot start before the next reset.
 
 The board says which case it is in rather than acking either way. Both
 media frames are answered with a report carrying two profiles:
