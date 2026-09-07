@@ -24,7 +24,7 @@
 # look, which is what we wanted all along -- we still want to know when it
 # happens, we just do not want to rewrite the message.
 #
-# The 6 foreign commits above the baseline:
+# The 7 foreign commits above the baseline:
 #   57f7c59 2026-08-07 Eric Moore <mooreericnyc@gmail.com>
 #           feat(lxmf): expose the propagation-node HOST direction
 #           (leviculum#38), merged as PR #201; carries
@@ -41,6 +41,9 @@
 #           <mooreericnyc@gmail.com>: completion futures, bounded
 #           event tap, stale-sweep fix, merged as PR #253; each
 #           carries a machine trailer, cherry-picked from CIRIS
+#   61edbbd 2026-08-16 Eric Moore <mooreericnyc@gmail.com>
+#           fix(test): self-spawn the pipe-bridge child, merged as
+#           PR #259; carries a Claude Fable 5 trailer
 #
 # The 16, newest first, all on master:
 #   5c79cc9 2026-07-31 feat(link): per-link delivery telemetry
@@ -62,7 +65,7 @@
 
 baseline 8d309ab69a2d451b54f61dc003fb0d509bb12524
 legacy 16
-foreign 6
+foreign 7
 
 # Every `ours` line is an identity this guard stops exempting -- i.e. one
 # whose commit messages it checks. `lp@lew-palm.de` is what Lew, the
