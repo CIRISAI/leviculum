@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `leviculum` .deb builds again: `lnprobe` was declared as a package
+  asset but missing from the build script's binary list, so `cargo deb`
+  aborted unable to resolve it. The binary now rides in the build, the
+  packaging check asserts it (with its manual page), and the nightly
+  binary tarballs carry it too.
+
 - The LNode LoRa transmit path runs channel access on every key-up
   instead of only when a host set `csma_enabled`: a randomised, listened
   pre-TX jitter (the RNode firmware's idle-channel CSMA draw, DIFS plus

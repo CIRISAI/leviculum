@@ -51,7 +51,7 @@ esac
 # them install between them. Kept in the same order as deb-stamp.sh's
 # CRATES, which writes the version files read below.
 CRATES=(leviculum-cli lnomad lblogd)
-BINS=(lnsd lnstest lncp lnstatus lnomad lblogd)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnomad lblogd)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled
