@@ -143,18 +143,27 @@ mod tests {
 
     impl CtxOwner {
         fn new() -> Self {
-            let (new_iface_tx, _new_iface_rx) = mpsc::channel(4);
+            Self::with_iface_channel(4).0
+        }
+
+        /// Like [`new`](Self::new) but with a caller-sized new-interface
+        /// channel, returning its receiver so a test can drain or fill it.
+        fn with_iface_channel(capacity: usize) -> (Self, mpsc::Receiver<InterfaceHandle>) {
+            let (new_iface_tx, new_iface_rx) = mpsc::channel(capacity);
             let (reconnect_tx, _reconnect_rx) = mpsc::channel(4);
             let (tunnel_notify_tx, _tunnel_notify_rx) = mpsc::channel(4);
             let (peer_lost_tx, _peer_lost_rx) = mpsc::channel(4);
-            Self {
-                next_id: Arc::new(AtomicUsize::new(100)),
-                new_iface_tx,
-                reconnect_tx,
-                tunnel_notify_tx,
-                peer_lost_tx,
-                inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
-            }
+            (
+                Self {
+                    next_id: Arc::new(AtomicUsize::new(100)),
+                    new_iface_tx,
+                    reconnect_tx,
+                    tunnel_notify_tx,
+                    peer_lost_tx,
+                    inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+                },
+                new_iface_rx,
+            )
         }
 
         fn ctx(&self) -> InterfaceBuildCtx<'_> {
@@ -726,5 +735,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// L-0063: an I2P peer sub-interface that cannot be registered (the
+    /// new-interface channel is full) must not be spawned at all. The old
+    /// path spawned the client task, then dropped the handle on `try_send`
+    /// failure — the task kept building SAM tunnels the driver could
+    /// neither see nor tear down. The id counter is the spawn's footprint:
+    /// each spawned peer allocates exactly one id right before its spawn,
+    /// so a full channel must leave the counter untouched for that peer.
+    #[tokio::test]
+    async fn i2p_peer_that_cannot_register_is_not_spawned() {
+        let (owner, mut new_iface_rx) = CtxOwner::with_iface_channel(1);
+        let config = InterfaceConfig {
+            interface_type: "I2PInterface".to_string(),
+            peers: Some(vec![
+                "peer-a.b32.i2p".to_string(),
+                "peer-b.b32.i2p".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let before = owner.next_id.load(std::sync::atomic::Ordering::Relaxed);
+        i2p::build(0, &config, &owner.ctx()).expect("i2p peers build");
+
+        // Exactly one peer fits the channel...
+        assert!(
+            new_iface_rx.try_recv().is_ok(),
+            "the first peer must register"
+        );
+        assert!(
+            new_iface_rx.try_recv().is_err(),
+            "the second peer cannot fit a capacity-1 channel"
+        );
+        // ...and only that one may have been spawned.
+        let allocated = owner.next_id.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert_eq!(
+            allocated, 1,
+            "L-0063: a peer that cannot register was spawned anyway \
+             ({allocated} ids allocated for 1 registrable slot)"
+        );
     }
 }

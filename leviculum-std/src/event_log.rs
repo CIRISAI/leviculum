@@ -543,16 +543,31 @@ fn node_name() -> &'static str {
 /// `LEVICULUM_EVENT_LOG=<path>` is set in the environment at first
 /// access AND the file opens successfully.  Cached via OnceLock so
 /// the env-var lookup + file-open happens exactly once per process.
+///
+/// An open failure is reported ONCE, on stderr, then cached as `None`
+/// (L-0022). stderr rather than `tracing` is deliberate twice over:
+/// this init runs inside the layer's own `on_event` (see the caller),
+/// where emitting a tracing event would re-enter the dispatcher while
+/// the OnceLock is mid-init; and a broken `LEVICULUM_EVENT_LOG` must
+/// be visible even in a process that installs no subscriber. No retry:
+/// the path is fixed by the environment for the process lifetime, its
+/// failure modes (permissions, missing directory) do not self-heal,
+/// and a retry would put a failing `open(2)` on every event emission
+/// inside the tracing hot path.
 fn event_log_file() -> Option<&'static Mutex<File>> {
     static FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
     FILE.get_or_init(|| {
         std::env::var(LOG_FILE_ENV_VAR).ok().and_then(|p| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-                .map(Mutex::new)
+            match OpenOptions::new().create(true).append(true).open(&p) {
+                Ok(f) => Some(Mutex::new(f)),
+                Err(e) => {
+                    eprintln!(
+                        "{LOG_FILE_ENV_VAR}={p}: cannot open event log: {e} — \
+                         event logging disabled for this process"
+                    );
+                    None
+                }
+            }
         })
     })
     .as_ref()

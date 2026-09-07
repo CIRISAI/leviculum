@@ -14,7 +14,7 @@ use super::error::RpcError;
 use super::pickle::*;
 use crate::driver::StdNodeCore;
 use crate::interfaces::inventory::SharedInventory;
-use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+use crate::interfaces::InterfaceStatsMap;
 
 /// Dispatch an RPC request against node state and return the pickle-encoded response.
 #[allow(clippy::too_many_arguments)]
@@ -23,7 +23,6 @@ pub(super) fn handle_request(
     core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
-    iface_online_map: &InterfaceOnlineMap,
     inventory: &SharedInventory,
     auto_peer_count: usize,
     discovery_storage: Option<&std::path::Path>,
@@ -35,7 +34,6 @@ pub(super) fn handle_request(
             core,
             start_time,
             iface_stats_map,
-            iface_online_map,
             inventory,
             auto_peer_count,
         ),
@@ -72,13 +70,13 @@ pub(super) fn handle_request(
         // waited 0 s where the same client against rnsd waits seconds — a
         // config difference smuggled into every timing A/B.
         RpcRequest::GetLowestInterfaceBitrate => {
-            match lowest_online_bitrate(core, iface_online_map, inventory) {
+            match lowest_online_bitrate(core, iface_stats_map, inventory) {
                 Some(bps) => pickle_int(bps),
                 None => pickle_none(),
             }
         }
         RpcRequest::GetMediumPathTimeout => pickle_float(medium_path_timeout_secs(
-            lowest_online_bitrate(core, iface_online_map, inventory),
+            lowest_online_bitrate(core, iface_stats_map, inventory),
         )),
 
         // `profiling_results` is deliberately NOT served (declined in the
@@ -493,9 +491,10 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         (pickle_str_key("packet_filter_hits"), pickle_int(0)),
         (pickle_str_key("autoconnect_source"), pickle_none()),
         // status: real `Interface::is_online()` (Codeberg #56). Source of
-        // truth is `iface_online_map`, populated by the driver on register
-        // and cleared on disconnect. Missing entry → fall back to `true`
-        // (preserves the pre-fix behavior for any caller-side mismatch).
+        // truth is the shared per-interface counters, whose online flag the
+        // owning interface task flips at its connect boundaries (L-0020).
+        // Missing entry → fall back to `true` (preserves the pre-fix
+        // behavior for any caller-side mismatch).
         (pickle_str_key("status"), pickle_bool(row.status)),
         // mode: real Reticulum propagation mode (Codeberg #91), carried
         // per-interface by transport from the parsed config and reported
@@ -652,7 +651,6 @@ pub(crate) fn build_interface_stats(
     core: &mut StdNodeCore,
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
-    iface_online_map: &InterfaceOnlineMap,
     inventory: &SharedInventory,
     auto_peer_count: usize,
 ) -> Value {
@@ -662,7 +660,6 @@ pub(crate) fn build_interface_stats(
     let uptime = start_time.elapsed().as_secs_f64();
     let epoch_base = epoch_base_secs(start_time);
     let counters_map = iface_stats_map.lock_recover();
-    let online_map = iface_online_map.lock_recover();
     let ifac_configs = core.clone_ifac_configs();
     let inv = inventory.lock_recover();
 
@@ -782,7 +779,14 @@ pub(crate) fn build_interface_stats(
             tx_queue_drops,
             tx_dropped_bytes,
             mtu: entry.hw_mtu.map(|m| m as i64),
-            status: online_map.get(&entry.id).copied().unwrap_or(true),
+            // Real `Interface::is_online()` (Codeberg #56): the shared
+            // counters carry the live state the interface task flips at
+            // its connect boundaries (L-0020). Missing entry -> online,
+            // preserving the pre-#56 fallback.
+            status: counters_map
+                .get(&entry.id)
+                .map(|c| c.is_online())
+                .unwrap_or(true),
             mode: entry.mode.as_u8(),
             bitrate,
             incoming_announce_frequency: entry.incoming_announce_frequency,
@@ -1337,16 +1341,20 @@ fn first_hop_timeout_secs(bitrate_bps: Option<u32>) -> f64 {
 /// `Transport.interfaces` list, and its `min` sees all of them.
 fn lowest_online_bitrate(
     core: &StdNodeCore,
-    iface_online_map: &InterfaceOnlineMap,
+    iface_stats_map: &InterfaceStatsMap,
     inventory: &SharedInventory,
 ) -> Option<i64> {
-    let online_map = iface_online_map.lock_recover();
+    let counters_map = iface_stats_map.lock_recover();
     let inv = inventory.lock_recover();
 
     let mut bitrates: Vec<i64> = Vec::new();
     for entry in core.interface_bitrate_entries() {
         // Missing entry -> online, matching the `status` key's fallback.
-        if !online_map.get(&entry.id).copied().unwrap_or(true) {
+        if !counters_map
+            .get(&entry.id)
+            .map(|c| c.is_online())
+            .unwrap_or(true)
+        {
             continue;
         }
         let itype = inv
@@ -1757,8 +1765,16 @@ mod tests {
         (core, tmp)
     }
 
-    fn empty_online_map() -> InterfaceOnlineMap {
+    fn empty_stats_map_local() -> InterfaceStatsMap {
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
+    /// Insert fresh counters for `id` with the given online state, so a
+    /// test can stage what an interface task would have recorded (L-0020).
+    fn stage_online(map: &InterfaceStatsMap, id: usize, online: bool) {
+        let counters = std::sync::Arc::new(crate::interfaces::InterfaceCounters::new());
+        counters.set_online(online);
+        map.lock_recover().insert(id, counters);
     }
 
     /// Mirrors Python `Transport.medium_path_timeout` (Reticulum 1.5.2) with
@@ -1817,7 +1833,7 @@ mod tests {
 
         let (mut core, _tmp) = timing_core("lowest-bitrate");
         let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
-        let online = empty_online_map();
+        let online = empty_stats_map_local();
 
         // Positive control for the None arm: with no interface at all there
         // is nothing to take a min over, and Python's generator is empty.
@@ -1851,13 +1867,13 @@ mod tests {
 
         // Taking the radio offline hands the min back to TCP: the `online`
         // filter is real, not decorative.
-        online.lock_recover().insert(1, false);
+        stage_online(&online, 1, false);
         assert_eq!(
             lowest_online_bitrate(&core, &online, &inventory),
             Some(crate::interfaces::tcp::TCP_BITRATE_GUESS),
             "an offline interface must not set the wait window"
         );
-        online.lock_recover().insert(1, true);
+        stage_online(&online, 1, true);
         assert_eq!(
             lowest_online_bitrate(&core, &online, &inventory),
             Some(2734)
@@ -1883,7 +1899,7 @@ mod tests {
 
         let (mut core, _tmp) = timing_core("lowest-bitrate-listeners");
         let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
-        let online = empty_online_map();
+        let online = empty_stats_map_local();
 
         let listener = |name: &str, type_name: &'static str, bitrate: i64| ListenerRow {
             identity: InterfaceIdentity {
@@ -1946,7 +1962,6 @@ mod tests {
 
         let (mut core, _tmp) = timing_core("timing-dispatch");
         let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
-        let online = empty_online_map();
         let stats: InterfaceStatsMap =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         inventory.lock_recover().add_listener(
@@ -1979,7 +1994,6 @@ mod tests {
                 core,
                 std::time::Instant::now(),
                 &stats,
-                &online,
                 &inventory,
                 0,
                 None,
@@ -2143,7 +2157,7 @@ mod tests {
     #[test]
     fn identity_data_handlers_return_bool_false_when_unknown() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::InterfaceStatsMap;
         use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
         use leviculum_core::node::NodeCoreBuilder;
         use std::collections::BTreeMap;
@@ -2157,7 +2171,6 @@ mod tests {
             crate::storage::Storage::new(&tmp).unwrap(),
         );
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
         let start = std::time::Instant::now();
 
         let decode = |bytes: &[u8], codec: Codec| -> Value {
@@ -2181,7 +2194,6 @@ mod tests {
                     &mut core,
                     start,
                     &stats,
-                    &online,
                     &crate::interfaces::inventory::InterfaceInventory::shared(),
                     0,
                     None,
@@ -2206,7 +2218,7 @@ mod tests {
     #[test]
     fn destination_data_rpc_round_trip() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::InterfaceStatsMap;
         use crate::rpc::pickle::{decode_response_msgpack, Codec, RpcRequest};
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::traits::Storage;
@@ -2216,7 +2228,6 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("rpc-dest-data-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
         let start = std::time::Instant::now();
 
         let decode = |bytes: &[u8], codec: Codec| -> Value {
@@ -2231,7 +2242,6 @@ mod tests {
                 core,
                 start,
                 &stats,
-                &online,
                 &crate::interfaces::inventory::InterfaceInventory::shared(),
                 0,
                 None,
@@ -2401,7 +2411,7 @@ mod tests {
     #[test]
     fn build_interface_stats_emits_radio_rows_for_rnode() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::rnode::BatteryState;
         use std::collections::BTreeMap;
@@ -2428,13 +2438,11 @@ mod tests {
             r.last_snr = Some(9.5);
         });
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
 
         let value = build_interface_stats(
             &mut core,
             std::time::Instant::now(),
             &stats,
-            &online,
             &crate::interfaces::inventory::InterfaceInventory::shared(),
             0,
         );
@@ -2477,7 +2485,7 @@ mod tests {
     #[test]
     fn build_interface_stats_reports_the_link_profile_of_each_medium() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::InterfaceStatsMap;
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::transport::LinkProfile;
         use std::collections::BTreeMap;
@@ -2509,12 +2517,10 @@ mod tests {
         core.set_interface_name(2, "tcp_client_0".into());
 
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
         let value = build_interface_stats(
             &mut core,
             std::time::Instant::now(),
             &stats,
-            &online,
             &crate::interfaces::inventory::InterfaceInventory::shared(),
             0,
         );
@@ -2578,7 +2584,7 @@ mod tests {
     #[test]
     fn a_configured_bitrate_still_outranks_the_interfaces_own_rate() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::InterfaceStatsMap;
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::transport::LinkProfile;
         use std::collections::BTreeMap;
@@ -2602,12 +2608,10 @@ mod tests {
         core.register_interface_bitrate(0, 9600);
 
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
         let value = build_interface_stats(
             &mut core,
             std::time::Instant::now(),
             &stats,
-            &online,
             &crate::interfaces::inventory::InterfaceInventory::shared(),
             0,
         );
@@ -2641,7 +2645,7 @@ mod tests {
     fn build_interface_stats_reports_listeners_and_their_children() {
         use crate::clock::SystemClock;
         use crate::interfaces::inventory::{InterfaceIdentity, InterfaceInventory, ListenerRow};
-        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::traits::InterfaceMode;
         use std::collections::BTreeMap;
@@ -2664,7 +2668,6 @@ mod tests {
         counters.rx_bytes.store(500, Ordering::Relaxed);
         counters.tx_bytes.store(90, Ordering::Relaxed);
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(7usize, counters)])));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::from([(7usize, true)])));
 
         let listener_name = "TCPServerInterface[Srv/127.0.0.1:4242]";
         let inventory = InterfaceInventory::shared();
@@ -2701,14 +2704,8 @@ mod tests {
             );
         }
 
-        let value = build_interface_stats(
-            &mut core,
-            std::time::Instant::now(),
-            &stats,
-            &online,
-            &inventory,
-            0,
-        );
+        let value =
+            build_interface_stats(&mut core, std::time::Instant::now(), &stats, &inventory, 0);
 
         let Value::Dict(top) = value else {
             panic!("interface_stats must be a dict")
@@ -2812,7 +2809,7 @@ mod tests {
     fn every_interface_row_carries_the_keys_rnstatus_reads_unguarded() {
         use crate::clock::SystemClock;
         use crate::interfaces::inventory::{InterfaceIdentity, InterfaceInventory, ListenerRow};
-        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::traits::InterfaceMode;
         use std::collections::BTreeMap;
@@ -2879,7 +2876,6 @@ mod tests {
             7usize,
             Arc::new(InterfaceCounters::new()),
         )])));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::from([(7usize, true)])));
 
         // Both row kinds: a listener (built from the inventory) and a spawned
         // connection (built from transport). They share `row_fields`, and this
@@ -2917,14 +2913,8 @@ mod tests {
             );
         }
 
-        let value = build_interface_stats(
-            &mut core,
-            std::time::Instant::now(),
-            &stats,
-            &online,
-            &inventory,
-            0,
-        );
+        let value =
+            build_interface_stats(&mut core, std::time::Instant::now(), &stats, &inventory, 0);
         let Value::Dict(top) = value else {
             panic!("interface_stats must be a dict")
         };
@@ -3017,7 +3007,7 @@ mod tests {
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;
-        use crate::interfaces::{InterfaceCounters, InterfaceOnlineMap, InterfaceStatsMap};
+        use crate::interfaces::{InterfaceCounters, InterfaceStatsMap};
         use leviculum_core::node::NodeCoreBuilder;
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
@@ -3035,13 +3025,11 @@ mod tests {
 
         let counters = Arc::new(InterfaceCounters::new());
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::from([(0usize, counters)])));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
 
         let value = build_interface_stats(
             &mut core,
             std::time::Instant::now(),
             &stats,
-            &online,
             &crate::interfaces::inventory::InterfaceInventory::shared(),
             0,
         );
@@ -3311,7 +3299,6 @@ mod tests {
         );
 
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(Default::default()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(Default::default()));
         let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
         let ask = |core: &mut StdNodeCore, verb: RpcRequest| -> Value {
             let bytes = handle_request(
@@ -3319,7 +3306,6 @@ mod tests {
                 core,
                 std::time::Instant::now(),
                 &stats,
-                &online,
                 &inventory,
                 0,
                 None,
@@ -3388,7 +3374,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let online: InterfaceOnlineMap = Arc::new(Mutex::new(BTreeMap::new()));
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3401,7 +3386,6 @@ mod tests {
                 &mut core,
                 std::time::Instant::now(),
                 &stats,
-                &online,
                 &crate::interfaces::inventory::InterfaceInventory::shared(),
                 0,
                 None,

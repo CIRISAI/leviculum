@@ -99,9 +99,7 @@ use crate::interfaces::tcp::{
     spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
-use crate::interfaces::{
-    InterfaceHandle, InterfaceOnlineMap, InterfaceRegistry, InterfaceStatsMap,
-};
+use crate::interfaces::{InterfaceHandle, InterfaceRegistry, InterfaceStatsMap};
 use crate::storage::Storage;
 
 /// Type alias for the concrete NodeCore used by std platforms.
@@ -917,11 +915,6 @@ pub struct ReticulumNode {
     start_time: std::time::Instant,
     /// Shared interface I/O counters, populated by the event loop.
     iface_stats_map: InterfaceStatsMap,
-    /// Per-interface online status, keyed by interface index. Inserted
-    /// `true` on registration, removed on disconnect. Read by the RPC
-    /// handler so the `interface_stats.status` field reflects the real
-    /// `is_online()` of each interface (Codeberg #56).
-    iface_online_map: InterfaceOnlineMap,
     /// Reporting-side interface inventory (Codeberg #177): the listeners this
     /// daemon runs, plus the reference display identity of the connections
     /// they spawn. Transport holds only interfaces it can route packets on,
@@ -1098,7 +1091,6 @@ impl ReticulumNode {
             connect_instance_name: None,
             start_time: std::time::Instant::now(),
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            iface_online_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
             local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
@@ -1387,7 +1379,6 @@ impl ReticulumNode {
             // Register human-readable interface names, HW_MTU, and counters with core
             {
                 let mut stats = self.iface_stats_map.lock_recover();
-                let mut online = self.iface_online_map.lock_recover();
                 let mut ready = self.iface_ready_map.lock_recover();
                 for handle in registry.handles() {
                     core.set_interface_name(handle.info.id.0, handle.info.name.clone());
@@ -1408,7 +1399,6 @@ impl ReticulumNode {
                         );
                     }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
-                    online.insert(handle.info.id.0, true);
                     ready.insert(handle.info.id.0, Arc::clone(&handle.ready));
                 }
             }
@@ -1547,7 +1537,6 @@ impl ReticulumNode {
             _ => None,
         };
         let iface_stats_map = Arc::clone(&self.iface_stats_map);
-        let iface_online_map = Arc::clone(&self.iface_online_map);
         let inventory = Arc::clone(&self.inventory);
         let local_client_count = Arc::clone(&self.local_client_count);
         let flush_interval_secs = self.flush_interval_secs;
@@ -1565,7 +1554,6 @@ impl ReticulumNode {
             .then(|| {
                 RemoteMgmtResponder::new(
                     Arc::clone(&self.iface_stats_map),
-                    Arc::clone(&self.iface_online_map),
                     Arc::clone(&self.inventory),
                     self.start_time,
                     self.auto_peer_count.clone(),
@@ -1628,7 +1616,6 @@ impl ReticulumNode {
                     shutdown: shutdown_rx,
                 },
                 iface_stats_map,
-                iface_online_map,
                 inventory,
                 local_client_count,
                 flush_interval_secs,
@@ -1844,7 +1831,6 @@ impl ReticulumNode {
                 authkey,
                 self.start_time,
                 Arc::clone(&self.iface_stats_map),
-                Arc::clone(&self.iface_online_map),
                 Arc::clone(&self.inventory),
                 self.auto_peer_count.clone(),
                 Some(self.discovery_storage_root()),
@@ -2354,7 +2340,12 @@ impl ReticulumNode {
     /// - **TCP server (`add_tcp_server`):** the listener is bound
     ///   before the handle is registered; the API returns
     ///   immediately as ready.
-    /// - **UDP, RNode, AutoInterface, Local IPC:** ready once the
+    /// - **RNode (serial or byte-channel):** ready once the reconnect
+    ///   task has opened the channel, the firmware answered the detect
+    ///   probe, and the radio configuration was confirmed (L-0024). Like
+    ///   the TCP client's signal it is one-way: reconnect cycles after
+    ///   the first successful configure keep it set.
+    /// - **UDP, AutoInterface, Local IPC:** ready once the
     ///   underlying socket / port is bound or the IPC stream is
     ///   connected — currently signalled at handle construction
     ///   time, so the API returns immediately as ready.
@@ -2747,27 +2738,31 @@ impl ReticulumNode {
     pub fn interface_stats(&self) -> Vec<InterfaceStatusSnapshot> {
         use std::sync::atomic::Ordering;
         // Take the core's name/status list first, then release that lock before
-        // touching the byte/online maps, so the three locks never nest.
+        // touching the counters map, so the two locks never nest.
         let entries = { self.inner.lock_recover().interface_stats() };
         let bytes = self.iface_stats_map.lock_recover();
-        let online = self.iface_online_map.lock_recover();
         entries
             .into_iter()
             .map(|e| {
-                let (rx_bytes, tx_bytes) = bytes
+                // Online state lives on the shared counters, flipped by the
+                // owning interface task at its connect boundaries (L-0020).
+                // A missing entry falls back to `true`, preserving the
+                // pre-#56 behavior for any caller-side mismatch.
+                let (rx_bytes, tx_bytes, online) = bytes
                     .get(&e.id)
                     .map(|c| {
                         (
                             c.rx_bytes.load(Ordering::Relaxed),
                             c.tx_bytes.load(Ordering::Relaxed),
+                            c.is_online(),
                         )
                     })
-                    .unwrap_or((0, 0));
+                    .unwrap_or((0, 0, true));
                 InterfaceStatusSnapshot {
                     interface_id: leviculum_core::transport::InterfaceId(e.id),
                     name: e.name,
                     is_local_client: e.is_local_client,
-                    online: online.get(&e.id).copied().unwrap_or(true),
+                    online,
                     rx_bytes,
                     tx_bytes,
                     held_announces: e.held_announces,
@@ -3629,7 +3624,6 @@ async fn run_event_loop(
     mut registry: InterfaceRegistry,
     channels: EventLoopChannels,
     iface_stats_map: InterfaceStatsMap,
-    iface_online_map: InterfaceOnlineMap,
     inventory: crate::interfaces::inventory::SharedInventory,
     local_client_count: Arc<AtomicUsize>,
     flush_interval_secs: u64,
@@ -3972,10 +3966,6 @@ async fn run_event_loop(
                             let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
                         }
-                        {
-                            let mut online = iface_online_map.lock_recover();
-                            online.remove(&iface_id.0);
-                        }
                         // Drop auto-connect tracking so a later rediscovery may
                         // re-establish this endpoint (Codeberg #32).
                         if let Some(manager) = autoconnect.as_mut() {
@@ -4206,10 +4196,6 @@ async fn run_event_loop(
                     let mut stats = iface_stats_map.lock_recover();
                     stats.insert(iface_idx, Arc::clone(&handle.counters));
                 }
-                {
-                    let mut online = iface_online_map.lock_recover();
-                    online.insert(iface_idx, true);
-                }
                 registry.register(handle);
 
                 // Send cached local-destination announces on the new interface
@@ -4327,7 +4313,7 @@ async fn run_event_loop(
                         reconnect_tx: &autoconnect_wiring.reconnect_tx,
                         corrupt_every: autoconnect_wiring.corrupt_every,
                         outbound_socket_hook: autoconnect_wiring.outbound_socket_hook.clone(),
-                        online: &iface_online_map,
+                        stats: &iface_stats_map,
                         teardown_ids: Vec::new(),
                         heard_ifac: &discovery_heard_ifac,
                         operator_ifac_present,
@@ -4375,10 +4361,6 @@ async fn run_event_loop(
                         {
                             let mut stats = iface_stats_map.lock_recover();
                             stats.remove(&iface_id.0);
-                        }
-                        {
-                            let mut online = iface_online_map.lock_recover();
-                            online.remove(&iface_id.0);
                         }
                     }
                 }
@@ -4482,7 +4464,9 @@ struct AutoConnectLiveSpawner<'a> {
     reconnect_tx: &'a mpsc::Sender<InterfaceId>,
     corrupt_every: Option<u64>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
-    online: &'a InterfaceOnlineMap,
+    /// Shared counters per registered interface; carries the live online
+    /// state the spawned client tasks maintain (L-0020).
+    stats: &'a InterfaceStatsMap,
     teardown_ids: Vec<InterfaceId>,
     /// #151: hearing-interface IFAC per discovered endpoint (inherit rule).
     heard_ifac: &'a HeardIfacMap,
@@ -4584,10 +4568,10 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
     }
 
     fn is_online(&self, id: InterfaceId) -> bool {
-        self.online
+        self.stats
             .lock_recover()
             .get(&id.0)
-            .copied()
+            .map(|c| c.is_online())
             .unwrap_or(false)
     }
 }
@@ -5591,7 +5575,7 @@ mod tests {
         new_iface_rx: mpsc::Receiver<InterfaceHandle>,
         reconnect_tx: mpsc::Sender<InterfaceId>,
         _reconnect_rx: mpsc::Receiver<InterfaceId>,
-        online: crate::interfaces::InterfaceOnlineMap,
+        stats: crate::interfaces::InterfaceStatsMap,
         heard_ifac: HeardIfacMap,
         spawned_ids: std::collections::BTreeSet<usize>,
         refused_warned: std::collections::BTreeSet<[u8; 32]>,
@@ -5607,7 +5591,7 @@ mod tests {
                 new_iface_rx,
                 reconnect_tx,
                 _reconnect_rx,
-                online: Arc::new(Mutex::new(BTreeMap::new())),
+                stats: Arc::new(Mutex::new(BTreeMap::new())),
                 heard_ifac: BTreeMap::new(),
                 spawned_ids: std::collections::BTreeSet::new(),
                 refused_warned: std::collections::BTreeSet::new(),
@@ -5626,7 +5610,7 @@ mod tests {
                 reconnect_tx: &self.reconnect_tx,
                 corrupt_every: None,
                 outbound_socket_hook: None,
-                online: &self.online,
+                stats: &self.stats,
                 teardown_ids: Vec::new(),
                 heard_ifac: &self.heard_ifac,
                 operator_ifac_present,
@@ -8033,7 +8017,6 @@ mod tests {
                 shutdown: shutdown_rx,
             },
             Arc::new(Mutex::new(BTreeMap::new())),
-            Arc::new(Mutex::new(BTreeMap::new())),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             Arc::new(AtomicUsize::new(0)),
             flush_interval_secs,
@@ -8646,8 +8629,6 @@ mod tests {
         // MDU, forcing the response-Resource branch (the branch under test).
         let stats_map: crate::interfaces::InterfaceStatsMap =
             Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-        let online_map: crate::interfaces::InterfaceOnlineMap =
-            Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
         {
             let mut inv = inventory.lock_recover();
@@ -8679,7 +8660,6 @@ mod tests {
         }
         let responder = RemoteMgmtResponder::new(
             stats_map,
-            online_map,
             inventory,
             std::time::Instant::now(),
             AutoPeerCount::default(),

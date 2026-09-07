@@ -32,7 +32,7 @@ use serde_pickle::value::Value;
 use super::completions::CompletionRegistry;
 use super::StdNodeCore;
 use crate::interfaces::inventory::SharedInventory;
-use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+use crate::interfaces::InterfaceStatsMap;
 
 /// The request path served by the remote-management responder.
 const STATUS_PATH: &str = "/status";
@@ -44,10 +44,9 @@ const STATUS_PATH: &str = "/status";
 /// consulted from the event loop's `dispatch_output` for every
 /// `RequestReceived` event.
 pub(crate) struct RemoteMgmtResponder {
-    /// Shared interface I/O counters (same map the RPC server reads).
+    /// Shared interface I/O counters (same map the RPC server reads);
+    /// carries the live online state the interface tasks maintain (L-0020).
     iface_stats_map: InterfaceStatsMap,
-    /// Per-interface online status (same map the RPC server reads).
-    iface_online_map: InterfaceOnlineMap,
     /// Reporting-side interface inventory (same one the RPC server reads), so
     /// a remote `rnstatus -R` is told about the same listeners as a local one
     /// (Codeberg #177).
@@ -62,14 +61,12 @@ pub(crate) struct RemoteMgmtResponder {
 impl RemoteMgmtResponder {
     pub(crate) fn new(
         iface_stats_map: InterfaceStatsMap,
-        iface_online_map: InterfaceOnlineMap,
         inventory: SharedInventory,
         start_time: Instant,
         auto_peer_count: super::AutoPeerCount,
     ) -> Self {
         Self {
             iface_stats_map,
-            iface_online_map,
             inventory,
             start_time,
             auto_peer_count,
@@ -110,7 +107,6 @@ impl RemoteMgmtResponder {
             &mut core,
             self.start_time,
             &self.iface_stats_map,
-            &self.iface_online_map,
             &self.inventory,
             auto_peer_count,
         );

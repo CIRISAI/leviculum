@@ -1365,6 +1365,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
+    ready: Arc<super::ReadySignal>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     C: Fn() -> Fut + Send + Sync,
@@ -1382,6 +1383,8 @@ async fn rnode_reconnect_task<S, C, Fut>(
     let mut has_connected_before = false;
 
     loop {
+        // Between here and a configured radio the carrier is down (L-0020).
+        counters.set_online(false);
         // Open the channel, then configure it. Combined so either step's error
         // routes through the same reconnect-retry path.
         let opened = async {
@@ -1395,6 +1398,12 @@ async fn rnode_reconnect_task<S, C, Fut>(
             Ok((port, detect)) => {
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
+                counters.set_online(true);
+                // Readiness contract (L-0024): detect answered, firmware
+                // validated, radio configured — only now may a caller that
+                // waited on `ready` transmit. One-way, like the TCP client's
+                // Option α signal: reconnects keep the signal set.
+                ready.signal_ready();
 
                 if let Some((major, minor)) = detect.firmware_version {
                     tracing::info!(
@@ -1434,6 +1443,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                 )
                 .await;
 
+                counters.set_online(false);
                 tracing::warn!("{}: disconnected", ctx.name);
             }
             Err(e) => {
@@ -1614,10 +1624,15 @@ where
     // radio-capable so interface_stats always emits the radio keys (with their
     // defaults) even before the first frame arrives.
     counters.enable_radio_stats();
+    // Offline until the reconnect loop has detected and configured the radio
+    // (L-0020); covers the window between registration and first configure.
+    counters.set_online(false);
+    let ready = super::ReadySignal::new();
 
     let id = ctx.id;
     let name = ctx.name.clone();
     let task_counters = Arc::clone(&counters);
+    let task_ready = Arc::clone(&ready);
     let bitrate = rnode::compute_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
     // Copied out before `ctx` moves into the task: the handle reports the
     // same pre-TX jitter ceiling the TX loop actually draws against, rather
@@ -1625,7 +1640,14 @@ where
     let tx_jitter_max_ms = ctx.jitter_max_ms;
 
     tokio::spawn(async move {
-        let run = rnode_reconnect_task(ctx, connect, incoming_tx, outgoing_rx, task_counters);
+        let run = rnode_reconnect_task(
+            ctx,
+            connect,
+            incoming_tx,
+            outgoing_rx,
+            task_counters,
+            task_ready,
+        );
         match shutdown {
             // Runtime-attached interface: stop promptly when the caller drops
             // its RNodeChannelHandle (the Sender drops, this resolves). The
@@ -1661,13 +1683,10 @@ where
         outgoing: outgoing_tx,
         counters,
         credit: None,
-        // RNode readiness is async (channel open + firmware probe + radio
-        // config) but is currently outside the scope of
-        // wait_for_interface_ready (TCP-client race is the bug we
-        // fixed in this batch).  Pre-signal so the API doesn't block
-        // on RNode interfaces; future work can convert this to a
-        // post-open signal if needed.
-        ready: super::ReadySignal::ready_immediate(),
+        // RNode readiness is async: the reconnect task signals once the
+        // channel is open, the firmware probe answered, and the radio is
+        // configured (L-0024).
+        ready,
     }
 }
 
@@ -2666,6 +2685,76 @@ mod tests {
             .expect("incoming channel open");
         assert_eq!(incoming.data, b"inbound-over-channel");
 
+        stub.abort();
+    }
+
+    // L-0024: `ready` must reflect the RNode lifecycle (channel open →
+    // firmware probe → radio config), not handle construction. A caller
+    // that sends after a construction-time `ready` sends into a port that
+    // may not even answer the detect probe yet.
+    #[tokio::test]
+    async fn test_rnode_channel_ready_waits_for_configuration() {
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+        let config =
+            |factory: Arc<dyn RNodeChannelFactory>, name: &str| RNodeChannelInterfaceConfig {
+                id: InterfaceId(0),
+                name: name.to_string(),
+                channel_factory: factory,
+                frequency: 868_000_000,
+                bandwidth: 125_000,
+                tx_power: 17,
+                sf: 7,
+                cr: 5,
+                st_alock: None,
+                lt_alock: None,
+                flow_control: false,
+                buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+                reconnect_notify: None,
+            };
+        let halves_of = |port: tokio::io::DuplexStream| {
+            let (read_half, write_half) = tokio::io::split(port);
+            std::sync::Mutex::new(Some((
+                Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+                Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+            )))
+        };
+
+        // (a) A channel whose far end never answers the detect probe: the
+        // interface must NOT report ready.
+        let (port, silent_peer) = tokio::io::duplex(64 * 1024);
+        let handle = spawn_rnode_channel_interface(
+            config(Arc::new(MockFactory(halves_of(port))), "rnode_ready_silent"),
+            None,
+        );
+        assert!(
+            handle.ready.wait(Duration::from_millis(300)).await.is_err(),
+            "L-0024: ready fired although the firmware probe never answered"
+        );
+        drop(silent_peer);
+        drop(handle);
+
+        // (b) Positive control: with a firmware stub that answers detect and
+        // confirms the radio config, ready fires.
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (got_tx, _got_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let stub = tokio::spawn(async move {
+            rnode_firmware_stub(peer, Vec::new(), got_tx).await;
+        });
+        let handle = spawn_rnode_channel_interface(
+            config(Arc::new(MockFactory(halves_of(port))), "rnode_ready_probed"),
+            None,
+        );
+        handle
+            .ready
+            .wait(Duration::from_secs(8))
+            .await
+            .expect("ready must fire once detect+configure completed");
         stub.abort();
     }
 

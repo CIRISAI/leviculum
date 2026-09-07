@@ -127,6 +127,8 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
+    // Offline until the reconnect loop establishes the I2P stream (L-0020).
+    counters.set_online(false);
     let ready = ReadySignal::new();
 
     let id = config.id;
@@ -206,6 +208,7 @@ async fn i2p_client_task(
             Ok((ctrl, stream)) => {
                 tracing::info!("{}: I2P stream established to {}", name, peer);
                 ready.signal_ready();
+                counters.set_online(true);
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
                 if is_reconnect {
@@ -226,6 +229,7 @@ async fn i2p_client_task(
                 )
                 .await;
                 drop(ctrl);
+                counters.set_online(false);
                 tracing::warn!("{}: I2P stream lost, rebuilding tunnel", name);
             }
             Err(e) => {

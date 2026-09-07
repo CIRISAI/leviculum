@@ -132,3 +132,32 @@ fn test_two_process_merge_monotone_alternating() {
     let _ = std::fs::remove_file(&log_a);
     let _ = std::fs::remove_file(&log_b);
 }
+
+/// L-0022: a `LEVICULUM_EVENT_LOG` that cannot be opened must be reported
+/// loudly, once — not cached as a silent `None` for the process lifetime.
+/// The helper still exits 0 (a broken log path must not kill a daemon),
+/// but stderr has to name the path and say that event logging is off.
+#[test]
+fn test_unopenable_event_log_path_is_reported_on_stderr() {
+    let bin = helper_bin();
+    let bad_path = "/nonexistent-dir-l0022/events.log";
+
+    let output = Command::new(&bin)
+        .args(["0", "1"])
+        .env("LEVICULUM_EVENT_LOG", bad_path)
+        .env("LEVICULUM_EVENT_NODE", "node-broken")
+        .output()
+        .expect("run helper with broken log path");
+
+    assert!(
+        output.status.success(),
+        "a broken event-log path must not kill the process: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(bad_path) && stderr.contains("LEVICULUM_EVENT_LOG"),
+        "L-0022: the open failure must reach the operator on stderr, \
+         naming the env var and the path; stderr was: {stderr:?}"
+    );
+}

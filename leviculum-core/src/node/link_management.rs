@@ -2854,7 +2854,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         };
 
-        match res.handle_proof(proof_data) {
+        let outcome = res.handle_proof(proof_data);
+
+        // A validated resource proof is link activity (#124, L-0019):
+        // refresh the activity clock and recover a Stale link BEFORE
+        // branching on the status. The refresh used to sit on the
+        // non-Complete `Ok(_)` arm below — but `handle_proof` returns only
+        // `Ok(Complete)` or `Err`, so the live success path (the completion
+        // proof, and each segment proof of a split transfer) never recorded
+        // activity. Python: Link.py:972-984 `receive()` sets `last_inbound`
+        // for every link packet, RESOURCE_PRF included, and flips
+        // STALE back to ACTIVE.
+        if outcome.is_ok() {
+            let now_secs = now_ms / MS_PER_SECOND;
+            self.try_recover_stale(&link_id, now_secs);
+            if let Some(link) = self.links.get_mut(&link_id) {
+                link.record_inbound(now_secs);
+            }
+        }
+
+        match outcome {
             Ok(crate::resource::ResourceStatus::Complete) => {
                 let resource_hash = *res.resource_hash();
                 // Telemetry (leviculum#35): the completion proof confirms the
@@ -2886,15 +2905,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
             Ok(_) => {
-                // A validated resource proof keeps the link alive (#124): drop
-                // the `link` borrow (set_outgoing_resource is its last use) then
-                // refresh the activity clock and recover a Stale link, so a
-                // proof-confirmed transfer is not torn down mid-flight.
-                link.set_outgoing_resource(res);
-                let now_secs = now_ms / MS_PER_SECOND;
-                self.try_recover_stale(&link_id, now_secs);
+                // Defensive arm for a future non-Complete success status:
+                // keep the transfer in flight. (Activity was already
+                // refreshed above.)
                 if let Some(link) = self.links.get_mut(&link_id) {
-                    link.record_inbound(now_secs);
+                    link.set_outgoing_resource(res);
                 }
             }
             Err(e) => {
@@ -3469,6 +3484,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             link.clear_outgoing_resource();
                         }
                         if let Some(resource_hash) = resource_hash {
+                            // Tell the peer we gave up (L-0062), or it keeps
+                            // REQing into a transfer that no longer exists.
+                            // Python: Resource.cancel() (Resource.py:1086-1095)
+                            // sends RESOURCE_ICL carrying the resource hash
+                            // when it is the initiator; the receiver-side
+                            // timeout below stays silent, as in Python.
+                            let icl = if let Some(link) = self.links.get(&link_id) {
+                                link.build_data_packet_with_context(
+                                    &resource_hash,
+                                    PacketContext::ResourceIcl,
+                                    &mut self.rng,
+                                )
+                                .ok()
+                            } else {
+                                None
+                            };
+                            if let Some(pkt) = icl {
+                                if let Some(link) = self.links.get_mut(&link_id) {
+                                    link.record_outbound(now_secs);
+                                }
+                                self.route_link_packet(&link_id, &pkt);
+                            }
                             self.events.push(NodeEvent::ResourceFailed {
                                 link_id,
                                 resource_hash,

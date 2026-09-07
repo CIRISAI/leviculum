@@ -416,7 +416,15 @@ fn keeping_note(st: &NamedState) -> String {
 /// - Resolution path: background lookups for named targets report back over
 ///   an internal channel; the loop itself never blocks on the resolver
 ///
-/// Recv errors break the loop (dropping `incoming_tx` signals interface-down).
+/// Recv errors are transient: log (throttled) and keep receiving (L-0021).
+/// That is the reference behavior — Python-RNS serves UDP via
+/// `socketserver.UDPServer.serve_forever`, whose
+/// `BaseServer._handle_request_noblock` swallows a failing `get_request()`
+/// outright (`except OSError: return`, CPython socketserver.py), so an rnsd
+/// UDP interface survives every recv error; ours used to die on the first
+/// (a single ECONNREFUSED from an ICMP port-unreachable killed it until
+/// daemon restart). Consecutive errors back off briefly so a socket that
+/// fails every call (e.g. gone bad) cannot spin the loop hot.
 /// Send errors are logged but do not kill the interface, and a failed send
 /// to one forward target does not skip the remaining targets. UDP send
 /// errors (network unreachable, host unreachable) are transient, and so are
@@ -462,11 +470,16 @@ async fn udp_io_task(
         }
     }
 
+    // Consecutive-recv-error streak, reset by any successful recv. Drives
+    // the log throttle and the anti-spin backoff below.
+    let mut recv_error_streak: u64 = 0;
+
     loop {
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, _src_addr)) => {
+                        recv_error_streak = 0;
                         if len > 0 && len <= UDP_MTU {
                             counters.rx_bytes.fetch_add(len as u64, Ordering::Relaxed);
                             if incoming_tx
@@ -483,8 +496,28 @@ async fn udp_io_task(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("UDP {} recv error: {}", name, e);
-                        break;
+                        // Transient by reference (see the task docs): log
+                        // throttled — the first few, then each doubling —
+                        // and keep receiving.
+                        recv_error_streak += 1;
+                        if recv_error_streak <= 3 || recv_error_streak.is_power_of_two() {
+                            tracing::warn!(
+                                "UDP {} recv error (#{} in a row, continuing): {}",
+                                name,
+                                recv_error_streak,
+                                e
+                            );
+                        }
+                        // A socket that fails EVERY call must not spin the
+                        // loop hot; one error costs no delay, a streak eases
+                        // off. Wire-invisible, so the deviation rule allows
+                        // it (Python's selector timeout paces its loop too).
+                        if recv_error_streak > 1 {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                (10 * recv_error_streak).min(1_000),
+                            ))
+                            .await;
+                        }
                     }
                 }
             }
@@ -551,6 +584,80 @@ async fn udp_io_task(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// L-0021: one `recv_from` error must not end the UDP I/O task. The
+    /// reference never dies here: Python-RNS serves UDP via
+    /// `socketserver.UDPServer.serve_forever`, whose
+    /// `BaseServer._handle_request_noblock` swallows the failing
+    /// `get_request()` outright (`except OSError: return`, CPython
+    /// socketserver.py) and keeps serving — so an rnsd UDP interface
+    /// survives every recv error for the process lifetime, while ours died
+    /// on the first one until the daemon restarted.
+    ///
+    /// The reproducible recv error on Linux: a CONNECTED UDP socket that
+    /// sent to a closed local port gets the ICMP port-unreachable queued
+    /// as `ECONNREFUSED` on its next `recv`.
+    #[tokio::test]
+    async fn recv_error_does_not_kill_the_interface() {
+        // A dead port: bound once to learn a free number, then closed.
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let victim = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let victim_addr = victim.local_addr().unwrap();
+        victim.connect(dead_addr).unwrap();
+
+        // Positive control: this platform really surfaces the ICMP error as
+        // a recv failure — otherwise the rest of the test proves nothing.
+        victim.send(b"probe").unwrap();
+        victim
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let control = victim.recv(&mut [0u8; 16]);
+        assert!(
+            control.is_err(),
+            "positive control: sending to a closed local port must queue a \
+             recv error, got {control:?}"
+        );
+        victim.set_read_timeout(None).unwrap();
+
+        // Queue a FRESH pending error and hand the socket to the interface
+        // task un-drained: its first recv_from consumes the ECONNREFUSED.
+        victim.send(b"probe").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut handle = spawn_udp_interface_from_socket(
+            InterfaceId(0),
+            "udp_victim".into(),
+            victim,
+            vec![dead_addr.into()],
+        )
+        .unwrap();
+
+        // After the error, a datagram from the connected peer's address must
+        // still come through — i.e. the recv loop is alive. Re-send with a
+        // short poll: the exact interleaving of the queued error and the
+        // datagram is the kernel's business, not the test's.
+        let sender = tokio::net::UdpSocket::bind(dead_addr)
+            .await
+            .expect("rebind the freed port as the peer");
+        let mut received = None;
+        for _ in 0..20 {
+            sender.send_to(b"still-alive", victim_addr).await.unwrap();
+            if let Ok(Some(pkt)) =
+                tokio::time::timeout(Duration::from_millis(250), handle.incoming.recv()).await
+            {
+                received = Some(pkt);
+                break;
+            }
+        }
+        let received = received.expect(
+            "L-0021: the UDP interface died on a single recv error \
+             (no datagram surfaced after it)",
+        );
+        assert_eq!(received.data, b"still-alive");
+    }
 
     #[tokio::test]
     async fn test_udp_loopback() {

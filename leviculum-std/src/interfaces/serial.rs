@@ -243,6 +243,8 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
+    // Offline until the reconnect loop opens the port (L-0020).
+    counters.set_online(false);
 
     let id = config.id;
     let handle_name = config.name.clone();
@@ -404,6 +406,27 @@ async fn send_radio_config(
     false
 }
 
+/// Run `stty -F <port> low_latency`, reporting failure instead of
+/// swallowing it (L-0023).
+///
+/// Failure modes: stty not spawnable (missing binary), or stty exiting
+/// non-zero (non-Linux stty syntax, nonexistent device, EPERM). The `Err`
+/// carries stty's own stderr so the operator sees its diagnosis.
+fn set_low_latency(port: &str) -> Result<(), String> {
+    match std::process::Command::new("stty")
+        .args(["-F", port, "low_latency"])
+        .output()
+    {
+        Err(e) => Err(format!("stty not runnable: {e}")),
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format!(
+            "stty exited with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
 /// Reconnect wrapper for serial port connections.
 ///
 /// Owns channel endpoints across reconnection cycles. On port loss, waits
@@ -418,14 +441,34 @@ async fn serial_reconnect_task(
     credit: Option<Arc<Mutex<super::airtime::AirtimeCredit>>>,
 ) {
     let mut has_connected_before = false;
+    // The low-latency warn fires once per task, not once per reconnect
+    // cycle: the condition (missing stty, non-Linux stty syntax, EPERM on
+    // the device) is static for the process lifetime, and the reconnect
+    // loop ticks every RECONNECT_INTERVAL against a dead port.
+    let mut low_latency_warned = false;
     loop {
-        // Set low_latency mode so the kernel batches USB CDC-ACM writes into
-        // 64-byte bulk transfers instead of sending byte-by-byte. Without this,
-        // HDLC frames arrive one byte at a time and the receiver's frame timeout
-        // discards most frames. pyserial does this via set_low_latency_mode().
-        let _ = std::process::Command::new("stty")
-            .args(["-F", &config.port, "low_latency"])
-            .output();
+        // Set low_latency mode so USB CDC-ACM traffic moves in full bulk
+        // transfers instead of byte-by-byte. Observed on the T114 rig
+        // (dfc3fb5): without it, HDLC frames trickled in one byte at a time
+        // and the receiver's frame timeout discarded most frames. The mode
+        // is load-bearing for LoRa-over-serial throughput, so a failure to
+        // set it is an operator-visible finding, not a shrug (L-0023).
+        // pyserial OFFERS this as set_low_latency_mode(); Python-RNS never
+        // calls it, so this is rig-driven, not reference parity.
+        if let Err(e) = set_low_latency(&config.port) {
+            if !low_latency_warned {
+                low_latency_warned = true;
+                tracing::warn!(
+                    "Serial interface {}: could not set low_latency on {}: {} — \
+                     expect degraded HDLC framing on USB CDC-ACM",
+                    name,
+                    config.port,
+                    e
+                );
+            }
+        } else {
+            low_latency_warned = false;
+        }
 
         let builder = tokio_serial::new(&config.port, config.speed)
             .data_bits(config.data_bits)
@@ -437,6 +480,7 @@ async fn serial_reconnect_task(
             Ok(mut port) => {
                 let is_reconnect = has_connected_before;
                 has_connected_before = true;
+                counters.set_online(true);
                 tracing::info!("Serial interface {} online on {}", name, config.port);
 
                 if is_reconnect {
@@ -464,6 +508,7 @@ async fn serial_reconnect_task(
                     config.test_drop_direct_ingress,
                 )
                 .await;
+                counters.set_online(false);
                 tracing::warn!("Serial interface {}: port lost, will reconnect", name);
             }
             Err(e) => {
@@ -684,6 +729,20 @@ pub(crate) fn parse_stop_bits(n: u8) -> tokio_serial::StopBits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-0023: the stty result carries the diagnosis; discarding it (the
+    /// old `let _ =`) hid every failure of a mode the comment above calls
+    /// load-bearing. A device that cannot exist must yield the error the
+    /// reconnect loop warns with.
+    #[test]
+    fn low_latency_failure_is_reported_not_swallowed() {
+        let err = set_low_latency("/dev/nonexistent-lnode-l0023")
+            .expect_err("a nonexistent device cannot accept low_latency");
+        assert!(
+            err.contains("stty"),
+            "the error must name the failing tool: {err}"
+        );
+    }
 
     /// An LNode is lawful out of the box: with no `airtime_limit_long` in
     /// the config, the frequency's own ETSI sub-band limit is what gets

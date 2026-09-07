@@ -37,7 +37,7 @@ use tokio::net::UnixStream as RpcStream;
 
 use crate::driver::{AutoPeerCount, StdNodeCore};
 use crate::interfaces::inventory::SharedInventory;
-use crate::interfaces::{InterfaceOnlineMap, InterfaceStatsMap};
+use crate::interfaces::InterfaceStatsMap;
 use connection::{read_message, server_handshake, write_message};
 use error::RpcError;
 use handlers::handle_request;
@@ -108,7 +108,6 @@ pub(crate) fn spawn_rpc_server(
     authkey: [u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
-    iface_online_map: InterfaceOnlineMap,
     inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
@@ -128,7 +127,6 @@ pub(crate) fn spawn_rpc_server(
             authkey,
             start_time,
             iface_stats_map,
-            iface_online_map,
             inventory,
             auto_peer_count,
             discovery_storage,
@@ -147,7 +145,6 @@ async fn rpc_accept_loop(
     authkey: [u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: InterfaceStatsMap,
-    iface_online_map: InterfaceOnlineMap,
     inventory: SharedInventory,
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
@@ -163,7 +160,6 @@ async fn rpc_accept_loop(
 
         let core = Arc::clone(&core);
         let stats_map = Arc::clone(&iface_stats_map);
-        let online_map = Arc::clone(&iface_online_map);
         let inventory = Arc::clone(&inventory);
         let peer_count = auto_peer_count.clone();
         let discovery_storage = discovery_storage.clone();
@@ -174,7 +170,6 @@ async fn rpc_accept_loop(
                 &authkey,
                 start_time,
                 &stats_map,
-                &online_map,
                 &inventory,
                 &peer_count,
                 discovery_storage.as_deref(),
@@ -195,7 +190,6 @@ async fn handle_rpc_connection(
     authkey: &[u8; 32],
     start_time: std::time::Instant,
     iface_stats_map: &InterfaceStatsMap,
-    iface_online_map: &InterfaceOnlineMap,
     inventory: &SharedInventory,
     auto_peer_count: &AutoPeerCount,
     discovery_storage: Option<&std::path::Path>,
@@ -215,7 +209,6 @@ async fn handle_rpc_connection(
             &mut core,
             start_time,
             iface_stats_map,
-            iface_online_map,
             inventory,
             peer_count,
             discovery_storage,
@@ -485,10 +478,6 @@ mod tests {
         Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
     }
 
-    fn empty_online_map() -> InterfaceOnlineMap {
-        Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
-    }
-
     /// The shared-instance RPC client now speaks msgpack on the wire (matching
     /// upstream Python-RNS `mp.packb`/`mp.unpackb`), not pickle: a request
     /// encodes as a msgpack map (fixmap header, never the pickle `0x80` PROTO
@@ -585,7 +574,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -778,7 +766,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -841,7 +828,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -901,7 +887,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1008,7 +993,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1041,7 +1025,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1078,7 +1061,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1189,7 +1171,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1245,7 +1226,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             None,
@@ -1343,7 +1323,6 @@ mod tests {
             authkey,
             start_time,
             empty_stats_map(),
-            empty_online_map(),
             crate::interfaces::inventory::InterfaceInventory::shared(),
             AutoPeerCount::default(),
             Some(td.path().to_path_buf()),
@@ -1373,13 +1352,14 @@ mod tests {
     }
 
     /// Codeberg #56: the `status` field of each per-interface dict must
-    /// reflect the real `Interface::is_online()` value (sourced from
-    /// `iface_online_map`), not the hardcoded `true` it used to be.
+    /// reflect the real `Interface::is_online()` value (sourced from the
+    /// shared counters the interface task flips, L-0020), not the
+    /// hardcoded `true` it used to be.
     ///
-    /// Sets up a core with one named interface, marks it offline in the
-    /// online map, queries `interface_stats`, and asserts the entry
+    /// Sets up a core with one named interface, marks its counters
+    /// offline, queries `interface_stats`, and asserts the entry
     /// reports `status: false`. Inverse: a second core+name with the
-    /// online map set to `true` reports `status: true`.
+    /// counters left online reports `status: true`.
     #[tokio::test]
     async fn test_rpc_interface_stats_status_reflects_is_online() {
         for (case, expected_status) in [("offline", false), ("online", true)] {
@@ -1397,11 +1377,11 @@ mod tests {
                 c.set_interface_name(iface_id, iface_name.clone());
             }
 
-            let online_map: InterfaceOnlineMap =
-                Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+            let stats_map = empty_stats_map();
             {
-                let mut m = online_map.lock().unwrap();
-                m.insert(iface_id, expected_status);
+                let counters = Arc::new(crate::interfaces::InterfaceCounters::new());
+                counters.set_online(expected_status);
+                stats_map.lock().unwrap().insert(iface_id, counters);
             }
 
             let instance_name = format!("rpctest_status_{}_{case}", std::process::id());
@@ -1412,8 +1392,7 @@ mod tests {
                 Arc::clone(&core),
                 authkey,
                 start_time,
-                empty_stats_map(),
-                Arc::clone(&online_map),
+                Arc::clone(&stats_map),
                 crate::interfaces::inventory::InterfaceInventory::shared(),
                 AutoPeerCount::default(),
                 None,

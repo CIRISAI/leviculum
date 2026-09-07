@@ -68,14 +68,29 @@ pub(super) fn build(
     // it starts.
     if let Some(peers) = &config.peers {
         for peer in peers {
+            let name = format!("i2p_{}_to_{}", idx, peer);
+            // Reserve the registration slot BEFORE spawning (L-0063): a
+            // spawned client whose handle cannot be delivered would keep
+            // building SAM tunnels the driver can neither see nor tear
+            // down. No slot, no task.
+            let permit = match ctx.new_iface_tx.try_reserve() {
+                Ok(permit) => permit,
+                Err(e) => {
+                    tracing::error!(
+                        "NOT spawning I2P peer interface {}: no registration slot ({})",
+                        name,
+                        e
+                    );
+                    continue;
+                }
+            };
             let id = InterfaceId(
                 ctx.next_id
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             );
-            let name = format!("i2p_{}_to_{}", idx, peer);
             let handle = spawn_i2p_client(I2pClientConfig {
                 id,
-                name: name.clone(),
+                name,
                 sam_address: sam_address.clone(),
                 peer: peer.clone(),
                 buffer_size,
@@ -85,12 +100,7 @@ pub(super) fn build(
                 ingress_control,
                 outbound_socket_hook: ctx.outbound_socket_hook.clone(),
             });
-            if ctx.new_iface_tx.try_send(handle).is_err() {
-                tracing::error!(
-                    "could not register I2P peer interface {}: new-interface channel full",
-                    name
-                );
-            }
+            permit.send(handle);
             tracing::info!("I2P client peer {} -> {}", idx, peer);
         }
     }

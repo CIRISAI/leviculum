@@ -22,6 +22,7 @@ mod announce_emission_unix_time;
 mod client_wait_for_path_request_fallback;
 mod core_lock_reentrancy;
 mod core_processor_seam;
+mod iface_online_after_task_death;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
 mod ratchet_rotation_single_packet;

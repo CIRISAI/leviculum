@@ -10484,6 +10484,178 @@ mod tests {
         )));
     }
 
+    /// L-0062: a sender-side resource timeout must tell the peer. Python's
+    /// watchdog (`Resource.py:576-578`) calls `cancel()` when
+    /// `retries_left` hits 0, and `cancel()` (`Resource.py:1086-1095`)
+    /// sends a `RESOURCE_ICL` packet carrying `self.hash` when
+    /// `self.initiator` — so an rnsd peer that gave up says so, and the
+    /// receiver stops REQing into a transfer that no longer exists.
+    #[test]
+    fn test_sender_resource_timeout_notifies_peer_with_icl() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        pair.responder
+            .set_resource_strategy(
+                &pair.responder_link_id,
+                crate::resource::ResourceStrategy::AcceptApp,
+            )
+            .unwrap();
+
+        let data = alloc::vec![0x5a; 4_096];
+        let (resource_hash, output) = pair
+            .initiator
+            .send_resource(&pair.initiator_link_id, &data, None, false)
+            .unwrap();
+        let adv = extract_broadcast_data(&output);
+
+        // Deliver the ADV and accept it, but withhold the responder's REQ:
+        // from the sender's view the transfer is now silent until its
+        // watchdog gives up.
+        let _ = pair.responder.handle_packet(InterfaceId(0), &adv);
+        let _ = pair
+            .responder
+            .accept_resource(&pair.responder_link_id)
+            .unwrap();
+        assert!(
+            pair.responder
+                .link(&pair.responder_link_id)
+                .unwrap()
+                .has_incoming_resource(),
+            "precondition: the receiver holds the incoming transfer"
+        );
+
+        // Drive the sender's watchdog to exhaustion; capture the wire
+        // actions of the round that declares the timeout.
+        let mut timeout_round_packets: Option<Vec<Vec<u8>>> = None;
+        for _ in 0..=crate::resource::RESOURCE_MAX_ADV_RETRIES {
+            pair.initiator.transport().clock().advance(100_000);
+            let now_ms = pair.initiator.transport().clock().now_ms();
+            pair.initiator.check_resource_timeouts(now_ms);
+            let output = pair.initiator.process_events_and_actions();
+            let failed = output.events.iter().any(|event| {
+                matches!(
+                    event,
+                    NodeEvent::ResourceFailed {
+                        resource_hash: failed,
+                        error: crate::resource::ResourceError::Timeout,
+                        is_sender: true,
+                        ..
+                    } if *failed == resource_hash
+                )
+            });
+            if failed {
+                timeout_round_packets = Some(
+                    output
+                        .actions
+                        .iter()
+                        .map(|a| match a {
+                            crate::transport::Action::Broadcast { data, .. }
+                            | crate::transport::Action::SendPacket { data, .. } => data.clone(),
+                        })
+                        .collect(),
+                );
+                break;
+            }
+        }
+        let timeout_round_packets =
+            timeout_round_packets.expect("the sender watchdog must declare the timeout");
+
+        assert!(
+            !timeout_round_packets.is_empty(),
+            "L-0062: the sender gave up without putting a cancel (ICL) on the wire"
+        );
+
+        // Semantic check: the peer hears the cancel and drops its side.
+        let mut receiver_cancelled = false;
+        for pkt in &timeout_round_packets {
+            let out = pair.responder.handle_packet(InterfaceId(0), pkt);
+            receiver_cancelled |= out.events.iter().any(|event| {
+                matches!(
+                    event,
+                    NodeEvent::ResourceFailed {
+                        resource_hash: failed,
+                        error: crate::resource::ResourceError::Cancelled,
+                        is_sender: false,
+                        ..
+                    } if *failed == resource_hash
+                )
+            });
+        }
+        assert!(
+            receiver_cancelled,
+            "the receiver must fail its incoming transfer on the sender's ICL"
+        );
+        assert!(
+            !pair
+                .responder
+                .link(&pair.responder_link_id)
+                .unwrap()
+                .has_incoming_resource(),
+            "the receiver must drop the cancelled incoming transfer"
+        );
+    }
+
+    /// Python-parity pin for the other arm of L-0062: a RECEIVER-side
+    /// timeout sends nothing. `Resource.cancel()` (`Resource.py:1086-1095`)
+    /// only emits a cancel packet `if self.initiator`; the receiver just
+    /// clears local state. Our incoming `TimedOut` arm must stay packetless.
+    #[test]
+    fn test_receiver_resource_timeout_stays_silent_like_python() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        pair.responder
+            .set_resource_strategy(
+                &pair.responder_link_id,
+                crate::resource::ResourceStrategy::AcceptApp,
+            )
+            .unwrap();
+
+        let data = alloc::vec![0xa7; 4_096];
+        let (resource_hash, output) = pair
+            .initiator
+            .send_resource(&pair.initiator_link_id, &data, None, false)
+            .unwrap();
+        let adv = extract_broadcast_data(&output);
+        let _ = pair.responder.handle_packet(InterfaceId(0), &adv);
+        let _ = pair
+            .responder
+            .accept_resource(&pair.responder_link_id)
+            .unwrap();
+
+        // Withhold all data from the receiver and drive ITS watchdog to the
+        // terminal failure.
+        let mut terminal_actions = None;
+        for _ in 0..20 {
+            pair.responder.transport().clock().advance(100_000);
+            let now_ms = pair.responder.transport().clock().now_ms();
+            pair.responder.check_resource_timeouts(now_ms);
+            let output = pair.responder.process_events_and_actions();
+            let failed = output.events.iter().any(|event| {
+                matches!(
+                    event,
+                    NodeEvent::ResourceFailed {
+                        resource_hash: failed,
+                        error: crate::resource::ResourceError::Timeout,
+                        is_sender: false,
+                        ..
+                    } if *failed == resource_hash
+                )
+            });
+            if failed {
+                terminal_actions = Some(output.actions.len());
+                break;
+            }
+        }
+        assert_eq!(
+            terminal_actions,
+            Some(0),
+            "a receiver-side resource timeout must not put a packet on the \
+             wire (Python Resource.cancel() only sends as initiator)"
+        );
+    }
+
     #[test]
     fn test_response_resource_receiver_failure_fails_request_exactly_once() {
         use crate::transport::InterfaceId;

@@ -478,6 +478,9 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
     let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
+    // Offline until the reconnect loop's first successful connect (L-0020);
+    // covers the window between registration and the task's first attempt.
+    counters.set_online(false);
     let ready = ReadySignal::new();
 
     let id = config.id;
@@ -744,6 +747,9 @@ async fn tcp_client_reconnect_loop(
     // so the success line can report how long the peer was gone.
     let mut outage_start: Option<Instant> = None;
     loop {
+        // Between here and a successful connect the carrier is down; say so
+        // (L-0020, Python `self.online = False` across teardown/reconnect).
+        counters.set_online(false);
         // Bound each attempt: a connect that does not resolve within
         // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
         // a black-holed peer that never sends RST) is abandoned and counted,
@@ -801,6 +807,7 @@ async fn tcp_client_reconnect_loop(
                 // reconnects after a drop are safe — the signal stays
                 // ready for the lifetime of the interface.
                 ready.signal_ready();
+                counters.set_online(true);
 
                 // Exactly ONE info line per successful connect.
                 tracing::info!(

@@ -150,6 +150,15 @@ pub(crate) struct InterfaceCounters {
     pub tx_dropped_bytes: AtomicU64,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
+    /// Live carrier state, flipped by the owning interface task at its
+    /// connect boundaries (L-0020). Interfaces without a carrier state
+    /// machine (UDP, server listeners, local IPC) never touch it and stay
+    /// at the construction default `true`, matching Python interfaces that
+    /// set `self.online = True` in `__init__`. Reconnect-wrapper interfaces
+    /// (TCP client, RNode, serial, I2P client) clear it while their carrier
+    /// is down, so `rnstatus` shows `Down` instead of a forever-online
+    /// corpse.
+    online: AtomicBool,
 }
 
 impl InterfaceCounters {
@@ -168,7 +177,19 @@ impl InterfaceCounters {
                 cached_txs: 0.0,
             }),
             radio: std::sync::Mutex::new(None),
+            online: AtomicBool::new(true),
         }
+    }
+
+    /// Record the carrier coming up or going down. Called by the owning
+    /// interface task only; readers use [`is_online`](Self::is_online).
+    pub(crate) fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::Release);
+    }
+
+    /// Whether the owning interface task currently considers its carrier up.
+    pub(crate) fn is_online(&self) -> bool {
+        self.online.load(Ordering::Acquire)
     }
 
     /// Mark this interface as radio-capable so `interface_stats` always emits
@@ -263,17 +284,6 @@ pub(crate) fn spawn_traffic_counter(iface_stats_map: InterfaceStatsMap) {
 /// Read by the RPC handler for byte counter reporting.
 pub(crate) type InterfaceStatsMap =
     Arc<std::sync::Mutex<std::collections::BTreeMap<usize, Arc<InterfaceCounters>>>>;
-
-/// Shared map of per-interface online status, keyed by interface ID index.
-///
-/// Populated by the driver when an interface registers (`true`) and updated
-/// on disconnect (entry removed alongside the stats entry — once the core
-/// also drops the interface name, the RPC layer's `interface_stats`
-/// enumeration won't visit the interface anyway). The RPC handler reads
-/// this to thread real `is_online()` into the `status` field of the
-/// `interface_stats` response (Codeberg #56). A missing entry falls back
-/// to `true` — preserves the pre-fix behavior for any caller-side mismatch.
-pub(crate) type InterfaceOnlineMap = Arc<std::sync::Mutex<std::collections::BTreeMap<usize, bool>>>;
 
 /// Per-interface readiness signal.
 ///

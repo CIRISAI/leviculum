@@ -220,3 +220,79 @@ fn proof_only_inbound_keeps_link_alive() {
         "the link must still be Active after a proof-only stream"
     );
 }
+
+/// L-0019: the sender-side RESOURCE completion proof must refresh the
+/// activity clock too. The #124 fix's resource arm sat on `Ok(_)` in
+/// `handle_resource_proof` — but `OutgoingResource::handle_proof` returns
+/// only `Ok(Complete)` or `Err`, so the live success path never recorded
+/// activity and a link whose last inbound is that proof reads as idle
+/// since the preceding REQ.
+///
+/// Reference: RNS `Link.receive()` (Link.py:972-984) sets
+/// `self.last_inbound = time.time()` for every link-associated packet —
+/// RESOURCE_PRF included — and flips a STALE link back to ACTIVE.
+#[test]
+fn resource_completion_proof_refreshes_activity_clock() {
+    let (mut initiator, mut responder, i_iface, r_iface, link_id) = establish();
+
+    responder
+        .set_resource_strategy(&link_id, crate::resource::ResourceStrategy::AcceptApp)
+        .expect("responder link must accept a strategy");
+    let data = std::vec![0xCDu8; 4096];
+    let (_resource_hash, out) = initiator
+        .send_resource(&link_id, &data, None, false)
+        .expect("send_resource must advertise");
+
+    // ADV to the responder; the app-accept starts the transfer (first REQ).
+    let mut for_initiator = deliver_all(&mut responder, r_iface, action_data(&out));
+    for_initiator.extend(action_data(
+        &responder
+            .accept_resource(&link_id)
+            .expect("accept_resource must start the incoming transfer"),
+    ));
+
+    // Shuttle to completion. The initiator's clock jumps before every
+    // delivery round, so its link's `last_inbound` afterwards carries the
+    // timestamp of the LAST inbound packet — which, in a completing
+    // transfer, is the resource completion proof.
+    let mut completed = false;
+    let mut last_delivery_secs = 0u64;
+    for _ in 0..64 {
+        if for_initiator.is_empty() {
+            break;
+        }
+        initiator.transport().clock().advance(7_000);
+        last_delivery_secs = initiator.transport().clock().now_ms() / 1_000;
+        let mut for_responder = Vec::new();
+        for pkt in for_initiator.drain(..) {
+            let out = initiator.handle_packet(InterfaceId(i_iface), &pkt);
+            completed |= out.events.iter().any(|e| {
+                matches!(
+                    e,
+                    NodeEvent::ResourceCompleted {
+                        is_sender: true,
+                        ..
+                    }
+                )
+            });
+            for_responder.extend(action_data(&out));
+        }
+        for_initiator = deliver_all(&mut responder, r_iface, for_responder);
+    }
+    assert!(
+        completed,
+        "positive control: the transfer must complete on the sender"
+    );
+
+    let last_inbound = initiator
+        .link(&link_id)
+        .expect("link must survive a completed transfer")
+        .last_inbound_secs();
+    assert_eq!(
+        last_inbound,
+        last_delivery_secs,
+        "L-0019: the resource completion proof must refresh last_inbound \
+         (froze {}s before the proof arrived)",
+        last_delivery_secs.saturating_sub(last_inbound)
+    );
+}
