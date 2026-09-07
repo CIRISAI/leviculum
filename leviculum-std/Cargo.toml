@@ -61,12 +61,6 @@ rmpv.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 
-# The Columba BLE interface (`interfaces::ble`). bluer talks to BlueZ over
-# D-Bus; the direct `dbus` dependency exists only to switch on its `vendored`
-# feature (build libdbus from source) so the musl-static default target links
-# self-contained — feature unification applies it to bluer's own dbus edge.
-bluer.workspace = true
-dbus.workspace = true
 # The pure BLE advertisement/decision logic shared with the firmware:
 # `parse_peer_advertisement`, `should_initiate`, the v0.3.0 capability
 # record and the LN-<hex8> name derivation. One implementation on both
@@ -106,3 +100,15 @@ tempfile = "3"
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
 lnomad = { path = "../lnomad" }
+
+# The Columba BLE interface (`interfaces::ble`) is LINUX-ONLY: bluer talks to
+# BlueZ over D-Bus, and libdbus-sys has no macOS or Windows build. Declared as
+# an unconditional dependency it broke both hosts outright — and this crate is
+# what CIRISEdge links into its darwin and win_amd64 wheels, so the breakage
+# reached a consumer, not just a CI lane. The direct `dbus` dependency exists
+# only to switch on its `vendored` feature (build libdbus from source) so the
+# musl-static default target links self-contained; feature unification applies
+# it to bluer's own dbus edge.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer.workspace = true
+dbus.workspace = true

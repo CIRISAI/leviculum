@@ -11,6 +11,9 @@
 
 pub(crate) mod airtime;
 pub mod auto_interface;
+// BLE rides BlueZ over D-Bus, which exists only on Linux (see this crate's
+// Cargo.toml for why the dependency is target-gated).
+#[cfg(target_os = "linux")]
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub use byte_channel::ByteChannelHandle;
