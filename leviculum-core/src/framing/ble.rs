@@ -213,6 +213,7 @@ pub struct BleDefragmenter {
     fragments: BTreeMap<u16, Vec<u8>>,
     expected_total: u16,
     last_fragment_ms: u64,
+    abandoned: u32,
 }
 
 impl BleDefragmenter {
@@ -222,6 +223,7 @@ impl BleDefragmenter {
             fragments: BTreeMap::new(),
             expected_total: 0,
             last_fragment_ms: 0,
+            abandoned: 0,
         }
     }
 
@@ -256,20 +258,22 @@ impl BleDefragmenter {
 
         // LONE fragment, complete packet in one piece
         if ftype == FRAGMENT_TYPE_LONE {
-            self.reset();
+            self.discard_partial();
+            self.expected_total = 0;
             return DefragResult::Complete(payload.to_vec());
         }
 
         // New multi-fragment sequence starting, reset any previous partial
         if ftype == FRAGMENT_TYPE_START && seq == 0 {
-            self.fragments.clear();
+            self.discard_partial();
             self.expected_total = total;
         }
 
         // Check consistency with current reassembly
         if total != self.expected_total {
             // Fragment from a different packet or corrupted, discard
-            self.reset();
+            self.discard_partial();
+            self.expected_total = 0;
             return DefragResult::Error;
         }
 
@@ -298,6 +302,45 @@ impl BleDefragmenter {
         }
     }
 
+    /// Drop an in-progress reassembly that a newer frame superseded, and
+    /// count it: an abandoned head is a whole Reticulum packet lost, and
+    /// before this counter existed the loss was invisible (#373 — two of
+    /// five relayed two-fragment packets vanished with no drop line on
+    /// any surface). Completion is not a discard and does not count.
+    fn discard_partial(&mut self) {
+        if !self.fragments.is_empty() {
+            self.abandoned = self.abandoned.saturating_add(1);
+            self.fragments.clear();
+        }
+    }
+
+    /// How many in-progress reassemblies were discarded before they
+    /// completed — a new START (or LONE) arrived over a partial head, or
+    /// a fragment's `total` contradicted the reassembly in progress.
+    /// Each count is one whole packet this receiver lost. Monotonic for
+    /// the life of the defragmenter; callers log the delta (#373).
+    pub fn abandoned_count(&self) -> u32 {
+        self.abandoned
+    }
+
+    /// Fragments held by the reassembly in progress, 0 when idle. A
+    /// caller that hard-resets on error uses this to tell "discarded a
+    /// partial packet" from "nothing was pending" (#373).
+    pub fn pending_fragments(&self) -> usize {
+        self.fragments.len()
+    }
+
+    /// Discard the reassembly in progress and count it when one was
+    /// pending: the caller is dropping a partial packet for a reason
+    /// the defragmenter could not see (a hard reset after a garbage
+    /// frame). Keeps [`abandoned_count`](BleDefragmenter::abandoned_count)
+    /// the one total for "reassemblies this receiver lost" (#373).
+    pub fn abandon(&mut self) {
+        self.discard_partial();
+        self.expected_total = 0;
+        self.last_fragment_ms = 0;
+    }
+
     /// Check if the current reassembly has timed out.
     ///
     /// Returns `true` if fragments are pending and the timeout has elapsed
@@ -307,7 +350,11 @@ impl BleDefragmenter {
             && now_ms.saturating_sub(self.last_fragment_ms) >= REASSEMBLY_TIMEOUT_MS
     }
 
-    /// Discard any in-progress reassembly.
+    /// Discard any in-progress reassembly without counting it as an
+    /// abandonment — the caller decided to drop it (timeout sweep,
+    /// completion) and owns reporting it. In-stream discards the
+    /// *defragmenter* decides count via
+    /// [`abandoned_count`](BleDefragmenter::abandoned_count).
     pub fn reset(&mut self) {
         self.fragments.clear();
         self.expected_total = 0;
@@ -586,6 +633,125 @@ mod tests {
             DefragResult::Complete(r) => assert_eq!(r, data2),
             other => panic!("Expected Complete, got {:?}", other),
         }
+    }
+
+    /// The #373 receiver-side property: when a peer's fragment streams
+    /// interleave on one link — START(A), START(B), END(B) — the torn
+    /// head A is dropped AND counted, and B still reassembles. Red
+    /// until the counter existed: the drop happened silently, which is
+    /// exactly how a relayed two-fragment packet could vanish with no
+    /// line on any surface.
+    #[test]
+    fn test_interleaved_start_abandons_first_with_a_counter() {
+        let a: Vec<u8> = (0..300).map(|i| (i % 256) as u8).collect();
+        let b: Vec<u8> = vec![0xEE; 300];
+        let frags_a = fragment_packet(&a, DEFAULT_MTU);
+        let frags_b = fragment_packet(&b, DEFAULT_MTU);
+        assert_eq!(frags_a.len(), 2);
+        assert_eq!(frags_b.len(), 2);
+
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
+        assert_eq!(defrag.abandoned_count(), 0, "A is still in progress");
+        assert_eq!(defrag.process(&frags_b[0], 1001), DefragResult::NeedMore);
+        assert_eq!(defrag.abandoned_count(), 1, "A's head was discarded");
+        match defrag.process(&frags_b[1], 1002) {
+            DefragResult::Complete(r) => assert_eq!(r, b, "B reassembles"),
+            other => panic!("Expected Complete, got {:?}", other),
+        }
+        assert_eq!(defrag.abandoned_count(), 1, "completion never counts");
+    }
+
+    /// Completing a packet is not an abandonment; neither is an idle
+    /// START. The counter measures lost packets, nothing else.
+    #[test]
+    fn test_completion_and_idle_start_do_not_count_as_abandonment() {
+        let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+        let mut defrag = BleDefragmenter::new();
+        for _ in 0..3 {
+            for frag in fragment_packet(&data, DEFAULT_MTU) {
+                defrag.process(&frag, 1000);
+            }
+        }
+        assert_eq!(defrag.abandoned_count(), 0);
+    }
+
+    /// A LONE (old-peer single fragment) over a partial head is also a
+    /// discard of that head, and counts like one.
+    #[test]
+    fn test_lone_over_a_partial_head_counts_the_abandonment() {
+        let a: Vec<u8> = vec![0xAA; 300];
+        let frags_a = fragment_packet(&a, DEFAULT_MTU);
+        let mut lone = vec![FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x01];
+        lone.extend_from_slice(b"hello");
+
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
+        match defrag.process(&lone, 1001) {
+            DefragResult::Complete(r) => assert_eq!(r, b"hello"),
+            other => panic!("Expected Complete, got {:?}", other),
+        }
+        assert_eq!(defrag.abandoned_count(), 1);
+    }
+
+    /// A fragment whose `total` contradicts the reassembly in progress
+    /// discards the partial (counted) and leaves the defragmenter clean
+    /// for the next packet.
+    #[test]
+    fn test_total_mismatch_counts_and_resets_cleanly() {
+        let a: Vec<u8> = vec![0xAA; 400];
+        let frags_a = fragment_packet(&a, DEFAULT_MTU); // 3 fragments
+        assert_eq!(frags_a.len(), 3);
+        // A CONTINUE claiming total=2 amid a total=3 reassembly.
+        let alien = [FRAGMENT_TYPE_CONTINUE, 0x00, 0x01, 0x00, 0x02];
+
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
+        assert_eq!(defrag.process(&alien, 1001), DefragResult::Error);
+        assert_eq!(defrag.abandoned_count(), 1);
+        assert_eq!(defrag.pending_fragments(), 0);
+
+        // The next packet reassembles as if nothing happened.
+        let b: Vec<u8> = vec![0xBB; 300];
+        let mut result = DefragResult::NeedMore;
+        for frag in fragment_packet(&b, DEFAULT_MTU) {
+            result = defrag.process(&frag, 2000);
+        }
+        match result {
+            DefragResult::Complete(r) => assert_eq!(r, b),
+            other => panic!("Expected Complete, got {:?}", other),
+        }
+        assert_eq!(defrag.abandoned_count(), 1, "no further discards");
+    }
+
+    /// The limitation the counter cannot close, pinned so nobody
+    /// mistakes it for a fixable receiver bug: the v2.2 header carries
+    /// no packet id, so a torn head END-completed by the NEXT packet's
+    /// tail with the same `total` is byte-for-byte indistinguishable
+    /// from a legitimate reassembly and splices (#255's Columba-side
+    /// glue, reproduced on our own receiver). The guarantee therefore
+    /// lives on the transmitter: never interleave, and reset the peer
+    /// via disconnect after a tear (`BLE_TX_RESYNC` in
+    /// `leviculum-nrf/src/ble/notify.rs`).
+    #[test]
+    fn test_torn_head_plus_matching_tail_splices_undetectably() {
+        let a: Vec<u8> = vec![0xAA; 300];
+        let b: Vec<u8> = vec![0xBB; 300];
+        let frags_a = fragment_packet(&a, DEFAULT_MTU);
+        let frags_b = fragment_packet(&b, DEFAULT_MTU);
+
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
+        // B's START never arrives (sender tore mid-A and mid-B); B's END
+        // carries seq=1 total=2, exactly what A's reassembly expects.
+        match defrag.process(&frags_b[1], 1001) {
+            DefragResult::Complete(spliced) => {
+                assert_eq!(&spliced[..177], &a[..177], "A's head");
+                assert_eq!(&spliced[177..], &b[177..], "B's tail");
+            }
+            other => panic!("Expected the splice, got {:?}", other),
+        }
+        assert_eq!(defrag.abandoned_count(), 0, "undetectable, uncounted");
     }
 
     #[test]

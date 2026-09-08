@@ -297,6 +297,43 @@ async fn ble_task(
     }
 }
 
+/// Run one inbound frame through a link's defragmenter, and say so when
+/// that cost a partial packet (#373): a new START over an unfinished
+/// head, a `total` that contradicts the reassembly in progress, or the
+/// hard reset after a garbage frame each discard one whole in-progress
+/// Reticulum packet — and before this line the discard was invisible on
+/// every surface. `lost=` is what this frame cost, `total=` the
+/// defragmenter's running count for the link, so one line states the
+/// incident and the history.
+fn process_logged(
+    d: &mut BleDefragmenter,
+    data: &[u8],
+    now_ms: u64,
+    slot_index: usize,
+) -> DefragResult {
+    let before = d.abandoned_count();
+    let result = d.process(data, now_ms);
+    if matches!(result, DefragResult::Error) {
+        // Hard reset: a garbage frame amid a reassembly must not leave a
+        // stale head for the next packet's tail to complete (#255), and
+        // the head it discards is a loss this link must report.
+        d.abandon();
+    }
+    let after = d.abandoned_count();
+    if after != before {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_RX_ABANDON slot={} lost={} total={}",
+                slot_index,
+                after.saturating_sub(before),
+                after,
+            ),
+        );
+    }
+    result
+}
+
 /// Per-connection event-loop. Inbound writes drive `gatt_server::run`'s
 /// closure (Columba defrag + handshake state); outbound BLE_OUTGOING and
 /// keepalive timer feed `gatt_server::notify_value`. The two halves run
@@ -380,7 +417,7 @@ async fn gatt_events(
             } else {
                 let now = Instant::now().as_millis();
                 let mut d = defrag.replace(BleDefragmenter::new());
-                let result = d.process(&data, now);
+                let result = process_logged(&mut d, &data, now, slot_index);
                 defrag.set(d);
                 match result {
                     DefragResult::Complete(packet) => {
@@ -390,12 +427,7 @@ async fn gatt_events(
                         // here (we're in a sync closure, can't await).
                         let _ = incoming_tx.try_send((link_peer.get(), packet));
                     }
-                    DefragResult::NeedMore => {}
-                    DefragResult::Error => {
-                        let mut d = defrag.replace(BleDefragmenter::new());
-                        d.reset();
-                        defrag.set(d);
-                    }
+                    DefragResult::NeedMore | DefragResult::Error => {}
                 }
             }
         }
@@ -872,19 +904,14 @@ async fn run_central_session(
         }
         let now = Instant::now().as_millis();
         let mut d = defrag.replace(BleDefragmenter::new());
-        let result = d.process(&data, now);
+        let result = process_logged(&mut d, &data, now, slot_index);
         defrag.set(d);
         match result {
             DefragResult::Complete(packet) => {
                 crate::info!("BLE: RX {}B", packet.len());
                 let _ = incoming_tx.try_send((Some(peer_id), packet));
             }
-            DefragResult::NeedMore => {}
-            DefragResult::Error => {
-                let mut d = defrag.replace(BleDefragmenter::new());
-                d.reset();
-                defrag.set(d);
-            }
+            DefragResult::NeedMore | DefragResult::Error => {}
         }
     });
 
@@ -900,11 +927,32 @@ async fn run_central_session(
             match select(outgoing_rx.receive(), keepalive_deadline).await {
                 Either::First(packet) => {
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
+                    let mut sent = 0usize;
+                    let mut torn = false;
                     for (index, fragment) in fragments.iter().enumerate() {
                         let Ok(value) = heapless_v8::Vec::from_slice(fragment.as_slice()) else {
                             // Unreachable: DEFAULT_MTU fragments are
                             // narrower than the 251-byte characteristic.
-                            return;
+                            // Reported all the same — this used to be a
+                            // bare `return`, i.e. exactly the silent
+                            // mid-packet loss #373 hunts.
+                            let dropped = BLE_TX_DROPPED
+                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            crate::log::log_fmt(
+                                "[BLE ] ",
+                                format_args!(
+                                    "BLE_TX_DROP kind=packet len={} frag={} of={} sent={} reason=oversize code=0 conn={} dropped={}",
+                                    packet.len(),
+                                    index,
+                                    fragments.len(),
+                                    sent,
+                                    conn.handle().unwrap_or(u16::MAX),
+                                    dropped,
+                                ),
+                            );
+                            torn = true;
+                            break;
                         };
                         if let Err(err) = client.rx_write_without_response(&value).await {
                             let dropped = BLE_TX_DROPPED
@@ -917,19 +965,41 @@ async fn run_central_session(
                                     packet.len(),
                                     index,
                                     fragments.len(),
-                                    index,
+                                    sent,
                                     dropped,
                                     err,
                                 ),
                             );
-                            // A torn head poisons the peer's reassembler
-                            // exactly as on the notify path (see
-                            // super::notify): the only in-band reset is
-                            // dropping the link. After a write error the
-                            // link is dead anyway; make it official.
-                            let _ = conn.disconnect();
-                            return;
+                            torn = true;
+                            break;
                         }
+                        sent += 1;
+                    }
+                    // One BLE_TX_PKT per multi-fragment packet, success
+                    // and failure alike (#373) — same line, same host
+                    // test as the notify path's.
+                    if fragments.len() > 1 {
+                        crate::log::log_fmt(
+                            "[BLE ] ",
+                            format_args!(
+                                "{}",
+                                leviculum_ble_tx::TxPktLine {
+                                    conn: conn.handle().unwrap_or(u16::MAX),
+                                    len: packet.len(),
+                                    frags: fragments.len(),
+                                    sent,
+                                }
+                            ),
+                        );
+                    }
+                    if torn {
+                        // A torn head poisons the peer's reassembler
+                        // exactly as on the notify path (see
+                        // super::notify): the only in-band reset is
+                        // dropping the link. After a write error the
+                        // link is dead anyway; make it official.
+                        let _ = conn.disconnect();
+                        return;
                     }
                     BLE_TX_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }

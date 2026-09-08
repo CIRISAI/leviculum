@@ -405,6 +405,7 @@ impl BleTask {
                     }
                     Inbound::Keepalive | Inbound::NeedMore | Inbound::NotHandshaked => {}
                 }
+                self.log_abandon_reports(table);
             }
             Ev::Scan {
                 addr,
@@ -496,6 +497,7 @@ impl BleTask {
                     }
                     _ => {}
                 }
+                self.log_abandon_reports(table);
             }
             Ev::CentralGone { addr } => {
                 dialling.remove(&addr.0);
@@ -616,6 +618,25 @@ impl BleTask {
             .peer_event_tx
             .send((self.id, PeerEvent::Up(identity)))
             .await;
+    }
+
+    /// One `BLE_RX_ABANDON` line per reassembly this receiver discarded
+    /// before completion (#373): a torn or interleaved fragment stream
+    /// from the peer cost `lost=` whole Reticulum packets; `total=` is
+    /// the link's running count. Mirrors the firmware's line of the
+    /// same name (slot-keyed there, identity-keyed here), so a merged
+    /// bench timeline shows the receiver side of a `BLE_TX_PKT
+    /// sent=<all>` that never became a delivery.
+    fn log_abandon_reports(&self, table: &mut LinkTable) {
+        for (identity, lost, total) in table.take_abandon_reports() {
+            tracing::warn!(
+                event = "BLE_RX_ABANDON",
+                iface = %self.name,
+                peer = %hex8(&identity),
+                lost = lost,
+                total = total,
+            );
+        }
     }
 
     fn log_link_up(&self, identity: &IdentityHash, addr: &Addr, role: Role, mtu: usize) {

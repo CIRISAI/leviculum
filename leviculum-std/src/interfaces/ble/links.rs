@@ -194,6 +194,13 @@ pub(crate) struct LinkTable {
     max_links: usize,
     links: Vec<Link>,
     pending: Vec<Pending>,
+    /// Reassemblies a link discarded before completion, queued for the
+    /// driver's `BLE_RX_ABANDON` lines (#373): `(identity, lost,
+    /// running total)` in frame order. Each entry is one or more whole
+    /// Reticulum packets this receiver lost — a torn or interleaved
+    /// fragment stream from the peer — which before the line existed
+    /// was invisible on every surface.
+    abandon_reports: Vec<(IdentityHash, u32, u32)>,
 }
 
 impl LinkTable {
@@ -203,6 +210,7 @@ impl LinkTable {
             max_links: max_links.max(1),
             links: Vec::new(),
             pending: Vec::new(),
+            abandon_reports: Vec::new(),
         }
     }
 
@@ -369,11 +377,32 @@ impl LinkTable {
             return Inbound::Keepalive;
         }
         link.last_real_data_ms = now_ms;
-        match link.defrag.process(data, now_ms) {
+        let before = link.defrag.abandoned_count();
+        let result = link.defrag.process(data, now_ms);
+        if matches!(result, DefragResult::Error) {
+            // Hard reset, as the firmware does: a garbage frame amid a
+            // reassembly must not leave a stale head for the next
+            // packet's tail to complete (#255) — and the head it
+            // discards is a loss this link must report.
+            link.defrag.abandon();
+        }
+        let after = link.defrag.abandoned_count();
+        let report =
+            (after != before).then(|| (link.identity, after.saturating_sub(before), after));
+        if let Some(report) = report {
+            self.abandon_reports.push(report);
+        }
+        match result {
             DefragResult::Complete(packet) => Inbound::Packet(packet),
             DefragResult::NeedMore => Inbound::NeedMore,
             DefragResult::Error => Inbound::Error,
         }
+    }
+
+    /// Drain the queued reassembly-loss reports (#373); the driver turns
+    /// each into one `BLE_RX_ABANDON` line.
+    pub(crate) fn take_abandon_reports(&mut self) -> Vec<(IdentityHash, u32, u32)> {
+        std::mem::take(&mut self.abandon_reports)
     }
 
     /// Fan one outbound Reticulum packet out to every live link.
@@ -600,6 +629,42 @@ mod tests {
         assert!(
             !t.knows_identity(&ID_A),
             "after the last link is gone the loss must be reportable"
+        );
+    }
+
+    /// The #373 receiver-side visibility: a torn/interleaved fragment
+    /// stream that costs a partial packet queues one report the driver
+    /// turns into a `BLE_RX_ABANDON` line, and the second packet still
+    /// reassembles. Before the report existed the discard was a silent
+    /// `NeedMore`.
+    #[test]
+    fn an_abandoned_reassembly_is_reported_and_the_next_packet_survives() {
+        let mut t = table();
+        let (adm, _) = t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
+        assert_eq!(adm, Admission::Accept);
+
+        let a = vec![0xAA; 300];
+        let b = vec![0xBB; 300];
+        let frags_a = fragment_packet(&a, 185);
+        let frags_b = fragment_packet(&b, 185);
+        assert_eq!(frags_a.len(), 2);
+
+        // A's head, then B's whole stream: A is discarded, B completes.
+        assert_eq!(t.central_frame(ADDR_1, &frags_a[0], 100), Inbound::NeedMore);
+        assert!(t.take_abandon_reports().is_empty(), "A is still pending");
+        assert_eq!(t.central_frame(ADDR_1, &frags_b[0], 101), Inbound::NeedMore);
+        assert_eq!(
+            t.take_abandon_reports(),
+            vec![(ID_A, 1, 1)],
+            "the torn head is one reported loss"
+        );
+        assert_eq!(
+            t.central_frame(ADDR_1, &frags_b[1], 102),
+            Inbound::Packet(b)
+        );
+        assert!(
+            t.take_abandon_reports().is_empty(),
+            "completion never counts"
         );
     }
 

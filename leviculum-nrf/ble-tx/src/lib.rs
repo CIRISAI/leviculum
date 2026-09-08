@@ -186,6 +186,50 @@ pub fn gap_name(
     }
 }
 
+/// The `BLE_TX_PKT` structured event: one line per multi-fragment
+/// packet handed to a link, whatever became of it (#373).
+///
+/// The desk log that motivated it had five relayed two-fragment packets
+/// forwarded to the BLE hop and only three arrive, with **no** line on
+/// our side for the other two — `BLE_TX_DROP` fires only when the
+/// driver abandons a packet, so a packet whose every fragment was
+/// accepted by the stack leaves no trace. This line closes that gap:
+/// `sent < frags` without a drop line is now a contradiction a capture
+/// can show, and `sent == frags` moves the search past this node.
+///
+/// Single-fragment packets and keepalives stay unlogged: they are the
+/// bulk of the traffic, every line also rewrites the 2 KiB post-crash
+/// tail, and the failure mode this measures needs at least two
+/// fragments to exist.
+///
+/// Formatted here, in the host-tested crate, so the exact line is
+/// pinned by a test rather than transcribed into one; the firmware's
+/// two TX paths (`notify.rs` pump, `columba.rs` central write loop)
+/// both render this one type. The trailing `t=` comes from the
+/// firmware log formatter, never from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxPktLine {
+    /// SoftDevice connection handle of the link the packet targeted.
+    pub conn: u16,
+    /// The whole Reticulum packet's length in bytes.
+    pub len: usize,
+    /// Fragments the packet was split into.
+    pub frags: usize,
+    /// Fragments the stack accepted; `sent < frags` is a loss on this
+    /// node and is accompanied by a drop line naming the reason.
+    pub sent: usize,
+}
+
+impl core::fmt::Display for TxPktLine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "BLE_TX_PKT conn={} len={} frags={} sent={}",
+            self.conn, self.len, self.frags, self.sent
+        )
+    }
+}
+
 /// The result of one `sd_ble_gatts_hvx` call, as the driver saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyOutcome {
@@ -755,6 +799,127 @@ mod tests {
         assert_eq!(drain_wait_budget(1), 6);
         assert_eq!(drain_wait_budget(3), 10);
         assert!(drain_wait_budget(usize::MAX) > 0);
+    }
+
+    /// The #373 first hypothesis, transmitter side: two multi-fragment
+    /// packets queued back-to-back to ONE link must reach the stack as
+    /// START..END, START..END — never interleaved. The firmware holds
+    /// this structurally: each link has exactly one outbound future
+    /// (`columba.rs`), which runs one `notify_fragments` (one
+    /// [`PacketTx`]) to a terminal action before taking the next packet
+    /// from the link's queue. This test is that loop shape against a
+    /// refusing, draining queue; the control below shows the harness
+    /// would catch the interleave if the shape were broken.
+    #[test]
+    fn back_to_back_packets_on_one_link_never_interleave_their_fragments() {
+        // (packet, fragment) pairs in stack-acceptance order.
+        let mut stream: Vec<(char, usize)> = Vec::new();
+        let mut in_flight = 0usize; // one-deep HVN queue, drains on wait
+        for id in ['A', 'B'] {
+            // One notify_fragments call: PacketTx runs to terminal
+            // before the loop takes the next packet.
+            let (mut tx, mut action) = PacketTx::start(2);
+            loop {
+                match action {
+                    Action::Send { index } => {
+                        let outcome = if in_flight >= 1 {
+                            NotifyOutcome::QueueFull
+                        } else {
+                            in_flight += 1;
+                            stream.push((id, index));
+                            NotifyOutcome::Sent
+                        };
+                        action = tx.step(Event::Notify(outcome));
+                    }
+                    Action::AwaitDrain { .. } => {
+                        in_flight -= 1;
+                        action = tx.step(Event::Drained);
+                    }
+                    Action::Done => break,
+                    other => panic!("unexpected terminal {:?}", other),
+                }
+            }
+        }
+        assert_eq!(
+            stream,
+            vec![('A', 0), ('A', 1), ('B', 0), ('B', 1)],
+            "START..END, START..END, in order"
+        );
+    }
+
+    /// Positive control for the test above: the serialisation is a
+    /// property of the one-pump-per-link loop, NOT of [`PacketTx`] —
+    /// two machines advanced concurrently against the same queue DO
+    /// interleave, and the stream detector sees it. This is the exact
+    /// shape a second writer to the same link would produce, which is
+    /// why the fan-out queue is a link's only packet source.
+    #[test]
+    fn control_two_concurrent_machines_do_interleave_and_the_harness_sees_it() {
+        let mut stream: Vec<(char, usize)> = Vec::new();
+        let mut in_flight = 0usize; // two-deep queue, drains on refusal
+        let (mut tx_a, mut act_a) = PacketTx::start(2);
+        let (mut tx_b, mut act_b) = PacketTx::start(2);
+        // Alternate the two machines, as two tasks racing one link would.
+        for _ in 0..16 {
+            for (id, tx, action) in [('A', &mut tx_a, &mut act_a), ('B', &mut tx_b, &mut act_b)] {
+                match *action {
+                    Action::Send { index } => {
+                        let outcome = if in_flight >= 2 {
+                            in_flight -= 1; // a drain happens between turns
+                            NotifyOutcome::QueueFull
+                        } else {
+                            in_flight += 1;
+                            stream.push((id, index));
+                            NotifyOutcome::Sent
+                        };
+                        *action = tx.step(Event::Notify(outcome));
+                    }
+                    Action::AwaitDrain { .. } => {
+                        *action = tx.step(Event::Drained);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let a_span: Vec<usize> = stream
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, _))| *id == 'A')
+            .map(|(i, _)| i)
+            .collect();
+        let b_span: Vec<usize> = stream
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, _))| *id == 'B')
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            b_span.first() < a_span.last() && a_span.first() < b_span.last(),
+            "the control must actually interleave, stream: {:?}",
+            stream
+        );
+    }
+
+    /// The `BLE_TX_PKT` line, verbatim (#373): what a healthy relayed
+    /// two-fragment packet writes, and what a partial hand-over writes.
+    /// The firmware appends ` t=<ms>`; everything before it is this.
+    #[test]
+    fn the_tx_pkt_line_is_the_documented_grammar_verbatim() {
+        let line = TxPktLine {
+            conn: 1,
+            len: 291,
+            frags: 2,
+            sent: 2,
+        };
+        assert_eq!(line.to_string(), "BLE_TX_PKT conn=1 len=291 frags=2 sent=2");
+
+        let torn = TxPktLine {
+            conn: 1,
+            len: 291,
+            frags: 2,
+            sent: 1,
+        };
+        assert_eq!(torn.to_string(), "BLE_TX_PKT conn=1 len=291 frags=2 sent=1");
     }
 
     #[test]

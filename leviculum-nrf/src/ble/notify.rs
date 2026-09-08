@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_futures::select::{select, Either};
 use embassy_time::Timer;
 use leviculum_ble_tx::{
-    AbortReason, Action, DrainSlot, Event, NotifyOutcome, PacketTx, DRAIN_WAIT_MS,
+    AbortReason, Action, DrainSlot, Event, NotifyOutcome, PacketTx, TxPktLine, DRAIN_WAIT_MS,
 };
 use nrf_softdevice::ble::gatt_server::{self, NotifyValueError};
 use nrf_softdevice::ble::Connection;
@@ -94,9 +94,11 @@ pub async fn notify_fragments<'a, F>(
             Action::Done => {
                 BLE_TX_PACKETS.fetch_add(1, Ordering::Relaxed);
                 BLE_TX_DRAIN_WAITS.fetch_add(tx.drain_waits(), Ordering::Relaxed);
+                log_tx_pkt(conn, packet_len, fragment_count, tx.fragments_sent());
                 return;
             }
             Action::Abort { index, reason } => {
+                log_tx_pkt(conn, packet_len, fragment_count, tx.fragments_sent());
                 report_tx_drop(
                     DropSite {
                         kind,
@@ -140,6 +142,7 @@ pub async fn notify_fragments<'a, F>(
             // performed. Reported rather than swallowed — a silently
             // dropped packet is the exact bug this function removes.
             Action::Nothing => {
+                log_tx_pkt(conn, packet_len, fragment_count, tx.fragments_sent());
                 report_tx_drop(
                     DropSite {
                         kind,
@@ -156,6 +159,28 @@ pub async fn notify_fragments<'a, F>(
             }
         }
     }
+}
+
+/// One `BLE_TX_PKT` line per multi-fragment packet handed to a link
+/// (#373), at the terminal action, success and failure alike — the line
+/// [`TxPktLine`]'s docs and host test pin. Single-fragment packets and
+/// keepalives stay unlogged.
+fn log_tx_pkt(conn: &Connection, packet_len: usize, frags: usize, sent: usize) {
+    if frags <= 1 {
+        return;
+    }
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "{}",
+            TxPktLine {
+                conn: conn.handle().unwrap_or(u16::MAX),
+                len: packet_len,
+                frags,
+                sent,
+            }
+        ),
+    );
 }
 
 /// Emit the structured drop event and bump the counters.

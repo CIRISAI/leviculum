@@ -375,6 +375,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_TX_FANOUT_DROP",
         required_keys: &["iface", "peer", "len", "depth"],
     },
+    // A link's reassembly was discarded before completion (#373): a
+    // torn or interleaved fragment stream from the peer cost `lost`
+    // whole Reticulum packets, `total` is the link's running count.
+    // Same name as the firmware's line (slot-keyed there), so a merged
+    // bench timeline carries both receivers.
+    EventSchema {
+        name: "BLE_RX_ABANDON",
+        required_keys: &["iface", "peer", "lost", "total"],
+    },
     EventSchema {
         name: "RNODE_TX_GATED",
         required_keys: &["iface", "held_ms", "depth"],
