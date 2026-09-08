@@ -664,8 +664,16 @@ pub trait Storage {
     /// Remove reverse table entries referencing a specific interface (for interface-down cleanup)
     fn remove_reverse_entries_for_interface(&mut self, iface_index: usize);
 
-    /// Remove expired receipts (status == Sent and timed out).
-    /// Returns the removed receipts for event emission.
+    /// Remove expired receipts and return only the ones that timed out.
+    ///
+    /// Two kinds of receipt are dropped, and both implementations must agree
+    /// on this so the receipt map is bounded on either target (Codeberg #275):
+    ///  - `Sent` and past its timeout: the proof never came. These are
+    ///    returned so the caller can emit a `ReceiptTimeout` event.
+    ///  - Terminal (`Delivered`/`Failed`) and past
+    ///    [`RECEIPT_RETENTION_MS`](crate::constants::RECEIPT_RETENTION_MS)
+    ///    beyond its timeout window: the outcome already reached the
+    ///    application, so it is dropped silently and never returned here.
     fn expire_receipts(&mut self, now_ms: u64) -> Vec<PacketReceipt>;
 
     /// Remove expired link table entries (validated past timeout, unvalidated past proof_timeout).

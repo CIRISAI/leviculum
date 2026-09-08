@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use heapless::FnvIndexMap;
 use heapless::FnvIndexSet;
 
-use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
+use crate::constants::{RATCHET_SIZE, RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES};
 use crate::identity::Identity;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathEntry, PathState,
@@ -812,11 +812,23 @@ impl Storage for EmbeddedStorage {
     }
 
     fn expire_receipts(&mut self, now_ms: u64) -> Vec<PacketReceipt> {
+        // Two removal reasons, only the first is a timeout the caller reports:
+        //  - Sent and past its timeout: proof never came, return it.
+        //  - Terminal (Delivered/Failed) and past the retention grace window:
+        //    the outcome already reached the application, reap it silently so
+        //    the receipt map stays bounded the same way MemoryStorage now does
+        //    (Codeberg #275). retain_collect returns everything it drops, so
+        //    the terminal ones are filtered back out below.
         self.receipts
             .retain_collect(|_, receipt| {
-                !(receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms))
+                let timed_out = receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms);
+                let terminal_expired = receipt.status != ReceiptStatus::Sent
+                    && now_ms.saturating_sub(receipt.sent_at_ms)
+                        > receipt.timeout_ms.saturating_add(RECEIPT_RETENTION_MS);
+                !(timed_out || terminal_expired)
             })
             .into_iter()
+            .filter(|(_, r)| r.status == ReceiptStatus::Sent)
             .map(|(_, r)| r)
             .collect()
     }
@@ -1734,6 +1746,40 @@ mod tests {
             .filter(|i| s.get_receipt(&key_th(*i)).is_some())
             .count();
         assert_eq!(live, cap);
+    }
+
+    #[test]
+    fn delivered_receipts_are_reaped_after_the_retention_window() {
+        // The same contract MemoryStorage is tested against (Codeberg #275):
+        // delivered receipts are reaped after the retention window and never
+        // surface as timeouts. Both storages must agree here.
+        let mut s = EmbeddedStorage::new();
+        let n = 8;
+        for i in 0..n {
+            let k = key_th(i);
+            let mut receipt = mk_receipt(k);
+            receipt.set_delivered();
+            s.set_receipt(k, receipt);
+        }
+
+        let sent_at = 1000u64;
+        let inside = sent_at + crate::constants::DATA_RECEIPT_TIMEOUT_MS;
+        assert!(s.expire_receipts(inside).is_empty());
+        assert!((0..n).all(|i| s.get_receipt(&key_th(i)).is_some()));
+
+        let after = sent_at
+            + crate::constants::DATA_RECEIPT_TIMEOUT_MS
+            + crate::constants::RECEIPT_RETENTION_MS
+            + 1;
+        let timed_out = s.expire_receipts(after);
+        assert!(
+            timed_out.is_empty(),
+            "delivered receipts must not surface as timeouts"
+        );
+        assert!(
+            (0..n).all(|i| s.get_receipt(&key_th(i)).is_none()),
+            "every delivered receipt must be reaped"
+        );
     }
 
     #[test]

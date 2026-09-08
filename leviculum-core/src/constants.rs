@@ -264,6 +264,20 @@ pub const RTT_RETRY_INTERVAL_MULTIPLIER: u64 = 3;
 /// instead; see [`TRAFFIC_TIMEOUT_FACTOR`] and [`TRAFFIC_TIMEOUT_MIN_MS`].
 pub const DATA_RECEIPT_TIMEOUT_MS: u64 = 30_000;
 
+/// How long a receipt in a terminal state (`Delivered` or `Failed`) is kept
+/// after its timeout window before it is reaped (milliseconds).
+///
+/// A delivered or failed receipt has already reached the application as an
+/// event, so nothing polls its status afterwards; it is retained only so a
+/// duplicate or late proof arriving just after the outcome still finds the
+/// receipt to validate against rather than looking like an unknown packet.
+/// A proof round trip is seconds, so 30 s is several multiples of the window
+/// in which a straggler can still arrive. Without this the `MemoryStorage`
+/// receipt map grew unbounded for the daemon's lifetime, every proved send
+/// leaking one entry (Codeberg #275); `EmbeddedStorage` capped at 8 instead,
+/// so the two storages did not share the invariant the trait requires.
+pub const RECEIPT_RETENTION_MS: u64 = 30_000;
+
 /// Default announce rate limit interval (milliseconds)
 pub const ANNOUNCE_RATE_LIMIT_MS: u64 = 2_000;
 

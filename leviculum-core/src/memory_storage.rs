@@ -13,7 +13,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::constants::{
-    HASHLIST_MAXSIZE, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE, TRUNCATED_HASHBYTES,
+    HASHLIST_MAXSIZE, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE, RECEIPT_RETENTION_MS,
+    TRUNCATED_HASHBYTES,
 };
 use crate::identity::Identity;
 use crate::storage_types::{
@@ -734,7 +735,18 @@ impl Storage for MemoryStorage {
         let mut expired = Vec::new();
         self.receipts.retain(|_, receipt| {
             if receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms) {
+                // A still-pending packet whose proof never came: timed out.
+                // Returned so the caller can emit a ReceiptTimeout event.
                 expired.push(receipt.clone());
+                false
+            } else if receipt.status != ReceiptStatus::Sent
+                && now_ms.saturating_sub(receipt.sent_at_ms)
+                    > receipt.timeout_ms.saturating_add(RECEIPT_RETENTION_MS)
+            {
+                // A terminal (Delivered/Failed) receipt kept only for the
+                // retention grace window is now reaped silently: the outcome
+                // already reached the application, so it is not returned as a
+                // timeout (Codeberg #275).
                 false
             } else {
                 true
@@ -1143,6 +1155,44 @@ mod tests {
 
         let expired = s.expire_receipts(50_000);
         assert_eq!(expired.len(), 1);
+    }
+
+    #[test]
+    fn delivered_receipts_are_reaped_after_the_retention_window() {
+        // Codeberg #275: a proved send used to leak its receipt forever. Store
+        // several delivered receipts, advance the clock past the retention
+        // window, and the table must be empty with no spurious timeout events.
+        let mut s = MemoryStorage::with_defaults();
+        let sent_at = 1_000u64;
+        let mut hashes = Vec::new();
+        for i in 0..8u8 {
+            let hash = [i; TRUNCATED_HASHBYTES];
+            let mut receipt = PacketReceipt::new([i; 32], DestinationHash::new(hash), sent_at);
+            receipt.set_delivered();
+            s.set_receipt(hash, receipt);
+            hashes.push(hash);
+        }
+
+        // Still inside the window: nothing reaped yet.
+        let inside = sent_at + crate::constants::DATA_RECEIPT_TIMEOUT_MS;
+        assert!(s.expire_receipts(inside).is_empty());
+        assert!(hashes.iter().all(|h| s.get_receipt(h).is_some()));
+
+        // Past timeout + retention: all gone, and no timeout events emitted
+        // (they were delivered, not timed out).
+        let after = sent_at
+            + crate::constants::DATA_RECEIPT_TIMEOUT_MS
+            + crate::constants::RECEIPT_RETENTION_MS
+            + 1;
+        let timed_out = s.expire_receipts(after);
+        assert!(
+            timed_out.is_empty(),
+            "delivered receipts must not surface as timeouts"
+        );
+        assert!(
+            hashes.iter().all(|h| s.get_receipt(h).is_none()),
+            "every delivered receipt must be reaped"
+        );
     }
 
     #[test]
