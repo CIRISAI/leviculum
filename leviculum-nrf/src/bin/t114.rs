@@ -786,6 +786,12 @@ async fn main(spawner: Spawner) {
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());
                 }
+                // A receipt timeout surfaces here, not on a reception —
+                // the proof wait (#373) needs this arm's events too.
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);

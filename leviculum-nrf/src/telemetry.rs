@@ -55,8 +55,9 @@ use leviculum_lxmf::telemetry::{
 };
 use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::{
-    choose_position, command_from_wire, EmissionRoute, Fix, PositionSource, Profile, ReportReason,
-    RequestOutcome, SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
+    choose_position, command_from_wire, EmissionRoute, FailureVerdict, Fix, PacketHash,
+    PositionSource, Profile, ProofTracker, ReportReason, RequestOutcome, SendPolicy, TargetCommand,
+    TargetState, FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported so the binaries name the outcome of
@@ -905,6 +906,29 @@ pub struct Reporter {
     /// makes the next boot restore `ready`, which owes the immediate
     /// report like any other newly usable target.
     key_persist_owed: bool,
+    /// The proof wait of the report last counted as sent (#373): the
+    /// transport tracks a receipt per single packet and its events —
+    /// `PacketDeliveryConfirmed` on a verified proof, `DeliveryFailed`
+    /// on `ReceiptTimeout` — drive this machine. First loss owes one
+    /// retransmission, second loss gives the report up. State only; the
+    /// bytes to resend are [`retry_payload`](Self::retry_payload).
+    proof: ProofTracker,
+    /// The exact LXMF bytes of the report awaiting proof, kept so the
+    /// retransmission is IDENTICAL — same position, same time; a
+    /// retransmission, not a new reading. Dropped on proof, on give-up,
+    /// and when a new report supersedes the wait.
+    retry_payload: Option<Vec<u8>>,
+    /// Whether the owed retransmission has already asked for a path.
+    /// One request per owed retry: `request_path` is unthrottled, the
+    /// telemetry tick is five-secondly, and the answer (or a peer-up
+    /// pull) flips `has_path` — asking again every tick would be a storm.
+    retry_path_requested: bool,
+    /// The LXMF bytes of the report between [`tick`](Self::tick) and
+    /// [`note_dispatch`](Self::note_dispatch), promoted to
+    /// [`retry_payload`](Self::retry_payload) only if the dispatch
+    /// settles as sent — a report that never left the board gets the
+    /// ordinary cadence re-emission, not the proof machinery.
+    pending_payload: Option<Vec<u8>>,
 }
 
 /// The report line of a report that has been handed to transport.
@@ -922,6 +946,17 @@ struct PendingLine {
     /// the dispatch is not in here: it is a broadcast toward everyone and
     /// its fate on a third interface says nothing about this report.
     route: EmissionRoute,
+    /// The packet hash the transport tracks the receipt under, and when
+    /// it was emitted — what arms the proof wait once the dispatch
+    /// settles as sent (#373).
+    packet_hash: PacketHash,
+    sent_ms: u64,
+}
+
+/// The first four bytes of a packet hash for the `pkt=` slot of the
+/// `[TELEMETRY]` proof lines, same shape as [`Reporter::target_short`].
+fn pkt_short(hash: &PacketHash) -> u32 {
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
 
 impl Reporter {
@@ -947,6 +982,10 @@ impl Reporter {
             last_state_line: None,
             pending_line: None,
             key_persist_owed: false,
+            proof: ProofTracker::new(),
+            retry_payload: None,
+            retry_path_requested: false,
+            pending_payload: None,
         }
     }
 
@@ -1045,6 +1084,13 @@ impl Reporter {
         self.last_key_request_ms = None;
         self.last_withheld = None;
         self.last_state_line = None;
+        // Whatever was awaiting proof was a report to the OLD target (or
+        // to the old cadence's satisfaction) — its proof belongs to
+        // nobody now, and retransmitting it would report to a recipient
+        // the operator just changed away from.
+        self.proof.clear();
+        self.retry_payload = None;
+        self.retry_path_requested = false;
         let command = command_from_wire(wire.profile);
         // A hash-only frame leaves a hash-only record on the page, and the
         // record is owed the key once it is known ([`key_persist_owed`]
@@ -1193,6 +1239,60 @@ impl Reporter {
             }
         }
 
+        // An owed retransmission (#373): the report that got no proof
+        // goes out ONCE more, same bytes, through the ordinary send path
+        // — so a path that went offline in between is re-resolved by the
+        // ordinary rules (75b14c8: a path over an offline interface is no
+        // path; 482572a: the relay re-originates the request toward its
+        // live peers). It does not touch the cadence: `note_emitted` is
+        // not called, so `min_interval_ms` for the next report still
+        // counts from the original attempt — neither shortened nor
+        // stretched — and the interface applies its airtime/CSMA rules to
+        // the retransmission like to any packet. Returns early: one
+        // telemetry emission per tick.
+        if let Some(first) = self.proof.awaiting_retry() {
+            let Some(payload) = self.retry_payload.take() else {
+                // Unreachable by construction (the payload is kept as
+                // long as the debt is), but a debt without bytes can only
+                // be forgotten, not paid.
+                self.proof.clear();
+                return actions;
+            };
+            if !node.has_path(&hash) {
+                self.retry_payload = Some(payload);
+                if !self.retry_path_requested {
+                    self.retry_path_requested = true;
+                    actions.extend(node.request_path(&hash).actions);
+                }
+                // The debt stands; the path answer (or a peer-up pull)
+                // flips `has_path` and a later tick pays it. A next
+                // scheduled report supersedes it via `note_report_sent`.
+                return actions;
+            }
+            match node.send_single_packet(&hash, &payload) {
+                Ok((retry_hash, out)) => {
+                    actions.extend(out.actions);
+                    // The payload is spent: exactly one retransmission,
+                    // whatever becomes of it. The retry's own receipt is
+                    // the backstop — its timeout is the give-up.
+                    self.proof.note_retry_sent(retry_hash);
+                    crate::log::log_fmt_critical(
+                        "[INFO!] ",
+                        format_args!(
+                            "[TELEMETRY] retry pkt={:08x} reason=no-proof",
+                            pkt_short(&first)
+                        ),
+                    );
+                }
+                Err(_) => {
+                    // The path vanished between `has_path` and the send:
+                    // keep the debt, next tick re-resolves.
+                    self.retry_payload = Some(payload);
+                }
+            }
+            return actions;
+        }
+
         // Only a receiver in presence state Fix may contribute a sensor
         // position — and a set fixed position replaces the sensor
         // entirely, whatever the receiver is doing ([`choose_position`]).
@@ -1311,7 +1411,7 @@ impl Reporter {
         }
 
         match node.send_single_packet(&hash, &on_air) {
-            Ok((_, out)) => {
+            Ok((packet_hash, out)) => {
                 // Note the route before the actions are merged with the
                 // announce's: after the merge there is no telling which
                 // frame was whose, and that distinction is the whole of
@@ -1337,7 +1437,10 @@ impl Reporter {
                     possrc,
                     unix_secs,
                     route,
+                    packet_hash,
+                    sent_ms: now_ms,
                 });
+                self.pending_payload = Some(on_air);
             }
             Err(_) => {
                 // The core could not build or route it at all. This path
@@ -1350,9 +1453,14 @@ impl Reporter {
         actions
     }
 
-    /// Act on the events one inbound dispatch produced: a Sideband
+    /// Act on the events one dispatch produced: a Sideband
     /// `TELEMETRY_REQUEST` delivered to our own `lxmf.delivery`
-    /// destination arms the immediate report (Codeberg #371).
+    /// destination arms the immediate report (Codeberg #371), and the
+    /// delivery events of the tracked report — `PacketDeliveryConfirmed`
+    /// from a verified proof, `DeliveryFailed` from a receipt timeout —
+    /// drive the proof wait (#373). The binaries therefore feed it the
+    /// RX arms' events AND the `handle_timeout` arm's: the receipt
+    /// timeout fires on a timeout tick, not on a reception.
     ///
     /// The gate is the configured target and nothing else for now — the
     /// requester the feature exists for *is* the target, and a general
@@ -1380,6 +1488,48 @@ impl Reporter {
         S: Storage,
     {
         for event in events {
+            match event {
+                NodeEvent::PacketDeliveryConfirmed { packet_hash } => {
+                    if let Some(proven) = self.proof.note_proof(packet_hash, now_ms) {
+                        // Delivered: the kept bytes have done their duty,
+                        // proven whether the first send or the
+                        // retransmission was the one that landed.
+                        self.retry_payload = None;
+                        crate::log::log_fmt_critical(
+                            "[INFO!] ",
+                            format_args!(
+                                "[TELEMETRY] proof pkt={:08x} after={}",
+                                pkt_short(&proven.first),
+                                proven.after_ms
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                NodeEvent::DeliveryFailed { packet_hash, .. } => {
+                    match self.proof.note_failure(packet_hash, now_ms) {
+                        FailureVerdict::RetryDue { .. } => {
+                            // The debt is armed; the next `tick` pays it
+                            // and writes the `retry` line at the moment
+                            // the retransmission actually goes out.
+                        }
+                        FailureVerdict::GaveUp { first, after_ms } => {
+                            self.retry_payload = None;
+                            crate::log::log_fmt_critical(
+                                "[INFO!] ",
+                                format_args!(
+                                    "[TELEMETRY] gave up pkt={:08x} after={}",
+                                    pkt_short(&first),
+                                    after_ms
+                                ),
+                            );
+                        }
+                        FailureVerdict::NotTracked => {}
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             let NodeEvent::PacketReceived {
                 destination, data, ..
             } = event
@@ -1468,9 +1618,21 @@ impl Reporter {
             .chain(result.drops.iter().map(|(iface, _)| iface.0))
             .chain(result.retries.iter().map(|retry| retry.iface_idx));
         if !self.policy.note_dispatch(line.route.went_out(losses)) {
+            // Never left the board: the ordinary cadence re-emission
+            // covers it, the proof machinery has nothing to wait for.
+            // (The receipt the send created still times out in transport;
+            // its failure event matches no tracked hash and falls through
+            // `note_failure` as NotTracked.)
+            self.pending_payload = None;
             self.withhold("send-failed");
             return;
         }
+        // On the air: from here the proof decides. A report that gets no
+        // proof within the receipt timeout is retransmitted once from
+        // these kept bytes (#373).
+        self.proof.note_report_sent(line.packet_hash, line.sent_ms);
+        self.retry_payload = self.pending_payload.take();
+        self.retry_path_requested = false;
         self.last_withheld = None;
         crate::log::log_fmt_critical(
             "[INFO!] ",

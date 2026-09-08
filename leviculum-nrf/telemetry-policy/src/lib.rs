@@ -984,5 +984,206 @@ impl EmissionRoute {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Proof-driven retransmission (#365/#373)
+// ---------------------------------------------------------------------------
+
+/// The truncated packet hash the transport tracks receipts under
+/// (`leviculum_core::constants::TRUNCATED_HASHBYTES`). Spelled out here
+/// because this crate deliberately links nothing.
+pub type PacketHash = [u8; 16];
+
+/// A tracked report was proven delivered. The caller writes the
+/// `[TELEMETRY] proof` line from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvenReport {
+    /// The FIRST send's packet hash — the report's identity in every log
+    /// line, whether the proof answered the first send or the
+    /// retransmission.
+    pub first: PacketHash,
+    /// Milliseconds from the first send to the proof.
+    pub after_ms: u64,
+}
+
+/// What a delivery failure means for the tracked report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureVerdict {
+    /// Not the packet this tracker is watching — some other sender's
+    /// business, nothing to do.
+    NotTracked,
+    /// The first send got no proof: the caller owes ONE retransmission of
+    /// the SAME payload. The tracker holds the debt
+    /// ([`ProofTracker::awaiting_retry`]) until
+    /// [`ProofTracker::note_retry_sent`] settles it.
+    RetryDue {
+        /// The first send's packet hash.
+        first: PacketHash,
+    },
+    /// The retransmission got no proof either: the report is given up.
+    /// The caller writes the `gave up` line and drops the payload; the
+    /// next scheduled report carries on unbothered.
+    GaveUp {
+        first: PacketHash,
+        /// Milliseconds from the first send to this final loss.
+        after_ms: u64,
+    },
+}
+
+/// Where the one in-flight report stands between emission and proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProofState {
+    /// Nothing in flight.
+    Idle,
+    /// The report went out; its receipt is ticking.
+    AwaitingProof { first: PacketHash, sent_ms: u64 },
+    /// The receipt timed out; one retransmission is owed and not yet out.
+    RetryOwed { first: PacketHash, sent_ms: u64 },
+    /// The retransmission went out; its receipt is ticking. `retry` is a
+    /// different hash from `first` — the ordinary send path re-encrypts
+    /// with a fresh ephemeral key — so both are watched.
+    AwaitingRetryProof {
+        first: PacketHash,
+        retry: PacketHash,
+        sent_ms: u64,
+    },
+}
+
+/// The proof-driven retransmission state machine (#365/#373): a telemetry
+/// report that gets no proof is sent ONCE more with the same payload,
+/// then given up.
+///
+/// The field case this pays for: the phone drops one relayed report in
+/// three, silently, after the relay's BLE forward (#373, ledger 365
+/// HISTORY 19:30-19:45). We cannot fix the phone; one retransmission
+/// buys back the position at the cost of one packet.
+///
+/// Python-side reference for the semantics: LXMF's own delivery resends
+/// an unproven opportunistic message from its `process_outbound` loop
+/// (`reference/LXMF/LXMF/LXMRouter.py:2736-2757`) up to
+/// `MAX_DELIVERY_ATTEMPTS = 5` (LXMRouter.py:30). We take the mechanism
+/// and not the count: a tracker's next reading is minutes away and
+/// airtime is the scarce resource, so exactly one retry.
+///
+/// Boundaries, deliberate:
+///
+/// * This crate holds hashes and clocks, never the payload — keeping the
+///   exact bytes for the retransmission is the caller's half, which is
+///   what makes "identical resend" true by construction rather than by
+///   re-building.
+/// * The tracker never touches [`SendPolicy`]'s cadence: the retry is a
+///   retransmission of a report already counted as sent, so it neither
+///   consumes a reading nor moves `min_interval_ms` for the next one.
+/// * One report in flight: a new report supersedes the old wait entirely
+///   ([`note_report_sent`](Self::note_report_sent)), because the next
+///   scheduled reading says everything the lost one did, fresher.
+#[derive(Debug, Clone)]
+pub struct ProofTracker {
+    state: ProofState,
+}
+
+impl Default for ProofTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProofTracker {
+    pub const fn new() -> Self {
+        Self {
+            state: ProofState::Idle,
+        }
+    }
+
+    /// A report went out (the dispatch settled as sent): watch its
+    /// receipt. Replaces whatever was tracked before — an old report's
+    /// pending retry included.
+    pub fn note_report_sent(&mut self, first: PacketHash, now_ms: u64) {
+        self.state = ProofState::AwaitingProof {
+            first,
+            sent_ms: now_ms,
+        };
+    }
+
+    /// The first send's hash while a retransmission is owed and not yet
+    /// out; the caller's cue to resend the kept payload.
+    pub const fn awaiting_retry(&self) -> Option<PacketHash> {
+        match self.state {
+            ProofState::RetryOwed { first, .. } => Some(first),
+            _ => None,
+        }
+    }
+
+    /// The retransmission went out under `retry`'s hash. Both hashes are
+    /// watched from here: the late proof of the FIRST send is as good as
+    /// the retry's own ([`note_proof`](Self::note_proof)).
+    pub fn note_retry_sent(&mut self, retry: PacketHash) {
+        if let ProofState::RetryOwed { first, sent_ms } = self.state {
+            self.state = ProofState::AwaitingRetryProof {
+                first,
+                retry,
+                sent_ms,
+            };
+        }
+    }
+
+    /// A delivery confirmation arrived. `Some` exactly once per tracked
+    /// report — success is counted once however many sends it took and
+    /// however late the proof came — and it cancels any owed or in-flight
+    /// retransmission: a proven report needs no third attempt.
+    pub fn note_proof(&mut self, hash: &PacketHash, now_ms: u64) -> Option<ProvenReport> {
+        let (first, sent_ms) = match self.state {
+            ProofState::AwaitingProof { first, sent_ms }
+            | ProofState::RetryOwed { first, sent_ms }
+                if first == *hash =>
+            {
+                (first, sent_ms)
+            }
+            ProofState::AwaitingRetryProof {
+                first,
+                retry,
+                sent_ms,
+            } if first == *hash || retry == *hash => (first, sent_ms),
+            _ => return None,
+        };
+        self.state = ProofState::Idle;
+        Some(ProvenReport {
+            first,
+            after_ms: now_ms.saturating_sub(sent_ms),
+        })
+    }
+
+    /// A delivery failure (receipt timeout, or a proof that did not
+    /// verify) arrived. First loss owes the one retry; the retry's loss
+    /// is the end of the report. A failure for the first hash while the
+    /// retransmission is in flight is NOT a second loss — that receipt
+    /// already timed out to get here — and changes nothing.
+    pub fn note_failure(&mut self, hash: &PacketHash, now_ms: u64) -> FailureVerdict {
+        match self.state {
+            ProofState::AwaitingProof { first, sent_ms } if first == *hash => {
+                self.state = ProofState::RetryOwed { first, sent_ms };
+                FailureVerdict::RetryDue { first }
+            }
+            ProofState::AwaitingRetryProof {
+                first,
+                retry,
+                sent_ms,
+            } if retry == *hash => {
+                self.state = ProofState::Idle;
+                FailureVerdict::GaveUp {
+                    first,
+                    after_ms: now_ms.saturating_sub(sent_ms),
+                }
+            }
+            _ => FailureVerdict::NotTracked,
+        }
+    }
+
+    /// Forget the tracked report — the target changed, so the old
+    /// report's proof belongs to nobody.
+    pub fn clear(&mut self) {
+        self.state = ProofState::Idle;
+    }
+}
+
 #[cfg(test)]
 mod tests;

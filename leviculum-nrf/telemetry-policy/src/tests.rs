@@ -1451,3 +1451,198 @@ fn a_request_triggered_report_still_honours_the_attempt_floor() {
         "owed until sent, emitted once the floor clears"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Proof-driven retransmission (#365/#373)
+// ---------------------------------------------------------------------------
+
+/// A distinct packet hash per send, so the tests can tell the first
+/// emission from the retransmission the way the transport does.
+fn pkt(n: u8) -> PacketHash {
+    [n; 16]
+}
+
+/// The common case: the proof arrives inside the receipt timeout. One
+/// success, measured from the send, and nothing owed.
+#[test]
+fn a_proof_inside_the_timeout_is_success_and_owes_nothing() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 1_000);
+    assert_eq!(
+        t.note_proof(&pkt(1), 1_160),
+        Some(ProvenReport {
+            first: pkt(1),
+            after_ms: 160
+        })
+    );
+    assert_eq!(t.awaiting_retry(), None);
+    // Counted once: the same proof again matches nothing.
+    assert_eq!(t.note_proof(&pkt(1), 1_161), None);
+}
+
+/// Sent, no proof within the timeout: exactly one resend is owed, and a
+/// second failure report for the same first send does not owe another.
+#[test]
+fn no_proof_within_the_timeout_owes_exactly_one_resend() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_098),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    assert_eq!(t.awaiting_retry(), Some(pkt(1)), "the debt is held");
+    // The debt is one deep: a duplicate failure changes nothing.
+    assert_eq!(t.note_failure(&pkt(1), 22_099), FailureVerdict::NotTracked);
+    assert_eq!(t.awaiting_retry(), Some(pkt(1)));
+}
+
+/// Proof after the resend: success, counted once, measured from the
+/// FIRST send.
+#[test]
+fn a_proof_for_the_resend_is_one_success() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.note_retry_sent(pkt(2));
+    assert_eq!(t.awaiting_retry(), None, "the debt is settled by the send");
+    assert_eq!(
+        t.note_proof(&pkt(2), 24_300),
+        Some(ProvenReport {
+            first: pkt(1),
+            after_ms: 24_300
+        })
+    );
+    assert_eq!(t.note_proof(&pkt(2), 24_301), None, "counted once");
+}
+
+/// No proof after the resend either: the report is given up, and no
+/// third attempt exists in any state the machine can reach from here.
+#[test]
+fn no_proof_after_the_resend_gives_up_with_no_third_attempt() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.note_retry_sent(pkt(2));
+    assert_eq!(
+        t.note_failure(&pkt(2), 44_000),
+        FailureVerdict::GaveUp {
+            first: pkt(1),
+            after_ms: 44_000
+        }
+    );
+    // Nothing survives the give-up: no retry owed, later events for
+    // either hash fall on the floor.
+    assert_eq!(t.awaiting_retry(), None);
+    assert_eq!(t.note_failure(&pkt(2), 44_001), FailureVerdict::NotTracked);
+    assert_eq!(t.note_failure(&pkt(1), 44_002), FailureVerdict::NotTracked);
+    assert_eq!(t.note_proof(&pkt(1), 44_003), None);
+}
+
+/// The proof of the FIRST send arriving after the resend went out: one
+/// success, and the retry's own timeout later is not a loss — the report
+/// was delivered.
+#[test]
+fn a_late_proof_for_the_first_send_counts_once_and_ends_the_chain() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.note_retry_sent(pkt(2));
+    assert_eq!(
+        t.note_proof(&pkt(1), 23_000),
+        Some(ProvenReport {
+            first: pkt(1),
+            after_ms: 23_000
+        })
+    );
+    // The retransmission's receipt will still time out; that is not a
+    // second loss and must not say "gave up" about a delivered report.
+    assert_eq!(t.note_failure(&pkt(2), 45_000), FailureVerdict::NotTracked);
+    assert_eq!(t.note_proof(&pkt(2), 45_001), None, "counted once");
+}
+
+/// A proof that lands between the timeout and the resend cancels the
+/// owed retry: a proven report is not retransmitted.
+#[test]
+fn a_proof_while_the_retry_is_owed_cancels_it() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    assert_eq!(
+        t.note_proof(&pkt(1), 22_500),
+        Some(ProvenReport {
+            first: pkt(1),
+            after_ms: 22_500
+        })
+    );
+    assert_eq!(
+        t.awaiting_retry(),
+        None,
+        "no retransmission of a proven report"
+    );
+}
+
+/// A new report supersedes the old wait entirely — pending retry
+/// included: the next scheduled reading says everything the lost one
+/// did, fresher.
+#[test]
+fn a_new_report_supersedes_the_old_wait_and_its_retry() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.note_report_sent(pkt(3), 60_000);
+    assert_eq!(
+        t.awaiting_retry(),
+        None,
+        "the old debt died with the report"
+    );
+    assert_eq!(t.note_proof(&pkt(1), 60_100), None, "old proof is nobody's");
+    assert_eq!(
+        t.note_proof(&pkt(3), 60_200),
+        Some(ProvenReport {
+            first: pkt(3),
+            after_ms: 200
+        })
+    );
+}
+
+/// Somebody else's packets — a hash never tracked — are none of this
+/// tracker's business in any state.
+#[test]
+fn untracked_hashes_are_ignored() {
+    let mut t = ProofTracker::new();
+    assert_eq!(t.note_failure(&pkt(9), 1), FailureVerdict::NotTracked);
+    assert_eq!(t.note_proof(&pkt(9), 2), None);
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(t.note_failure(&pkt(9), 3), FailureVerdict::NotTracked);
+    assert_eq!(t.note_proof(&pkt(9), 4), None);
+    assert_eq!(t.awaiting_retry(), None);
+}
+
+/// Clearing the target forgets the tracked report and its debt.
+#[test]
+fn clear_forgets_the_tracked_report() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0);
+    assert_eq!(
+        t.note_failure(&pkt(1), 22_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.clear();
+    assert_eq!(t.awaiting_retry(), None);
+    assert_eq!(t.note_proof(&pkt(1), 23_000), None);
+}
