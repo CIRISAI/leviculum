@@ -25,6 +25,7 @@ use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Sender;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
@@ -157,7 +158,8 @@ const CAPABILITY_AD: [u8; MANUFACTURER_DATA_LEN] = manufacturer_data(LOCAL_CAPS)
 // budget is arithmetic over constants, so it is decided here instead.
 const _: () = assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY);
 
-/// Register the GATT service and spawn the Columba peripheral task.
+/// Register the GATT service and spawn the Columba tasks: one
+/// peripheral task per incoming link slot (#372) and the central half.
 /// Called by [`super::init`] once the SoftDevice is enabled.
 ///
 /// Takes the SoftDevice by unique reference and hands back a shared one:
@@ -165,6 +167,20 @@ const _: () = assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY);
 /// (`ReticulumServer::new` adds attributes to the SoftDevice's table),
 /// and everything after it — the SoC-event task, the flash writes in
 /// [`crate::radio_store`] — shares the handle.
+///
+/// The advertising and scan-response payloads are built here, once, for
+/// all peripheral tasks: nrf-softdevice's `advertise_connectable` wants
+/// `&'static` slices, and the name in the scan response is the boot
+/// name — the operator's (#235) if one is set, `LN-<hex8>` from the
+/// identity hash otherwise (#255), the same value
+/// `crate::ble::set_gap_device_name` writes into the GAP attribute so
+/// the two BLE surfaces cannot disagree, truncated visibly on a
+/// codepoint boundary to `DEVICE_NAME_LEN`. It rides in the SCAN
+/// RESPONSE, a second 31-byte PDU, so it does not compete with the
+/// advertisement's budget. Built once into `StaticCell`s the SoftDevice
+/// holds `&'static`s to for the life of the advertising loops: that is
+/// why a name set at runtime reaches BLE only at the next boot, and why
+/// the control frame's report says so rather than implying otherwise.
 pub fn spawn(
     spawner: &Spawner,
     sd: &'static mut Softdevice,
@@ -175,29 +191,14 @@ pub fn spawn(
         inner: ReticulumServer::new(sd).expect("GATT server"),
     });
     let sd: &'static Softdevice = sd;
-    spawner.must_spawn(ble_task(sd, server, identity_hash));
-    // Phase B (#255): the central half — scan, decide, initiate. Both
-    // halves of the protocol spawn here, behind the one entry point the
-    // neutral module calls.
-    spawner.must_spawn(central_task(sd, identity_hash));
-    sd
-}
 
-#[embassy_executor::task]
-async fn ble_task(
-    sd: &'static Softdevice,
-    server: &'static NotifyAwareServer,
-    identity_hash: [u8; 16],
-) {
     // Publish the identity characteristic value so a connecting peer can
     // read it before exchanging frames over rx/tx.
     let _ = server.inner.reticulum_service.identity_set(&identity_hash);
 
-    // Static-lifetime advertising / scan payloads — nrf-softdevice's
-    // peripheral::advertise_connectable wants &'static slices.
     static ADV_DATA: StaticCell<LegacyAdvertisementPayload> = StaticCell::new();
     static SCAN_DATA: StaticCell<LegacyAdvertisementPayload> = StaticCell::new();
-    let adv = ADV_DATA.init(
+    let adv: &'static LegacyAdvertisementPayload = ADV_DATA.init(
         LegacyAdvertisementBuilder::new()
             .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
             .services_128(ServiceList::Complete, &[RETICULUM_SVC_UUID_LE])
@@ -207,22 +208,8 @@ async fn ble_task(
             )
             .build(),
     );
-    // Individual per-node name: the operator's (#235) if one is set,
-    // `LN-<hex8>` from the identity hash otherwise (#255) — the same
-    // value `crate::ble::set_gap_device_name` writes into the GAP
-    // attribute, taken from `crate::name::boot_gap_name` so the two BLE
-    // surfaces cannot disagree, and the same name the LXMF announce
-    // carries on the mesh (truncated here to `DEVICE_NAME_LEN`, visibly
-    // and on a codepoint boundary). It rides in the SCAN RESPONSE, a
-    // second 31-byte PDU, so it does not compete with the
-    // advertisement's budget.
-    //
-    // Built once, into a `StaticCell` the SoftDevice holds a `&'static`
-    // to for the life of the advertising loop below: that is why a name
-    // set at runtime reaches BLE only at the next boot, and why the
-    // control frame's report says so rather than implying otherwise.
     let name = crate::name::boot_gap_name();
-    let scan = SCAN_DATA.init(
+    let scan: &'static LegacyAdvertisementPayload = SCAN_DATA.init(
         LegacyAdvertisementBuilder::new()
             .full_name(name.as_str())
             .build(),
@@ -233,14 +220,48 @@ async fn ble_task(
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
-            "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={}",
+            "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={} periph_links={}",
             adv.as_ref().len(),
             scan.as_ref().len(),
             LEGACY_AD_CAPACITY,
             u8::from(CAPABILITY_AD[3] & CAP_PERIPHERAL_ONLY != 0),
+            super::PERIPH_LINKS,
         ),
     );
 
+    for index in 0..super::PERIPH_LINKS {
+        spawner.must_spawn(peripheral_task(sd, server, adv, scan, index));
+    }
+    // Phase B (#255): the central half — scan, decide, initiate. Both
+    // halves of the protocol spawn here, behind the one entry point the
+    // neutral module calls.
+    spawner.must_spawn(central_task(sd, identity_hash));
+    sd
+}
+
+/// Serializes the advertise phase across the peripheral tasks: the
+/// SoftDevice runs ONE advertising set (`adv_set_count: 1`), so exactly
+/// one free task may hold `advertise_connectable` at a time. On a
+/// connect the winner releases the lock and serves its session; the
+/// next free task takes over the advertisement, which is what keeps the
+/// board connectable while any slot is free (#372). With every slot in
+/// a session nobody holds the lock and nothing advertises — a full
+/// board is honestly silent rather than accepting a connection it
+/// would immediately have to refuse.
+static ADV_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
+/// One incoming-link slot: advertise (serialized on [`ADV_LOCK`]),
+/// accept, serve the session, repeat. `index` is the task's identity in
+/// the logs and its carrier-wake latch; the session itself is keyed by
+/// its drain slot, as every session is.
+#[embassy_executor::task(pool_size = super::PERIPH_LINKS)]
+async fn peripheral_task(
+    sd: &'static Softdevice,
+    server: &'static NotifyAwareServer,
+    adv: &'static LegacyAdvertisementPayload,
+    scan: &'static LegacyAdvertisementPayload,
+    index: usize,
+) {
     let incoming_tx = BLE_INCOMING.sender();
 
     loop {
@@ -253,26 +274,47 @@ async fn ble_task(
         if !crate::media::ble_active() {
             crate::log::log_fmt(
                 "[BLE ] ",
-                format_args!("BLE_CARRIER_GATE role=peripheral state=off"),
+                format_args!("BLE_CARRIER_GATE role=peripheral adv={index} state=off"),
             );
-            super::carrier_on(CarrierWaiter::Peripheral).await;
+            super::carrier_on(CarrierWaiter::Peripheral(index)).await;
             crate::log::log_fmt(
                 "[BLE ] ",
-                format_args!("BLE_CARRIER_GATE role=peripheral state=on"),
+                format_args!("BLE_CARRIER_GATE role=peripheral adv={index} state=on"),
             );
         }
-        let config = peripheral::Config::default();
-        let advertisement = peripheral::ConnectableAdvertisement::ScannableUndirected {
-            adv_data: adv.as_ref(),
-            scan_data: scan.as_ref(),
+        let conn = {
+            let _adv_turn = ADV_LOCK.lock().await;
+            // The carrier can flip off while this task waits for the
+            // lock; back to the gate rather than advertising a
+            // switched-off carrier onto the air.
+            if !crate::media::ble_active() {
+                continue;
+            }
+            let config = peripheral::Config::default();
+            let advertisement = peripheral::ConnectableAdvertisement::ScannableUndirected {
+                adv_data: adv.as_ref(),
+                scan_data: scan.as_ref(),
+            };
+            match select(
+                peripheral::advertise_connectable(sd, advertisement, &config),
+                super::carrier_off(CarrierWaiter::Peripheral(index)),
+            )
+            .await
+            {
+                Either::First(Ok(conn)) => Some(conn),
+                Either::First(Err(_)) => None,
+                // Carrier switched off while advertising: dropping the
+                // advertise future is what stops the advertisement (the
+                // SoftDevice cancels it on drop). The gate above then
+                // holds the loop.
+                Either::Second(()) => continue,
+            }
+            // The lock drops here: a session must not hold the
+            // advertisement hostage, and a failed advertise must not
+            // spin-hold it through its backoff.
         };
-        match select(
-            peripheral::advertise_connectable(sd, advertisement, &config),
-            super::carrier_off(CarrierWaiter::Peripheral),
-        )
-        .await
-        {
-            Either::First(Ok(conn)) => {
+        match conn {
+            Some(conn) => {
                 crate::info!("BLE: connected");
                 gatt_events(&conn, server, &incoming_tx).await;
                 // The ATT MTU the peer and we settled on, reported here
@@ -285,14 +327,9 @@ async fn ble_task(
                 // answered by reading crate source.
                 crate::info!("BLE: disconnected att_mtu={}", conn.att_mtu());
             }
-            Either::First(Err(_)) => {
+            None => {
                 Timer::after_millis(1000).await;
             }
-            // Carrier switched off while advertising: dropping the
-            // advertise future is what stops the advertisement (the
-            // SoftDevice cancels it on drop). The gate above then holds
-            // the loop.
-            Either::Second(()) => {}
         }
     }
 }
@@ -472,7 +509,7 @@ async fn gatt_events(
     if let Either3::Third(()) = select3(
         inbound,
         outbound,
-        super::carrier_off(CarrierWaiter::Peripheral),
+        super::carrier_off(CarrierWaiter::Session(slot_index)),
     )
     .await
     {
@@ -571,8 +608,8 @@ pub struct ReticulumClient {
 /// (service UUID + capability record), so scan requests would spend
 /// airtime to learn a name we do not use (v2.2 §Discovery Phase:
 /// matching is by service UUID, never by name). The radio is shared
-/// with our own advertising and up to two live connections; 30 %
-/// leaves the SoftDevice scheduler room for both.
+/// with our own advertising and up to four live connections; 30 %
+/// leaves the SoftDevice scheduler room for all of them.
 const SCAN_INTERVAL_625US: u32 = 160;
 const SCAN_WINDOW_625US: u32 = 48;
 
@@ -592,8 +629,8 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 const DUPLICATE_ADDR_TTL: Duration = Duration::from_secs(120);
 
 /// The addresses [`DUPLICATE_ADDR_TTL`] talks about. Small and flat:
-/// at most one phone and one neighbour are linked, so duplicates are
-/// rare; the table only has to bridge one rotation interval.
+/// at most [`MAX_LINKS`] peers are linked, so duplicates are rare; the
+/// table only has to bridge one rotation interval.
 struct RecentDuplicates {
     entries: [Option<(u64, Instant)>; MAX_LINKS],
 }
@@ -1020,7 +1057,7 @@ async fn run_central_session(
     if let Either3::Third(()) = select3(
         inbound,
         outbound,
-        super::carrier_off(CarrierWaiter::Central),
+        super::carrier_off(CarrierWaiter::Session(slot_index)),
     )
     .await
     {

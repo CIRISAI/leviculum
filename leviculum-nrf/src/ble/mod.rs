@@ -50,17 +50,20 @@
 //!
 //! # Architecture notes (carried over from the trouble-host migration)
 //!
-//! - One task per role: the peripheral task's
-//!   `peripheral::advertise_connectable` produces a Connection, then
-//!   `gatt_server::run(&conn, &server, |evt| { ... })` drives a callback
-//!   closure for incoming writes. Outgoing notifications use
+//! - One task per link: each of the [`PERIPH_LINKS`] peripheral tasks'
+//!   `peripheral::advertise_connectable` produces a Connection (the
+//!   tasks serialize on one advertising lock — the SoftDevice runs a
+//!   single advertising set — so exactly one free task advertises at a
+//!   time and a connect hands the lock to the next free one, #372),
+//!   then `gatt_server::run(&conn, &server, |evt| { ... })` drives a
+//!   callback closure for incoming writes. Outgoing notifications use
 //!   `gatt_server::notify_value(conn, handle, &data)` sync, one fragment
 //!   at a time, flow-controlled against the SoftDevice's per-connection
 //!   HVN queue (see [`notify`]). The central task (phase B) holds the
 //!   same shape with the GATT roles mirrored. Concurrent inbound +
 //!   outbound is via embassy_futures::select inside the connection
 //!   lifetime; each task carries at most one connection, which is what
-//!   holds `conn_count = 2` structurally.
+//!   holds `conn_count` = [`CONN_COUNT`] structurally.
 //! - SoftDevice owns RADIO/TIMER0/RTC0/etc.; we don't bind those.
 //!   USB VBUS detect goes via `SoftwareVbusDetect` fed by SoC events.
 //!
@@ -93,21 +96,39 @@ bind_interrupts!(pub struct Irqs {
     USBD => embassy_nrf::usb::InterruptHandler<peripherals::USBD>;
 });
 
-/// Concurrent BLE connections the SoftDevice is configured for.
+/// Incoming (peripheral-role) BLE links accepted concurrently
+/// (Codeberg #372).
 ///
-/// Two (#255 phase B, Ausbaustufe 1): the phone on the peripheral slot
-/// plus ONE neighbour LNode we initiate to on the central slot. The
-/// design headroom recorded on the issue is 4. The RAM consequence was
-/// paid in phase A — see the `memory.x` header, and the A3
-/// `SD_RAM_FLOOR` boot check judges this configuration against the
-/// linked floor on every boot.
-const CONN_COUNT: u8 = 2;
+/// Three, on both bins: with one slot, two boards beside a phone pair
+/// with each other first and the phone can only reach the board whose
+/// single slot is still free — the 2026-09-07/08 field failure. The RAM
+/// bill is paid in `memory.x` (both bins share it and the SoftDevice
+/// cost is board-independent), and the measured stack floor leaves
+/// ~74 KiB of headroom after it, so nothing forces a smaller Pocket
+/// value. One advertising set serves all slots: the peripheral tasks
+/// serialize on [`columba`]'s advertising lock, so a free slot keeps
+/// the board connectable while the busy ones run their sessions.
+pub(crate) const PERIPH_LINKS: usize = 3;
+
+/// Outgoing (central-role) links this node initiates. Stays at one
+/// (#372 step 4): a board dials at most one neighbour at a time, the
+/// central task's sequential scan→connect→session loop holds that
+/// structurally, and no field topology has yet needed more — raising it
+/// is a budget question (`memory.x`) before it is a code change.
+const CENTRAL_LINKS: usize = 1;
+
+/// Concurrent BLE connections the SoftDevice is configured for:
+/// every incoming slot plus the initiated one. The boot-time
+/// `SD_RAM_FLOOR` check judges this configuration against the linked
+/// ceiling on every boot.
+const CONN_COUNT: u8 = (PERIPH_LINKS + CENTRAL_LINKS) as u8;
 
 /// Slots in the per-connection HVN drain table ([`HVN_DRAIN`]).
 ///
-/// Sized to the design headroom rather than to today's [`CONN_COUNT`]:
-/// the table is a handful of bytes per slot, and sizing it once means
-/// raising `conn_count` is a SoftDevice-config change and nothing else.
+/// The #255 design headroom of 4 that this table was pre-sized to is
+/// now spent: #372 raised [`CONN_COUNT`] to meet it, so every slot is
+/// claimable. Growing further means growing both together (and paying
+/// the `memory.x` bill first).
 pub const MAX_LINKS: usize = 4;
 
 // A table smaller than the SoftDevice's connection count would refuse a
@@ -171,10 +192,14 @@ pub enum PeerEvent {
 /// path table — on separate channels the `Up` could win the race, see
 /// the still-standing direct entry, skip the pull, and then have the
 /// `Lost` cull re-arm exactly the trap the pull exists to clear.
-static BLE_PEER_EVENTS: Channel<CriticalSectionRawMutex, PeerEvent, 4> = Channel::new();
+/// Depth 8: a carrier-off teardown drops every live link at once, and
+/// with [`CONN_COUNT`] = 4 that is up to four `Lost` reports in one
+/// burst before the main loop runs — twice that leaves room for the
+/// relink `Up`s that follow (#372).
+static BLE_PEER_EVENTS: Channel<CriticalSectionRawMutex, PeerEvent, 8> = Channel::new();
 
 /// Report a peer transition (see [`BLE_PEER_EVENTS`]). `try_send`: with
-/// the 4-deep queue full the oldest pending report wins and this one is
+/// the 8-deep queue full the oldest pending report wins and this one is
 /// dropped — the affected node then falls back to the pre-#365
 /// behaviour (a dropped `Lost` ages the paths out via ordinary expiry,
 /// a dropped `Up` waits for the peer's periodic announce) rather than
@@ -212,20 +237,40 @@ pub(crate) fn report_peer_event(event: PeerEvent) {
 /// and the advertise/scan futures are dropped and not re-entered until
 /// the carrier reads on again.
 ///
-/// One latch per task, not one shared: `Signal::wait` consumes the
+/// One latch per waiter, not one shared: `Signal::wait` consumes the
 /// latch, so a shared one would wake whichever task polled first and
-/// starve the other. Within a task only one of [`carrier_on`] /
+/// starve the others. Within a waiter only one of [`carrier_on`] /
 /// [`carrier_off`] is ever awaited at a time, and both re-check the
 /// media state after every wake, so a stale latched wake (a LoRa-only
 /// profile change, a flip-and-back while the task was busy) is a no-op.
-static CARRIER_WAKES: [Signal<CriticalSectionRawMutex, ()>; 2] = [Signal::new(), Signal::new()];
+///
+/// The waiters, one latch each: the [`PERIPH_LINKS`] peripheral
+/// advertise/accept tasks, the central scan task, and one per drain
+/// slot for the live sessions (a session's waiter is keyed by its
+/// unique slot, so peripheral and central sessions cannot collide).
+static CARRIER_WAKES: [Signal<CriticalSectionRawMutex, ()>; PERIPH_LINKS + 1 + MAX_LINKS] =
+    [const { Signal::new() }; PERIPH_LINKS + 1 + MAX_LINKS];
 
 /// A protocol task's handle on its carrier-wake latch (see
-/// [`CARRIER_WAKES`]). The discriminant is the latch index.
+/// [`CARRIER_WAKES`]).
 #[derive(Clone, Copy)]
 pub(crate) enum CarrierWaiter {
-    Peripheral = 0,
-    Central = 1,
+    /// Peripheral advertise/accept task `i` (`0..PERIPH_LINKS`).
+    Peripheral(usize),
+    /// The central scan/initiate task.
+    Central,
+    /// A live session, keyed by its drain-table slot.
+    Session(usize),
+}
+
+impl CarrierWaiter {
+    fn index(self) -> usize {
+        match self {
+            CarrierWaiter::Peripheral(i) => i,
+            CarrierWaiter::Central => PERIPH_LINKS,
+            CarrierWaiter::Session(slot) => PERIPH_LINKS + 1 + slot,
+        }
+    }
 }
 
 /// Wake every BLE protocol task to re-read the media profile. Called by
@@ -244,7 +289,7 @@ pub fn note_media_changed() {
 /// session or an advertise/scan future; never resolves while the
 /// carrier stays on.
 pub(crate) async fn carrier_off(waiter: CarrierWaiter) {
-    let wake = &CARRIER_WAKES[waiter as usize];
+    let wake = &CARRIER_WAKES[waiter.index()];
     while crate::media::ble_active() {
         wake.wait().await;
     }
@@ -254,7 +299,7 @@ pub(crate) async fn carrier_off(waiter: CarrierWaiter) {
 /// protocol task's loop, so a switched-off carrier neither advertises
 /// nor scans nor accepts.
 pub(crate) async fn carrier_on(waiter: CarrierWaiter) {
-    let wake = &CARRIER_WAKES[waiter as usize];
+    let wake = &CARRIER_WAKES[waiter.index()];
     while !crate::media::ble_active() {
         wake.wait().await;
     }
@@ -323,7 +368,7 @@ pub struct BleChannels {
     /// `handle_interface_peer_lost` and `Up` to
     /// `handle_interface_peer_up`. See [`BLE_PEER_EVENTS`] for why both
     /// ride one ordered channel.
-    pub peer_event_rx: Receiver<'static, CriticalSectionRawMutex, PeerEvent, 4>,
+    pub peer_event_rx: Receiver<'static, CriticalSectionRawMutex, PeerEvent, 8>,
 }
 
 pub fn channels() -> BleChannels {
@@ -458,18 +503,18 @@ const ATTR_TAB_SIZE: raw::ble_gatts_cfg_attr_tab_size_t = raw::ble_gatts_cfg_att
     attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
 };
 
-/// Role counts. `central_role_count: 1` is the phase-B role flip,
-/// raised together with [`CONN_COUNT`] and with clearing the
-/// `PERIPHERAL_ONLY` advertisement bit in [`columba`] — three spellings
-/// of the one fact "this node can initiate one connection", changed in
-/// the same commit so they cannot drift.
+/// Role counts, fed from [`PERIPH_LINKS`] / [`CENTRAL_LINKS`] so the
+/// SoftDevice grant and the task structure cannot drift: one peripheral
+/// task per incoming slot (#372), one sequential central task
+/// (`central_role_count: 1` was the phase-B role flip, tied to the
+/// cleared `PERIPHERAL_ONLY` advertisement bit in [`columba`]).
 ///
 /// Not a `const`: bindgen's `new_bitfield_1` is a plain `fn`.
 fn role_count_cfg() -> raw::ble_gap_cfg_role_count_t {
     raw::ble_gap_cfg_role_count_t {
         adv_set_count: 1,
-        periph_role_count: 1,
-        central_role_count: 1,
+        periph_role_count: PERIPH_LINKS as u8,
+        central_role_count: CENTRAL_LINKS as u8,
         central_sec_count: 0,
         _bitfield_1: raw::ble_gap_cfg_role_count_t::new_bitfield_1(0),
     }
