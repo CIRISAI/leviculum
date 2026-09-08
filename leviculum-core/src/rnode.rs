@@ -899,6 +899,13 @@ pub fn airtime_ms(payload_bytes: u32, bandwidth_hz: u32, sf: u8, cr: u8) -> u64 
 ///
 /// The on-air preamble is the programmed count plus the fixed 4.25-symbol
 /// tail (sync word + start markers), i.e. `(4*n + 17)/4` symbols.
+///
+/// Returns 0 for degenerate inputs (bandwidth 0, sf 0, or sf above 63), the
+/// same inputs [`compute_bitrate`] and [`derive_preamble_symbols`] reject:
+/// `bandwidth_hz == 0` would divide by zero and `sf > 63` would overflow the
+/// `1u64 << sf` shift. A total function here means a bad config value is
+/// refused where it is read rather than panicking in the arithmetic
+/// (Codeberg #274).
 pub fn airtime_ms_with_preamble(
     payload_bytes: u32,
     bandwidth_hz: u32,
@@ -906,6 +913,9 @@ pub fn airtime_ms_with_preamble(
     cr: u8,
     preamble_symbols: u16,
 ) -> u64 {
+    if sf == 0 || sf > 63 || bandwidth_hz == 0 {
+        return 0;
+    }
     // Symbol time: T_sym = 2^SF / BW (in seconds)
     // We compute in microseconds to avoid floating point.
     // T_sym_us = 2^SF * 1_000_000 / BW
@@ -2715,6 +2725,18 @@ mod tests {
         // 100 bytes at SF12 125kHz CR8, very slow long range
         let ms = airtime_ms(100, 125_000, 12, 8);
         assert!(ms >= 2000, "airtime={ms}ms, expected >2000ms for SF12");
+    }
+
+    #[test]
+    fn airtime_is_total_for_degenerate_inputs() {
+        // A zero bandwidth used to divide by zero; a zero or oversized sf used
+        // to overflow the `1u64 << sf` shift. Both now return 0 rather than
+        // panicking, matching compute_bitrate/derive_preamble_symbols
+        // (Codeberg #274).
+        assert_eq!(airtime_ms_with_preamble(184, 0, 7, 5, 8), 0);
+        assert_eq!(airtime_ms_with_preamble(184, 125_000, 0, 5, 8), 0);
+        assert_eq!(airtime_ms_with_preamble(184, 125_000, 64, 5, 8), 0);
+        assert_eq!(airtime_ms(184, 0, 7, 5), 0);
     }
 
     #[test]
