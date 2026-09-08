@@ -97,6 +97,14 @@ each other first and the phone could only reach the board whose one
 slot was still free: with slots to spare, a neighbour board and a
 phone link to the same relay simultaneously.
 
+The SoftDevice RAM cost of this configuration (`conn_count = 4`,
+periph 3, central 1) is measured, not extrapolated: the S140 wants an
+app RAM base of `0x20005DA0` (23 968 B), 928 B under the linked
+ceiling in `leviculum-nrf/memory.x` (rig T114 `SD_RAM_FLOOR`,
+2026-09-08). The margin is deliberately small — the requirement is a
+fixed, deterministic property of this exact configuration and the
+boot-time `SD_RAM_FLOOR` assert refuses any config that outgrows it.
+
 There is deliberately NO preference of a phone over a board for the
 last free slot. With more slots than nearby peers the policy would
 decide nothing, and deciding it well needs information a connect-time

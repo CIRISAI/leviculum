@@ -216,8 +216,11 @@ pub fn spawn(
     );
 
     // The measured bytes, not the computed ones: if the builder ever
-    // disagrees with `ADV_BYTES_USED`, the capture says so.
-    crate::log::log_fmt(
+    // disagrees with `ADV_BYTES_USED`, the capture says so. Critical
+    // path: this fires once, at boot, before the host's DTR-assert has
+    // opened the runtime drain — the gated `log_fmt` silently dropped
+    // it and the #372 rig proof could not observe its own checkpoint.
+    crate::log::log_fmt_critical(
         "[BLE ] ",
         format_args!(
             "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={} periph_links={}",

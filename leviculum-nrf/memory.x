@@ -81,25 +81,27 @@ MEMORY
      *     wanted_app_ram_base = 0x20003BA8  (15 272 B of SD RAM)
      *
      * 2026-09-08, #372 — conn_count 4, periph 3, central 1 (three
-     * incoming links + one initiated), same att_mtu/event_length. The
-     * two measured points above put one extra connection at
-     *     0x20003BA8 - 0x20002CE0 = 0xEC8 = 3 784 B
-     * so two more connections extrapolate to
-     *     0x20003BA8 + 2 * 0xEC8 = 0x20005938  (22 840 B of SD RAM)
-     *     + 0x800 margin        = 0x20006138
-     *     rounded up to 32-byte alignment = 0x20006140
+     * incoming links + one initiated), same att_mtu/event_length.
+     * MEASURED on the rig T114 (SD_RAM_FLOOR at boot, firmware
+     * ead0bce, 2026-09-08 23:07, rig-run/proof-372-t114.log):
+     *     wanted_app_ram_base = 0x20005DA0  (23 968 B of SD RAM)
+     *     + 928 B margin      = 0x20006140
      *         <- the SD ceiling = ORIGIN(RETAINED); ORIGIN(RAM) is that
      *            plus LENGTH(RETAINED)
+     * (The pre-flash extrapolation from the two points above — 3 784 B
+     * per extra connection, 22 840 B total — undershot by 1 128 B: a
+     * peripheral slot costs more than c1's central-slot delta.)
      *
-     * The margin is 0x800 rather than the usual 0x400 because the two
-     * measured points differ in conn_count AND central_role_count
-     * together — the periph-slot/central-slot split of the per-
-     * connection cost is extrapolated, not measured. The exact number
-     * for THIS configuration is measured on every boot: `assert_sd_
-     * fits_below_retained` (src/ble/mod.rs) probes the real config and
-     * panics with both values if it does not fit, and its SD_RAM_FLOOR
-     * log line carries the true requirement. `src/bin/sd-ram-probe.rs`
-     * cases p2c1/p3c1 measure the curve on a spare board.
+     * The measured margin is 928 B, less than the usual 0x400, and it
+     * does not need to be more: the requirement is a fixed,
+     * deterministic property of this exact configuration, re-measured
+     * on every boot — `assert_sd_fits_below_retained` (src/ble/mod.rs)
+     * probes the real config and panics with both values if it does
+     * not fit, and its SD_RAM_FLOOR log line carries the true
+     * requirement. The margin only has to absorb a deliberate config
+     * change, and the boot assert catches one that outgrows it.
+     * `src/bin/sd-ram-probe.rs` cases p2c1/p3c1 measure the curve on a
+     * spare board.
      *
      * Cost of #372: ORIGIN moves up by
      *     0x20006140 - 0x20003FC0 = 0x2180 = 8 576 B
