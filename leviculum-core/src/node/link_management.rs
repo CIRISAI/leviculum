@@ -42,6 +42,15 @@ enum SegmentAdvance {
     /// segment count for the sender's ResourceCompleted event (1 when the
     /// transfer was never split).
     Done { total_segments: u32 },
+    /// Building or advertising the next segment failed, or the link went away
+    /// mid-transfer. The transfer did NOT complete: the caller emits
+    /// ResourceFailed rather than ResourceCompleted, so an unsent LXMF message
+    /// is not marked Delivered (Codeberg #270). The caller supplies the
+    /// resource hash from the just-completed segment it still holds; LXMF keys
+    /// the failure on the link, not the hash.
+    Failed {
+        error: crate::resource::ResourceError,
+    },
 }
 
 /// Simple message type for sending raw bytes over a channel
@@ -2891,6 +2900,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 let total_segments = match self.advance_outgoing_segments(&link_id, now_ms) {
                     SegmentAdvance::Sent => return,
                     SegmentAdvance::Done { total_segments } => total_segments,
+                    SegmentAdvance::Failed { error } => {
+                        // A mid-transfer segment build or link-away: the
+                        // transfer stopped short, so report failure instead of
+                        // completion. The resource is not put back (Codeberg
+                        // #270).
+                        crate::tracing::debug!(
+                            "Resource segment advance failed: {error}; reporting failure"
+                        );
+                        self.events.push(NodeEvent::ResourceFailed {
+                            link_id,
+                            resource_hash,
+                            error,
+                            is_sender: true,
+                        });
+                        return;
+                    }
                 };
 
                 // Don't put the resource back, transfer is complete.
@@ -2936,8 +2961,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// caller and is not put back; when a next segment exists it replaces the
     /// resource on the link. Returns [`SegmentAdvance::Sent`] when the next
     /// segment was advertised (the caller must not emit ResourceCompleted yet),
-    /// or [`SegmentAdvance::Done`] with the transfer's total segment count when
-    /// there are no more segments (single-segment transfers report 1).
+    /// [`SegmentAdvance::Done`] with the transfer's total segment count when
+    /// there are no more segments (single-segment transfers report 1), or
+    /// [`SegmentAdvance::Failed`] when the next segment could not be built or
+    /// the link went away mid-transfer (Codeberg #270).
     fn advance_outgoing_segments(&mut self, link_id: &LinkId, now_ms: u64) -> SegmentAdvance {
         use crate::packet::PacketContext;
 
@@ -2958,12 +2985,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         let index = plan.next_index();
-        let total_segments = plan.total_segments();
 
         // Build the next segment. Needs an immutable link borrow plus rng.
         let build = {
             let Some(link) = self.links.get(link_id) else {
-                return SegmentAdvance::Done { total_segments };
+                // Link gone before the next segment could be built: the
+                // transfer failed, it did not complete (Codeberg #270).
+                return SegmentAdvance::Failed {
+                    error: crate::resource::ResourceError::LinkClosed,
+                };
             };
             plan.build_segment(index, &link.resource_crypt_params(), &mut self.rng, now_ms)
         };
@@ -2975,7 +3005,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 if let Some(link) = self.links.get_mut(link_id) {
                     link.clear_outgoing_resource();
                 }
-                return SegmentAdvance::Done { total_segments };
+                return SegmentAdvance::Failed { error: e };
             }
         };
 
@@ -2983,7 +3013,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         plan.advance();
 
         let Some(link) = self.links.get_mut(link_id) else {
-            return SegmentAdvance::Done { total_segments };
+            // Link gone after the segment was built: still a failed transfer.
+            return SegmentAdvance::Failed {
+                error: crate::resource::ResourceError::LinkClosed,
+            };
         };
         link.set_outgoing_resource(outgoing);
         link.set_outgoing_segments(plan);
