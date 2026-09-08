@@ -61,7 +61,7 @@ MEMORY
      * RAM ORIGIN must equal ORIGIN(RETAINED) + LENGTH(RETAINED),
      * 32-byte aligned — the ASSERTs below hold both edges.
      */
-    RETAINED : ORIGIN = 0x20003FC0, LENGTH = 0xC80
+    RETAINED : ORIGIN = 0x20006140, LENGTH = 0xC80
 
     /*
      * RAM ORIGIN is, under flip-link, our stack's FLOOR (`_stack_end`).
@@ -79,26 +79,36 @@ MEMORY
      * central 1, att_mtu 256, event_length 24, i.e. the phase-B
      * configuration (phone + one neighbour LNode):
      *     wanted_app_ram_base = 0x20003BA8  (15 272 B of SD RAM)
-     *     + 0x400 margin      = 0x20003FA8
-     *     rounded up to 32-byte alignment = 0x20003FC0
+     *
+     * 2026-09-08, #372 — conn_count 4, periph 3, central 1 (three
+     * incoming links + one initiated), same att_mtu/event_length. The
+     * two measured points above put one extra connection at
+     *     0x20003BA8 - 0x20002CE0 = 0xEC8 = 3 784 B
+     * so two more connections extrapolate to
+     *     0x20003BA8 + 2 * 0xEC8 = 0x20005938  (22 840 B of SD RAM)
+     *     + 0x800 margin        = 0x20006138
+     *     rounded up to 32-byte alignment = 0x20006140
      *         <- the SD ceiling = ORIGIN(RETAINED); ORIGIN(RAM) is that
      *            plus LENGTH(RETAINED)
      *
-     * The 0x400 margin is deliberately kept rather than spent: the
-     * previous ceiling carried it, and a configuration that outgrows
-     * the ceiling is a board that panics at boot (see `assert_sd_fits_
-     * below_retained` in src/ble/mod.rs, which compares against
-     * `__sretained` = ORIGIN(RETAINED)). The alignment round-up
-     * preserves the 32-byte property this file has always had; nothing
-     * requires more than 8 bytes.
+     * The margin is 0x800 rather than the usual 0x400 because the two
+     * measured points differ in conn_count AND central_role_count
+     * together — the periph-slot/central-slot split of the per-
+     * connection cost is extrapolated, not measured. The exact number
+     * for THIS configuration is measured on every boot: `assert_sd_
+     * fits_below_retained` (src/ble/mod.rs) probes the real config and
+     * panics with both values if it does not fit, and its SD_RAM_FLOOR
+     * log line carries the true requirement. `src/bin/sd-ram-probe.rs`
+     * cases p2c1/p3c1 measure the curve on a spare board.
      *
-     * Cost, paid HERE in phase A rather than in phase B, so the stack
-     * consequence of the central role is measurable before the role
-     * exists (#255 phase A / A4): ORIGIN moves up by
-     *     0x20003FC0 - 0x200030E0 = 0xEE0 = 3 808 B
+     * Cost of #372: ORIGIN moves up by
+     *     0x20006140 - 0x20003FC0 = 0x2180 = 8 576 B
      * and the stack region — [_stack_end, __sdata), everything below
-     * .data — shrinks by exactly that. Phase B then raises conn_count
-     * and central_role_count with no change to this file.
+     * .data — shrinks by exactly that. Against the measured stack
+     * floor that is cheap: the T114 long-run [STACK] watermark reads
+     * min_free ~= 82 900 of a 115 552-byte region (proof-370/-373 rig
+     * logs, 2026-09-08), so ~74 KiB of never-touched stack remain
+     * after this move.
      *
      * Lower bound: S140 v7 reserves the bottom 8 KiB (0x20000000-
      * 0x20001FFF) for MBR + master-init scratch; cannot probe below
@@ -111,11 +121,11 @@ MEMORY
      * register access from RawHwRng, fixed in commit f093099). Worth
      * re-running 64 KiB with the f093099 build to confirm.
      *
-     * Leaves 256K - 15.9K SD - 3.1K retained = 236.9K (0x3B3C0) for
-     * application: 0x20004C40 = 0x20003FC0 + 0xC80 (RETAINED), and
-     * 0x20004C40 + 0x3B3C0 = 0x20040000, the top of RAM.
+     * Leaves 256K - 24.3K SD - 3.1K retained = 228.6K (0x39240) for
+     * application: 0x20006DC0 = 0x20006140 + 0xC80 (RETAINED), and
+     * 0x20006DC0 + 0x39240 = 0x20040000, the top of RAM.
      */
-    RAM   : ORIGIN = 0x20004C40, LENGTH = 0x3B3C0
+    RAM   : ORIGIN = 0x20006DC0, LENGTH = 0x39240
 }
 
 /* The retained section itself. NOLOAD: no image content, and neither

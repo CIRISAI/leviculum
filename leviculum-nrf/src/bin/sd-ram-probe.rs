@@ -48,7 +48,7 @@ struct Case {
     att_mtu: u16,
 }
 
-const CASES: [Case; 7] = [
+const CASES: [Case; 9] = [
     // Exactly the shipped config (ble.rs `init`): today's requirement,
     // hence today's headroom against the linked RAM ORIGIN.
     Case {
@@ -102,6 +102,26 @@ const CASES: [Case; 7] = [
         conn_count: 4,
         periph_role_count: 1,
         central_role_count: 3,
+        central_sec_count: 0,
+        att_mtu: 256,
+    },
+    // The #372 steps: N incoming (peripheral) links plus the one
+    // initiated central link. p3c1 is the shipped configuration; these
+    // two cases measure the periph-slot cost the memory.x extrapolation
+    // (from c1's central-slot delta) only estimates.
+    Case {
+        name: "p2c1",
+        conn_count: 3,
+        periph_role_count: 2,
+        central_role_count: 1,
+        central_sec_count: 0,
+        att_mtu: 256,
+    },
+    Case {
+        name: "p3c1",
+        conn_count: 4,
+        periph_role_count: 3,
+        central_role_count: 1,
         central_sec_count: 0,
         att_mtu: 256,
     },
