@@ -473,6 +473,45 @@ mod tests {
         assert_eq!(router.handle_at(999), None, "beyond the table is free");
     }
 
+    /// The #372 fan-out view at full occupancy: with all four slots
+    /// claimed, `handle_at` names every live link (that iteration IS
+    /// the firmware's per-link queue fan-out), each slot's drain edge
+    /// still reaches only its own waiter, and a release makes exactly
+    /// that slot disappear from the fan-out.
+    #[test]
+    fn four_claims_fan_out_and_drain_independently() {
+        let router: DrainRouter<4> = DrainRouter::new();
+        let handles = [0x10u16, 0x11, 0x12, 0x13];
+        let slots: Vec<&DrainSlot> = handles
+            .iter()
+            .map(|&h| router.claim(h).expect("slot"))
+            .collect();
+        let live: Vec<Option<u16>> = (0..4).map(|i| router.handle_at(i)).collect();
+        assert_eq!(live, handles.iter().copied().map(Some).collect::<Vec<_>>());
+
+        // One drain, one waiter: slot 2's edge wakes slot 2 alone.
+        let mut waits: Vec<_> = slots.iter().map(|s| Box::pin(s.wait())).collect();
+        for w in waits.iter_mut() {
+            assert_eq!(poll_once!(w), Poll::Pending);
+        }
+        assert!(router.drained(0x12));
+        for (i, w) in waits.iter_mut().enumerate() {
+            let expected = if i == 2 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            };
+            assert_eq!(poll_once!(w), expected, "slot {i}");
+        }
+
+        // A released link leaves the fan-out; the rest stay.
+        router.release(0x11);
+        assert_eq!(router.handle_at(1), None);
+        assert_eq!(router.claimed(), 3);
+        assert_eq!(router.handle_at(0), Some(0x10));
+        assert_eq!(router.handle_at(3), Some(0x13));
+    }
+
     #[test]
     fn releasing_an_unknown_handle_leaves_every_claim_alone() {
         let router: DrainRouter<2> = DrainRouter::new();

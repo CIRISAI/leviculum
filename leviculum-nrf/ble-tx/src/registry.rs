@@ -168,6 +168,27 @@ mod tests {
         assert_eq!(losses, vec![A]);
     }
 
+    /// The #372 shape: every slot filled by a different identity — a
+    /// phone and three boards. Each is an arrival, the count says four,
+    /// and losing one leaves the other three linked and untouched.
+    #[test]
+    fn n_identities_fill_n_slots_and_one_loss_leaves_n_minus_one() {
+        const C: [u8; 16] = [0xcc; 16];
+        const D: [u8; 16] = [0xdd; 16];
+        let mut reg = PeerRegistry::<4>::new();
+        for (slot, id) in [A, B, C, D].into_iter().enumerate() {
+            assert!(reg.link_up(slot, id), "each identity's first link");
+        }
+        assert_eq!(reg.peer_count(), 4);
+
+        assert_eq!(reg.link_down(1), Some(B), "B's only link is a loss");
+        assert_eq!(reg.peer_count(), 3);
+        for id in [A, C, D] {
+            assert!(reg.is_linked(&id), "the others are untouched");
+        }
+        assert!(!reg.is_linked(&B));
+    }
+
     /// The mirrored peer count is DISTINCT identities: a displaced
     /// identity on two slots is one peer, and a slot gap does not
     /// confuse the count.
