@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnflash --watch` records a board's debug log for field testing: it
+  opens the debug CDC with DTR and RTS raised, prefixes every line
+  with a wall-clock ISO-8601 timestamp, appends to `--out` flushed per
+  line, and reconnects with bounded backoff when the port vanishes
+  (reset, reflash, unplug), logging the gap as its own line. `lnflash
+  --summarize <file>` reads a watch file back and prints receptions
+  per class per hour (announce, data, path request) plus the last line
+  seen per class.
+
 - An LNode now answers a Sideband telemetry request: an LXMF message
   from the configured target carrying the `TELEMETRY_REQUEST` command
   triggers an immediate report, rate-limited to one request-triggered

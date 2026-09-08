@@ -366,6 +366,28 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// The host's UTC offset at `unix_secs`, in seconds, from the C library's
+/// local time (which reads the TZ database). Asked per timestamp rather
+/// than once, so a DST change during a long watch moves the offset with
+/// it. `0` when the conversion fails — the stamp then names the same
+/// instant, just written as UTC, which is the honest fallback.
+///
+/// Lives here because `localtime_r` is a raw libc call; the ISO-8601
+/// rendering that consumes this is pure and tested in `watch`.
+pub fn utc_offset_secs(unix_secs: i64) -> i64 {
+    // The `time_t` deprecation warns about musl going 64-bit; this cast
+    // already assumes the 64-bit width, so the rename changes nothing.
+    #[allow(deprecated)]
+    let t = unix_secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the call; localtime_r writes
+    // only into `tm` and returns NULL on failure.
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return 0;
+    }
+    tm.tm_gmtoff
+}
+
 /// A scripted serial device for tests: a pseudo-terminal whose slave path
 /// the code under test opens like a board's transport CDC, while a stub
 /// thread plays the device on the master end. Lives here because the pty
@@ -431,6 +453,20 @@ pub(crate) mod testpty {
     }
 
     impl Pty {
+        /// Write raw bytes from the device side, no HDLC framing: what a
+        /// board's debug CDC does, a text log rather than a framed
+        /// transport. Dropping the `Pty` afterwards closes the master and
+        /// the slave reads EOF — but the pty discards bytes still queued
+        /// at that moment, so a test must have read everything it wrote
+        /// before it drops this.
+        pub fn write_raw(&self, data: &[u8]) {
+            self.master
+                .try_clone()
+                .expect("cloning the pty master")
+                .write_all(data)
+                .expect("writing raw bytes");
+        }
+
         /// Put a frame on the wire from the device side without the
         /// device having been asked for it.
         ///

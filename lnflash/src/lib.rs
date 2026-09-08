@@ -31,6 +31,7 @@ pub mod name;
 pub mod position;
 pub mod radio;
 pub mod softdevice;
+pub mod summarize;
 pub mod sys;
 pub mod telemetry;
 pub mod transport;
@@ -38,6 +39,7 @@ pub mod uf2;
 pub mod ui;
 pub mod usb;
 pub mod verify;
+pub mod watch;
 
 // The committed sysfs fixture tree encodes ':' as '+' (NTFS cannot check a
 // colon out); this helper materializes the decoded tree for unit tests.

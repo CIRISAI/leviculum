@@ -170,6 +170,42 @@ struct Cli {
     )]
     clear_name: bool,
 
+    /// Watch a running board's debug log (the CDC at if00, opened with
+    /// DTR and RTS raised — without them the port reads as silent) and
+    /// prefix every line with an ISO-8601 wall-clock timestamp. Keeps
+    /// reading across resets, reflashes and unplugs: the gap is logged as
+    /// its own line and the port is reopened with a bounded backoff,
+    /// never exiting on EOF. With no value and exactly one running board,
+    /// that board; with several, name a serial (or a bus port like
+    /// 3-2.4); a value containing a slash is opened directly as a serial
+    /// port path. Runs until interrupted. No daemon, no background mode:
+    /// run it in a terminal, or under nohup yourself.
+    #[arg(
+        long,
+        value_name = "SERIAL",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name"]
+    )]
+    watch: Option<String>,
+
+    /// Append every watched line to this file as well as stdout, flushed
+    /// per line so a crash loses nothing. The file is the evidence a
+    /// field walk leaves; --summarize reads it back.
+    #[arg(long, value_name = "FILE", requires = "watch")]
+    out: Option<PathBuf>,
+
+    /// Read a --watch file and print, per hour, how many LoRa receptions
+    /// of each class it holds (announce, data, path request), plus the
+    /// last line seen per class. A view over the watch file — the watch
+    /// itself never filters.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = ["watch", "out", "set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name"]
+    )]
+    summarize: Option<PathBuf>,
+
     /// Configure the telemetry target on every running LNode, then exit.
     /// No flashing — activation is configuration, not firmware. Takes the
     /// --telemetry / --telemetry-profile / --telemetry-key / --no-telemetry
@@ -392,6 +428,24 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         console = Console::new(cli.quiet);
         &mut console
     };
+
+    if let Some(file) = &cli.summarize {
+        let text = std::fs::read_to_string(file)
+            .map_err(|err| format!("reading {}: {err}", file.display()))?;
+        print!("{}", lnflash::summarize::report(&text));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Some(selector) = &cli.watch {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        lnflash::watch::watch(&catalogue, &sysfs, selector, cli.out.as_deref(), cli.quiet)?;
+        // Reached only when a test connector stops the loop; a real watch
+        // ends with Ctrl-C or a watch-file write error.
+        return Ok(ExitCode::SUCCESS);
+    }
 
     if cli.set_time {
         let sysfs = match &cli.sysfs {
@@ -1078,6 +1132,87 @@ mod tests {
         assert_eq!(name_flags(&["--clear-name"]).unwrap(), (None, true));
         let err = name_flags(&["--set-name", "Balkon", "--clear-name"]).unwrap_err();
         assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // Watch and summarize (Codeberg #365's field-walk evidence)
+    // -----------------------------------------------------------------
+
+    fn watch_flags(args: &[&str]) -> Result<(Option<String>, Option<PathBuf>), String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok((cli.watch, cli.out))
+    }
+
+    #[test]
+    fn no_watch_flag_means_the_session_does_not_run_at_all() {
+        assert_eq!(watch_flags(&[]).unwrap(), (None, None));
+        assert_eq!(watch_flags(&["--yes"]).unwrap(), (None, None));
+    }
+
+    /// The bare flag is "the one board that is attached", which must be
+    /// distinguishable from the flag being absent.
+    #[test]
+    fn the_bare_watch_flag_is_the_one_board_form_and_not_an_absent_flag() {
+        assert_eq!(watch_flags(&["--watch"]).unwrap().0, Some(String::new()));
+        assert_ne!(watch_flags(&["--watch"]).unwrap().0, None);
+    }
+
+    #[test]
+    fn the_watch_selector_and_out_file_are_carried_verbatim() {
+        assert_eq!(
+            watch_flags(&["--watch", "183004F712B4A7FE", "--out", "/tmp/walk.log"]).unwrap(),
+            (
+                Some("183004F712B4A7FE".to_string()),
+                Some(PathBuf::from("/tmp/walk.log"))
+            )
+        );
+        // A path selects a port directly; the slash must survive clap.
+        assert_eq!(
+            watch_flags(&["--watch", "/dev/ttyACM1"]).unwrap().0,
+            Some("/dev/ttyACM1".to_string())
+        );
+    }
+
+    #[test]
+    fn an_out_file_without_a_watch_is_a_usage_error() {
+        // --out names where a watch writes; alone it would silently do
+        // nothing.
+        let err = watch_flags(&["--out", "/tmp/walk.log"]).unwrap_err();
+        assert!(err.contains("--watch"), "{err}");
+    }
+
+    #[test]
+    fn the_watch_session_does_not_combine_with_the_configure_sessions() {
+        for args in [
+            vec!["--watch", "--set-time"],
+            vec!["--watch", "--set-telemetry"],
+            vec!["--watch", "--set-tx-spacing", "60"],
+            vec!["--watch", "--set-tx-power", "14"],
+            vec!["--watch", "--set-position", "52.52,13.40"],
+            vec!["--watch", "--clear-position"],
+            vec!["--watch", "--set-media", "lora=on"],
+            vec!["--watch", "--set-name", "Balkon"],
+            vec!["--watch", "--clear-name"],
+        ] {
+            let err = watch_flags(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn summarizing_and_watching_are_two_commands() {
+        // One reads a finished file, the other produces it; combined,
+        // the summary would race its own input.
+        for args in [
+            vec!["--summarize", "/tmp/walk.log", "--watch"],
+            vec!["--summarize", "/tmp/walk.log", "--out", "/tmp/walk.log"],
+            vec!["--summarize", "/tmp/walk.log", "--set-time"],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()));
+            let err = cli.map(|_| ()).unwrap_err().to_string();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
     }
 
     #[test]

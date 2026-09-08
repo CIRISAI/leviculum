@@ -632,33 +632,64 @@ fn reachable_boards(
 /// re-enumeration kills the fd with EIO rather than retargeting it. A
 /// by-id path narrows the resolve-to-open window; this closes it.
 fn open_transport(sysfs: &Sysfs, device: &Device, tty: &Path) -> io::Result<crate::sys::Fd> {
+    open_interface(
+        sysfs,
+        device,
+        tty,
+        radio::TRANSPORT_INTERFACE,
+        "transport port",
+        "nothing was sent",
+    )
+}
+
+/// [`open_transport`] for the debug CDC (if00): same proof, and DTR+RTS
+/// raised the same way — the debug port transmits only with both set.
+pub(crate) fn open_debug(sysfs: &Sysfs, device: &Device, tty: &Path) -> io::Result<crate::sys::Fd> {
+    open_interface(
+        sysfs,
+        device,
+        tty,
+        crate::watch::DEBUG_INTERFACE,
+        "debug port",
+        "nothing was read",
+    )
+}
+
+fn open_interface(
+    sysfs: &Sysfs,
+    device: &Device,
+    tty: &Path,
+    interface: u8,
+    what: &str,
+    consequence: &str,
+) -> io::Result<crate::sys::Fd> {
     let fd = crate::sys::Fd::open_serial(tty)?;
-    fd.set_transport_port()?;
+    if interface == crate::watch::DEBUG_INTERFACE {
+        fd.set_debug_port()?;
+    } else {
+        fd.set_transport_port()?;
+    }
     let Some(current) = sysfs
         .devices()?
         .into_iter()
         .find(|d| d.is_same_board(device))
     else {
         return Err(io::Error::other(format!(
-            "{} is no longer on the bus; nothing was sent",
+            "{} is no longer on the bus; {consequence}",
             device.name
         )));
     };
-    let Some(tty_name) = current
-        .interface(radio::TRANSPORT_INTERFACE)
-        .and_then(|i| i.tty.clone())
-    else {
+    let Some(tty_name) = current.interface(interface).and_then(|i| i.tty.clone()) else {
         return Err(io::Error::other(format!(
-            "{} has no transport port (if{:02}) any more; nothing was sent",
-            current.name,
-            radio::TRANSPORT_INTERFACE
+            "{} has no {what} (if{interface:02}) any more; {consequence}",
+            current.name
         )));
     };
     let expected = sysfs.dev_path(&tty_name);
     let expected_rdev = std::os::unix::fs::MetadataExt::rdev(&std::fs::metadata(&expected)?);
     if fd.rdev()? != expected_rdev {
         return Err(io::Error::other(format!(
-            "{} re-enumerated: its transport port is {} now, not {}; nothing was sent",
+            "{} re-enumerated: its {what} is {} now, not {}; {consequence}",
             current.name,
             expected.display(),
             tty.display()

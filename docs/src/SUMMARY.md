@@ -39,6 +39,7 @@
 - [lnstest command-line utility](guide/lnstest.md)
 - [lncp file transfer](guide/lncp.md)
 - [lnstatus network status](guide/lnstatus.md)
+- [Field testing](guide/field-testing.md)
 - [Manual page: lnsd(1)](man/lnsd.1.md)
 - [Manual page: lnstest(1)](man/lnstest.1.md)
 - [Manual page: lncp(1)](man/lncp.1.md)
@@ -46,6 +47,7 @@
 - [Manual page: lnprobe(1)](man/lnprobe.1.md)
 - [Manual page: lnomad(1)](man/lnomad.1.md)
 - [Manual page: lblogd(1)](man/lblogd.1.md)
+- [Manual page: lnflash(1)](man/lnflash.1.md)
 
 # Firmware (LNode)
 
