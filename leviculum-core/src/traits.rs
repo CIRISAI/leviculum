@@ -1025,6 +1025,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         assert!(storage.get_path(&hash).is_none());

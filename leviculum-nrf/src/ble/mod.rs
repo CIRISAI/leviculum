@@ -129,8 +129,17 @@ const QUEUE_DEPTH: usize = 4;
 /// queues use it.
 type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
 
+/// An inbound packet with the peer link it arrived through (Codeberg
+/// #365): the identity hash the peer presented in the handshake — the
+/// same 16 bytes the peer events report — or `None` for bytes that
+/// arrived before the handshake completed. The main loop passes it to
+/// `NodeCore::handle_packet_from_peer` so path entries learned over
+/// this link are attributable when the link dies, even when the
+/// announce identity differs from the link identity (Columba).
+type InboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
+
 // Channels between the BLE tasks and the binaries' main loop.
-static BLE_INCOMING: PacketQueue = Channel::new();
+static BLE_INCOMING: InboundQueue = Channel::new();
 static BLE_OUTGOING: PacketQueue = Channel::new();
 
 /// A peer-link transition report toward the main loop (Codeberg #365).
@@ -308,7 +317,7 @@ async fn tx_fanout_task() -> ! {
 }
 
 pub struct BleChannels {
-    pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
     pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
     /// `handle_interface_peer_lost` and `Up` to
@@ -352,7 +361,13 @@ impl Interface for BleInterface {
         564
     }
     fn is_online(&self) -> bool {
-        crate::media::ble_active()
+        // Online means "a frame handed to this interface can reach a
+        // peer": the carrier must be on AND at least one link must be
+        // live — with no link the fan-out drops every packet silently
+        // (see `tx_fanout_task`). The main loop mirrors this into the
+        // core, where a path over an offline interface is no path
+        // (Codeberg #365).
+        crate::media::ble_active() && HVN_DRAIN.claimed() > 0
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
         // The media profile, applied at the interface — see the LoRa

@@ -96,6 +96,7 @@ fn app_proof_leaves_on_ingress_interface() {
             interface_index: sender_iface,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         },
     );
     let recv_pub = receiver

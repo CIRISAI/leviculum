@@ -98,8 +98,11 @@ pub async fn notify_fragments<'a, F>(
             }
             Action::Abort { index, reason } => {
                 report_tx_drop(
-                    kind,
-                    packet_len,
+                    DropSite {
+                        kind,
+                        packet_len,
+                        conn: conn.handle().unwrap_or(u16::MAX),
+                    },
                     index,
                     fragment_count,
                     &tx,
@@ -138,8 +141,11 @@ pub async fn notify_fragments<'a, F>(
             // dropped packet is the exact bug this function removes.
             Action::Nothing => {
                 report_tx_drop(
-                    kind,
-                    packet_len,
+                    DropSite {
+                        kind,
+                        packet_len,
+                        conn: conn.handle().unwrap_or(u16::MAX),
+                    },
                     tx.fragments_sent(),
                     fragment_count,
                     &tx,
@@ -162,9 +168,19 @@ pub async fn notify_fragments<'a, F>(
 /// The trailing `t=` is not written here: `log_fmt` appends it to every
 /// line, from the same `Instant::now()`. This call site used to write
 /// its own, which after that change rendered the field twice.
-fn report_tx_drop(
-    kind: &str,
+/// What identifies one drop line beyond the state machine's own
+/// counters: the traffic kind, the packet's size, and the SoftDevice
+/// connection handle of the link the TX targeted (`conn=` — the fan-out
+/// sends one copy per live link, and the 2026-09-08 desk log could not
+/// attribute an `sd_error` without it, #365).
+struct DropSite<'a> {
+    kind: &'a str,
     packet_len: usize,
+    conn: u16,
+}
+
+fn report_tx_drop(
+    site: DropSite<'_>,
     index: usize,
     fragment_count: usize,
     tx: &PacketTx,
@@ -176,14 +192,15 @@ fn report_tx_drop(
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
-            "BLE_TX_DROP kind={} len={} frag={} of={} sent={} reason={} code={} waits={} dropped={}",
-            kind,
-            packet_len,
+            "BLE_TX_DROP kind={} len={} frag={} of={} sent={} reason={} code={} conn={} waits={} dropped={}",
+            site.kind,
+            site.packet_len,
             index,
             fragment_count,
             tx.fragments_sent(),
             reason,
             code,
+            site.conn,
             tx.drain_waits(),
             dropped,
         ),

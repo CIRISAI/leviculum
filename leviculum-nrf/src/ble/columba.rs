@@ -304,7 +304,12 @@ async fn ble_task(
 async fn gatt_events(
     conn: &Connection,
     server: &NotifyAwareServer,
-    incoming_tx: &Sender<'static, CriticalSectionRawMutex, alloc::vec::Vec<u8>, 4>,
+    incoming_tx: &Sender<
+        'static,
+        CriticalSectionRawMutex,
+        (Option<[u8; 16]>, alloc::vec::Vec<u8>),
+        4,
+    >,
 ) {
     // This connection's drain edge. Claimed for the lifetime of the
     // connection and released below, so a reconnect (or a second link,
@@ -335,6 +340,10 @@ async fn gatt_events(
     let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new());
     let handshake_done: Cell<bool> = Cell::new(false);
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
+    // The identity this link's peer presented in the handshake, for
+    // tagging inbound packets with their ingress link (Codeberg #365).
+    // `None` until the handshake lands.
+    let link_peer: Cell<Option<[u8; 16]>> = Cell::new(None);
 
     // This link's private outbound queue (fed by the fan-out; see
     // super::LINK_OUT). Drain packets left over from the slot's
@@ -363,6 +372,7 @@ async fn gatt_events(
                 let mut peer_id = [0u8; 16];
                 peer_id.copy_from_slice(&data);
                 peer_link_up(slot_index, peer_id);
+                link_peer.set(Some(peer_id));
                 handshake_done.set(true);
                 last_keepalive.set(Instant::now());
             } else if data.len() < FRAGMENT_HEADER_SIZE {
@@ -378,7 +388,7 @@ async fn gatt_events(
                         // try_send: if the consumer is slow and the 4-deep
                         // channel is full, drop the packet rather than block
                         // here (we're in a sync closure, can't await).
-                        let _ = incoming_tx.try_send(packet);
+                        let _ = incoming_tx.try_send((link_peer.get(), packet));
                     }
                     DefragResult::NeedMore => {}
                     DefragResult::Error => {
@@ -857,7 +867,7 @@ async fn run_central_session(
         match result {
             DefragResult::Complete(packet) => {
                 crate::info!("BLE: RX {}B", packet.len());
-                let _ = incoming_tx.try_send(packet);
+                let _ = incoming_tx.try_send((Some(peer_id), packet));
             }
             DefragResult::NeedMore => {}
             DefragResult::Error => {

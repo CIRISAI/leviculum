@@ -3175,6 +3175,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: vec![blob],
                 next_hop: Some(via),
+                via_peer: None,
             },
         );
         core.storage_mut().set_reverse(

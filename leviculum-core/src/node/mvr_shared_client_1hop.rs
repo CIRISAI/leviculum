@@ -94,6 +94,7 @@ fn install_path(node: &mut ClientNode, dest: &DestinationHash, hops: u8, iface: 
             interface_index: iface,
             random_blobs: Vec::new(),
             next_hop: Some(NEXT_HOP),
+            via_peer: None,
         },
     );
 }

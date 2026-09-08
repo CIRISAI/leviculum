@@ -1046,9 +1046,15 @@ mod tests {
         // residual is the irreducible cost of an inline insertion sequence
         // (per-slot alignment padding, not the 4-byte counter itself). Tighten
         // or relax this bound deliberately, never by accident.
+        //
+        // Deliberate relaxation 2026-09-08 (Codeberg #365): `PathEntry`
+        // gained `via_peer: Option<[u8; 16]>` — 24 B padded per slot,
+        // 768 B over the 32-slot path table — so the peer-loss cull can
+        // attribute an entry whose announce identity differs from its
+        // link identity (Columba). 43_500 -> 44_300; measured 43_696 B.
         let size = core::mem::size_of::<EmbeddedStorage>();
         assert!(
-            size <= 43_500,
+            size <= 44_300,
             "EmbeddedStorage grew to {size} B; the eviction order tracking must \
              not duplicate full keys (Batch 12 regression was 45616 B)"
         );
@@ -1113,6 +1119,7 @@ mod tests {
             interface_index: 0,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         };
 
         // Fill to capacity (32) with unique keys.
@@ -1150,6 +1157,7 @@ mod tests {
             interface_index: 0,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         };
 
         assert!(s.get_path(&hash).is_none());
@@ -1174,6 +1182,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
         }
@@ -1190,6 +1199,7 @@ mod tests {
                 interface_index: 1,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         assert_eq!(s.path_count(), 32);
@@ -1276,6 +1286,7 @@ mod tests {
             interface_index: 0,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         }
     }
     fn mk_announce(seed: u8) -> AnnounceEntry {

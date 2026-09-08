@@ -1077,6 +1077,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         assert_eq!(s.path_count(), 1);
@@ -1102,6 +1103,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         s.set_path(
@@ -1112,6 +1114,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         assert_eq!(s.earliest_path_expiry(), Some(1000));
@@ -1368,6 +1371,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -1710,6 +1714,7 @@ mod tests {
             interface_index: iface,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         };
 
         s.set_path(h1, make_path(0));
@@ -1768,6 +1773,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         let (dump, total) = s.diagnostic_dump();

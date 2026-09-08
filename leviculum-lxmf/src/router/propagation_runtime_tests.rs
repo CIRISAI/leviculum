@@ -573,6 +573,7 @@ fn incomplete_restored_propagation_path_is_removed_before_recovery_request() {
             interface_index: 0,
             random_blobs: Vec::new(),
             next_hop: None,
+            via_peer: None,
         },
     );
     let lxmf = LxmfNode::register(&mut core, delivery, LxmfNodeConfig::default())

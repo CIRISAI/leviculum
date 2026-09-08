@@ -229,6 +229,7 @@ fn check_path_table_eviction() {
         interface_index: 0,
         random_blobs: Vec::new(),
         next_hop: None,
+        via_peer: None,
     };
 
     let mut s = EmbeddedStorage::new();
@@ -263,6 +264,7 @@ fn check_path_table_refresh() {
         interface_index: 0,
         random_blobs: Vec::new(),
         next_hop: None,
+        via_peer: None,
     };
 
     let mut s = EmbeddedStorage::new();

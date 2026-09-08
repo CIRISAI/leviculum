@@ -1045,6 +1045,7 @@ mod tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         assert_eq!(CoreStorage::get_path(&storage, &dest).unwrap().hops, 2);

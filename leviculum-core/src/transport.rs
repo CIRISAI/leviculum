@@ -1724,6 +1724,28 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Populated by the driver at registration time, removed on interface down.
     interface_names: BTreeMap<usize, String>,
 
+    /// Interfaces whose driver currently reports `is_online() == false`
+    /// (Codeberg #365). A missing entry means online — the default, so a
+    /// driver that never mirrors its interface state keeps today's
+    /// behaviour. A path entry over an offline interface does not count
+    /// as a path ([`Self::has_path`]) and is refused by
+    /// [`Self::send_to_destination`]: Python's per-interface
+    /// `process_outgoing` is gated on `self.online`, and Python culls
+    /// paths whose attached interface is gone (Transport.py:784-785);
+    /// our runtime media switch turns a carrier off without detaching
+    /// the interface, so the equivalent statement lives at the path
+    /// lookup.
+    offline_interfaces: BTreeSet<usize>,
+
+    /// The peer link the packet currently being processed arrived
+    /// through, as reported by a multi-peer interface (Codeberg #365).
+    /// Set for the duration of one `process_incoming_from_peer` call
+    /// and stamped onto path entries installed from announces, so the
+    /// peer-loss cull can attribute an entry whose announce identity
+    /// differs from the link identity (Columba presents different
+    /// identities at the two layers).
+    ingress_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+
     /// Per-interface Reticulum propagation mode (Python `Interface.mode`).
     /// Keyed by interface index. Only non-`Full` interfaces are stored; a
     /// missing entry means `InterfaceMode::Full` (the default). Set from config
@@ -1958,6 +1980,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // announce_rate_table: migrated to Storage
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
+            offline_interfaces: BTreeSet::new(),
+            ingress_peer: None,
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
             interface_ingress_control: BTreeMap::new(),
@@ -2080,7 +2104,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     // Path Management
     /// Check if we have a path to a destination
     pub fn has_path(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
-        self.storage.has_path(dest_hash)
+        // A path over an offline interface is no path (Codeberg #365):
+        // answering true here sends the caller into `send_to_destination`,
+        // which refuses it — answering false sends the caller into its
+        // no-path arm (withhold + path request), which is the recovery.
+        self.storage
+            .get_path(dest_hash)
+            .is_some_and(|p| self.interface_online(p.interface_index))
     }
 
     /// Get the hop count to a destination
@@ -2329,6 +2359,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         announce_verified: bool,
     ) -> Result<(), TransportError> {
         self.process_incoming_inner(interface_index, raw, precomputed_hash, announce_verified)
+    }
+
+    /// Like [`process_incoming`](Self::process_incoming), additionally
+    /// naming the peer link the bytes arrived through on a multi-peer
+    /// interface (Codeberg #365). The peer id is the same 16 bytes the
+    /// interface reports on peer-up/peer-lost; announces processed
+    /// within this call stamp it on the path entries they install, so
+    /// [`Self::drop_paths_via_peer`] can attribute them when the link
+    /// dies — identity match or not.
+    pub fn process_incoming_from_peer(
+        &mut self,
+        interface_index: usize,
+        peer: [u8; TRUNCATED_HASHBYTES],
+        raw: &[u8],
+    ) -> Result<(), TransportError> {
+        self.ingress_peer = Some(peer);
+        let result = self.process_incoming_inner(interface_index, raw, None, false);
+        self.ingress_peer = None;
+        result
     }
 
     fn process_incoming_inner(
@@ -2968,6 +3017,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 path.next_hop,
             )
         };
+
+        // A path over an offline interface is no path (Codeberg #365): the
+        // desk test of 2026-09-08 17:20 routed a telemetry report onto a
+        // BLE interface whose carrier was switched off, and the interface's
+        // carrier-off `try_send` returned Ok — a silent black hole counted
+        // as sent. Refusing here sends every caller into its no-path arm.
+        if !self.interface_online(interface_index) {
+            crate::tracing::debug!(
+                event = "OUTBOUND_WITHHELD",
+                dst = %HexShort(dest_hash),
+                iface = %self.iface_name(interface_index),
+                next_hop = ?next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+                reason = "iface-offline",
+            );
+            return Err(TransportError::NoPath);
+        }
+        // The routing decision, stated once per originated packet so a log
+        // can distinguish "sent to a live carrier" from "sent to a dead
+        // one" from "not sent" (Codeberg #365).
+        crate::tracing::debug!(
+            event = "OUTBOUND_ROUTE",
+            dst = %HexShort(dest_hash),
+            iface = %self.iface_name(interface_index),
+            next_hop = ?next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+            online = "y",
+        );
 
         // Consult the next-slot backchannel: if the interface is not yet
         // ready for an MTU-sized packet, return PacingDelay with the exact
@@ -3677,14 +3752,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///
     /// An entry is "via `peer`" when that peer is the neighbour we
     /// would hand the packet to:
+    /// - entries stamped with the peer's link as `via_peer` were
+    ///   learned through it (`process_incoming_from_peer`) — the
+    ///   authoritative attribution, and the only one that works when
+    ///   the peer's link identity differs from the identity signing
+    ///   its announces (Columba, desk test 2026-09-08 17:17:43);
     /// - relayed entries name the relaying transport in `next_hop` —
     ///   the same identity hash the peer presents in the Columba
     ///   handshake and stamps as `transport_id` on announces it relays;
     /// - direct entries (`next_hop == None`) belong to the announcing
     ///   identity itself, recalled from the cached announce
     ///   (`recall_identity_hash`). A direct entry whose announce has
-    ///   been evicted from the cache cannot be attributed and is left
-    ///   to ordinary expiry.
+    ///   been evicted from the cache and that carries no `via_peer`
+    ///   stamp cannot be attributed and is left to ordinary expiry.
     pub fn drop_paths_via_peer(
         &mut self,
         interface_index: usize,
@@ -3696,10 +3776,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .into_iter()
             .filter(|(hash, entry)| {
                 entry.interface_index == interface_index
-                    && match entry.next_hop {
-                        Some(next_hop) => next_hop == *peer,
-                        None => self.recall_identity_hash(hash) == Some(*peer),
-                    }
+                    && (entry.via_peer == Some(*peer)
+                        || match entry.next_hop {
+                            Some(next_hop) => next_hop == *peer,
+                            None => self.recall_identity_hash(hash) == Some(*peer),
+                        })
             })
             .map(|(hash, _)| hash)
             .collect();
@@ -4066,6 +4147,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         interface_index,
                         random_blobs: path.random_blobs.clone(),
                         next_hop: path.next_hop,
+                        via_peer: None,
                     },
                 );
                 self.mark_path_unknown_state(&dest_hash);
@@ -4677,6 +4759,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     interface_index,
                     random_blobs,
                     next_hop: packet.transport_id,
+                    // The peer link this announce arrived through, when a
+                    // multi-peer interface named one (Codeberg #365): the
+                    // peer-loss cull attributes by it, so a Columba entry
+                    // whose announce identity differs from its link
+                    // identity is still cullable.
+                    via_peer: self.ingress_peer,
                 },
             );
             let readback_ok = self.storage.get_path(&dest_hash).is_some();
@@ -6479,6 +6567,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
 
+        // A caller asking for a path while the table holds an entry over
+        // an OFFLINE interface is saying that entry does not serve
+        // (Codeberg #365). Mark it unresponsive so the answer — often the
+        // same cached announce emission at more hops, relayed by a
+        // neighbour — is accepted as the alternative route (the
+        // Transport.py:1677-1679 arm in handle_announce) instead of
+        // losing the hop-count comparison to the stale entry.
+        if let Some(entry) = self.storage.get_path(dest_hash) {
+            if !self.interface_online(entry.interface_index) {
+                self.storage
+                    .set_path_state(*dest_hash, PathState::Unresponsive);
+            }
+        }
+
         // Rate limiting
         if let Some(last_request) = self.storage.get_path_request_time(dest_hash) {
             if now.saturating_sub(last_request) < PATH_REQUEST_MIN_INTERVAL_MS {
@@ -6679,6 +6781,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Remove interface name (called during handle_interface_down cleanup).
     pub fn remove_interface_name(&mut self, id: usize) {
         self.interface_names.remove(&id);
+    }
+
+    // Public: Interface online mirror (Codeberg #365)
+    /// Mirror an interface's `is_online()` into the transport (called by
+    /// the driver whenever it can — per main-loop pass on the firmware).
+    /// Online is the default, so `true` is stored as a removal and a
+    /// driver that never calls this keeps every interface online.
+    pub fn set_interface_online(&mut self, id: usize, online: bool) {
+        if online {
+            self.offline_interfaces.remove(&id);
+        } else {
+            self.offline_interfaces.insert(id);
+        }
+    }
+
+    /// Whether the driver currently reports this interface online. See
+    /// [`Self::set_interface_online`]; an interface nobody mirrored is
+    /// online.
+    pub fn interface_online(&self, id: usize) -> bool {
+        !self.offline_interfaces.contains(&id)
     }
 
     // Public: Interface Mode API (Codeberg #91)
@@ -9625,6 +9747,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -9647,6 +9770,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -9692,6 +9816,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -9760,6 +9885,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -9873,6 +9999,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -10455,6 +10582,7 @@ mod tests {
                     interface_index: learned_on_iface,
                     random_blobs: Vec::new(),
                     next_hop: Some(dummy_dest(0xEE)),
+                    via_peer: None,
                 },
             );
         }
@@ -11115,6 +11243,7 @@ mod tests {
                         interface_index: 0,
                         random_blobs: Vec::new(),
                         next_hop: None,
+                        via_peer: None,
                     },
                 );
                 assert!(
@@ -11282,6 +11411,7 @@ mod tests {
                         interface_index: 0,
                         random_blobs: Vec::new(),
                         next_hop: Some(*node_b.identity.hash()),
+                        via_peer: None,
                     },
                 );
 
@@ -11407,6 +11537,7 @@ mod tests {
                         interface_index: 1,
                         random_blobs: Vec::new(),
                         next_hop: None,
+                        via_peer: None,
                     },
                 );
 
@@ -11501,6 +11632,7 @@ mod tests {
                         interface_index: 0,
                         random_blobs: Vec::new(),
                         next_hop: None,
+                        via_peer: None,
                     },
                 );
 
@@ -14309,6 +14441,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some([0xEE; TRUNCATED_HASHBYTES]),
+                    via_peer: None,
                 },
             );
 
@@ -14366,6 +14499,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some([0xEE; TRUNCATED_HASHBYTES]),
+                    via_peer: None,
                 },
             );
 
@@ -14859,6 +14993,7 @@ mod tests {
                     hops: 0,
                     expires_ms: now + 600_000,
                     random_blobs: Vec::new(),
+                    via_peer: None,
                 },
             );
 
@@ -15669,6 +15804,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -15727,6 +15863,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop_hash),
+                    via_peer: None,
                 },
             );
 
@@ -15792,6 +15929,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -15953,6 +16091,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop_relay),
+                    via_peer: None,
                 },
             );
 
@@ -16298,6 +16437,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop_hash),
+                    via_peer: None,
                 },
             );
 
@@ -16393,6 +16533,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -16750,6 +16891,7 @@ mod tests {
                     interface_index: idx,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -16784,6 +16926,7 @@ mod tests {
                     interface_index: idx,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop),
+                    via_peer: None,
                 },
             );
 
@@ -16847,6 +16990,7 @@ mod tests {
                     interface_index: idx,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop),
+                    via_peer: None,
                 },
             );
 
@@ -17322,6 +17466,7 @@ mod tests {
                     interface_index: idx,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -19534,6 +19679,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop_hash),
+                    via_peer: None,
                 },
             );
 
@@ -19603,6 +19749,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: Some(next_hop_hash),
+                    via_peer: None,
                 },
             );
 
@@ -20472,6 +20619,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20509,6 +20657,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
             assert!(transport.mark_path_unresponsive(&dest_hash));
@@ -20528,6 +20677,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
             assert!(
@@ -20664,6 +20814,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20719,6 +20870,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20767,6 +20919,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20818,6 +20971,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20906,6 +21060,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -20960,6 +21115,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -21034,6 +21190,7 @@ mod tests {
                     interface_index: 0,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -21835,6 +21992,7 @@ mod tests {
                     interface_index: 1,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -21963,6 +22121,7 @@ mod tests {
                     interface_index: 0,
                     expires_ms: u64::MAX,
                     random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
                 },
             );
             // first_hop_extra = 0 (no bitrate, single hop)
@@ -21985,6 +22144,7 @@ mod tests {
                     interface_index: iface_idx,
                     expires_ms: u64::MAX,
                     random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
                 },
             );
             // first_hop_extra = 500 * 8 * 1000 / 976 = 4098 ms
@@ -22006,6 +22166,7 @@ mod tests {
                     interface_index: 0,
                     expires_ms: u64::MAX,
                     random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
                 },
             );
             // first_hop_extra = 500 * 8 * 1000 / 300 = 13333 ms
@@ -22028,6 +22189,7 @@ mod tests {
                     interface_index: iface_idx,
                     expires_ms: u64::MAX,
                     random_blobs: alloc::vec::Vec::new(),
+                    via_peer: None,
                 },
             );
 
@@ -22646,6 +22808,7 @@ mod tests {
                     interface_index: LOCAL_CLIENT_IFACE,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -22711,6 +22874,7 @@ mod tests {
                     interface_index: NETWORK_IFACE,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
 
@@ -26212,6 +26376,7 @@ mod tests {
                     next_hop: None,
                     expires_ms: 1000 + 3_600_000,
                     random_blobs: vec![],
+                    via_peer: None,
                 },
             );
 
@@ -26421,6 +26586,7 @@ mod tests {
                     next_hop: None,
                     expires_ms: 1000 + 3_600_000,
                     random_blobs: vec![],
+                    via_peer: None,
                 },
             );
 
@@ -27136,6 +27302,7 @@ mod tests {
                 interface_index: 1,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -28482,6 +28649,7 @@ mod table_export_tests {
                     interface_index: idx,
                     random_blobs: Vec::new(),
                     next_hop: None,
+                    via_peer: None,
                 },
             );
         }
@@ -28529,6 +28697,7 @@ mod table_export_tests {
                 interface_index: 0,
                 random_blobs: vec![older, newer],
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -28547,6 +28716,7 @@ mod table_export_tests {
                 interface_index: 0,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         let row = t

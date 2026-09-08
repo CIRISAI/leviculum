@@ -551,7 +551,7 @@ async fn main(spawner: Spawner) {
             }
         };
 
-        match select4(
+        let wake = select4(
             select4(
                 serial.incoming_rx.receive(),
                 lora_channels.incoming_rx.receive(),
@@ -569,8 +569,18 @@ async fn main(spawner: Spawner) {
             ),
             telemetry_tick,
         )
-        .await
-        {
+        .await;
+        // Mirror each interface's is_online() into the core (#365): a
+        // path over an offline interface is no path, so a report due
+        // while a carrier is off (or peerless, for BLE) falls through
+        // to a path request instead of a silent carrier-off drop. After
+        // the await, not at the loop top: a `--set-media ble=off` lands
+        // in another task while this one sleeps, and the arm below must
+        // route with the state as it is NOW.
+        node.set_interface_online(0, serial_iface.is_online());
+        node.set_interface_online(1, lora_iface.is_online());
+        node.set_interface_online(2, ble_iface.is_online());
+        match wake {
             Either4::Second(unix) => {
                 // A GNSS fix carrying UTC. The seam applies the same
                 // sanity window as every other time source; a refusal is
@@ -706,14 +716,20 @@ async fn main(spawner: Spawner) {
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
-            Either4::First(Either4::Third(Either::First(data))) => {
+            Either4::First(Either4::Third(Either::First((peer, data)))) => {
                 info!("BLE RX {} bytes", data.len());
                 // See the LoRa arm: a medium switched off at runtime
                 // delivers nothing upward either.
                 if !leviculum_nrf::media::ble_active() {
                     continue;
                 }
-                let output = node.handle_packet(InterfaceId(2), &data);
+                // Name the ingress link when the handshake did (#365):
+                // paths learned through it become attributable to the
+                // peer when the link dies.
+                let output = match peer {
+                    Some(peer) => node.handle_packet_from_peer(InterfaceId(2), peer, &data),
+                    None => node.handle_packet(InterfaceId(2), &data),
+                };
                 if !output.actions.is_empty() {
                     info!("BLE RX -> {} actions", output.actions.len());
                 }

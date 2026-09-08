@@ -38,6 +38,14 @@ pub struct PathEntry {
     pub random_blobs: Vec<[u8; crate::constants::RANDOM_HASHBYTES]>,
     /// Identity hash of the next relay hop (from announce transport_id)
     pub next_hop: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// The peer link the installing announce arrived through, as reported
+    /// by a multi-peer interface (Codeberg #365) — the same 16 bytes the
+    /// interface reports on peer-up/peer-lost. `None` when the carrier has
+    /// no peer links (LoRa, serial) or the driver did not name one. Lets
+    /// the peer-loss cull attribute an entry whose announce identity
+    /// differs from the link identity (Columba presents different
+    /// identities at the two layers).
+    pub via_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 }
 
 impl PathEntry {

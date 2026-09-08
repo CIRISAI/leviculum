@@ -144,6 +144,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PKT_LOCAL",
         required_keys: &["dst", "iface", "matched"],
     },
+    // Codeberg #365: the routing decision for an ORIGINATED packet, one
+    // line per `send_to_destination`, so a log distinguishes "sent to a
+    // live carrier" from "withheld because the path's interface is
+    // offline" — the firmware's `[TELEMETRY] send` line is the same
+    // statement on the debug port (docs/src/structured-event-logs.md).
+    EventSchema {
+        name: "OUTBOUND_ROUTE",
+        required_keys: &["dst", "iface", "next_hop", "online"],
+    },
+    EventSchema {
+        name: "OUTBOUND_WITHHELD",
+        required_keys: &["dst", "iface", "next_hop", "reason"],
+    },
     EventSchema {
         name: "PKT_DROP",
         required_keys: &["dst", "hops", "iface_in", "ph", "reason", "type"],

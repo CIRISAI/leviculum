@@ -1257,9 +1257,57 @@ impl Reporter {
         };
 
         if !node.has_path(&hash) {
+            // No usable route. Distinguish "no entry at all" from "entry
+            // over an offline interface" (#365) — both fall through to a
+            // path request, which the broadcast puts on the carriers that
+            // are still online.
+            let reason = if node.path_route(&hash).is_some() {
+                "iface-offline"
+            } else {
+                "no-path"
+            };
             actions.extend(node.request_path(&hash).actions);
-            self.withhold("no-path");
+            self.withhold(reason);
             return actions;
+        }
+
+        // The routing decision, stated at the moment it is made (#365):
+        // a capture must show "sent to a live carrier" (this line,
+        // online=y, then the `report` line once the dispatch settles),
+        // "handed to a dead one" (online=n — unreachable while the
+        // has_path gate above holds, kept honest in case of a race) and
+        // "not sent" (the `report withheld` line) as three different
+        // shapes. Frozen in docs/src/structured-event-logs.md.
+        if let Some((iface_idx, next_hop, online)) = node.path_route(&hash) {
+            let mut next_hop_hex = [0u8; 4];
+            let next_hop = match next_hop {
+                Some(nh) => {
+                    next_hop_hex.copy_from_slice(&nh[..4]);
+                    Some(u32::from_be_bytes(next_hop_hex))
+                }
+                None => None,
+            };
+            match next_hop {
+                Some(nh) => crate::log::log_fmt_critical(
+                    "[INFO!] ",
+                    format_args!(
+                        "[TELEMETRY] send dst={:08x} via={} next_hop={:08x} online={}",
+                        self.target_short(),
+                        node.interface_name(iface_idx).unwrap_or("?"),
+                        nh,
+                        if online { "y" } else { "n" }
+                    ),
+                ),
+                None => crate::log::log_fmt_critical(
+                    "[INFO!] ",
+                    format_args!(
+                        "[TELEMETRY] send dst={:08x} via={} next_hop=direct online={}",
+                        self.target_short(),
+                        node.interface_name(iface_idx).unwrap_or("?"),
+                        if online { "y" } else { "n" }
+                    ),
+                ),
+            }
         }
 
         match node.send_single_packet(&hash, &on_air) {

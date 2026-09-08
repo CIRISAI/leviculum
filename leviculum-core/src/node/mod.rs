@@ -54,6 +54,8 @@ mod mvr_app_proof_ingress_iface;
 #[cfg(test)]
 mod mvr_bidir_transfer;
 #[cfg(test)]
+mod mvr_ble_cull_identity_mismatch;
+#[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
@@ -87,6 +89,8 @@ mod mvr_lrproof;
 mod mvr_lrproof_echo_storm;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
+#[cfg(test)]
+mod mvr_offline_iface_no_path;
 #[cfg(test)]
 mod mvr_orphaned_path_cache;
 #[cfg(test)]
@@ -1899,6 +1903,34 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// Like [`handle_packet`](Self::handle_packet), but naming the peer
+    /// link the bytes arrived through on a multi-peer interface
+    /// (Codeberg #365). `peer` is the same identity hash the interface
+    /// reports on peer-up/peer-lost; path entries installed from
+    /// announces in this call carry it, so
+    /// [`handle_interface_peer_lost`](Self::handle_interface_peer_lost)
+    /// can attribute them even when the announce identity differs from
+    /// the link identity (Columba presents different identities at the
+    /// two layers).
+    pub fn handle_packet_from_peer(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        peer: [u8; TRUNCATED_HASHBYTES],
+        data: &[u8],
+    ) -> crate::transport::TickOutput {
+        if let Err(e) = self
+            .transport
+            .process_incoming_from_peer(iface.0, peer, data)
+        {
+            crate::tracing::trace!(
+                "Failed to process incoming packet on {}: {}",
+                self.transport.iface_name(iface.0),
+                e
+            );
+        }
+        self.process_events_and_actions()
+    }
+
     /// Like [`handle_packet`](Self::handle_packet), but with the dedup
     /// SHA-256 already computed by the caller over `data` (leviculum#29: the
     /// std driver computes it before taking the node lock). Ignored — and
@@ -2335,6 +2367,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.own_tunnel_ids()
     }
 
+    /// Mirror an interface's `is_online()` into the core (Codeberg #365).
+    ///
+    /// A path entry over an offline interface does not count as a path:
+    /// `has_path` reads false and `send_to_destination` refuses it, so a
+    /// sender falls through to its no-path arm (withhold + path request)
+    /// instead of handing the packet to a carrier that silently drops it.
+    /// Unlike [`handle_interface_down`](Self::handle_interface_down) this
+    /// removes nothing — the moment the driver reports the interface back
+    /// online the same entries route again.
+    pub fn set_interface_online(&mut self, iface: usize, online: bool) {
+        self.transport.set_interface_online(iface, online);
+    }
+
+    /// Whether the driver currently reports this interface online (see
+    /// [`set_interface_online`](Self::set_interface_online)).
+    pub fn interface_online(&self, iface: usize) -> bool {
+        self.transport.interface_online(iface)
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
@@ -2400,6 +2451,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Remove local client flag, interface name and HW_MTU
         // (after logging so the name is still available above)
         self.transport.set_local_client(iface_idx, false);
+        // Forget the online mirror too: online is the default, and a later
+        // interface re-registered under this index must not inherit a stale
+        // offline flag (Codeberg #365).
+        self.transport.set_interface_online(iface_idx, true);
         self.transport.remove_interface_name(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
@@ -2760,6 +2815,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Get the hop count to a destination
     pub fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8> {
         self.transport.hops_to(dest_hash.as_bytes())
+    }
+
+    /// The raw routing decision for `dest_hash`, for a sender's log line
+    /// (Codeberg #365): `(interface index, next hop, interface online)`.
+    /// `None` when the path table holds no entry at all — unlike
+    /// [`has_path`](Self::has_path), which also reads false for an entry
+    /// over an offline interface, this reports that entry, so the log can
+    /// distinguish "no path" from "path over a dead carrier".
+    pub fn path_route(
+        &self,
+        dest_hash: &DestinationHash,
+    ) -> Option<(usize, Option<[u8; TRUNCATED_HASHBYTES]>, bool)> {
+        self.transport
+            .get_path_clone(dest_hash.as_bytes())
+            .map(|p| {
+                (
+                    p.interface_index,
+                    p.next_hop,
+                    self.transport.interface_online(p.interface_index),
+                )
+            })
     }
 
     /// Returns the current ratchet public key for a registered destination.
@@ -6868,6 +6944,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -6996,6 +7073,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -7104,6 +7182,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         let recalled = Identity::from_public_key_bytes(&recv_pub_bytes).unwrap();
@@ -7221,6 +7300,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -7310,6 +7390,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -7516,6 +7597,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -7636,6 +7718,7 @@ mod tests {
                 interface_index: sender_iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
 
@@ -7760,6 +7843,7 @@ mod tests {
                 interface_index: iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         let pub_identity = Identity::from_public_key_bytes(&recv_pub_bytes).unwrap();
@@ -7809,6 +7893,7 @@ mod tests {
                 interface_index: iface,
                 random_blobs: Vec::new(),
                 next_hop: None,
+                via_peer: None,
             },
         );
         let pub_identity = Identity::from_public_key_bytes(&recv_pub_bytes).unwrap();
