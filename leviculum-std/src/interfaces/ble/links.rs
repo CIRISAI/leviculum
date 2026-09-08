@@ -875,6 +875,76 @@ mod tests {
         assert_eq!(last, Inbound::Packet(packet));
     }
 
+    /// The #372 question, answered for lnsd: the peripheral side holds
+    /// two centrals CONCURRENTLY. Both handshake, both links are live at
+    /// once, their interleaved fragment streams reassemble on separate
+    /// per-link state, the outbound fan-out serves both through the
+    /// shared notify pipe at the smaller MTU, and losing one central
+    /// leaves the other untouched. (The BlueZ layer above imposes no
+    /// stricter limit: the advertisement stays registered while centrals
+    /// are connected, writes arrive keyed by device address, and one
+    /// notify reaches every subscriber — so this table IS the admission
+    /// bound, `max_links` = 4 by default.)
+    #[test]
+    fn two_centrals_hold_concurrent_peripheral_links() {
+        let mut t = table();
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &ID_A, 100),
+            Inbound::HandshakeComplete {
+                identity: ID_A,
+                displaced: None
+            }
+        );
+        assert_eq!(
+            t.peripheral_frame(ADDR_2, 23, &ID_B, 200),
+            Inbound::HandshakeComplete {
+                identity: ID_B,
+                displaced: None
+            },
+            "the second central is admitted while the first is live"
+        );
+        assert_eq!(t.link_count(), 2);
+        assert!(t.knows_identity(&ID_A) && t.knows_identity(&ID_B));
+
+        // Interleaved multi-fragment traffic from both centrals: each
+        // link reassembles on its own defragmenter, nothing crosses.
+        let pkt_a: Vec<u8> = vec![0xA5; 300];
+        let pkt_b: Vec<u8> = vec![0x5B; 300];
+        let frags_a = fragment_packet(&pkt_a, 185);
+        let frags_b = fragment_packet(&pkt_b, 23);
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &frags_a[0], 300),
+            Inbound::NeedMore
+        );
+        let mut last_b = Inbound::NeedMore;
+        for frag in &frags_b {
+            last_b = t.peripheral_frame(ADDR_2, 23, frag, 301);
+        }
+        assert_eq!(last_b, Inbound::Packet(pkt_b));
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &frags_a[1], 302),
+            Inbound::Packet(pkt_a),
+            "B's whole stream in between did not touch A's reassembly"
+        );
+        assert!(t.take_abandon_reports().is_empty());
+
+        // Outbound: one shared notify pipe, fragmented at the MINIMUM
+        // peripheral MTU so the smaller subscriber gets whole fragments.
+        let out: Vec<u8> = vec![0x77; 100];
+        let plan = t.plan_tx(&out);
+        assert_eq!(
+            plan.notify_fragments.len(),
+            100usize.div_ceil(payload_per_fragment(23))
+        );
+        assert!(plan.central.is_empty());
+
+        // One central disconnecting is one loss; the other link stands.
+        assert_eq!(t.remove_by_addr(&ADDR_2).map(|(id, ..)| id), Some(ID_B));
+        assert!(!t.knows_identity(&ID_B));
+        assert!(t.knows_identity(&ID_A), "the first central is untouched");
+        assert_eq!(t.link_count(), 1);
+    }
+
     #[test]
     fn a_rejected_peripheral_handshake_does_not_open_a_link() {
         let mut t = table();
