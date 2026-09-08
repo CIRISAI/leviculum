@@ -98,6 +98,8 @@ mod mvr_path_response_hops;
 #[cfg(test)]
 mod mvr_path_response_retries;
 #[cfg(test)]
+mod mvr_peer_link_reorigination;
+#[cfg(test)]
 mod mvr_peer_up_pull;
 #[cfg(test)]
 mod mvr_pending_local_path_requests;
@@ -425,14 +427,30 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// a path for (Codeberg #365); see
     /// [`handle_interface_peer_up`](Self::handle_interface_peer_up).
     ///
-    /// Default `["lxmf.delivery"]`: the Columba mesh is the current
-    /// user-visible goal, and its phones answer a path request for their
-    /// delivery destination with an announce while announcing on neither
-    /// connect nor reconnect (M1 measurement, ledger 365). A peer without
-    /// that destination simply does not answer — the cost of a wrong guess
-    /// is one 48-byte packet on one interface. Configurable so a second
-    /// well-known aspect can be added without a code change
-    /// ([`NodeCoreBuilder::peer_up_pull_names`]).
+    /// Default EMPTY: the pull derives `D(name, handshake identity)`, and
+    /// against the reference stacks the handshake identity is the wrong
+    /// key for that derivation. Columba's Identity characteristic /
+    /// handshake carries `Transport.identity.hash` (the ble-reticulum
+    /// reference checkout: `BLEInterface`'s
+    /// `_start_advertising_when_identity_ready`, and the spec
+    /// `BLE_PROTOCOL_v2.2.md` §Identity Handshake Protocol), and
+    /// Python-RNS's transport identity is a standalone keypair created
+    /// at `transport_identity`, Transport.py:218-225 —
+    /// cryptographically unrelated to the LXMF identity its
+    /// `lxmf.delivery` destination is derived from, and not mappable to
+    /// it locally. Field measurement 2026-09-08 (ledger 365): every pull
+    /// to the phone asked for a destination the phone does not have, and
+    /// `paths=0` held for 70 s. The bench proofs passed only because our
+    /// own stacks hand their single node identity to the handshake
+    /// (`leviculum-nrf/src/bin/t114.rs`, lnsd's BLE interface), so for
+    /// them handshake identity == LXMF identity. An operator running a
+    /// fleet of such nodes can re-enable the pull
+    /// ([`NodeCoreBuilder::peer_up_pull_names`]); for everyone else the
+    /// peer-link re-origination
+    /// (`Transport::reoriginate_toward_peer_links`) replaces the pull's
+    /// job by forwarding the requester's own — correctly named — path
+    /// request to the peer. The peer-up report itself stays: the
+    /// peer-lost cull attributes path entries by these reports.
     peer_up_pull_names: Vec<String>,
 }
 
@@ -489,7 +507,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             resource_window_policy,
             announce_control: None,
             pending_single_dest_plaintext: None,
-            peer_up_pull_names: alloc::vec![String::from("lxmf.delivery")],
+            peer_up_pull_names: Vec::new(),
         }
     }
 
@@ -2386,6 +2404,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_online(iface)
     }
 
+    /// Mirror an interface's live direct-peer count into the core
+    /// (Codeberg #365), the per-peer sibling of
+    /// [`set_interface_online`](Self::set_interface_online). Fed from
+    /// the interface's own link bookkeeping (the BLE link registry on
+    /// the firmware, the lnsd BLE `LinkTable` via its peer events); an
+    /// interface nobody mirrors stays at zero. A non-zero count marks
+    /// the interface as a peer-link carrier the transport may
+    /// re-originate an unanswerable path request on
+    /// (`Transport::reoriginate_toward_peer_links`).
+    pub fn set_interface_peer_count(&mut self, iface: usize, count: usize) {
+        self.transport.set_interface_peer_count(iface, count);
+    }
+
+    /// The driver-mirrored live direct-peer count (see
+    /// [`set_interface_peer_count`](Self::set_interface_peer_count)).
+    pub fn interface_peer_count(&self, iface: usize) -> usize {
+        self.transport.interface_peer_count(iface)
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
@@ -2453,8 +2490,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_local_client(iface_idx, false);
         // Forget the online mirror too: online is the default, and a later
         // interface re-registered under this index must not inherit a stale
-        // offline flag (Codeberg #365).
+        // offline flag (Codeberg #365). Same for the peer-count mirror,
+        // whose default is zero.
         self.transport.set_interface_online(iface_idx, true);
+        self.transport.set_interface_peer_count(iface_idx, 0);
         self.transport.remove_interface_name(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
@@ -2531,21 +2570,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// announce; the existing announce handling installs the direct entry
     /// (fewer hops beat a stale relayed route) and rebroadcasts it.
     ///
-    /// Why pull at all: a peer that answers path requests for its own
-    /// destinations but does not announce on (re)connect — Columba's
-    /// measured behaviour — leaves a relay that lost its direct entry
-    /// (reboot, or the peer-lost cull after a link flap) holding the
-    /// destination via a third node. A path request from that third node
-    /// then dies in the requestor-is-next-hop guard, reference-identically
-    /// (Transport.py:2958), and the cell stays dark until the peer happens
-    /// to announce. Pulling on peer-up recovers both ways into that trap
-    /// with one packet per event: no retry loop, a missing answer is the
-    /// peer's business.
+    /// The list is EMPTY by default, so the report's routine effect is the
+    /// bookkeeping the peer-lost cull needs: `peer` here is the handshake
+    /// identity, which against reference stacks is the TRANSPORT identity
+    /// — a keypair unrelated to the peer's LXMF identity — so the derived
+    /// `D` names a destination such a peer does not hold (the full
+    /// citation chain lives on the `peer_up_pull_names` field). The
+    /// recovery the pull used to attempt is served by the peer-link
+    /// re-origination instead (`Transport::reoriginate_toward_peer_links`):
+    /// the moment anyone asks this node for the peer's real destination,
+    /// the correctly named request is forwarded over the peer link, which
+    /// the peer answers for its own destination (M1 measurement, ledger
+    /// 365).
     ///
-    /// The direct-entry guard keeps link churn quiet: a relink that never
-    /// culled the path (same-identity displacement is not even reported as
-    /// peer-up by the interfaces) or a peer-up arriving while the direct
-    /// entry still stands produces no request.
+    /// For a configured list, the direct-entry guard keeps link churn
+    /// quiet: a relink that never culled the path (same-identity
+    /// displacement is not even reported as peer-up by the interfaces) or
+    /// a peer-up arriving while the direct entry still stands produces no
+    /// request.
     pub fn handle_interface_peer_up(
         &mut self,
         iface: crate::transport::InterfaceId,

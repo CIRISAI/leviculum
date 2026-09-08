@@ -396,7 +396,8 @@ pub(crate) struct IncomingPacket {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum PeerEvent {
     /// The identity gained its FIRST link on the interface; the loop
-    /// pulls the peer's delivery path (`NodeCore::handle_interface_peer_up`).
+    /// counts it into the core's peer mirror and reports the arrival
+    /// (`NodeCore::handle_interface_peer_up`; the pull there is opt-in).
     Up([u8; 16]),
     /// The identity's LAST link on the interface died; the loop culls
     /// the paths via that peer (`NodeCore::handle_interface_peer_lost`).

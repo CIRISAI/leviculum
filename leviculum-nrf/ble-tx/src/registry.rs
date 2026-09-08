@@ -64,6 +64,25 @@ impl<const N: usize> PeerRegistry<N> {
     pub fn is_linked(&self, peer: &[u8; 16]) -> bool {
         self.slots.iter().flatten().any(|id| id == peer)
     }
+
+    /// The number of DISTINCT live peer identities (Codeberg #365) —
+    /// the value the main loop mirrors into the core as the
+    /// interface's peer count. Distinct, not per-slot: in the
+    /// zombie-displacement window one peer holds two links, and it is
+    /// still one peer.
+    pub fn peer_count(&self) -> usize {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|id| (i, id)))
+            .filter(|(i, id)| {
+                self.slots[..*i]
+                    .iter()
+                    .flatten()
+                    .all(|earlier| earlier != *id)
+            })
+            .count()
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +166,25 @@ mod tests {
         reg.link_up(1, A);
         let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
         assert_eq!(losses, vec![A]);
+    }
+
+    /// The mirrored peer count is DISTINCT identities: a displaced
+    /// identity on two slots is one peer, and a slot gap does not
+    /// confuse the count.
+    #[test]
+    fn peer_count_is_distinct_identities_across_slot_gaps() {
+        let mut reg = PeerRegistry::<4>::new();
+        assert_eq!(reg.peer_count(), 0);
+        reg.link_up(1, A);
+        assert_eq!(reg.peer_count(), 1);
+        // The displacement window: same identity on a second slot.
+        reg.link_up(3, A);
+        assert_eq!(reg.peer_count(), 1, "two links, one peer");
+        reg.link_up(0, B);
+        assert_eq!(reg.peer_count(), 2);
+        reg.link_down(1);
+        assert_eq!(reg.peer_count(), 2, "A still holds slot 3");
+        reg.link_down(3);
+        assert_eq!(reg.peer_count(), 1);
     }
 }

@@ -193,7 +193,8 @@ struct BleTask {
     /// Peer transitions toward the driver loop (Codeberg #365): `Lost`
     /// when an identity's LAST link on this broadcast domain died (the
     /// loop culls the paths via that peer), `Up` when an identity
-    /// gained its FIRST link (the loop pulls the peer's delivery path).
+    /// gained its FIRST link (the loop counts it into the peer mirror
+    /// and runs the opt-in peer-up pull).
     /// One ordered channel for both — see [`PeerEvent`].
     peer_event_tx: mpsc::Sender<(InterfaceId, PeerEvent)>,
     counters: Arc<InterfaceCounters>,

@@ -1737,6 +1737,29 @@ pub struct Transport<C: Clock, S: Storage> {
     /// lookup.
     offline_interfaces: BTreeSet<usize>,
 
+    /// Live direct-peer count per interface, mirrored by the driver the
+    /// same way as [`Self::set_interface_online`] (Codeberg #365). A
+    /// missing entry means zero — the default, so only link-shaped
+    /// carriers that actually track peers (BLE via its link registry,
+    /// and in future TCP client links / IPC) ever appear here. A LoRa
+    /// broadcast domain has no "peers" in this sense and never mirrors
+    /// a count. Read by the peer-link path-request re-origination
+    /// ([`Self::reoriginate_toward_peer_links`]) to decide which
+    /// interfaces are worth asking on behalf of a request we cannot
+    /// answer.
+    interface_peer_counts: BTreeMap<usize, usize>,
+
+    /// Destinations whose pending discovery entry was registered by the
+    /// peer-link re-origination (Codeberg #365). These entries answer
+    /// the requester through the ordinary discovery path response, but
+    /// are excluded from [`Self::retry_pending_discoveries`]: the
+    /// re-origination is bounded to ONE request per destination per
+    /// PATH_REQUEST_MIN_INTERVAL_MS and must never reach interfaces
+    /// without live peers, which the all-interfaces retry broadcast
+    /// would violate. Pruned against the discovery table on each retry
+    /// cycle and removed with the entry when the response fires.
+    peer_link_reoriginations: BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
+
     /// The peer link the packet currently being processed arrived
     /// through, as reported by a multi-peer interface (Codeberg #365).
     /// Set for the duration of one `process_incoming_from_peer` call
@@ -1981,6 +2004,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
             offline_interfaces: BTreeSet::new(),
+            interface_peer_counts: BTreeMap::new(),
+            peer_link_reoriginations: BTreeSet::new(),
             ingress_peer: None,
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
@@ -6803,6 +6828,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         !self.offline_interfaces.contains(&id)
     }
 
+    /// Mirror an interface's live direct-peer count into the transport
+    /// (Codeberg #365), the same way the driver mirrors `is_online()`.
+    /// Zero is the default, so `0` is stored as a removal and a driver
+    /// that never calls this leaves the interface without peers — the
+    /// correct statement for broadcast media (LoRa), where "peers" is
+    /// not a meaningful notion at this layer.
+    pub fn set_interface_peer_count(&mut self, id: usize, count: usize) {
+        if count == 0 {
+            self.interface_peer_counts.remove(&id);
+        } else {
+            self.interface_peer_counts.insert(id, count);
+        }
+    }
+
+    /// The driver-mirrored live direct-peer count for this interface
+    /// (zero when never mirrored). See [`Self::set_interface_peer_count`].
+    pub fn interface_peer_count(&self, id: usize) -> usize {
+        self.interface_peer_counts.get(&id).copied().unwrap_or(0)
+    }
+
     // Public: Interface Mode API (Codeberg #91)
     /// Set the Reticulum propagation mode for an interface (called by the driver
     /// at registration from the parsed config). `Full` is the default, so a
@@ -8625,6 +8670,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         }
                     }
                 }
+
+                // Codeberg #365: a request we cannot answer is re-originated
+                // toward live peer links. Skipped when the recursive
+                // discovery above already covered every other interface.
+                if !active_discovery {
+                    self.reoriginate_toward_peer_links(&requested_hash, interface_index)?;
+                }
             }
         }
 
@@ -8651,6 +8703,153 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Re-originate an unanswerable path request toward live peer links
+    /// (Codeberg #365).
+    ///
+    /// The reference re-originates a request it cannot answer on every
+    /// other interface — but only when the receiving interface is in a
+    /// DISCOVER_PATHS_FOR mode (Python `Transport.path_request`,
+    /// Transport.py:2917-2918 gate, 3015-3037 re-origination), because
+    /// on shared broadcast media unconditional recursion is a flood
+    /// amplifier. This generalises that mechanism from mode-gated to
+    /// peer-link-gated: when a request arrives on interface X for a
+    /// destination we hold no usable path to (none, or one over an
+    /// offline interface, or one marked Unresponsive), it is
+    /// re-originated toward every OTHER interface whose driver mirrors
+    /// live direct peers ([`Self::set_interface_peer_count`]).
+    ///
+    /// The flood argument behind Python's mode gate does not apply to
+    /// peer links: the re-origination goes only onto link-shaped
+    /// carriers (BLE, TCP client links, IPC — a LoRa broadcast domain
+    /// never mirrors a peer count), never back onto X, at most once per
+    /// destination per PATH_REQUEST_MIN_INTERVAL_MS (the limiter is
+    /// shared with [`Self::request_path`], so a request this node just
+    /// raised itself also counts), and a non-transport peer (a phone)
+    /// answers only for its own destinations instead of re-broadcasting
+    /// — while a transport peer applies this same once-per-interval,
+    /// never-backwards rule. Wire-compatible: peers see the ordinary
+    /// 48-byte path request `request_path` always emits, under our own
+    /// tag — a fresh tag, so a peer that already deduped the
+    /// requester's original tag (both reached it over different routes)
+    /// still answers this request.
+    ///
+    /// The requester is answered through the ordinary discovery
+    /// machinery: the pending entry registered here makes the answering
+    /// announce come back to X as a targeted PATH_RESPONSE
+    /// (`send_discovery_path_response`; Python serves the answer from
+    /// `discovery_path_requests`, Transport.py:1983-1996
+    /// semantics). Unlike a mode-gated discovery the entry is marked in
+    /// `peer_link_reoriginations`, which excludes it from the
+    /// all-interfaces retry broadcast (`retry_pending_discoveries`) —
+    /// the once-bound above holds across ticks.
+    ///
+    /// The field mechanism this closes (ledger 365, 2026-09-08
+    /// 17:17-17:19): a T114 relay with a live BLE link to a Columba
+    /// phone held `paths=0` for 70 s while the Pocket asked for the
+    /// phone's delivery destination over LoRa — the Full-mode gate
+    /// dropped every request, and Columba announces only when asked for
+    /// its own destination. A local client's request forwarded over BLE
+    /// resolved the phone in 162 ms; this gives a network requester the
+    /// same service.
+    ///
+    /// Deliberately narrower than the wording "no usable path" might
+    /// suggest: a held path WITH a surviving cached announce is
+    /// answered from the cache by case 2b before control reaches case 3
+    /// (reference-identical), so this arm serves the states that today
+    /// end in silence.
+    fn reoriginate_toward_peer_links(
+        &mut self,
+        requested_hash: &[u8; TRUNCATED_HASHBYTES],
+        from_interface: usize,
+    ) -> Result<(), TransportError> {
+        if !self.config.enable_transport {
+            return Ok(());
+        }
+        let usable_path = self.storage.get_path(requested_hash).is_some_and(|p| {
+            self.interface_online(p.interface_index)
+                && self.storage.get_path_state(requested_hash) != Some(PathState::Unresponsive)
+        });
+        if usable_path {
+            return Ok(());
+        }
+        // Never back onto X, never onto interfaces without live peers,
+        // never onto local clients (case 3's local-client forward
+        // already reaches those), and the #172 egress limit applies as
+        // it does to the mode-gated re-origination.
+        let egress_limited = self.egress_limited_path_request_ifaces(from_interface);
+        let targets: Vec<usize> = self
+            .interface_names
+            .keys()
+            .copied()
+            .filter(|&id| {
+                id != from_interface
+                    && !self.is_local_client(id)
+                    && self.interface_online(id)
+                    && self.interface_peer_count(id) > 0
+                    && !egress_limited.contains(&id)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        // One re-origination per destination per interval, shared with
+        // request_path's limiter.
+        let now = self.clock.now_ms();
+        if let Some(last_request) = self.storage.get_path_request_time(requested_hash) {
+            if now.saturating_sub(last_request) < PATH_REQUEST_MIN_INTERVAL_MS {
+                return Ok(());
+            }
+        }
+        // A pending discovery is already waiting for this destination;
+        // its answer will serve, no second emission.
+        if self
+            .storage
+            .get_discovery_path_request(requested_hash)
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.storage.set_path_request_time(*requested_hash, now);
+
+        // A held entry over an offline interface is why we are here at
+        // all — mark it Unresponsive (as `request_path` does) so the
+        // answer's announce displaces it even at a worse hop count
+        // (the Transport.py:1677-1679 arm in handle_announce).
+        if let Some(entry) = self.storage.get_path(requested_hash) {
+            if !self.interface_online(entry.interface_index) {
+                self.storage
+                    .set_path_state(*requested_hash, PathState::Unresponsive);
+            }
+        }
+
+        self.storage.set_discovery_path_request(
+            *requested_hash,
+            from_interface,
+            now + DISCOVERY_TIMEOUT_MS,
+        );
+        self.peer_link_reoriginations.insert(*requested_hash);
+
+        // Our own tag, deterministic from clock + dest (the same scheme
+        // as `solicit_path_after_relay_no_path`); collisions are ruled
+        // out by the per-destination interval above.
+        let mut tag = [0u8; TRUNCATED_HASHBYTES];
+        tag[..8].copy_from_slice(&now.to_be_bytes());
+        tag[8..16].copy_from_slice(&requested_hash[..8]);
+        let fwd = self.build_forwarded_path_request(requested_hash, &tag)?;
+        for &iface in &targets {
+            crate::tracing::debug!(
+                event = "PR_REORIG",
+                dst = %HexShort(requested_hash),
+                iface_in = %self.iface_name(from_interface),
+                iface_out = %self.iface_name(iface),
+                peers = self.interface_peer_count(iface),
+            );
+            self.record_outgoing_path_request(iface);
+            let _ = self.send_on_interface(iface, &fwd);
+        }
         Ok(())
     }
 
@@ -9283,12 +9482,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             return;
         }
 
+        // Prune re-origination markers whose discovery entry is gone
+        // (answered or expired), so the set stays bounded by the live
+        // discovery table.
+        let Self {
+            peer_link_reoriginations,
+            storage,
+            ..
+        } = self;
+        peer_link_reoriginations.retain(|d| storage.get_discovery_path_request(d).is_some());
+
         let dest_hashes = self.storage.discovery_path_request_dest_hashes();
         if dest_hashes.is_empty() {
             return;
         }
 
         for dest_hash in dest_hashes {
+            // A peer-link re-origination fires ONCE (Codeberg #365): the
+            // all-interfaces retry broadcast would reach media without
+            // live peers and break the once-per-interval bound. Its
+            // pending entry only waits for the answer.
+            if self.peer_link_reoriginations.contains(&dest_hash) {
+                continue;
+            }
             let (requesting_iface, timeout_ms) =
                 match self.storage.get_discovery_path_request(&dest_hash) {
                     Some(entry) => entry,
@@ -9384,6 +9600,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if now >= timeout {
             // Expired, clean up
             self.storage.remove_discovery_path_request(dest_hash);
+            self.peer_link_reoriginations.remove(dest_hash);
             return;
         }
 
@@ -9409,6 +9626,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         self.storage.remove_discovery_path_request(dest_hash);
+        self.peer_link_reoriginations.remove(dest_hash);
         // Deliberate deviation from Python: Python lets entries expire after
         // 15s (no removal on delivery), which can cause duplicate PATH_RESPONSE
         // packets if a second matching announce arrives within the timeout.

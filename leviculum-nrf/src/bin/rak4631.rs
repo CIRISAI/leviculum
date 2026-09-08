@@ -595,6 +595,11 @@ async fn main(spawner: Spawner) {
         node.set_interface_online(0, serial_iface.is_online());
         node.set_interface_online(1, lora_iface.is_online());
         node.set_interface_online(2, ble_iface.is_online());
+        // The peer-count sibling of the online mirror (Codeberg #365):
+        // marks BLE as a peer-link carrier the transport may
+        // re-originate an unanswerable path request on. Serial and LoRa
+        // mirror nothing — no "peers" at this layer — and stay at zero.
+        node.set_interface_peer_count(2, ble_iface.peer_count());
         match wake {
             Either4::Third(Either3::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The

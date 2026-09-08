@@ -480,8 +480,8 @@ static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<PeerRegistry<M
     BlockingMutex::new(RefCell::new(PeerRegistry::new()));
 
 /// Register a slot's peer and, when this is the identity's FIRST link,
-/// report the arrival to the main loop so the transport pulls the
-/// peer's delivery path over the new link (Codeberg #365) — the mirror
+/// report the arrival to the main loop so the transport learns about
+/// the peer behind the new link (Codeberg #365) — the mirror
 /// of [`peer_link_down`]'s last-link rule. A same-identity link on
 /// another slot (the zombie-displacement window) means the peer was
 /// never gone: registry churn, not an arrival, so no report.
@@ -506,6 +506,16 @@ fn peer_link_down(slot_index: usize) {
 
 fn peer_already_linked(peer_id: &[u8; 16]) -> bool {
     LIVE_PEERS.lock(|peers| peers.borrow().is_linked(peer_id))
+}
+
+/// The number of distinct live peer identities on the BLE interface
+/// (Codeberg #365) — what the main loop mirrors into the core as the
+/// interface's peer count, next to the `is_online` mirror. Counted from
+/// the post-handshake registry, not the drain table: a link that has
+/// not presented an identity yet is not a peer the transport can ask
+/// anything of.
+pub(crate) fn live_peer_count() -> usize {
+    LIVE_PEERS.lock(|peers| peers.borrow().peer_count())
 }
 
 /// The Columba service from the client side — the same three

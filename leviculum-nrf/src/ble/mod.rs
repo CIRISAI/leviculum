@@ -348,6 +348,19 @@ impl BleInterface {
             drops: leviculum_media_state::DropRun::new(),
         }
     }
+
+    /// Distinct live peer identities behind this interface (Codeberg
+    /// #365), for the main loop's `set_interface_peer_count` mirror —
+    /// the sibling of the `is_online` mirror. Zero with the carrier
+    /// off: links torn down by a media switch cannot be asked anything,
+    /// whatever the registry still holds mid-teardown.
+    pub fn peer_count(&self) -> usize {
+        if crate::media::ble_active() {
+            columba::live_peer_count()
+        } else {
+            0
+        }
+    }
 }
 
 impl Interface for BleInterface {

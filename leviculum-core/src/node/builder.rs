@@ -72,10 +72,15 @@ impl NodeCoreBuilder {
     }
 
     /// Replace the full destination names the peer-up pull derives per-peer
-    /// destinations from (Codeberg #365). Default: `["lxmf.delivery"]` —
-    /// see `NodeCore::handle_interface_peer_up` for the mechanism and the
-    /// field doc on `NodeCore` for why that default. An empty list disables
-    /// the pull.
+    /// destinations from (Codeberg #365). Default: EMPTY — the handshake
+    /// identity the pull would derive from is the peer's TRANSPORT
+    /// identity, unrelated to its LXMF identity, so the derived name does
+    /// not exist on reference peers; see the `peer_up_pull_names` field
+    /// doc on `NodeCore` for the citations and
+    /// `NodeCore::handle_interface_peer_up` for the mechanism. Setting
+    /// e.g. `["lxmf.delivery"]` re-enables the pull for fleets whose
+    /// nodes are known to hand their LXMF identity to the handshake (our
+    /// firmware and lnsd do).
     pub fn peer_up_pull_names(mut self, names: Vec<alloc::string::String>) -> Self {
         self.peer_up_pull_names = Some(names);
         self

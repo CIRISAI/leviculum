@@ -46,6 +46,17 @@
 //! Wire-compatible both ways: the pull is the ordinary 48-byte path
 //! request, the answer the ordinary announce.
 //!
+//! Since the 2026-09-08 batch the pull is OPT-IN
+//! (`NodeCoreBuilder::peer_up_pull_names`, default empty): against
+//! Columba the handshake identity is the phone's transport identity,
+//! not its LXMF identity, so the derived destination does not exist
+//! there — see `mvr_peer_up_pull` for the citations. This file builds
+//! its nodes with the pull configured, which is sound for the trap it
+//! walks: the peer whose announce closes the chain is modelled as a
+//! single-identity node (handshake identity == LXMF identity), the
+//! shape our own boards and lnsd present, for which the pull derivation
+//! is correct.
+//!
 //! ## Shape
 //!
 //! 2 nodes (both the boards' exact storage type), deterministic,
@@ -81,12 +92,13 @@ use crate::transport::{Action, InterfaceId, TickOutput};
 /// Both boards' exact shape: `EmbeddedStorage`, transport enabled.
 type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
 
+/// Pull configured (opt-in since 2026-09-08, see the module doc): this
+/// file pins the single-identity-fleet recovery.
 fn make_node() -> Box<EmbeddedNode> {
-    NodeCoreBuilder::new().enable_transport(true).build_boxed(
-        OsRng,
-        MockClock::new(TEST_TIME_MS),
-        EmbeddedStorage::new(),
-    )
+    NodeCoreBuilder::new()
+        .enable_transport(true)
+        .peer_up_pull_names(std::vec![String::from("lxmf.delivery")])
+        .build_boxed(OsRng, MockClock::new(TEST_TIME_MS), EmbeddedStorage::new())
 }
 
 fn add_iface(node: &mut EmbeddedNode, name: &'static str, id: u8) -> usize {

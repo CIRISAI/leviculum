@@ -1,19 +1,32 @@
 //! mvr: peer-up pull (Codeberg #365) — a node that gains a direct peer
-//! asks it for its delivery path.
+//! asks it for its delivery path, IF configured to.
 //!
-//! When an interface reports "peer with identity I is up", the core
-//! derives the peer's delivery destination
+//! When an interface reports "peer with identity I is up" and
+//! `peer_up_pull_names` is configured, the core derives the peer's
+//! delivery destination
 //! `D = truncated_hash(sha256("lxmf.delivery")[..10] || I)` and, unless
 //! it already holds a DIRECT entry for `D` on that interface, sends one
-//! ordinary path request for `D` on that interface only. The measured
-//! premise (M1, ledger 365): Columba answers a path request for its own
-//! delivery destination with an announce in under a second, but
-//! announces on neither connect nor reconnect — so the pull is the only
-//! way a relay recovers its direct entry after a reboot or a peer-lost
-//! cull without waiting for the phone's periodic announce.
+//! ordinary path request for `D` on that interface only.
 //!
-//! Pinned here: the derivation against the two full identity→lxmf pairs
-//! from the ledger (the field boards' banners), the
+//! The default is EMPTY (field finding 2026-09-08, ledger 365): `I` is
+//! the handshake identity, which against Columba is the phone's
+//! TRANSPORT identity (the ble-reticulum reference checkout,
+//! `BLEInterface._start_advertising_when_identity_ready`, advertises
+//! `Transport.identity.hash`; Python-RNS creates that identity as a
+//! standalone keypair at `transport_identity`, Transport.py:218-225)
+//! — unrelated to the LXMF
+//! identity `lxmf.delivery` is actually derived from, so every default
+//! pull asked the phone for a destination it does not have and
+//! `paths=0` held for 70 s. The bench proofs passed only because our
+//! own stacks hand their single node identity to the handshake. The
+//! peer-link re-origination (`mvr_peer_link_reorigination`) replaces
+//! the pull's recovery job; the pull stays available for fleets whose
+//! peers are known to be single-identity
+//! (`NodeCoreBuilder::peer_up_pull_names`).
+//!
+//! Pinned here: the empty default is quiet on peer-up, and for a
+//! configured list: the derivation against the two full identity→lxmf
+//! pairs from the ledger (the field boards' banners), the
 //! one-request-on-the-reporting-interface-only shape, the direct-entry
 //! guard (relink churn must not spray requests), and that a RELAYED
 //! entry does NOT suppress the pull — a stale relayed route is exactly
@@ -41,12 +54,13 @@ use crate::transport::{Action, InterfaceId, TickOutput};
 /// Both boards' exact shape: `EmbeddedStorage`, transport enabled.
 type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
 
+/// A node with the pull explicitly configured — the opt-in shape for a
+/// single-identity fleet (the default list is empty, pinned below).
 fn make_node() -> Box<EmbeddedNode> {
-    NodeCoreBuilder::new().enable_transport(true).build_boxed(
-        OsRng,
-        MockClock::new(TEST_TIME_MS),
-        EmbeddedStorage::new(),
-    )
+    NodeCoreBuilder::new()
+        .enable_transport(true)
+        .peer_up_pull_names(std::vec![String::from("lxmf.delivery")])
+        .build_boxed(OsRng, MockClock::new(TEST_TIME_MS), EmbeddedStorage::new())
 }
 
 fn add_iface(node: &mut EmbeddedNode, name: &'static str, id: u8) -> usize {
@@ -259,4 +273,33 @@ fn a_relayed_entry_does_not_suppress_the_pull() {
         "a relayed entry is the trap state, the pull must still fire"
     );
     assert_eq!(requests[0].0, Some(InterfaceId(ble)));
+}
+
+/// The default list is empty, so a peer-up on an unconfigured node
+/// emits NOTHING: the handshake identity is the peer's transport
+/// identity, and `D("lxmf.delivery", transport identity)` names a
+/// destination a reference peer does not hold — the 2026-09-08 field
+/// finding this default closes (every pull to the Columba phone went
+/// unanswered while its real destination resolved in 162 ms once the
+/// correctly named request was forwarded). The report itself is still
+/// processed; the recovery lives in `mvr_peer_link_reorigination`.
+#[test]
+fn the_default_pull_list_is_empty_and_peer_up_stays_quiet() {
+    let phone_identity_hash = *Identity::generate(&mut OsRng).hash();
+
+    let mut node = NodeCoreBuilder::new().enable_transport(true).build_boxed(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        EmbeddedStorage::new(),
+    );
+    let ble = add_iface(&mut node, "ble_nrf", 0);
+    let _lora = add_iface(&mut node, "lora_sx1262", 1);
+
+    let out = node.handle_interface_peer_up(InterfaceId(ble), phone_identity_hash);
+    assert!(
+        wire_out(&out).is_empty(),
+        "no configured pull names: a peer-up report must put nothing on \
+         the wire — a default pull would ask for a destination derived \
+         from the wrong identity"
+    );
 }

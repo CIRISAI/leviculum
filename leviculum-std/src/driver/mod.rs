@@ -649,7 +649,8 @@ struct EventLoopChannels {
     /// #365): `Lost` when a peer's last link on that broadcast domain died
     /// (the loop culls the paths via that peer — the per-peer analog of
     /// the `Disconnected` cleanup), `Up` when a peer's first link came up
-    /// (the loop pulls the peer's delivery path). Currently fed by the BLE
+    /// (the loop counts it into the core's peer mirror and runs the
+    /// opt-in peer-up pull). Currently fed by the BLE
     /// interface only; see [`crate::interfaces::PeerEvent`] for why both
     /// share one ordered channel.
     peer_event_rx: mpsc::Receiver<(InterfaceId, crate::interfaces::PeerEvent)>,
@@ -1342,7 +1343,8 @@ impl ReticulumNode {
         // Per-peer transition reports from multi-peer interfaces (Codeberg
         // #365). The BLE interface fires (id, Lost/Up) here when a peer's
         // last link died or its first link came up; the event loop culls
-        // the paths via a lost peer and pulls a fresh peer's delivery path.
+        // the paths via a lost peer, mirrors the live peer count into the
+        // core and reports a fresh peer's arrival.
         let (peer_event_tx, peer_event_rx) =
             mpsc::channel::<(InterfaceId, crate::interfaces::PeerEvent)>(16);
 
@@ -3700,6 +3702,16 @@ async fn run_event_loop(
     // nothing. Settled on every exit path, including shutdown.
     let mut flush_in_flight: Option<tokio::task::JoinHandle<crate::storage::FlushOutcome>> = None;
     let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+    // Live peer count per multi-peer interface (Codeberg #365), counted
+    // from the same ordered Up/Lost channel the path cull and the
+    // peer-up decision ride — the interface's LinkTable reports each
+    // identity's first link as Up and its last link's death as Lost, so
+    // the transitions balance per identity. Mirrored into the core
+    // (`set_interface_peer_count`, the sibling of the firmware's
+    // per-pass online mirror) before each event is handled, so the
+    // peer-link path-request re-origination sees the interface as a
+    // live-peer carrier exactly while it has one.
+    let mut live_peer_counts: BTreeMap<usize, usize> = BTreeMap::new();
     // Track which per-interface queues have already emitted the
     // depth-high warning so we don't spam once the queue is deep.
     // Cleared when the queue drops back below RETRY_QUEUE_DEPTH_WARN.
@@ -3914,6 +3926,11 @@ async fn run_event_loop(
                     }
                     RecvEvent::Disconnected(iface_id) => {
                         tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
+                        // The core forgets its peer-count mirror in
+                        // handle_interface_down; forget the driver's
+                        // half too so a re-registered index starts at
+                        // zero (Codeberg #365).
+                        live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
@@ -4266,14 +4283,25 @@ async fn run_event_loop(
             // culls the path entries whose next hop is that peer on that
             // interface — the per-peer analog of the Disconnected cleanup
             // above, Transport.py:784-785 semantics) or whose first link
-            // came up (core pulls the peer's delivery path over that link,
-            // see `handle_interface_peer_up`). One ordered channel for
+            // came up (the driver mirrors the live peer count into core and
+            // reports the arrival, see `handle_interface_peer_up`; the
+            // delivery-path pull there is opt-in). One ordered channel for
             // both, so a flap's cull always lands before its reconnect's
             // pull decision. The interface itself stays up — other peers
             // keep their links and paths.
             Some((iface_id, event)) = peer_event_rx.recv() => {
+                // Keep the driver's live-peer count and its core mirror
+                // in step with the transition before handling it
+                // (Codeberg #365; see `live_peer_counts`).
+                let count = live_peer_counts.entry(iface_id.0).or_insert(0);
+                match event {
+                    crate::interfaces::PeerEvent::Lost(_) => *count = count.saturating_sub(1),
+                    crate::interfaces::PeerEvent::Up(_) => *count += 1,
+                }
+                let count = *count;
                 let output = {
                     let mut core = inner.lock_recover();
+                    core.set_interface_peer_count(iface_id.0, count);
                     match event {
                         crate::interfaces::PeerEvent::Lost(peer) => {
                             core.handle_interface_peer_lost(iface_id, peer)
@@ -4373,6 +4401,7 @@ async fn run_event_loop(
                             iface_id,
                             registry.name_of(iface_id),
                         );
+                        live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
                             core.handle_interface_down(iface_id)
