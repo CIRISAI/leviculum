@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per class per hour (announce, data, path request) plus the last line
   seen per class.
 
+- Every LoRa receive line says how strong the frame was, and what it
+  was (#364). lnsd's RNode RX line and its `LORA_RX` trace event carry
+  `rssi=`/`snr=` from the stat frames the RNode firmware indicates
+  before each data frame, paired the way Python's `RNodeInterface`
+  pairs them. The LNode firmware's `[LORA] RX` line adds `flags=` (the
+  packet's header flags byte) and `dst=` (first 8 hex of the
+  destination hash), so `lnflash --summarize` classifies announce,
+  data, path request and proof straight from a watch file.
+
 - An LNode now answers a Sideband telemetry request: an LXMF message
   from the configured target carrying the `TELEMETRY_REQUEST` command
   triggers an immediate report, rate-limited to one request-triggered
@@ -77,6 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request was clamped, on its critical log path (#349).
 
 ### Fixed
+
+- `lnflash --watch` no longer stamps a torn first line as evidence:
+  the port's buffer can hold a partial line written before DTR was
+  raised, gluing two board lines at the tear. Bytes up to the first
+  newline after each (re)open are discarded and accounted on one
+  `[WATCH] discarded partial first line (<n> bytes)` line.
 
 - The `leviculum` .deb builds again: `lnprobe` was declared as a package
   asset but missing from the build script's binary list, so `cargo deb`

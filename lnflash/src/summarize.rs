@@ -216,14 +216,17 @@ fn flags_value(rest: &str) -> Option<u8> {
 }
 
 /// Whether the line names the path request destination — in words, or as
-/// a hex token (possibly truncated with a trailing `..`) that prefixes
-/// the well-known hash.
+/// a hex token (possibly truncated with a trailing `..`, possibly behind
+/// the firmware's `dst=` key) that prefixes the well-known hash.
 fn names_path_request(rest: &str, path_request_hex: &str) -> bool {
     if rest.contains("PATH_REQUEST") || rest.contains("PATHREQ") {
         return true;
     }
     rest.split_whitespace().any(|token| {
-        let hex = token.trim_end_matches("..");
+        let hex = token
+            .strip_prefix("dst=")
+            .unwrap_or(token)
+            .trim_end_matches("..");
         hex.len() >= 8
             && hex.bytes().all(|b| b.is_ascii_hexdigit())
             && path_request_hex.starts_with(&hex.to_ascii_lowercase())
@@ -324,6 +327,31 @@ last seen per class:
         );
         assert_eq!(
             classify("47 bytes rssi=-71 flags=0x03", &hex),
+            Some(Class::Proof)
+        );
+    }
+
+    #[test]
+    fn the_new_firmware_line_shape_classifies_all_four_classes() {
+        // What the firmware prints since the flags=/dst= keys landed:
+        // `RX <n> bytes rssi=<r> snr=<s> flags=0x<hh> dst=<hex8>`.
+        let hex = path_request_hex();
+        assert_eq!(
+            classify("183 bytes rssi=-69 snr=5 flags=0x01 dst=2f9a770a", &hex),
+            Some(Class::Announce)
+        );
+        assert_eq!(
+            classify("91 bytes rssi=-95 snr=7 flags=0x00 dst=9eb1f403", &hex),
+            Some(Class::Data)
+        );
+        // A data packet whose dst= is the well-known
+        // rnstransport.path.request hash is a path request.
+        assert_eq!(
+            classify("51 bytes rssi=-96 snr=6 flags=0x00 dst=6b9f6601", &hex),
+            Some(Class::PathRequest)
+        );
+        assert_eq!(
+            classify("47 bytes rssi=-71 snr=4 flags=0x03 dst=9eb1f403", &hex),
             Some(Class::Proof)
         );
     }

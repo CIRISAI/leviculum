@@ -27,7 +27,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1407`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1118-1143`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1161-1186`), continuing to listen so RX is
 not starved.
 
 The host-side airtime credit bucket

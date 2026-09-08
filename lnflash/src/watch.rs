@@ -12,7 +12,10 @@
 //!
 //! Deliberately no filtering: the watch file is the evidence, and a
 //! classifier that decided at capture time what matters would decide
-//! wrongly exactly once. The view lives in [`crate::summarize`].
+//! wrongly exactly once. The view lives in [`crate::summarize`]. The one
+//! exception is the torn first line after each (re)open
+//! (`FirstLineSync`), which is discarded but accounted on its own
+//! `[WATCH]` line — junk stamped as evidence is worse than a counted gap.
 //!
 //! Deliberately no daemon and no background mode: the person runs it in
 //! a terminal, or under `nohup` themselves.
@@ -291,11 +294,74 @@ pub(crate) fn reconnect_line(name: &str, gap: Duration) -> String {
 /// the reason it ended. Only a sink failure is a hard error.
 fn pump<W: Write>(fd: &Fd, sink: &mut Sink<W>) -> io::Result<String> {
     let mut carry: Vec<u8> = Vec::new();
+    let mut sync = FirstLineSync::new();
     loop {
-        if let Some(reason) = drain_once(fd, sink, &mut carry)? {
+        if let Some(reason) = drain_once(fd, sink, &mut carry, &mut sync)? {
             return Ok(reason);
         }
     }
+}
+
+/// The first line after (re)open may be torn: the port's buffer can hold
+/// bytes written before DTR was raised, so the first read opens mid-line
+/// — the bench watch stamped `[STACK] … region=0x20004c40..0x20020[GNSS]
+/// bytes=0 …`, two board lines glued at the tear. Until the first
+/// newline the stream is not at a line boundary; those bytes are
+/// discarded and accounted with one `[WATCH] discarded partial first
+/// line (<n> bytes)` line instead of being stamped as evidence.
+pub(crate) struct FirstLineSync {
+    /// `Some(n)`: still before the first newline, `n` bytes discarded so
+    /// far. `None`: synced — every further byte belongs to real lines.
+    discarded: Option<usize>,
+}
+
+impl FirstLineSync {
+    pub(crate) fn new() -> Self {
+        Self { discarded: Some(0) }
+    }
+
+    /// Consume the pre-newline bytes from `carry`, leaving it at a line
+    /// boundary once the first newline arrives. An open that lands
+    /// exactly on a boundary (the first byte is the newline) lost
+    /// nothing and writes no marker.
+    fn apply<W: Write>(&mut self, sink: &mut Sink<W>, carry: &mut Vec<u8>) -> io::Result<()> {
+        let Some(count) = self.discarded.as_mut() else {
+            return Ok(());
+        };
+        match carry.iter().position(|&b| b == b'\n') {
+            Some(pos) => {
+                let total = *count + pos;
+                carry.drain(..=pos);
+                self.discarded = None;
+                if total > 0 {
+                    sink.line(&discard_line(total))?;
+                }
+            }
+            None => {
+                *count += carry.len();
+                carry.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// The port went away before any newline: everything it said was the
+    /// torn first line. Report the count rather than stamping the junk.
+    fn finish<W: Write>(&mut self, sink: &mut Sink<W>, carry: &mut Vec<u8>) -> io::Result<()> {
+        let Some(count) = self.discarded.take() else {
+            return Ok(());
+        };
+        let total = count + carry.len();
+        carry.clear();
+        if total > 0 {
+            sink.line(&discard_line(total))?;
+        }
+        Ok(())
+    }
+}
+
+fn discard_line(n: usize) -> String {
+    format!("[WATCH] discarded partial first line ({n} bytes)")
 }
 
 /// One read step of [`pump`], split out so a test can interleave reads
@@ -306,10 +372,12 @@ pub(crate) fn drain_once<W: Write>(
     fd: &Fd,
     sink: &mut Sink<W>,
     carry: &mut Vec<u8>,
+    sync: &mut FirstLineSync,
 ) -> io::Result<Option<String>> {
     match fd.read_available(POLL) {
         Ok(Some(bytes)) => {
             carry.extend_from_slice(&bytes);
+            sync.apply(sink, carry)?;
             while let Some(pos) = carry.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = carry.drain(..=pos).collect();
                 sink.line(&decode(&line))?;
@@ -321,10 +389,12 @@ pub(crate) fn drain_once<W: Write>(
             Ok(None)
         }
         Ok(None) => {
+            sync.finish(sink, carry)?;
             flush_carry(sink, carry)?;
             Ok(Some("EOF, the port closed".into()))
         }
         Err(err) => {
+            sync.finish(sink, carry)?;
             flush_carry(sink, carry)?;
             Ok(Some(format!("read failed: {err}")))
         }
@@ -513,20 +583,123 @@ mod tests {
         fd.set_debug_port().unwrap();
         let mut sink = test_sink();
         let mut carry = Vec::new();
+        let mut sync = FirstLineSync::new();
 
         // The pty discards unread bytes when its master closes, so the
-        // reads are interleaved with the writes rather than raced.
+        // reads are interleaved with the writes rather than raced. The
+        // first line (29 bytes before its newline, the CR counted) is the
+        // possibly-torn one and becomes the discard marker.
         pty.write_raw(b"[LORA] RX 183 bytes rssi=-69\r\n[BOOT] hello\npartial");
-        assert_eq!(drain_once(&fd, &mut sink, &mut carry).unwrap(), None);
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
         drop(pty);
-        let reason = drain_once(&fd, &mut sink, &mut carry)
+        let reason = drain_once(&fd, &mut sink, &mut carry, &mut sync)
             .unwrap()
             .expect("master closed, the port is gone");
         assert!(reason.contains("EOF"), "{reason}");
         assert_eq!(
             sunk(sink),
-            "t1 [LORA] RX 183 bytes rssi=-69\nt2 [BOOT] hello\nt3 partial\n",
-            "CR stripped, every line stamped, the half-line flushed on the gap"
+            "t1 [WATCH] discarded partial first line (29 bytes)\n\
+             t2 [BOOT] hello\nt3 partial\n",
+            "first line discarded and marked, every line stamped, the \
+             half-line flushed on the gap"
+        );
+    }
+
+    #[test]
+    fn the_torn_first_line_after_open_is_discarded_and_marked() {
+        // The bench observation: the port's buffer held a partial line
+        // from before DTR, so the first read opens mid-line — two board
+        // lines glued at the tear
+        // (`[STACK] … region=0x20004c40..0x20020[GNSS] bytes=0 …`).
+        let pty = Pty::open();
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        fd.set_debug_port().unwrap();
+        let mut sink = test_sink();
+        let mut carry = Vec::new();
+        let mut sync = FirstLineSync::new();
+
+        pty.write_raw(b"0x20020[GNSS] bytes=0 fixes=0\n[STACK] free=1234\n");
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
+        drop(pty);
+        let _ = drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap();
+        assert_eq!(
+            sunk(sink),
+            "t1 [WATCH] discarded partial first line (29 bytes)\n\
+             t2 [STACK] free=1234\n",
+            "the torn tail is counted, the first complete line survives"
+        );
+    }
+
+    #[test]
+    fn the_discard_counts_across_reads_and_an_exact_boundary_costs_nothing() {
+        // A torn tail arriving in two reads is still one count; a port
+        // whose first byte is the newline lost nothing and gets no marker.
+        let pty = Pty::open();
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        fd.set_debug_port().unwrap();
+        let mut sink = test_sink();
+        let mut carry = Vec::new();
+        let mut sync = FirstLineSync::new();
+
+        pty.write_raw(b"torn");
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
+        pty.write_raw(b"-tail\nhello\n");
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
+        assert_eq!(
+            sunk(sink),
+            "t1 [WATCH] discarded partial first line (9 bytes)\nt2 hello\n"
+        );
+
+        let pty = Pty::open();
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        fd.set_debug_port().unwrap();
+        let mut sink = test_sink();
+        let mut carry = Vec::new();
+        let mut sync = FirstLineSync::new();
+        pty.write_raw(b"\nhello\n");
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
+        assert_eq!(sunk(sink), "t1 hello\n", "no marker for a lossless open");
+    }
+
+    #[test]
+    fn a_port_that_dies_before_any_newline_reports_the_discard_not_the_junk() {
+        let pty = Pty::open();
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        fd.set_debug_port().unwrap();
+        let mut sink = test_sink();
+        let mut carry = Vec::new();
+        let mut sync = FirstLineSync::new();
+
+        pty.write_raw(b"torn");
+        assert_eq!(
+            drain_once(&fd, &mut sink, &mut carry, &mut sync).unwrap(),
+            None
+        );
+        drop(pty);
+        let reason = drain_once(&fd, &mut sink, &mut carry, &mut sync)
+            .unwrap()
+            .expect("master closed, the port is gone");
+        assert!(reason.contains("EOF"), "{reason}");
+        assert_eq!(
+            sunk(sink),
+            "t1 [WATCH] discarded partial first line (4 bytes)\n",
+            "everything before the first newline is the torn line, junk \
+             is never stamped as evidence"
         );
     }
 
@@ -541,8 +714,11 @@ mod tests {
         let pty2 = Pty::open();
         let slave1 = pty1.slave_path.clone();
         let slave2 = pty2.slave_path.clone();
-        pty1.write_raw(b"alpha\n");
-        pty2.write_raw(b"beta\n");
+        // Each session opens onto a torn tail (discarded and marked) and
+        // then a real line, exactly like a board whose buffer held a
+        // partial line from before DTR.
+        pty1.write_raw(b"tail1\nalpha\n");
+        pty2.write_raw(b"tail2\nbeta\n");
         let closer = std::thread::spawn(move || {
             let mut pty1 = Some(pty1);
             let mut pty2 = Some(pty2);
@@ -596,18 +772,20 @@ mod tests {
         let said = String::from_utf8(sink.file.map(|t| t.0).unwrap_or_default()).unwrap();
         let expected = [
             "t1 [WATCH] watching board (session 1)",
-            "t2 alpha",
-            "t3 [WATCH] board (session 1) went away (EOF, the port closed); reconnecting",
-            "t4 [WATCH] reconnected to board (session 2) after ",
-            "t5 beta",
-            "t6 [WATCH] board (session 2) went away (EOF, the port closed); reconnecting",
+            "t2 [WATCH] discarded partial first line (5 bytes)",
+            "t3 alpha",
+            "t4 [WATCH] board (session 1) went away (EOF, the port closed); reconnecting",
+            "t5 [WATCH] reconnected to board (session 2) after ",
+            "t6 [WATCH] discarded partial first line (5 bytes)",
+            "t7 beta",
+            "t8 [WATCH] board (session 2) went away (EOF, the port closed); reconnecting",
         ];
         let lines: Vec<&str> = said.lines().collect();
         assert_eq!(lines.len(), expected.len(), "{said}");
         for (line, want) in lines.iter().zip(expected) {
             assert!(line.starts_with(want), "wanted {want:?}, got {line:?}");
         }
-        assert!(lines[3].ends_with("s gap"), "{said}");
+        assert!(lines[4].ends_with("s gap"), "{said}");
     }
 
     // -----------------------------------------------------------------

@@ -739,6 +739,24 @@ async fn transmit_all_frames(
 }
 
 // RX helper
+/// The classification fields of a received Reticulum packet, for the
+/// `[LORA] RX` line: the header flags byte and the first 4 bytes of the
+/// destination hash. `lnflash --summarize` classifies announce, data, path
+/// request and proof from exactly these two keys (`lnflash/src/summarize.rs`).
+/// The destination sits after flags(1)+hops(1), shifted 16 bytes further when
+/// the header-type bit says a transport id precedes it (packet layout in
+/// `leviculum-core/src/packet.rs`). `None` for a packet too short to carry
+/// the header its flags claim — that line keeps its old bare shape.
+fn classify_fields(data: &[u8]) -> Option<(u8, &[u8])> {
+    let flags = *data.first()?;
+    let dst_at = if flags & leviculum_core::packet::FLAG_HEADER_TYPE_MASK != 0 {
+        18
+    } else {
+        2
+    };
+    Some((flags, data.get(dst_at..dst_at + 4)?))
+}
+
 /// Everything a reception has to pass through on its way to the core, as one
 /// [`FrameSink`](leviculum_rx_arming::FrameSink).
 ///
@@ -795,15 +813,31 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
             );
         }
         if let Some(data) = self.reassembler.feed(frame, self.rx_timeout_count) {
-            crate::log::log_fmt(
-                "[LORA] ",
-                format_args!(
-                    "RX {} bytes rssi={} snr={}",
-                    data.len(),
-                    status.rssi,
-                    status.snr
+            match classify_fields(&data) {
+                Some((flags, dst)) => crate::log::log_fmt(
+                    "[LORA] ",
+                    format_args!(
+                        "RX {} bytes rssi={} snr={} flags=0x{:02x} dst={:02x}{:02x}{:02x}{:02x}",
+                        data.len(),
+                        status.rssi,
+                        status.snr,
+                        flags,
+                        dst[0],
+                        dst[1],
+                        dst[2],
+                        dst[3]
+                    ),
                 ),
-            );
+                None => crate::log::log_fmt(
+                    "[LORA] ",
+                    format_args!(
+                        "RX {} bytes rssi={} snr={}",
+                        data.len(),
+                        status.rssi,
+                        status.snr
+                    ),
+                ),
+            }
             LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             #[cfg(feature = "display")]
             crate::baseboard::LORA_RX_FLASH.signal(());

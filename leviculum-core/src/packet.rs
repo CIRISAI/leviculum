@@ -16,8 +16,10 @@ use crate::constants::{HEADER_MAXSIZE, HEADER_MINSIZE, MDU, TRUNCATED_HASHBYTES}
 
 /// Bit mask for IFAC (Interface Access Code) flag (bit 7)
 const FLAG_IFAC_MASK: u8 = 0x80;
-/// Bit mask for header type flag (bit 6)
-const FLAG_HEADER_TYPE_MASK: u8 = 0x40;
+/// Bit mask for header type flag (bit 6). Public because the firmware's
+/// `[LORA] RX` line locates the destination hash by this bit
+/// (`leviculum-nrf/src/lora.rs`), and the bit definition must not fork.
+pub const FLAG_HEADER_TYPE_MASK: u8 = 0x40;
 /// Bit mask for context flag (bit 5)
 const FLAG_CONTEXT_MASK: u8 = 0x20;
 /// Bit mask for transport type flag (bit 4)

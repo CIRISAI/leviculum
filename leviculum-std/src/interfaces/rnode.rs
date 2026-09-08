@@ -632,6 +632,36 @@ fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -
     true
 }
 
+/// The ` rssi=<dBm> snr=<dB>` suffix a data frame's RX log lines carry
+/// (Codeberg #364: the air sniffer could not say whether a lost frame was
+/// weaker).
+///
+/// The firmware indicates the frame's RSSI and SNR to the host BEFORE the
+/// data frame itself, on every MCU variant (RNode_Firmware.ino:454-458 and
+/// :495-499 AVR, :1668-1670 ESP32, :1689-1691 nRF52 — always
+/// `kiss_indicate_stat_rssi(); kiss_indicate_stat_snr();
+/// kiss_write_packet();`), so at `CMD_DATA` time the most recently stored
+/// stat values are this frame's own signal report. That last-seen pairing is
+/// the reference's: Python keeps `r_stat_rssi`/`r_stat_snr` from the
+/// preceding stat frames (RNodeInterface.py:877-880, the SNR a signed byte
+/// scaled by 0.25) and reads them for the frame that follows. Key names
+/// match the firmware's `[LORA] RX` line. Empty until the first stat frame —
+/// a stream that never carried stats (a mock, an older firmware) logs the
+/// bare line rather than an invented value.
+fn signal_suffix(counters: &InterfaceCounters) -> String {
+    use std::fmt::Write as _;
+    let mut suffix = String::new();
+    if let Some(radio) = counters.radio_stats() {
+        if let Some(rssi) = radio.last_rssi {
+            let _ = write!(suffix, " rssi={rssi}");
+        }
+        if let Some(snr) = radio.last_snr {
+            let _ = write!(suffix, " snr={snr}");
+        }
+    }
+    suffix
+}
+
 // ---------------------------------------------------------------------------
 // I/O task
 // ---------------------------------------------------------------------------
@@ -843,7 +873,13 @@ where
                             if let KissDeframeResult::Frame { command, payload } = frame {
                                 match command {
                                     rnode::CMD_DATA => {
-                                        tracing::debug!("{}: RX {} bytes from radio", name, payload.len());
+                                        let signal = signal_suffix(&counters);
+                                        tracing::debug!(
+                                            "{}: RX {} bytes from radio{}",
+                                            name,
+                                            payload.len(),
+                                            signal
+                                        );
                                         // TEST-ONLY range emulation: an
                                         // out-of-range frame was never heard,
                                         // so it is dropped before any counter
@@ -862,7 +898,7 @@ where
                                         // RX on the other.
                                         tracing::debug!(
                                             target: "leviculum_std::interfaces::rnode::rx_trace",
-                                            "LORA_RX iface={name} len={}",
+                                            "LORA_RX iface={name} len={}{signal}",
                                             payload.len()
                                         );
                                         counters.rx_bytes.fetch_add(
@@ -3323,6 +3359,89 @@ mod tests {
         assert!(
             !logs.contains("DIRECT_INGRESS_FILTER"),
             "armed line must be absent with the knob off; logs:\n{logs}"
+        );
+    }
+
+    /// A data frame's RX lines carry the RSSI/SNR the firmware indicated
+    /// immediately before it (Codeberg #364). The mocked KISS stream
+    /// reproduces the firmware's order on every MCU variant — CMD_STAT_RSSI,
+    /// CMD_STAT_SNR, then the CMD_DATA frame (RNode_Firmware.ino:1689-1691)
+    /// — and the pairing is the reference's last-seen one
+    /// (RNodeInterface.py:877-880): the stats stored when CMD_DATA arrives
+    /// are that frame's own report. A frame no stat frame preceded logs the
+    /// bare line, not an invented value.
+    #[tokio::test]
+    async fn test_rx_lines_carry_the_preceding_stat_frames_rssi_and_snr() {
+        let (buf, _guard) = capture_logs();
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_signal".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                counters,
+                /* flow_control = */ false,
+                /* jitter_max_ms = */ 1,
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        // The mocked KISS stream, in the firmware's order: a data frame no
+        // stat frame preceded (a mock, an older firmware), then a real
+        // reception's RSSI stat, SNR stat, data frame. Raw 100 is 100-157 =
+        // -57 dBm; raw 21 is 21*0.25 = 5.25 dB, proving the scaled value
+        // (not the raw byte) is logged. `kiss::frame` clears its output, so
+        // each frame is built and written on its own.
+        let mut wire = Vec::new();
+        for (command, payload) in [
+            (rnode::CMD_DATA, &[0x00, 0x00, 0x01][..]),
+            (rnode::CMD_STAT_RSSI, &[100][..]),
+            (rnode::CMD_STAT_SNR, &[21][..]),
+            (rnode::CMD_DATA, &[0x00, 0x00, 0x02, 0x03][..]),
+        ] {
+            kiss::frame(command, payload, &mut wire);
+            peer.write_all(&wire)
+                .await
+                .expect("write mocked KISS stream");
+        }
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), incoming_rx.recv())
+                .await
+                .expect("data frame within 2s")
+                .expect("incoming channel open");
+        }
+        drop(outgoing_tx);
+        drop(peer);
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+        let captured = buf.lock().unwrap();
+        let logs = String::from_utf8_lossy(&captured);
+        let rx_events: Vec<&str> = logs.lines().filter(|l| l.contains("LORA_RX")).collect();
+        assert_eq!(rx_events.len(), 2, "two LORA_RX events; logs:\n{logs}");
+        assert!(
+            rx_events[0].contains("len=3")
+                && !rx_events[0].contains("rssi=")
+                && !rx_events[0].contains("snr="),
+            "the un-preceded frame carries no signal keys: {}",
+            rx_events[0]
+        );
+        assert!(
+            rx_events[1].contains("len=4 rssi=-57 snr=5.25"),
+            "the preceded frame carries the paired stats: {}",
+            rx_events[1]
+        );
+        assert!(
+            logs.contains("RX 4 bytes from radio rssi=-57 snr=5.25"),
+            "the human RX line carries the same pair; logs:\n{logs}"
         );
     }
 
