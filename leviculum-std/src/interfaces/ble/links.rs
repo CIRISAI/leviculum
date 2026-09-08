@@ -23,7 +23,8 @@
 //! peripheral links rather than per link.
 
 use leviculum_ble_tx::{
-    addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, MANUFACTURER_DATA_LEN,
+    addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, ScanMode,
+    MANUFACTURER_DATA_LEN,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -554,11 +555,18 @@ pub(crate) fn decide_from_scan(
     if !parsed.offers_service {
         return None;
     }
+    // Always the strict rule: the #375 fallback needs a clock over the
+    // whole search (how long since the last initiate verdict or link),
+    // and lnsd's scanner does not keep one yet — this batch wires the
+    // fallback into the firmware's central task only. Until lnsd grows
+    // the same clock it can, like any node, sit out the sort when every
+    // permitted peer is dark; a later batch decides that.
     let decision = should_initiate(
         LOCAL_CAPS,
         addr_value_display(local_addr),
         parsed.caps,
         addr_value_display(peer_addr),
+        ScanMode::Strict,
     );
     Some(ScanDecision {
         decision,

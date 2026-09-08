@@ -38,6 +38,24 @@
 //! advertisement carries no identity; the firmware closes the hole
 //! post-connect by reading the Identity characteristic and dropping the
 //! link if that identity is already live.
+//!
+//! # The fallback mode (Codeberg #375)
+//!
+//! The sort alone strands the high addresses of a room: a board that
+//! outranks every advertising neighbour gets only `wait` verdicts, and
+//! once the boards above it have gone dark (all incoming slots in
+//! sessions — a full board does not advertise, #372) it scans forever
+//! with no permitted target, so ten boards form one connected BLE graph
+//! only ~79 % of the time. [`ScanMode::Fallback`] is the escape: after
+//! the central task has searched for a bounded time without one
+//! `initiate` verdict, the sort's `wait` becomes
+//! [`ConnectDecision::InitiateFallback`] and any advertising Reticulum
+//! peer is a target. The cycles this can close are harmless (Reticulum
+//! dedups by packet hash); a duplicate link to an already-linked
+//! identity is refused post-connect by the registry, exactly like a
+//! rotated-address reconnect. The rule stays pure: whether the bound
+//! has elapsed is measured by the caller and handed in as the mode,
+//! never measured here.
 
 use crate::adv::{COMPANY_ID, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION};
 use crate::CAP_PERIPHERAL_ONLY;
@@ -134,6 +152,26 @@ pub fn addr_value(addr_le: &[u8; 6]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+/// Which acceptance regime the caller's search is in (#375).
+///
+/// The mode is an *input*: the rule never measures time. The firmware's
+/// central task tracks how long it has scanned without a single
+/// `initiate` verdict and switches to [`Self::Fallback`] when that
+/// exceeds its bound; the host simulation does the same in rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// The v2.2 sort with the v0.3.0 override, unmodified.
+    Strict,
+    /// The strict rule has yielded no target for the caller's bound:
+    /// the address sort's `wait` becomes
+    /// [`ConnectDecision::InitiateFallback`]. Everything else is
+    /// unchanged — the capability overrides are physical facts about
+    /// who *can* connect, not tie-breaks, and equal addresses stay a
+    /// stand-down (that is the self/collision guard, and dialling
+    /// yourself is never a fallback).
+    Fallback,
+}
+
 /// The connection decision, with the rule that produced it — the rule
 /// is what the `BLE_SCAN_DECISION` log line and the table tests hold
 /// on to, so "right answer, wrong reason" cannot pass.
@@ -147,6 +185,12 @@ pub enum ConnectDecision {
     /// v2.2 address sort: the peer's address is the lower one; it
     /// initiates, we keep advertising.
     WaitPeerHasLowerAddress,
+    /// #375: the sort says wait, but the caller is in
+    /// [`ScanMode::Fallback`] — the strict rule produced no target for
+    /// the whole bound, so any advertising Reticulum peer is dialled
+    /// rather than none. Its own rule name, so a capture can tell a
+    /// fallback dial from a sort win.
+    InitiateFallback,
     /// v0.3.0 §3.1 case 2: we are the peripheral-only side, the peer
     /// must come to us.
     WaitWeArePeripheralOnly,
@@ -164,7 +208,7 @@ impl ConnectDecision {
     pub fn initiate(self) -> bool {
         matches!(
             self,
-            Self::InitiatePeripheralOnlyPeer | Self::InitiateLowerAddress
+            Self::InitiatePeripheralOnlyPeer | Self::InitiateLowerAddress | Self::InitiateFallback
         )
     }
 
@@ -175,6 +219,7 @@ impl ConnectDecision {
             Self::InitiatePeripheralOnlyPeer => "initiate_peer_peripheral_only",
             Self::InitiateLowerAddress => "initiate_lower_address",
             Self::WaitPeerHasLowerAddress => "wait_peer_lower_address",
+            Self::InitiateFallback => "initiate_fallback",
             Self::WaitWeArePeripheralOnly => "wait_we_are_peripheral_only",
             Self::NobodyBothPeripheralOnly => "nobody_both_peripheral_only",
             Self::NobodyEqualAddresses => "nobody_equal_addresses",
@@ -190,12 +235,21 @@ impl ConnectDecision {
 /// readable capability record) is full capability per v0.3.0 §3.2.
 /// Addresses are [`addr_value`]s of the two *current* addresses — ours
 /// as configured in the SoftDevice, the peer's as it advertises now.
+///
+/// `mode` is the #375 fallback switch (see [`ScanMode`] and the module
+/// docs). It reshapes exactly one outcome: the address sort's
+/// [`ConnectDecision::WaitPeerHasLowerAddress`] becomes
+/// [`ConnectDecision::InitiateFallback`]. The capability cases are
+/// untouched — a peripheral-only side still cannot dial no matter how
+/// long it has waited — and equal addresses still stand down, because
+/// that case guards against dialling ourselves, not against a tie.
 #[must_use]
 pub fn should_initiate(
     local_caps: u8,
     local_addr: u64,
     peer_caps: Option<u8>,
     peer_addr: u64,
+    mode: ScanMode,
 ) -> ConnectDecision {
     let local_po = local_caps & CAP_PERIPHERAL_ONLY != 0;
     let peer_po = peer_caps.unwrap_or(0) & CAP_PERIPHERAL_ONLY != 0;
@@ -207,7 +261,10 @@ pub fn should_initiate(
             if local_addr < peer_addr {
                 ConnectDecision::InitiateLowerAddress
             } else if local_addr > peer_addr {
-                ConnectDecision::WaitPeerHasLowerAddress
+                match mode {
+                    ScanMode::Strict => ConnectDecision::WaitPeerHasLowerAddress,
+                    ScanMode::Fallback => ConnectDecision::InitiateFallback,
+                }
             } else {
                 ConnectDecision::NobodyEqualAddresses
             }
@@ -340,41 +397,59 @@ mod tests {
     }
 
     /// The v2.2 §Connection Direction sort and every v0.3.0 §3.1
-    /// override, as one table: local caps × peer caps × address order.
+    /// override, as one table: local caps × peer caps × address order,
+    /// in both scan modes (#375). Fallback rows restate every strict
+    /// row: exactly one cell may differ, the sort's wait.
     #[test]
     fn the_decision_table_matches_v2_2_and_the_v0_3_0_override() {
         use ConnectDecision::*;
+        use ScanMode::{Fallback, Strict};
         const LOWER: u64 = 0xB827_EB10_28CD;
         const HIGHER: u64 = 0xB827_EBA8_A722;
         const PO: u8 = CAP_PERIPHERAL_ONLY;
+        type Row = (u8, u64, Option<u8>, u64, ScanMode, ConnectDecision);
         #[rustfmt::skip]
-        let table: &[(u8, u64, Option<u8>, u64, ConnectDecision)] = &[
+        let table: &[Row] = &[
             // v2.2 sort, both fully capable (v0.3.0 case 4)…
-            (0, LOWER,  Some(0), HIGHER, InitiateLowerAddress),
-            (0, HIGHER, Some(0), LOWER,  WaitPeerHasLowerAddress),
+            (0, LOWER,  Some(0), HIGHER, Strict, InitiateLowerAddress),
+            (0, HIGHER, Some(0), LOWER,  Strict, WaitPeerHasLowerAddress),
             // …and identically for a v2.2 peer with no record (§3.2).
-            (0, LOWER,  None,    HIGHER, InitiateLowerAddress),
-            (0, HIGHER, None,    LOWER,  WaitPeerHasLowerAddress),
+            (0, LOWER,  None,    HIGHER, Strict, InitiateLowerAddress),
+            (0, HIGHER, None,    LOWER,  Strict, WaitPeerHasLowerAddress),
             // v0.3.0 case 1: peripheral-only peer — the sort says wait,
             // the override says initiate. THE address-rotation bypass.
-            (0, HIGHER, Some(PO), LOWER, InitiatePeripheralOnlyPeer),
-            (0, LOWER,  Some(PO), HIGHER, InitiatePeripheralOnlyPeer),
+            (0, HIGHER, Some(PO), LOWER, Strict, InitiatePeripheralOnlyPeer),
+            (0, LOWER,  Some(PO), HIGHER, Strict, InitiatePeripheralOnlyPeer),
             // v0.3.0 case 2: we are the peripheral-only side, even
             // where the sort would have had us initiate.
-            (PO, LOWER,  Some(0), HIGHER, WaitWeArePeripheralOnly),
-            (PO, HIGHER, None,    LOWER,  WaitWeArePeripheralOnly),
+            (PO, LOWER,  Some(0), HIGHER, Strict, WaitWeArePeripheralOnly),
+            (PO, HIGHER, None,    LOWER,  Strict, WaitWeArePeripheralOnly),
             // v0.3.0 case 3: deadlock, named as such.
-            (PO, LOWER,  Some(PO), HIGHER, NobodyBothPeripheralOnly),
+            (PO, LOWER,  Some(PO), HIGHER, Strict, NobodyBothPeripheralOnly),
             // The spec's "should never happen" MAC collision.
-            (0, LOWER,  Some(0), LOWER, NobodyEqualAddresses),
+            (0, LOWER,  Some(0), LOWER, Strict, NobodyEqualAddresses),
             // Reserved capability bits do not read as PERIPHERAL_ONLY.
-            (0, HIGHER, Some(0x02), LOWER, WaitPeerHasLowerAddress),
+            (0, HIGHER, Some(0x02), LOWER, Strict, WaitPeerHasLowerAddress),
+            // #375 fallback: THE changed cell — the sort's wait becomes
+            // a dial, with its own rule name…
+            (0, HIGHER, Some(0), LOWER,  Fallback, InitiateFallback),
+            (0, HIGHER, None,    LOWER,  Fallback, InitiateFallback),
+            (0, HIGHER, Some(0x02), LOWER, Fallback, InitiateFallback),
+            // …a sort win keeps its honest strict name…
+            (0, LOWER,  Some(0), HIGHER, Fallback, InitiateLowerAddress),
+            (0, LOWER,  Some(PO), HIGHER, Fallback, InitiatePeripheralOnlyPeer),
+            // …and no fallback overrides physics or the self-guard: a
+            // peripheral-only side still cannot dial, equal addresses
+            // still stand down.
+            (PO, LOWER,  Some(0), HIGHER, Fallback, WaitWeArePeripheralOnly),
+            (PO, HIGHER, Some(PO), LOWER, Fallback, NobodyBothPeripheralOnly),
+            (0, LOWER,  Some(0), LOWER, Fallback, NobodyEqualAddresses),
         ];
-        for &(lc, la, pc, pa, want) in table {
+        for &(lc, la, pc, pa, mode, want) in table {
             assert_eq!(
-                should_initiate(lc, la, pc, pa),
+                should_initiate(lc, la, pc, pa, mode),
                 want,
-                "local_caps={lc:#x} local={la:#x} peer_caps={pc:?} peer={pa:#x}"
+                "local_caps={lc:#x} local={la:#x} peer_caps={pc:?} peer={pa:#x} mode={mode:?}"
             );
         }
     }
@@ -389,12 +464,24 @@ mod tests {
         let mut peer = ours;
         peer[5] = 0xB9; // most significant displayed octet: peer higher
         assert_eq!(
-            should_initiate(0, addr_value(&ours), Some(0), addr_value(&peer)),
+            should_initiate(
+                0,
+                addr_value(&ours),
+                Some(0),
+                addr_value(&peer),
+                ScanMode::Strict
+            ),
             ConnectDecision::InitiateLowerAddress
         );
         peer[5] = 0xB7; // now peer lower
         assert_eq!(
-            should_initiate(0, addr_value(&ours), Some(0), addr_value(&peer)),
+            should_initiate(
+                0,
+                addr_value(&ours),
+                Some(0),
+                addr_value(&peer),
+                ScanMode::Strict
+            ),
             ConnectDecision::WaitPeerHasLowerAddress
         );
     }
@@ -410,12 +497,24 @@ mod tests {
         let ours = addr_value(&[0x22, 0xA7, 0xA8, 0xEB, 0x27, 0x50]);
         let rpa_before = addr_value(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x40]);
         let rpa_after = addr_value(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x7F]);
-        let sort_before = should_initiate(0, ours, Some(0), rpa_before);
-        let sort_after = should_initiate(0, ours, Some(0), rpa_after);
+        let sort_before = should_initiate(0, ours, Some(0), rpa_before, ScanMode::Strict);
+        let sort_after = should_initiate(0, ours, Some(0), rpa_after, ScanMode::Strict);
         assert_ne!(sort_before, sort_after, "the sort is rotation-unstable");
         assert_eq!(
-            should_initiate(0, ours, Some(CAP_PERIPHERAL_ONLY), rpa_before),
-            should_initiate(0, ours, Some(CAP_PERIPHERAL_ONLY), rpa_after),
+            should_initiate(
+                0,
+                ours,
+                Some(CAP_PERIPHERAL_ONLY),
+                rpa_before,
+                ScanMode::Strict
+            ),
+            should_initiate(
+                0,
+                ours,
+                Some(CAP_PERIPHERAL_ONLY),
+                rpa_after,
+                ScanMode::Strict
+            ),
             "the override is not"
         );
     }
@@ -434,18 +533,25 @@ mod tests {
         let rpa_ceiling = addr_value(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
         assert!(rpa_ceiling < static_random_floor);
         assert_eq!(
-            should_initiate(0, static_random_floor, Some(0), rpa_ceiling),
+            should_initiate(
+                0,
+                static_random_floor,
+                Some(0),
+                rpa_ceiling,
+                ScanMode::Strict
+            ),
             ConnectDecision::WaitPeerHasLowerAddress,
             "an LNode never wins the sort against a phone's RPA"
         );
     }
 
     #[test]
-    fn initiate_maps_exactly_the_two_initiating_rules() {
+    fn initiate_maps_exactly_the_three_initiating_rules() {
         use ConnectDecision::*;
         for d in [
             InitiatePeripheralOnlyPeer,
             InitiateLowerAddress,
+            InitiateFallback,
             WaitPeerHasLowerAddress,
             WaitWeArePeripheralOnly,
             NobodyBothPeripheralOnly,
@@ -453,7 +559,10 @@ mod tests {
         ] {
             assert_eq!(
                 d.initiate(),
-                matches!(d, InitiatePeripheralOnlyPeer | InitiateLowerAddress)
+                matches!(
+                    d,
+                    InitiatePeripheralOnlyPeer | InitiateLowerAddress | InitiateFallback
+                )
             );
             assert!(!d.as_str().contains(char::is_whitespace), "log-safe");
         }

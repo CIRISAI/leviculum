@@ -116,6 +116,61 @@ The firmware keeps advertising while any slot is free and goes silent
 when full, so a scanner not seeing the relay is the honest signal of
 that state.
 
+### Initiation direction, the fallback, cycles and duplicate links
+
+Who initiates is the v2.2 address sort: the lower BLE address dials, the
+higher one advertises and waits (with the v0.3.0 capability override for
+peripheral-only peers). The sort alone does not reliably connect a room
+of boards (#375): a full board stops advertising, so the highest
+addresses can run out of permitted targets and sit scanning forever
+while the sort forbids them to dial anyone lower. A Monte Carlo of
+random arrival orders puts ten boards at a 21 % chance of a
+disconnected BLE graph under the pure sort.
+
+The fallback closes the stranded-board gap: a central task that has
+scanned for `SCAN_FALLBACK_AFTER_MS` (30 s) without a single initiate
+verdict, and without a link coming up in either role, accepts any
+advertising Reticulum peer (`BLE_SCAN_FALLBACK` marks the switch, and
+the verdict logs as `rule=initiate_fallback` in `BLE_SCAN_DECISION`).
+Full boards do not advertise, so a fallback dial only ever lands on a
+free slot. The rule stays pure and host tested in
+`leviculum-nrf/ble-tx` (`should_initiate` with a `ScanMode` input);
+the firmware measures the time and hands the mode in.
+
+With the fallback no board is ever left without a BLE link, but full
+connectivity is not guaranteed: a fallback dial can close a cycle
+inside its own component, and when every component has spent all its
+outgoing links that way, nobody is scanning and disjoint components
+never merge (measured at 2 of 1000 arrival orders for ten boards, 48
+of 1000 for twenty). Breaking that residual lock needs a better target
+choice than first-advertiser-wins, which is the free-slot capability
+record's batch.
+
+Two consequences of dialling against the sort are deliberate:
+
+- **Cycles in the BLE graph are harmless.** Reticulum treats every
+  interface as a lossy broadcast domain and deduplicates packets at the
+  transport, so a packet arriving over two paths costs one discarded
+  duplicate, not a loop; announce rebroadcast is suppressed the same
+  way. Connectivity is what the graph owes the mesh, minimal edge count
+  is not.
+- **A second link to an already linked identity is refused as churn.**
+  It adds no reachability, burns one of three incoming slots and the
+  airtime of a connect, so the central path reads the peer's Identity
+  characteristic at connect and drops the duplicate (`BLE_LINK_DUP`),
+  exactly as it does when a linked phone rotates its address and
+  reappears. The registry rule that a same-identity second link is
+  churn rather than an arrival is pinned by
+  `a_second_link_of_the_same_identity_is_churn_not_an_arrival` in
+  `leviculum-nrf/ble-tx/src/registry.rs`.
+
+The simulation that motivated the fallback is a host test:
+`leviculum-nrf/ble-tx/tests/graph_formation.rs` replays random arrival
+orders through the real rule with the real slot limits. It reproduces
+the issue's strict-rule disconnection rates exactly, asserts that with
+the fallback no board ends linkless, and pins the saturated-cycle lock
+as the only residual disconnection mechanism.
+
 Three implementations exist in tree: the shared carrier logic
 (`leviculum-core/src/framing/ble.rs`, plus the advertisement/decision
 logic in `leviculum-nrf/ble-tx`), the firmware's dual-role

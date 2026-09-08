@@ -29,7 +29,8 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
-    PeerRegistry, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN,
+    PeerRegistry, ScanMode, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
+    MANUFACTURER_DATA_LEN,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -562,6 +563,10 @@ fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
     if first {
         super::report_peer_event(super::PeerEvent::Up(peer_id));
     }
+    // A link up in either role restarts the fallback clock (#375): the
+    // board is reachable over BLE again, so the strict rule gets its
+    // full bound before the scanner may dial against the sort.
+    note_strict_reset();
 }
 
 /// Clear a slot's registry entry and, when that took the peer's LAST
@@ -625,6 +630,90 @@ const CONNECT_TIMEOUT_10MS: u16 = 500;
 /// scan pass. Keeps a refusing/vanishing peer from being hammered.
 const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 
+/// How long the central task searches under the strict rule before the
+/// scanner switches to [`ScanMode::Fallback`] (Codeberg #375): after
+/// this much scanning without a single `initiate` verdict — and without
+/// a link coming up in either role — any advertising Reticulum peer
+/// becomes a target.
+///
+/// 30 s, sized between the cadences on either side of it. Below: one
+/// failed strict attempt costs up to [`CONNECT_TIMEOUT_10MS`] (5 s)
+/// plus [`CENTRAL_RETRY_BACKOFF_MS`] (5 s), and the 30 %-duty passive
+/// scan ([`SCAN_INTERVAL_625US`]/[`SCAN_WINDOW_625US`]) hears a waiting
+/// peer — which advertises several times a second — within seconds; 30 s
+/// therefore spans several complete search-connect-backoff cycles, so a
+/// permitted peer that exists gets found and even a couple of racing
+/// boot-order failures resolve under the strict rule rather than
+/// tripping a premature fallback (whose wrong dial is refused as a
+/// duplicate and then blocks that address for [`DUPLICATE_ADDR_TTL`],
+/// 120 s — four times this bound). Above: this is the whole BLE-less
+/// window of a stranded board — one that outranks every visible
+/// neighbour, Codeberg #375's disconnected-graph case — so tens of
+/// seconds is the ceiling the issue allows; half a minute keeps the
+/// stranding shorter than one duplicate-table TTL.
+const SCAN_FALLBACK_AFTER_MS: u64 = 30_000;
+
+/// The strict-phase clock behind [`SCAN_FALLBACK_AFTER_MS`]: when the
+/// current strict phase began (in `embassy_time` ticks) and whether the
+/// switch to fallback was already logged for this phase. Reset by
+/// [`note_strict_reset`] — a link up in either role, or the strict rule
+/// producing a target — which is what makes the fallback a last resort
+/// rather than a periodic mode.
+///
+/// A blocking mutex over a `Cell`, like [`LIVE_PEERS`]: written from
+/// the peripheral tasks (via [`peer_link_up`]) and read from the
+/// central task's scan callback, and the ticks are 64-bit, which the
+/// target has no atomic for.
+static FALLBACK_CLOCK: BlockingMutex<CriticalSectionRawMutex, Cell<(u64, bool)>> =
+    BlockingMutex::new(Cell::new((0, false)));
+
+/// Restart the strict phase: a link came up in either role, or the
+/// strict rule found a permitted peer — either way the board is not
+/// stranded, so the fallback clock starts over.
+fn note_strict_reset() {
+    FALLBACK_CLOCK.lock(|clock| clock.set((Instant::now().as_ticks(), false)));
+}
+
+/// The [`ScanMode`] the current strict phase has reached, logging the
+/// strict-to-fallback switch once per phase (`BLE_SCAN_FALLBACK`).
+///
+/// Sampled per advertising report rather than per scan pass: a strict
+/// pass that never finds a target never *ends* — `central::scan` runs
+/// until its callback accepts a peer — so "the next pass" would never
+/// come for exactly the stranded board the fallback exists for. The
+/// timing stays an input to [`should_initiate`]; the rule itself never
+/// measures it.
+fn scan_mode_now() -> ScanMode {
+    // One lock for the read-check-mark sequence: a reset racing in
+    // between two separate locks would be overwritten with the stale
+    // phase. The log line itself stays outside the critical section.
+    let announce = FALLBACK_CLOCK.lock(|clock| {
+        let (since_ticks, announced) = clock.get();
+        let elapsed_ms =
+            Duration::from_ticks(Instant::now().as_ticks().saturating_sub(since_ticks)).as_millis();
+        if elapsed_ms < SCAN_FALLBACK_AFTER_MS {
+            return None;
+        }
+        if !announced {
+            clock.set((since_ticks, true));
+            return Some(Some(elapsed_ms));
+        }
+        Some(None)
+    });
+    match announce {
+        None => ScanMode::Strict,
+        Some(logged) => {
+            if let Some(elapsed_ms) = logged {
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!("BLE_SCAN_FALLBACK after_ms={elapsed_ms}"),
+                );
+            }
+            ScanMode::Fallback
+        }
+    }
+}
+
 /// How long an address that turned out to carry an already-linked
 /// identity is skipped. Sized to the RPA rotation timescale (minutes):
 /// the address dies on its own at the peer's next rotation, this just
@@ -672,18 +761,20 @@ impl RecentDuplicates {
 }
 
 /// Scan until one advertisement wins an initiate decision, and return
-/// that peer's current address.
+/// that peer's current address plus the rule that permitted it (the
+/// caller resets the fallback clock on a strict verdict, #375).
 ///
 /// Every connectable PDU carrying the Reticulum service UUID gets a
 /// [`should_initiate`] verdict from the v2.2 sort + v0.3.0 override
-/// (the rule lives host-tested in [`leviculum_ble_tx::peer`]); the
+/// (the rule lives host-tested in [`leviculum_ble_tx::peer`]), under
+/// the [`ScanMode`] the fallback clock has reached at that report; the
 /// verdict is logged once per (address, rule) change rather than per
 /// PDU, because a waiting peer re-advertises several times a second.
 async fn find_peer_to_initiate(
     sd: &'static Softdevice,
     own_addr_value: u64,
     skip: &RecentDuplicates,
-) -> Result<Address, central::ScanError> {
+) -> Result<(Address, ConnectDecision), central::ScanError> {
     let config = central::ScanConfig {
         active: false,
         extended: false,
@@ -709,7 +800,13 @@ async fn find_peer_to_initiate(
         }
         let peer = Address::from_raw(report.peer_addr);
         let peer_value = addr_value(&peer.bytes());
-        let decision = should_initiate(LOCAL_CAPS, own_addr_value, parsed.caps, peer_value);
+        let decision = should_initiate(
+            LOCAL_CAPS,
+            own_addr_value,
+            parsed.caps,
+            peer_value,
+            scan_mode_now(),
+        );
         if last_logged.get() != Some((peer_value, decision)) {
             last_logged.set(Some((peer_value, decision)));
             crate::log::log_fmt(
@@ -731,7 +828,7 @@ async fn find_peer_to_initiate(
         if !decision.initiate() || skip.contains(peer_value) {
             return None;
         }
-        Some(peer)
+        Some((peer, decision))
     })
     .await
 }
@@ -1111,7 +1208,16 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
         )
         .await
         {
-            Either::First(Ok(peer)) => {
+            Either::First(Ok((peer, decision))) => {
+                // A strict verdict is a permitted peer: the strict rule
+                // works here, so the fallback clock restarts (#375). A
+                // fallback verdict must NOT restart it — if this dial
+                // fails, the board is still stranded and the next pass
+                // must stay in fallback rather than wait out the bound
+                // again.
+                if decision != ConnectDecision::InitiateFallback {
+                    note_strict_reset();
+                }
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!(

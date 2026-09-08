@@ -46,6 +46,7 @@ pub use adv::{
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
+    ScanMode,
 };
 pub use registry::PeerRegistry;
 
