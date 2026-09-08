@@ -87,6 +87,27 @@ caps at `MAX_CONNECTIONS = 7` and Android allows about 8 BLE connections total
 across all apps; in practice 3 to 4 links are reliable. This protocol therefore
 does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 
+### Incoming link slots and the slot-contention policy
+
+An LNode accepts three incoming (peripheral-role) links and initiates
+one outgoing (central-role) link (#372); lnsd bounds both roles
+together at `max_links = 4`. Three incoming slots dissolve the
+single-slot field failure where two boards beside a phone paired with
+each other first and the phone could only reach the board whose one
+slot was still free: with slots to spare, a neighbour board and a
+phone link to the same relay simultaneously.
+
+There is deliberately NO preference of a phone over a board for the
+last free slot. With more slots than nearby peers the policy would
+decide nothing, and deciding it well needs information a connect-time
+policy does not have (which peer carries traffic the mesh needs). It
+becomes worth revisiting when a deployment has more adjacent boards
+than a relay has slots — the boards can then occupy every slot before
+a phone arrives, which is the single-slot failure again, one layer up.
+The firmware keeps advertising while any slot is free and goes silent
+when full, so a scanner not seeing the relay is the honest signal of
+that state.
+
 Three implementations exist in tree: the shared carrier logic
 (`leviculum-core/src/framing/ble.rs`, plus the advertisement/decision
 logic in `leviculum-nrf/ble-tx`), the firmware's dual-role
