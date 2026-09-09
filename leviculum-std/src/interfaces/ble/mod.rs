@@ -45,7 +45,9 @@ use super::{
 };
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
-use links::{Addr, Admission, DialQueue, IdentityHash, Inbound, LinkTable, Role, ScanScheduler};
+use links::{
+    Addr, Admission, DialQueue, Displaced, IdentityHash, Inbound, LinkTable, Role, ScanScheduler,
+};
 
 /// Outbound channel depth, matching the other interfaces' default.
 const BLE_BUFFER_SIZE: usize = 256;
@@ -464,10 +466,11 @@ impl BleTask {
                         // the strict phase (#375 §0).
                         scheduler.note_reset(now);
                         let first_link = displaced.is_none();
-                        if let Some((identity, old_addr, role)) = displaced {
-                            self.log_link_down(&identity, role, "displaced");
-                            central_pipes.remove(&old_addr);
-                            disconnect_quietly(adapter, old_addr).await;
+                        if let Some(old) = displaced {
+                            self.log_link_dup_displace(&identity, &addr.0, Role::Peripheral, &old);
+                            self.log_link_down(&old.identity, old.role, "displaced");
+                            central_pipes.remove(&old.addr);
+                            disconnect_quietly(adapter, old.addr).await;
                         }
                         self.log_link_up(&identity, &addr.0, Role::Peripheral, mtu);
                         if first_link {
@@ -475,7 +478,7 @@ impl BleTask {
                         }
                     }
                     Inbound::HandshakeRejected(admission) => {
-                        self.log_rejection(admission, &data, &addr.0);
+                        self.log_rejection(admission, Role::Peripheral, &data, &addr.0);
                         backoff_until.insert(addr.0, now + DUPLICATE_ADDR_TTL_MS);
                         disconnect_quietly(adapter, addr.0).await;
                     }
@@ -573,10 +576,11 @@ impl BleTask {
                         // is then a no-op.
                         dial_queue.release(&addr.0, now);
                         let first_link = displaced.is_none();
-                        if let Some((identity, old_addr, role)) = displaced {
-                            self.log_link_down(&identity, role, "displaced");
-                            central_pipes.remove(&old_addr);
-                            disconnect_quietly(adapter, old_addr).await;
+                        if let Some(old) = displaced {
+                            self.log_link_dup_displace(&identity, &addr.0, Role::Central, &old);
+                            self.log_link_down(&old.identity, old.role, "displaced");
+                            central_pipes.remove(&old.addr);
+                            disconnect_quietly(adapter, old.addr).await;
                         }
                         central_pipes.insert(addr.0, CentralPipe { frames });
                         self.log_link_up(&identity, &addr.0, Role::Central, mtu);
@@ -586,7 +590,7 @@ impl BleTask {
                         let _ = ack.send(true);
                     }
                     other => {
-                        self.log_rejection(other, &identity, &addr.0);
+                        self.log_rejection(other, Role::Central, &identity, &addr.0);
                         backoff_until.insert(
                             addr.0,
                             now + match other {
@@ -968,18 +972,45 @@ impl BleTask {
         );
     }
 
-    fn log_rejection(&self, admission: Admission, identity: &[u8], addr: &Addr) {
+    /// A duplicate identity we resolved by displacing the old link
+    /// (#376/#382). The firmware's `BLE_LINK_DUP … action=displace`,
+    /// key for key, so one grep reads a mixed capture: `origin=` names
+    /// who opened the connection that won, `old_silence_ms=` how long
+    /// the loser had delivered nothing at all.
+    fn log_link_dup_displace(
+        &self,
+        identity: &IdentityHash,
+        addr: &Addr,
+        role: Role,
+        old: &Displaced,
+    ) {
+        tracing::info!(
+            event = "BLE_LINK_DUP",
+            iface = %self.name,
+            peer = %hex8(identity),
+            addr = %hex12(addr),
+            action = "displace",
+            origin = role.origin_as_str(),
+            old_role = old.role.as_str(),
+            old_silence_ms = old.silence_ms,
+        );
+    }
+
+    fn log_rejection(&self, admission: Admission, role: Role, identity: &[u8], addr: &Addr) {
         match admission {
             Admission::RejectSelf => tracing::warn!(
                 event = "BLE_LINK_SELF",
                 addr = %hex12(addr),
                 action = "disconnect",
             ),
-            Admission::RejectDuplicate => tracing::info!(
+            Admission::RejectDuplicate { old_silence_ms } => tracing::info!(
                 event = "BLE_LINK_DUP",
+                iface = %self.name,
                 peer = %hex8(identity),
                 addr = %hex12(addr),
-                action = "disconnect",
+                action = "refuse",
+                origin = role.origin_as_str(),
+                old_silence_ms = old_silence_ms,
             ),
             Admission::RejectFull => tracing::info!(
                 "BLE {}: link limit reached, rejecting {}",

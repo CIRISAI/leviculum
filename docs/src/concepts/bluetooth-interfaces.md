@@ -171,32 +171,61 @@ Two consequences of dialling against the sort are deliberate:
   duplicate, not a loop; announce rebroadcast is suppressed the same
   way. Connectivity is what the graph owes the mesh, minimal edge count
   is not.
-- **A second link to an already linked identity is refused while the
-  first one is alive.** It adds no reachability, burns one of three
-  incoming slots and the airtime of a connect, so both roles resolve
-  the identity at connect — read from the Identity characteristic as
-  central, presented in the handshake as peripheral — and drop the
-  newcomer (`BLE_LINK_DUP … action=refuse`). The exception is a link
-  that has carried no real data for 30 seconds: that one is a zombie
-  and the newcomer displaces it instead (`action=displace`), which is
-  how a peer whose rotated address reconnects wins against its own
-  stale session. Both branches log the old link's `old_age_ms`, so a
-  capture shows the evidence the decision rested on.
+- **A second link to an already linked identity is decided by who
+  opened it.** It adds no reachability, burns one of three incoming
+  slots and the airtime of a connect, so both roles resolve the
+  identity at connect — read from the Identity characteristic as
+  central, presented in the handshake as peripheral — and then apply
+  one rule, `judge_duplicate` in
+  `leviculum-nrf/ble-tx/src/registry.rs`, which lnsd calls too:
 
-  Refusing is the only safe default because the identity behind an
-  advertisement is unknowable before connecting: a phone rotating its
-  address will be dialled by a board already linked to it, and a rule
-  that always kept the newest connection then killed the phone's own
-  working link every ~95 seconds (the 2026-09-09 field T114 on #376).
-  The refused address goes into the dead-end table for its TTL so the
-  scanner does not immediately re-offer it. Rule and timeout are the
-  reference's `_check_duplicate_identity`/`_zombie_timeout`; the
-  constant `ZOMBIE_TIMEOUT_MS` lives once in
-  `leviculum-nrf/ble-tx/src/registry.rs` and lnsd imports it, so the
-  two Rust stacks cannot drift. The registry decisions are pinned by
-  `a_second_link_is_refused_while_the_old_one_is_fresh`,
-  `a_second_link_displaces_an_old_one_that_has_gone_zombie` and
-  `the_freshness_boundary_is_the_zombie_timeout` there.
+  - an **incoming** duplicate DISPLACES the old link
+    (`BLE_LINK_DUP … action=displace origin=incoming`). A peer that
+    opens a second connection has, by its own one-link-per-identity
+    rule, given up on the first, and it has already built the
+    replacement. No clock is consulted: the peer's own action is better
+    evidence than any timer of ours;
+  - an **outgoing** duplicate — our own dial — is REFUSED
+    (`action=refuse origin=outgoing`) unless the old link has delivered
+    nothing at all, payload AND keepalives, for `LINK_TIMEOUT_MS`
+    (45 s, three missed keepalives). Our dial is evidence of nothing:
+    an advertisement carries no identity and the peer rotates its
+    address, so a dial that lands on an identity we already hold is
+    most likely our own fallback dial finding the peer beside us. The
+    refused address goes into the dead-end table for its TTL so the
+    scanner does not immediately re-offer it.
+
+  Every line carries `origin=` and `old_silence_ms=`, so a capture
+  shows the evidence the decision rested on.
+
+  The two 2026-09-09 field T114s are the two directions, and each one
+  broke the rule that ignored direction. In the morning the phone
+  dialled a board already linked to it, the board refused, and the
+  phone stopped reading the link it had abandoned — every announce went
+  into a dead socket (#376). In the evening our own fallback dial found
+  the phone under a rotated address and displaced its working link
+  every ~95 seconds (#376, 13bea3e5).
+
+  What replaced the intervening 30 s payload-silence clock is a
+  measurement (#382). Over 14.1 h beside a Columba phone
+  (`ble-accept-rns/lnsd.log`, 2026-08-30) the gaps between received
+  non-keepalive packets from a peer that was demonstrably present
+  throughout ran to a median of 51 s, a 90th percentile of 182 s and a
+  maximum of 5590 s; 502 links outlived 45 s with no payload at all.
+  Payload silence is what an idle phone looks like, not evidence of
+  anything. Keepalives are evidence, and the same log shows them
+  arriving: only 2 of those 502 links were ever closed by the silence
+  timer, so the other 500 were kept alive by something the peer sent,
+  which is the keepalive. Since the liveness bound is now the link
+  timeout itself, a link the duplicate rule calls dead is exactly a
+  link lnsd's expiry sweep is about to remove — one clock, not two.
+  The decisions are pinned by
+  `our_own_dial_is_refused_while_the_old_link_still_answers`,
+  `an_incoming_duplicate_displaces_the_old_link_however_fresh_it_is`,
+  `a_keepalive_alone_keeps_a_link_out_of_reach_of_our_dial` and
+  `the_dead_link_boundary_is_the_link_timeout_and_only_binds_our_dials`
+  in the registry, and by `our_dial_is_refused_where_the_peers_own_dial_displaces`
+  in `leviculum-std/src/interfaces/ble/links.rs`.
 
 The simulation that motivated the fallback is a host test:
 `leviculum-nrf/ble-tx/tests/graph_formation.rs` replays random arrival

@@ -10,18 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A second BLE connection from an identity a node already holds a link
-  to is refused while that link is alive, and displaces it only once it
-  has gone zombie: no frame other than a keepalive received for 30
-  seconds (#376). The rule and the constant are the reference's
-  (`_check_duplicate_identity`, `_zombie_timeout`), and the firmware and
-  lnsd now read one `ZOMBIE_TIMEOUT_MS`. Keeping the newest connection
-  unconditionally, as the firmware did briefly, killed a phone's own
-  working link every ~95 seconds: a board cannot recognise its own peer
-  before connecting, because an advertisement carries no identity and
-  phones rotate their address, so its fallback dial reaches a peer it is
-  already linked to. `BLE_LINK_DUP` now says `action=refuse` or
-  `action=displace` with the old link's `old_age_ms`, `BLE_COUNTERS`
-  gains `refused=`, and a refused address enters the dead-end table so
+  to is decided by who opened it (#376, #382). An INCOMING duplicate
+  displaces the old link: a peer that opens a second connection has, by
+  its own one-link-per-identity rule, given up on the first, and it has
+  already built the replacement. An OUTGOING one — our own dial — is
+  refused unless the old link has delivered nothing at all, payload and
+  keepalives alike, for the link timeout (45 s); a node cannot recognise
+  its own peer before connecting, because an advertisement carries no
+  identity and phones rotate their address, so its fallback dial reaches
+  a peer it is already linked to. The two 2026-09-09 field failures were
+  the two directions: refusing an incoming duplicate cost a phone every
+  announce, displacing on an outgoing one cost it its working link every
+  ~95 seconds.
+
+  The intervening rule displaced any link that had received no frame
+  other than a keepalive for 30 seconds, and that fires on healthy
+  links: measured beside a Columba phone over 14.1 hours, the gaps
+  between received non-keepalive packets from a peer that was present
+  throughout had a median of 51 s, a 90th percentile of 182 s and a
+  maximum of 5590 s. Payload silence is what an idle phone looks like.
+  Keepalives are what a live peer sends regardless, so liveness is now
+  measured on every inbound frame, against the link timeout the
+  interfaces already expire links on — one clock instead of two, shared
+  by the firmware and lnsd. `BLE_LINK_DUP` says `action=refuse` or
+  `action=displace` with `origin=` and the old link's
+  `old_silence_ms`, on both stacks; `BLE_COUNTERS` carries `refused=`
+  and `displaced=`, and a refused address enters the dead-end table so
   the scanner stops re-dialling it.
 
 ### Added

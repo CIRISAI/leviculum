@@ -974,10 +974,12 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
 /// `displaced=` counts links torn down because a newer connection of
-/// the same identity took over a link that had gone zombie, and
-/// `refused=` counts second connections sent away because that
-/// identity's existing link was still carrying data — beside a Columba
-/// phone it is `refused=` that should climb (#376).
+/// the same identity took over — the peer dialled in, or our own dial
+/// found a link that had stopped answering — and `refused=` counts
+/// dials of OURS sent away because that identity's existing link was
+/// still answering. Beside a Columba phone both climb: `refused=` for
+/// the fallback dials that keep finding the phone's rotated address,
+/// `displaced=` once per reconnect the phone itself initiates (#382).
 /// `route_miss=` counts routed
 /// packets dropped because the peer the core addressed held no live
 /// link here (#376); a rising value on a healthy board means the path

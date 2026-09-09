@@ -23,9 +23,9 @@
 //! peripheral links rather than per link.
 
 use leviculum_ble_tx::{
-    addr_value, effective_tx_gap_ms, parse_peer_advertisement, should_initiate, CandidateTable,
-    ConnectDecision, ScanMode, TxGap, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    addr_value, effective_tx_gap_ms, judge_duplicate, parse_peer_advertisement, should_initiate,
+    CandidateTable, ConnectDecision, Duplicate, Origin, ScanMode, TxGap, MANUFACTURER_DATA_LEN,
+    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -58,24 +58,18 @@ pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 /// cost a link, and BlueZ surfaces no supervision-timeout event for
 /// peripheral-role links, so this timer is the only down-detector that
 /// covers both roles.
-pub(crate) const LINK_TIMEOUT_MS: u64 = 3 * KEEPALIVE_INTERVAL_MS;
+///
+/// Taken from the firmware's registry since #382, which made the same
+/// number the bound on when a duplicate may displace a link: a link the
+/// duplicate rule calls dead is exactly a link [`LinkTable::expire`] is
+/// about to remove anyway, and two copies of that number in one
+/// repository would not stay equal.
+pub(crate) use leviculum_ble_tx::LINK_TIMEOUT_MS;
 
 /// A central that connects but never writes its 16-byte identity is
 /// disconnected after this long — the reference's
 /// `_pending_identity_timeout` (`ble-reticulum@07d94130` `BLEInterface.py`, `_pending_identity_timeout`).
 pub(crate) const HANDSHAKE_TIMEOUT_MS: u64 = 30_000;
-
-/// An existing link whose peer has sent no *real* data (keepalives do not
-/// count) for this long may be displaced by a fresh link carrying the
-/// same identity — the reference's `_zombie_timeout`
-/// (`ble-reticulum@07d94130` `BLEInterface.py`, `_zombie_timeout`). This is how a peer that rotated its BLE
-/// address and reconnected wins against its own stale session, and
-/// below it the newcomer is refused instead.
-///
-/// Taken from the firmware's registry since #376, which adopted the
-/// same rule: three implementations agreeing on 30 s is the point, and
-/// two copies of the number in one repository would not stay equal.
-pub(crate) use leviculum_ble_tx::ZOMBIE_TIMEOUT_MS;
 
 /// Our side of a link: `Central` when we initiated the connection,
 /// `Peripheral` when the peer connected to our GATT server.
@@ -93,6 +87,36 @@ impl Role {
             Role::Peripheral => "peripheral",
         }
     }
+
+    /// Who opened this connection, the input the duplicate rule turns
+    /// on (#382). Our role IS the direction: we are the peripheral only
+    /// when the peer dialled us, the central only when we dialled it.
+    pub(crate) fn origin(self) -> Origin {
+        match self {
+            Role::Central => Origin::Outgoing,
+            Role::Peripheral => Origin::Incoming,
+        }
+    }
+
+    /// Stable token for `BLE_LINK_DUP origin=`, the firmware's spelling.
+    pub(crate) fn origin_as_str(self) -> &'static str {
+        match self.origin() {
+            Origin::Incoming => "incoming",
+            Origin::Outgoing => "outgoing",
+        }
+    }
+}
+
+/// A link torn down because a newer connection of the same identity
+/// took it over (#376), and the silence that justified it (#382) — what
+/// the driver needs to disconnect the stale device and log the
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Displaced {
+    pub(crate) identity: IdentityHash,
+    pub(crate) addr: Addr,
+    pub(crate) role: Role,
+    pub(crate) silence_ms: u64,
 }
 
 /// One live, handshaked link.
@@ -104,8 +128,10 @@ pub(crate) struct Link {
     /// a newer value.
     pub(crate) mtu: usize,
     defrag: BleDefragmenter,
+    /// When this link last delivered ANY frame, keepalives included —
+    /// the liveness clock both [`LinkTable::expire`] and the duplicate
+    /// rule read (#382).
     last_heard_ms: u64,
-    last_real_data_ms: u64,
     last_keepalive_tx_ms: u64,
 }
 
@@ -116,9 +142,13 @@ pub(crate) enum Admission {
     /// The peer presented our own identity — we connected to ourselves
     /// through some reflective path. Firmware: `BLE_LINK_SELF`.
     RejectSelf,
-    /// The identity is already live on another link that is still fresh.
-    /// Firmware: `BLE_LINK_DUP`.
-    RejectDuplicate,
+    /// A dial of OURS reached an identity that already holds a live
+    /// link, and that link is still answering. Firmware:
+    /// `BLE_LINK_DUP … action=refuse`. `old_silence_ms` is how long the
+    /// old link had delivered nothing at all — the evidence.
+    RejectDuplicate {
+        old_silence_ms: u64,
+    },
     /// `max_links` reached.
     RejectFull,
 }
@@ -137,11 +167,11 @@ pub(crate) enum Inbound {
     Packet(Vec<u8>),
     /// A central completed the 16-byte identity handshake and the link is
     /// now live. The driver should log its `BLE_LINK_UP` — and, when the
-    /// admission displaced a zombie link with the same identity,
+    /// admission displaced an old link with the same identity,
     /// disconnect the displaced device.
     HandshakeComplete {
         identity: IdentityHash,
-        displaced: Option<(IdentityHash, Addr, Role)>,
+        displaced: Option<Displaced>,
     },
     /// A central's handshake was rejected; the driver must disconnect the
     /// device. The old link, if the rejection displaced nothing, stays.
@@ -288,7 +318,7 @@ impl LinkTable {
     ///
     /// Decides whether a link removal is a real peer loss the transport
     /// must hear about (drop the paths via that peer) or a same-identity
-    /// churn — a zombie displaced by its own reconnect — where the peer
+    /// churn — a link displaced by the peer's own reconnect — where the peer
     /// is still reachable and the paths must stay.
     pub(crate) fn knows_identity(&self, identity: &IdentityHash) -> bool {
         self.links.iter().any(|l| &l.identity == identity)
@@ -297,15 +327,14 @@ impl LinkTable {
     /// Admission check + insert, shared by both roles.
     ///
     /// Duplicate handling is identity-keyed, never address-keyed, because
-    /// addresses rotate (v2.2 §"Why Not Use MAC Addresses as Keys?"). A
-    /// live link with the same identity blocks the newcomer *unless* it
-    /// has gone zombie — no real data for [`ZOMBIE_TIMEOUT_MS`] — in
-    /// which case the newcomer displaces it (the reference's
-    /// `_check_duplicate_identity`, `ble-reticulum@07d94130`
-    /// `BLEInterface.py`). The
-    /// displaced link's `(identity, addr, role)` is returned so the
-    /// driver can disconnect the stale device.
-    #[allow(clippy::type_complexity)]
+    /// addresses rotate (v2.2 §"Why Not Use MAC Addresses as Keys?").
+    /// Which of the two links the peer keeps is decided by
+    /// [`judge_duplicate`] from `role` — `Peripheral` means the peer
+    /// dialled US, `Central` means we dialled it, and the firmware
+    /// registry applies the identical function to the identical
+    /// evidence (#382). A displaced link is returned as [`Displaced`]
+    /// so the driver can disconnect the stale device and log the
+    /// decision.
     pub(crate) fn admit(
         &mut self,
         identity: IdentityHash,
@@ -313,18 +342,28 @@ impl LinkTable {
         role: Role,
         mtu: usize,
         now_ms: u64,
-    ) -> (Admission, Option<(IdentityHash, Addr, Role)>) {
+    ) -> (Admission, Option<Displaced>) {
         if identity == self.own_identity {
             return (Admission::RejectSelf, None);
         }
         let mut displaced = None;
         if let Some(pos) = self.links.iter().position(|l| l.identity == identity) {
-            let existing = &self.links[pos];
-            if now_ms.saturating_sub(existing.last_real_data_ms) < ZOMBIE_TIMEOUT_MS {
-                return (Admission::RejectDuplicate, None);
+            let silence_ms = now_ms.saturating_sub(self.links[pos].last_heard_ms);
+            if judge_duplicate(role.origin(), silence_ms) == Duplicate::Refuse {
+                return (
+                    Admission::RejectDuplicate {
+                        old_silence_ms: silence_ms,
+                    },
+                    None,
+                );
             }
             let old = self.links.remove(pos);
-            displaced = Some((old.identity, old.addr, old.role));
+            displaced = Some(Displaced {
+                identity: old.identity,
+                addr: old.addr,
+                role: old.role,
+                silence_ms,
+            });
         }
         if self.links.len() >= self.max_links {
             return (Admission::RejectFull, displaced);
@@ -336,7 +375,6 @@ impl LinkTable {
             mtu: mtu.max(MIN_MTU),
             defrag: BleDefragmenter::new(),
             last_heard_ms: now_ms,
-            last_real_data_ms: now_ms,
             last_keepalive_tx_ms: now_ms,
         });
         (Admission::Accept, displaced)
@@ -417,13 +455,15 @@ impl LinkTable {
         let Some(link) = self.link_mut_by_addr(&addr) else {
             return Inbound::NotHandshaked;
         };
+        // Every inbound frame is evidence the peer is there, keepalives
+        // included: one clock for the expiry sweep and for the
+        // duplicate rule, because a quiet phone sends nothing else for
+        // minutes on end (#382).
         link.last_heard_ms = now_ms;
-        // Keepalives are filtered before reassembly and do not count as
-        // real data for the zombie rule (`ble-reticulum@07d94130` `BLEInterface.py`, `_zombie_timeout`).
+        // Keepalives are still filtered before reassembly.
         if data.len() < FRAGMENT_HEADER_SIZE {
             return Inbound::Keepalive;
         }
-        link.last_real_data_ms = now_ms;
         let before = link.defrag.abandoned_count();
         let result = link.defrag.process(data, now_ms);
         if matches!(result, DefragResult::Error) {
@@ -1072,8 +1112,8 @@ mod tests {
     }
 
     /// The peer-loss report decision (Codeberg #365): a removal that
-    /// leaves the identity without any live link is a real loss; a
-    /// zombie displaced by its own reconnect is not.
+    /// leaves the identity without any live link is a real loss; a link
+    /// displaced by the peer's own reconnect is not.
     #[test]
     fn knows_identity_separates_peer_loss_from_same_identity_churn() {
         let mut t = table();
@@ -1082,13 +1122,12 @@ mod tests {
         assert!(t.knows_identity(&ID_A));
         assert!(!t.knows_identity(&ID_B));
 
-        // Same identity reappears on a fresh address after the old link
-        // went zombie: displaced, but the peer is still linked — no
-        // peer-loss report.
-        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, ZOMBIE_TIMEOUT_MS + 1);
+        // Same identity dials in again from a fresh address: displaced,
+        // but the peer is still linked — no peer-loss report.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, 1);
         assert_eq!(adm, Admission::Accept);
         assert_eq!(
-            displaced.map(|(id, addr, _)| (id, addr)),
+            displaced.map(|d| (d.identity, d.addr)),
             Some((ID_A, ADDR_1))
         );
         assert!(
@@ -1165,9 +1204,10 @@ mod tests {
             "the report point IS the moment the identity becomes known"
         );
 
-        // The relink: same identity, fresh random address, old link gone
-        // zombie. Accepted, but with a displacement — churn, no report.
-        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, ZOMBIE_TIMEOUT_MS + 1);
+        // The relink: same identity, fresh random address, the peer
+        // dialling in. Accepted, but with a displacement — churn, no
+        // report.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 100, 1);
         assert_eq!(adm, Admission::Accept);
         assert!(
             displaced.is_some(),
@@ -1178,7 +1218,7 @@ mod tests {
         // must be reported, or the flap-recovery pull never fires.
         let _ = t.remove_by_addr(&ADDR_2);
         assert!(!t.knows_identity(&ID_A));
-        let (adm, displaced) = t.admit(ID_A, ADDR_1, Role::Central, 100, 2 * ZOMBIE_TIMEOUT_MS);
+        let (adm, displaced) = t.admit(ID_A, ADDR_1, Role::Central, 100, 2 * LINK_TIMEOUT_MS);
         assert_eq!(adm, Admission::Accept);
         assert!(
             displaced.is_none(),
@@ -1396,29 +1436,86 @@ mod tests {
         assert_eq!(t.link_count(), 0);
     }
 
+    /// The #382 rule through `admit`, both directions on one table:
+    /// our own dial loses to a link that still answers, the PEER's dial
+    /// wins against the same link.
     #[test]
-    fn a_fresh_duplicate_identity_is_rejected_a_zombie_is_displaced() {
+    fn our_dial_is_refused_where_the_peers_own_dial_displaces() {
         let mut t = table();
         t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
-        // Real data at t=1000 keeps the link fresh.
-        let frags = fragment_packet(b"data", 185);
-        t.central_frame(ADDR_1, &frags[0], 1_000);
+        // Nothing but keepalives for ten minutes — a phone with nothing
+        // to report, which is what a healthy idle link looks like.
+        let mut now = 0;
+        while now < 600_000 {
+            now += KEEPALIVE_INTERVAL_MS;
+            t.central_frame(ADDR_1, &[0x00], now);
+        }
 
-        // Same identity from a rotated address, link still fresh: reject.
-        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 185, 10_000);
-        assert_eq!(adm, Admission::RejectDuplicate);
+        // Our own dial reaching the same identity under its rotated
+        // address: refused, because our dial is evidence of nothing.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 185, now + 1);
+        assert_eq!(
+            adm,
+            Admission::RejectDuplicate { old_silence_ms: 1 },
+            "a keepalive one millisecond ago is a live link"
+        );
         assert!(displaced.is_none());
+        assert_eq!(t.link_count(), 1);
 
-        // Keepalives do not refresh the zombie clock.
-        t.central_frame(ADDR_1, &[0x00], 40_000);
-        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 185, 40_000);
-        assert_eq!(adm, Admission::Accept, "zombie displaced");
-        assert_eq!(displaced, Some((ID_A, ADDR_1, Role::Central)));
+        // The PEER dialling in with the same identity: displaced, at the
+        // same instant and on the same evidence. It has given up on the
+        // old link by its own one-link rule.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 185, now + 1);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(
+            displaced,
+            Some(Displaced {
+                identity: ID_A,
+                addr: ADDR_1,
+                role: Role::Central,
+                silence_ms: 1,
+            })
+        );
         assert_eq!(t.link_count(), 1);
         assert_eq!(
             t.link_by_addr(&ADDR_2).map(|l| l.role),
             Some(Role::Peripheral)
         );
+    }
+
+    /// A link that has stopped answering ENTIRELY — no payload, no
+    /// keepalive — is dead, and our own dial takes it over. The
+    /// boundary is the link timeout, the same instant `expire` would
+    /// have removed it.
+    #[test]
+    fn our_dial_displaces_a_link_that_stopped_answering_at_the_link_timeout() {
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
+        let frags = fragment_packet(b"data", 185);
+        t.central_frame(ADDR_1, &frags[0], 1_000);
+
+        let (adm, _) = t.admit(
+            ID_A,
+            ADDR_2,
+            Role::Central,
+            185,
+            1_000 + LINK_TIMEOUT_MS - 1,
+        );
+        assert_eq!(
+            adm,
+            Admission::RejectDuplicate {
+                old_silence_ms: LINK_TIMEOUT_MS - 1
+            },
+            "one millisecond under the timeout the old link still holds the peer"
+        );
+
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 185, 1_000 + LINK_TIMEOUT_MS);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(
+            displaced.map(|d| (d.identity, d.addr, d.silence_ms)),
+            Some((ID_A, ADDR_1, LINK_TIMEOUT_MS))
+        );
+        assert_eq!(t.link_count(), 1);
     }
 
     #[test]
@@ -1682,8 +1779,8 @@ mod tests {
 
     /// A peer holding a SECOND link — the rotated address reconnecting —
     /// is still one peer and gets the packet once. Here the table itself
-    /// enforces that: `admit` refuses a duplicate identity on a live link
-    /// and displaces a zombie one, so one identity never owns two rows.
+    /// enforces that: `admit` refuses our own dial into a live link and
+    /// displaces a dead one, so one identity never owns two rows.
     /// (The firmware's registry does allow the two-slot displacement
     /// window; its own decision test is
     /// `leviculum_ble_tx::registry::a_peer_with_two_links_gets_the_packet_once`.)
@@ -1693,15 +1790,14 @@ mod tests {
         t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
         assert_eq!(
             t.admit(ID_A, ADDR_2, Role::Central, 517, 0).0,
-            Admission::RejectDuplicate,
-            "a live link of the same identity refuses the newcomer"
+            Admission::RejectDuplicate { old_silence_ms: 0 },
+            "a live link of the same identity refuses our own dial"
         );
-        // Past the zombie bound the newcomer displaces the old row.
-        let (admission, displaced) =
-            t.admit(ID_A, ADDR_2, Role::Central, 517, ZOMBIE_TIMEOUT_MS + 1);
+        // Past the link timeout the newcomer displaces the old row.
+        let (admission, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 517, LINK_TIMEOUT_MS + 1);
         assert_eq!(admission, Admission::Accept);
         assert_eq!(
-            displaced.map(|(id, addr, _)| (id, addr)),
+            displaced.map(|d| (d.identity, d.addr)),
             Some((ID_A, ADDR_1))
         );
         assert_eq!(t.live_links(), 1, "one identity, one row, always");

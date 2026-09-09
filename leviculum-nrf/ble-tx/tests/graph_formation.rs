@@ -139,9 +139,9 @@ struct Board {
 /// board addresses are static, so the pre-dial address exclusion
 /// (Core Spec §4.5) keeps a linked board from ever being dialled
 /// again, and the sim never forms a second link. (An identity
-/// duplicate arriving over a ROTATED address — a phone — is refused
-/// unless the old link has gone zombie, #376; static-address boards
-/// cannot reach that path at all.)
+/// duplicate arriving over a ROTATED address — a phone — is decided by
+/// who opened it, #382; static-address boards cannot reach that path at
+/// all.)
 fn linked(boards: &[Board], a: usize, b: usize) -> bool {
     boards[a].outgoing == Some(b) || boards[b].outgoing == Some(a)
 }

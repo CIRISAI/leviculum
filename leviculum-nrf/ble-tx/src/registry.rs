@@ -12,12 +12,12 @@
 //! report neither.
 //!
 //! Which of the two links that peer keeps is [`PeerRegistry::link_up`]'s
-//! second job, and the rule is the reference's: the old link wins unless
-//! it has gone zombie — no real data for [`ZOMBIE_TIMEOUT_MS`] — in
-//! which case the newcomer displaces it. That needs a clock, so the
-//! registry carries one per slot ([`PeerRegistry::note_real_data`]),
-//! fed by the caller's inbound path exactly as lnsd's `LinkTable` feeds
-//! `last_real_data_ms`.
+//! second job, and the rule is [`judge_duplicate`]: who opened the
+//! connection decides, and silence on the old link decides only when we
+//! opened it. That needs a liveness clock, so the registry carries one
+//! per slot ([`PeerRegistry::note_heard`]), fed by the caller's inbound
+//! path for EVERY frame, keepalives included, exactly as lnsd's
+//! `LinkTable` feeds `last_heard_ms`.
 //!
 //! The rules are pure and their failure modes are sequences (a flap, a
 //! displacement, the runtime carrier-off teardown that drops every live
@@ -25,6 +25,8 @@
 //! state machines; the firmware wraps one instance in a
 //! critical-section mutex and reports what the return values tell it to
 //! (`leviculum_nrf::ble::columba`).
+
+use leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS;
 
 /// One interface's live links, indexed by the link's drain-table slot —
 /// the same index that selects its outbound queue, so the drain table,
@@ -46,30 +48,91 @@
 pub struct PeerRegistry<const N: usize> {
     slots: [Option<[u8; 16]>; N],
     addrs: [Option<u64>; N],
-    last_real_ms: [u64; N],
+    last_heard_ms: [u64; N],
 }
 
-/// How long an existing link may have carried no *real* data — anything
-/// the peer sent that is not a keepalive — before a fresh link from the
-/// same identity may displace it (Codeberg #376).
+/// A link that has delivered NOTHING — no packet fragment, no
+/// keepalive — for this long is dead, and only then may a dial of ours
+/// displace it (see [`judge_duplicate`]).
 ///
-/// The reference's `_zombie_timeout` (`ble-reticulum@07d94130`
-/// `BLEInterface.py`, `_zombie_timeout`, applied in
-/// `_check_duplicate_identity`) and lnsd's `ZOMBIE_TIMEOUT_MS`
-/// (`leviculum-std/src/interfaces/ble/links.rs`, `LinkTable::admit`)
-/// hold the same 30 s, and lnsd now reads *this* constant so the two
-/// Rust stacks cannot drift apart. The mechanism it names is real and
-/// asymmetric: a degraded BLE link still passes 1-byte keepalives while
-/// every larger write fails, so silence-on-data is the only evidence a
-/// link is dead that a live connection handle cannot fake.
+/// Three missed keepalives at the protocol's 15 s cadence
+/// (`leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS`), which is
+/// also lnsd's link-expiry timer: a link that qualifies for
+/// displacement here is exactly a link lnsd's `expire` sweep is already
+/// about to remove, so the two cannot disagree about when a link is
+/// over. lnsd imports this constant rather than keeping its own.
 ///
-/// The rule is a *refusal* rule first: below this age the old link is
-/// kept and the newcomer is dropped. The 2026-09-09 field T114 is why —
-/// there the newcomer was our own fallback dial into a phone we were
-/// already linked to, and displacing the phone's own working link cost
-/// every announce and every telemetry proof for as long as the phone
-/// stayed beside the board.
-pub const ZOMBIE_TIMEOUT_MS: u64 = 30_000;
+/// It replaced a 30 s clock that measured PAYLOAD silence only
+/// (Codeberg #382). The measurement that killed that clock: over 14.1 h
+/// beside a Columba phone (`ble-accept-rns/lnsd.log`, 2026-08-30) the
+/// gaps between received non-keepalive packets from a peer that was
+/// demonstrably present throughout ran to a median of 51 s, a 90th
+/// percentile of 182 s and a maximum of 5590 s, and 502 links outlived
+/// 45 s without one byte of payload. Payload silence is what an idle
+/// phone looks like; it is not evidence of anything. Keepalives are,
+/// and the same log shows them arriving: only 2 of those 502 links were
+/// ever closed by the silence timer.
+pub const LINK_TIMEOUT_MS: u64 = 3 * KEEPALIVE_INTERVAL_MS;
+
+/// Who opened the connection whose duplicate identity is being judged —
+/// the asymmetry the rule turns on ([`judge_duplicate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The PEER connected to us (we are the peripheral; on lnsd,
+    /// `Role::Peripheral`).
+    Incoming,
+    /// WE dialled the peer (we are the central; on lnsd,
+    /// `Role::Central`).
+    Outgoing,
+}
+
+/// What to do with a second connection carrying an identity we already
+/// hold a live link to (see [`judge_duplicate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Duplicate {
+    /// Keep the old link, drop the newcomer.
+    Refuse,
+    /// Tear the old link down; the newcomer takes the peer over.
+    Displace,
+}
+
+/// Decide a duplicate identity from WHO opened the connection, and only
+/// then from how long the old link has been silent (Codeberg #382).
+///
+/// The two field failures of 2026-09-09 were the two directions of this
+/// question, and each names its own answer:
+///
+/// - **Incoming — displace.** The phone connected to a board that was
+///   already linked to it, the board refused, and the phone stopped
+///   reading the link it had abandoned: every announce the board sent
+///   went into a dead socket (6d3e5d4). A peer that opens a second
+///   connection has, by its own one-link-per-identity rule, given up on
+///   the first, and it has already built the replacement — so the cost
+///   of displacing is one link swapped for an equivalent one, while the
+///   cost of refusing is a peer that hears nothing until the old link
+///   expires. No clock is consulted: the peer's own action is better
+///   evidence than any timer of ours.
+/// - **Outgoing — refuse, unless the old link is dead.** Our dial is
+///   evidence of nothing. An advertisement carries no identity and the
+///   peer rotates its address, so a dial that lands on an identity we
+///   already hold is most likely our own fallback dial finding the peer
+///   beside us. Displacing there killed the phone's working link every
+///   ~95 s (13bea3e5). The one exception is a link that has delivered
+///   nothing at all for [`LINK_TIMEOUT_MS`] — no payload AND no
+///   keepalive — which is not "quiet" but gone.
+///
+/// Silence on payload alone is deliberately NOT part of this: an idle
+/// phone sends payload minutes apart (the distribution is on
+/// [`LINK_TIMEOUT_MS`]), so the old 30 s payload clock fired on healthy
+/// links. The keepalive is what a live peer emits whether or not it has
+/// anything to say, which is exactly what "alive" needs to mean.
+pub const fn judge_duplicate(origin: Origin, old_silence_ms: u64) -> Duplicate {
+    match origin {
+        Origin::Incoming => Duplicate::Displace,
+        Origin::Outgoing if old_silence_ms >= LINK_TIMEOUT_MS => Duplicate::Displace,
+        Origin::Outgoing => Duplicate::Refuse,
+    }
+}
 
 /// What registering a link amounted to (see [`PeerRegistry::link_up`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,15 +141,22 @@ pub enum LinkUp {
     /// the caller reports a peer arrival exactly then.
     Accepted { first: bool },
     /// Registered, and the identity's OLD link on `old_slot` must be
-    /// torn down by the caller: it had carried no real data for
-    /// `old_age_ms` (at or beyond [`ZOMBIE_TIMEOUT_MS`]), so it is a
-    /// zombie and the newcomer wins. Never an arrival — the peer was
-    /// never gone.
-    Displaced { old_slot: usize, old_age_ms: u64 },
-    /// NOT registered: the identity's link on `old_slot` carried real
-    /// data `old_age_ms` ago, inside [`ZOMBIE_TIMEOUT_MS`], so it is
-    /// alive and keeps the peer. The caller drops THIS connection.
-    Refused { old_slot: usize, old_age_ms: u64 },
+    /// torn down by the caller. Never an arrival — the peer was never
+    /// gone. `old_silence_ms` is how long that link had delivered
+    /// nothing at all, the evidence a capture can check the decision
+    /// against; on an incoming duplicate it is reported, not consulted.
+    Displaced {
+        old_slot: usize,
+        old_silence_ms: u64,
+    },
+    /// NOT registered: our own dial reached an identity whose link on
+    /// `old_slot` was last heard from `old_silence_ms` ago, inside
+    /// [`LINK_TIMEOUT_MS`], so it is alive and keeps the peer. The
+    /// caller drops THIS connection.
+    Refused {
+        old_slot: usize,
+        old_silence_ms: u64,
+    },
 }
 
 impl<const N: usize> Default for PeerRegistry<N> {
@@ -101,7 +171,7 @@ impl<const N: usize> PeerRegistry<N> {
         Self {
             slots: [None; N],
             addrs: [None; N],
-            last_real_ms: [0; N],
+            last_heard_ms: [0; N],
         }
     }
 
@@ -125,75 +195,77 @@ impl<const N: usize> PeerRegistry<N> {
     /// advertisement is unknowable before connecting, so that residual
     /// dial is inherent. It is resolved post-connect by
     /// [`link_up`](Self::link_up)'s identity duplicate rule, which
-    /// refuses the newcomer unless the old link has gone zombie.
+    /// refuses such a dial unless the old link has stopped answering
+    /// altogether.
     pub fn addr_linked(&self, addr_value: u64) -> bool {
         self.addrs.iter().flatten().any(|a| *a == addr_value)
     }
 
-    /// Register a slot's peer, at `now_ms`.
+    /// Register a slot's peer, at `now_ms`, with `origin` naming who
+    /// opened this connection.
     ///
     /// With no other link from that identity this is a plain
     /// [`LinkUp::Accepted`], `first` iff it is the identity's FIRST live
-    /// link — the caller reports a peer arrival exactly then.
+    /// link — the caller reports a peer arrival exactly then; `origin`
+    /// is not consulted.
     ///
     /// A second connection from an identity we already hold is decided
-    /// by the old link's freshness, never by its age or its role
-    /// ([`ZOMBIE_TIMEOUT_MS`]): a link that carried real data recently
-    /// is alive and keeps the peer, so the newcomer is
-    /// [`LinkUp::Refused`] and nothing here changes; a link that has
-    /// been silent on data for the full timeout is a zombie and is
-    /// [`LinkUp::Displaced`]. Neither edge of a displacement is a peer
+    /// by [`judge_duplicate`]: an incoming one displaces the old link,
+    /// an outgoing one is [`LinkUp::Refused`] unless the old link has
+    /// been silent — on payload AND keepalives — for
+    /// [`LINK_TIMEOUT_MS`]. Neither edge of a displacement is a peer
     /// transition — the peer was never gone — which is why `Displaced`
     /// carries no `first` flag.
     ///
     /// Re-registering the SAME slot is neither: the link the caller
     /// would tear down is the one it just kept.
     ///
-    /// An accepted link starts its freshness clock here. The handshake
+    /// An accepted link starts its liveness clock here. The handshake
     /// (peripheral) or the identity read (central) that got us this far
-    /// is itself data the peer delivered, and the reference counts it
-    /// the same way (`ble-reticulum@07d94130` `BLEInterface.py`,
-    /// `_handle_identity_handshake`: "the 16-byte handshake counts as
-    /// real data").
-    pub fn link_up(&mut self, slot: usize, peer: [u8; 16], now_ms: u64) -> LinkUp {
+    /// is itself something the peer delivered.
+    pub fn link_up(&mut self, slot: usize, peer: [u8; 16], origin: Origin, now_ms: u64) -> LinkUp {
         let old = self
             .slots
             .iter()
             .position(|id| *id == Some(peer))
             .filter(|old| *old != slot);
         if let Some(old_slot) = old {
-            let old_age_ms = now_ms.saturating_sub(self.last_real_ms[old_slot]);
-            if old_age_ms < ZOMBIE_TIMEOUT_MS {
+            let old_silence_ms = now_ms.saturating_sub(self.last_heard_ms[old_slot]);
+            if judge_duplicate(origin, old_silence_ms) == Duplicate::Refuse {
                 return LinkUp::Refused {
                     old_slot,
-                    old_age_ms,
+                    old_silence_ms,
                 };
             }
             self.slots[slot] = Some(peer);
-            self.last_real_ms[slot] = now_ms;
+            self.last_heard_ms[slot] = now_ms;
             return LinkUp::Displaced {
                 old_slot,
-                old_age_ms,
+                old_silence_ms,
             };
         }
         let first = self.slots.iter().flatten().all(|id| *id != peer);
         self.slots[slot] = Some(peer);
-        self.last_real_ms[slot] = now_ms;
+        self.last_heard_ms[slot] = now_ms;
         LinkUp::Accepted { first }
     }
 
-    /// A slot's peer sent real data at `now_ms` — the freshness clock
+    /// A slot's peer delivered a frame at `now_ms` — the liveness clock
     /// [`link_up`](Self::link_up)'s duplicate rule reads.
     ///
-    /// "Real data" is a received frame that is not a keepalive, lnsd's
-    /// and the reference's notion exactly: keepalives are excluded
-    /// because the failure this guards against is the link that still
-    /// passes 1-byte writes while every packet-sized one fails. The
-    /// caller filters keepalives out on its inbound path and calls this
-    /// for what remains — per FRAME, not per reassembled packet, so a
-    /// long packet's fragments each count.
-    pub fn note_real_data(&mut self, slot: usize, now_ms: u64) {
-        self.last_real_ms[slot] = now_ms;
+    /// EVERY inbound frame, keepalives included (Codeberg #382). A
+    /// keepalive is the one thing a peer with nothing to say still
+    /// sends, so excluding it made a quiet peer indistinguishable from
+    /// a departed one; the failure the old payload-only clock guarded
+    /// against — a degraded link that still passes 1-byte writes while
+    /// packet-sized ones fail — is now caught by the peer itself, which
+    /// reconnects and displaces the link as an incoming duplicate.
+    ///
+    /// Called per FRAME, not per reassembled packet, so a long packet's
+    /// fragments each count and a packet that never finishes
+    /// reassembling still proves the link delivers.
+    pub fn note_heard(&mut self, slot: usize, now_ms: u64) {
+        self.last_heard_ms[slot] = now_ms;
     }
 
     /// Clear a slot. `Some(identity)` iff that took the identity's LAST
@@ -219,7 +291,7 @@ impl<const N: usize> PeerRegistry<N> {
     ///
     /// A peer holding two links is still one peer, and either link
     /// reaches it, so the lowest slot is returned. Two links exist only
-    /// during a zombie displacement's hand-over, whose old link is
+    /// during a displacement's hand-over, whose old link is
     /// already being torn down: [`Self::link_up`] registers the new slot
     /// BEFORE the old one is signalled, and the old session clears its
     /// registry entry before releasing its drain slot, so the window is a
@@ -230,7 +302,7 @@ impl<const N: usize> PeerRegistry<N> {
 
     /// The number of DISTINCT live peer identities (Codeberg #365) —
     /// the value the main loop mirrors into the core as the
-    /// interface's peer count. Distinct, not per-slot: during a zombie
+    /// interface's peer count. Distinct, not per-slot: during a
     /// displacement's hand-over (#376) one peer briefly holds two links,
     /// and it is still one peer.
     pub fn peer_count(&self) -> usize {
@@ -302,42 +374,52 @@ mod tests {
     const A: [u8; 16] = [0xaa; 16];
     const B: [u8; 16] = [0xbb; 16];
 
-    /// The number itself, pinned. Three implementations agree on 30 s —
-    /// this constant, lnsd's re-export of it, and the reference's
-    /// `_zombie_timeout` — and a phone that walks between them must
-    /// meet one rule, so the value is not free to drift quietly.
+    /// The number itself, pinned. It is the link timeout the interfaces
+    /// already run on — three missed keepalives — not a second constant
+    /// beside it, so a link that may be displaced is exactly a link
+    /// lnsd's expiry sweep is about to remove.
     #[test]
-    fn the_zombie_timeout_is_the_references_thirty_seconds() {
-        assert_eq!(ZOMBIE_TIMEOUT_MS, 30_000);
+    fn the_dead_link_bound_is_the_link_timeout_itself() {
+        assert_eq!(LINK_TIMEOUT_MS, 45_000);
+        assert_eq!(LINK_TIMEOUT_MS, 3 * KEEPALIVE_INTERVAL_MS);
     }
 
     #[test]
     fn the_first_link_of_an_identity_is_an_arrival_and_displaces_nothing() {
         let mut reg = PeerRegistry::<4>::new();
-        assert_eq!(reg.link_up(0, A, 0), LinkUp::Accepted { first: true });
         assert_eq!(
-            reg.link_up(1, B, 0),
+            reg.link_up(0, A, Origin::Incoming, 0),
+            LinkUp::Accepted { first: true }
+        );
+        assert_eq!(
+            reg.link_up(1, B, Origin::Outgoing, 0),
             LinkUp::Accepted { first: true },
-            "a different identity is its own arrival, no displacement"
+            "a different identity is its own arrival, in either direction"
         );
     }
 
-    /// The 2026-09-09 field T114, as a unit: the phone's own link is
-    /// carrying data, our fallback dial reaches the same identity from
-    /// its rotated address, and the LIVE link keeps the peer. Before
-    /// this rule the newcomer displaced it unconditionally and every
-    /// announce and proof to that phone died.
+    /// The 2026-09-09 evening field T114, as a unit: the phone's own
+    /// link is up and answering, our fallback dial reaches the same
+    /// identity from its rotated address, and the LIVE link keeps the
+    /// peer. Our dial is evidence of nothing, so it loses however long
+    /// the phone has had nothing to SAY.
     #[test]
-    fn a_second_link_is_refused_while_the_old_one_is_fresh() {
+    fn our_own_dial_is_refused_while_the_old_link_still_answers() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 1_000);
-        reg.note_real_data(0, 5_000);
+        reg.link_up(0, A, Origin::Incoming, 1_000);
+        // Only keepalives since; no payload for ten minutes.
+        let mut t = 1_000;
+        while t < 600_000 {
+            t += KEEPALIVE_INTERVAL_MS;
+            reg.note_heard(0, t);
+        }
         assert_eq!(
-            reg.link_up(1, A, 5_000 + ZOMBIE_TIMEOUT_MS - 1),
+            reg.link_up(1, A, Origin::Outgoing, t + LINK_TIMEOUT_MS - 1),
             LinkUp::Refused {
                 old_slot: 0,
-                old_age_ms: ZOMBIE_TIMEOUT_MS - 1
-            }
+                old_silence_ms: LINK_TIMEOUT_MS - 1
+            },
+            "ten minutes without payload is a quiet phone, not a dead link"
         );
         assert_eq!(reg.slot_for(&A), Some(0), "the old link still holds it");
         assert!(
@@ -347,125 +429,160 @@ mod tests {
         assert_eq!(reg.link_down(0), Some(A), "and the old link is the peer");
     }
 
-    /// The morning case 6d3e5d4 was written for, still covered: that
-    /// link had been silent for minutes, so it is a zombie by this rule
-    /// and the reconnect takes the peer over.
+    /// The 2026-09-09 morning field T114, the case 6d3e5d4 was written
+    /// for: the phone opened a second connection, which by its own
+    /// one-link rule means it has stopped reading the first. No clock
+    /// is consulted — the peer just told us, and it told us one
+    /// millisecond after the old link last spoke.
     #[test]
-    fn a_second_link_displaces_an_old_one_that_has_gone_zombie() {
+    fn an_incoming_duplicate_displaces_the_old_link_however_fresh_it_is() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 1_000);
-        // Keepalives keep the connection handle alive but are not real
-        // data, so the caller never touches the clock for them.
+        reg.link_up(0, A, Origin::Incoming, 1_000);
+        reg.note_heard(0, 5_000);
         assert_eq!(
-            reg.link_up(1, A, 1_000 + 4 * ZOMBIE_TIMEOUT_MS),
+            reg.link_up(1, A, Origin::Incoming, 5_001),
             LinkUp::Displaced {
                 old_slot: 0,
-                old_age_ms: 4 * ZOMBIE_TIMEOUT_MS
+                old_silence_ms: 1
             }
         );
         // Both slots hold the identity until the old session's teardown
         // clears its own entry — the hand-over window `slot_for`
         // documents; the peer is one peer throughout it.
         assert_eq!(reg.peer_count(), 1);
-        assert_eq!(reg.link_down(0), None, "the zombie's death is churn");
+        assert_eq!(reg.link_down(0), None, "the old link's death is churn");
         assert_eq!(reg.slot_for(&A), Some(1), "the new link holds the peer");
     }
 
-    /// The boundary sits exactly at the constant: one millisecond under
-    /// it the old link is alive, at it the old link is a zombie. Same
-    /// comparison lnsd's `admit` makes, so a phone that walks between
-    /// the two stacks meets one rule.
+    /// A dial of ours still wins against a link that has stopped
+    /// answering altogether — no payload AND no keepalive. On the board
+    /// this is the only mechanism that clears such a link, because the
+    /// firmware has no expiry sweep and a SoftDevice supervision
+    /// timeout may be minutes away.
     #[test]
-    fn the_freshness_boundary_is_the_zombie_timeout() {
+    fn our_own_dial_displaces_a_link_that_stopped_answering() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, A, Origin::Incoming, 1_000);
+        assert_eq!(
+            reg.link_up(1, A, Origin::Outgoing, 1_000 + 4 * LINK_TIMEOUT_MS),
+            LinkUp::Displaced {
+                old_slot: 0,
+                old_silence_ms: 4 * LINK_TIMEOUT_MS
+            }
+        );
+        assert_eq!(reg.peer_count(), 1, "one peer across the hand-over");
+        assert_eq!(reg.link_down(0), None, "the old link's death is churn");
+        assert_eq!(reg.slot_for(&A), Some(1), "the new link holds the peer");
+    }
+
+    /// The boundary sits exactly at the constant, and only for our own
+    /// dials: one millisecond under it the old link still answers, at
+    /// it the link is over. Same comparison lnsd's `admit` makes
+    /// through the same function, so a phone that walks between the two
+    /// stacks meets one rule.
+    #[test]
+    fn the_dead_link_boundary_is_the_link_timeout_and_only_binds_our_dials() {
+        assert_eq!(
+            judge_duplicate(Origin::Outgoing, LINK_TIMEOUT_MS - 1),
+            Duplicate::Refuse
+        );
+        assert_eq!(
+            judge_duplicate(Origin::Outgoing, LINK_TIMEOUT_MS),
+            Duplicate::Displace
+        );
+        assert_eq!(judge_duplicate(Origin::Incoming, 0), Duplicate::Displace);
+        assert_eq!(
+            judge_duplicate(Origin::Incoming, LINK_TIMEOUT_MS - 1),
+            Duplicate::Displace
+        );
+
         let mut fresh = PeerRegistry::<4>::new();
-        fresh.link_up(0, A, 0);
+        fresh.link_up(0, A, Origin::Incoming, 0);
         assert!(matches!(
-            fresh.link_up(1, A, ZOMBIE_TIMEOUT_MS - 1),
+            fresh.link_up(1, A, Origin::Outgoing, LINK_TIMEOUT_MS - 1),
             LinkUp::Refused { .. }
         ));
 
-        let mut stale = PeerRegistry::<4>::new();
-        stale.link_up(0, A, 0);
+        let mut gone = PeerRegistry::<4>::new();
+        gone.link_up(0, A, Origin::Incoming, 0);
         assert!(matches!(
-            stale.link_up(1, A, ZOMBIE_TIMEOUT_MS),
+            gone.link_up(1, A, Origin::Outgoing, LINK_TIMEOUT_MS),
             LinkUp::Displaced { .. }
         ));
     }
 
-    /// Real data slides the boundary: a link the caller keeps feeding
-    /// can never be displaced, however old the link itself is.
+    /// The keepalive is the whole point of #382: a peer with nothing to
+    /// report still sends one every 15 s, and each one slides the
+    /// boundary, so a link the caller keeps feeding can never be
+    /// displaced by a dial of ours however old it is.
     #[test]
-    fn real_data_keeps_an_old_link_out_of_the_zombie_window() {
+    fn a_keepalive_alone_keeps_a_link_out_of_reach_of_our_dial() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
         let mut t = 0;
-        for _ in 0..10 {
-            t += ZOMBIE_TIMEOUT_MS - 1;
-            reg.note_real_data(0, t);
+        for _ in 0..100 {
+            t += KEEPALIVE_INTERVAL_MS;
+            reg.note_heard(0, t);
         }
-        assert!(matches!(reg.link_up(1, A, t + 1), LinkUp::Refused { .. }));
+        assert!(
+            matches!(
+                reg.link_up(1, A, Origin::Outgoing, t + LINK_TIMEOUT_MS - 1),
+                LinkUp::Refused { .. }
+            ),
+            "25 minutes of keepalives and no payload is a healthy link"
+        );
         assert!(matches!(
-            reg.link_up(1, A, t + ZOMBIE_TIMEOUT_MS),
+            reg.link_up(1, A, Origin::Outgoing, t + LINK_TIMEOUT_MS),
             LinkUp::Displaced { .. }
         ));
-    }
-
-    /// The hand-over sequence end to end: after a displacement the old
-    /// slot's teardown is churn (the identity still owns the new link),
-    /// and only the new link's death is the peer loss.
-    #[test]
-    fn displacement_teardown_of_the_old_slot_is_churn_not_a_loss() {
-        let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        assert!(matches!(
-            reg.link_up(1, A, ZOMBIE_TIMEOUT_MS),
-            LinkUp::Displaced { old_slot: 0, .. }
-        ));
-        assert_eq!(reg.link_down(0), None, "old link's death is churn");
-        assert!(reg.is_linked(&A), "the new link carries the peer");
-        assert_eq!(reg.link_down(1), Some(A), "new link's death is the loss");
     }
 
     /// A same-slot re-registration must not name its own slot: the
     /// caller would refuse — or tear down — the very connection it just
-    /// kept. True on both sides of the freshness boundary.
+    /// kept. True in both directions and on both sides of the boundary.
     #[test]
     fn re_registering_the_same_slot_neither_refuses_nor_displaces() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        assert_eq!(reg.link_up(0, A, 1), LinkUp::Accepted { first: false });
+        reg.link_up(0, A, Origin::Incoming, 0);
         assert_eq!(
-            reg.link_up(0, A, 10 * ZOMBIE_TIMEOUT_MS),
+            reg.link_up(0, A, Origin::Incoming, 1),
+            LinkUp::Accepted { first: false }
+        );
+        assert_eq!(
+            reg.link_up(0, A, Origin::Outgoing, 10 * LINK_TIMEOUT_MS),
             LinkUp::Accepted { first: false }
         );
     }
 
-    /// A slot's freshness clock belongs to the link that holds it now:
+    /// A slot's liveness clock belongs to the link that holds it now:
     /// a fresh registration resets it, so a peer inheriting a slot whose
     /// previous tenant went silent is not instantly displaceable.
     #[test]
-    fn a_new_link_starts_its_own_freshness_clock() {
+    fn a_new_link_starts_its_own_liveness_clock() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, B, 0);
+        reg.link_up(0, B, Origin::Incoming, 0);
         reg.link_down(0);
         // Slot 0 was silent for ages; A claims it now.
-        let t = 10 * ZOMBIE_TIMEOUT_MS;
-        reg.link_up(0, A, t);
-        assert!(matches!(reg.link_up(1, A, t + 1), LinkUp::Refused { .. }));
+        let t = 10 * LINK_TIMEOUT_MS;
+        reg.link_up(0, A, Origin::Incoming, t);
+        assert!(matches!(
+            reg.link_up(1, A, Origin::Outgoing, t + 1),
+            LinkUp::Refused { .. }
+        ));
     }
 
     #[test]
     fn the_last_link_of_an_identity_is_a_loss() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
         assert_eq!(reg.link_down(0), Some(A));
     }
 
     #[test]
     fn a_non_last_link_down_is_churn_not_a_loss() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(1, A, ZOMBIE_TIMEOUT_MS);
+        reg.link_up(0, A, Origin::Incoming, 0);
+        reg.link_up(1, A, Origin::Incoming, LINK_TIMEOUT_MS);
         assert_eq!(reg.link_down(0), None);
         assert!(reg.is_linked(&A));
         assert_eq!(reg.link_down(1), Some(A));
@@ -481,7 +598,7 @@ mod tests {
     fn the_duplicate_check_tracks_liveness() {
         let mut reg = PeerRegistry::<4>::new();
         assert!(!reg.is_linked(&A));
-        reg.link_up(0, A, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
         assert!(reg.is_linked(&A));
         reg.link_down(0);
         assert!(!reg.is_linked(&A));
@@ -495,8 +612,8 @@ mod tests {
     #[test]
     fn dropping_every_claimed_slot_yields_one_loss_per_identity() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(2, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
+        reg.link_up(2, B, Origin::Incoming, 0);
         let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
         assert_eq!(losses, vec![A, B]);
         assert!(!reg.is_linked(&A));
@@ -508,8 +625,8 @@ mod tests {
     #[test]
     fn a_displaced_identity_is_lost_once_when_all_slots_drop() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(1, A, ZOMBIE_TIMEOUT_MS);
+        reg.link_up(0, A, Origin::Incoming, 0);
+        reg.link_up(1, A, Origin::Incoming, LINK_TIMEOUT_MS);
         let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
         assert_eq!(losses, vec![A]);
     }
@@ -524,7 +641,7 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         for (slot, id) in [A, B, C, D].into_iter().enumerate() {
             assert_eq!(
-                reg.link_up(slot, id, 0),
+                reg.link_up(slot, id, Origin::Incoming, 0),
                 LinkUp::Accepted { first: true },
                 "each identity's first link"
             );
@@ -553,7 +670,10 @@ mod tests {
         assert!(!reg.addr_linked(0xBEEF));
 
         // Identity arrives; the address side is unaffected.
-        assert_eq!(reg.link_up(1, A, 0), LinkUp::Accepted { first: true });
+        assert_eq!(
+            reg.link_up(1, A, Origin::Incoming, 0),
+            LinkUp::Accepted { first: true }
+        );
         assert!(reg.addr_linked(0xC0DE));
 
         // Teardown clears both facts independently.
@@ -585,12 +705,12 @@ mod tests {
     fn peer_count_is_distinct_identities_across_slot_gaps() {
         let mut reg = PeerRegistry::<4>::new();
         assert_eq!(reg.peer_count(), 0);
-        reg.link_up(1, A, 0);
+        reg.link_up(1, A, Origin::Incoming, 0);
         assert_eq!(reg.peer_count(), 1);
         // The displacement hand-over: same identity on a second slot.
-        reg.link_up(3, A, ZOMBIE_TIMEOUT_MS);
+        reg.link_up(3, A, Origin::Incoming, LINK_TIMEOUT_MS);
         assert_eq!(reg.peer_count(), 1, "two links, one peer");
-        reg.link_up(0, B, ZOMBIE_TIMEOUT_MS);
+        reg.link_up(0, B, Origin::Incoming, LINK_TIMEOUT_MS);
         assert_eq!(reg.peer_count(), 2);
         reg.link_down(1);
         assert_eq!(reg.peer_count(), 2, "A still holds slot 3");
@@ -604,8 +724,8 @@ mod tests {
     fn a_packet_without_a_hint_floods_every_live_link() {
         let mut reg = PeerRegistry::<4>::new();
         assert_eq!(plan_fanout(&reg, None), TxFanout::Flood, "no links");
-        reg.link_up(0, A, 0);
-        reg.link_up(1, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
+        reg.link_up(1, B, Origin::Incoming, 0);
         assert_eq!(plan_fanout(&reg, None), TxFanout::Flood);
     }
 
@@ -614,8 +734,8 @@ mod tests {
     #[test]
     fn a_hinted_packet_takes_only_that_peers_link() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(2, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 0);
+        reg.link_up(2, B, Origin::Incoming, 0);
         assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(0));
         assert_eq!(plan_fanout(&reg, Some(&B)), TxFanout::Route(2));
     }
@@ -626,8 +746,8 @@ mod tests {
     #[test]
     fn a_peer_with_two_links_gets_the_packet_once() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(1, A, 0);
-        reg.link_up(3, A, ZOMBIE_TIMEOUT_MS);
+        reg.link_up(1, A, Origin::Incoming, 0);
+        reg.link_up(3, A, Origin::Incoming, LINK_TIMEOUT_MS);
         assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(1));
     }
 
@@ -636,7 +756,7 @@ mod tests {
     #[test]
     fn a_hint_for_a_peer_with_no_link_drops_instead_of_flooding() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, B, 0);
+        reg.link_up(0, B, Origin::Incoming, 0);
         assert_eq!(
             plan_fanout(&reg, Some(&A)),
             TxFanout::NoLink,
@@ -652,7 +772,7 @@ mod tests {
     #[test]
     fn slot_for_forgets_a_slot_at_teardown() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(2, A, 0);
+        reg.link_up(2, A, Origin::Incoming, 0);
         assert_eq!(reg.slot_for(&A), Some(2));
         reg.link_down(2);
         assert_eq!(reg.slot_for(&A), None);
