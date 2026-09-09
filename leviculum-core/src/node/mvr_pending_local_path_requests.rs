@@ -183,7 +183,7 @@ fn emissions_reaching(
     let mut out = Vec::new();
     for action in actions {
         let data = match action {
-            Action::SendPacket { iface: i, data } if i.0 == iface => data,
+            Action::SendPacket { iface: i, data, .. } if i.0 == iface => data,
             Action::Broadcast {
                 data,
                 exclude_iface,
@@ -301,7 +301,7 @@ fn non_transport_shared_instance_forwards_path_request_to_local_clients() {
     let out = node.handle_packet(InterfaceId(net), &request);
 
     let forwarded_to_client = out.actions.iter().any(|a| match a {
-        Action::SendPacket { iface, data } if iface.0 == client => Packet::unpack(data)
+        Action::SendPacket { iface, data, .. } if iface.0 == client => Packet::unpack(data)
             .map(|p| {
                 p.destination_hash == PATH_REQUEST_DEST_KAT
                     && p.data.as_slice().starts_with(&dest_hash)
@@ -372,7 +372,7 @@ fn non_transport_full_chain_serves_fresh_response_to_requester() {
         .iter()
         .find_map(|a| {
             let data = match a {
-                Action::SendPacket { iface, data } if iface.0 == net => data,
+                Action::SendPacket { iface, data, .. } if iface.0 == net => data,
                 Action::Broadcast { data, .. } => data,
                 _ => return None,
             };

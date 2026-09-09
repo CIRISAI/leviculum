@@ -696,6 +696,7 @@ mod tests {
         handle_a
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: payload.to_vec(),
                 high_priority: false,
             })
@@ -713,6 +714,7 @@ mod tests {
         handle_b
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: payload2.to_vec(),
                 high_priority: false,
             })
@@ -750,6 +752,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: b"test".to_vec(),
                 high_priority: false,
             })
@@ -812,6 +815,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: payload.to_vec(),
                 high_priority: false,
             })
@@ -852,6 +856,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: payload.to_vec(),
                 high_priority: false,
             })
@@ -1033,6 +1038,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: b"into the void".to_vec(),
                 high_priority: false,
             })
@@ -1094,6 +1100,7 @@ mod tests {
             handle
                 .outgoing
                 .send(OutgoingPacket {
+                    peer: None,
                     data: b"to old".to_vec(),
                     high_priority: false,
                 })
@@ -1124,6 +1131,7 @@ mod tests {
             handle
                 .outgoing
                 .send(OutgoingPacket {
+                    peer: None,
                     data: b"to new".to_vec(),
                     high_priority: false,
                 })

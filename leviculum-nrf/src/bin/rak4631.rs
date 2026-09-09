@@ -848,8 +848,13 @@ async fn main(spawner: Spawner) {
                     // (single interface only).
                     for act in &output.actions {
                         match act {
-                            Action::SendPacket { iface, data } => {
-                                info!("ACT SendPacket iface={} len={}", iface.0, data.len());
+                            Action::SendPacket { iface, data, peer } => {
+                                info!(
+                                    "ACT SendPacket iface={} len={} routed={}",
+                                    iface.0,
+                                    data.len(),
+                                    peer.is_some()
+                                );
                             }
                             Action::Broadcast {
                                 exclude_iface,

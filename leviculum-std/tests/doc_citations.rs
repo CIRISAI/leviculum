@@ -105,7 +105,7 @@ const WINDOW: usize = 8;
 /// Path prefixes that refer to sibling repositories. These citations are
 /// counted and reported but cannot be existence-checked from this
 /// workspace.
-const EXTERNAL_PREFIXES: &[&str] = &["periculum/"];
+const EXTERNAL_PREFIXES: &[&str] = &["periculum/", "ble-reticulum/"];
 
 /// The vendored references. A citation into one of these that is not
 /// checked out fails differently from a citation that has drifted.

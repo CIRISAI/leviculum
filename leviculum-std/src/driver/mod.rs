@@ -6110,10 +6110,12 @@ mod tests {
         // Two frames in flight to the dead interface.
         let mut output = TickOutput::empty();
         output.actions.push(Action::SendPacket {
+            peer: None,
             iface: InterfaceId(12),
             data: vec![0xAA; 32],
         });
         output.actions.push(Action::SendPacket {
+            peer: None,
             iface: InterfaceId(12),
             data: vec![0xBB; 32],
         });
@@ -7448,6 +7450,7 @@ mod tests {
         answer
             .actions
             .push(leviculum_core::transport::Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(3),
                 data: vec![0xEE; 24],
             });
@@ -7765,6 +7768,7 @@ mod tests {
         output
             .actions
             .push(leviculum_core::transport::Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(5),
                 data: vec![0x77; 16],
             });
@@ -8178,6 +8182,7 @@ mod tests {
         output
             .actions
             .push(leviculum_core::transport::Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(0),
                 data: vec![0xAB; 32],
             });

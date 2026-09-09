@@ -125,7 +125,7 @@ fn wire_out(out: &TickOutput) -> Vec<(Option<InterfaceId>, Vec<u8>)> {
     out.actions
         .iter()
         .map(|action| match action {
-            Action::SendPacket { iface, data } => (Some(*iface), data.clone()),
+            Action::SendPacket { iface, data, .. } => (Some(*iface), data.clone()),
             Action::Broadcast { data, .. } => (None, data.clone()),
         })
         .collect()

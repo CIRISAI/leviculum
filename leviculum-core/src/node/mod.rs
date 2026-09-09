@@ -59,6 +59,8 @@ mod mvr_bidir_transfer;
 mod mvr_ble_cull_identity_mismatch;
 #[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
+#[cfg(test)]
+mod mvr_ble_routed_delivery_hint;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]
@@ -8353,7 +8355,7 @@ mod tests {
             .actions
             .iter()
             .find_map(|a| match a {
-                Action::SendPacket { iface, data }
+                Action::SendPacket { iface, data, .. }
                     if *iface == crate::transport::InterfaceId(1) =>
                 {
                     let pkt = crate::packet::Packet::unpack(data).ok()?;
@@ -8499,7 +8501,7 @@ mod tests {
             }
         }
         let announced_on_if0 = output.actions.iter().any(|a| {
-            matches!(a, Action::SendPacket { iface, data }
+            matches!(a, Action::SendPacket { iface, data, .. }
                 if *iface == InterfaceId(0)
                     && crate::packet::Packet::unpack(data)
                         .map(|p| p.destination_hash == dest_hash.into_bytes())
@@ -8555,7 +8557,7 @@ mod tests {
         let mut sent_data: Option<Vec<u8>> = None;
         for action in &output.actions {
             match action {
-                Action::SendPacket { iface, data } => {
+                Action::SendPacket { iface, data, .. } => {
                     assert_eq!(
                         *iface,
                         InterfaceId(1),
@@ -8830,7 +8832,7 @@ mod tests {
             .actions
             .iter()
             .filter_map(|a| match a {
-                Action::SendPacket { iface, data }
+                Action::SendPacket { iface, data, .. }
                     if *iface == crate::transport::InterfaceId(0) =>
                 {
                     Some(data)

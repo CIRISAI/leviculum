@@ -917,6 +917,7 @@ mod tests {
         // Send a packet
         outgoing_tx
             .send(OutgoingPacket {
+                peer: None,
                 data: b"test data".to_vec(),
                 high_priority: false,
             })

@@ -117,7 +117,7 @@ fn actions_on(output: &TickOutput) -> Vec<(Option<usize>, Vec<u8>)> {
         .actions
         .iter()
         .map(|a| match a {
-            Action::SendPacket { iface, data } => (Some(iface.0), data.clone()),
+            Action::SendPacket { iface, data, .. } => (Some(iface.0), data.clone()),
             Action::Broadcast { data, .. } => (None, data.clone()),
         })
         .collect()

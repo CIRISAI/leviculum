@@ -21,9 +21,10 @@
 //!   task, the packet channels and the [`Interface`] implementation, the
 //!   per-connection HVN drain table (whose claim index doubles as the
 //!   link identity), the per-link outbound queues and the fan-out that
-//!   copies each outbound packet to every live link, and the fragment
-//!   pump that walks [`leviculum_ble_tx::PacketTx`] over a GATT notify
-//!   handle.
+//!   places each outbound packet on the link of the peer the core
+//!   addressed it to — or, for a broadcast, on every live link (#376) —
+//!   and the fragment pump that walks [`leviculum_ble_tx::PacketTx`]
+//!   over a GATT notify handle.
 //!
 //! The acceptance test for the split is that a sibling `ble_leviculum`
 //! could be added without touching [`columba`]. What such a sibling
@@ -159,9 +160,15 @@ type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
 /// announce identity differs from the link identity (Columba).
 type InboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
 
+/// An outbound packet with the core's #376 delivery hint: the 16-byte
+/// identity of the peer these bytes are for, or `None` for a broadcast
+/// (an announce, a path request, anything the core did not address at a
+/// named peer). [`tx_fanout_task`] turns the hint into links.
+type OutboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
+
 // Channels between the BLE tasks and the binaries' main loop.
 static BLE_INCOMING: InboundQueue = Channel::new();
-static BLE_OUTGOING: PacketQueue = Channel::new();
+static BLE_OUTGOING: OutboundQueue = Channel::new();
 
 /// A peer-link transition report toward the main loop (Codeberg #365).
 /// Only the interface knows a single peer inside its broadcast domain
@@ -341,17 +348,23 @@ pub(crate) async fn carrier_on(waiter: CarrierWaiter) {
 
 /// Per-link outbound queues, indexed by the link's [`HVN_DRAIN`] slot.
 ///
-/// A Reticulum interface is a broadcast domain: one `try_send` from the
-/// node core must reach **every** peer on the medium, exactly as one
-/// LoRa transmission reaches every listener. With two live links, two
-/// connection tasks receiving from the single [`BLE_OUTGOING`] channel
-/// would round-robin it instead — each announce reaching one peer and
-/// not the other — so [`tx_fanout_task`] is the only consumer of
-/// [`BLE_OUTGOING`], and it copies each packet into the queue of every
-/// live link. Which links are live is read from [`HVN_DRAIN`]'s claims:
-/// a connection claims its slot for its whole lifetime, so the drain
-/// table is also the link table, and a second registry that could
-/// disagree with it is never built.
+/// A Reticulum interface is a broadcast domain: one BROADCAST `try_send`
+/// from the node core must reach **every** peer on the medium, exactly
+/// as one LoRa transmission reaches every listener. With two live links,
+/// two connection tasks receiving from the single [`BLE_OUTGOING`]
+/// channel would round-robin it instead — each announce reaching one
+/// peer and not the other — so [`tx_fanout_task`] is the only consumer
+/// of [`BLE_OUTGOING`]. Which links are live is read from
+/// [`HVN_DRAIN`]'s claims: a connection claims its slot for its whole
+/// lifetime, so the drain table is also the link table, and a second
+/// registry that could disagree with it is never built.
+///
+/// A ROUTED packet is a different question, and since #376 the core
+/// answers it: the packet carries the peer it is for, and the fan-out
+/// queues it on that peer's link alone. The broadcast domain is
+/// unchanged — an announce still reaches every link — but a report
+/// addressed to the phone no longer also travels to the board beside
+/// it, which used to forward it back to the phone.
 static LINK_OUT: [PacketQueue; MAX_LINKS] = [const { Channel::new() }; MAX_LINKS];
 
 /// This link's private outbound queue (see [`LINK_OUT`]).
@@ -364,40 +377,117 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
     &LINK_OUT[slot_index]
 }
 
-/// Fan one outbound packet out to every live link (see [`LINK_OUT`]).
+/// Deliver one outbound packet: to the link of the peer the core
+/// addressed it to, or — with no addressee — to every live link (see
+/// [`LINK_OUT`]).
+///
+/// The hint is the core's `via_peer` (Codeberg #376), the same 16 bytes
+/// this interface reports on peer-up/peer-lost, and
+/// [`leviculum_ble_tx::plan_fanout`] maps it onto a drain slot. Before
+/// it, a routed packet was copied onto every link: a telemetry report
+/// addressed to the phone also went to the other board, which forwarded
+/// it back to the phone — double airtime per report, `TRANSPORT dup=` on
+/// both boards, and relayed copies racing the direct ones (the desk
+/// timeline on #376). A broadcast still reaches every peer, which is
+/// what a Reticulum interface owes it.
 ///
 /// `try_send`, never `send`: a link whose queue is full — a peer that
 /// stopped draining — costs that link the packet and is told so in the
 /// log, but must not stall delivery to the healthy links or wedge the
-/// fan-out. With no live link at all the packet is dropped silently;
-/// that is today's behaviour for an unconnected board, just moved from
-/// the connect-time drain to the moment of sending.
+/// fan-out. With no live link at all a flooded packet is dropped
+/// silently; that is today's behaviour for an unconnected board, just
+/// moved from the connect-time drain to the moment of sending. A ROUTED
+/// packet whose peer has no live link is dropped loudly
+/// (`BLE_TX_ROUTE_MISS`) rather than flooded — see
+/// [`leviculum_ble_tx::TxFanout::NoLink`] for why.
 #[embassy_executor::task]
 async fn tx_fanout_task() -> ! {
     loop {
-        let packet = BLE_OUTGOING.receive().await;
-        for (index, queue) in LINK_OUT.iter().enumerate() {
-            if HVN_DRAIN.handle_at(index).is_none() {
-                continue;
-            }
-            if queue.try_send(packet.clone()).is_err() {
+        let (peer, packet) = BLE_OUTGOING.receive().await;
+        match columba::plan_fanout(peer.as_ref()) {
+            // `Route` and `NoLink` are only reachable with a hint, so
+            // the peer is Some in both arms.
+            leviculum_ble_tx::TxFanout::Route(slot) => {
+                let hint = peer.unwrap_or_default();
+                let Some(handle) = HVN_DRAIN.handle_at(slot) else {
+                    // The registry named a slot the drain table no longer
+                    // claims: the link died between the two reads. Same
+                    // decision as NoLink.
+                    log_route_miss(&hint, packet.len());
+                    continue;
+                };
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!(
-                        "BLE_TX_FANOUT_DROP slot={} len={} depth={}",
-                        index,
-                        packet.len(),
-                        QUEUE_DEPTH
+                        "BLE_TX_ROUTE peer={:02x}{:02x}{:02x}{:02x} conn={} slot={} len={}",
+                        hint[0],
+                        hint[1],
+                        hint[2],
+                        hint[3],
+                        handle,
+                        slot,
+                        packet.len()
                     ),
+                );
+                queue_on_link(slot, packet);
+            }
+            leviculum_ble_tx::TxFanout::NoLink => {
+                log_route_miss(&peer.unwrap_or_default(), packet.len())
+            }
+            leviculum_ble_tx::TxFanout::Flood => {
+                let mut links = 0usize;
+                for (index, _) in LINK_OUT.iter().enumerate() {
+                    if HVN_DRAIN.handle_at(index).is_none() {
+                        continue;
+                    }
+                    links += 1;
+                    queue_on_link(index, packet.clone());
+                }
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!("BLE_TX_FLOOD links={} len={}", links, packet.len()),
                 );
             }
         }
     }
 }
 
+/// Put one packet in a link's outbound queue, reporting a full queue.
+fn queue_on_link(slot: usize, packet: Vec<u8>) {
+    let len = packet.len();
+    if LINK_OUT[slot].try_send(packet).is_err() {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_TX_FANOUT_DROP slot={} len={} depth={}",
+                slot, len, QUEUE_DEPTH
+            ),
+        );
+    }
+}
+
+/// One line per routed packet whose peer holds no live link here.
+fn log_route_miss(peer: &[u8; 16], len: usize) {
+    BLE_TX_ROUTE_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "BLE_TX_ROUTE_MISS peer={:02x}{:02x}{:02x}{:02x} len={}",
+            peer[0], peer[1], peer[2], peer[3], len
+        ),
+    );
+}
+
+/// Routed packets dropped because the addressed peer held no live link
+/// (Codeberg #376), for the `BLE_COUNTERS` line.
+pub static BLE_TX_ROUTE_MISSES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 pub struct BleChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    /// The outbound side carries the #376 delivery hint alongside the
+    /// bytes; see [`OutboundQueue`].
+    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
     /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
     /// `handle_interface_peer_lost` and `Up` to
     /// `handle_interface_peer_up`. See [`BLE_PEER_EVENTS`] for why both
@@ -414,14 +504,16 @@ pub fn channels() -> BleChannels {
 }
 
 pub struct BleInterface {
-    sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
+    sender: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
     /// The carrier-off drop run — see the LoRa interface for why these
     /// are counted rather than logged one line per packet.
     drops: leviculum_media_state::DropRun,
 }
 
 impl BleInterface {
-    pub fn new(sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>) -> Self {
+    pub fn new(
+        sender: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
+    ) -> Self {
         Self {
             sender,
             drops: leviculum_media_state::DropRun::new(),
@@ -462,6 +554,18 @@ impl Interface for BleInterface {
         crate::media::ble_active() && HVN_DRAIN.claimed() > 0
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
+        self.try_send_to_peer(data, None, false)
+    }
+    /// The #376 delivery hint, carried to [`tx_fanout_task`]: this
+    /// interface holds several point-to-point links, so a routed packet
+    /// belongs on the addressed peer's link alone. `None` keeps the
+    /// broadcast fan-out.
+    fn try_send_to_peer(
+        &mut self,
+        data: &[u8],
+        peer: Option<&[u8; 16]>,
+        _high_priority: bool,
+    ) -> Result<(), InterfaceError> {
         // The media profile, applied at the interface — see the LoRa
         // interface for why this is `Ok` and not `BufferFull`.
         if !crate::media::ble_active() {
@@ -473,21 +577,23 @@ impl Interface for BleInterface {
         if let Some(run) = self.drops.resumed() {
             crate::media::log_tx_resumed(self.name(), run);
         }
-        self.sender.try_send(data.to_vec()).map_err(|_| {
-            // Codeberg #344: same silence as the other two. A phone that
-            // stops draining the notify path fills this queue, and the board
-            // could not tell that from a mesh with nothing to say.
-            crate::log::log_fmt(
-                "[IFACE_FULL] ",
-                format_args!(
-                    "iface={} depth={} len={}",
-                    self.name(),
-                    self.sender.capacity(),
-                    data.len()
-                ),
-            );
-            InterfaceError::BufferFull
-        })
+        self.sender
+            .try_send((peer.copied(), data.to_vec()))
+            .map_err(|_| {
+                // Codeberg #344: same silence as the other two. A phone that
+                // stops draining the notify path fills this queue, and the board
+                // could not tell that from a mesh with nothing to say.
+                crate::log::log_fmt(
+                    "[IFACE_FULL] ",
+                    format_args!(
+                        "iface={} depth={} len={}",
+                        self.name(),
+                        self.sender.capacity(),
+                        data.len()
+                    ),
+                );
+                InterfaceError::BufferFull
+            })
     }
 }
 
@@ -863,12 +969,15 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> route_miss=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
 /// `displaced=` counts links torn down because a newer connection of
-/// the same identity took over (#376).
+/// the same identity took over (#376). `route_miss=` counts routed
+/// packets dropped because the peer the core addressed held no live
+/// link here (#376); a rising value on a healthy board means the path
+/// table outlived a link and the #365 cull should have fired.
 /// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
 /// off this line: both slots claimed, and every HVN drain edge still
 /// found the link that produced it.
@@ -880,13 +989,14 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} route_miss={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_UNROUTED.load(Ordering::Relaxed),
                 HVN_DRAIN.claimed(),
                 columba::BLE_LINKS_DISPLACED.load(Ordering::Relaxed),
+                BLE_TX_ROUTE_MISSES.load(Ordering::Relaxed),
             ),
         );
     }

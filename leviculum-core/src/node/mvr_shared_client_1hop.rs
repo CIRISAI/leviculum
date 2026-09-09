@@ -106,7 +106,7 @@ fn one_send_packet(output: &TickOutput) -> (InterfaceId, Vec<u8>) {
     let mut sends = Vec::new();
     for action in &output.actions {
         match action {
-            Action::SendPacket { iface, data } => sends.push((*iface, data.clone())),
+            Action::SendPacket { iface, data, .. } => sends.push((*iface, data.clone())),
             Action::Broadcast { .. } => panic!("routed send must not broadcast"),
         }
     }

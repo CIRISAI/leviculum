@@ -159,7 +159,7 @@ fn forwarded_data(out: &TickOutput, dest: &crate::DestinationHash) -> Vec<(Optio
         .iter()
         .filter_map(|action| {
             let (iface, data) = match action {
-                Action::SendPacket { iface, data } => (Some(iface.0), data),
+                Action::SendPacket { iface, data, .. } => (Some(iface.0), data),
                 Action::Broadcast { data, .. } => (None, data),
             };
             Packet::unpack(data).ok().and_then(|p| {

@@ -672,6 +672,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: response.to_vec(),
                 high_priority: false,
             })
@@ -793,6 +794,7 @@ mod tests {
         client_handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: b"client-to-server".to_vec(),
                 high_priority: false,
             })
@@ -809,6 +811,7 @@ mod tests {
         server_handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: b"server-to-client".to_vec(),
                 high_priority: false,
             })

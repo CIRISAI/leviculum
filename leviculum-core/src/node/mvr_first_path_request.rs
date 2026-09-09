@@ -97,7 +97,7 @@ fn first_path_request_before_any_announce_is_answered() {
         .actions
         .iter()
         .find_map(|a| match a {
-            Action::SendPacket { iface: i, data } if i.0 == iface => Some(data.clone()),
+            Action::SendPacket { iface: i, data, .. } if i.0 == iface => Some(data.clone()),
             _ => None,
         })
         .expect(

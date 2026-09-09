@@ -241,6 +241,21 @@ pub enum Action {
         iface: InterfaceId,
         /// The packet data (already framed for the wire)
         data: Vec<u8>,
+        /// The peer behind that interface these bytes are for, when the
+        /// core knows one (Codeberg #376).
+        ///
+        /// The 16-byte identity a multi-peer interface reports on
+        /// peer-up/peer-lost and stamps on inbound packets
+        /// ([`Transport::process_incoming_from_peer`]) — the same value a
+        /// path entry carries as [`PathEntry::via_peer`]. Set whenever the
+        /// next hop was learned on a named peer link; `None` otherwise,
+        /// which every single-peer interface ignores and a multi-peer one
+        /// reads as "every live link".
+        ///
+        /// A peer, never a link: the core does not know what a BLE
+        /// connection handle is, and must not. See
+        /// [`crate::traits::Interface::try_send_to_peer`].
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     },
     /// Broadcast a packet on all online interfaces, optionally excluding one
     Broadcast {
@@ -327,6 +342,16 @@ pub struct SendRetry {
     pub iface_idx: usize,
     /// The packet data that failed to send.
     pub data: Vec<u8>,
+    /// The delivery hint the failed action carried (Codeberg #376).
+    ///
+    /// Carried so the answer is not thrown away at the boundary: a
+    /// driver that re-sends this packet can address the same one peer
+    /// the first attempt was addressed to. **No driver reads it yet** —
+    /// lnsd's retry queue is a `VecDeque<Vec<u8>>` per interface, so a
+    /// `BufferFull` retry on a multi-peer interface still floods, which
+    /// is the pre-#376 behaviour and safe. Threading it through that
+    /// queue is a driver change, not a core one.
+    pub peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 }
 
 /// Result of dispatching actions to interfaces.
@@ -418,7 +443,7 @@ pub fn dispatch_actions(
     let mut drops = Vec::new();
     for action in actions {
         match action {
-            Action::SendPacket { iface, data } => {
+            Action::SendPacket { iface, data, peer } => {
                 let send_data = match ifac_configs.get(&iface.0) {
                     Some(cfg) => match cfg.apply_ifac(&data) {
                         Ok(wrapped) => wrapped,
@@ -435,13 +460,17 @@ pub fn dispatch_actions(
                 };
                 if let Some(iface_obj) = interfaces.iter_mut().find(|i| i.id() == iface) {
                     // SendPacket = directed traffic (link requests, proofs, channel data)
-                    // → high priority on constrained interfaces like LoRa
-                    if let Err(e) = iface_obj.try_send_prioritized(&send_data, true) {
+                    // → high priority on constrained interfaces like LoRa.
+                    // `peer` rides along as the delivery hint (Codeberg
+                    // #376): a multi-peer interface serves the one link it
+                    // names, every other interface ignores it.
+                    if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
                         errors.push((iface, e));
                         if matches!(e, crate::traits::InterfaceError::BufferFull) {
                             retries.push(SendRetry {
                                 iface_idx: iface.0,
                                 data: send_data,
+                                peer,
                             });
                         }
                     }
@@ -2322,12 +2351,18 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         );
 
         // Prefer explicit interface (PROVE_ALL), fall back to path lookup (PROVE_APP)
-        let interface_index = match receiving_interface {
-            Some(iface) => iface,
+        //
+        // The #376 delivery hint comes from the same choice: proving on the
+        // interface the packet arrived on addresses the peer it arrived
+        // from (`ingress_peer`, set for the duration of
+        // `process_incoming_from_peer` and `None` for a deferred prove),
+        // proving over a path addresses the peer that path was learned on.
+        let (interface_index, peer) = match receiving_interface {
+            Some(iface) => (iface, self.ingress_peer),
             None => self
                 .storage
                 .get_path(destination_hash)
-                .map(|p| p.interface_index)
+                .map(|p| (p.interface_index, p.via_peer))
                 .ok_or(TransportError::NoPath)?,
         };
         crate::tracing::debug!(
@@ -2339,7 +2374,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // ph=None: the proof packet's own bytes are hashed nowhere else on
         // this node, so the journey helper hashing them (only when the pkt
         // target is enabled) is the single hashing for this packet.
-        self.send_packet_on_interface(interface_index, &packet, None)
+        self.send_packet_on_interface(interface_index, &packet, None, peer)
     }
 
     // Packet I/O
@@ -2833,11 +2868,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// packet hash (dedup/cache/truncated — same prefix). `None` computes it
     /// here, but only when the journey target is enabled; for such packets
     /// this is the only hashing on this node.
+    ///
+    /// `peer` is the #376 delivery hint: the peer behind `interface_index`
+    /// these bytes are for, or `None` when the core has no addressee for
+    /// them. See [`Action::SendPacket::peer`].
     fn push_packet(
         &mut self,
         interface_index: usize,
         data: Vec<u8>,
         ph: Option<[u8; PKT_PH_BYTES]>,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) {
         if self.pkt_journey_enabled() {
             let ph = ph.unwrap_or_else(|| ph8(&packet_hash(&data)));
@@ -2853,6 +2893,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.pending_actions.push(Action::SendPacket {
             iface: InterfaceId(interface_index),
             data,
+            peer,
         });
     }
 
@@ -2887,13 +2928,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         });
     }
 
-    /// Send raw data on a specific interface
+    /// Send raw data on a specific interface.
+    ///
+    /// No #376 delivery hint: the callers here address an INTERFACE, not a
+    /// peer behind it (a reply on the ingress interface, an answer to a
+    /// local client, a proof onto the link's leg). A multi-peer interface
+    /// serves every live link for these, exactly as before. Callers that do
+    /// know the addressee take
+    /// [`Self::send_on_interface_to_peer`](Self::send_on_interface_to_peer).
     pub fn send_on_interface(
         &mut self,
         interface_index: usize,
         data: &[u8],
     ) -> Result<(), TransportError> {
-        self.send_on_interface_ph(interface_index, data, None)
+        self.send_on_interface_ph(interface_index, data, None, None)
+    }
+
+    /// [`Self::send_on_interface`] for bytes the core has already addressed
+    /// to one peer behind that interface (Codeberg #376).
+    pub fn send_on_interface_to_peer(
+        &mut self,
+        interface_index: usize,
+        data: &[u8],
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+    ) -> Result<(), TransportError> {
+        self.send_on_interface_ph(interface_index, data, None, peer)
     }
 
     /// [`Self::send_on_interface`] with the packet hash threaded through for
@@ -2904,8 +2963,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         data: &[u8],
         ph: Option<[u8; PKT_PH_BYTES]>,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
-        self.push_packet(interface_index, data.to_vec(), ph);
+        self.push_packet(interface_index, data.to_vec(), ph, peer);
         self.stats.packets_sent += 1;
         Ok(())
     }
@@ -3030,7 +3090,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ) -> Result<(), TransportError> {
         // Read path data into locals to release the immutable borrow on storage
         // before we mutably borrow for hash caching.
-        let (interface_index, needs_relay, is_direct, next_hop) = {
+        let (interface_index, needs_relay, is_direct, next_hop, via_peer) = {
             let path = self
                 .storage
                 .get_path(dest_hash)
@@ -3040,6 +3100,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 path.needs_relay(),
                 path.is_direct(),
                 path.next_hop,
+                // The #376 delivery hint: the peer link this path was
+                // learned on (stamped by `process_incoming_from_peer`).
+                // This is the case the field failure was made of — a
+                // telemetry report addressed to the phone was copied onto
+                // the other board's link too, which forwarded it back to
+                // the phone: double airtime and a relayed copy racing the
+                // direct one.
+                path.via_peer,
             )
         };
 
@@ -3066,6 +3134,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             dst = %HexShort(dest_hash),
             iface = %self.iface_name(interface_index),
             next_hop = ?next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
+            via_peer = ?via_peer.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
             online = "y",
         );
 
@@ -3130,10 +3199,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Journey correlator: the transport header inserted above is
             // stripped by get_hashable_part, so cache_hash matches the bytes
             // actually sent.
-            self.send_on_interface_ph(interface_index, &buf, Some(ph8(&cache_hash)))
+            self.send_on_interface_ph(interface_index, &buf, Some(ph8(&cache_hash)), via_peer)
         } else {
             // Direct neighbor or already Type2: send as-is
-            self.send_on_interface_ph(interface_index, data, Some(ph8(&cache_hash)))
+            self.send_on_interface_ph(interface_index, data, Some(ph8(&cache_hash)), via_peer)
         }
     }
 
@@ -5061,6 +5130,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 self.pending_actions.push(Action::SendPacket {
                                     iface: InterfaceId(client_iface),
                                     data: buf[..len].to_vec(),
+                                    // A relayed announce toward a local IPC
+                                    // client: no addressee, no #376 hint.
+                                    peer: None,
                                 });
                             }
                         }
@@ -5166,13 +5238,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         if self.config.enable_transport || from_local || for_local {
             // Read path data into locals (releases immutable borrow)
-            let (target_iface, path_hops, needs_relay, next_hop) =
+            let (target_iface, path_hops, needs_relay, next_hop, via_peer) =
                 if let Some(path) = self.storage.get_path(&dest_hash) {
                     (
                         path.interface_index,
                         path.hops,
                         path.needs_relay(),
                         path.next_hop,
+                        // The #376 delivery hint: this forward is addressed
+                        // at the peer the path was learned from, so a
+                        // multi-peer interface serves that link alone.
+                        path.via_peer,
                     )
                 } else {
                     // No path known, drop
@@ -5326,6 +5402,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Some(interface_index),
                 &mut forwarded,
                 ph8(&truncated_hash),
+                via_peer,
             );
         }
 
@@ -5820,6 +5897,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     Some(interface_index),
                     &mut forwarded,
                     ph8(&cache_hash),
+                    // No #376 hint: the link table names an interface, not
+                    // the peer behind it, so this repeat keeps the pre-#376
+                    // every-live-link behaviour on a multi-peer carrier.
+                    None,
                 );
             } else if packet.context == PacketContext::Lrproof {
                 crate::tracing::debug!(
@@ -5864,6 +5945,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             Some(interface_index),
                             &mut forwarded,
                             ph8(&cache_hash),
+                            // The reverse table records the interface the
+                            // original packet came in on, not its peer.
+                            None,
                         );
                     }
                 }
@@ -5982,6 +6066,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             self.pending_actions.push(Action::SendPacket {
                                 iface: InterfaceId(client_iface),
                                 data: buf[..len].to_vec(),
+                                peer: None,
                             });
                         }
                     }
@@ -6187,6 +6272,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         Some(interface_index),
                         &mut forwarded,
                         ph8(&full_packet_hash),
+                        // Link-table repeat: interface known, peer not.
+                        None,
                     );
                 }
             }
@@ -6241,7 +6328,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         truncated_hash: [u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
         // Read path data into locals (releases immutable borrow)
-        let (target_iface, needs_relay, next_hop) = if let Some(path) =
+        let (target_iface, needs_relay, next_hop, via_peer) = if let Some(path) =
             self.storage.get_path(&packet.destination_hash)
         {
             crate::tracing::debug!(
@@ -6251,7 +6338,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 hops = path.hops,
                 iface = %self.iface_name(path.interface_index),
             );
-            (path.interface_index, path.needs_relay(), path.next_hop)
+            (
+                path.interface_index,
+                path.needs_relay(),
+                path.next_hop,
+                // The #376 delivery hint: this relay goes to the peer the
+                // path was learned from, not to every peer on the medium.
+                path.via_peer,
+            )
         } else {
             crate::tracing::debug!(
                 "Cannot forward packet for <{}>, no path known, dropping",
@@ -6331,6 +6425,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             Some(source_interface_index),
             &mut packet,
             ph8(&truncated_hash),
+            via_peer,
         )
     }
 
@@ -6411,6 +6506,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         receiving_iface: Option<usize>,
         packet: &mut Packet,
         ph: [u8; PKT_PH_BYTES],
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
         if packet.hops > self.config.max_hops {
             crate::tracing::debug!(
@@ -6450,7 +6546,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         );
 
         self.stats.packets_forwarded += 1;
-        self.send_packet_on_interface(target_iface, packet, Some(ph))
+        self.send_packet_on_interface(target_iface, packet, Some(ph), peer)
     }
 
     /// Forward a packet on all interfaces except one.
@@ -6564,6 +6660,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         packet: &Packet,
         ph: Option<[u8; PKT_PH_BYTES]>,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
         // Use a dynamically-sized buffer so forwarded packets with a
         // negotiated link MTU larger than the base MTU can be serialized.
@@ -6571,7 +6668,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut buf = alloc::vec![0u8; size];
         let len = packet.pack(&mut buf)?;
 
-        self.send_on_interface_ph(interface_index, &buf[..len], ph)
+        self.send_on_interface_ph(interface_index, &buf[..len], ph, peer)
     }
 
     // Public: Path Request API
@@ -8332,7 +8429,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             "Answering path request for <{}> from local client, path is known",
                             HexShort(&requested_hash),
                         );
-                        self.push_packet(interface_index, buf[..len].to_vec(), None);
+                        self.push_packet(interface_index, buf[..len].to_vec(), None, None);
                         // Transmit-time recording, as above (Python routes this
                         // answer through outbound() -> sent_announce() too).
                         self.record_outgoing_announce(interface_index);
@@ -9081,7 +9178,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             target_iface,
                             len
                         );
-                        self.push_packet(target_iface, buf[..len].to_vec(), None);
+                        // No #376 hint: the announce entry records the
+                        // requesting INTERFACE, never the peer behind it, and
+                        // a path response is announce-shaped anyway — every
+                        // live link is the right audience.
+                        self.push_packet(target_iface, buf[..len].to_vec(), None, None);
                         // Python records sent_announce() at transmit time for
                         // every announce, including targeted path responses
                         // (Transport.py:1323), so they count toward
@@ -9235,6 +9336,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.pending_actions.push(Action::SendPacket {
                     iface: InterfaceId(*iface_idx),
                     data: raw.clone(),
+                    // An announce is a broadcast: no #376 hint, every live
+                    // link on a multi-peer interface gets it.
+                    peer: None,
                 });
                 // Compute holdoff: wait_ms = (bytes * 8 * 1000) / (bitrate * cap% / 100)
                 let tx_bits = raw.len() as u64 * 8;
@@ -9270,6 +9374,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.pending_actions.push(Action::SendPacket {
                 iface: InterfaceId(iface_idx),
                 data: raw.clone(),
+                peer: None,
             });
             ann_tx_ifaces.push(iface_idx);
         }
@@ -9353,7 +9458,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         for (iface_idx, raw, dst, hops) in sends {
-            self.push_packet(iface_idx, raw, None);
+            self.push_packet(iface_idx, raw, None, None);
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
             crate::tracing::debug!(
@@ -9788,6 +9893,7 @@ mod tests {
         #[test]
         fn test_action_send_packet() {
             let action = Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(3),
                 data: vec![1, 2, 3],
             };
@@ -9830,6 +9936,7 @@ mod tests {
         #[test]
         fn test_action_variants_not_equal() {
             let send = Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(0),
                 data: vec![1],
             };
@@ -9853,6 +9960,7 @@ mod tests {
         fn test_tick_output_with_actions() {
             let output = TickOutput {
                 actions: vec![Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(0),
                     data: vec![42],
                 }],
@@ -9868,6 +9976,7 @@ mod tests {
             let output = TickOutput {
                 actions: vec![
                     Action::SendPacket {
+                        peer: None,
                         iface: InterfaceId(0),
                         data: vec![1],
                     },
@@ -10295,6 +10404,7 @@ mod tests {
             assert_eq!(
                 actions[0],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(99),
                     data: b"test".to_vec()
                 }
@@ -12555,7 +12665,7 @@ mod tests {
             let response = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 0 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("path response must be sent to the requesting interface");
@@ -12668,7 +12778,7 @@ mod tests {
             let sends: Vec<_> = actions
                 .iter()
                 .filter_map(|a| match a {
-                    Action::SendPacket { iface, data } => Some((iface, data)),
+                    Action::SendPacket { iface, data, .. } => Some((iface, data)),
                     _ => None,
                 })
                 .collect();
@@ -12785,7 +12895,7 @@ mod tests {
             let fwd = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 0 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("multi-hop data must be forwarded toward the path interface");
@@ -12824,7 +12934,7 @@ mod tests {
             let fwd2 = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 0 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("last-hop data must be forwarded to the destination's interface");
@@ -12971,7 +13081,7 @@ mod tests {
             let wire = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 0 => Some(data.clone()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 0 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("origination must emit on the path interface");
@@ -13235,7 +13345,7 @@ mod tests {
             let response = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.clone()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.clone()),
                     _ => None,
                 })
                 .expect("a request from a third party must be answered from the cached path");
@@ -15001,7 +15111,7 @@ mod tests {
             let sent_len = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.len()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.len()),
                     _ => None,
                 })
                 .expect("announce should be sent on the capped interface");
@@ -15046,7 +15156,9 @@ mod tests {
             let sent_len = actions1
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.len() as u64),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => {
+                        Some(data.len() as u64)
+                    }
                     _ => None,
                 })
                 .expect("first announce should be sent on the capped interface");
@@ -16047,7 +16159,7 @@ mod tests {
             let forwarded_raw = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.as_slice()),
                     _ => None,
                 })
                 .expect("Should have a SendPacket action for iface 1");
@@ -16105,7 +16217,7 @@ mod tests {
             let forwarded_raw = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.as_slice()),
                     _ => None,
                 })
                 .expect("Should have a SendPacket action for iface 1");
@@ -16175,7 +16287,9 @@ mod tests {
                 let forwarded_raw = actions
                     .iter()
                     .find_map(|a| match a {
-                        Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                        Action::SendPacket { iface, data, .. } if iface.0 == 1 => {
+                            Some(data.as_slice())
+                        }
                         _ => None,
                     })
                     .expect("Should have a SendPacket action for iface 1");
@@ -16260,7 +16374,9 @@ mod tests {
                 let forwarded_raw = actions
                     .iter()
                     .find_map(|a| match a {
-                        Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                        Action::SendPacket { iface, data, .. } if iface.0 == 1 => {
+                            Some(data.as_slice())
+                        }
                         _ => None,
                     })
                     .expect("Should have a SendPacket action for iface 1");
@@ -16332,7 +16448,9 @@ mod tests {
                 let forwarded_raw = actions
                     .iter()
                     .find_map(|a| match a {
-                        Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                        Action::SendPacket { iface, data, .. } if iface.0 == 1 => {
+                            Some(data.as_slice())
+                        }
                         _ => None,
                     })
                     .expect("Should have a SendPacket action for iface 1");
@@ -16612,7 +16730,7 @@ mod tests {
             let (target_iface, forwarded_raw) = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } => Some((*iface, data.as_slice())),
+                    Action::SendPacket { iface, data, .. } => Some((*iface, data.as_slice())),
                     _ => None,
                 })
                 .expect("Should have a SendPacket action for routed proof");
@@ -16690,7 +16808,7 @@ mod tests {
             let forwarded_raw = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.as_slice()),
                     _ => None,
                 })
                 .expect("Should have a SendPacket action for iface 1");
@@ -16785,7 +16903,7 @@ mod tests {
             let forwarded_raw = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == 1 => Some(data.as_slice()),
+                    Action::SendPacket { iface, data, .. } if iface.0 == 1 => Some(data.as_slice()),
                     _ => None,
                 })
                 .expect("Should have a SendPacket action for iface 1");
@@ -16982,6 +17100,7 @@ mod tests {
             assert_eq!(
                 actions[0],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(idx),
                     data: data.to_vec(),
                 }
@@ -17001,6 +17120,7 @@ mod tests {
             assert_eq!(
                 actions[0],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(99),
                     data: b"data".to_vec()
                 }
@@ -17121,6 +17241,7 @@ mod tests {
             assert_eq!(
                 actions[0],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(idx),
                     data: data.to_vec(),
                 }
@@ -17293,6 +17414,7 @@ mod tests {
             assert_eq!(
                 actions[0],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(0),
                     data: b"unicast".to_vec(),
                 }
@@ -17308,6 +17430,7 @@ mod tests {
             assert_eq!(
                 actions[2],
                 Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(1),
                     data: b"unicast2".to_vec(),
                 }
@@ -22836,7 +22959,7 @@ mod tests {
             let send_data = actions
                 .iter()
                 .find_map(|a| match a {
-                    Action::SendPacket { iface, data } if iface.0 == LOCAL_CLIENT_IFACE => {
+                    Action::SendPacket { iface, data, .. } if iface.0 == LOCAL_CLIENT_IFACE => {
                         Some(data)
                     }
                     _ => None,
@@ -26824,6 +26947,7 @@ mod tests {
             let mut interfaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
 
             let actions = vec![Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(0),
                 data: vec![1, 2, 3],
             }];
@@ -26896,6 +27020,7 @@ mod tests {
             let result = dispatch_actions(
                 &mut interfaces,
                 vec![Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(1),
                     data: vec![0u8; 32],
                 }],
@@ -26938,6 +27063,7 @@ mod tests {
             let result = dispatch_actions(
                 &mut interfaces,
                 vec![Action::SendPacket {
+                    peer: None,
                     // Id 7 is in no dispatch slice this stack builds.
                     iface: InterfaceId(7),
                     data: vec![0u8; 32],
@@ -26999,6 +27125,7 @@ mod tests {
             let result = dispatch_actions(
                 &mut interfaces,
                 vec![Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(0),
                     data: vec![0u8; 32],
                 }],
@@ -27042,6 +27169,7 @@ mod tests {
                     dispatch_actions(
                         &mut interfaces,
                         vec![Action::SendPacket {
+                            peer: None,
                             iface: InterfaceId(7),
                             data: vec![0u8; 32],
                         }],
@@ -27073,6 +27201,7 @@ mod tests {
                     dispatch_actions(
                         &mut interfaces,
                         vec![Action::SendPacket {
+                            peer: None,
                             iface: InterfaceId(0),
                             data: vec![0u8; 32],
                         }],
@@ -27316,6 +27445,7 @@ mod tests {
 
             let (raw, _) = make_test_announce();
             let actions = vec![Action::SendPacket {
+                peer: None,
                 iface: InterfaceId(0),
                 data: raw.clone(),
             }];
@@ -27352,6 +27482,7 @@ mod tests {
                 let mut ifac_configs = BTreeMap::new();
                 ifac_configs.insert(0, cfg.clone());
                 let actions = vec![Action::SendPacket {
+                    peer: None,
                     iface: InterfaceId(0),
                     data: raw.clone(),
                 }];
@@ -28407,7 +28538,7 @@ mod tunnel_restore_tests {
         let wire = actions
             .iter()
             .find_map(|a| match a {
-                Action::SendPacket { iface, data } if iface.0 == if_a => Some(data.clone()),
+                Action::SendPacket { iface, data, .. } if iface.0 == if_a => Some(data.clone()),
                 _ => None,
             })
             .expect("synthesize must be sent on the registered interface");
@@ -28607,7 +28738,10 @@ mod tunnel_restore_tests {
     fn take_send_packet(t: &mut Transport<MockClock, MemoryStorage>, iface: usize) -> Vec<u8> {
         let mut found: Option<Vec<u8>> = None;
         for action in t.drain_actions() {
-            if let Action::SendPacket { iface: id, data } = action {
+            if let Action::SendPacket {
+                iface: id, data, ..
+            } = action
+            {
                 if id.0 == iface {
                     assert!(
                         found.is_none(),

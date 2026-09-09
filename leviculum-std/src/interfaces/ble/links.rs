@@ -166,10 +166,27 @@ pub(crate) struct Expired {
     pub(crate) pending: Vec<Addr>,
 }
 
+/// What the core's #376 delivery hint made of one outbound packet.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum TxRoute {
+    /// No hint — a broadcast (announce, path request, anything the core
+    /// did not address at a named peer). Every live link, as always.
+    #[default]
+    Flood,
+    /// Hinted, and the peer holds a live link: that link alone.
+    Routed { peer: IdentityHash, role: Role },
+    /// Hinted at a peer with NO live link here. Nothing is sent: see
+    /// [`LinkTable::plan_tx_to`] for why this is a drop and not a
+    /// fallback flood.
+    NoLink { peer: IdentityHash },
+}
+
 /// The outbound fan-out for one Reticulum packet: what to write to the
 /// shared notify pipe, and what to write to each central-role link.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TxPlan {
+    /// What the hint decided (Codeberg #376) — the driver's log line.
+    pub(crate) route: TxRoute,
     /// Fragments for the peripheral-side notify pipe, fragmented at the
     /// minimum MTU across peripheral links. Empty when no peripheral link
     /// is live.
@@ -430,9 +447,77 @@ impl LinkTable {
         std::mem::take(&mut self.abandon_reports)
     }
 
-    /// Fan one outbound Reticulum packet out to every live link.
+    /// Fan one outbound Reticulum packet out to every live link — the
+    /// no-hint case of [`Self::plan_tx_to`], kept for the tests that pin
+    /// the broadcast fan-out on its own.
+    #[cfg(test)]
     pub(crate) fn plan_tx(&self, packet: &[u8]) -> TxPlan {
+        self.plan_tx_to(packet, None)
+    }
+
+    /// Plan one outbound packet, honouring the core's #376 delivery hint.
+    ///
+    /// `peer: None` is the broadcast case and fans out to every live link,
+    /// exactly as before. `peer: Some(id)` names the ONE peer the core
+    /// addressed the packet at, and the plan then carries that peer's link
+    /// alone: a routed packet copied onto the other links costs their
+    /// airtime, and — the 2026-09-09 desk failure — the neighbour that
+    /// received the stray copy forwards it back to the addressee, which
+    /// then counts the duplicate.
+    ///
+    /// Two properties of this carrier shape the result:
+    ///
+    /// - A peer holding several links is still one peer. Any of its links
+    ///   reaches it, so the first one found is taken (the registry churns
+    ///   through two links only while a rotated-address reconnect displaces
+    ///   its predecessor).
+    /// - The peripheral side has ONE notify characteristic and BlueZ fans a
+    ///   notification out to every subscribed central. Routing to a
+    ///   peripheral-role peer therefore still reaches the other subscribed
+    ///   centrals; what it does drop is every CENTRAL-role link, which is
+    ///   where the board-to-board copy in the field went. Targeting one
+    ///   subscriber would need a characteristic per link, which the Columba
+    ///   wire protocol does not have.
+    /// - A hint naming a peer with no live link DROPS the packet rather
+    ///   than falling back to a flood. The hint exists because the core
+    ///   routed these bytes at that neighbour; the remaining links are not
+    ///   a route to it, and flooding them re-creates exactly the relayed
+    ///   duplicate this change removes. The peer's disappearance is already
+    ///   reported to the core as a peer loss (Codeberg #365), which culls
+    ///   the paths via it, so the next packet is routed afresh instead of
+    ///   sprayed.
+    pub(crate) fn plan_tx_to(&self, packet: &[u8], peer: Option<&IdentityHash>) -> TxPlan {
         let mut plan = TxPlan::default();
+        if let Some(peer) = peer {
+            let Some(link) = self.links.iter().find(|l| &l.identity == peer) else {
+                plan.route = TxRoute::NoLink { peer: *peer };
+                return plan;
+            };
+            plan.route = TxRoute::Routed {
+                peer: *peer,
+                role: link.role,
+            };
+            match link.role {
+                // Fragmented at the MINIMUM peripheral MTU, not this
+                // link's: the notification is shared, so a fragment sized
+                // for this peer would be truncated at a smaller-MTU
+                // subscriber. Same rule as the flood path below.
+                Role::Peripheral => {
+                    let mtu = self
+                        .links
+                        .iter()
+                        .filter(|l| l.role == Role::Peripheral)
+                        .map(|l| l.mtu)
+                        .min()
+                        .unwrap_or(link.mtu);
+                    plan.notify_fragments = fragment_packet(packet, mtu);
+                }
+                Role::Central => plan
+                    .central
+                    .push((link.addr, fragment_packet(packet, link.mtu))),
+            }
+            return plan;
+        }
         let periph_mtu = self
             .links
             .iter()
@@ -447,6 +532,11 @@ impl LinkTable {
                 .push((link.addr, fragment_packet(packet, link.mtu)));
         }
         plan
+    }
+
+    /// Live links, for the driver's `BLE_TX_FLOOD links=` count.
+    pub(crate) fn live_links(&self) -> usize {
+        self.links.len()
     }
 
     /// Which links are due a keepalive at `now_ms`; marks them sent.
@@ -1524,6 +1614,133 @@ mod tests {
         let mut t2 = table();
         t2.admit(ID_A, ADDR_1, Role::Central, 185, 0);
         assert!(t2.plan_tx(&packet).notify_fragments.is_empty());
+    }
+
+    /// The #376 hint, the case the field failure was made of: a routed
+    /// packet for a central-role peer goes on that peer's pipe and on
+    /// nothing else — no notify to the peripheral subscribers, which is
+    /// where the board-to-board copy went.
+    #[test]
+    fn a_hinted_packet_takes_only_the_addressed_peers_link() {
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+
+        let packet: Vec<u8> = vec![0x55; 200];
+        let plan = t.plan_tx_to(&packet, Some(&ID_A));
+        assert_eq!(
+            plan.route,
+            TxRoute::Routed {
+                peer: ID_A,
+                role: Role::Central
+            }
+        );
+        assert_eq!(plan.central.len(), 1);
+        assert_eq!(plan.central[0].0, ADDR_1);
+        assert!(
+            plan.notify_fragments.is_empty(),
+            "a packet routed at the central-role peer must not be \
+             notified to the peripheral subscribers as well"
+        );
+    }
+
+    /// Routing at a peripheral-role peer drops every CENTRAL link. The
+    /// notify pipe is shared by construction (one characteristic, BlueZ
+    /// fans it to every subscriber), and its fragments stay sized for
+    /// the SMALLEST subscriber so none of them is truncated.
+    #[test]
+    fn a_hint_for_a_peripheral_peer_keeps_the_shared_notify_and_drops_the_centrals() {
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+        t.admit([3; 16], ADDR_3, Role::Peripheral, 23, 0);
+
+        let packet: Vec<u8> = vec![0x55; 400];
+        let plan = t.plan_tx_to(&packet, Some(&ID_B));
+        assert_eq!(
+            plan.route,
+            TxRoute::Routed {
+                peer: ID_B,
+                role: Role::Peripheral
+            }
+        );
+        assert!(
+            plan.central.is_empty(),
+            "the central link is not the addressee"
+        );
+        assert_eq!(
+            plan.notify_fragments.len(),
+            400usize.div_ceil(payload_per_fragment(23)),
+            "fragmented for the smallest subscriber of the shared pipe"
+        );
+    }
+
+    /// A peer holding a SECOND link — the rotated address reconnecting —
+    /// is still one peer and gets the packet once. Here the table itself
+    /// enforces that: `admit` refuses a duplicate identity on a live link
+    /// and displaces a zombie one, so one identity never owns two rows.
+    /// (The firmware's registry does allow the two-slot displacement
+    /// window; its own decision test is
+    /// `leviculum_ble_tx::registry::a_peer_with_two_links_gets_the_packet_once`.)
+    #[test]
+    fn a_peer_that_reconnects_still_gets_the_packet_once() {
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
+        assert_eq!(
+            t.admit(ID_A, ADDR_2, Role::Central, 517, 0).0,
+            Admission::RejectDuplicate,
+            "a live link of the same identity refuses the newcomer"
+        );
+        // Past the zombie bound the newcomer displaces the old row.
+        let (admission, displaced) =
+            t.admit(ID_A, ADDR_2, Role::Central, 517, ZOMBIE_TIMEOUT_MS + 1);
+        assert_eq!(admission, Admission::Accept);
+        assert_eq!(
+            displaced.map(|(id, addr, _)| (id, addr)),
+            Some((ID_A, ADDR_1))
+        );
+        assert_eq!(t.live_links(), 1, "one identity, one row, always");
+
+        let packet: Vec<u8> = vec![0x55; 100];
+        let plan = t.plan_tx_to(&packet, Some(&ID_A));
+        assert_eq!(plan.central.len(), 1, "one peer, one copy");
+        assert_eq!(plan.central[0].0, ADDR_2, "and it is the newest link");
+        assert!(plan.notify_fragments.is_empty());
+    }
+
+    /// The peer walked out between the core's routing decision and this
+    /// plan: nothing is sent. Flooding the remaining links would spend
+    /// their airtime on a packet they cannot deliver, and a neighbour
+    /// that forwarded it would rebuild the duplicate #376 removes.
+    #[test]
+    fn a_hint_for_a_peer_with_no_link_sends_nothing() {
+        let mut t = table();
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+
+        let packet: Vec<u8> = vec![0x55; 100];
+        let plan = t.plan_tx_to(&packet, Some(&ID_A));
+        assert_eq!(plan.route, TxRoute::NoLink { peer: ID_A });
+        assert!(plan.central.is_empty());
+        assert!(
+            plan.notify_fragments.is_empty(),
+            "the surviving peripheral link is not a route to the addressee"
+        );
+    }
+
+    /// No hint is a broadcast and still reaches every live link — the
+    /// announce case, which is what makes a peer discoverable at all.
+    #[test]
+    fn no_hint_still_floods_every_live_link() {
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+
+        let packet: Vec<u8> = vec![0x55; 100];
+        let plan = t.plan_tx_to(&packet, None);
+        assert_eq!(plan.route, TxRoute::Flood);
+        assert_eq!(plan.central.len(), 1);
+        assert!(!plan.notify_fragments.is_empty());
+        assert_eq!(t.live_links(), 2);
     }
 
     #[test]

@@ -135,7 +135,7 @@ fn targeted_responses(out: &TickOutput, iface: usize, dest: &[u8; TRUNCATED_HASH
     out.actions
         .iter()
         .filter(|a| match a {
-            Action::SendPacket { iface: i, data } if i.0 == iface => Packet::unpack(data)
+            Action::SendPacket { iface: i, data, .. } if i.0 == iface => Packet::unpack(data)
                 .map(|p| {
                     p.flags.packet_type == PacketType::Announce
                         && p.context == PacketContext::PathResponse

@@ -151,7 +151,7 @@ fn app_proof_leaves_on_ingress_interface() {
     let mut proof_raw = None;
     for action in &proof_out.actions {
         match action {
-            Action::SendPacket { iface, data } => {
+            Action::SendPacket { iface, data, .. } => {
                 assert_eq!(
                     *iface,
                     InterfaceId(iface_b),

@@ -273,7 +273,7 @@ impl Mesh {
         }
         for a in &out.actions {
             match a {
-                Action::SendPacket { iface, data } => {
+                Action::SendPacket { iface, data, .. } => {
                     pending.push((src, iface.0, data.clone()));
                 }
                 Action::Broadcast {

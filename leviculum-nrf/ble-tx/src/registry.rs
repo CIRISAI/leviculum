@@ -130,6 +130,20 @@ impl<const N: usize> PeerRegistry<N> {
         self.slots.iter().flatten().any(|id| id == peer)
     }
 
+    /// The slot of a live link to this peer, if it holds one (Codeberg
+    /// #376) — the fan-out's peer-to-link map.
+    ///
+    /// A peer holding two links is still one peer, and either link
+    /// reaches it, so the lowest slot is returned. Two links exist only
+    /// during a displacement hand-over, whose old link is already being
+    /// torn down: [`Self::link_up`] registers the new slot BEFORE the old
+    /// one is signalled, and the old session clears its registry entry
+    /// before releasing its drain slot, so the window is a fan-out or two
+    /// wide and both slots are live throughout it.
+    pub fn slot_for(&self, peer: &[u8; 16]) -> Option<usize> {
+        self.slots.iter().position(|id| id.as_ref() == Some(peer))
+    }
+
     /// The number of DISTINCT live peer identities (Codeberg #365) —
     /// the value the main loop mirrors into the core as the
     /// interface's peer count. Distinct, not per-slot: during the
@@ -147,6 +161,53 @@ impl<const N: usize> PeerRegistry<N> {
                     .all(|earlier| earlier != *id)
             })
             .count()
+    }
+}
+
+/// What the core's #376 delivery hint made of one outbound packet
+/// (`leviculum_nrf::ble::tx_fanout_task`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxFanout {
+    /// No hint — a broadcast (announce, path request, anything the core
+    /// did not address at a named peer). Copied into every live link's
+    /// queue, which is what a Reticulum interface owes a broadcast: one
+    /// `try_send` reaches every peer on the medium, exactly as one LoRa
+    /// transmission reaches every listener.
+    Flood,
+    /// Hinted, and the peer holds a live link: queue on that slot alone.
+    Route(usize),
+    /// Hinted at a peer with NO live link here. The packet is DROPPED,
+    /// not flooded.
+    ///
+    /// The hint exists because the core routed these bytes at that one
+    /// neighbour. The remaining links are not a route to it: flooding
+    /// them spends their airtime on a packet they must forward or drop,
+    /// and a neighbour that forwards it re-creates exactly the relayed
+    /// duplicate the hint removes (the 2026-09-09 desk failure, where a
+    /// telemetry report addressed to the phone reached it twice, once
+    /// through the other board). The peer's disappearance is separately
+    /// reported to the core as a peer loss (Codeberg #365), which culls
+    /// the paths via it, so the next packet for that destination is
+    /// routed afresh — over another interface or after a fresh path
+    /// request — instead of sprayed at links that cannot deliver it.
+    NoLink,
+}
+
+/// Map the core's delivery hint onto this interface's links (see
+/// [`TxFanout`]).
+///
+/// Pure, so the decision is host-tested; the firmware's fan-out task
+/// supplies the registry and executes the answer.
+pub fn plan_fanout<const N: usize>(
+    registry: &PeerRegistry<N>,
+    peer: Option<&[u8; 16]>,
+) -> TxFanout {
+    match peer {
+        None => TxFanout::Flood,
+        Some(peer) => match registry.slot_for(peer) {
+            Some(slot) => TxFanout::Route(slot),
+            None => TxFanout::NoLink,
+        },
     }
 }
 
@@ -359,5 +420,65 @@ mod tests {
         assert_eq!(reg.peer_count(), 2, "A still holds slot 3");
         reg.link_down(3);
         assert_eq!(reg.peer_count(), 1);
+    }
+
+    /// Without a hint the fan-out is a flood, whatever the registry
+    /// holds: a broadcast owes every peer on the medium a copy.
+    #[test]
+    fn a_packet_without_a_hint_floods_every_live_link() {
+        let mut reg = PeerRegistry::<4>::new();
+        assert_eq!(plan_fanout(&reg, None), TxFanout::Flood, "no links");
+        reg.link_up(0, A);
+        reg.link_up(1, B);
+        assert_eq!(plan_fanout(&reg, None), TxFanout::Flood);
+    }
+
+    /// With a hint the packet goes on the hinted peer's link and on no
+    /// other — the whole point of #376 part 2.
+    #[test]
+    fn a_hinted_packet_takes_only_that_peers_link() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, A);
+        reg.link_up(2, B);
+        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(0));
+        assert_eq!(plan_fanout(&reg, Some(&B)), TxFanout::Route(2));
+    }
+
+    /// A peer holding two links (the displacement hand-over window) is
+    /// one peer: either link reaches it, and the decision picks one
+    /// rather than duplicating the packet across both.
+    #[test]
+    fn a_peer_with_two_links_gets_the_packet_once() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(1, A);
+        reg.link_up(3, A);
+        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(1));
+    }
+
+    /// The peer walked out between the core's routing decision and this
+    /// fan-out: DROP, never a fallback flood. See [`TxFanout::NoLink`].
+    #[test]
+    fn a_hint_for_a_peer_with_no_link_drops_instead_of_flooding() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, B);
+        assert_eq!(
+            plan_fanout(&reg, Some(&A)),
+            TxFanout::NoLink,
+            "A is gone; B's link is not a route to A"
+        );
+        // And with nothing live at all it is still a drop, not a flood.
+        reg.link_down(0);
+        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::NoLink);
+    }
+
+    /// The peer's LAST link died: `slot_for` must not keep naming the
+    /// slot the teardown released.
+    #[test]
+    fn slot_for_forgets_a_slot_at_teardown() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(2, A);
+        assert_eq!(reg.slot_for(&A), Some(2));
+        reg.link_down(2);
+        assert_eq!(reg.slot_for(&A), None);
     }
 }

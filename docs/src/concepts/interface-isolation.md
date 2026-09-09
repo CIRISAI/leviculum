@@ -11,9 +11,13 @@ request, a data packet, or a resource chunk. They are all just bytes.
 
 ## What "media-agnostic core" means
 
-`leviculum-core` decides *what* to send and to *which* interface. It
-never decides *when* to put a frame on the wire, never spaces
-transmissions, and never reasons about contention. The core processes
+`leviculum-core` decides *what* to send, to *which* interface, and —
+on an interface that carries several peers — for *which peer* (the
+`peer` hint on `Action::SendPacket`, Codeberg #376: an identity, never
+a link, a handle or an address, so the interface still owns the map
+from peer to link). It never decides *when* to put a frame on the
+wire, never spaces transmissions, and never reasons about
+contention. The core processes
 every packet with zero delay and emits an `Action::SendPacket` or
 `Action::Broadcast` immediately (see [Architecture](../architecture.md)).
 

@@ -334,6 +334,7 @@ impl BleTask {
                         &mut notify_pacer,
                         start,
                         &packet.data,
+                        packet.peer,
                     )
                     .await;
                 }
@@ -762,7 +763,15 @@ impl BleTask {
         }
     }
 
-    /// Fan one Reticulum packet out to every live link.
+    /// Deliver one Reticulum packet: to the peer the core addressed it
+    /// to, or — with no addressee — to every live link.
+    ///
+    /// `peer` is the core's #376 delivery hint, the identity a path entry
+    /// carries as `via_peer`. With it, this interface stops copying a
+    /// routed packet onto links it was never meant for; without it (an
+    /// announce, a path request) the fan-out is unchanged. See
+    /// [`LinkTable::plan_tx_to`] for the mapping and for the
+    /// peer-with-no-live-link decision.
     ///
     /// The notify pipe is paced here (#376): the orchestrator is the
     /// pipe's only writer, so the inter-packet gap is served inline
@@ -771,6 +780,7 @@ impl BleTask {
     /// ceiling, and inbound events queue in their channels meanwhile.
     /// Central links get their packet as one queued unit and pace
     /// themselves in their own task.
+    #[allow(clippy::too_many_arguments)]
     async fn send_packet(
         &self,
         table: &LinkTable,
@@ -779,8 +789,40 @@ impl BleTask {
         notify_pacer: &mut links::LinkPacer,
         start: Instant,
         packet: &[u8],
+        peer: Option<IdentityHash>,
     ) {
-        let plan = table.plan_tx(packet);
+        let plan = table.plan_tx_to(packet, peer.as_ref());
+        match plan.route {
+            // One line per outbound packet, like the sibling
+            // `BLE_TX_GAP`: the bench recipe on #376 reads the routing
+            // decision off the same capture as the pacing.
+            links::TxRoute::Flood => tracing::info!(
+                event = "BLE_TX_FLOOD",
+                iface = %self.name,
+                links = table.live_links(),
+                len = packet.len(),
+            ),
+            links::TxRoute::Routed { peer, role } => tracing::info!(
+                event = "BLE_TX_ROUTE",
+                iface = %self.name,
+                peer = %hex8(&peer),
+                conn = %role.as_str(),
+                len = packet.len(),
+            ),
+            links::TxRoute::NoLink { peer } => {
+                self.counters.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .tx_dropped_bytes
+                    .fetch_add(packet.len() as u64, Ordering::Relaxed);
+                tracing::warn!(
+                    event = "BLE_TX_ROUTE_MISS",
+                    iface = %self.name,
+                    peer = %hex8(&peer),
+                    len = packet.len(),
+                );
+                return;
+            }
+        }
         let mut delivered = false;
         notifiers.retain(|n| !n.is_stopped());
         if !plan.notify_fragments.is_empty() && !notifiers.is_empty() {

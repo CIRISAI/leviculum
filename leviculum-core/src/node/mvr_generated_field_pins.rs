@@ -1046,7 +1046,7 @@ fn own_destination_path_response_is_a_fresh_regeneration() {
         .actions
         .iter()
         .find_map(|a| match a {
-            Action::SendPacket { iface: i, data } if i.0 == iface => Some(data.clone()),
+            Action::SendPacket { iface: i, data, .. } if i.0 == iface => Some(data.clone()),
             _ => None,
         })
         .expect("own-destination path response must target the requesting interface");

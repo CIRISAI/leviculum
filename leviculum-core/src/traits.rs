@@ -293,6 +293,36 @@ pub trait Interface {
         self.try_send(data)
     }
 
+    /// Try to send a packet the core has already addressed to one peer
+    /// behind this interface (Codeberg #376).
+    ///
+    /// `peer` is the 16-byte identity a multi-peer interface reports on
+    /// peer-up/peer-lost — the SAME value it stamps on an inbound packet
+    /// through `Transport::process_incoming_from_peer`, and therefore the
+    /// value a path entry carries as `via_peer`. `None` means the core has
+    /// no addressee for these bytes: an announce, a path request, anything
+    /// broadcast, and every packet whose next hop the core did not learn on
+    /// a named peer link.
+    ///
+    /// The hint is a DELIVERY hint, not a routing decision: it names the
+    /// peer, never a link, a connection handle or an address, so the core
+    /// stays media-agnostic and the interface maps peer to link(s) itself.
+    /// A single-peer interface (TCP, serial, LoRa's shared air) has nothing
+    /// to map, which is why the default implementation drops the hint and
+    /// behaves exactly like [`Self::try_send_prioritized`]. Only the two BLE
+    /// interfaces override it, because only there does one interface hold
+    /// several point-to-point links and a fan-out cost real airtime on the
+    /// links the packet was never meant for.
+    fn try_send_to_peer(
+        &mut self,
+        data: &[u8],
+        peer: Option<&[u8; TRUNCATED_HASHBYTES]>,
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        let _ = peer;
+        self.try_send_prioritized(data, high_priority)
+    }
+
     /// Wall-clock time (ms) at which this interface will next accept a
     /// packet of the given size.
     ///

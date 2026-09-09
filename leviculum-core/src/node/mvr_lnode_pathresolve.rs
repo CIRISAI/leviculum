@@ -161,7 +161,7 @@ fn lora_bound(output: &TickOutput, lora_iface: usize) -> Vec<Vec<u8>> {
         .actions
         .iter()
         .filter_map(|a| match a {
-            Action::SendPacket { iface, data } => (iface.0 == lora_iface).then(|| data.clone()),
+            Action::SendPacket { iface, data, .. } => (iface.0 == lora_iface).then(|| data.clone()),
             Action::Broadcast {
                 data,
                 exclude_iface,

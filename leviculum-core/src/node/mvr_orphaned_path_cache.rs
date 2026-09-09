@@ -156,7 +156,7 @@ fn send_packets(output: &TickOutput) -> Vec<(usize, Vec<u8>)> {
         .actions
         .iter()
         .filter_map(|a| match a {
-            Action::SendPacket { iface, data } => Some((iface.0, data.clone())),
+            Action::SendPacket { iface, data, .. } => Some((iface.0, data.clone())),
             Action::Broadcast { .. } => None,
         })
         .collect()

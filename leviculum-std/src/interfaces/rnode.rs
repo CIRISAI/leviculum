@@ -2700,6 +2700,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: b"outbound-over-channel".to_vec(),
                 high_priority: false,
             })
@@ -3095,6 +3096,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                peer: None,
                 data: test_data.to_vec(),
                 high_priority: false,
             })
@@ -3168,6 +3170,7 @@ mod tests {
         let payload = b"hello";
         outgoing_tx
             .send(OutgoingPacket {
+                peer: None,
                 data: payload.to_vec(),
                 high_priority: false,
             })
@@ -3480,6 +3483,7 @@ mod tests {
         for p in payloads.iter() {
             outgoing_tx
                 .send(OutgoingPacket {
+                    peer: None,
                     data: p.to_vec(),
                     high_priority: false,
                 })
@@ -3714,6 +3718,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    peer: None,
                     data: b"ping0".to_vec(),
                     high_priority: false,
                 },
@@ -3745,6 +3750,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 1,
                 packet: OutgoingPacket {
+                    peer: None,
                     data: b"ping1".to_vec(),
                     high_priority: false,
                 },
@@ -3835,6 +3841,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    peer: None,
                     data: b"nope".to_vec(),
                     high_priority: false,
                 },
@@ -3950,6 +3957,7 @@ mod tests {
                     .send(TaggedOutgoing {
                         subint,
                         packet: OutgoingPacket {
+                            peer: None,
                             data: data.to_vec(),
                             high_priority: false,
                         },
@@ -4114,6 +4122,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    peer: None,
                     data: b"bootstrap".to_vec(),
                     high_priority: false,
                 },
@@ -4135,6 +4144,7 @@ mod tests {
                 .send(TaggedOutgoing {
                     subint: 1,
                     packet: OutgoingPacket {
+                        peer: None,
                         data: format!("v1-{i:03}").into_bytes(),
                         high_priority: false,
                     },
@@ -4147,6 +4157,7 @@ mod tests {
                 .send(TaggedOutgoing {
                     subint: 0,
                     packet: OutgoingPacket {
+                        peer: None,
                         data: format!("v0-{i:03}").into_bytes(),
                         high_priority: false,
                     },
@@ -4230,6 +4241,7 @@ mod tests {
         for p in payloads.iter() {
             outgoing_tx
                 .send(OutgoingPacket {
+                    peer: None,
                     data: p.to_vec(),
                     high_priority: false,
                 })
@@ -4471,6 +4483,7 @@ mod tests {
         async fn push(&self, payload: &[u8]) {
             self.outgoing_tx
                 .send(OutgoingPacket {
+                    peer: None,
                     data: payload.to_vec(),
                     high_priority: false,
                 })

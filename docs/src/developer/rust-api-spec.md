@@ -209,7 +209,7 @@ loses outbound packets and events.
 
 | Variant | Fields | Source |
 |---------|--------|--------|
-| `SendPacket` | `iface: InterfaceId, data: Vec<u8>` | `transport.rs:115` |
+| `SendPacket` | `iface: InterfaceId, data: Vec<u8>, peer: Option<[u8; 16]>` | `transport.rs:115` |
 | `Broadcast` | `data: Vec<u8>, exclude_iface: Option<InterfaceId>` | `transport.rs:122` |
 
 The helper `dispatch_actions(interfaces: &mut [&mut dyn Interface], actions:
@@ -262,7 +262,7 @@ The three abstractions you implement to run the core on a platform. Defined in
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
 | `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:97` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:753`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:783`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`, `heapless`-backed

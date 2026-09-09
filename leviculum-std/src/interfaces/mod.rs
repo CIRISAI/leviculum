@@ -503,12 +503,21 @@ pub(crate) const fn hw_mtu_for_bitrate(bitrate: i64) -> Option<u32> {
 }
 
 /// Packet to send out through an interface
+#[derive(Default)]
 pub(crate) struct OutgoingPacket {
     pub data: Vec<u8>,
     /// High-priority packets (link requests, proofs, channel data) are sent
     /// before normal-priority packets (announce rebroadcasts) on constrained
     /// interfaces like LoRa. Read by RNode send queue (behind `serial` feature).
     pub high_priority: bool,
+    /// The peer behind this interface the core addressed these bytes to
+    /// (Codeberg #376), or `None` for a broadcast and for every interface
+    /// that carries exactly one peer. Only the BLE interface reads it: it
+    /// holds several point-to-point links at once, and delivering a routed
+    /// packet on all of them costs airtime on links the packet was never
+    /// meant for — and, in the field, a second copy relayed back to the
+    /// addressee by the neighbour that received the stray one.
+    pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
 }
 
 /// Metadata describing a registered interface
@@ -613,6 +622,14 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         data: &[u8],
         high_priority: bool,
     ) -> Result<(), InterfaceError> {
+        self.try_send_to_peer(data, None, high_priority)
+    }
+    fn try_send_to_peer(
+        &mut self,
+        data: &[u8],
+        peer: Option<&[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
         // Airtime-credit check for constrained interfaces. LoRa-Serial
         // populates `credit`; TCP/UDP/Local leave it `None` and skip the
         // charge entirely. See `airtime.rs` for the bucket semantics.
@@ -625,6 +642,7 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         match self.outgoing.try_send(OutgoingPacket {
             data: data.to_vec(),
             high_priority,
+            peer: peer.copied(),
         }) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(InterfaceError::BufferFull),

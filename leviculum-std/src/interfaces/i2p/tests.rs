@@ -105,6 +105,7 @@ async fn start_mock_sam() -> SocketAddr {
 
 fn out(data: &[u8]) -> OutgoingPacket {
     OutgoingPacket {
+        peer: None,
         data: data.to_vec(),
         high_priority: false,
     }

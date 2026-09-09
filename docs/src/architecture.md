@@ -50,8 +50,10 @@ injected `Clock`/`Storage`/`Interface` traits that make this portable.
   next_deadline() ──►│  Returns: Option<u64>           │
                      └─────────────────────────────────┘
 
-  Action::SendPacket { iface, data }     — send to one interface
-  Action::Broadcast { data, exclude }    — send to all interfaces (except one)
+  Action::SendPacket { iface, data, peer }  — send to one interface,
+                                             optionally naming the peer
+                                             behind it the bytes are for
+  Action::Broadcast { data, exclude }       — send to all interfaces (except one)
 ```
 
 ## Driver Event Loop

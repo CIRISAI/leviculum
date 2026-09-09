@@ -375,6 +375,25 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_TX_FANOUT_DROP",
         required_keys: &["iface", "peer", "len", "depth"],
     },
+    // What the core's #376 delivery hint made of one outbound packet.
+    // BLE_TX_ROUTE names the one peer the packet was addressed to and
+    // the role of the link it went on; BLE_TX_FLOOD is the broadcast
+    // case with the number of live links it reached; BLE_TX_ROUTE_MISS
+    // is a routed packet dropped because the addressed peer holds no
+    // live link here. Exactly one of the three per outbound packet, so
+    // a capture accounts for every packet the interface was handed.
+    EventSchema {
+        name: "BLE_TX_ROUTE",
+        required_keys: &["iface", "peer", "conn", "len"],
+    },
+    EventSchema {
+        name: "BLE_TX_FLOOD",
+        required_keys: &["iface", "links", "len"],
+    },
+    EventSchema {
+        name: "BLE_TX_ROUTE_MISS",
+        required_keys: &["iface", "peer", "len"],
+    },
     // A link's reassembly was discarded before completion (#373): a
     // torn or interleaved fragment stream from the peer cost `lost`
     // whole Reticulum packets, `total` is the link's running count.

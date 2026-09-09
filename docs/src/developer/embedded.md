@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:263`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:278`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -122,7 +122,7 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:411`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:430`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -214,10 +214,19 @@ impl Interface for MyRadio {
 ```
 
 A constrained medium (LoRa) overrides `next_slot_ms`
-(`leviculum-core/src/traits.rs:305`) to report the next airtime-fit time, so the
+(`leviculum-core/src/traits.rs:335`) to report the next airtime-fit time, so the
 core schedules retries against capacity without knowing any radio physics — the
 [interface-isolation rule](choosing-a-layer.md). For a fast link the default
 ("always ready") is correct.
+
+An interface that carries several point-to-point links behind one
+`InterfaceId` (BLE) overrides `try_send_to_peer`
+(`leviculum-core/src/traits.rs:316`): the core passes the 16-byte
+identity of the peer it addressed the packet at — the same value the
+interface reports on peer-up/peer-lost — or `None` for a broadcast.
+The interface maps that identity to its own link(s); the core never
+sees a link. The default implementation drops the hint, which is why
+a single-peer interface implements nothing.
 
 ### `Storage`
 
@@ -225,7 +234,7 @@ Key-value persistence for the path table, link table, announce caches,
 identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:196`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:753`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:783`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

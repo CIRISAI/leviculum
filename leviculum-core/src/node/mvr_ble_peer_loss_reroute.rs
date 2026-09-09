@@ -135,7 +135,7 @@ fn data_sends_to(out: &TickOutput, dest: &[u8; TRUNCATED_HASHBYTES]) -> Vec<Opti
         .iter()
         .filter_map(|action| {
             let (data, target) = match action {
-                Action::SendPacket { iface, data } => (data, Some(*iface)),
+                Action::SendPacket { iface, data, .. } => (data, Some(*iface)),
                 Action::Broadcast { data, .. } => (data, None),
             };
             Packet::unpack(data)

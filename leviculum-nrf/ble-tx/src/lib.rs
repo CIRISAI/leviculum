@@ -53,7 +53,7 @@ pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,
 };
-pub use registry::{LinkUp, PeerRegistry};
+pub use registry::{plan_fanout, LinkUp, PeerRegistry, TxFanout};
 pub use window::{
     CandidateTable, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
