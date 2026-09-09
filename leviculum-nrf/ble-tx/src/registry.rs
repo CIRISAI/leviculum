@@ -22,9 +22,22 @@
 /// the same index that selects its outbound queue, so the drain table,
 /// the fan-out and this registry can never disagree about which links
 /// exist.
+///
+/// Two facts per slot, learned at different moments: the CONNECTION
+/// address ([`conn_up`](Self::conn_up)), known the instant the link
+/// exists in either role, and the peer IDENTITY
+/// ([`link_up`](Self::link_up)), known only after the handshake or the
+/// characteristic read. The address side exists for the scanner
+/// (#375 §0): Core Spec Vol 6 Part B §4.5 permits only one connection
+/// between two device addresses — an initiator "shall not send a
+/// connection request to an advertiser it is already connected to",
+/// and an advertiser "shall ignore" one from a device it is connected
+/// to — so a dial to a live link's address can never succeed and must
+/// be excluded BEFORE it spends five seconds timing out on the air.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRegistry<const N: usize> {
     slots: [Option<[u8; 16]>; N],
+    addrs: [Option<u64>; N],
 }
 
 impl<const N: usize> Default for PeerRegistry<N> {
@@ -36,7 +49,42 @@ impl<const N: usize> Default for PeerRegistry<N> {
 impl<const N: usize> PeerRegistry<N> {
     /// No links.
     pub const fn new() -> Self {
-        Self { slots: [None; N] }
+        Self {
+            slots: [None; N],
+            addrs: [None; N],
+        }
+    }
+
+    /// Register a slot's connection address — at the connection event,
+    /// in either role, before any identity is known.
+    pub fn conn_up(&mut self, slot: usize, addr_value: u64) {
+        self.addrs[slot] = Some(addr_value);
+    }
+
+    /// Clear a slot's connection address at teardown (the counterpart
+    /// of [`conn_up`](Self::conn_up); identity clearing is
+    /// [`link_down`](Self::link_down)'s job).
+    pub fn conn_down(&mut self, slot: usize) {
+        self.addrs[slot] = None;
+    }
+
+    /// Whether a live connection was made on this address — the
+    /// scanner's pre-dial exclusion (see the struct docs). Addresses
+    /// rotate, so a linked PEER can still reappear under a fresh
+    /// address this check cannot know; that residual dial is refused
+    /// post-connect by the identity duplicate check, exactly as
+    /// before.
+    pub fn addr_linked(&self, addr_value: u64) -> bool {
+        self.addrs.iter().flatten().any(|a| *a == addr_value)
+    }
+
+    /// Whether ANY connection is live in either role — the #375 quiet
+    /// fallback's gate: only a board with no connection at all may
+    /// dial against the sort. Connection-keyed, not identity-keyed,
+    /// because the rig showed the fallback firing in the gap between a
+    /// connection and its identity handshake.
+    pub fn any_conn(&self) -> bool {
+        self.addrs.iter().any(Option::is_some)
     }
 
     /// Register a slot's peer. `true` iff this is the identity's FIRST
@@ -187,6 +235,46 @@ mod tests {
             assert!(reg.is_linked(&id), "the others are untouched");
         }
         assert!(!reg.is_linked(&B));
+    }
+
+    /// The #375 §0 exclusion input: a connection's address is known —
+    /// and the quiet-fallback gate closed — from the connection event,
+    /// before any identity arrives, and both clear at teardown.
+    #[test]
+    fn conn_addresses_are_tracked_from_connect_to_teardown() {
+        let mut reg = PeerRegistry::<4>::new();
+        assert!(!reg.any_conn());
+        assert!(!reg.addr_linked(0xC0DE));
+
+        // The rig's exact gap: connected, identity not yet presented.
+        reg.conn_up(1, 0xC0DE);
+        assert!(reg.any_conn(), "the quiet gate closes at the connection");
+        assert!(reg.addr_linked(0xC0DE), "excluded before any dial");
+        assert!(!reg.addr_linked(0xBEEF));
+
+        // Identity arrives; the address side is unaffected.
+        assert!(reg.link_up(1, A));
+        assert!(reg.addr_linked(0xC0DE));
+
+        // Teardown clears both facts independently.
+        assert_eq!(reg.link_down(1), Some(A));
+        assert!(reg.any_conn(), "identity gone, connection fact still set");
+        reg.conn_down(1);
+        assert!(!reg.any_conn());
+        assert!(!reg.addr_linked(0xC0DE));
+    }
+
+    /// Two live connections on different slots: clearing one leaves the
+    /// other's address linked and the gate closed.
+    #[test]
+    fn one_teardown_leaves_the_other_connection_linked() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.conn_up(0, 0x1111);
+        reg.conn_up(2, 0x2222);
+        reg.conn_down(0);
+        assert!(!reg.addr_linked(0x1111));
+        assert!(reg.addr_linked(0x2222));
+        assert!(reg.any_conn());
     }
 
     /// The mirrored peer count is DISTINCT identities: a displaced

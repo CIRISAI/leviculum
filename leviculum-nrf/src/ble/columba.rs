@@ -30,7 +30,7 @@ use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
     PeerRegistry, ScanMode, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_LEN,
+    MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -410,6 +410,11 @@ async fn gatt_events(
         );
         return;
     };
+    // The connection event, before any identity: the peer's address
+    // enters the registry (pre-dial exclusion) and the fallback clock
+    // restarts (#375 §0 — resetting only at identity left a 3 s gap
+    // the rig's fallback fired straight into).
+    conn_link_up(slot_index, addr_value(&conn.peer_address().bytes()));
 
     // Per-connection state. `Cell` lets the closure inside
     // `gatt_server::run` mutate handshake_done while the outbound branch
@@ -529,6 +534,7 @@ async fn gatt_events(
     // the identity still reads linked would refuse a legitimate
     // reconnect in the central task's duplicate check.
     peer_link_down(slot_index);
+    conn_link_down(slot_index);
     HVN_DRAIN.release(conn_handle);
 }
 
@@ -585,6 +591,40 @@ fn peer_already_linked(peer_id: &[u8; 16]) -> bool {
     LIVE_PEERS.lock(|peers| peers.borrow().is_linked(peer_id))
 }
 
+/// Register a connection's address at the connection event, in either
+/// role — before any identity is known — and restart the strict phase:
+/// the rig showed the fallback firing in the 3 s gap between `BLE:
+/// connected` and the identity handshake (#375 §0), because the clock
+/// used to reset only at identity.
+fn conn_link_up(slot_index: usize, addr_value: u64) {
+    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_up(slot_index, addr_value));
+    note_strict_reset();
+}
+
+/// Clear a connection's address at teardown. The strict phase restarts
+/// here too: a board that just lost a link gets the full strict bound
+/// before it may dial against the sort.
+fn conn_link_down(slot_index: usize) {
+    LIVE_PEERS.lock(|peers| peers.borrow_mut().conn_down(slot_index));
+    note_strict_reset();
+}
+
+/// Whether a live connection was made on this address. Core Spec Vol 6
+/// Part B §4.5 permits one connection per address pair — the initiator
+/// shall not dial an advertiser it is connected to, and the advertiser
+/// shall ignore such a CONNECT_IND — so a dial here can only time out
+/// (5 s on the air, the rig's `BLE_CENTRAL_FAIL … err=Timeout` loop)
+/// and the scanner excludes the address before dialling.
+fn addr_already_linked(addr_value: u64) -> bool {
+    LIVE_PEERS.lock(|peers| peers.borrow().addr_linked(addr_value))
+}
+
+/// Whether any connection is live in either role — the quiet-fallback
+/// gate ([`scan_mode_now`]).
+fn any_conn_live() -> bool {
+    LIVE_PEERS.lock(|peers| peers.borrow().any_conn())
+}
+
 /// The number of distinct live peer identities on the BLE interface
 /// (Codeberg #365) — what the main loop mirrors into the core as the
 /// interface's peer count, next to the `is_online` mirror. Counted from
@@ -630,35 +670,23 @@ const CONNECT_TIMEOUT_10MS: u16 = 500;
 /// scan pass. Keeps a refusing/vanishing peer from being hammered.
 const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 
-/// How long the central task searches under the strict rule before the
-/// scanner switches to [`ScanMode::Fallback`] (Codeberg #375): after
-/// this much scanning without a single `initiate` verdict — and without
-/// a link coming up in either role — any advertising Reticulum peer
-/// becomes a target.
-///
-/// 30 s, sized between the cadences on either side of it. Below: one
-/// failed strict attempt costs up to [`CONNECT_TIMEOUT_10MS`] (5 s)
-/// plus [`CENTRAL_RETRY_BACKOFF_MS`] (5 s), and the 30 %-duty passive
-/// scan ([`SCAN_INTERVAL_625US`]/[`SCAN_WINDOW_625US`]) hears a waiting
-/// peer — which advertises several times a second — within seconds; 30 s
-/// therefore spans several complete search-connect-backoff cycles, so a
-/// permitted peer that exists gets found and even a couple of racing
-/// boot-order failures resolve under the strict rule rather than
-/// tripping a premature fallback (whose wrong dial is refused as a
-/// duplicate and then blocks that address for [`DUPLICATE_ADDR_TTL`],
-/// 120 s — four times this bound). Above: this is the whole BLE-less
-/// window of a stranded board — one that outranks every visible
-/// neighbour, Codeberg #375's disconnected-graph case — so tens of
-/// seconds is the ceiling the issue allows; half a minute keeps the
-/// stranding shorter than one duplicate-table TTL.
-const SCAN_FALLBACK_AFTER_MS: u64 = 30_000;
+// The fallback bound itself, `SCAN_FALLBACK_AFTER_MS` (30 s), lives in
+// `leviculum_ble_tx::window` since #375 part 2 — lnsd runs the same
+// clock, and a shared constant cannot drift. The firmware-side
+// arithmetic behind it still holds: one failed strict attempt costs up
+// to [`CONNECT_TIMEOUT_10MS`] (5 s) plus [`CENTRAL_RETRY_BACKOFF_MS`]
+// (5 s), so 30 s spans several complete search-connect-backoff cycles
+// at the 30 %-duty passive scan cadence
+// ([`SCAN_INTERVAL_625US`]/[`SCAN_WINDOW_625US`]).
 
 /// The strict-phase clock behind [`SCAN_FALLBACK_AFTER_MS`]: when the
 /// current strict phase began (in `embassy_time` ticks) and whether the
 /// switch to fallback was already logged for this phase. Reset by
-/// [`note_strict_reset`] — a link up in either role, or the strict rule
-/// producing a target — which is what makes the fallback a last resort
-/// rather than a periodic mode.
+/// [`note_strict_reset`] — a connection event in either role, a
+/// teardown, or the strict rule producing a target — and held at zero
+/// by [`scan_mode_now`] for as long as any connection is live (the
+/// quiet spec, #375 part 2), which is what makes the fallback a last
+/// resort of a fully linkless board rather than a periodic mode.
 ///
 /// A blocking mutex over a `Cell`, like [`LIVE_PEERS`]: written from
 /// the peripheral tasks (via [`peer_link_up`]) and read from the
@@ -684,6 +712,18 @@ fn note_strict_reset() {
 /// timing stays an input to [`should_initiate`]; the rule itself never
 /// measures it.
 fn scan_mode_now() -> ScanMode {
+    // The quiet spec (#375 part 2, item 1): while ANY connection is
+    // live in either role the clock is held at zero — only a fully
+    // linkless board may dial against the sort. Measured cost in
+    // ble-tx/tests/graph_formation.rs: 28 and 78 all-linked splits per
+    // 1000 orders at 10 and 20 boards against the eager spec's zero,
+    // and never a linkless board; what it buys is the end of the rig's
+    // doomed 20 s dial cycle at an already-linked peer (§0 of the
+    // 2026-09-09 batch).
+    if any_conn_live() {
+        note_strict_reset();
+        return ScanMode::Strict;
+    }
     // One lock for the read-check-mark sequence: a reset racing in
     // between two separate locks would be overwritten with the stale
     // phase. The log line itself stays outside the critical section.
@@ -714,23 +754,35 @@ fn scan_mode_now() -> ScanMode {
     }
 }
 
-/// How long an address that turned out to carry an already-linked
-/// identity is skipped. Sized to the RPA rotation timescale (minutes):
-/// the address dies on its own at the peer's next rotation, this just
-/// stops us re-connecting to it every scan pass until then.
-const DUPLICATE_ADDR_TTL: Duration = Duration::from_secs(120);
+/// How long a dead-end address is skipped: one that carried an
+/// already-linked (or our own) identity, or that a fallback dial could
+/// not connect to. Sized to the RPA rotation timescale (minutes): the
+/// address dies on its own at the peer's next rotation, this just
+/// stops us re-dialling it every scan pass until then — the rig's
+/// pre-#375-part-2 capture shows the alternative, a 5 s timeout dial
+/// at the same address every ~20 s, forever.
+const DEAD_END_TTL: Duration = Duration::from_secs(120);
 
-/// The addresses [`DUPLICATE_ADDR_TTL`] talks about. Small and flat:
-/// at most [`MAX_LINKS`] peers are linked, so duplicates are rare; the
-/// table only has to bridge one rotation interval.
-struct RecentDuplicates {
-    entries: [Option<(u64, Instant)>; MAX_LINKS],
+/// Room for the addresses [`DEAD_END_TTL`] talks about: up to
+/// [`MAX_LINKS`] revealed duplicates plus a run of failed fallback
+/// targets (at most one failure per ~13 s dial cycle, so eight slots
+/// bridge more than one TTL of them). Overflow reuses the oldest
+/// entry — an early re-dial, not a loss.
+const DEAD_END_SLOTS: usize = 2 * MAX_LINKS;
+
+/// The addresses the scanner must not dial for a while, and when each
+/// was condemned: duplicates/self revealed post-connect, and failed
+/// fallback dials (#375 §0 — a fallback target that does not answer a
+/// CONNECT_IND within 5 s is gone or unreachable by rule, and without
+/// this entry the 5 s backoff re-dialled it forever).
+struct RecentDeadEnds {
+    entries: [Option<(u64, Instant)>; DEAD_END_SLOTS],
 }
 
-impl RecentDuplicates {
+impl RecentDeadEnds {
     const fn new() -> Self {
         Self {
-            entries: [None; MAX_LINKS],
+            entries: [None; DEAD_END_SLOTS],
         }
     }
 
@@ -740,7 +792,7 @@ impl RecentDuplicates {
         let slot = self
             .entries
             .iter()
-            .position(|e| e.is_none_or(|(_, at)| now - at >= DUPLICATE_ADDR_TTL))
+            .position(|e| e.is_none_or(|(_, at)| now - at >= DEAD_END_TTL))
             .unwrap_or_else(|| {
                 self.entries
                     .iter()
@@ -756,7 +808,7 @@ impl RecentDuplicates {
         self.entries
             .iter()
             .flatten()
-            .any(|&(a, at)| a == addr && now - at < DUPLICATE_ADDR_TTL)
+            .any(|&(a, at)| a == addr && now - at < DEAD_END_TTL)
     }
 }
 
@@ -773,7 +825,7 @@ impl RecentDuplicates {
 async fn find_peer_to_initiate(
     sd: &'static Softdevice,
     own_addr_value: u64,
-    skip: &RecentDuplicates,
+    skip: &RecentDeadEnds,
 ) -> Result<(Address, ConnectDecision), central::ScanError> {
     let config = central::ScanConfig {
         active: false,
@@ -825,7 +877,10 @@ async fn find_peer_to_initiate(
                 ),
             );
         }
-        if !decision.initiate() || skip.contains(peer_value) {
+        // The third filter is the §4.5 exclusion: a dial to an address
+        // we already hold a connection with can only time out (see
+        // [`addr_already_linked`]), so it never leaves the scanner.
+        if !decision.initiate() || skip.contains(peer_value) || addr_already_linked(peer_value) {
             return None;
         }
         Some((peer, decision))
@@ -834,12 +889,19 @@ async fn find_peer_to_initiate(
 }
 
 /// One central link, connect to teardown. Returns after logging why it
-/// ended; the caller paces the next attempt.
+/// ended; the caller paces the next attempt. `decision` is the verdict
+/// that permitted the dial: a FALLBACK target that does not even
+/// connect goes into the dead-end table (#375 §0 — before that entry
+/// existed, the 5 s retry backoff re-dialled the same dead address
+/// every ~20 s forever), while a failed strict dial keeps only the
+/// short backoff, because the sort will keep electing that peer and a
+/// two-minute hole toward it would cost real links.
 async fn central_link(
     sd: &'static Softdevice,
     own_identity: &[u8; 16],
     peer: Address,
-    duplicates: &mut RecentDuplicates,
+    decision: ConnectDecision,
+    dead_ends: &mut RecentDeadEnds,
 ) {
     let peer_value = addr_value(&peer.bytes());
     let whitelist = [&peer];
@@ -862,6 +924,16 @@ async fn central_link(
                 "[BLE ] ",
                 format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=connect err={err:?}"),
             );
+            if decision == ConnectDecision::InitiateFallback {
+                dead_ends.note(peer_value);
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!(
+                        "BLE_DIAL_DEAD_END addr={peer_value:012x} reason=fallback_connect ttl_s={}",
+                        DEAD_END_TTL.as_secs()
+                    ),
+                );
+            }
             return;
         }
     };
@@ -900,7 +972,7 @@ async fn central_link(
             "[BLE ] ",
             format_args!("BLE_LINK_SELF addr={peer_value:012x} action=disconnect"),
         );
-        duplicates.note(peer_value);
+        dead_ends.note(peer_value);
         let _ = conn.disconnect();
         return;
     }
@@ -914,7 +986,7 @@ async fn central_link(
                 peer_id[0], peer_id[1], peer_id[2], peer_id[3], peer_value
             ),
         );
-        duplicates.note(peer_value);
+        dead_ends.note(peer_value);
         let _ = conn.disconnect();
         return;
     }
@@ -941,6 +1013,7 @@ async fn central_link(
         let _ = conn.disconnect();
         return;
     };
+    conn_link_up(slot_index, peer_value);
     peer_link_up(slot_index, peer_id);
 
     run_central_session(
@@ -961,6 +1034,7 @@ async fn central_link(
         ),
     );
     peer_link_down(slot_index);
+    conn_link_down(slot_index);
     HVN_DRAIN.release(conn_handle);
 }
 
@@ -1185,7 +1259,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
         format_args!("BLE_CENTRAL_ADDR addr={own_addr_value:012x} caps={LOCAL_CAPS:#04x}"),
     );
 
-    let mut duplicates = RecentDuplicates::new();
+    let mut dead_ends = RecentDeadEnds::new();
     loop {
         // The runtime carrier gate, as at the top of the peripheral
         // loop: `ble=off` holds the task here, so a switched-off
@@ -1203,7 +1277,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
             );
         }
         match select(
-            find_peer_to_initiate(sd, own_addr_value, &duplicates),
+            find_peer_to_initiate(sd, own_addr_value, &dead_ends),
             super::carrier_off(CarrierWaiter::Central),
         )
         .await
@@ -1225,7 +1299,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                         addr_value(&peer.bytes())
                     ),
                 );
-                central_link(sd, &identity_hash, peer, &mut duplicates).await;
+                central_link(sd, &identity_hash, peer, decision, &mut dead_ends).await;
             }
             Either::First(Err(err)) => {
                 crate::warn!("BLE: scan pass failed err={:?}", err);

@@ -59,7 +59,7 @@ const LINK_QUEUE_DEPTH: usize = 32;
 const SESSION_BACKOFF_MS: u64 = 5_000;
 
 /// How long an address that presented a duplicate or our own identity is
-/// not redialled, the firmware's `DUPLICATE_ADDR_TTL`.
+/// not redialled, the firmware's `DEAD_END_TTL`.
 const DUPLICATE_ADDR_TTL_MS: u64 = 120_000;
 
 /// Delay before retrying BlueZ session/adapter setup after a failure.
