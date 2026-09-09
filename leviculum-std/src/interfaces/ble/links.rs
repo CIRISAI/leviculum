@@ -239,14 +239,14 @@ impl LinkTable {
         self.links.iter().any(|l| &l.addr == addr) || self.pending.iter().any(|p| &p.addr == addr)
     }
 
-    /// Whether any BLE connection is live — a handshaked link in either
-    /// role or a pending peripheral-side handshake. The quiet-fallback
-    /// gate's input (#375 part 2): connection-keyed, not identity-keyed,
-    /// exactly like the firmware registry's `any_conn`, so the clock is
-    /// already suspended in the gap between a connection and its
-    /// handshake.
-    pub(crate) fn has_connections(&self) -> bool {
-        !self.links.is_empty() || !self.pending.is_empty()
+    /// Whether any peripheral-side handshake is pending — the table's
+    /// half of the fallback clock's busy input (#375 part 3, the eager
+    /// spec): a connection that has not identified yet holds the clock,
+    /// a handshaked link does not. A linked peer's address is kept out
+    /// of the window by [`Self::knows_addr`] instead, so the clock may
+    /// run — and the fallback fire — while links are live.
+    pub(crate) fn has_pending_handshakes(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Whether `identity` still owns a live link (Codeberg #365).
@@ -597,10 +597,11 @@ pub(crate) fn decide_from_scan(
 /// Same policy, same shared pieces as the boards: the clock switches
 /// [`decide_from_scan`] to [`ScanMode::Fallback`] after
 /// [`SCAN_FALLBACK_AFTER_MS`] without a dial or a connection — held at
-/// zero while the interface is busy (the quiet spec: only a fully
-/// linkless scanner may dial against the sort) — and eligible sightings
-/// collect for [`SCAN_WINDOW_COLLECT_MS`] into the firmware's own
-/// [`CandidateTable`], so which peer gets dialled is decided by the
+/// zero only while a dial of ours is in flight or a handshake is
+/// pending (the eager spec, #375 part 3: live links no longer suspend
+/// it, their addresses are simply never dialled) — and eligible
+/// sightings collect for [`SCAN_WINDOW_COLLECT_MS`] into the firmware's
+/// own [`CandidateTable`], so which peer gets dialled is decided by the
 /// identical code on both stacks.
 pub(crate) struct ScanScheduler {
     /// When the current strict phase began.
@@ -621,12 +622,13 @@ impl ScanScheduler {
         }
     }
 
-    /// The [`ScanMode`] for a sighting at `now_ms`. `busy` means the
-    /// interface holds any connection (either role, handshaked or
-    /// pending) or has a dial in flight: while true the clock is held
-    /// at zero, so the fallback can never fire — the quiet spec. The
-    /// second value is the elapsed time to log as `BLE_SCAN_FALLBACK`,
-    /// returned exactly once per strict phase that reaches the bound.
+    /// The [`ScanMode`] for a sighting at `now_ms`. `busy` means a dial
+    /// of ours is in flight or a handshake is pending (either role) —
+    /// NOT "any link" (#375 part 3): while true the clock is held at
+    /// zero, because the in-flight attempt's outcome is about to reset
+    /// it anyway. The second value is the elapsed time to log as
+    /// `BLE_SCAN_FALLBACK`, returned exactly once per strict phase that
+    /// reaches the bound.
     pub(crate) fn mode(&mut self, busy: bool, now_ms: u64) -> (ScanMode, Option<u64>) {
         if busy {
             self.note_reset(now_ms);
@@ -895,9 +897,9 @@ mod tests {
     }
 
     /// The #375 fallback clock, lnsd edition: strict until the bound,
-    /// one announce per phase, and the quiet spec — any busy sighting
-    /// (live or pending connection, dial in flight) holds the clock at
-    /// zero.
+    /// one announce per phase, and a busy sighting (a dial of ours in
+    /// flight or a handshake pending — the eager spec's whole busy set)
+    /// holds the clock at zero.
     #[test]
     fn the_fallback_clock_switches_once_per_phase_and_busy_suspends_it() {
         let mut s = ScanScheduler::new(0);
@@ -917,7 +919,8 @@ mod tests {
             "one announce per phase"
         );
 
-        // A busy sighting restarts the phase — the quiet spec.
+        // A busy sighting (dial in flight / handshake pending)
+        // restarts the phase.
         assert_eq!(
             s.mode(true, SCAN_FALLBACK_AFTER_MS + 6_000),
             (ScanMode::Strict, None)
@@ -1274,25 +1277,29 @@ mod tests {
         assert_eq!(t.link_count(), 0);
     }
 
-    /// The quiet-fallback gate's input: pending handshakes count as
-    /// connections exactly like handshaked links — the firmware
-    /// registry's `any_conn` reading, where the clock is suspended
-    /// from the connection event, not from the handshake.
+    /// The fallback clock's table-side busy input (#375 part 3): a
+    /// pending handshake holds the clock — the attempt's outcome is
+    /// about to reset it anyway — but a handshaked link does NOT. The
+    /// eager spec: a linked board's clock runs, and only `knows_addr`
+    /// keeps the linked address itself out of the window.
     #[test]
-    fn has_connections_counts_links_and_pending_handshakes() {
+    fn pending_handshakes_are_busy_handshaked_links_are_not() {
         let mut t = table();
-        assert!(!t.has_connections());
-        // An unidentified central: pending, no link — still a connection.
+        assert!(!t.has_pending_handshakes());
+        // An unidentified central: pending, no link — busy.
         t.peripheral_frame(ADDR_1, 185, &[0xFF; 20], 0);
         assert_eq!(t.link_count(), 0);
-        assert!(t.has_connections(), "pending handshake closes the gate");
+        assert!(t.has_pending_handshakes(), "a pending handshake is busy");
         let _ = t.expire(HANDSHAKE_TIMEOUT_MS);
-        assert!(!t.has_connections());
+        assert!(!t.has_pending_handshakes());
 
+        // A handshaked link leaves the clock running.
         t.admit(ID_A, ADDR_2, Role::Central, 185, HANDSHAKE_TIMEOUT_MS);
-        assert!(t.has_connections());
-        t.remove_by_addr(&ADDR_2);
-        assert!(!t.has_connections());
+        assert_eq!(t.link_count(), 1);
+        assert!(
+            !t.has_pending_handshakes(),
+            "a live link must not suspend the clock"
+        );
     }
 
     #[test]

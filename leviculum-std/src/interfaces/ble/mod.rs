@@ -441,10 +441,14 @@ impl BleTask {
                 // A sighting with no RSSI is a BlueZ cache entry, not a
                 // device on the air right now.
                 let Some(rssi) = rssi else { return };
-                // The quiet spec's busy input (#375 part 2): any
-                // connection in either role — handshaked or pending —
-                // or a dial in flight holds the fallback clock at zero.
-                let busy = table.has_connections() || !dialling.is_empty();
+                // The fallback clock's busy input (#375 part 3, the
+                // eager spec): only a dial of ours in flight or a
+                // handshake still pending holds the clock at zero. A
+                // handshaked link does not — its address is kept out
+                // of the window by knows_addr below, and the clock
+                // must keep running so a linked-but-losing-the-sort
+                // board can still fallback-dial a third party.
+                let busy = table.has_pending_handshakes() || !dialling.is_empty();
                 let (mode, announce) = scheduler.mode(busy, now);
                 if let Some(after_ms) = announce {
                     tracing::info!(
@@ -506,6 +510,13 @@ impl BleTask {
                 match admission {
                     Admission::Accept => {
                         scheduler.note_reset(now);
+                        // The dial landed: from here it is a table link,
+                        // not a dial in flight, so it leaves the busy
+                        // set (the eager spec's clock keeps running
+                        // while links are live). CentralGone still
+                        // fires at the session's end; its remove is
+                        // then a no-op.
+                        dialling.remove(&addr.0);
                         let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
