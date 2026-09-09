@@ -237,6 +237,31 @@ interesting states are queue-full-then-drains, queue-full-then-times-out and
 hard-error-mid-packet, and none of them are reachable on demand with a real
 phone in the loop.
 
+### Pacing on a link
+
+Two packets whose fragments leave back to back on one connection can
+cost the receiver the first packet: the 2026-09-09 desk measurement
+(#376) showed a Columba phone one hop from two boards losing exactly
+the first of two fragmented packets arriving back to back, on both
+boards' links, reproducibly — and receiving both once the sender left
+100 ms between the packets.
+
+Every pump therefore serves a per-link **inter-packet gap**, measured
+from the last fragment of one packet to the first fragment of the next
+on the same connection: the compiled default is 100 ms
+(`leviculum-ble-tx`'s `DEFAULT_TX_GAP_MS`). The number is the measured
+value, not a derived one — one to two connection intervals (30 to
+50 ms) may suffice but was not measured. The knob stays for
+measurement: `lnflash --set-ble-tx-gap <ms>` overrides the default on a
+running board (`0` disables the gap entirely), is never persisted, and
+a reset restores the default. The first packet of a connection is never
+deferred, an idle link pays nothing, and keepalives are neither paced
+nor slide the window. Every actual wait logs
+`BLE_TX_GAP conn=<h> waited_ms=<n>`. lnsd's Columba interface serves
+the same default on its notify pipe and each central link — it is the
+phone stand-in on the rig and must behave like a board toward a real
+phone.
+
 ## ble-leviculum (BLE 5 broadcast mesh)
 
 Reticulum broadcasts are sent as real BLE 5 connectionless extended

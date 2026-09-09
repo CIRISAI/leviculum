@@ -285,24 +285,38 @@ pub fn note_media_changed() {
     }
 }
 
-/// The inter-packet transmit gap (#376, `TYPE_BLE_TX_GAP`), in
-/// milliseconds. `0` — the boot value, and what every reset restores —
-/// imposes nothing; the knob is deliberately not persisted, exactly like
-/// the LoRa transmit spacing (#345): a bench must not be able to leave a
-/// board silently paced after the session that paced it.
-static TX_GAP_MS: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// The operator's inter-packet-gap override (#376, `TYPE_BLE_TX_GAP`),
+/// in milliseconds. With no override — the boot state, and what every
+/// reset restores — the pumps serve the compiled
+/// [`leviculum_ble_tx::DEFAULT_TX_GAP_MS`] (100 ms, the measured desk
+/// value; the justification lives on that constant). The knob stays a
+/// measurement instrument: any set value overrides the default, `0`
+/// disables the gap entirely, and nothing is persisted, exactly like
+/// the LoRa transmit spacing (#345): a bench must not be able to leave
+/// a board silently mispaced after the session that paced it.
+///
+/// `u16::MAX` is the no-override sentinel; the control envelope refuses
+/// anything above `BLE_TX_GAP_MAX_MS`, so no operator value can collide
+/// with it (asserted below).
+const TX_GAP_OVERRIDE_NONE: u16 = u16::MAX;
+const _: () = assert!(leviculum_core::envelope::BLE_TX_GAP_MAX_MS < TX_GAP_OVERRIDE_NONE);
+static TX_GAP_OVERRIDE_MS: core::sync::atomic::AtomicU16 =
+    core::sync::atomic::AtomicU16::new(TX_GAP_OVERRIDE_NONE);
 
-/// Set the inter-packet gap. Called from the serial control task; the
-/// per-connection pumps read it at each packet, so it takes effect from
-/// the next packet on every live link without touching the links.
+/// Set the inter-packet gap override. Called from the serial control
+/// task; the per-connection pumps read it at each packet, so it takes
+/// effect from the next packet on every live link without touching the
+/// links.
 pub fn set_tx_gap_ms(gap_ms: u16) {
-    TX_GAP_MS.store(gap_ms, core::sync::atomic::Ordering::Relaxed);
+    TX_GAP_OVERRIDE_MS.store(gap_ms, core::sync::atomic::Ordering::Relaxed);
     crate::log::log_fmt("[BLE ] ", format_args!("tx_gap_ms={}", gap_ms));
 }
 
-/// The gap the pumps serve right now.
+/// The gap the pumps serve right now: the override if one was set this
+/// boot, [`leviculum_ble_tx::DEFAULT_TX_GAP_MS`] otherwise.
 pub(crate) fn tx_gap_ms() -> u16 {
-    TX_GAP_MS.load(core::sync::atomic::Ordering::Relaxed)
+    let raw = TX_GAP_OVERRIDE_MS.load(core::sync::atomic::Ordering::Relaxed);
+    leviculum_ble_tx::effective_tx_gap_ms((raw != TX_GAP_OVERRIDE_NONE).then_some(raw))
 }
 
 /// Resolve when the BLE carrier reads off. Selected against a live

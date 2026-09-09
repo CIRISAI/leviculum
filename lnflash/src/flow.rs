@@ -959,13 +959,14 @@ pub fn set_ble_tx_gap(
         all_took_it &= reply.took_it();
         match reply {
             SessionReply::Acked if gap_ms == 0 => ui.say(&format!(
-                "{port}: BLE transmit gap back to the default — the board imposes no gap \
-                 between packets on a connection."
+                "{port}: BLE transmit gap disabled — the board imposes no gap between \
+                 packets on a connection until a reset restores the 100 ms default."
             )),
             SessionReply::Acked => ui.say(&format!(
-                "{port}: BLE transmit gap set to {gap_ms} ms. The board logs [BLE ] \
-                 tx_gap_ms={gap_ms} now and BLE_TX_GAP conn=… waited_ms=… on its debug port \
-                 (if00) for every packet it defers. Not persisted: a reset returns it to 0."
+                "{port}: BLE transmit gap set to {gap_ms} ms (compiled default: 100 ms). \
+                 The board logs [BLE ] tx_gap_ms={gap_ms} now and BLE_TX_GAP conn=… \
+                 waited_ms=… on its debug port (if00) for every packet it defers. Not \
+                 persisted: a reset restores the default."
             )),
             SessionReply::Refused(reason) => ui.say(&format!(
                 "{port}: the board refused the BLE transmit gap — {}.",

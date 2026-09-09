@@ -89,13 +89,15 @@ Host side: `lnflash --announce`.
 
 `BLE_TX_GAP` sets the gap the BLE drain leaves between the last fragment
 of one packet and the first fragment of the next packet **on the same
-connection handle**. `0` (the boot value) imposes nothing; values above
-5000 ms are refused with reason `0x03`. Interface-layer only, per
-connection — the fan-out and the core never learn of it — and volatile
-like TX_SPACING: a reset restores 0. The board logs
-`[BLE ] tx_gap_ms=<n>` when the value takes effect and
-`BLE_TX_GAP conn=<h> waited_ms=<n>` once per deferred packet. Host side:
-`lnflash --set-ble-tx-gap <ms>`.
+connection handle**. With no value set the pumps serve the compiled
+default of 100 ms (#376, the measured desk value —
+`leviculum-ble-tx`'s `DEFAULT_TX_GAP_MS`); any set value overrides it,
+`0` disables the gap entirely, and values above 5000 ms are refused
+with reason `0x03`. Interface-layer only, per connection — the fan-out
+and the core never learn of it — and volatile like TX_SPACING: a reset
+restores the default. The board logs `[BLE ] tx_gap_ms=<n>` when the
+value takes effect and `BLE_TX_GAP conn=<h> waited_ms=<n>` once per
+deferred packet. Host side: `lnflash --set-ble-tx-gap <ms>`.
 
 ### NODE_NAME (0x0C) and NODE_NAME_REPORT (0x87)
 

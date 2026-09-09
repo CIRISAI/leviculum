@@ -46,7 +46,7 @@ pub use adv::{
     LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
 };
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
-pub use gap::TxGap;
+pub use gap::{effective_tx_gap_ms, TxGap, DEFAULT_TX_GAP_MS};
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,

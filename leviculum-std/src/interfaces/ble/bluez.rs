@@ -370,6 +370,12 @@ impl CentralTask {
             op_type: WriteOp::Command,
             ..Default::default()
         };
+        // This link's inter-packet gap (#376): the queue carries one
+        // packet's fragments per unit, so pacing packet-to-packet is a
+        // sleep between units. Keepalives bypass the gap and never
+        // slide its window, same rule as the firmware pumps.
+        let start = tokio::time::Instant::now();
+        let mut pacer = super::links::LinkPacer::new();
         loop {
             tokio::select! {
                 frame = session.notify_stream.next() => {
@@ -379,14 +385,46 @@ impl CentralTask {
                         break;
                     }
                 }
-                payload = session.frames_rx.recv() => {
-                    let Some(payload) = payload else { break };
-                    if let Err(e) = session.rx_char.write_ext(&payload, &write_req).await {
-                        tracing::debug!(
-                            "BLE {}: write to {} failed: {e}",
-                            self.iface,
-                            self.addr
+                unit = session.frames_rx.recv() => {
+                    let Some(frames) = unit else { break };
+                    let keepalive = frames.len() == 1
+                        && frames[0].len()
+                            < leviculum_core::framing::ble::FRAGMENT_HEADER_SIZE;
+                    if !keepalive {
+                        let now_ms = tokio::time::Instant::now()
+                            .duration_since(start)
+                            .as_millis() as u64;
+                        let wait = pacer.wait_ms(now_ms);
+                        if wait > 0 {
+                            tracing::info!(
+                                event = "BLE_TX_GAP",
+                                iface = %self.iface,
+                                addr = %self.addr,
+                                waited_ms = wait,
+                            );
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                        }
+                    }
+                    let mut failed = false;
+                    for payload in &frames {
+                        if let Err(e) = session.rx_char.write_ext(payload, &write_req).await {
+                            tracing::debug!(
+                                "BLE {}: write to {} failed: {e}",
+                                self.iface,
+                                self.addr
+                            );
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if !keepalive {
+                        pacer.packet_done(
+                            tokio::time::Instant::now()
+                                .duration_since(start)
+                                .as_millis() as u64,
                         );
+                    }
+                    if failed {
                         break;
                     }
                 }
@@ -397,7 +435,7 @@ impl CentralTask {
 
 struct CentralSession {
     notify_stream: std::pin::Pin<Box<dyn futures::Stream<Item = Vec<u8>> + Send>>,
-    frames_rx: mpsc::Receiver<Vec<u8>>,
+    frames_rx: mpsc::Receiver<Vec<Vec<u8>>>,
     rx_char: bluer::gatt::remote::Characteristic,
 }
 

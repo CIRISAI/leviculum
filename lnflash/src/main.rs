@@ -98,11 +98,12 @@ struct Cli {
     /// Set the BLE inter-packet transmit gap, in milliseconds, on every
     /// running LNode, then exit. No flashing. The board leaves at least
     /// this gap between the last fragment of one packet and the first
-    /// fragment of the next packet on the same Bluetooth connection; 0 is
-    /// the default and imposes nothing. 0 to 5000 — the board refuses the
-    /// rest by name, and so does this command line. A bench instrument
-    /// for #376 like --set-tx-spacing, and volatile like it: not
-    /// persisted, a reset restores 0.
+    /// fragment of the next packet on the same Bluetooth connection. The
+    /// compiled default is 100 ms (#376, the measured desk value); a set
+    /// value overrides it and 0 disables the gap entirely. 0 to 5000 —
+    /// the board refuses the rest by name, and so does this command
+    /// line. A measurement override like --set-tx-spacing, and volatile
+    /// like it: not persisted, a reset restores the default.
     #[arg(
         long,
         value_name = "MS",

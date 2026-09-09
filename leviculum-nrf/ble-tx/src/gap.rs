@@ -1,12 +1,13 @@
 //! The per-connection inter-packet transmit gap (Codeberg #376).
 //!
-//! A bench instrument for the direct-announce loss: the operator sets a
-//! gap over the control envelope (`TYPE_BLE_TX_GAP`) and the drain then
-//! leaves at least that many milliseconds between the **last fragment of
-//! one packet** and the **first fragment of the next packet** on the same
-//! connection handle. `0` — the compiled default, restored by every reset
-//! — imposes nothing, so a fleet that never touches the knob transmits
-//! exactly as before.
+//! Born as a bench instrument for the direct-announce loss, now the
+//! default behaviour: the drain leaves at least [`DEFAULT_TX_GAP_MS`]
+//! between the **last fragment of one packet** and the **first fragment
+//! of the next packet** on the same connection handle. The operator's
+//! knob (`TYPE_BLE_TX_GAP`, `--set-ble-tx-gap`) stays for measurement
+//! and overrides the default — `0` disables the gap entirely — and a
+//! reset restores the default, so a bench cannot leave a board silently
+//! unpaced (or mispaced) after the session that paced it.
 //!
 //! Interface-layer only, like the LoRa transmit spacing (#345, the
 //! `leviculum-tx-spacing` crate this is the BLE sibling of): the fan-out
@@ -20,6 +21,32 @@
 //! subtle: a gap measured from the *start* of the previous packet, or
 //! one that also spaces the first packet of a connection, would silently
 //! shrink or misplace the very window the bench is trying to open.
+
+/// The compiled default inter-packet gap, in milliseconds.
+///
+/// 100 ms is the MEASURED value, not a derived one: the 2026-09-09 desk
+/// run on #376 showed a Columba phone one hop from two boards losing
+/// the first of two fragmented packets whose fragments arrived back to
+/// back on one connection, and a 100 ms gap between packets on the link
+/// let both through — both boards at one hop, proofs direct. A smaller
+/// value may well suffice (one to two connection intervals, 30 to
+/// 50 ms, is the plausible floor) but was not measured, so the default
+/// states what the bench proved and nothing sharper.
+pub const DEFAULT_TX_GAP_MS: u16 = 100;
+
+/// Resolve the gap a pump serves: the operator's override when one was
+/// set this boot (`0` = no gap at all), the compiled
+/// [`DEFAULT_TX_GAP_MS`] otherwise. Every pump on both stacks — the
+/// peripheral notify path and the central write path, firmware and
+/// lnsd — resolves through here, so the default cannot drift between
+/// them.
+#[must_use]
+pub const fn effective_tx_gap_ms(override_ms: Option<u16>) -> u16 {
+    match override_ms {
+        Some(ms) => ms,
+        None => DEFAULT_TX_GAP_MS,
+    }
+}
 
 /// One connection's gap state: when its previous packet finished.
 ///
@@ -81,6 +108,38 @@ mod tests {
         let mut gap = TxGap::new();
         gap.packet_done(1_000);
         assert_eq!(gap.wait_ms(1_000, 0), 0, "back-to-back at gap 0");
+    }
+
+    #[test]
+    fn the_default_gap_applies_when_no_override_is_set() {
+        assert_eq!(effective_tx_gap_ms(None), DEFAULT_TX_GAP_MS);
+        let mut gap = TxGap::new();
+        gap.packet_done(1_000);
+        assert_eq!(
+            gap.wait_ms(1_000, effective_tx_gap_ms(None)),
+            u64::from(DEFAULT_TX_GAP_MS),
+            "a fleet that never touches the knob is paced at the default"
+        );
+    }
+
+    #[test]
+    fn the_override_wins_over_the_default() {
+        assert_eq!(effective_tx_gap_ms(Some(20)), 20);
+        let mut gap = TxGap::new();
+        gap.packet_done(1_000);
+        assert_eq!(gap.wait_ms(1_000, effective_tx_gap_ms(Some(20))), 20);
+    }
+
+    #[test]
+    fn a_zero_override_disables_the_gap() {
+        assert_eq!(effective_tx_gap_ms(Some(0)), 0);
+        let mut gap = TxGap::new();
+        gap.packet_done(1_000);
+        assert_eq!(
+            gap.wait_ms(1_000, effective_tx_gap_ms(Some(0))),
+            0,
+            "the knob at 0 restores the unpaced pre-default behaviour"
+        );
     }
 
     #[test]

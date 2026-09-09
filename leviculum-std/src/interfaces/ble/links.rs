@@ -23,9 +23,9 @@
 //! peripheral links rather than per link.
 
 use leviculum_ble_tx::{
-    addr_value, parse_peer_advertisement, should_initiate, CandidateTable, ConnectDecision,
-    ScanMode, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    addr_value, effective_tx_gap_ms, parse_peer_advertisement, should_initiate, CandidateTable,
+    ConnectDecision, ScanMode, TxGap, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -699,6 +699,44 @@ impl ScanScheduler {
 }
 
 // ---------------------------------------------------------------------
+// The per-link inter-packet transmit gap (#376)
+// ---------------------------------------------------------------------
+
+/// The inter-packet gap lnsd serves on every BLE link: the firmware's
+/// compiled default ([`leviculum_ble_tx::DEFAULT_TX_GAP_MS`], 100 ms —
+/// the measured desk value, justified on that constant), always. lnsd
+/// has no runtime knob, and as the phone stand-in on the rig it must
+/// pace exactly as a board does toward a real phone.
+///
+/// Wraps the firmware's own host-tested [`TxGap`] arithmetic, so "gap"
+/// means the same thing on both stacks: measured from the last fragment
+/// of one packet to the first fragment of the next on the same link,
+/// the first packet never deferred, keepalives neither paced nor
+/// sliding the window (they never call
+/// [`packet_done`](Self::packet_done)).
+pub(crate) struct LinkPacer {
+    gap: TxGap,
+}
+
+impl LinkPacer {
+    pub(crate) fn new() -> Self {
+        Self { gap: TxGap::new() }
+    }
+
+    /// How long the next packet must still wait at `now_ms`, in
+    /// milliseconds; 0 is "send now".
+    pub(crate) fn wait_ms(&self, now_ms: u64) -> u64 {
+        self.gap.wait_ms(now_ms, effective_tx_gap_ms(None))
+    }
+
+    /// The last fragment of a packet was handed to the carrier; the
+    /// next packet's gap is measured from here.
+    pub(crate) fn packet_done(&mut self, now_ms: u64) {
+        self.gap.packet_done(now_ms);
+    }
+}
+
+// ---------------------------------------------------------------------
 // The dial queue — one connection setup in flight, jittered (#49 part 3)
 // ---------------------------------------------------------------------
 
@@ -902,6 +940,25 @@ mod tests {
 
     fn table() -> LinkTable {
         LinkTable::new(OWN, DEFAULT_MAX_LINKS)
+    }
+
+    /// lnsd paces every BLE link at the firmware's compiled default gap
+    /// (#376): 100 ms between packets on a link, no knob, first packet
+    /// free, the boundary itself send-now. The pacer wraps the
+    /// firmware's `TxGap`, so this pins that lnsd resolves the SAME
+    /// default the boards' pumps do.
+    #[test]
+    fn lnsd_paces_links_with_the_firmware_default_gap() {
+        let default = u64::from(leviculum_ble_tx::DEFAULT_TX_GAP_MS);
+        let mut pacer = LinkPacer::new();
+        assert_eq!(pacer.wait_ms(0), 0, "first packet is never deferred");
+        pacer.packet_done(1_000);
+        assert_eq!(pacer.wait_ms(1_000), default, "back to back: full gap");
+        assert_eq!(pacer.wait_ms(1_040), default - 40, "the remainder");
+        assert_eq!(pacer.wait_ms(1_000 + default), 0, "boundary is send-now");
+        // A keepalive never calls packet_done, so it cannot slide the
+        // window — the pacer only ever hears about packets.
+        assert_eq!(pacer.wait_ms(1_050), default - 50);
     }
 
     /// lnsd advertises under the same name a board with the same identity

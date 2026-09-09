@@ -50,8 +50,9 @@ use links::{Addr, Admission, DialQueue, IdentityHash, Inbound, LinkTable, Role, 
 /// Outbound channel depth, matching the other interfaces' default.
 const BLE_BUFFER_SIZE: usize = 256;
 
-/// Per-central-link fragment channel depth. A full channel drops the
-/// packet on that link (counted + logged), it never blocks the domain.
+/// Per-central-link packet-unit channel depth (one message = one
+/// packet's fragments, #376). A full channel drops the packet on that
+/// link (counted + logged), it never blocks the domain.
 const LINK_QUEUE_DEPTH: usize = 32;
 
 /// Reconnect/backoff after a failed or ended central session, the
@@ -118,11 +119,16 @@ pub(crate) enum Ev {
     },
     /// A central-role connection read the peer's identity and asks to be
     /// admitted before it handshakes. `true` on `ack` = proceed.
+    ///
+    /// `frames` carries one PACKET per message — all its fragments as a
+    /// unit — so the link task can pace packet-to-packet (#376) and a
+    /// full queue costs whole packets, never a torn fragment stream. A
+    /// keepalive rides as a single sub-header-size frame.
     CentralIdentity {
         addr: Address,
         identity: IdentityHash,
         mtu: usize,
-        frames: mpsc::Sender<Vec<u8>>,
+        frames: mpsc::Sender<Vec<Vec<u8>>>,
         ack: oneshot::Sender<bool>,
     },
     /// A notification arrived on a central-role link.
@@ -201,9 +207,10 @@ struct BleTask {
     ready: Arc<ReadySignal>,
 }
 
-/// Orchestrator-side state for one central-role link's TX pipe.
+/// Orchestrator-side state for one central-role link's TX pipe. One
+/// message = one packet's fragments (see [`Ev::CentralIdentity`]).
 struct CentralPipe {
-    frames: mpsc::Sender<Vec<u8>>,
+    frames: mpsc::Sender<Vec<Vec<u8>>>,
 }
 
 impl BleTask {
@@ -284,6 +291,12 @@ impl BleTask {
         let now_ms = |i: Instant| i.duration_since(start).as_millis() as u64;
 
         let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections);
+        // The peripheral notify pipe's inter-packet gap (#376). One
+        // pacer for the pipe IS per-link pacing here: a notification
+        // reaches every subscribed central at once, so all peripheral
+        // links share one schedule. The central links pace themselves,
+        // each in its own task (`bluez::CentralTask::session_loop`).
+        let mut notify_pacer = links::LinkPacer::new();
         // The firmware central task's fallback clock and collection
         // window (#375 part 2, item 3), driven from the event loop:
         // sightings feed it, ticks close its windows.
@@ -314,7 +327,15 @@ impl BleTask {
                         // Daemon dropped the handle: interface detached.
                         return Ok(());
                     };
-                    self.send_packet(&table, &central_pipes, &mut notifiers, &packet.data).await;
+                    self.send_packet(
+                        &table,
+                        &central_pipes,
+                        &mut notifiers,
+                        &mut notify_pacer,
+                        start,
+                        &packet.data,
+                    )
+                    .await;
                 }
                 ev = ev_rx.recv() => {
                     let Some(ev) = ev else { return Ok(()) };
@@ -365,7 +386,7 @@ impl BleTask {
                         if let Some(pipe) = central_pipes.get(&addr) {
                             let _ = pipe
                                 .frames
-                                .try_send(vec![leviculum_core::framing::ble::KEEPALIVE_BYTE]);
+                                .try_send(vec![vec![leviculum_core::framing::ble::KEEPALIVE_BYTE]]);
                         }
                     }
                     let expired = table.expire(now);
@@ -742,16 +763,38 @@ impl BleTask {
     }
 
     /// Fan one Reticulum packet out to every live link.
+    ///
+    /// The notify pipe is paced here (#376): the orchestrator is the
+    /// pipe's only writer, so the inter-packet gap is served inline
+    /// before the packet's first fragment. That parks the event loop
+    /// for up to the gap — deliberate: the gap IS the pipe's throughput
+    /// ceiling, and inbound events queue in their channels meanwhile.
+    /// Central links get their packet as one queued unit and pace
+    /// themselves in their own task.
     async fn send_packet(
         &self,
         table: &LinkTable,
         central_pipes: &HashMap<Addr, CentralPipe>,
         notifiers: &mut Vec<CharacteristicNotifier>,
+        notify_pacer: &mut links::LinkPacer,
+        start: Instant,
         packet: &[u8],
     ) {
         let plan = table.plan_tx(packet);
         let mut delivered = false;
-        if !plan.notify_fragments.is_empty() {
+        notifiers.retain(|n| !n.is_stopped());
+        if !plan.notify_fragments.is_empty() && !notifiers.is_empty() {
+            let now_ms = Instant::now().duration_since(start).as_millis() as u64;
+            let wait = notify_pacer.wait_ms(now_ms);
+            if wait > 0 {
+                tracing::info!(
+                    event = "BLE_TX_GAP",
+                    iface = %self.name,
+                    link = "notify",
+                    waited_ms = wait,
+                );
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+            }
             let mut ok = true;
             for frag in plan.notify_fragments {
                 if !send_via_notifiers(notifiers, frag).await {
@@ -759,26 +802,20 @@ impl BleTask {
                     break;
                 }
             }
+            notify_pacer.packet_done(Instant::now().duration_since(start).as_millis() as u64);
             delivered |= ok;
         }
         for (addr, frags) in plan.central {
             let Some(pipe) = central_pipes.get(&addr) else {
                 continue;
             };
-            let depth = frags.len();
-            let mut ok = true;
-            for frag in frags {
-                if pipe.frames.try_send(frag).is_err() {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
+            let frag_count = frags.len();
+            // One try_send per packet: it lands whole or not at all, so
+            // a full queue can no longer tear the peer's reassembly
+            // with a partial fragment stream.
+            if pipe.frames.try_send(frags).is_ok() {
                 delivered = true;
             } else {
-                // A partially queued packet tears the peer's reassembly;
-                // the periodic keepalive/expiry keeps the link honest and
-                // the drop is counted, never silent.
                 self.counters.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
                 self.counters
                     .tx_dropped_bytes
@@ -792,7 +829,7 @@ impl BleTask {
                     iface = %self.name,
                     peer = %peer,
                     len = packet.len(),
-                    depth = depth,
+                    depth = frag_count,
                 );
             }
         }

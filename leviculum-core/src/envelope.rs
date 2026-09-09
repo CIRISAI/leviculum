@@ -206,10 +206,13 @@ pub const TYPE_ANNOUNCE: u8 = 0x0F;
 /// in milliseconds, one big-endian u16 like [`TYPE_TX_SPACING`]. The
 /// firmware's BLE drain leaves at least this gap between the last
 /// fragment of one packet and the first fragment of the next packet on
-/// the same connection handle; `0` (the default) imposes nothing.
+/// the same connection handle. With no override the pumps serve the
+/// compiled default of 100 ms (`leviculum-ble-tx`'s
+/// `DEFAULT_TX_GAP_MS`, the measured desk value); a set value overrides
+/// it and `0` disables the gap entirely.
 ///
 /// A bench instrument like [`TYPE_TX_SPACING`], and volatile like it:
-/// not persisted, a reset restores `0`. Values above
+/// not persisted, a reset restores the default. Values above
 /// [`BLE_TX_GAP_MAX_MS`] are refused with [`REFUSE_VALUE`] — the bound
 /// lives in [`classify_control_frame`], so every binary and every
 /// host-side stub refuses the same values.

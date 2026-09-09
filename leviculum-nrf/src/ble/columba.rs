@@ -378,14 +378,16 @@ fn process_logged(
 }
 
 /// Hold the next packet back until this connection's inter-packet gap
-/// (#376, `--set-ble-tx-gap`) has elapsed. Both pumps — the peripheral
-/// notify path and the central write path — call this before a packet's
-/// first fragment and [`TxGap::packet_done`] after its last, so the gap
-/// is packet-to-packet on one connection handle, exactly as specified.
-/// Keepalives bypass it on both sides: the knob is specified between
-/// packets, and a keepalive that slid the window would change the
-/// quantity being swept. With the gap at 0 (the default) the wait is 0
-/// and nothing is logged — the fleet path is untouched.
+/// (#376) has elapsed: the compiled 100 ms default
+/// ([`leviculum_ble_tx::DEFAULT_TX_GAP_MS`], the measured desk value),
+/// or the `--set-ble-tx-gap` override (0 disables). Both pumps — the
+/// peripheral notify path and the central write path — call this before
+/// a packet's first fragment and [`TxGap::packet_done`] after its last,
+/// so the gap is packet-to-packet on one connection handle, exactly as
+/// specified. Keepalives bypass it on both sides: the gap is specified
+/// between packets, and a keepalive that slid the window would change
+/// the quantity being paced. Every actual wait logs `BLE_TX_GAP` — the
+/// desk signature of a paced link.
 async fn serve_tx_gap(gap: &TxGap, conn_handle: u16) {
     let wait_ms = gap.wait_ms(Instant::now().as_millis(), super::tx_gap_ms());
     if wait_ms > 0 {
