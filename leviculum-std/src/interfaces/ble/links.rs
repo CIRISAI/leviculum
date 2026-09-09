@@ -23,8 +23,9 @@
 //! peripheral links rather than per link.
 
 use leviculum_ble_tx::{
-    addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, ScanMode,
-    MANUFACTURER_DATA_LEN,
+    addr_value, parse_peer_advertisement, should_initiate, CandidateTable, ConnectDecision,
+    ScanMode, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -236,6 +237,16 @@ impl LinkTable {
     /// link or a pending handshake (then it must not be dialled again).
     pub(crate) fn knows_addr(&self, addr: &Addr) -> bool {
         self.links.iter().any(|l| &l.addr == addr) || self.pending.iter().any(|p| &p.addr == addr)
+    }
+
+    /// Whether any BLE connection is live — a handshaked link in either
+    /// role or a pending peripheral-side handshake. The quiet-fallback
+    /// gate's input (#375 part 2): connection-keyed, not identity-keyed,
+    /// exactly like the firmware registry's `any_conn`, so the clock is
+    /// already suspended in the gap between a connection and its
+    /// handshake.
+    pub(crate) fn has_connections(&self) -> bool {
+        !self.links.is_empty() || !self.pending.is_empty()
     }
 
     /// Whether `identity` still owns a live link (Codeberg #365).
@@ -528,11 +539,17 @@ pub(crate) struct ScanDecision {
 ///
 /// Returns `None` when the sighting does not offer the Columba service
 /// (not a peer; no decision to log).
+///
+/// `mode` is the #375 fallback switch, fed from the [`ScanScheduler`]'s
+/// clock — the same clock the firmware's central task runs, so the
+/// periculum `ble_room` cell (#49) exercises the rule the boards
+/// actually run.
 pub(crate) fn decide_from_scan(
     local_addr: &Addr,
     peer_addr: &Addr,
     offers_service: bool,
     manufacturer_ffff: Option<&[u8]>,
+    mode: ScanMode,
 ) -> Option<ScanDecision> {
     let mut pdu: Vec<u8> = Vec::with_capacity(2 + 16 + 2 + MANUFACTURER_DATA_LEN + 2);
     if offers_service {
@@ -555,24 +572,115 @@ pub(crate) fn decide_from_scan(
     if !parsed.offers_service {
         return None;
     }
-    // Always the strict rule: the #375 fallback needs a clock over the
-    // whole search (how long since the last initiate verdict or link),
-    // and lnsd's scanner does not keep one yet — this batch wires the
-    // fallback into the firmware's central task only. Until lnsd grows
-    // the same clock it can, like any node, sit out the sort when every
-    // permitted peer is dark; a later batch decides that.
     let decision = should_initiate(
         LOCAL_CAPS,
         addr_value_display(local_addr),
         parsed.caps,
         addr_value_display(peer_addr),
-        ScanMode::Strict,
+        mode,
     );
     Some(ScanDecision {
         decision,
         caps_record: parsed.caps.is_some(),
         caps: parsed.caps.unwrap_or(0),
     })
+}
+
+// ---------------------------------------------------------------------
+// The fallback clock and the collection window (#375 part 2, item 3)
+// ---------------------------------------------------------------------
+
+/// The firmware central task's fallback clock and scan window, as one
+/// pure state machine for lnsd's driver loop: no tokio, no BlueZ, the
+/// caller passes `now_ms` and performs what the return values ask for.
+///
+/// Same policy, same shared pieces as the boards: the clock switches
+/// [`decide_from_scan`] to [`ScanMode::Fallback`] after
+/// [`SCAN_FALLBACK_AFTER_MS`] without a dial or a connection — held at
+/// zero while the interface is busy (the quiet spec: only a fully
+/// linkless scanner may dial against the sort) — and eligible sightings
+/// collect for [`SCAN_WINDOW_COLLECT_MS`] into the firmware's own
+/// [`CandidateTable`], so which peer gets dialled is decided by the
+/// identical code on both stacks.
+pub(crate) struct ScanScheduler {
+    /// When the current strict phase began.
+    strict_since_ms: u64,
+    /// Whether this phase's strict-to-fallback switch was already
+    /// announced (`BLE_SCAN_FALLBACK` is logged once per phase).
+    announced: bool,
+    /// The open collection window: close deadline and candidates.
+    window: Option<(u64, CandidateTable<Addr, WINDOW_CANDIDATES>)>,
+}
+
+impl ScanScheduler {
+    pub(crate) fn new(now_ms: u64) -> Self {
+        Self {
+            strict_since_ms: now_ms,
+            announced: false,
+            window: None,
+        }
+    }
+
+    /// The [`ScanMode`] for a sighting at `now_ms`. `busy` means the
+    /// interface holds any connection (either role, handshaked or
+    /// pending) or has a dial in flight: while true the clock is held
+    /// at zero, so the fallback can never fire — the quiet spec. The
+    /// second value is the elapsed time to log as `BLE_SCAN_FALLBACK`,
+    /// returned exactly once per strict phase that reaches the bound.
+    pub(crate) fn mode(&mut self, busy: bool, now_ms: u64) -> (ScanMode, Option<u64>) {
+        if busy {
+            self.note_reset(now_ms);
+            return (ScanMode::Strict, None);
+        }
+        let elapsed = now_ms.saturating_sub(self.strict_since_ms);
+        if elapsed < SCAN_FALLBACK_AFTER_MS {
+            return (ScanMode::Strict, None);
+        }
+        let announce = (!self.announced).then_some(elapsed);
+        self.announced = true;
+        (ScanMode::Fallback, announce)
+    }
+
+    /// A connection formed or ended: the strict phase starts over, as
+    /// the firmware resets its clock at every connection event and
+    /// teardown (#375 §0 — resetting only at identity left a gap the
+    /// rig's fallback fired into).
+    pub(crate) fn note_reset(&mut self, now_ms: u64) {
+        self.strict_since_ms = now_ms;
+        self.announced = false;
+    }
+
+    /// An eligible sighting — initiate verdict, every driver filter
+    /// passed. The first one opens the window; all of them collect.
+    pub(crate) fn offer(&mut self, addr: Addr, decision: ConnectDecision, now_ms: u64) {
+        let (_, table) = self
+            .window
+            .get_or_insert_with(|| (now_ms + SCAN_WINDOW_COLLECT_MS, CandidateTable::new()));
+        table.offer(addr_value_display(&addr), decision, addr);
+    }
+
+    /// Close the window once its bound has passed: the dial target —
+    /// lowest eligible address, strict verdicts before fallback
+    /// verdicts — with its rule and the window's `seen` count. A
+    /// strict-class choice restarts the strict phase (the rule works,
+    /// the fallback clock starts over); a fallback choice does not, so
+    /// a failed fallback dial re-enters fallback immediately.
+    pub(crate) fn poll(&mut self, now_ms: u64) -> Option<(Addr, ConnectDecision, usize)> {
+        if !self
+            .window
+            .as_ref()
+            .is_some_and(|(until, _)| now_ms >= *until)
+        {
+            return None;
+        }
+        let (_, table) = self.window.take()?;
+        let seen = table.seen();
+        let (_, decision, addr) = table.into_best()?;
+        if decision != ConnectDecision::InitiateFallback {
+            self.note_reset(now_ms);
+        }
+        Some((addr, decision, seen))
+    }
 }
 
 #[cfg(test)]
@@ -741,32 +849,168 @@ mod tests {
         let higher: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x01];
 
         // Dual-role record, our public address sorts below static random.
-        let d =
-            decide_from_scan(&local, &higher, true, Some(&[0x03, 0x00])).expect("service offered");
+        let d = decide_from_scan(&local, &higher, true, Some(&[0x03, 0x00]), ScanMode::Strict)
+            .expect("service offered");
         assert_eq!(d.decision, ConnectDecision::InitiateLowerAddress);
         assert!(d.caps_record);
         assert_eq!(d.caps, 0x00);
 
         // No manufacturer record: same sort, caps_record=0 (v2.2 peer).
-        let d = decide_from_scan(&local, &higher, true, None).expect("service offered");
+        let d = decide_from_scan(&local, &higher, true, None, ScanMode::Strict)
+            .expect("service offered");
         assert_eq!(d.decision, ConnectDecision::InitiateLowerAddress);
         assert!(!d.caps_record);
 
         // Peripheral-only override beats a losing sort.
         let lower: Addr = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
-        let d =
-            decide_from_scan(&local, &lower, true, Some(&[0x03, 0x01])).expect("service offered");
+        let d = decide_from_scan(&local, &lower, true, Some(&[0x03, 0x01]), ScanMode::Strict)
+            .expect("service offered");
         assert_eq!(d.decision, ConnectDecision::InitiatePeripheralOnlyPeer);
         assert!(d.decision.initiate());
 
         // An older record version is ignored → treated as no record.
-        let d =
-            decide_from_scan(&local, &lower, true, Some(&[0x02, 0x01])).expect("service offered");
+        let d = decide_from_scan(&local, &lower, true, Some(&[0x02, 0x01]), ScanMode::Strict)
+            .expect("service offered");
         assert!(!d.caps_record);
         assert_eq!(d.decision, ConnectDecision::WaitPeerHasLowerAddress);
 
+        // The fallback mode reshapes exactly that losing sort into a
+        // dial (#375), same as the firmware's decision table.
+        let d = decide_from_scan(
+            &local,
+            &lower,
+            true,
+            Some(&[0x02, 0x01]),
+            ScanMode::Fallback,
+        )
+        .expect("service offered");
+        assert_eq!(d.decision, ConnectDecision::InitiateFallback);
+        assert!(d.decision.initiate());
+
         // No service, no decision.
-        assert_eq!(decide_from_scan(&local, &higher, false, None), None);
+        assert_eq!(
+            decide_from_scan(&local, &higher, false, None, ScanMode::Strict),
+            None
+        );
+    }
+
+    /// The #375 fallback clock, lnsd edition: strict until the bound,
+    /// one announce per phase, and the quiet spec — any busy sighting
+    /// (live or pending connection, dial in flight) holds the clock at
+    /// zero.
+    #[test]
+    fn the_fallback_clock_switches_once_per_phase_and_busy_suspends_it() {
+        let mut s = ScanScheduler::new(0);
+        assert_eq!(s.mode(false, 1_000), (ScanMode::Strict, None));
+        assert_eq!(
+            s.mode(false, SCAN_FALLBACK_AFTER_MS - 1),
+            (ScanMode::Strict, None)
+        );
+        // The bound: fallback, announced exactly once.
+        assert_eq!(
+            s.mode(false, SCAN_FALLBACK_AFTER_MS),
+            (ScanMode::Fallback, Some(SCAN_FALLBACK_AFTER_MS))
+        );
+        assert_eq!(
+            s.mode(false, SCAN_FALLBACK_AFTER_MS + 5_000),
+            (ScanMode::Fallback, None),
+            "one announce per phase"
+        );
+
+        // A busy sighting restarts the phase — the quiet spec.
+        assert_eq!(
+            s.mode(true, SCAN_FALLBACK_AFTER_MS + 6_000),
+            (ScanMode::Strict, None)
+        );
+        // The full bound applies again after the busy period ends…
+        assert_eq!(
+            s.mode(false, 2 * SCAN_FALLBACK_AFTER_MS),
+            (ScanMode::Strict, None)
+        );
+        // …and the next switch announces again.
+        let (mode, announce) = s.mode(false, 3 * SCAN_FALLBACK_AFTER_MS);
+        assert_eq!(mode, ScanMode::Fallback);
+        assert!(announce.is_some(), "a fresh phase re-announces its switch");
+    }
+
+    /// The firmware's connection-event reset, lnsd edition (#375 §0):
+    /// a link forming or ending restarts the strict phase.
+    #[test]
+    fn a_connection_event_restarts_the_strict_phase() {
+        let mut s = ScanScheduler::new(0);
+        assert_eq!(s.mode(false, SCAN_FALLBACK_AFTER_MS).0, ScanMode::Fallback);
+        s.note_reset(SCAN_FALLBACK_AFTER_MS + 1_000);
+        assert_eq!(
+            s.mode(false, SCAN_FALLBACK_AFTER_MS + 2_000).0,
+            ScanMode::Strict,
+            "the teardown/connect reset grants a fresh strict bound"
+        );
+    }
+
+    /// The collection window: opens at the first eligible sighting,
+    /// closes only after its bound, and elects the lowest eligible
+    /// address with strict verdicts ahead of fallback verdicts — via
+    /// the shared [`CandidateTable`], so this is the firmware's choice
+    /// verbatim.
+    #[test]
+    fn the_window_collects_and_dials_the_lowest_eligible_candidate() {
+        let mut s = ScanScheduler::new(0);
+        assert_eq!(s.poll(10_000), None, "no window before a candidate");
+
+        s.offer(ADDR_2, ConnectDecision::InitiateLowerAddress, 1_000);
+        assert_eq!(
+            s.poll(1_000 + SCAN_WINDOW_COLLECT_MS - 1),
+            None,
+            "the window holds for its bound"
+        );
+        // A lower-addressed strict candidate and an even lower fallback
+        // candidate arrive during the window.
+        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, 2_000);
+        s.offer(
+            [0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+            ConnectDecision::InitiateFallback,
+            2_500,
+        );
+        let (addr, decision, seen) = s
+            .poll(1_000 + SCAN_WINDOW_COLLECT_MS)
+            .expect("window closes at its bound");
+        assert_eq!(addr, ADDR_1, "lowest STRICT candidate wins");
+        assert_eq!(decision, ConnectDecision::InitiateLowerAddress);
+        assert_eq!(seen, 3);
+        assert_eq!(s.poll(60_000), None, "the window is consumed");
+    }
+
+    /// The dial-time clock rule, shared with the firmware's central
+    /// task: a strict-class choice restarts the strict phase, a
+    /// fallback choice must NOT — if that dial fails, the scanner is
+    /// still stranded and stays in fallback rather than waiting out
+    /// the bound again.
+    #[test]
+    fn a_fallback_dial_does_not_restart_the_strict_phase() {
+        let mut s = ScanScheduler::new(0);
+        assert_eq!(s.mode(false, SCAN_FALLBACK_AFTER_MS).0, ScanMode::Fallback);
+        s.offer(
+            ADDR_1,
+            ConnectDecision::InitiateFallback,
+            SCAN_FALLBACK_AFTER_MS,
+        );
+        let closed = SCAN_FALLBACK_AFTER_MS + SCAN_WINDOW_COLLECT_MS;
+        assert!(s.poll(closed).is_some());
+        assert_eq!(
+            s.mode(false, closed + 1).0,
+            ScanMode::Fallback,
+            "still stranded, still fallback"
+        );
+
+        // The strict counterpart restarts the phase.
+        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, closed + 2);
+        let closed2 = closed + 2 + SCAN_WINDOW_COLLECT_MS;
+        assert!(s.poll(closed2).is_some());
+        assert_eq!(
+            s.mode(false, closed2 + 1).0,
+            ScanMode::Strict,
+            "a strict dial proves the sort works and restarts the clock"
+        );
     }
 
     #[test]
@@ -1028,6 +1272,27 @@ mod tests {
         let e = t.expire(30_000 + LINK_TIMEOUT_MS);
         assert_eq!(e.links, vec![(ID_A, ADDR_1, Role::Central)]);
         assert_eq!(t.link_count(), 0);
+    }
+
+    /// The quiet-fallback gate's input: pending handshakes count as
+    /// connections exactly like handshaked links — the firmware
+    /// registry's `any_conn` reading, where the clock is suspended
+    /// from the connection event, not from the handshake.
+    #[test]
+    fn has_connections_counts_links_and_pending_handshakes() {
+        let mut t = table();
+        assert!(!t.has_connections());
+        // An unidentified central: pending, no link — still a connection.
+        t.peripheral_frame(ADDR_1, 185, &[0xFF; 20], 0);
+        assert_eq!(t.link_count(), 0);
+        assert!(t.has_connections(), "pending handshake closes the gate");
+        let _ = t.expire(HANDSHAKE_TIMEOUT_MS);
+        assert!(!t.has_connections());
+
+        t.admit(ID_A, ADDR_2, Role::Central, 185, HANDSHAKE_TIMEOUT_MS);
+        assert!(t.has_connections());
+        t.remove_by_addr(&ADDR_2);
+        assert!(!t.has_connections());
     }
 
     #[test]

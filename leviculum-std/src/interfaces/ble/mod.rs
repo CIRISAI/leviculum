@@ -45,7 +45,7 @@ use super::{
 };
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
-use links::{Addr, Admission, IdentityHash, Inbound, LinkTable, Role};
+use links::{Addr, Admission, IdentityHash, Inbound, LinkTable, Role, ScanScheduler};
 
 /// Outbound channel depth, matching the other interfaces' default.
 const BLE_BUFFER_SIZE: usize = 256;
@@ -278,6 +278,10 @@ impl BleTask {
         let now_ms = |i: Instant| i.duration_since(start).as_millis() as u64;
 
         let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections);
+        // The firmware central task's fallback clock and collection
+        // window (#375 part 2, item 3), driven from the event loop:
+        // sightings feed it, ticks close its windows.
+        let mut scheduler = ScanScheduler::new(0);
         let mut notifiers: Vec<CharacteristicNotifier> = Vec::new();
         let mut central_pipes: HashMap<Addr, CentralPipe> = HashMap::new();
         let mut dialling: HashSet<Addr> = HashSet::new();
@@ -306,6 +310,7 @@ impl BleTask {
                         &adapter,
                         &local_addr,
                         &mut table,
+                        &mut scheduler,
                         &mut notifiers,
                         &mut central_pipes,
                         &mut dialling,
@@ -335,6 +340,11 @@ impl BleTask {
                         }
                     }
                     let expired = table.expire(now);
+                    if !(expired.links.is_empty() && expired.pending.is_empty()) {
+                        // Connections ended: a fresh strict phase, as
+                        // the firmware resets its clock at teardown.
+                        scheduler.note_reset(now);
+                    }
                     for (identity, addr, role) in expired.links {
                         self.log_link_down(&identity, role, "timeout");
                         central_pipes.remove(&addr);
@@ -350,6 +360,17 @@ impl BleTask {
                         disconnect_quietly(&adapter, addr).await;
                     }
                     backoff_until.retain(|_, until| *until > now);
+                    // A collection window whose bound passed without a
+                    // further sighting closes on the tick.
+                    self.dial_window_choice(
+                        &mut scheduler,
+                        &table,
+                        &adapter,
+                        &mut dialling,
+                        &backoff_until,
+                        &ev_tx,
+                        now,
+                    );
                 }
             }
         }
@@ -362,6 +383,7 @@ impl BleTask {
         adapter: &bluer::Adapter,
         local_addr: &Addr,
         table: &mut LinkTable,
+        scheduler: &mut ScanScheduler,
         notifiers: &mut Vec<CharacteristicNotifier>,
         central_pipes: &mut HashMap<Addr, CentralPipe>,
         dialling: &mut HashSet<Addr>,
@@ -384,6 +406,9 @@ impl BleTask {
                         identity,
                         displaced,
                     } => {
+                        // A connection event in either role restarts
+                        // the strict phase (#375 §0).
+                        scheduler.note_reset(now);
                         let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
@@ -416,9 +441,25 @@ impl BleTask {
                 // A sighting with no RSSI is a BlueZ cache entry, not a
                 // device on the air right now.
                 let Some(rssi) = rssi else { return };
-                let Some(decision) =
-                    links::decide_from_scan(local_addr, &addr.0, offers_service, record.as_deref())
-                else {
+                // The quiet spec's busy input (#375 part 2): any
+                // connection in either role — handshaked or pending —
+                // or a dial in flight holds the fallback clock at zero.
+                let busy = table.has_connections() || !dialling.is_empty();
+                let (mode, announce) = scheduler.mode(busy, now);
+                if let Some(after_ms) = announce {
+                    tracing::info!(
+                        event = "BLE_SCAN_FALLBACK",
+                        iface = %self.name,
+                        after_ms = after_ms,
+                    );
+                }
+                let Some(decision) = links::decide_from_scan(
+                    local_addr,
+                    &addr.0,
+                    offers_service,
+                    record.as_deref(),
+                    mode,
+                ) else {
                     return;
                 };
                 if last_decision.insert(addr.0, decision) != Some(decision) {
@@ -440,15 +481,19 @@ impl BleTask {
                 {
                     return;
                 }
-                dialling.insert(addr.0);
-                let central = bluez::CentralTask {
-                    adapter: adapter.clone(),
-                    addr,
-                    own_identity: self.identity_hash,
-                    ev_tx: ev_tx.clone(),
-                    iface: self.name.clone(),
-                };
-                tokio::spawn(central.run());
+                // Eligible: into the collection window instead of an
+                // immediate dial — the firmware's window, the same
+                // CandidateTable, the same lowest-eligible choice.
+                scheduler.offer(addr.0, decision.decision, now);
+                self.dial_window_choice(
+                    scheduler,
+                    table,
+                    adapter,
+                    dialling,
+                    backoff_until,
+                    ev_tx,
+                    now,
+                );
             }
             Ev::CentralIdentity {
                 addr,
@@ -460,6 +505,7 @@ impl BleTask {
                 let (admission, displaced) = table.admit(identity, addr.0, Role::Central, mtu, now);
                 match admission {
                     Admission::Accept => {
+                        scheduler.note_reset(now);
                         let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
@@ -500,6 +546,9 @@ impl BleTask {
                 self.log_abandon_reports(table);
             }
             Ev::CentralGone { addr } => {
+                // A dial or link ended either way: fresh strict phase,
+                // as the firmware resets its clock at teardown.
+                scheduler.note_reset(now);
                 dialling.remove(&addr.0);
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
@@ -510,6 +559,57 @@ impl BleTask {
                 *until = (*until).max(now + SESSION_BACKOFF_MS);
             }
         }
+    }
+
+    /// Close the scheduler's collection window if its bound has passed
+    /// and dial its choice — the lowest eligible address, strict
+    /// verdicts first, elected by the same [`CandidateTable`] the
+    /// firmware and the #375 simulation use. Logs `BLE_SCAN_WINDOW`
+    /// once per window that ends in a dial, like the firmware.
+    ///
+    /// The eligibility filters ran when each candidate was collected;
+    /// they run again here because the window is seconds long and the
+    /// world moves — the chosen peer may have connected to us in the
+    /// meantime, the table may have filled, a failure may have imposed
+    /// a backoff. A window whose choice fails the re-check simply ends
+    /// without a dial; the peer's next advertisement opens a new one.
+    #[allow(clippy::too_many_arguments)]
+    fn dial_window_choice(
+        &self,
+        scheduler: &mut ScanScheduler,
+        table: &LinkTable,
+        adapter: &bluer::Adapter,
+        dialling: &mut HashSet<Addr>,
+        backoff_until: &HashMap<Addr, u64>,
+        ev_tx: &mpsc::Sender<Ev>,
+        now: u64,
+    ) {
+        let Some((addr, decision, seen)) = scheduler.poll(now) else {
+            return;
+        };
+        if table.is_full()
+            || table.knows_addr(&addr)
+            || dialling.contains(&addr)
+            || backoff_until.get(&addr).is_some_and(|until| *until > now)
+        {
+            return;
+        }
+        tracing::info!(
+            event = "BLE_SCAN_WINDOW",
+            iface = %self.name,
+            seen = seen,
+            chosen = %hex12(&addr),
+            rule = decision.as_str(),
+        );
+        dialling.insert(addr);
+        let central = bluez::CentralTask {
+            adapter: adapter.clone(),
+            addr: Address(addr),
+            own_identity: self.identity_hash,
+            ev_tx: ev_tx.clone(),
+            iface: self.name.clone(),
+        };
+        tokio::spawn(central.run());
     }
 
     /// Fan one Reticulum packet out to every live link.
