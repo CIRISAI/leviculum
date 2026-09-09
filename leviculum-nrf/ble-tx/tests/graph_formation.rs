@@ -135,9 +135,12 @@ struct Board {
     strict_rounds: u32,
 }
 
-/// Whether the two boards already hold a link in either direction: the
-/// registry's churn rule — a second link to a linked identity is
-/// refused (`BLE_LINK_DUP`), so the sim never forms one.
+/// Whether the two boards already hold a link in either direction:
+/// board addresses are static, so the pre-dial address exclusion
+/// (Core Spec §4.5) keeps a linked board from ever being dialled
+/// again, and the sim never forms a second link. (An identity
+/// duplicate arriving over a ROTATED address — a phone — displaces the
+/// old link since #376; static-address boards cannot reach that path.)
 fn linked(boards: &[Board], a: usize, b: usize) -> bool {
     boards[a].outgoing == Some(b) || boards[b].outgoing == Some(a)
 }

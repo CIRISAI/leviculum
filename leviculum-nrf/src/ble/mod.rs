@@ -849,10 +849,12 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
+/// `displaced=` counts links torn down because a newer connection of
+/// the same identity took over (#376).
 /// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
 /// off this line: both slots claimed, and every HVN drain edge still
 /// found the link that produced it.
@@ -864,12 +866,13 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_UNROUTED.load(Ordering::Relaxed),
                 HVN_DRAIN.claimed(),
+                columba::BLE_LINKS_DISPLACED.load(Ordering::Relaxed),
             ),
         );
     }

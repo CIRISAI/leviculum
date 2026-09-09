@@ -7,9 +7,11 @@
 //! identity's FIRST link up is a peer arrival (the main loop pulls the
 //! peer's delivery path), the identity's LAST link down is a peer loss
 //! (the main loop culls the paths via that peer). A same-identity link
-//! on another slot — the zombie-displacement window, where a peer's
-//! rotated address reconnects before its old link is torn down — is
-//! registry churn on both edges and must report neither.
+//! on another slot — a peer whose rotated address reconnected while its
+//! old link was still up — is registry churn on both edges and must
+//! report neither; since #376 it additionally DISPLACES the old link:
+//! [`PeerRegistry::link_up`] names the old slot and the caller tears
+//! that connection down, so the peer keeps exactly its newest link.
 //!
 //! The rules are pure and their failure modes are sequences (a flap, a
 //! displacement, the runtime carrier-off teardown that drops every live
@@ -38,6 +40,16 @@
 pub struct PeerRegistry<const N: usize> {
     slots: [Option<[u8; 16]>; N],
     addrs: [Option<u64>; N],
+}
+
+/// What registering a link amounted to (see [`PeerRegistry::link_up`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkUp {
+    /// The identity's FIRST live link — report a peer arrival.
+    pub first: bool,
+    /// The slot of the identity's OLD link, which the caller must tear
+    /// down: the newest connection wins (#376).
+    pub displaced: Option<usize>,
 }
 
 impl<const N: usize> Default for PeerRegistry<N> {
@@ -71,19 +83,33 @@ impl<const N: usize> PeerRegistry<N> {
     /// Whether a live connection was made on this address — the
     /// scanner's pre-dial exclusion (see the struct docs). Addresses
     /// rotate, so a linked PEER can still reappear under a fresh
-    /// address this check cannot know; that residual dial is refused
-    /// post-connect by the identity duplicate check, exactly as
-    /// before.
+    /// address this check cannot know; that residual connection is
+    /// resolved post-connect by [`link_up`](Self::link_up)'s identity
+    /// duplicate rule, which since #376 displaces the OLD link rather
+    /// than refusing the new one.
     pub fn addr_linked(&self, addr_value: u64) -> bool {
         self.addrs.iter().flatten().any(|a| *a == addr_value)
     }
 
-    /// Register a slot's peer. `true` iff this is the identity's FIRST
-    /// live link — the caller reports a peer arrival exactly then.
-    pub fn link_up(&mut self, slot: usize, peer: [u8; 16]) -> bool {
+    /// Register a slot's peer.
+    ///
+    /// `first` iff this is the identity's FIRST live link — the caller
+    /// reports a peer arrival exactly then. `displaced` names the slot
+    /// of the identity's OLD link, if one exists (#376): a second
+    /// connection from an identity we already hold means the peer moved
+    /// to the new connection, so the caller keeps THIS link and tears
+    /// the old one down. Neither edge of that hand-over is a peer
+    /// transition — the peer was never gone. Re-registering the same
+    /// slot displaces nothing.
+    pub fn link_up(&mut self, slot: usize, peer: [u8; 16]) -> LinkUp {
         let first = self.slots.iter().flatten().all(|id| *id != peer);
+        let displaced = self
+            .slots
+            .iter()
+            .position(|id| *id == Some(peer))
+            .filter(|old| *old != slot);
         self.slots[slot] = Some(peer);
-        first
+        LinkUp { first, displaced }
     }
 
     /// Clear a slot. `Some(identity)` iff that took the identity's LAST
@@ -106,9 +132,9 @@ impl<const N: usize> PeerRegistry<N> {
 
     /// The number of DISTINCT live peer identities (Codeberg #365) —
     /// the value the main loop mirrors into the core as the
-    /// interface's peer count. Distinct, not per-slot: in the
-    /// zombie-displacement window one peer holds two links, and it is
-    /// still one peer.
+    /// interface's peer count. Distinct, not per-slot: during the
+    /// displacement hand-over (#376) one peer briefly holds two links,
+    /// and it is still one peer.
     pub fn peer_count(&self) -> usize {
         self.slots
             .iter()
@@ -132,19 +158,67 @@ mod tests {
     const B: [u8; 16] = [0xbb; 16];
 
     #[test]
-    fn the_first_link_of_an_identity_is_an_arrival() {
+    fn the_first_link_of_an_identity_is_an_arrival_and_displaces_nothing() {
         let mut reg = PeerRegistry::<4>::new();
-        assert!(reg.link_up(0, A));
-        assert!(reg.link_up(1, B));
+        assert_eq!(
+            reg.link_up(0, A),
+            LinkUp {
+                first: true,
+                displaced: None
+            }
+        );
+        assert_eq!(
+            reg.link_up(1, B),
+            LinkUp {
+                first: true,
+                displaced: None
+            },
+            "a different identity is its own arrival, no displacement"
+        );
     }
 
     #[test]
-    fn a_second_link_of_the_same_identity_is_churn_not_an_arrival() {
+    fn a_second_link_of_the_same_identity_is_churn_and_displaces_the_old() {
         let mut reg = PeerRegistry::<4>::new();
-        assert!(reg.link_up(0, A));
-        // The zombie-displacement window: the peer's rotated address
-        // reconnected before the old link died.
-        assert!(!reg.link_up(1, A));
+        reg.link_up(0, A);
+        // The peer's rotated address reconnected while the old link was
+        // still up: churn (no arrival report), and the OLD slot is
+        // named for teardown — the newest connection wins (#376).
+        assert_eq!(
+            reg.link_up(1, A),
+            LinkUp {
+                first: false,
+                displaced: Some(0)
+            }
+        );
+    }
+
+    /// The hand-over sequence end to end: after a displacement the old
+    /// slot's teardown is churn (the identity still owns the new link),
+    /// and only the new link's death is the peer loss.
+    #[test]
+    fn displacement_teardown_of_the_old_slot_is_churn_not_a_loss() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, A);
+        assert_eq!(reg.link_up(1, A).displaced, Some(0));
+        assert_eq!(reg.link_down(0), None, "old link's death is churn");
+        assert!(reg.is_linked(&A), "the new link carries the peer");
+        assert_eq!(reg.link_down(1), Some(A), "new link's death is the loss");
+    }
+
+    /// A same-slot re-registration must not name its own slot: the
+    /// caller would tear down the very connection it just kept.
+    #[test]
+    fn re_registering_the_same_slot_displaces_nothing() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, A);
+        assert_eq!(
+            reg.link_up(0, A),
+            LinkUp {
+                first: false,
+                displaced: None
+            }
+        );
     }
 
     #[test]
@@ -196,7 +270,7 @@ mod tests {
         assert!(!reg.is_linked(&B));
     }
 
-    /// Same teardown with the displacement window open: two links, one
+    /// Same teardown mid-displacement-hand-over: two links, one
     /// identity. One loss, not two — the peer left once.
     #[test]
     fn a_displaced_identity_is_lost_once_when_all_slots_drop() {
@@ -216,7 +290,7 @@ mod tests {
         const D: [u8; 16] = [0xdd; 16];
         let mut reg = PeerRegistry::<4>::new();
         for (slot, id) in [A, B, C, D].into_iter().enumerate() {
-            assert!(reg.link_up(slot, id), "each identity's first link");
+            assert!(reg.link_up(slot, id).first, "each identity's first link");
         }
         assert_eq!(reg.peer_count(), 4);
 
@@ -242,7 +316,7 @@ mod tests {
         assert!(!reg.addr_linked(0xBEEF));
 
         // Identity arrives; the address side is unaffected.
-        assert!(reg.link_up(1, A));
+        assert!(reg.link_up(1, A).first);
         assert!(reg.addr_linked(0xC0DE));
 
         // Teardown clears both facts independently.
@@ -276,7 +350,7 @@ mod tests {
         assert_eq!(reg.peer_count(), 0);
         reg.link_up(1, A);
         assert_eq!(reg.peer_count(), 1);
-        // The displacement window: same identity on a second slot.
+        // The displacement hand-over: same identity on a second slot.
         reg.link_up(3, A);
         assert_eq!(reg.peer_count(), 1, "two links, one peer");
         reg.link_up(0, B);

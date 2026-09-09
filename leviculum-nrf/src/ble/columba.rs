@@ -21,11 +21,12 @@
 use core::cell::{Cell, RefCell};
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, Either, Either3};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Sender;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
@@ -435,7 +436,8 @@ async fn gatt_events(
     // enters the registry (pre-dial exclusion) and the fallback clock
     // restarts (#375 §0 — resetting only at identity left a 3 s gap
     // the rig's fallback fired straight into).
-    conn_link_up(slot_index, addr_value(&conn.peer_address().bytes()));
+    let peer_value = addr_value(&conn.peer_address().bytes());
+    conn_link_up(slot_index, peer_value);
 
     // Per-connection state. `Cell` lets the closure inside
     // `gatt_server::run` mutate handshake_done while the outbound branch
@@ -475,7 +477,7 @@ async fn gatt_events(
                 );
                 let mut peer_id = [0u8; 16];
                 peer_id.copy_from_slice(&data);
-                peer_link_up(slot_index, peer_id);
+                peer_link_up(slot_index, conn_handle, peer_value, peer_id);
                 link_peer.set(Some(peer_id));
                 handshake_done.set(true);
                 last_keepalive.set(Instant::now());
@@ -540,20 +542,32 @@ async fn gatt_events(
     // The third arm is the runtime carrier switch (`--set-media
     // ble=off`): the link is disconnected exactly as if the peer had
     // walked out of range — the teardown below reports the loss through
-    // the same `peer_link_down`, so the core's cull is identical.
-    if let Either3::Third(()) = select3(
+    // the same `peer_link_down`, so the core's cull is identical. The
+    // fourth is a displacement (#376): a newer connection of this
+    // link's identity took over, the displacer already logged and moved
+    // the queue, ending the old link is this arm's whole job — and the
+    // shared teardown below is churn, not a loss, because the new link
+    // is already registered.
+    match select4(
         inbound,
         outbound,
         super::carrier_off(CarrierWaiter::Session(slot_index)),
+        displaced(slot_index, conn_handle),
     )
     .await
     {
-        crate::log::log_fmt(
-            "[BLE ] ",
-            format_args!("BLE_CARRIER_DROP role=peripheral slot={}", slot_index),
-        );
-        // Already-disconnected is fine; the teardown is the same.
-        let _ = conn.disconnect();
+        Either4::Third(()) => {
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_DROP role=peripheral slot={}", slot_index),
+            );
+            // Already-disconnected is fine; the teardown is the same.
+            let _ = conn.disconnect();
+        }
+        Either4::Fourth(()) => {
+            let _ = conn.disconnect();
+        }
+        Either4::First(_) | Either4::Second(_) => {}
     }
 
     // Registry entry first, then the slot: a slot that reads free while
@@ -574,9 +588,14 @@ async fn gatt_events(
 /// scanner cannot apply that lesson pre-connect — an advertisement
 /// carries no identity — so a peer we already hold a link to can rotate
 /// its address and reappear as a seemingly new device. This registry is
-/// the post-connect closure of that hole: the central path reads the
-/// peer's Identity characteristic first and drops the connection if
-/// that identity is already live ([`BLE_LINK_DUP`] in the log).
+/// the post-connect closure of that hole: when an identity we already
+/// hold connects again — read from the Identity characteristic on the
+/// central path, presented in the handshake on the peripheral one — the
+/// NEW connection is kept and the OLD link is displaced (#376,
+/// `BLE_LINK_DUP … action=displace` in the log). The field T114 showed
+/// why the other way round fails: Columba serves only the connection it
+/// opened last, so a board that refused the newcomer kept notifying a
+/// link the phone no longer read, and its announces never arrived.
 ///
 /// The first/last-link rules live host-tested in
 /// [`leviculum_ble_tx::registry`]; this is the one firmware instance,
@@ -584,21 +603,102 @@ async fn gatt_events(
 static LIVE_PEERS: BlockingMutex<CriticalSectionRawMutex, RefCell<PeerRegistry<MAX_LINKS>>> =
     BlockingMutex::new(RefCell::new(PeerRegistry::new()));
 
+/// Links displaced by a newer connection of the same identity (#376),
+/// for the `BLE_COUNTERS` line's `displaced=` field.
+pub(crate) static BLE_LINKS_DISPLACED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Per-slot displacement latches (#376): [`peer_link_up`] signals the
+/// OLD link's slot when a newer connection of the same identity takes
+/// over, and the session holding that slot tears itself down through
+/// [`displaced`]. The payload is the connection handle the displacer
+/// read out of the drain table, so a wake aimed at a previous tenancy
+/// of the slot can never kill an innocent successor. One latch per
+/// drain slot, like the session half of `CARRIER_WAKES`.
+static DISPLACE_WAKES: [Signal<CriticalSectionRawMutex, u16>; MAX_LINKS] =
+    [const { Signal::new() }; MAX_LINKS];
+
+/// Resolve when this session's link has been displaced by a newer
+/// connection of the same identity (#376) — the fourth arm of both
+/// session selects. A latched wake for a different handle is a stale
+/// leftover from a previous tenancy: consumed and ignored.
+async fn displaced(slot_index: usize, conn_handle: u16) {
+    let wake = &DISPLACE_WAKES[slot_index];
+    loop {
+        if wake.wait().await == conn_handle {
+            return;
+        }
+    }
+}
+
 /// Register a slot's peer and, when this is the identity's FIRST link,
 /// report the arrival to the main loop so the transport learns about
 /// the peer behind the new link (Codeberg #365) — the mirror
-/// of [`peer_link_down`]'s last-link rule. A same-identity link on
-/// another slot (the zombie-displacement window) means the peer was
-/// never gone: registry churn, not an arrival, so no report.
-fn peer_link_up(slot_index: usize, peer_id: [u8; 16]) {
-    let first = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_up(slot_index, peer_id));
-    if first {
+/// of [`peer_link_down`]'s last-link rule.
+///
+/// A same-identity link on another slot means the peer was never gone —
+/// registry churn, neither `Lost` nor `Up` — and since #376 it
+/// DISPLACES the old link: the peer moved to the connection it opened
+/// last (the field T114 beside a Columba phone showed the old link
+/// staying up unread while every announce we notified on it was lost),
+/// so this NEW connection is kept and the old one is woken to tear
+/// itself down. The new link is registered BEFORE the old one is
+/// signalled, which is what makes the old teardown's `link_down` a
+/// churn edge rather than a `Lost`/`Up` flap.
+fn peer_link_up(slot_index: usize, conn_handle: u16, peer_value: u64, peer_id: [u8; 16]) {
+    let up = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_up(slot_index, peer_id));
+    if up.first {
         super::report_peer_event(super::PeerEvent::Up(peer_id));
+    }
+    if let Some(old_slot) = up.displaced {
+        displace_old_link(old_slot, slot_index, conn_handle, peer_value, peer_id);
     }
     // A link up in either role restarts the fallback clock (#375): the
     // board is reachable over BLE again, so the strict rule gets its
     // full bound before the scanner may dial against the sort.
     note_strict_reset();
+}
+
+/// Tear down the OLD link of an identity whose newer connection just
+/// registered (#376). The old slot's queued packets move to the new
+/// link's queue first — the displacement says the peer no longer reads
+/// the old connection, so anything left there would die with it; a
+/// packet the old pump already pulled out of the queue is the one loss
+/// this cannot prevent. Runs synchronously between the registry check
+/// and the wake (no await point), so the old session — which clears its
+/// registry entry before releasing its drain slot — cannot vanish in
+/// between: the latched wake always reaches the tenancy it names.
+fn displace_old_link(
+    old_slot: usize,
+    new_slot: usize,
+    new_conn: u16,
+    peer_value: u64,
+    peer_id: [u8; 16],
+) {
+    let old_conn = HVN_DRAIN
+        .handle_at(old_slot)
+        .unwrap_or(leviculum_ble_tx::NO_CONN_HANDLE);
+    let old_queue = super::link_out(old_slot);
+    let new_queue = super::link_out(new_slot);
+    let mut moved = 0usize;
+    let mut dropped = 0usize;
+    while let Ok(packet) = old_queue.try_receive() {
+        if new_queue.try_send(packet).is_ok() {
+            moved += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    BLE_LINKS_DISPLACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "BLE_LINK_DUP peer={:02x}{:02x}{:02x}{:02x} addr={:012x} action=displace old_conn={} new_conn={} moved={} dropped={}",
+            peer_id[0], peer_id[1], peer_id[2], peer_id[3],
+            peer_value, old_conn, new_conn, moved, dropped,
+        ),
+    );
+    DISPLACE_WAKES[old_slot].signal(old_conn);
 }
 
 /// Clear a slot's registry entry and, when that took the peer's LAST
@@ -611,10 +711,6 @@ fn peer_link_down(slot_index: usize) {
     if let Some(identity) = lost {
         super::report_peer_event(super::PeerEvent::Lost(identity));
     }
-}
-
-fn peer_already_linked(peer_id: &[u8; 16]) -> bool {
-    LIVE_PEERS.lock(|peers| peers.borrow().is_linked(peer_id))
 }
 
 /// Register a connection's address at the connection event, in either
@@ -777,24 +873,26 @@ fn scan_mode_now() -> ScanMode {
     }
 }
 
-/// How long a dead-end address is skipped: one that carried an
-/// already-linked (or our own) identity, or that a fallback dial could
-/// not connect to. Sized to the RPA rotation timescale (minutes): the
+/// How long a dead-end address is skipped: one that carried our own
+/// identity, or that a fallback dial could not connect to (an
+/// already-linked identity is no longer a dead end — since #376 that
+/// dial displaces the old link and stays connected). Sized to the RPA
+/// rotation timescale (minutes): the
 /// address dies on its own at the peer's next rotation, this just
 /// stops us re-dialling it every scan pass until then — the rig's
 /// pre-#375-part-2 capture shows the alternative, a 5 s timeout dial
 /// at the same address every ~20 s, forever.
 const DEAD_END_TTL: Duration = Duration::from_secs(120);
 
-/// Room for the addresses [`DEAD_END_TTL`] talks about: up to
-/// [`MAX_LINKS`] revealed duplicates plus a run of failed fallback
-/// targets (at most one failure per ~13 s dial cycle, so eight slots
-/// bridge more than one TTL of them). Overflow reuses the oldest
-/// entry — an early re-dial, not a loss.
+/// Room for the addresses [`DEAD_END_TTL`] talks about: a revealed
+/// self-link plus a run of failed fallback targets (at most one
+/// failure per ~13 s dial cycle, so eight slots bridge more than one
+/// TTL of them). Overflow reuses the oldest entry — an early re-dial,
+/// not a loss.
 const DEAD_END_SLOTS: usize = 2 * MAX_LINKS;
 
 /// The addresses the scanner must not dial for a while, and when each
-/// was condemned: duplicates/self revealed post-connect, and failed
+/// was condemned: a self-link revealed post-connect, and failed
 /// fallback dials (#375 §0 — a fallback target that does not answer a
 /// CONNECT_IND within 5 s is gone or unreachable by rule, and without
 /// this entry the 5 s backoff re-dialled it forever).
@@ -1034,20 +1132,10 @@ async fn central_link(
         let _ = conn.disconnect();
         return;
     }
-    if peer_already_linked(&peer_id) {
-        // The rotation hole, closed: same identity, (usually) a fresh
-        // address. See [`LIVE_PEERS`].
-        crate::log::log_fmt(
-            "[BLE ] ",
-            format_args!(
-                "BLE_LINK_DUP peer={:02x}{:02x}{:02x}{:02x} addr={:012x} action=disconnect",
-                peer_id[0], peer_id[1], peer_id[2], peer_id[3], peer_value
-            ),
-        );
-        dead_ends.note(peer_value);
-        let _ = conn.disconnect();
-        return;
-    }
+    // An identity we already hold is NOT refused here: registering it
+    // below displaces the old link instead (#376, see [`LIVE_PEERS`]) —
+    // the peer keeps its newest connection, so this dial's address is a
+    // live link's address, not a dead end.
 
     // From here the link is real: register it exactly as the peripheral
     // side does — a drain-table claim (whose index is the link identity
@@ -1071,8 +1159,14 @@ async fn central_link(
         let _ = conn.disconnect();
         return;
     };
+    // This link's outbound queue; stale packets are the previous
+    // tenant's, drained BEFORE the registry entry so a displacement's
+    // moved packets (#376) land in a clean queue instead of being
+    // thrown away with the leftovers.
+    let outgoing_rx = super::link_out(slot_index).receiver();
+    while outgoing_rx.try_receive().is_ok() {}
     conn_link_up(slot_index, peer_value);
-    peer_link_up(slot_index, peer_id);
+    peer_link_up(slot_index, conn_handle, peer_value, peer_id);
 
     run_central_session(
         &conn,
@@ -1080,6 +1174,7 @@ async fn central_link(
         own_identity,
         peer_id,
         slot_index,
+        conn_handle,
         peer_value,
     )
     .await;
@@ -1106,6 +1201,7 @@ async fn run_central_session(
     own_identity: &[u8; 16],
     peer_id: [u8; 16],
     slot_index: usize,
+    conn_handle: u16,
     peer_value: u64,
 ) {
     // Subscribe to the peer's TX before announcing ourselves, so
@@ -1155,10 +1251,10 @@ async fn run_central_session(
     let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new());
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
 
-    // This link's outbound queue; stale packets are the previous
-    // tenant's (same claim-time drain as the peripheral side).
+    // This link's outbound queue. Already drained of the previous
+    // tenant's leftovers by [`central_link`], before the registry
+    // entry — see there (#376).
     let outgoing_rx = super::link_out(slot_index).receiver();
-    while outgoing_rx.try_receive().is_ok() {}
 
     // Inbound: the peer's TX notifications. We read the peer's identity
     // from its characteristic, so a 16-byte first frame is NOT a
@@ -1290,19 +1386,29 @@ async fn run_central_session(
 
     // Third arm: the runtime carrier switch, as on the peripheral side —
     // disconnect, and let [`central_link`]'s teardown report the loss
-    // through the same `peer_link_down` that range loss takes.
-    if let Either3::Third(()) = select3(
+    // through the same `peer_link_down` that range loss takes. Fourth:
+    // a displacement (#376) — a newer connection of this identity took
+    // over, already logged by the displacer; the teardown behind it is
+    // churn because the new link is already registered.
+    match select4(
         inbound,
         outbound,
         super::carrier_off(CarrierWaiter::Session(slot_index)),
+        displaced(slot_index, conn_handle),
     )
     .await
     {
-        crate::log::log_fmt(
-            "[BLE ] ",
-            format_args!("BLE_CARRIER_DROP role=central slot={}", slot_index),
-        );
-        let _ = conn.disconnect();
+        Either4::Third(()) => {
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!("BLE_CARRIER_DROP role=central slot={}", slot_index),
+            );
+            let _ = conn.disconnect();
+        }
+        Either4::Fourth(()) => {
+            let _ = conn.disconnect();
+        }
+        Either4::First(_) | Either4::Second(_) => {}
     }
 }
 
