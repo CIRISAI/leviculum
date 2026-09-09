@@ -76,7 +76,20 @@ Summarize the walk afterwards:
 
 ## EXIT STATUS
 
-0 when every addressed board did what was asked (for **--watch**: never reached; the watch runs until killed). 1 otherwise.
+0 when every addressed board did what was asked (for **--watch**: never reached; the watch runs until killed).
+
+On a flash run the three outcomes are kept apart, because they need different things done about them:
+
+0
+:   Every board was written and named the build in this bundle on its debug port.
+
+1
+:   The flash failed: a board never came back, or came back naming a different build, or nothing was written to it.
+
+2
+:   Every board took the write and none contradicted it, and at least one could not be read back. The firmware is on the board as far as anything here knows; which build it is running is unknown. Read it back again (**--watch**, or re-run the flash) rather than assuming the write failed.
+
+Every other session exits 0 when every addressed board did what was asked and 1 otherwise.
 
 ## SEE ALSO
 

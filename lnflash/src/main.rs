@@ -667,20 +667,149 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     ));
     for outcome in outcomes.iter().filter(|o| !o.is_good()) {
         ui.say(&format!(
-            "  {} ({}): not confirmed — {:?}",
-            outcome.port, outcome.board, outcome.verdict
+            "  {} ({}): {}",
+            outcome.port,
+            outcome.board,
+            outcome.describe()
         ));
     }
-    Ok(if good == outcomes.len() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    let code = exit_code(&outcomes);
+    if code == EXIT_UNCONFIRMED {
+        ui.say(&format!(
+            "Exit {EXIT_UNCONFIRMED}: every board took the write and none contradicted it, so \
+             this is not a failed flash — it is a flash nobody could read back. Exit \
+             {EXIT_FLASH_FAILED} is reserved for a board that did not come back or that named a \
+             different build."
+        ));
+    }
+    Ok(ExitCode::from(code))
+}
+
+/// Every board was written and named the build in this bundle.
+const EXIT_CONFIRMED: u8 = 0;
+/// The flash failed: a board did not come back, or came back naming a
+/// different build, or nothing was written to it.
+const EXIT_FLASH_FAILED: u8 = 1;
+/// Every board took the write and none contradicted it, and at least one
+/// could not be read back. Separate from [`EXIT_FLASH_FAILED`] because the
+/// two need different things done about them, and because collapsing them
+/// is what made a good flash stop a script (Codeberg #378).
+const EXIT_UNCONFIRMED: u8 = 2;
+
+/// The worst outcome decides, and a contradiction is worse than an
+/// absence of evidence.
+fn exit_code(outcomes: &[flow::Outcome]) -> u8 {
+    let mut code = EXIT_CONFIRMED;
+    for outcome in outcomes {
+        match outcome.confirmation() {
+            flow::Confirmation::Confirmed => {}
+            flow::Confirmation::Unknown => code = code.max(EXIT_UNCONFIRMED),
+            flow::Confirmation::Failed => return EXIT_FLASH_FAILED,
+        }
+    }
+    code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use lnflash::transport::Written;
+    use lnflash::verify::Verdict;
+
+    fn outcome(written: bool, verdict: Option<Verdict>) -> flow::Outcome {
+        flow::Outcome {
+            port: "1-1".into(),
+            board: "rak4631".into(),
+            softdevice_installed: None,
+            application_written: written.then(|| Written {
+                path: PathBuf::from("APP.UF2"),
+                bytes: 1_000_000,
+                blocks: 1953,
+                declined: 0,
+                reboot_error: None,
+            }),
+            verdict,
+            radio: None,
+            telemetry: None,
+        }
+    }
+
+    fn confirmed() -> flow::Outcome {
+        outcome(
+            true,
+            Some(Verdict::Confirmed {
+                git_sha: "daa8b8e".into(),
+            }),
+        )
+    }
+
+    fn unknown() -> flow::Outcome {
+        outcome(
+            true,
+            Some(Verdict::Unconfirmed {
+                why: "no [FW_BUILD] line arrived".into(),
+            }),
+        )
+    }
+
+    fn wrong_build() -> flow::Outcome {
+        outcome(
+            true,
+            Some(Verdict::WrongBuild {
+                saw: "ead0bce".into(),
+                expected: "daa8b8e".into(),
+            }),
+        )
+    }
+
+    #[test]
+    fn every_board_confirmed_exits_zero() {
+        assert_eq!(exit_code(&[confirmed(), confirmed()]), EXIT_CONFIRMED);
+    }
+
+    #[test]
+    fn a_flash_nobody_could_read_back_exits_two_not_one() {
+        // Codeberg #378: this run wrote both boards successfully and
+        // stopped the script that chained on it. "Not confirmed" is not
+        // "failed", and the exit code has to say which one it is.
+        assert_eq!(exit_code(&[confirmed(), unknown()]), EXIT_UNCONFIRMED);
+        assert_eq!(exit_code(&[unknown()]), EXIT_UNCONFIRMED);
+    }
+
+    #[test]
+    fn a_board_that_contradicts_the_image_exits_one() {
+        assert_eq!(exit_code(&[wrong_build()]), EXIT_FLASH_FAILED);
+        assert_eq!(exit_code(&[confirmed(), wrong_build()]), EXIT_FLASH_FAILED);
+        assert_eq!(
+            exit_code(&[outcome(true, Some(Verdict::Absent))]),
+            EXIT_FLASH_FAILED
+        );
+        assert_eq!(exit_code(&[outcome(false, None)]), EXIT_FLASH_FAILED);
+    }
+
+    #[test]
+    fn a_real_failure_outranks_an_unread_board() {
+        // Both in one run: the operator has to reflash, so the exit code
+        // must be the one that says so.
+        assert_eq!(exit_code(&[unknown(), wrong_build()]), EXIT_FLASH_FAILED);
+        assert_eq!(exit_code(&[wrong_build(), unknown()]), EXIT_FLASH_FAILED);
+    }
+
+    #[test]
+    fn the_summary_line_never_names_a_sha_it_did_not_read() {
+        // The old summary printed `not confirmed — Some(WrongBuild { saw:
+        // "ead0bce" … })` for a board that had said nothing at all.
+        let line = unknown().describe();
+        assert!(line.contains("unknown"), "{line}");
+        assert!(!line.contains("ead0bce"), "{line}");
+        // A board that really did contradict the image still names both.
+        let line = wrong_build().describe();
+        assert!(
+            line.contains("ead0bce") && line.contains("daa8b8e"),
+            "{line}"
+        );
+    }
 
     fn plan(args: &[&str]) -> Result<RadioPlan, String> {
         let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))

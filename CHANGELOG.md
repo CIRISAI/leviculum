@@ -128,6 +128,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lnflash` confirms a flash against a build line the board emitted
+  *after* the reset the tool triggered, and no longer reports a good
+  flash as a failed one (#378). It used to read a 12 s window off a
+  bare `/dev/ttyACM` number and keep the last `[FW_BUILD]` in it, so a
+  line already in the port's input queue — filled before the question
+  was asked — could answer it: on 2026-09-09 a RAK4631 that was running
+  the new firmware was reported as `WrongBuild { saw: "ead0bce" }`,
+  the sha it had been running before the flash, and the run exited
+  non-zero. Now the bootloader must be gone from the bus (a board still
+  sitting in it never rebooted, which is `Absent`), the debug port is
+  resolved to its `by-id` path and the open proved against the board's
+  bus identity, the input queue is flushed, and only a complete line
+  arriving afterwards counts — a half-read `git_sha=daa8b8e` parses as
+  `daa8` and would be a failure manufactured out of a partial read. The
+  budget is three banner periods (15 s); the firmware emits one every
+  5 s, so a healthy board answers in the first. A confirmation that
+  cannot decide says the running build is unknown and names no sha at
+  all. The exit code now distinguishes the three: 0 confirmed, 1 the
+  flash failed (no board back, or a different build named, or nothing
+  written), 2 written but not read back.
+
 - `lnflash --watch` no longer stamps a torn first line as evidence:
   the port's buffer can hold a partial line written before DTR was
   raised, gluing two board lines at the tear. Bytes up to the first

@@ -24,7 +24,7 @@
 
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::entry;
 use crate::envelope::SessionReply;
@@ -375,8 +375,9 @@ pub struct Options {
     pub dry_run: bool,
     /// How long to wait for a bootloader or an application to appear.
     pub appear_within: Duration,
-    /// How long to listen for the `[FW_BUILD]` banner.
-    pub banner_window: Duration,
+    /// How long to spend establishing which build the board is running
+    /// once it has come back ([`verify::FRESH_BANNER_BUDGET`]).
+    pub banner_budget: Duration,
     /// What to do about the radio configuration once the board is up: ask,
     /// send what the flags already decided, or leave it alone.
     pub radio: RadioPlan,
@@ -391,7 +392,7 @@ impl Default for Options {
             board: None,
             dry_run: false,
             appear_within: entry::BOOTLOADER_APPEARS_WITHIN,
-            banner_window: verify::BANNER_WINDOW,
+            banner_budget: verify::FRESH_BANNER_BUDGET,
             radio: RadioPlan::default(),
             telemetry: TelemetryPlan::default(),
         }
@@ -473,6 +474,24 @@ pub struct Outcome {
     pub telemetry: Option<TelemetryOutcome>,
 }
 
+/// What one board's flash amounts to, in the only three states a caller
+/// can act on differently.
+///
+/// Kept apart because "not confirmed" was reported as a failure and cost a
+/// day of doubt on hardware that was fine (Codeberg #378). A script that
+/// chains on `lnflash` has to be able to tell "the board contradicts the
+/// image I wrote" (write it again, or look at the board) from "I could not
+/// read the board back" (read it again).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirmation {
+    /// Written, and the board named the build we wrote.
+    Confirmed,
+    /// Written, and the board neither confirmed nor contradicted it.
+    Unknown,
+    /// Not written, or the board contradicted it.
+    Failed,
+}
+
 impl Outcome {
     /// Whether the firmware is on the board and confirmed.
     ///
@@ -481,8 +500,32 @@ impl Outcome {
     /// that did not ACK is a board running our firmware on what it had
     /// stored — worth a warning, not worth reporting the flash as failed.
     pub fn is_good(&self) -> bool {
-        self.application_written.is_some()
-            && self.verdict.as_ref().is_some_and(Verdict::is_confirmed)
+        self.confirmation() == Confirmation::Confirmed
+    }
+
+    /// This board's contribution to the process exit code.
+    pub fn confirmation(&self) -> Confirmation {
+        if self.application_written.is_none() {
+            return Confirmation::Failed;
+        }
+        match &self.verdict {
+            Some(verdict) if verdict.is_confirmed() => Confirmation::Confirmed,
+            Some(verdict) if verdict.contradicts() => Confirmation::Failed,
+            // No verdict at all is the same claim as an unconfirmed one:
+            // the image went to the board and nothing came back about it.
+            _ => Confirmation::Unknown,
+        }
+    }
+
+    /// The closing line for this board, when it is not a plain success.
+    pub fn describe(&self) -> String {
+        match (&self.application_written, &self.verdict) {
+            (None, _) => "nothing was written".to_string(),
+            (Some(_), None) => {
+                "flashed, and the running build is unknown — it was never read back".to_string()
+            }
+            (Some(_), Some(verdict)) => verdict.describe(),
+        }
     }
 }
 
@@ -2204,7 +2247,22 @@ fn verify_boot(
     // The bootloader drive going away is the first half of "it took"; the
     // application coming back is the second. Waiting for the first also
     // keeps a stale sysfs entry from answering the second.
-    entry::wait_until_gone(sysfs, was, opts.appear_within)?;
+    //
+    // The answer is acted on rather than discarded: a board still sitting
+    // on the bus in its bootloader never rebooted into what was written, so
+    // whatever a port says next is about the session that was already
+    // running. Reading it would answer a question about the new image with
+    // a sentence from before it existed (#378).
+    if !entry::wait_until_gone(sysfs, was, opts.appear_within)? {
+        ui.say(&format!(
+            "{port}: the bootloader is still on the bus, so the board never rebooted into what \
+             was written."
+        ));
+        return Ok(Booted {
+            verdict: Verdict::Absent,
+            app: None,
+        });
+    }
     let Some(app) = entry::wait_for_application(sysfs, &ids, Some(was), opts.appear_within)? else {
         ui.say(&format!("{port}: the application never came back."));
         return Ok(Booted {
@@ -2218,13 +2276,10 @@ fn verify_boot(
         app.id
     ));
 
-    // if00 is the debug log. Without DTR+RTS it reads as silent even on a
-    // healthy board, which `Fd::set_debug_port` asserts.
-    let banner = match app.tty(0) {
-        Some(tty) => verify::read_banner(&tty, opts.banner_window).unwrap_or(None),
-        None => None,
-    };
-    let verdict = verify::judge(banner, confirmed.payloads().app.git_sha.as_deref());
+    let verdict = verify::judge(
+        running_build(sysfs, &app, opts),
+        confirmed.payloads().app.git_sha.as_deref(),
+    );
     match &verdict {
         Verdict::Confirmed { git_sha } => {
             ui.say(&format!("{port}: running git_sha={git_sha}. Done."))
@@ -2233,7 +2288,7 @@ fn verify_boot(
             "{port}: the board reports git_sha={saw}, not {expected}. The write did not take."
         )),
         Verdict::Unconfirmed { why } => ui.say(&format!(
-            "{port}: re-enumerated, but the firmware could not be confirmed — {why}."
+            "{port}: re-enumerated, but which build it is running is unknown — {why}."
         )),
         Verdict::Absent => {}
     }
@@ -2241,6 +2296,69 @@ fn verify_boot(
         verdict,
         app: Some(app),
     })
+}
+
+/// How long to wait before opening the debug port again after it went
+/// away mid-read. Long enough that a board in the middle of re-enumerating
+/// is not asked once per millisecond, short enough that the retry costs a
+/// small fraction of the budget it spends.
+const REOPEN_PAUSE: Duration = Duration::from_millis(200);
+
+/// What the board is running **now**, or the sentence explaining why that
+/// could not be established.
+///
+/// Three things this does that reading a window off `/dev/ttyACMn` did not
+/// (Codeberg #378):
+///
+/// * It waits for the debug interface to bind a driver and takes the
+///   **stable by-id path** ([`entry::wait_for_interface_tty`]). A board
+///   that has just re-enumerated can be on the bus before its ports are,
+///   and a bare tty number is a position rather than an identity — the
+///   number resolved a moment ago can name a different board by the time
+///   it is opened (#334 family). That other board is the one still running
+///   the firmware this flash replaced, so a read that lands on it comes
+///   back with exactly the pre-flash sha #378 reports.
+/// * It opens through [`open_debug`], which proves after the open that the
+///   fd is bound to *this* board before a byte is read.
+/// * It asks [`verify::fresh_banner`] for a line emitted after the reset,
+///   not for the last line in a window.
+///
+/// The budget covers the whole attempt, reopens included: a port that
+/// vanishes mid-read (a board that resets once more on its way up) is
+/// retried rather than reported, for as long as the budget lasts.
+fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::FwBuild, String> {
+    let deadline = Instant::now() + opts.banner_budget;
+    let mut why = format!(
+        "no [FW_BUILD] line arrived on the debug port (if{:02}) in the {} s after the reset",
+        crate::watch::DEBUG_INTERFACE,
+        opts.banner_budget.as_secs()
+    );
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(why);
+        }
+        match entry::wait_for_interface_tty(sysfs, app, crate::watch::DEBUG_INTERFACE, remaining) {
+            Ok(Some(tty)) => match open_debug(sysfs, app, &tty)
+                .and_then(|fd| verify::fresh_banner(&fd, deadline))
+            {
+                Ok(Some(build)) => return Ok(build),
+                Ok(None) => {}
+                Err(err) => why = format!("the debug port could not be read ({err})"),
+            },
+            Ok(None) => {
+                why = format!(
+                    "the debug port (if{:02}) never appeared",
+                    crate::watch::DEBUG_INTERFACE
+                )
+            }
+            Err(err) => why = format!("the debug port could not be resolved ({err})"),
+        }
+        if Instant::now() >= deadline {
+            return Err(why);
+        }
+        std::thread::sleep(REOPEN_PAUSE);
+    }
 }
 
 #[cfg(test)]

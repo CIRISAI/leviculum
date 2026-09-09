@@ -741,6 +741,63 @@ position for an identity is the defect itself.
 `tools/test-fw-readback.sh` (`just nrf-fw-readback`) drives all of this
 against stubbed boards, so it runs with no hardware.
 
+#### The line has to be one the board said after the reset
+
+Reading a window and keeping the last `[FW_BUILD]` in it is not the same
+question as "what is running now". The port's input queue was filled
+before the question was asked, and a line in it is an answer to a
+question nobody asked — on 2026-09-09 that made `lnflash` report
+
+```
+1 of 2 board(s) confirmed running the firmware in this bundle.
+  1-1 (rak4631): not confirmed — Some(WrongBuild { saw: "ead0bce", expected: "daa8b8e" })
+```
+
+about a board whose own debug port said `git_sha=daa8b8e` seconds
+later. `ead0bce` was the build that had been running before the flash.
+A completely successful flash exited non-zero, which stops any script
+that chains on it (Codeberg #378).
+
+The confirmation therefore establishes a boundary the tool itself
+creates, and only accepts what comes after it
+(`lnflash/src/verify.rs`, `fresh_banner`):
+
+- **The board must have left the bus.** If the bootloader is still
+  there when the wait times out, the board never rebooted into what was
+  written, and nothing a port says next is about the new image. That is
+  `Absent`, not a build claim.
+- **The port's input queue is flushed on open** — one `tcflush`, the
+  same one every control transaction does — so no line from the
+  previous session can be read as an answer.
+- **The debug port is resolved to its `by-id` path and the open is
+  proved** against the board's bus identity before a byte is read
+  (`entry::wait_for_interface_tty`, `flow::open_debug`). A bare
+  `/dev/ttyACM` number is a position, and on a multi-board run the
+  board it moves to is the one still carrying the firmware this flash
+  replaced.
+- **Only a complete line counts.** A half-read `git_sha=daa8b8e` parses
+  as `daa8` and would be reported as a *different* build — a failure
+  manufactured out of a partial read.
+- **The budget is three banner periods, 15 s.** The firmware emits one
+  every 5 s, so a healthy board answers inside the first; the margin
+  covers a board whose banner task ticks just before the port opens and
+  a line the flush cut in half. A board still silent after that is
+  silent, and silence is `unknown`.
+
+The exit code carries the same three-way split, because "not confirmed"
+and "failed" need different things done about them:
+
+| exit | meaning |
+|---|---|
+| 0 | every board was written and named the build in this bundle |
+| 1 | the flash failed: a board did not come back, or named a different build, or nothing was written |
+| 2 | every board took the write, none contradicted it, and at least one could not be read back |
+
+Naming the old sha as if it were current is the defect. A confirmation
+that cannot decide says `unknown` and never names a sha it did not
+read.
+
+
 `just nrf-shellcheck` (Codeberg #345) is the static half of the same
 coverage: `shellcheck -x` over `leviculum-nrf/tools/*.sh` and
 `scripts/flash-lnodes-from-head.sh`, which sources them. The scripts
