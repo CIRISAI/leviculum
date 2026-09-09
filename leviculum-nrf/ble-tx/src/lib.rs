@@ -38,6 +38,7 @@ pub mod adv;
 pub mod drain;
 pub mod peer;
 pub mod registry;
+pub mod window;
 
 pub use adv::{
     ad_structure_len, manufacturer_data, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, COMPANY_ID,
@@ -49,6 +50,9 @@ pub use peer::{
     ScanMode,
 };
 pub use registry::PeerRegistry;
+pub use window::{
+    CandidateTable, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+};
 
 /// Upper bound on a single wait for the SoftDevice's
 /// `BLE_GATTS_EVT_HVN_TX_COMPLETE`, in milliseconds.

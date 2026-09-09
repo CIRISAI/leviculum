@@ -10,32 +10,60 @@
 //! The harness is calibrated against the issue's own Monte Carlo: under
 //! the strict rule it reproduces the published disconnection rates
 //! exactly (21 % of orders at 10 boards, 40 % at 20 — see the control
-//! below). What it then shows about the fallback is sharper than the
-//! issue's "0 %" row:
+//! below). Part 2 of the batch turned it into a 2×2 instrument over the
+//! two open policy questions:
 //!
-//! 1. **No board is ever left without a BLE link.** The issue's
-//!    headline failure — a board that "sits scanning forever with no
-//!    BLE link at all" — is gone: 0 of 1 000 orders at both sizes,
-//!    against 84/1000 under the strict rule at n=10.
-//! 2. **The residual disconnection is one specific, rarer mechanism:
-//!    the fully saturated cycle lock.** A fallback dial can land inside
-//!    the dialler's own component and close a cycle there, spending the
-//!    component's last free central; if every component saturates this
-//!    way simultaneously, nobody is scanning and disjoint components
-//!    never merge (2/1000 orders at n=10, 48/1000 at n=20). The tests
-//!    assert that every disconnected order shows exactly this
-//!    signature — all outgoing links in use — so a disconnected board
-//!    that is still SEARCHING would fail them: the fallback rule itself
-//!    has no remaining gap, the single-central topology does. Closing
-//!    the lock needs a smarter target choice (collecting a scan window
-//!    and dialling the lowest-addressed candidate yields 0/1000 at both
-//!    sizes in this harness), which belongs to the free-slot-record
-//!    batch (#375 item 3), not to the rule.
-//! 3. The strict-only control proves the fallback is what changed the
-//!    outcome, not the harness: same seeds, same loop, 210/1000
-//!    disconnected orders.
+//! - **When may the fallback fire?** [`FallbackSpec::Eager`]: the clock
+//!   runs whenever the outgoing slot is free (as first built).
+//!   [`FallbackSpec::Quiet`]: only while the board has no live link in
+//!   either role — the rig showed an eager fallback dialling its own
+//!   already-linked peer every ~20 s forever (§0 of the 2026-09-09
+//!   batch), so quiet is the shipped spec.
+//! - **Which eligible advertiser is dialled?**
+//!   [`TargetChoice::FirstSeen`]: whichever eligible PDU the radio
+//!   heard first (as first built; seeded random here).
+//!   [`TargetChoice::LowestEligible`]: collect one scan window and dial
+//!   the lowest-addressed candidate, strict verdicts before fallback
+//!   verdicts, via the same [`CandidateTable`] the firmware and lnsd
+//!   use — the policy is shared by construction.
+//!
+//! Measured on this seed stream (disconnected/linkless orders per 1000):
+//!
+//! | spec  | choice   | n=10        | n=20        |
+//! |-------|----------|-------------|-------------|
+//! | eager | first    | 2 / 0       | 48 / 0      |
+//! | eager | lowest   | 0 / 0       | 0 / 0       |
+//! | quiet | first    | 126 / 0     | 328 / 0     |
+//! | quiet | lowest   | 28 / 0      | 78 / 0      |
+//! | strict (control) | 210 / 84    | 400 / 80    |
+//!
+//! What the assertions below hold on to:
+//!
+//! - **The lowest-eligible window closes the saturated-cycle lock**:
+//!   eager/lowest is 0/1000 at both sizes, and under quiet it cuts the
+//!   splits by ~4× against first-seen.
+//! - **The quiet spec has a real, bounded cost in this harness**:
+//!   28/1000 and 78/1000 disconnected orders against eager/lowest's
+//!   0/0 — well beyond noise. The mechanism: quiet suppresses exactly
+//!   the cross-component merge dial. A component whose boards all hold
+//!   SOME link (so their clocks are suspended) but lose the sort
+//!   against the other component's advertisers can never initiate the
+//!   merge, and when no strict edge exists in either direction the two
+//!   components are stable disjoint. Every residual split is of this
+//!   all-linked kind — the linkless column stays 0, so #375's headline
+//!   failure (a board with no BLE link at all, scanning forever) never
+//!   returns. The harness is also a static worst case: links here
+//!   never drop, while any real link churn unsuspends a board, restarts
+//!   its 30 s strict phase and then lets it fallback-dial the other
+//!   component. Quiet is nonetheless the shipped spec — the rig showed
+//!   an eager fallback dialling a peer it was already linked to every
+//!   ~20 s, forever (§0 of the 2026-09-09 batch): a dial the Core Spec
+//!   dooms (Vol 6 Part B §4.5, one connection per address pair), spent
+//!   on air every cycle.
 
-use leviculum_ble_tx::{should_initiate, ScanMode};
+use leviculum_ble_tx::{
+    should_initiate, CandidateTable, ConnectDecision, ScanMode, WINDOW_CANDIDATES,
+};
 
 /// The firmware's incoming-slot count (`PERIPH_LINKS`, #372).
 const PERIPH_SLOTS: usize = 3;
@@ -52,6 +80,32 @@ const FALLBACK_AFTER_ROUNDS: u32 = 6;
 /// is about one order in five, so a thousand orders leaves a vanishing
 /// chance of the control finding nothing.
 const ORDERS: u64 = 1_000;
+
+/// When the fallback clock may run (#375 part 2, item 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackSpec {
+    /// No fallback at all: the strict rule as published (the control).
+    Off,
+    /// As first built: the clock runs whenever the outgoing slot is
+    /// free, live incoming links notwithstanding.
+    Eager,
+    /// The shipped spec: the clock is suspended (held at zero) while
+    /// the board has ANY live link in either role; only a fully
+    /// linkless board may dial against the sort.
+    Quiet,
+}
+
+/// Which eligible advertiser a scanning board dials (#375 part 2, item 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetChoice {
+    /// Whichever eligible PDU the radio heard first — arbitrary, so
+    /// seeded random here (as the firmware behaved before the window).
+    FirstSeen,
+    /// One scan window collected, then the lowest-addressed eligible
+    /// candidate, strict verdicts before fallback verdicts — the real
+    /// [`CandidateTable`] policy.
+    LowestEligible,
+}
 
 /// xorshift64* — deterministic, seedable, no dependency.
 fn next_rand(state: &mut u64) -> u64 {
@@ -84,7 +138,7 @@ fn linked(boards: &[Board], a: usize, b: usize) -> bool {
 }
 
 /// Replay one arrival order to quiescence and return the final boards.
-fn run_sim(n: usize, seed: u64, with_fallback: bool) -> Vec<Board> {
+fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice) -> Vec<Board> {
     let mut rng = seed | 1;
     let mut boards: Vec<Board> = Vec::with_capacity(n);
     while boards.len() < n {
@@ -126,44 +180,78 @@ fn run_sim(n: usize, seed: u64, with_fallback: bool) -> Vec<Board> {
             if !boards[i].arrived || boards[i].outgoing.is_some() {
                 continue;
             }
-            let mode = if with_fallback && boards[i].strict_rounds >= FALLBACK_AFTER_ROUNDS {
+            // The quiet spec suspends the clock while ANY link is live
+            // (the firmware resets it on every scan pass that finds a
+            // live connection); an outgoing link already stopped the
+            // scan above, so incoming links are what decides here.
+            let suspended = spec == FallbackSpec::Quiet && !boards[i].incoming.is_empty();
+            let mode = if spec != FallbackSpec::Off
+                && !suspended
+                && boards[i].strict_rounds >= FALLBACK_AFTER_ROUNDS
+            {
                 ScanMode::Fallback
             } else {
                 ScanMode::Strict
             };
             // Visible: arrived, advertising (a full board is not), not
             // ourselves, not already linked to us; then the real rule.
-            let candidates: Vec<usize> = (0..n)
-                .filter(|&p| {
-                    p != i
-                        && boards[p].arrived
-                        && boards[p].incoming.len() < PERIPH_SLOTS
-                        && !linked(&boards, i, p)
-                        && should_initiate(0, boards[i].addr, Some(0), boards[p].addr, mode)
-                            .initiate()
+            let candidates: Vec<(usize, ConnectDecision)> = (0..n)
+                .filter_map(|p| {
+                    if p == i
+                        || !boards[p].arrived
+                        || boards[p].incoming.len() >= PERIPH_SLOTS
+                        || linked(&boards, i, p)
+                    {
+                        return None;
+                    }
+                    let decision =
+                        should_initiate(0, boards[i].addr, Some(0), boards[p].addr, mode);
+                    decision.initiate().then_some((p, decision))
                 })
                 .collect();
-            match candidates.as_slice() {
-                [] => boards[i].strict_rounds += 1,
-                found => {
-                    // The firmware dials whichever eligible PDU it saw
-                    // first, so the pick is arbitrary: seeded random.
-                    let target = found[(next_rand(&mut rng) as usize) % found.len()];
-                    boards[i].outgoing = Some(target);
-                    boards[target].incoming.push(i);
-                    // A link up resets the clock in either role, as
-                    // `peer_link_up` does on the firmware.
+            if candidates.is_empty() {
+                if suspended {
                     boards[i].strict_rounds = 0;
-                    boards[target].strict_rounds = 0;
-                    any_link = true;
+                } else {
+                    boards[i].strict_rounds += 1;
                 }
+            } else {
+                let target = match choice {
+                    // The pre-window firmware dialled whichever eligible
+                    // PDU it saw first, so the pick is arbitrary: seeded
+                    // random.
+                    TargetChoice::FirstSeen => {
+                        candidates[(next_rand(&mut rng) as usize) % candidates.len()].0
+                    }
+                    // One round IS one collected window here: every
+                    // eligible advertiser was heard, the table chooses.
+                    TargetChoice::LowestEligible => {
+                        let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
+                            CandidateTable::new();
+                        for &(p, decision) in &candidates {
+                            window.offer(boards[p].addr, decision, p);
+                        }
+                        window
+                            .into_best()
+                            .map(|(_, _, p)| p)
+                            .expect("a non-empty candidate set chooses")
+                    }
+                };
+                boards[i].outgoing = Some(target);
+                boards[target].incoming.push(i);
+                // A link up resets the clock in either role, as the
+                // firmware does on the connection event.
+                boards[i].strict_rounds = 0;
+                boards[target].strict_rounds = 0;
+                any_link = true;
             }
         }
 
         linkless_streak = if any_link { 0 } else { linkless_streak + 1 };
         // Quiescent: everyone has arrived and even the boards that
         // reached fallback during the streak found nobody. Visibility
-        // only changes when a link forms, so nothing changes hereafter.
+        // only changes when a link forms (a quiet-suspended board's
+        // links never drop here), so nothing changes hereafter.
         if round >= n && linkless_streak > FALLBACK_AFTER_ROUNDS {
             break;
         }
@@ -196,47 +284,142 @@ fn is_connected(boards: &[Board]) -> bool {
     seen.iter().all(|&s| s)
 }
 
-/// The two fallback claims at one size: no board ends linkless, and
-/// every disconnected order carries the saturated-cycle-lock signature
-/// (all outgoing links in use, so nobody was still searching), with the
-/// lock rarer than `max_locked` orders in [`ORDERS`].
-fn assert_fallback_properties(n: usize, max_locked: usize) {
-    let mut locked = Vec::new();
+/// One configuration's rates over [`ORDERS`] seeded orders.
+struct Outcome {
+    /// Orders whose final graph is not one connected component.
+    disconnected: usize,
+    /// Orders where some board ended with no BLE link at all.
+    linkless: usize,
+}
+
+fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice) -> Outcome {
+    let mut outcome = Outcome {
+        disconnected: 0,
+        linkless: 0,
+    };
     for seed in 0..ORDERS {
-        let boards = run_sim(n, 0xB1E5_0000 + seed, true);
-        for (i, b) in boards.iter().enumerate() {
-            assert!(
-                b.outgoing.is_some() || !b.incoming.is_empty(),
-                "board {i} ended with no BLE link at n={n}, seed {seed}"
-            );
-        }
+        let boards = run_sim(n, 0xB1E5_0000 + seed, spec, choice);
         if !is_connected(&boards) {
-            assert!(
-                boards.iter().all(|b| b.outgoing.is_some()),
-                "disconnected with a board still searching at n={n}, seed {seed}: \
-                 the fallback rule itself failed, not the saturation lock"
-            );
-            locked.push(seed);
+            outcome.disconnected += 1;
+        }
+        if boards
+            .iter()
+            .any(|b| b.outgoing.is_none() && b.incoming.is_empty())
+        {
+            outcome.linkless += 1;
         }
     }
-    assert!(
-        locked.len() <= max_locked,
-        "saturated-cycle locks at n={n} grew past {max_locked}/{ORDERS}: {locked:?}"
+    outcome
+}
+
+/// The batch's two-spec table (item 1): both fallback specs, with and
+/// without the lowest-eligible window, at both sizes, plus the strict
+/// baseline — printed for the record (`--nocapture`), with the
+/// load-bearing cells asserted:
+///
+/// - eager/lowest yields 0/1000 disconnected orders at both sizes —
+///   the saturated-cycle lock is a first-seen artefact and the window
+///   removes it entirely;
+/// - the quiet spec's cost against eager/lowest is exactly the pinned
+///   28 and 78 orders (the module docs say why, and why it is shipped
+///   anyway); the seed stream is fixed, so equality, like the
+///   calibration cells;
+/// - no fallback configuration ever leaves a board linkless — #375's
+///   headline failure stays gone under every spec;
+/// - the calibration cells still match the published measurements
+///   (eager/first: 2 and 48), so the instrument itself has not moved.
+#[test]
+fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest() {
+    let configs = [
+        (FallbackSpec::Off, TargetChoice::FirstSeen, "strict"),
+        (FallbackSpec::Eager, TargetChoice::FirstSeen, "eager/first"),
+        (
+            FallbackSpec::Eager,
+            TargetChoice::LowestEligible,
+            "eager/lowest",
+        ),
+        (FallbackSpec::Quiet, TargetChoice::FirstSeen, "quiet/first"),
+        (
+            FallbackSpec::Quiet,
+            TargetChoice::LowestEligible,
+            "quiet/lowest",
+        ),
+    ];
+    let mut rates = std::collections::HashMap::new();
+    println!("spec/choice     n=10 disc/linkless   n=20 disc/linkless   (per {ORDERS})");
+    for (spec, choice, label) in configs {
+        let at10 = measure(10, spec, choice);
+        let at20 = measure(20, spec, choice);
+        println!(
+            "{label:<15} {:>4} / {:<10} {:>4} / {:<10}",
+            at10.disconnected, at10.linkless, at20.disconnected, at20.linkless
+        );
+        rates.insert(label, (at10, at20));
+    }
+
+    let (at10, at20) = &rates["eager/lowest"];
+    assert_eq!(
+        (at10.disconnected, at20.disconnected),
+        (0, 0),
+        "eager/lowest: the lowest-eligible window must close the saturation lock"
+    );
+    let (at10, at20) = &rates["quiet/lowest"];
+    assert_eq!(
+        (at10.disconnected, at20.disconnected),
+        (28, 78),
+        "quiet/lowest moved: the quiet spec's documented cost is stale, re-measure"
+    );
+    for label in ["eager/first", "eager/lowest", "quiet/first", "quiet/lowest"] {
+        let (at10, at20) = &rates[label];
+        assert_eq!(
+            (at10.linkless, at20.linkless),
+            (0, 0),
+            "{label}: a fallback spec left some board with no BLE link at all"
+        );
+    }
+    let (cal10, cal20) = &rates["eager/first"];
+    assert_eq!(
+        (cal10.disconnected, cal20.disconnected),
+        (2, 48),
+        "the calibration cells moved: the instrument changed, re-measure everything"
     );
 }
 
+/// The shipped configuration (quiet fallback + lowest-eligible window)
+/// at both sizes: no board is EVER left without a BLE link, and every
+/// residual disconnected order carries the quiet-suspension signature —
+/// all boards hold links, nobody is a stranded scanner. That signature
+/// is what separates the quiet spec's documented cost (an all-linked
+/// split, unfrozen by any real-world link churn) from a fallback-rule
+/// failure (a linkless board that never dials), which must stay
+/// impossible.
 #[test]
-fn ten_boards_connect_or_rarely_lock_saturated_and_nobody_is_linkless() {
-    // Measured on this seed stream: 2/1000 locked orders (the strict
-    // control below loses 210/1000).
-    assert_fallback_properties(10, 5);
-}
-
-#[test]
-fn twenty_boards_connect_or_rarely_lock_saturated_and_nobody_is_linkless() {
-    // Measured on this seed stream: 48/1000 locked orders (the strict
-    // rule loses 400/1000).
-    assert_fallback_properties(20, 60);
+fn the_shipped_config_strands_nobody_and_splits_only_into_fully_linked_components() {
+    for n in [10usize, 20] {
+        let mut split = 0usize;
+        for seed in 0..ORDERS {
+            let boards = run_sim(
+                n,
+                0xB1E5_0000 + seed,
+                FallbackSpec::Quiet,
+                TargetChoice::LowestEligible,
+            );
+            for (i, b) in boards.iter().enumerate() {
+                assert!(
+                    b.outgoing.is_some() || !b.incoming.is_empty(),
+                    "board {i} ended with no BLE link at n={n}, seed {seed}"
+                );
+            }
+            if !is_connected(&boards) {
+                split += 1;
+            }
+        }
+        let pinned = if n == 10 { 28 } else { 78 };
+        assert_eq!(
+            split, pinned,
+            "quiet/lowest splits at n={n} moved off the documented rate"
+        );
+    }
 }
 
 /// The control: identical harness, identical seeds, fallback off — the
@@ -246,27 +429,16 @@ fn twenty_boards_connect_or_rarely_lock_saturated_and_nobody_is_linkless() {
 /// Carlo says 21 %), 84 of which leave some board with no link at all.
 #[test]
 fn control_the_strict_rule_alone_disconnects_a_fifth_of_the_orders() {
-    let mut disconnected = 0usize;
-    let mut some_board_linkless = 0usize;
-    for seed in 0..ORDERS {
-        let boards = run_sim(10, 0xB1E5_0000 + seed, false);
-        if !is_connected(&boards) {
-            disconnected += 1;
-        }
-        if boards
-            .iter()
-            .any(|b| b.outgoing.is_none() && b.incoming.is_empty())
-        {
-            some_board_linkless += 1;
-        }
-    }
+    let outcome = measure(10, FallbackSpec::Off, TargetChoice::FirstSeen);
     assert!(
-        disconnected >= 100,
-        "the strict rule connected almost every order ({disconnected}/{ORDERS} lost); \
-         the control lost its teeth"
+        outcome.disconnected >= 100,
+        "the strict rule connected almost every order ({}/{ORDERS} lost); \
+         the control lost its teeth",
+        outcome.disconnected
     );
     assert!(
-        some_board_linkless >= 50,
-        "strict orders with a fully linkless board: {some_board_linkless}/{ORDERS}"
+        outcome.linkless >= 50,
+        "strict orders with a fully linkless board: {}/{ORDERS}",
+        outcome.linkless
     );
 }
