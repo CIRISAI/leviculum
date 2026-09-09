@@ -28,9 +28,10 @@ use embassy_sync::channel::Sender;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, ConnectDecision,
-    PeerRegistry, ScanMode, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS,
+    addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
+    ConnectDecision, PeerRegistry, ScanMode, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
+    LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -812,9 +813,19 @@ impl RecentDeadEnds {
     }
 }
 
-/// Scan until one advertisement wins an initiate decision, and return
-/// that peer's current address plus the rule that permitted it (the
-/// caller resets the fallback clock on a strict verdict, #375).
+/// Scan until one advertisement wins an initiate decision, keep
+/// collecting further eligible advertisers for one bounded window
+/// ([`SCAN_WINDOW_COLLECT_MS`]), then return the best candidate — the
+/// lowest eligible address, strict verdicts before fallback verdicts —
+/// plus the rule that permitted it (the caller resets the fallback
+/// clock on a strict verdict, #375) and the window's `seen` count for
+/// the `BLE_SCAN_WINDOW` log line.
+///
+/// Dialling the FIRST eligible advertiser instead is what enabled the
+/// saturated-cycle lock (`graph_formation.rs`: 48/1000 disconnected
+/// orders at 20 boards; the window's choice gives 0). The choice
+/// itself lives in [`CandidateTable`], the same pure structure the
+/// simulation and lnsd use, so the three cannot drift.
 ///
 /// Every connectable PDU carrying the Reticulum service UUID gets a
 /// [`should_initiate`] verdict from the v2.2 sort + v0.3.0 override
@@ -826,7 +837,7 @@ async fn find_peer_to_initiate(
     sd: &'static Softdevice,
     own_addr_value: u64,
     skip: &RecentDeadEnds,
-) -> Result<(Address, ConnectDecision), central::ScanError> {
+) -> Result<Option<(Address, ConnectDecision, usize)>, central::ScanError> {
     let config = central::ScanConfig {
         active: false,
         extended: false,
@@ -834,21 +845,27 @@ async fn find_peer_to_initiate(
         window: SCAN_WINDOW_625US,
         ..central::ScanConfig::default()
     };
+    let window: RefCell<CandidateTable<Address, WINDOW_CANDIDATES>> =
+        RefCell::new(CandidateTable::new());
     let last_logged: Cell<Option<(u64, ConnectDecision)>> = Cell::new(None);
-    central::scan(sd, &config, |report| {
+    // One advertising report's whole pipeline — parse, decide, log,
+    // filter, collect — shared verbatim by both scan phases below;
+    // `true` iff the report put a candidate into the window.
+    let consider = |report: &nrf_softdevice::raw::ble_gap_evt_adv_report_t| -> bool {
         // Only PDUs we could act on: connectable advertising, not scan
         // responses (passive scanning yields none, but the filter makes
         // the assumption explicit rather than inherited).
         if report.type_.connectable() == 0 || report.type_.scan_response() != 0 {
-            return None;
+            return false;
         }
         // SAFETY: the SoftDevice hands us this report synchronously;
         // p_data/len describe its advertising-data buffer, valid for
         // the duration of the callback.
-        let data = unsafe { core::slice::from_raw_parts(report.data.p_data, report.data.len as usize) };
+        let data =
+            unsafe { core::slice::from_raw_parts(report.data.p_data, report.data.len as usize) };
         let parsed = parse_peer_advertisement(data, &RETICULUM_SVC_UUID_LE);
         if !parsed.offers_service {
-            return None;
+            return false;
         }
         let peer = Address::from_raw(report.peer_addr);
         let peer_value = addr_value(&peer.bytes());
@@ -881,11 +898,30 @@ async fn find_peer_to_initiate(
         // we already hold a connection with can only time out (see
         // [`addr_already_linked`]), so it never leaves the scanner.
         if !decision.initiate() || skip.contains(peer_value) || addr_already_linked(peer_value) {
-            return None;
+            return false;
         }
-        Some((peer, decision))
-    })
-    .await
+        window.borrow_mut().offer(peer_value, decision, peer)
+    };
+    // Phase 1: scan until the first eligible candidate opens the
+    // window. A strict pass that never finds one never ends — that is
+    // the searching state the fallback clock measures.
+    central::scan(sd, &config, |report| consider(report).then_some(())).await?;
+    // Phase 2: keep scanning for the window bound, collecting into the
+    // table; the callback accepts nothing, so this scan can only end
+    // in an error — the timer closing the window is the normal path.
+    let collect = central::scan(sd, &config, |report| {
+        consider(report);
+        None::<()>
+    });
+    match select(collect, Timer::after_millis(SCAN_WINDOW_COLLECT_MS)).await {
+        Either::First(Err(err)) => return Err(err),
+        Either::First(Ok(())) | Either::Second(()) => {}
+    }
+    let window = window.into_inner();
+    let seen = window.seen();
+    Ok(window
+        .into_best()
+        .map(|(_, decision, peer)| (peer, decision, seen)))
 }
 
 /// One central link, connect to teardown. Returns after logging why it
@@ -1282,7 +1318,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
         )
         .await
         {
-            Either::First(Ok((peer, decision))) => {
+            Either::First(Ok(Some((peer, decision, seen)))) => {
                 // A strict verdict is a permitted peer: the strict rule
                 // works here, so the fallback clock restarts (#375). A
                 // fallback verdict must NOT restart it — if this dial
@@ -1292,6 +1328,18 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 if decision != ConnectDecision::InitiateFallback {
                     note_strict_reset();
                 }
+                // Once per window that ends in a dial: how many
+                // eligible advertisers the window held and which one
+                // the shared choice elected, under which rule.
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!(
+                        "BLE_SCAN_WINDOW seen={} chosen={:012x} rule={}",
+                        seen,
+                        addr_value(&peer.bytes()),
+                        decision.as_str(),
+                    ),
+                );
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!(
@@ -1301,6 +1349,10 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
                 );
                 central_link(sd, &identity_hash, peer, decision, &mut dead_ends).await;
             }
+            // Unreachable in practice — a window only closes after its
+            // first candidate — but an empty one is a plain rescan,
+            // never a panic.
+            Either::First(Ok(None)) => continue,
             Either::First(Err(err)) => {
                 crate::warn!("BLE: scan pass failed err={:?}", err);
             }
