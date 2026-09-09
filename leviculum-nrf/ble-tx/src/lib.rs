@@ -37,6 +37,7 @@
 pub mod adv;
 pub mod drain;
 pub mod gap;
+pub mod hold;
 pub mod peer;
 pub mod registry;
 pub mod window;
@@ -47,6 +48,7 @@ pub use adv::{
 };
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use gap::{effective_tx_gap_ms, TxGap, DEFAULT_TX_GAP_MS};
+pub use hold::TxHold;
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,

@@ -262,6 +262,17 @@ the same default on its notify pipe and each central link — it is the
 phone stand-in on the rig and must behave like a board toward a real
 phone.
 
+Related, from the same desk session: the peripheral pump **drains
+nothing before the peer can receive**. The first notify on a fresh
+connection, sent before the central had written the TX CCCD, fails
+inside the SoftDevice (`sd_error code=13313`,
+`BLE_ERROR_GATTS_SYS_ATTR_MISSING`) and the packet dies. The pump now
+holds the drain until both the CCCD subscription and the identity
+handshake have happened — packets queued before that wait, they are not
+dropped — and logs `BLE_TX_HELD conn=<h> reason=not-subscribed` once
+per connection when it actually held one. Policy host-tested in
+`leviculum-ble-tx`'s `hold` module.
+
 ## ble-leviculum (BLE 5 broadcast mesh)
 
 Reticulum broadcasts are sent as real BLE 5 connectionless extended

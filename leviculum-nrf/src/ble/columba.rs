@@ -21,7 +21,7 @@
 use core::cell::{Cell, RefCell};
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::Sender;
@@ -448,6 +448,16 @@ async fn gatt_events(
     let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new());
     let handshake_done: Cell<bool> = Cell::new(false);
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
+    // The drain hold (#376): nothing is notified — packets or
+    // keepalives — until the peer has BOTH written the TX CCCD and
+    // handshaked, whichever lands later. The 11:31:18 field T114 sent
+    // its first notify before the central had subscribed and the
+    // SoftDevice refused it with sd_error 13313
+    // (BLE_ERROR_GATTS_SYS_ATTR_MISSING); the packet died. Policy
+    // host-tested in [`leviculum_ble_tx::hold`]; the latch wakes the
+    // outbound arm when readiness changes.
+    let tx_hold: Cell<leviculum_ble_tx::TxHold> = Cell::new(leviculum_ble_tx::TxHold::new());
+    let tx_ready: Signal<CriticalSectionRawMutex, ()> = Signal::new();
     // The identity this link's peer presented in the handshake, for
     // tagging inbound packets with their ingress link (Codeberg #365).
     // `None` until the handshake lands.
@@ -463,51 +473,65 @@ async fn gatt_events(
 
     let inbound = gatt_server::run(conn, server, |evt| {
         let ReticulumServerEvent::ReticulumService(service_evt) = evt;
-        // tx is notify-only; CCCD writes from the peer would also land in
-        // this event stream, but the macro variant naming depends on
-        // whether `notify` was declared. Any variant other than RxWrite
-        // is a no-op for us, hence `if let`.
-        if let ReticulumServiceEvent::RxWrite(data) = service_evt {
-            if !handshake_done.get() && data.len() == 16 {
-                // Identity handshake — peer's first write is its 16-byte identity.
-                crate::log::log_fmt(
-                    "[BLE ] ",
-                    format_args!(
-                        "peer id: {:02x}{:02x}{:02x}{:02x}",
-                        data[0], data[1], data[2], data[3]
-                    ),
-                );
-                let mut peer_id = [0u8; 16];
-                peer_id.copy_from_slice(&data);
-                peer_link_up(slot_index, conn_handle, peer_value, peer_id);
-                link_peer.set(Some(peer_id));
-                handshake_done.set(true);
-                last_keepalive.set(Instant::now());
-            } else if data.len() < FRAGMENT_HEADER_SIZE {
-                // Single-byte keepalive (0x00); nothing to defragment.
-            } else {
-                let now = Instant::now().as_millis();
-                let mut d = defrag.replace(BleDefragmenter::new());
-                let result = process_logged(&mut d, &data, now, slot_index);
-                let frags = d.last_completed_fragments();
-                defrag.set(d);
-                match result {
-                    DefragResult::Complete(packet) => {
-                        // conn= tells the phone's link from the
-                        // neighbour board's; frags= shows how the
-                        // peer fragmented (#376).
-                        crate::info!(
-                            "BLE: RX {}B conn={} frags={}",
-                            packet.len(),
-                            conn_handle,
-                            frags
-                        );
-                        // try_send: if the consumer is slow and the 4-deep
-                        // channel is full, drop the packet rather than block
-                        // here (we're in a sync closure, can't await).
-                        let _ = incoming_tx.try_send((link_peer.get(), packet));
+        match service_evt {
+            ReticulumServiceEvent::RxWrite(data) => {
+                if !handshake_done.get() && data.len() == 16 {
+                    // Identity handshake — peer's first write is its 16-byte identity.
+                    crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "peer id: {:02x}{:02x}{:02x}{:02x}",
+                            data[0], data[1], data[2], data[3]
+                        ),
+                    );
+                    let mut peer_id = [0u8; 16];
+                    peer_id.copy_from_slice(&data);
+                    peer_link_up(slot_index, conn_handle, peer_value, peer_id);
+                    link_peer.set(Some(peer_id));
+                    handshake_done.set(true);
+                    last_keepalive.set(Instant::now());
+                    let mut hold = tx_hold.get();
+                    hold.note_handshake();
+                    tx_hold.set(hold);
+                    if hold.ready() {
+                        tx_ready.signal(());
                     }
-                    DefragResult::NeedMore | DefragResult::Error => {}
+                } else if data.len() < FRAGMENT_HEADER_SIZE {
+                    // Single-byte keepalive (0x00); nothing to defragment.
+                } else {
+                    let now = Instant::now().as_millis();
+                    let mut d = defrag.replace(BleDefragmenter::new());
+                    let result = process_logged(&mut d, &data, now, slot_index);
+                    let frags = d.last_completed_fragments();
+                    defrag.set(d);
+                    match result {
+                        DefragResult::Complete(packet) => {
+                            // conn= tells the phone's link from the
+                            // neighbour board's; frags= shows how the
+                            // peer fragmented (#376).
+                            crate::info!(
+                                "BLE: RX {}B conn={} frags={}",
+                                packet.len(),
+                                conn_handle,
+                                frags
+                            );
+                            // try_send: if the consumer is slow and the 4-deep
+                            // channel is full, drop the packet rather than block
+                            // here (we're in a sync closure, can't await).
+                            let _ = incoming_tx.try_send((link_peer.get(), packet));
+                        }
+                        DefragResult::NeedMore | DefragResult::Error => {}
+                    }
+                }
+            }
+            // The peer wrote the TX CCCD — the subscription half of the
+            // drain hold (#376). An unsubscribe re-arms the hold.
+            ReticulumServiceEvent::TxCccdWrite { notifications } => {
+                let mut hold = tx_hold.get();
+                hold.note_subscription(notifications);
+                tx_hold.set(hold);
+                if hold.ready() {
+                    tx_ready.signal(());
                 }
             }
         }
@@ -518,14 +542,37 @@ async fn gatt_events(
         // link, so a reconnect starts unpaced.
         let mut tx_gap = TxGap::new();
         loop {
-            let keepalive_deadline = if handshake_done.get() {
+            // Keepalives only once the link is ready (#376): before the
+            // CCCD subscription a keepalive notify fails with the same
+            // sd_error 13313 the first packet did. Readiness implies the
+            // handshake, which is what armed this deadline before.
+            let keepalive_deadline = if tx_hold.get().ready() {
                 Timer::at(last_keepalive.get() + Duration::from_millis(KEEPALIVE_INTERVAL_MS))
             } else {
                 Timer::at(Instant::MAX)
             };
 
-            match select(outgoing_rx.receive(), keepalive_deadline).await {
-                Either::First(packet) => {
+            match select3(outgoing_rx.receive(), keepalive_deadline, tx_ready.wait()).await {
+                Either3::First(packet) => {
+                    if !tx_hold.get().ready() {
+                        // Held, not dropped (#376): the packet waits here
+                        // until the subscription (or the handshake, if
+                        // later) lands; the link's queue holds the rest.
+                        let mut hold = tx_hold.get();
+                        if hold.note_held() {
+                            crate::log::log_fmt(
+                                "[BLE ] ",
+                                format_args!(
+                                    "BLE_TX_HELD conn={} reason=not-subscribed",
+                                    conn_handle
+                                ),
+                            );
+                        }
+                        tx_hold.set(hold);
+                        while !tx_hold.get().ready() {
+                            tx_ready.wait().await;
+                        }
+                    }
                     serve_tx_gap(&tx_gap, conn_handle).await;
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
                     notify_fragments(
@@ -540,12 +587,14 @@ async fn gatt_events(
                     .await;
                     tx_gap.packet_done(Instant::now().as_millis());
                 }
-                Either::Second(()) => {
+                Either3::Second(()) => {
                     let kv = [KEEPALIVE_BYTE];
                     notify_fragments(conn, drain, tx_handle, 1, |_| &kv, "keepalive", kv.len())
                         .await;
                     last_keepalive.set(Instant::now());
                 }
+                // Readiness changed: recompute the keepalive deadline.
+                Either3::Third(()) => {}
             }
         }
     };
