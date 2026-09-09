@@ -225,6 +225,19 @@ impl LinkTable {
         self.links.len() >= self.max_links
     }
 
+    /// Whether the advertisement belongs on the air: a full table must
+    /// not advertise. The firmware's `ADV_LOCK` policy (columba.rs,
+    /// ead0bce): with every slot in a session nothing advertises — a
+    /// full node is honestly silent rather than accepting a connection
+    /// it would immediately refuse. The driver deregisters the
+    /// advertisement when this flips false and re-registers it when a
+    /// slot frees; the GATT application stays up throughout, because
+    /// live peripheral sessions keep using it (as the firmware keeps
+    /// serving its sessions while dark).
+    pub(crate) fn should_advertise(&self) -> bool {
+        !self.is_full()
+    }
+
     pub(crate) fn link_by_addr(&self, addr: &Addr) -> Option<&Link> {
         self.links.iter().find(|l| &l.addr == addr)
     }
@@ -1082,6 +1095,36 @@ mod tests {
             t.admit([3; 16], ADDR_3, Role::Central, 185, 0).0,
             Admission::RejectFull
         );
+    }
+
+    /// The firmware's full-is-dark policy (`ADV_LOCK`, columba.rs at
+    /// ead0bce), lnsd edition (#49 item 1): a full table must not
+    /// advertise, and a freed slot puts the advertisement back on the
+    /// air. Both roles count — `admit` refuses any newcomer once
+    /// `max_links` is reached, so advertising while full would only
+    /// invite connections that end in `RejectFull`.
+    #[test]
+    fn a_full_table_goes_dark_and_a_freed_slot_re_advertises() {
+        let mut t = LinkTable::new(OWN, 2);
+        assert!(t.should_advertise(), "empty table advertises");
+        t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        assert!(t.should_advertise(), "one free slot still advertises");
+        t.admit(ID_B, ADDR_2, Role::Central, 185, 0);
+        assert!(
+            !t.should_advertise(),
+            "full table is dark, both roles counted"
+        );
+
+        // A slot freed by disconnect re-advertises…
+        t.remove_by_addr(&ADDR_2);
+        assert!(t.should_advertise(), "a freed slot goes back on the air");
+
+        // …and so does one freed by expiry.
+        t.admit(ID_B, ADDR_2, Role::Central, 185, 0);
+        assert!(!t.should_advertise());
+        let expired = t.expire(LINK_TIMEOUT_MS);
+        assert_eq!(expired.links.len(), 2);
+        assert!(t.should_advertise(), "expiry frees the air too");
     }
 
     #[test]

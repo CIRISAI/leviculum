@@ -43,14 +43,14 @@ const SCAN_WINDOW: Duration = Duration::from_secs(2);
 /// identity read, subscribe, handshake.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Keeps the advertisement and the GATT application registered; both
-/// deregister from BlueZ when this is dropped.
-pub(crate) struct PeripheralHandles {
-    _adv: AdvertisementHandle,
-    _app: ApplicationHandle,
-}
-
-/// Register the Columba advertisement and GATT application.
+/// Register the Columba advertisement.
+///
+/// Separate from [`serve_gatt`] because the two have different
+/// lifetimes: the GATT application serves live sessions for the whole
+/// BlueZ session, while the advertisement is gated on link-table
+/// occupancy (`LinkTable::should_advertise`, the firmware's `ADV_LOCK`
+/// policy) — deregistered when the table fills, re-registered when a
+/// slot frees. Dropping the returned handle deregisters it.
 ///
 /// The advertisement carries the service UUID and the v0.3.0 capability
 /// record with flags 0x00 — dual-role, and deliberately *present* rather
@@ -58,12 +58,11 @@ pub(crate) struct PeripheralHandles {
 /// assumed one. BlueZ places the `LN-<hex8>` local name in the scan
 /// response, where it does not compete with the 31 advertisement bytes
 /// (same layout as the firmware's).
-pub(crate) async fn start_peripheral(
+pub(crate) async fn register_advertisement(
     adapter: &Adapter,
     identity: IdentityHash,
-    ev_tx: mpsc::Sender<Ev>,
     iface: &str,
-) -> bluer::Result<PeripheralHandles> {
+) -> bluer::Result<AdvertisementHandle> {
     let name = super::links::local_name(&identity);
     // The manufacturer-record payload minus the company ID: BlueZ keys
     // the record by CID and prepends it on the wire.
@@ -78,7 +77,20 @@ pub(crate) async fn start_peripheral(
         ..Default::default()
     };
     let adv = adapter.advertise(advertisement).await?;
+    tracing::info!(
+        "BLE {iface}: advertising as {name} (service {SERVICE_UUID}, dual-role record present)"
+    );
+    Ok(adv)
+}
 
+/// Register the Columba GATT application; it serves every
+/// peripheral-role session for the whole BlueZ session. Dropping the
+/// returned handle deregisters it.
+pub(crate) async fn serve_gatt(
+    adapter: &Adapter,
+    identity: IdentityHash,
+    ev_tx: mpsc::Sender<Ev>,
+) -> bluer::Result<ApplicationHandle> {
     let write_tx = ev_tx.clone();
     let notify_tx = ev_tx;
     let app = Application {
@@ -147,15 +159,7 @@ pub(crate) async fn start_peripheral(
         }],
         ..Default::default()
     };
-    let app = adapter.serve_gatt_application(app).await?;
-
-    tracing::info!(
-        "BLE {iface}: advertising as {name} (service {SERVICE_UUID}, dual-role record present)"
-    );
-    Ok(PeripheralHandles {
-        _adv: adv,
-        _app: app,
-    })
+    adapter.serve_gatt_application(app).await
 }
 
 /// Windowed discovery: scan for [`SCAN_WINDOW`], report every sighting,

@@ -237,13 +237,19 @@ impl BleTask {
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<Ev>(64);
 
-        // Peripheral half: advertisement + GATT application. The handles
-        // deregister on drop, so they live for the session.
-        let _periph = if self.opts.enable_peripheral {
-            Some(
-                bluez::start_peripheral(&adapter, self.identity_hash, ev_tx.clone(), &self.name)
-                    .await?,
-            )
+        // Peripheral half. The GATT application lives for the session —
+        // live peripheral links keep using it — while the advertisement
+        // is gated on table occupancy below (`should_advertise`, the
+        // firmware's ADV_LOCK policy at ead0bce): deregistered when the
+        // table fills, re-registered when a slot frees. Both handles
+        // deregister on drop.
+        let _app = if self.opts.enable_peripheral {
+            Some(bluez::serve_gatt(&adapter, self.identity_hash, ev_tx.clone()).await?)
+        } else {
+            None
+        };
+        let mut adv = if self.opts.enable_peripheral {
+            Some(bluez::register_advertisement(&adapter, self.identity_hash, &self.name).await?)
         } else {
             None
         };
@@ -320,6 +326,7 @@ impl BleTask {
                         now_ms(Instant::now()),
                     )
                     .await;
+                    self.reconcile_advertising(&adapter, &table, &mut adv).await;
                 }
                 _ = tick.tick() => {
                     let now = now_ms(Instant::now());
@@ -371,6 +378,9 @@ impl BleTask {
                         &ev_tx,
                         now,
                     );
+                    // Expiry can free a slot, and a failed re-register
+                    // gets its retry here.
+                    self.reconcile_advertising(&adapter, &table, &mut adv).await;
                 }
             }
         }
@@ -621,6 +631,50 @@ impl BleTask {
             iface: self.name.clone(),
         };
         tokio::spawn(central.run());
+    }
+
+    /// Apply the table's advertising verdict (#49 item 1, the firmware's
+    /// ADV_LOCK policy): a full table takes the advertisement off the
+    /// air — dropping the handle deregisters it from BlueZ — and a freed
+    /// slot puts it back. The GATT application is untouched either way;
+    /// live peripheral sessions keep running while dark, exactly as the
+    /// firmware keeps serving its sessions when nothing advertises.
+    /// Called after every event and on every tick, so a failed
+    /// re-registration is retried within a second.
+    async fn reconcile_advertising(
+        &self,
+        adapter: &bluer::Adapter,
+        table: &LinkTable,
+        adv: &mut Option<bluer::adv::AdvertisementHandle>,
+    ) {
+        if !self.opts.enable_peripheral {
+            return;
+        }
+        if table.should_advertise() {
+            if adv.is_none() {
+                match bluez::register_advertisement(adapter, self.identity_hash, &self.name).await {
+                    Ok(handle) => {
+                        *adv = Some(handle);
+                        tracing::info!(
+                            event = "BLE_ADV_GATE",
+                            iface = %self.name,
+                            state = "on",
+                        );
+                    }
+                    Err(e) => tracing::warn!(
+                        "BLE {}: re-registering advertisement failed ({e}); retrying",
+                        self.name
+                    ),
+                }
+            }
+        } else if adv.take().is_some() {
+            tracing::info!(
+                event = "BLE_ADV_GATE",
+                iface = %self.name,
+                state = "off",
+                reason = "full",
+            );
+        }
     }
 
     /// Fan one Reticulum packet out to every live link.
