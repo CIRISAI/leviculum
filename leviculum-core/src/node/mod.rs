@@ -60,6 +60,8 @@ mod mvr_ble_cull_identity_mismatch;
 #[cfg(test)]
 mod mvr_ble_peer_loss_reroute;
 #[cfg(test)]
+mod mvr_ble_peer_up_announce;
+#[cfg(test)]
 mod mvr_ble_routed_delivery_hint;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
@@ -796,7 +798,33 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         app_data: Option<&[u8]>,
         interface_index: usize,
     ) -> Result<crate::transport::TickOutput, AnnounceError> {
-        self.announce_destination_impl(dest_hash, app_data, Some(interface_index))
+        self.announce_destination_impl(dest_hash, app_data, Some((interface_index, None)))
+    }
+
+    /// [`Self::announce_destination_on_interface`] addressed at ONE peer
+    /// behind that interface (Codeberg #376).
+    ///
+    /// The occasion is a BLE peer that just finished its identity
+    /// handshake: it is the one node on that interface that does not know
+    /// us, and the announce is for it. Broadcasting it instead is what
+    /// this issue started with — the neighbour board rebroadcasts the
+    /// copy it was never meant to have and the relayed announce races the
+    /// direct one into the phone's path table, which is how a board one
+    /// hop away came to be listed at two.
+    ///
+    /// The hint is the same `Action::SendPacket::peer` a routed packet
+    /// carries; a multi-peer interface puts the bytes on that peer's link
+    /// alone and a single-peer one ignores it. A peer whose link is
+    /// already gone drops the packet rather than falling back to a flood
+    /// (`leviculum-nrf/ble-tx/src/registry.rs`).
+    pub fn announce_destination_to_peer(
+        &mut self,
+        dest_hash: &DestinationHash,
+        app_data: Option<&[u8]>,
+        interface_index: usize,
+        peer: [u8; TRUNCATED_HASHBYTES],
+    ) -> Result<crate::transport::TickOutput, AnnounceError> {
+        self.announce_destination_impl(dest_hash, app_data, Some((interface_index, Some(peer))))
     }
 
     /// Seed wall-clock unix time from a source that claims to know it
@@ -822,11 +850,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.time_source()
     }
 
+    /// `target` is `None` for a broadcast on every interface, or the
+    /// interface to send on plus the #376 delivery hint naming the one
+    /// peer behind it the announce is for (`None` for every peer).
     fn announce_destination_impl(
         &mut self,
         dest_hash: &DestinationHash,
         app_data: Option<&[u8]>,
-        interface_index: Option<usize>,
+        target: Option<(usize, Option<[u8; TRUNCATED_HASHBYTES]>)>,
     ) -> Result<crate::transport::TickOutput, AnnounceError> {
         let now_ms = self.transport.clock().now_ms();
         let emission_secs = self.transport.announce_emission_secs(now_ms);
@@ -848,15 +879,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport
             .storage_mut()
             .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
-        match interface_index {
-            Some(idx) => {
+        match target {
+            Some((idx, peer)) => {
                 // send_on_interface does not cache the originated packet
                 // hash the way send_on_all_interfaces does, so record it
                 // here to keep echo dedup intact.
                 self.transport
                     .storage_mut()
                     .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                let _ = self.transport.send_on_interface(idx, &buf[..len]);
+                let _ = self
+                    .transport
+                    .send_on_interface_to_peer(idx, &buf[..len], peer);
             }
             None => self.transport.send_on_all_interfaces(&buf[..len]),
         }
@@ -2680,7 +2713,54 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// destinations because the peer on the recovered interface has never
     /// seen them (Block D).
     pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
+        self.announce_local_destinations(interface_index, None);
+        self.process_events_and_actions()
+    }
+
+    /// [`Self::handle_interface_up`]'s announce, aimed at ONE peer behind
+    /// an interface that was already up (Codeberg #376).
+    ///
+    /// The occasion is a multi-peer interface reporting a peer's first
+    /// link (`handle_interface_peer_up`): the interface did not change
+    /// state, but for this peer the situation is the same one
+    /// interface-recovery describes — it has never heard our destinations
+    /// and cannot address us until it has. The daemon-side answer to the
+    /// field report that opened #376, where a phone connecting between
+    /// two telemetry reports learned nothing about the node it was
+    /// linked to.
+    ///
+    /// Everything is the interface-up path's: the same destination set,
+    /// the same "has announced before" filter, the same cached bytes for
+    /// local-client destinations. The one difference is the delivery
+    /// hint, which puts the announce on that peer's link and no other —
+    /// a broadcast here would be rebroadcast by a neighbour and race the
+    /// direct copy, which is the two-hop symptom this issue is named for.
+    ///
+    /// Returns the number of announces emitted, so the caller can log the
+    /// occasion honestly rather than assume one happened. The clock gate
+    /// and the per-peer rate limit are the CALLER's
+    /// (`leviculum_announce_policy`): both are policy about when a node
+    /// should speak, not about what an announce is.
+    pub fn announce_local_destinations_to_peer(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        peer: [u8; TRUNCATED_HASHBYTES],
+    ) -> (usize, crate::transport::TickOutput) {
+        let sent = self.announce_local_destinations(iface.0, Some(peer));
+        (sent, self.process_events_and_actions())
+    }
+
+    /// The shared body of [`Self::handle_interface_up`] and
+    /// [`Self::announce_local_destinations_to_peer`]: re-announce every
+    /// destination this node holds on one interface, optionally addressed
+    /// at one peer behind it. Returns how many announces were emitted.
+    fn announce_local_destinations(
+        &mut self,
+        interface_index: usize,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+    ) -> usize {
         let now_ms = self.transport.clock().now_ms();
+        let mut sent = 0usize;
         let emission_secs = self.transport.announce_emission_secs(now_ms);
 
         // Collect destination hashes first to avoid borrow conflict. Only
@@ -2722,16 +2802,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             self.transport
                                 .storage_mut()
                                 .set_announce_cache(dest_hash.into_bytes(), buf[..len].to_vec());
-                            // Target only the interface that came up; cache
-                            // the originated packet hash for echo dedup,
-                            // which send_on_interface (unlike
+                            // Target only the interface that came up (and,
+                            // since #376, only the peer this is for when
+                            // the caller named one); cache the originated
+                            // packet hash for echo dedup, which
+                            // send_on_interface (unlike
                             // send_on_all_interfaces) does not do itself.
                             self.transport
                                 .storage_mut()
                                 .add_packet_hash(crate::packet::packet_hash(&buf[..len]));
-                            let _ = self
-                                .transport
-                                .send_on_interface(interface_index, &buf[..len]);
+                            let _ = self.transport.send_on_interface_to_peer(
+                                interface_index,
+                                &buf[..len],
+                                peer,
+                            );
+                            sent += 1;
                         }
                     }
                     Err(e) => {
@@ -2766,14 +2851,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     self.transport
                         .storage_mut()
                         .add_packet_hash(crate::packet::packet_hash(&cached_raw));
-                    let _ = self
-                        .transport
-                        .send_on_interface(interface_index, &cached_raw);
+                    let _ = self.transport.send_on_interface_to_peer(
+                        interface_index,
+                        &cached_raw,
+                        peer,
+                    );
+                    sent += 1;
                 }
             }
         }
 
-        self.process_events_and_actions()
+        sent
     }
 
     /// Internal: Process transport events, drain actions
