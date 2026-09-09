@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A second BLE connection from an identity a node already holds a link
+  to is refused while that link is alive, and displaces it only once it
+  has gone zombie: no frame other than a keepalive received for 30
+  seconds (#376). The rule and the constant are the reference's
+  (`_check_duplicate_identity`, `_zombie_timeout`), and the firmware and
+  lnsd now read one `ZOMBIE_TIMEOUT_MS`. Keeping the newest connection
+  unconditionally, as the firmware did briefly, killed a phone's own
+  working link every ~95 seconds: a board cannot recognise its own peer
+  before connecting, because an advertisement carries no identity and
+  phones rotate their address, so its fallback dial reaches a peer it is
+  already linked to. `BLE_LINK_DUP` now says `action=refuse` or
+  `action=displace` with the old link's `old_age_ms`, `BLE_COUNTERS`
+  gains `refused=`, and a refused address enters the dead-end table so
+  the scanner stops re-dialling it.
+
 ### Added
 
 - A board announces itself on a new BLE connection and on a timer, not

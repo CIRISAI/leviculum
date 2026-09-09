@@ -969,12 +969,16 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> route_miss=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
 /// `displaced=` counts links torn down because a newer connection of
-/// the same identity took over (#376). `route_miss=` counts routed
+/// the same identity took over a link that had gone zombie, and
+/// `refused=` counts second connections sent away because that
+/// identity's existing link was still carrying data — beside a Columba
+/// phone it is `refused=` that should climb (#376).
+/// `route_miss=` counts routed
 /// packets dropped because the peer the core addressed held no live
 /// link here (#376); a rising value on a healthy board means the path
 /// table outlived a link and the #365 cull should have fired.
@@ -989,13 +993,14 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} route_miss={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_UNROUTED.load(Ordering::Relaxed),
                 HVN_DRAIN.claimed(),
                 columba::BLE_LINKS_DISPLACED.load(Ordering::Relaxed),
+                columba::BLE_LINKS_REFUSED.load(Ordering::Relaxed),
                 BLE_TX_ROUTE_MISSES.load(Ordering::Relaxed),
             ),
         );

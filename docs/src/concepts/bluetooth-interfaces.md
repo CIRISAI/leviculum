@@ -171,15 +171,32 @@ Two consequences of dialling against the sort are deliberate:
   duplicate, not a loop; announce rebroadcast is suppressed the same
   way. Connectivity is what the graph owes the mesh, minimal edge count
   is not.
-- **A second link to an already linked identity is refused as churn.**
-  It adds no reachability, burns one of three incoming slots and the
-  airtime of a connect, so the central path reads the peer's Identity
-  characteristic at connect and drops the duplicate (`BLE_LINK_DUP`),
-  exactly as it does when a linked phone rotates its address and
-  reappears. The registry rule that a same-identity second link is
-  churn rather than an arrival is pinned by
-  `a_second_link_of_the_same_identity_is_churn_not_an_arrival` in
-  `leviculum-nrf/ble-tx/src/registry.rs`.
+- **A second link to an already linked identity is refused while the
+  first one is alive.** It adds no reachability, burns one of three
+  incoming slots and the airtime of a connect, so both roles resolve
+  the identity at connect — read from the Identity characteristic as
+  central, presented in the handshake as peripheral — and drop the
+  newcomer (`BLE_LINK_DUP … action=refuse`). The exception is a link
+  that has carried no real data for 30 seconds: that one is a zombie
+  and the newcomer displaces it instead (`action=displace`), which is
+  how a peer whose rotated address reconnects wins against its own
+  stale session. Both branches log the old link's `old_age_ms`, so a
+  capture shows the evidence the decision rested on.
+
+  Refusing is the only safe default because the identity behind an
+  advertisement is unknowable before connecting: a phone rotating its
+  address will be dialled by a board already linked to it, and a rule
+  that always kept the newest connection then killed the phone's own
+  working link every ~95 seconds (the 2026-09-09 field T114 on #376).
+  The refused address goes into the dead-end table for its TTL so the
+  scanner does not immediately re-offer it. Rule and timeout are the
+  reference's `_check_duplicate_identity`/`_zombie_timeout`; the
+  constant `ZOMBIE_TIMEOUT_MS` lives once in
+  `leviculum-nrf/ble-tx/src/registry.rs` and lnsd imports it, so the
+  two Rust stacks cannot drift. The registry decisions are pinned by
+  `a_second_link_is_refused_while_the_old_one_is_fresh`,
+  `a_second_link_displaces_an_old_one_that_has_gone_zombie` and
+  `the_freshness_boundary_is_the_zombie_timeout` there.
 
 The simulation that motivated the fallback is a host test:
 `leviculum-nrf/ble-tx/tests/graph_formation.rs` replays random arrival

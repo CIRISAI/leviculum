@@ -69,8 +69,13 @@ pub(crate) const HANDSHAKE_TIMEOUT_MS: u64 = 30_000;
 /// count) for this long may be displaced by a fresh link carrying the
 /// same identity — the reference's `_zombie_timeout`
 /// (`ble-reticulum@07d94130` `BLEInterface.py`, `_zombie_timeout`). This is how a peer that rotated its BLE
-/// address and reconnected wins against its own stale session.
-pub(crate) const ZOMBIE_TIMEOUT_MS: u64 = 30_000;
+/// address and reconnected wins against its own stale session, and
+/// below it the newcomer is refused instead.
+///
+/// Taken from the firmware's registry since #376, which adopted the
+/// same rule: three implementations agreeing on 30 s is the point, and
+/// two copies of the number in one repository would not stay equal.
+pub(crate) use leviculum_ble_tx::ZOMBIE_TIMEOUT_MS;
 
 /// Our side of a link: `Central` when we initiated the connection,
 /// `Peripheral` when the peer connected to our GATT server.
