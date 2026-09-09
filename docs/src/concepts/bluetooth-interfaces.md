@@ -129,22 +129,39 @@ disconnected BLE graph under the pure sort.
 
 The fallback closes the stranded-board gap: a central task that has
 scanned for `SCAN_FALLBACK_AFTER_MS` (30 s) without a single initiate
-verdict, and without a link coming up in either role, accepts any
-advertising Reticulum peer (`BLE_SCAN_FALLBACK` marks the switch, and
-the verdict logs as `rule=initiate_fallback` in `BLE_SCAN_DECISION`).
-Full boards do not advertise, so a fallback dial only ever lands on a
-free slot. The rule stays pure and host tested in
+verdict, and without a connection event in either role, accepts any
+advertising Reticulum peer (`BLE_SCAN_FALLBACK` marks the switch, once
+per strict phase, and the verdict logs as `rule=initiate_fallback` in
+`BLE_SCAN_DECISION`). Full boards do not advertise, so a fallback dial
+only ever lands on a free slot. The rule stays pure and host tested in
 `leviculum-nrf/ble-tx` (`should_initiate` with a `ScanMode` input);
 the firmware measures the time and hands the mode in.
 
-With the fallback no board is ever left without a BLE link, but full
-connectivity is not guaranteed: a fallback dial can close a cycle
-inside its own component, and when every component has spent all its
-outgoing links that way, nobody is scanning and disjoint components
-never merge (measured at 2 of 1000 arrival orders for ten boards, 48
-of 1000 for twenty). Breaking that residual lock needs a better target
-choice than first-advertiser-wins, which is the free-slot capability
-record's batch.
+The clock is eager: it runs whenever the outgoing slot is free, live
+links notwithstanding, so a board that holds links but keeps losing
+the sort can still dial a third party and merge two components. Two
+guards make that safe. A live connection's address is excluded before
+it can leave the scanner (the registry's `addr_linked`): the Core Spec
+permits one connection per address pair (Vol 6 Part B §4.5), so such a
+dial could only time out — the rig once showed exactly that, a doomed
+5 s dial at an already-linked peer every ~20 s, forever. And a
+fallback target that does not even connect goes into a dead-end table
+for two minutes (`BLE_DIAL_DEAD_END`, sized to the RPA rotation
+timescale), so a vanished advertiser is not re-dialled every backoff.
+The interim alternative — suspending the clock while any link is live
+— was shipped briefly and measurably cost merges: 28 and 78 all-linked
+splits per 1000 arrival orders at 10 and 20 boards, against eager's
+zero, because a component whose boards all hold some link can never
+initiate a cross-component dial.
+
+Which eligible advertiser gets dialled is not first-heard-wins: the
+scanner collects one bounded window (`BLE_SCAN_WINDOW`) and dials the
+lowest eligible address, strict verdicts before fallback verdicts, via
+a `CandidateTable` shared by the firmware, lnsd and the simulation.
+First-heard-wins is what produced the saturated-cycle lock — fallback
+dials closing cycles inside their own component until nobody scans —
+measured at 48 of 1000 arrival orders for twenty boards; the window's
+choice removes it entirely.
 
 Two consequences of dialling against the sort are deliberate:
 
@@ -167,9 +184,11 @@ Two consequences of dialling against the sort are deliberate:
 The simulation that motivated the fallback is a host test:
 `leviculum-nrf/ble-tx/tests/graph_formation.rs` replays random arrival
 orders through the real rule with the real slot limits. It reproduces
-the issue's strict-rule disconnection rates exactly, asserts that with
-the fallback no board ends linkless, and pins the saturated-cycle lock
-as the only residual disconnection mechanism.
+the issue's strict-rule disconnection rates exactly, asserts that no
+fallback configuration ever leaves a board linkless, pins the quiet
+suspension's measured cost as the record, and holds the shipped
+configuration — eager clock, lowest-eligible window — to zero
+disconnected orders at both sizes.
 
 Three implementations exist in tree: the shared carrier logic
 (`leviculum-core/src/framing/ble.rs`, plus the advertisement/decision
