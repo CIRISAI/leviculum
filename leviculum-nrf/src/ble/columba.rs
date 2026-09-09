@@ -620,12 +620,6 @@ fn addr_already_linked(addr_value: u64) -> bool {
     LIVE_PEERS.lock(|peers| peers.borrow().addr_linked(addr_value))
 }
 
-/// Whether any connection is live in either role — the quiet-fallback
-/// gate ([`scan_mode_now`]).
-fn any_conn_live() -> bool {
-    LIVE_PEERS.lock(|peers| peers.borrow().any_conn())
-}
-
 /// The number of distinct live peer identities on the BLE interface
 /// (Codeberg #365) — what the main loop mirrors into the core as the
 /// interface's peer count, next to the `is_online` mirror. Counted from
@@ -684,10 +678,17 @@ const CENTRAL_RETRY_BACKOFF_MS: u64 = 5_000;
 /// current strict phase began (in `embassy_time` ticks) and whether the
 /// switch to fallback was already logged for this phase. Reset by
 /// [`note_strict_reset`] — a connection event in either role, a
-/// teardown, or the strict rule producing a target — and held at zero
-/// by [`scan_mode_now`] for as long as any connection is live (the
-/// quiet spec, #375 part 2), which is what makes the fallback a last
-/// resort of a fully linkless board rather than a periodic mode.
+/// teardown, or the strict rule producing a target — and otherwise it
+/// runs whenever the central task is scanning, live links
+/// notwithstanding (the eager spec, #375 part 3). Live links no longer
+/// suspend it: the doomed dial that motivated the quiet spec is
+/// excluded by address before it can leave the scanner
+/// ([`addr_already_linked`], Core Spec Vol 6 Part B §4.5), a failed
+/// fallback dial is backed off by [`RecentDeadEnds`], and the quiet
+/// suspension itself measurably cost merges —
+/// `ble-tx/tests/graph_formation.rs` puts it at 28 and 78 all-linked
+/// splits per 1000 arrival orders at 10 and 20 boards against eager's
+/// zero.
 ///
 /// A blocking mutex over a `Cell`, like [`LIVE_PEERS`]: written from
 /// the peripheral tasks (via [`peer_link_up`]) and read from the
@@ -712,19 +713,15 @@ fn note_strict_reset() {
 /// come for exactly the stranded board the fallback exists for. The
 /// timing stays an input to [`should_initiate`]; the rule itself never
 /// measures it.
+///
+/// Under the eager spec a linked board reaches fallback too — on a
+/// two-node rig the surviving scanner sits in fallback with its only
+/// neighbour's address excluded, so no candidate ever opens a window
+/// and nothing is dialled. `BLE_SCAN_FALLBACK` is still logged once
+/// per phase, not once per pass: the `announced` flag only clears at
+/// [`note_strict_reset`], and a board in that state has no connection
+/// events to reset it.
 fn scan_mode_now() -> ScanMode {
-    // The quiet spec (#375 part 2, item 1): while ANY connection is
-    // live in either role the clock is held at zero — only a fully
-    // linkless board may dial against the sort. Measured cost in
-    // ble-tx/tests/graph_formation.rs: 28 and 78 all-linked splits per
-    // 1000 orders at 10 and 20 boards against the eager spec's zero,
-    // and never a linkless board; what it buys is the end of the rig's
-    // doomed 20 s dial cycle at an already-linked peer (§0 of the
-    // 2026-09-09 batch).
-    if any_conn_live() {
-        note_strict_reset();
-        return ScanMode::Strict;
-    }
     // One lock for the read-check-mark sequence: a reset racing in
     // between two separate locks would be overwritten with the stale
     // phase. The log line itself stays outside the critical section.

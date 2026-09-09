@@ -14,11 +14,10 @@
 //! two open policy questions:
 //!
 //! - **When may the fallback fire?** [`FallbackSpec::Eager`]: the clock
-//!   runs whenever the outgoing slot is free (as first built).
-//!   [`FallbackSpec::Quiet`]: only while the board has no live link in
-//!   either role — the rig showed an eager fallback dialling its own
-//!   already-linked peer every ~20 s forever (§0 of the 2026-09-09
-//!   batch), so quiet is the shipped spec.
+//!   runs whenever the outgoing slot is free — the shipped spec since
+//!   part 3. [`FallbackSpec::Quiet`]: only while the board has no live
+//!   link in either role — shipped briefly in part 2, kept here as the
+//!   record.
 //! - **Which eligible advertiser is dialled?**
 //!   [`TargetChoice::FirstSeen`]: whichever eligible PDU the radio
 //!   heard first (as first built; seeded random here).
@@ -52,14 +51,20 @@
 //!   components are stable disjoint. Every residual split is of this
 //!   all-linked kind — the linkless column stays 0, so #375's headline
 //!   failure (a board with no BLE link at all, scanning forever) never
-//!   returns. The harness is also a static worst case: links here
-//!   never drop, while any real link churn unsuspends a board, restarts
-//!   its 30 s strict phase and then lets it fallback-dial the other
-//!   component. Quiet is nonetheless the shipped spec — the rig showed
-//!   an eager fallback dialling a peer it was already linked to every
-//!   ~20 s, forever (§0 of the 2026-09-09 batch): a dial the Core Spec
-//!   dooms (Vol 6 Part B §4.5, one connection per address pair), spent
-//!   on air every cycle.
+//!   returns.
+//!
+//! Part 2 shipped quiet anyway, because the rig had shown an eager
+//! fallback dialling a peer it was already linked to every ~20 s,
+//! forever (§0 of the 2026-09-09 batch): a dial the Core Spec dooms
+//! (Vol 6 Part B §4.5, one connection per address pair), spent on air
+//! every cycle. Part 3 shipped eager after all — that doomed-dial
+//! cycle is now closed at its root, not by the clock: a live
+//! connection's address is excluded before it can leave the scanner
+//! (the registry's `addr_linked`, the §4.5 exclusion) and a fallback
+//! dial that cannot even connect goes into the dead-end table for two
+//! minutes. With the cycle gone, quiet bought nothing this table does
+//! not take away, and the 28/78 all-linked splits it cost are exactly
+//! the merges eager performs.
 
 use leviculum_ble_tx::{
     should_initiate, CandidateTable, ConnectDecision, ScanMode, WINDOW_CANDIDATES,
@@ -86,12 +91,12 @@ const ORDERS: u64 = 1_000;
 enum FallbackSpec {
     /// No fallback at all: the strict rule as published (the control).
     Off,
-    /// As first built: the clock runs whenever the outgoing slot is
-    /// free, live incoming links notwithstanding.
+    /// The shipped spec (part 3): the clock runs whenever the outgoing
+    /// slot is free, live incoming links notwithstanding.
     Eager,
-    /// The shipped spec: the clock is suspended (held at zero) while
-    /// the board has ANY live link in either role; only a fully
-    /// linkless board may dial against the sort.
+    /// Part 2's spec, kept as the record: the clock is suspended (held
+    /// at zero) while the board has ANY live link in either role; only
+    /// a fully linkless board may dial against the sort.
     Quiet,
 }
 
@@ -181,8 +186,8 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice) -> Vec
                 continue;
             }
             // The quiet spec suspends the clock while ANY link is live
-            // (the firmware resets it on every scan pass that finds a
-            // live connection); an outgoing link already stopped the
+            // (part 2's firmware reset it on every scan pass that found
+            // a live connection); an outgoing link already stopped the
             // scan above, so incoming links are what decides here.
             let suspended = spec == FallbackSpec::Quiet && !boards[i].incoming.is_empty();
             let mode = if spec != FallbackSpec::Off
@@ -321,8 +326,8 @@ fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice) -> Outcome {
 ///   the saturated-cycle lock is a first-seen artefact and the window
 ///   removes it entirely;
 /// - the quiet spec's cost against eager/lowest is exactly the pinned
-///   28 and 78 orders (the module docs say why, and why it is shipped
-///   anyway); the seed stream is fixed, so equality, like the
+///   28 and 78 orders (the module docs say why, and why part 3 shipped
+///   eager over it); the seed stream is fixed, so equality, like the
 ///   calibration cells;
 /// - no fallback configuration ever leaves a board linkless — #375's
 ///   headline failure stays gone under every spec;
@@ -385,23 +390,24 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
     );
 }
 
-/// The shipped configuration (quiet fallback + lowest-eligible window)
-/// at both sizes: no board is EVER left without a BLE link, and every
-/// residual disconnected order carries the quiet-suspension signature —
-/// all boards hold links, nobody is a stranded scanner. That signature
-/// is what separates the quiet spec's documented cost (an all-linked
-/// split, unfrozen by any real-world link churn) from a fallback-rule
-/// failure (a linkless board that never dials), which must stay
-/// impossible.
+/// The shipped configuration (eager fallback + lowest-eligible window,
+/// #375 part 3) at both sizes: no board is EVER left without a BLE
+/// link, and no arrival order ends disconnected — every order forms one
+/// connected component. Eager is safe to ship because the doomed dial
+/// that forced part 2's quiet spec is closed at its root: the §4.5
+/// exclusion keeps a live connection's address out of the scanner and
+/// the dead-end table backs off a fallback target that will not
+/// connect. The quiet rows in the module table stay as the record of
+/// what the suspension cost (28 and 78 all-linked splits per 1000).
 #[test]
-fn the_shipped_config_strands_nobody_and_splits_only_into_fully_linked_components() {
+fn the_shipped_config_eager_lowest_connects_every_order_and_strands_nobody() {
     for n in [10usize, 20] {
         let mut split = 0usize;
         for seed in 0..ORDERS {
             let boards = run_sim(
                 n,
                 0xB1E5_0000 + seed,
-                FallbackSpec::Quiet,
+                FallbackSpec::Eager,
                 TargetChoice::LowestEligible,
             );
             for (i, b) in boards.iter().enumerate() {
@@ -414,10 +420,9 @@ fn the_shipped_config_strands_nobody_and_splits_only_into_fully_linked_component
                 split += 1;
             }
         }
-        let pinned = if n == 10 { 28 } else { 78 };
         assert_eq!(
-            split, pinned,
-            "quiet/lowest splits at n={n} moved off the documented rate"
+            split, 0,
+            "eager/lowest left {split} of {ORDERS} orders disconnected at n={n}"
         );
     }
 }
