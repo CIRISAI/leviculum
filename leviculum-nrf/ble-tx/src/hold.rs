@@ -93,6 +93,45 @@ mod tests {
         assert!(hold.ready(), "subscription landed: the queue drains now");
     }
 
+    /// #376 item 3, the peer-up announce: the announce a board sends when
+    /// a peer's identity handshake completes is queued at exactly the
+    /// moment this hold is armed on the peripheral path — handshake done,
+    /// CCCD not yet written. It must WAIT, not be dropped.
+    ///
+    /// This pins the readiness edge the announce is queued into. The
+    /// waiting itself is the pump's `while !tx_hold.get().ready() {
+    /// tx_ready.wait().await; }` in `leviculum-nrf/src/ble/columba.rs`,
+    /// which takes the packet off the queue and blocks on this state
+    /// rather than handing it to `sd_ble_gatts_hvx`: the announce is the
+    /// first packet on a fresh link, which is precisely the packet the
+    /// field lost to sd_error 13313.
+    #[test]
+    fn a_peer_up_announce_is_queued_into_a_held_link_and_waits() {
+        let mut hold = TxHold::new();
+
+        // The peer-up edge: the identity handshake landed, so the core is
+        // told the peer exists and the announce is built and queued.
+        hold.note_handshake();
+        assert!(
+            !hold.ready(),
+            "the announce arrives before the CCCD write: notifying now is \
+             the 13313 failure, so the pump must hold it"
+        );
+        assert!(
+            hold.note_held(),
+            "the first held packet on this connection says so once"
+        );
+        assert!(
+            !hold.note_held(),
+            "and every further held packet is silent, so a phone that \
+             subscribes late cannot flood the log"
+        );
+
+        // The phone subscribes: the announce that has been waiting goes.
+        hold.note_subscription(true);
+        assert!(hold.ready());
+    }
+
     /// The other order — the spec's "or the identity handshake, if that
     /// is the later of the two".
     #[test]

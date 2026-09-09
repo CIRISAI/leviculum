@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A board announces itself on a new BLE connection and on a timer, not
+  only before a telemetry report (#376). When a peer completes its
+  identity handshake the node announces its delivery destination to
+  that peer over that link alone, at most once per peer identity per 15
+  minutes; independently of telemetry it announces on every interface
+  every 30 minutes. Both are withheld while the board has no plausible
+  wall clock, because an announce stamped from uptime can never replace
+  a path at the receiver. A phone that connects between two reports now
+  sees the board at one hop straight away.
+
 - `lnflash --watch` records a board's debug log for field testing: it
   opens the debug CDC with DTR and RTS raised, prefixes every line
   with a wall-clock ISO-8601 timestamp, appends to `--out` flushed per

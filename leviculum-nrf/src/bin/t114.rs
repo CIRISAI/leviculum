@@ -448,6 +448,11 @@ async fn main(spawner: Spawner) {
         node.probe_dest_hash().map(|h| *h.as_bytes()),
         delivery_hash.as_ref().map(|h| *h.as_bytes()),
     );
+    // The announce occasions telemetry does not cover (#376): a new BLE
+    // peer, and the plain timer. Armed from the node's clock so the first
+    // periodic announce is a fixed delay after boot, not after whatever
+    // the loop happened to do first.
+    let mut announce_gate = leviculum_nrf::announce::AnnounceGate::new(node.now_ms());
     let mut reporter = delivery_hash.map(leviculum_nrf::telemetry::Reporter::new);
     if reporter.is_none() {
         log_critical!("[TELEMETRY] target=00000000 state=off reason=no-delivery-destination");
@@ -551,6 +556,17 @@ async fn main(spawner: Spawner) {
             }
         };
 
+        // The periodic announce (#376 item 2). Sleeps exactly to its own
+        // deadline rather than polling: an idle board with telemetry off
+        // wakes twice an hour for this, and a clockless one once a
+        // minute until its clock arrives.
+        let announce_tick = async {
+            Timer::after(Duration::from_millis(
+                announce_gate.periodic_wait_ms(node.now_ms()).max(1),
+            ))
+            .await
+        };
+
         let wake = select4(
             select4(
                 serial.incoming_rx.receive(),
@@ -568,7 +584,7 @@ async fn main(spawner: Spawner) {
                 fixed_position_rx.receive(),
                 serial.announce_rx.receive(),
             ),
-            telemetry_tick,
+            select(telemetry_tick, announce_tick),
         )
         .await;
         // Mirror each interface's is_online() into the core (#365): a
@@ -722,7 +738,7 @@ async fn main(spawner: Spawner) {
                 // channel means a busy link; the host's retry covers it.
                 let _ = serial_ctl_tx.try_send(answer);
             }
-            Either4::Fourth(()) => {
+            Either4::Fourth(Either::First(())) => {
                 // Telemetry evaluation (#236). Everything decided here is
                 // decided in the policy crate; this arm reads the board's
                 // sensors, hands them over, and dispatches whatever came
@@ -742,6 +758,22 @@ async fn main(spawner: Spawner) {
                         reporter.note_dispatch(&dispatched);
                         leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
                     }
+                }
+            }
+            Either4::Fourth(Either::Second(())) => {
+                // The periodic announce (#376 item 2). Independent of
+                // telemetry: a node that reports rarely, or has no target
+                // at all, still has to be findable, and a phone that
+                // missed the peer-up announce gets one from here. The gate
+                // owns the deadline and the clock rule; this arm dispatches
+                // whatever it hands back, which is nothing before the
+                // deadline and nothing without a plausible clock.
+                let actions = announce_gate.periodic(&mut node, delivery_hash.as_ref());
+                if !actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("announce-periodic", &mut node, &dispatched);
                 }
             }
             Either4::First(Either4::First(data)) => {
@@ -835,8 +867,21 @@ async fn main(spawner: Spawner) {
                         ("ble-peer-lost", output)
                     }
                     BlePeerEvent::Up(peer) => {
-                        let output = node.handle_interface_peer_up(InterfaceId(2), peer);
+                        let mut output = node.handle_interface_peer_up(InterfaceId(2), peer);
                         info!("BLE peer up, {} pull actions", output.actions.len());
+                        // #376: and announce OURSELVES to that peer, on
+                        // its link alone. The peer just finished its
+                        // identity handshake, so it can receive and it is
+                        // exactly the node that does not know us; the pull
+                        // above only asks what IT is. A broadcast here
+                        // would reach the neighbour board, which forwards
+                        // it, and the relayed copy racing the direct one
+                        // is the two-hop reading this issue opened with.
+                        output.actions.extend(announce_gate.peer_up(
+                            &mut node,
+                            delivery_hash.as_ref(),
+                            peer,
+                        ));
                         ("ble-peer-up", output)
                     }
                 };

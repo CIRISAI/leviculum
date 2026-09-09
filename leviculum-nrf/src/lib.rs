@@ -16,6 +16,7 @@ compile_error!("`bsp-rak4631` and `bsp-t114` are mutually exclusive — pick exa
 #[cfg(not(any(feature = "bsp-rak4631", feature = "bsp-t114")))]
 compile_error!("must enable exactly one of `bsp-rak4631` or `bsp-t114`");
 
+pub mod announce;
 pub mod ble;
 pub mod boards;
 pub mod boot_trace;

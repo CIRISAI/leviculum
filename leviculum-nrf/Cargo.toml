@@ -37,6 +37,11 @@ leviculum-telemetry-policy = { path = "telemetry-policy" }
 # Unconditional like sd-policy — it is a handful of enums and costs
 # nothing on a build without the `softdevice` feature.
 leviculum-ble-tx = { path = "ble-tx" }
+# Pure announce cadence and per-peer rate limit (#376): when the board
+# announces itself on a new BLE peer and on its own timer, and when the
+# clock gate withholds it. Shared verbatim with `lnsd`, so the policy the
+# desk measures on a board is the policy the daemon runs.
+leviculum-announce-policy = { path = "announce-policy" }
 # Pure two-bound admission (slots and bytes) for the outbound LoRa queue,
 # host-testable like sd-policy/ble-tx (#344). Not in leviculum-core: that
 # crate must build for thumbv6m, which has no atomic CAS.
