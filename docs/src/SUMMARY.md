@@ -6,6 +6,7 @@
 
 - [Architecture overview](architecture.md)
 - [Interface isolation](concepts/interface-isolation.md)
+- [An interface that holds several peers](concepts/multi-peer-interfaces.md)
 - [The core lock budget](concepts/core-lock-budget.md)
 - [The self-deadlock tripwire](concepts/self-deadlock-tripwire.md)
 - [Bluetooth interfaces](concepts/bluetooth-interfaces.md)
