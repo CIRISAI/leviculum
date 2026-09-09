@@ -783,7 +783,10 @@ async fn main(spawner: Spawner) {
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
             }
             Either4::First(Either4::Third(Either::First((peer, data)))) => {
-                info!("BLE RX {} bytes", data.len());
+                // The reception itself is already on the log: columba's
+                // `BLE: RX <n>B conn=<h> frags=<k>` line names the link
+                // and the peer's fragmentation (#376), so a second
+                // per-packet line here said less and doubled the noise.
                 // See the LoRa arm: a medium switched off at runtime
                 // delivers nothing upward either.
                 if !leviculum_nrf::media::ble_active() {

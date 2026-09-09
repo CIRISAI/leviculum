@@ -214,6 +214,7 @@ pub struct BleDefragmenter {
     expected_total: u16,
     last_fragment_ms: u64,
     abandoned: u32,
+    completed_fragments: u16,
 }
 
 impl BleDefragmenter {
@@ -224,6 +225,7 @@ impl BleDefragmenter {
             expected_total: 0,
             last_fragment_ms: 0,
             abandoned: 0,
+            completed_fragments: 0,
         }
     }
 
@@ -260,6 +262,7 @@ impl BleDefragmenter {
         if ftype == FRAGMENT_TYPE_LONE {
             self.discard_partial();
             self.expected_total = 0;
+            self.completed_fragments = 1;
             return DefragResult::Complete(payload.to_vec());
         }
 
@@ -295,11 +298,21 @@ impl BleDefragmenter {
                     }
                 }
             }
+            self.completed_fragments = self.expected_total;
             self.reset();
             DefragResult::Complete(packet)
         } else {
             DefragResult::NeedMore
         }
+    }
+
+    /// How many fragments made up the most recently completed packet: 1
+    /// for a LONE frame, the sequence's `total` otherwise; 0 before any
+    /// completion. The RX log lines carry it (#376): whether a peer
+    /// really fragments at 20 bytes although the negotiated ATT MTU
+    /// allows far larger is visible nowhere else.
+    pub fn last_completed_fragments(&self) -> u16 {
+        self.completed_fragments
     }
 
     /// Drop an in-progress reassembly that a newer frame superseded, and
@@ -447,6 +460,37 @@ mod tests {
             DefragResult::Complete(result) => assert_eq!(result, data),
             other => panic!("Expected Complete, got {:?}", other),
         }
+    }
+
+    /// The RX lines' `frags=` source (#376): 1 for a LONE frame, the
+    /// sequence total for a multi-fragment packet, 0 before anything
+    /// completed, and the previous value survives NeedMore frames.
+    #[test]
+    fn last_completed_fragments_reports_how_the_peer_fragmented() {
+        let mut defrag = BleDefragmenter::new();
+        assert_eq!(defrag.last_completed_fragments(), 0, "nothing completed");
+
+        let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+        let frags = fragment_packet(&data, DEFAULT_MTU);
+        assert_eq!(frags.len(), 3);
+        for frag in &frags[..2] {
+            assert_eq!(defrag.process(frag, 1000), DefragResult::NeedMore);
+            assert_eq!(defrag.last_completed_fragments(), 0);
+        }
+        assert!(matches!(
+            defrag.process(&frags[2], 1000),
+            DefragResult::Complete(_)
+        ));
+        assert_eq!(defrag.last_completed_fragments(), 3);
+
+        // A LONE frame from an older peer counts as one fragment.
+        let mut lone = vec![FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x01];
+        lone.extend_from_slice(b"x");
+        assert!(matches!(
+            defrag.process(&lone, 1000),
+            DefragResult::Complete(_)
+        ));
+        assert_eq!(defrag.last_completed_fragments(), 1);
     }
 
     #[test]

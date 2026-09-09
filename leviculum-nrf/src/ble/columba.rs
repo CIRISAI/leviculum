@@ -487,10 +487,19 @@ async fn gatt_events(
                 let now = Instant::now().as_millis();
                 let mut d = defrag.replace(BleDefragmenter::new());
                 let result = process_logged(&mut d, &data, now, slot_index);
+                let frags = d.last_completed_fragments();
                 defrag.set(d);
                 match result {
                     DefragResult::Complete(packet) => {
-                        crate::info!("BLE: RX {}B", packet.len());
+                        // conn= tells the phone's link from the
+                        // neighbour board's; frags= shows how the
+                        // peer fragmented (#376).
+                        crate::info!(
+                            "BLE: RX {}B conn={} frags={}",
+                            packet.len(),
+                            conn_handle,
+                            frags
+                        );
                         // try_send: if the consumer is slow and the 4-deep
                         // channel is full, drop the packet rather than block
                         // here (we're in a sync closure, can't await).
@@ -1270,10 +1279,20 @@ async fn run_central_session(
         let now = Instant::now().as_millis();
         let mut d = defrag.replace(BleDefragmenter::new());
         let result = process_logged(&mut d, &data, now, slot_index);
+        let frags = d.last_completed_fragments();
         defrag.set(d);
         match result {
             DefragResult::Complete(packet) => {
-                crate::info!("BLE: RX {}B", packet.len());
+                // conn= and frags= as on the peripheral side (#376):
+                // whether a Columba peer that showed "MTU 20 bytes"
+                // really sends 20-byte pieces although our central
+                // negotiated a large att_mtu is exactly this number.
+                crate::info!(
+                    "BLE: RX {}B conn={} frags={}",
+                    packet.len(),
+                    conn_handle,
+                    frags
+                );
                 let _ = incoming_tx.try_send((Some(peer_id), packet));
             }
             DefragResult::NeedMore | DefragResult::Error => {}
