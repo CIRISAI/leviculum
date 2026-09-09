@@ -85,6 +85,7 @@ use tokio::sync::mpsc::{
 use tokio::sync::watch;
 
 use crate::interfaces::IncomingPacket;
+use leviculum_announce_policy::{Decision, PeerAnnounceLimiter};
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::link::LinkId;
 use leviculum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent};
@@ -591,6 +592,79 @@ fn announce_cap_percent_from_config(config: &InterfaceConfig) -> Option<u32> {
     config
         .announce_cap
         .map(|cap| (cap.round().max(1.0) as u32).min(100))
+}
+
+/// The `peer=` field of an `[ANNOUNCE]` event: the first four bytes of
+/// the identity, the same eight hex digits the BLE interface's own lines
+/// and the firmware's `[ANNOUNCE]` line carry, so one capture can be
+/// grepped for a peer across both.
+fn peer_hex8(identity: &[u8; 16]) -> String {
+    identity
+        .iter()
+        .take(4)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// How many peer identities `lnsd`'s peer-up announce gate remembers.
+///
+/// Thirty-two, against the firmware's eight: a daemon's BLE adapter is
+/// not bounded by four SoftDevice links, and on a PC the table costs 768
+/// bytes. Overflowing it costs one extra announce for the peer whose own
+/// announce is furthest in the past, never a wrongly withheld one — see
+/// [`PeerAnnounceLimiter`].
+const PEER_ANNOUNCE_SLOTS: usize = 32;
+
+/// Announce this daemon's destinations to a peer whose first link on a
+/// multi-peer interface just came up (Codeberg #376).
+///
+/// The daemon owns no `lxmf.delivery` destination the way a board does —
+/// its destinations are whatever was registered on it (the probe and
+/// management destinations) plus the cached announces of its IPC
+/// clients — so "announce ourselves" means exactly the set interface
+/// recovery re-announces, addressed at the one peer instead of put on the
+/// whole interface. The delivery hint is what keeps a neighbour on the
+/// same adapter from receiving a copy it would forward, which is the
+/// relayed-announce race #376 opened with.
+///
+/// `clock_ok` and `now_ms` are read from the core by the caller and
+/// passed in rather than taken here, so the two gates this function obeys
+/// — the clock rule and the fifteen-minute per-identity limit — are
+/// exercisable without a fake clock. On a PC `has_plausible_wall_clock`
+/// is true from the first instruction; the gate still exists because the
+/// same policy runs on a board that boots without one.
+fn peer_up_announce(
+    core: &mut StdNodeCore,
+    gate: &mut PeerAnnounceLimiter<PEER_ANNOUNCE_SLOTS>,
+    iface: InterfaceId,
+    peer: [u8; 16],
+    now_ms: u64,
+    clock_ok: bool,
+) -> leviculum_core::transport::TickOutput {
+    match gate.peer_up(peer, now_ms, clock_ok) {
+        Decision::Announce => {
+            let (sent, output) = core.announce_local_destinations_to_peer(iface, peer);
+            if sent > 0 {
+                tracing::info!(
+                    event = "ANNOUNCE_TX",
+                    reason = "peer-up",
+                    peer = %peer_hex8(&peer),
+                    iface = iface.0,
+                    count = sent,
+                );
+            }
+            output
+        }
+        Decision::Withheld(reason) => {
+            tracing::debug!(
+                event = "ANNOUNCE_WITHHELD",
+                reason = reason.as_str(),
+                peer = %peer_hex8(&peer),
+                iface = iface.0,
+            );
+            leviculum_core::transport::TickOutput::default()
+        }
+    }
 }
 
 /// Hand an interface's configured bitrate and announce cap to the core.
@@ -3712,6 +3786,13 @@ async fn run_event_loop(
     // peer-link path-request re-origination sees the interface as a
     // live-peer carrier exactly while it has one.
     let mut live_peer_counts: BTreeMap<usize, usize> = BTreeMap::new();
+    // The peer-up announce gate (Codeberg #376), keyed on peer IDENTITY
+    // for the reason the constant states: a BLE peer rotates its address
+    // and a rotation must not buy it another announce. Loop-local like
+    // `live_peer_counts` — it is per-run state about who has been spoken
+    // to, and a restart legitimately starts over.
+    let mut peer_announce_gate: PeerAnnounceLimiter<PEER_ANNOUNCE_SLOTS> =
+        PeerAnnounceLimiter::new();
     // Track which per-interface queues have already emitted the
     // depth-high warning so we don't spam once the queue is deep.
     // Cleared when the queue drops back below RETRY_QUEUE_DEPTH_WARN.
@@ -4307,7 +4388,29 @@ async fn run_event_loop(
                             core.handle_interface_peer_lost(iface_id, peer)
                         }
                         crate::interfaces::PeerEvent::Up(peer) => {
-                            core.handle_interface_peer_up(iface_id, peer)
+                            let mut output = core.handle_interface_peer_up(iface_id, peer);
+                            // Codeberg #376: and announce OURSELVES to the
+                            // new peer, on its link alone. The pull above
+                            // asks what the peer is; this tells it what we
+                            // are, which it cannot learn any other way
+                            // until our next announce happens to fall in
+                            // its lifetime. The clock plausibility and the
+                            // per-peer rate limit are read here, so the
+                            // core keeps deciding only what an announce is.
+                            let clock_ok = core.has_plausible_wall_clock();
+                            let now_ms = core.now_ms();
+                            output.actions.extend(
+                                peer_up_announce(
+                                    &mut core,
+                                    &mut peer_announce_gate,
+                                    iface_id,
+                                    peer,
+                                    now_ms,
+                                    clock_ok,
+                                )
+                                .actions,
+                            );
+                            output
                         }
                     }
                 };
@@ -5899,6 +6002,167 @@ mod tests {
             crate::clock::SystemClock::new(),
             crate::storage::Storage::new(&tmp).unwrap(),
         )
+    }
+
+    // --- Codeberg #376: the peer-up announce, on lnsd ---
+
+    const PHONE: [u8; 16] = [0xb9; 16];
+    const NEIGHBOUR: [u8; 16] = [0x5d; 16];
+    const T0: u64 = 1_700_000_000_000;
+
+    /// A daemon-owned destination that has already announced once, which
+    /// is the state the re-announce paths require: announcing the first
+    /// time is the application's decision, not the peer-up path's.
+    fn announced_destination(core: &mut StdNodeCore) -> DestinationHash {
+        use leviculum_core::Identity;
+        use leviculum_core::{DestinationType, Direction};
+        let dest = Destination::new(
+            Some(Identity::generate(&mut rand_core::OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "lxmf",
+            &["delivery"],
+        )
+        .unwrap();
+        let hash = *dest.hash();
+        core.register_destination(dest);
+        // The first announce is the application's decision, and the
+        // re-announce paths only repeat destinations that have made it.
+        // Its own actions go nowhere: this test has no interfaces.
+        let _seed = core.announce_destination(&hash, Some(b"seed")).unwrap();
+        hash
+    }
+
+    /// Every announce in an output, as (interface, delivery hint); a
+    /// `Broadcast` has no interface, which is what makes "it went to every
+    /// link" visible rather than silent.
+    fn announced(out: &TickOutput) -> Vec<(Option<usize>, Option<[u8; 16]>)> {
+        use leviculum_core::packet::{Packet, PacketType};
+        out.actions
+            .iter()
+            .filter_map(|action| match action {
+                leviculum_core::transport::Action::SendPacket { iface, data, peer } => {
+                    Packet::unpack(data)
+                        .ok()
+                        .filter(|p| p.flags.packet_type == PacketType::Announce)
+                        .map(|_| (Some(iface.0), *peer))
+                }
+                leviculum_core::transport::Action::Broadcast { data, .. } => Packet::unpack(data)
+                    .ok()
+                    .filter(|p| p.flags.packet_type == PacketType::Announce)
+                    .map(|_| (None, None)),
+            })
+            .collect()
+    }
+
+    /// One announce per peer-up edge, on that peer's link alone. The
+    /// daemon's mirror of the firmware test of the same name: an announce
+    /// broadcast here would reach a neighbour on the same adapter, which
+    /// forwards it, and the relayed copy racing the direct one is the
+    /// two-hop reading #376 opened with.
+    #[test]
+    fn a_peer_up_announces_to_that_peer_alone() {
+        let mut core = test_core("peerup-one");
+        let mut gate = PeerAnnounceLimiter::new();
+        announced_destination(&mut core);
+
+        let out = peer_up_announce(&mut core, &mut gate, InterfaceId(0), PHONE, T0, true);
+
+        assert_eq!(
+            announced(&out),
+            vec![(Some(0), Some(PHONE))],
+            "one announce, on the new peer's link, addressed at it"
+        );
+    }
+
+    /// The rate limit, in the shape the field produces it: the same
+    /// identity relinking inside the window announces once. A phone
+    /// rotates its BLE address on every reconnect, so the gate is keyed on
+    /// the identity and a rotation cannot reset it.
+    #[test]
+    fn the_same_identity_relinking_inside_the_window_announces_once() {
+        let mut core = test_core("peerup-limit");
+        let mut gate = PeerAnnounceLimiter::new();
+        announced_destination(&mut core);
+
+        let first = peer_up_announce(&mut core, &mut gate, InterfaceId(0), PHONE, T0, true);
+        assert_eq!(announced(&first).len(), 1);
+
+        for minute in 1..15u64 {
+            let again = peer_up_announce(
+                &mut core,
+                &mut gate,
+                InterfaceId(0),
+                PHONE,
+                T0 + minute * 60_000,
+                true,
+            );
+            assert!(
+                announced(&again).is_empty(),
+                "relink at +{minute} min is inside the 15 minute window"
+            );
+        }
+
+        let after = peer_up_announce(
+            &mut core,
+            &mut gate,
+            InterfaceId(0),
+            PHONE,
+            T0 + leviculum_announce_policy::PEER_UP_ANNOUNCE_MIN_INTERVAL_MS,
+            true,
+        );
+        assert_eq!(announced(&after).len(), 1, "the window is over");
+    }
+
+    /// A second peer is a second budget: the phone and a neighbour daemon
+    /// on the same adapter each get their own announce.
+    #[test]
+    fn the_limit_is_per_peer() {
+        let mut core = test_core("peerup-perpeer");
+        let mut gate = PeerAnnounceLimiter::new();
+        announced_destination(&mut core);
+
+        assert_eq!(
+            announced(&peer_up_announce(
+                &mut core,
+                &mut gate,
+                InterfaceId(0),
+                PHONE,
+                T0,
+                true
+            )),
+            vec![(Some(0), Some(PHONE))]
+        );
+        assert_eq!(
+            announced(&peer_up_announce(
+                &mut core,
+                &mut gate,
+                InterfaceId(0),
+                NEIGHBOUR,
+                T0,
+                true
+            )),
+            vec![(Some(0), Some(NEIGHBOUR))]
+        );
+    }
+
+    /// No plausible wall clock, no announce. On a PC the clock is always
+    /// there, so this is the gate as policy rather than as a condition
+    /// lnsd reaches — but the same code runs on a board that boots
+    /// without one, where an announce stamped from uptime would poison
+    /// the receiver's path table for the life of the entry.
+    #[test]
+    fn no_announce_without_a_clock() {
+        let mut core = test_core("peerup-noclock");
+        let mut gate = PeerAnnounceLimiter::new();
+        announced_destination(&mut core);
+
+        let out = peer_up_announce(&mut core, &mut gate, InterfaceId(0), PHONE, T0, false);
+        assert!(announced(&out).is_empty());
+
+        // And nothing was spent: the announce follows the clock.
+        let after = peer_up_announce(&mut core, &mut gate, InterfaceId(0), PHONE, T0 + 1, true);
+        assert_eq!(announced(&after).len(), 1);
     }
 
     /// The other half of Codeberg #92: `announce_cap_percent_from_config`

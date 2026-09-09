@@ -1926,6 +1926,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-announce-policy"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-ble-tx"
 version = "0.1.0"
 dependencies = [
@@ -2046,6 +2050,7 @@ dependencies = [
  "hex",
  "hmac",
  "if-addrs",
+ "leviculum-announce-policy",
  "leviculum-ble-tx",
  "leviculum-core",
  "leviculum-lxmf",

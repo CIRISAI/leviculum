@@ -66,6 +66,10 @@ thiserror.workspace = true
 # record and the LN-<hex8> name derivation. One implementation on both
 # sides of the rig, per the reuse rule in the #255 seam report.
 leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
+# The announce cadence and per-peer rate limit both stacks obey (#376):
+# host-tested once, next to the firmware that shares it, so the policy the
+# desk measures on a board is the policy the daemon runs.
+leviculum-announce-policy = { path = "../leviculum-nrf/announce-policy" }
 # ble-tx's drain slots are `embassy-sync` Signals, so linking it needs a
 # `critical_section::Impl`. ble-tx supplies one only as a dev-dependency —
 # correct there, because the firmware gets the real one from nrf-softdevice
