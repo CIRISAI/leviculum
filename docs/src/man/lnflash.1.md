@@ -7,7 +7,7 @@ lnflash -- flash, configure and watch LNode boards
 ## SYNOPSIS
 
 **lnflash** [*options*]\
-**lnflash** **--set-time** | **--set-telemetry** | **--set-media** [*spec*] | **--set-name** [*name*] | **--set-position** *lat,lon[,alt]* | **--set-tx-power** *dbm* | **--set-tx-spacing** *ms*\
+**lnflash** **--set-time** | **--set-telemetry** | **--set-media** [*spec*] | **--set-name** [*name*] | **--set-position** *lat,lon[,alt]* | **--set-tx-power** *dbm* | **--set-tx-spacing** *ms* | **--set-ble-tx-gap** *ms* | **--announce**\
 **lnflash** **--watch** [*serial-or-port*] [**--out** *file*]\
 **lnflash** **--summarize** *file*
 
@@ -47,7 +47,7 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 
 ## CONFIGURE SESSIONS
 
-Each finds every running LNode on the bus, talks to it over the control envelope on the transport CDC (if02), reports what each board answered and exits. **--set-time** teaches the boards the host clock; **--set-tx-spacing** sets the on-air transmit spacing (not persisted); **--set-tx-power** sets the transmit power (persisted); **--set-position**/**--clear-position** pin or release a fixed position; **--set-media** reads or sets which carriers a board meshes over; **--set-name**/**--clear-name** read or set what the board is called; **--set-telemetry** configures the telemetry target. A flag given with no value, where allowed, only reads the boards back.
+Each finds every running LNode on the bus, talks to it over the control envelope on the transport CDC (if02), reports what each board answered and exits. **--set-time** teaches the boards the host clock; **--set-tx-spacing** sets the on-air transmit spacing (not persisted); **--set-tx-power** sets the transmit power (persisted); **--set-position**/**--clear-position** pin or release a fixed position; **--set-media** reads or sets which carriers a board meshes over; **--set-name**/**--clear-name** read or set what the board is called; **--set-telemetry** configures the telemetry target; **--set-ble-tx-gap** sets the gap the board leaves between packets on one Bluetooth connection, 0 to 5000 ms (not persisted; 0 imposes nothing); **--announce** makes each board announce its LXMF delivery destination immediately on all interfaces, exactly as its telemetry path does — a board without a calendar clock withholds the announce and says so (run **--set-time** first). A flag given with no value, where allowed, only reads the boards back.
 
 ## FIELD WATCH
 

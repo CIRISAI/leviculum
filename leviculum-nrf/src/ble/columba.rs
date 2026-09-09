@@ -29,7 +29,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
-    ConnectDecision, PeerRegistry, ScanMode, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
+    ConnectDecision, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
     LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
     WINDOW_CANDIDATES,
 };
@@ -376,6 +376,26 @@ fn process_logged(
     result
 }
 
+/// Hold the next packet back until this connection's inter-packet gap
+/// (#376, `--set-ble-tx-gap`) has elapsed. Both pumps — the peripheral
+/// notify path and the central write path — call this before a packet's
+/// first fragment and [`TxGap::packet_done`] after its last, so the gap
+/// is packet-to-packet on one connection handle, exactly as specified.
+/// Keepalives bypass it on both sides: the knob is specified between
+/// packets, and a keepalive that slid the window would change the
+/// quantity being swept. With the gap at 0 (the default) the wait is 0
+/// and nothing is logged — the fleet path is untouched.
+async fn serve_tx_gap(gap: &TxGap, conn_handle: u16) {
+    let wait_ms = gap.wait_ms(Instant::now().as_millis(), super::tx_gap_ms());
+    if wait_ms > 0 {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!("BLE_TX_GAP conn={} waited_ms={}", conn_handle, wait_ms),
+        );
+        Timer::after(Duration::from_millis(wait_ms)).await;
+    }
+}
+
 /// Per-connection event-loop. Inbound writes drive `gatt_server::run`'s
 /// closure (Columba defrag + handshake state); outbound BLE_OUTGOING and
 /// keepalive timer feed `gatt_server::notify_value`. The two halves run
@@ -481,6 +501,9 @@ async fn gatt_events(
     });
 
     let outbound = async {
+        // This connection's inter-packet gap state (#376); dies with the
+        // link, so a reconnect starts unpaced.
+        let mut tx_gap = TxGap::new();
         loop {
             let keepalive_deadline = if handshake_done.get() {
                 Timer::at(last_keepalive.get() + Duration::from_millis(KEEPALIVE_INTERVAL_MS))
@@ -490,6 +513,7 @@ async fn gatt_events(
 
             match select(outgoing_rx.receive(), keepalive_deadline).await {
                 Either::First(packet) => {
+                    serve_tx_gap(&tx_gap, conn_handle).await;
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
                     notify_fragments(
                         conn,
@@ -501,6 +525,7 @@ async fn gatt_events(
                         packet.len(),
                     )
                     .await;
+                    tx_gap.packet_done(Instant::now().as_millis());
                 }
                 Either::Second(()) => {
                     let kv = [KEEPALIVE_BYTE];
@@ -1165,11 +1190,15 @@ async fn run_central_session(
     // so unlike the notify path no drain machinery is needed; every
     // remaining error is fatal for the link.
     let outbound = async {
+        // This connection's inter-packet gap state (#376); dies with the
+        // link, so a reconnect starts unpaced.
+        let mut tx_gap = TxGap::new();
         loop {
             let keepalive_deadline =
                 Timer::at(last_keepalive.get() + Duration::from_millis(KEEPALIVE_INTERVAL_MS));
             match select(outgoing_rx.receive(), keepalive_deadline).await {
                 Either::First(packet) => {
+                    serve_tx_gap(&tx_gap, conn.handle().unwrap_or(u16::MAX)).await;
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
                     let mut sent = 0usize;
                     let mut torn = false;
@@ -1219,6 +1248,7 @@ async fn run_central_session(
                         }
                         sent += 1;
                     }
+                    tx_gap.packet_done(Instant::now().as_millis());
                     // One BLE_TX_PKT per multi-fragment packet, success
                     // and failure alike (#373) — same line, same host
                     // test as the notify path's.

@@ -80,6 +80,37 @@ struct Cli {
     #[arg(long, value_name = "MS", conflicts_with_all = ["set_time", "set_telemetry"])]
     set_tx_spacing: Option<u16>,
 
+    /// Make every running LNode announce its LXMF delivery destination
+    /// immediately, on all interfaces, then exit. No flashing, nothing
+    /// persisted. Exactly the announce the board's telemetry path sends
+    /// before a report, under the same rule: a board without a calendar
+    /// clock withholds it and says so ([ANNOUNCE] withheld
+    /// reason=no-clock on its debug port) — run --set-time first. A bench
+    /// instrument for #376: it separates "the announce never left the
+    /// board" from "it left and was not taken" without waiting out the
+    /// board's own announce cadence.
+    #[arg(
+        long,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize"]
+    )]
+    announce: bool,
+
+    /// Set the BLE inter-packet transmit gap, in milliseconds, on every
+    /// running LNode, then exit. No flashing. The board leaves at least
+    /// this gap between the last fragment of one packet and the first
+    /// fragment of the next packet on the same Bluetooth connection; 0 is
+    /// the default and imposes nothing. 0 to 5000 — the board refuses the
+    /// rest by name, and so does this command line. A bench instrument
+    /// for #376 like --set-tx-spacing, and volatile like it: not
+    /// persisted, a reset restores 0.
+    #[arg(
+        long,
+        value_name = "MS",
+        value_parser = clap::value_parser!(u16).range(..=leviculum_core::envelope::BLE_TX_GAP_MAX_MS as i64),
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce"]
+    )]
+    set_ble_tx_gap: Option<u16>,
+
     /// Set the transmit power, in dBm, on every running LNode, then exit.
     /// No flashing. Reads the board's current radio settings first and sends
     /// them back with only the power changed, so nothing else moves; a board
@@ -470,6 +501,32 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::set_tx_spacing(&catalogue, &sysfs, ui, spacing_ms)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if cli.announce {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::announce(&catalogue, &sysfs, ui)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if let Some(gap_ms) = cli.set_ble_tx_gap {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_ble_tx_gap(&catalogue, &sysfs, ui, gap_ms)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -917,6 +974,75 @@ mod tests {
             vec!["--set-tx-spacing", "60", "--set-tx-power", "14"],
         ] {
             let err = spacing(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Announce-now and the BLE transmit gap (Codeberg #376)
+    // -----------------------------------------------------------------
+
+    fn gap(args: &[&str]) -> Result<(bool, Option<u16>), String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok((cli.announce, cli.set_ble_tx_gap))
+    }
+
+    #[test]
+    fn without_the_376_flags_neither_session_runs_at_all() {
+        // The control: a plain flash touches neither the announce cadence
+        // nor the BLE pacing.
+        assert_eq!(gap(&[]).unwrap(), (false, None));
+        assert_eq!(gap(&["--yes"]).unwrap(), (false, None));
+    }
+
+    #[test]
+    fn a_gap_on_the_command_line_is_carried_verbatim_across_the_range() {
+        // Both ends included: 0 is the default and has to travel as a
+        // value, and the board bound itself is still a legal experiment.
+        for ms in [
+            0u16,
+            1,
+            20,
+            500,
+            leviculum_core::envelope::BLE_TX_GAP_MAX_MS,
+        ] {
+            assert_eq!(
+                gap(&["--set-ble-tx-gap", &ms.to_string()]).unwrap(),
+                (false, Some(ms))
+            );
+        }
+    }
+
+    #[test]
+    fn a_gap_beyond_the_board_bound_is_a_usage_error() {
+        // The board would refuse these by name (REFUSE_VALUE); the command
+        // line refuses them first so no board is rebooted, opened or
+        // written on the way to a wire refusal.
+        for value in ["5001", "70000", "-1", "twenty"] {
+            assert!(
+                gap(&["--set-ble-tx-gap", value]).is_err(),
+                "{value} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_376_sessions_are_not_combinable_with_the_other_sessions() {
+        // Each ends the run after talking to the boards, so any pair
+        // would silently drop one.
+        for args in [
+            vec!["--announce", "--set-time"],
+            vec!["--announce", "--set-telemetry"],
+            vec!["--announce", "--set-tx-spacing", "60"],
+            vec!["--announce", "--set-ble-tx-gap", "20"],
+            vec!["--announce", "--watch"],
+            vec!["--set-ble-tx-gap", "20", "--set-time"],
+            vec!["--set-ble-tx-gap", "20", "--set-tx-spacing", "60"],
+            vec!["--set-ble-tx-gap", "20", "--set-media", "ble=off"],
+            vec!["--set-ble-tx-gap", "20", "--summarize", "/tmp/walk.log"],
+        ] {
+            let err = gap(&args).unwrap_err();
             assert!(err.contains("cannot be used with"), "{args:?}: {err}");
         }
     }

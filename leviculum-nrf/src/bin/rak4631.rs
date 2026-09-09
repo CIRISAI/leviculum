@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -577,10 +577,11 @@ async fn main(spawner: Spawner) {
                 Timer::at(deadline),
             ),
             gnss_time_candidate,
-            select3(
+            select4(
                 serial.wall_time_rx.receive(),
                 telemetry_target_rx.receive(),
                 fixed_position_rx.receive(),
+                serial.announce_rx.receive(),
             ),
             telemetry_tick,
         )
@@ -601,7 +602,7 @@ async fn main(spawner: Spawner) {
         // mirror nothing — no "peers" at this layer — and stay at zero.
         node.set_interface_peer_count(2, ble_iface.peer_count());
         match wake {
-            Either4::Third(Either3::First(unix_secs)) => {
+            Either4::Third(Either4::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
                 // seam applies the same sanity window as every other time
                 // source; the bool picks the enveloped ack or the named
@@ -621,7 +622,7 @@ async fn main(spawner: Spawner) {
                 // the host's retry covers it.
                 let _ = serial_ctl_tx.try_send(answer);
             }
-            Either4::Third(Either3::Second(wire)) => {
+            Either4::Third(Either4::Second(wire)) => {
                 // A host set or cleared the telemetry target (#236). What
                 // happens here is the part that needs the node — the
                 // identity lookup that decides ready vs awaiting-key. The
@@ -638,7 +639,7 @@ async fn main(spawner: Spawner) {
                     }
                 }
             }
-            Either4::Third(Either3::Third(position)) => {
+            Either4::Third(Either4::Third(position)) => {
                 // A host set or cleared the fixed position. This is the
                 // part that needs the reporter — the source switch and the
                 // confirmation re-arm; the persist is the serial task's,
@@ -656,6 +657,66 @@ async fn main(spawner: Spawner) {
                         None => log_critical!("[TELEMETRY] fixed-position cleared"),
                     }
                 }
+            }
+            Either4::Third(Either4::Fourth(())) => {
+                // A host asked for an announce now (#376 `TYPE_ANNOUNCE`,
+                // `lnflash --announce`). Exactly the announce the
+                // telemetry path sends before a report — same
+                // destination, same app data, same clock gate — so the
+                // desk measures the announce the board sends on its own
+                // cadence, only sooner.
+                use leviculum_core::envelope;
+                let answer = match delivery_hash.as_ref() {
+                    None => {
+                        // No delivery destination was registered this
+                        // boot: nothing exists to announce, and neither a
+                        // retry nor the clock can change that.
+                        envelope::encode_refusal(
+                            envelope::TYPE_ANNOUNCE,
+                            envelope::REFUSE_UNSUPPORTED,
+                        )
+                    }
+                    Some(_) if !node.has_plausible_wall_clock() => {
+                        // The telemetry path's clock gate: the emission
+                        // timestamp inside the announce is what peers
+                        // rank paths by, and an uptime-stamped announce
+                        // would poison the very path under measurement.
+                        log_critical!("[ANNOUNCE] withheld reason=no-clock");
+                        envelope::encode_refusal(envelope::TYPE_ANNOUNCE, envelope::REFUSE_NO_CLOCK)
+                    }
+                    Some(hash) => {
+                        let app_data = leviculum_nrf::telemetry::announce_app_data(node.identity());
+                        match node.announce_destination(hash, Some(&app_data)) {
+                            Ok(out) => {
+                                let mut ifaces: [&mut dyn Interface; 3] =
+                                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                                let dispatched =
+                                    dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                                leviculum_nrf::dispatch::settle(
+                                    "announce-host",
+                                    &mut node,
+                                    &dispatched,
+                                );
+                                let dh = hash.as_bytes();
+                                log_critical!(
+                                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason=host",
+                                    dh[0],
+                                    dh[1],
+                                    dh[2],
+                                    dh[3]
+                                );
+                                envelope::encode_ack(envelope::TYPE_ANNOUNCE)
+                            }
+                            Err(_) => envelope::encode_refusal(
+                                envelope::TYPE_ANNOUNCE,
+                                envelope::REFUSE_BUSY,
+                            ),
+                        }
+                    }
+                };
+                // Best effort, like the wall-time answer: a full outgoing
+                // channel means a busy link; the host's retry covers it.
+                let _ = serial_ctl_tx.try_send(answer);
             }
             Either4::Second(unix) => {
                 // A GNSS fix carrying UTC. The seam applies the same

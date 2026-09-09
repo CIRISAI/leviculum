@@ -49,6 +49,13 @@ static OUTGOING_CHANNEL: Channel<CriticalSectionRawMutex, Vec<u8>, 8> = Channel:
 /// through the ordinary outgoing channel once the seam has spoken.
 static WALL_TIME_CHANNEL: Channel<CriticalSectionRawMutex, u64, 1> = Channel::new();
 
+/// Host-requested announces (#376, `TYPE_ANNOUNCE`). The node core owns
+/// the destinations and the clock gate, so the serial task hands the
+/// request to the main loop the same way it hands the wall time; the
+/// main loop answers with the enveloped ack or the `no-clock` refusal
+/// through the ordinary outgoing channel.
+static ANNOUNCE_CHANNEL: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+
 /// The control-frame types this firmware accepts — what the capability
 /// report advertises.
 pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
@@ -66,6 +73,8 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_NODE_NAME,
     envelope::TYPE_NODE_NAME_QUERY,
     envelope::TYPE_IDENTITY_QUERY,
+    envelope::TYPE_ANNOUNCE,
+    envelope::TYPE_BLE_TX_GAP,
 ];
 
 /// nRF52840 FICR base address
@@ -110,6 +119,10 @@ pub struct SerialChannels {
     /// Receive host wall-time injections (#238 `TYPE_WALL_TIME`); the main
     /// loop calls the calendar seam and answers via `outgoing_tx`.
     pub wall_time_rx: Receiver<'static, CriticalSectionRawMutex, u64, 1>,
+    /// Receive host announce requests (#376 `TYPE_ANNOUNCE`); the main
+    /// loop runs the announce — clock gate and all — and answers via
+    /// `outgoing_tx`.
+    pub announce_rx: Receiver<'static, CriticalSectionRawMutex, (), 1>,
 }
 
 /// Initialize USB composite device and spawn driver tasks.
@@ -177,6 +190,7 @@ pub fn init(
         incoming_rx: INCOMING_CHANNEL.receiver(),
         outgoing_tx: OUTGOING_CHANNEL.sender(),
         wall_time_rx: WALL_TIME_CHANNEL.receiver(),
+        announce_rx: ANNOUNCE_CHANNEL.receiver(),
     }
 }
 
@@ -836,6 +850,47 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: identity report write failed");
+                                    }
+                                }
+                                ControlAction::AnnounceNow => {
+                                    // The node core owns the destinations
+                                    // and the clock gate, so the main loop
+                                    // runs the announce and answers, like
+                                    // the wall time. A full channel means
+                                    // a request is already pending —
+                                    // refuse audibly, the host retries.
+                                    if ANNOUNCE_CHANNEL.try_send(()).is_err() {
+                                        let refusal = envelope::encode_refusal(
+                                            envelope::TYPE_ANNOUNCE,
+                                            envelope::REFUSE_BUSY,
+                                        );
+                                        if !write_framed(
+                                            &mut tx,
+                                            &control,
+                                            &refusal,
+                                            &mut frame_buf,
+                                        )
+                                        .await
+                                        {
+                                            log("SER: announce refusal write failed");
+                                        }
+                                    }
+                                }
+                                ControlAction::BleTxGap(gap_ms) => {
+                                    // The BLE interface owns the knob, as
+                                    // the LoRa interface owns the transmit
+                                    // spacing: the gap is a property of
+                                    // the medium, served per connection in
+                                    // the drain, and no other layer learns
+                                    // of it. One atomic store, already
+                                    // bounded by the classifier — nothing
+                                    // here can fail.
+                                    crate::ble::set_tx_gap_ms(gap_ms);
+                                    let answer = envelope::encode_ack(envelope::TYPE_BLE_TX_GAP);
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: ble-tx-gap answer write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

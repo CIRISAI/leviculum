@@ -285,6 +285,26 @@ pub fn note_media_changed() {
     }
 }
 
+/// The inter-packet transmit gap (#376, `TYPE_BLE_TX_GAP`), in
+/// milliseconds. `0` — the boot value, and what every reset restores —
+/// imposes nothing; the knob is deliberately not persisted, exactly like
+/// the LoRa transmit spacing (#345): a bench must not be able to leave a
+/// board silently paced after the session that paced it.
+static TX_GAP_MS: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Set the inter-packet gap. Called from the serial control task; the
+/// per-connection pumps read it at each packet, so it takes effect from
+/// the next packet on every live link without touching the links.
+pub fn set_tx_gap_ms(gap_ms: u16) {
+    TX_GAP_MS.store(gap_ms, core::sync::atomic::Ordering::Relaxed);
+    crate::log::log_fmt("[BLE ] ", format_args!("tx_gap_ms={}", gap_ms));
+}
+
+/// The gap the pumps serve right now.
+pub(crate) fn tx_gap_ms() -> u16 {
+    TX_GAP_MS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Resolve when the BLE carrier reads off. Selected against a live
 /// session or an advertise/scan future; never resolves while the
 /// carrier stays on.

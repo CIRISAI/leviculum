@@ -78,6 +78,7 @@
 - [Storage trait analysis](storage-trait-analysis.md)
 - [Broadcast Python-RNS parity](architecture-broadcast-python-parity.md)
 - [Hop counting](architecture-hop-counting.md)
+- [Announce dedup and path replacement](protocol-notes/announce-dedup-and-path-replacement.md)
 - [Testing quick reference](development-testing.md)
 - [CI pipeline](development-ci.md)
 - [Soak and endurance](soak-and-endurance.md)

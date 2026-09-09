@@ -26,8 +26,8 @@ use leviculum_core::envelope::{
     encode_node_name, encode_node_name_query, encode_position_source_query, encode_radio_config,
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
     IdentityReportWire, MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE,
-    TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT,
+    REFUSE_MALFORMED, REFUSE_NO_CLOCK, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED,
+    REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT,
     TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
     TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
@@ -161,6 +161,11 @@ pub fn reason_str(reason: u8) -> &'static str {
         REFUSE_PERSIST => {
             "the board applied the value but could not write it to flash, \
                            so a reset would lose it"
+        }
+        REFUSE_NO_CLOCK => {
+            "the board has no calendar clock yet, so it withheld the announce \
+                           (reason=no-clock on its debug port); seed one with --set-time \
+                           or a GNSS fix and retry"
         }
         _ => "an unnamed reason",
     }
@@ -347,6 +352,50 @@ pub fn send_tx_spacing(fd: &Fd, spacing_ms: u16) -> io::Result<ControlOutcome> {
         &payload,
         CONTROL_TIMING,
         command_answer(leviculum_core::envelope::TYPE_TX_SPACING),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
+/// Ask the board to announce its LXMF delivery destination now (#376,
+/// `TYPE_ANNOUNCE`).
+///
+/// One-shot, nothing persisted: the board runs exactly the announce its
+/// telemetry path sends before a report — same destination, same app
+/// data, same clock gate. A board without a calendar clock refuses with
+/// [`leviculum_core::envelope::REFUSE_NO_CLOCK`] and says
+/// `[ANNOUNCE] withheld reason=no-clock` on its debug port. The frame is
+/// 5 bytes — under the 19-byte Reticulum minimum — so old firmware
+/// cannot mistake it for a packet; it still goes through [`probed`] on
+/// the flow path so an old board is reported as old rather than as
+/// silent.
+pub fn send_announce(fd: &Fd) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_announce();
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_ANNOUNCE),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
+/// Set the BLE inter-packet transmit gap (#376, `TYPE_BLE_TX_GAP`).
+///
+/// The BLE sibling of [`send_tx_spacing`], and volatile like it: the
+/// board leaves at least this gap between the last fragment of one
+/// packet and the first fragment of the next on the same connection,
+/// and a reset restores 0. Values above
+/// [`leviculum_core::envelope::BLE_TX_GAP_MAX_MS`] are refused by the
+/// board with a named value refusal — the CLI additionally refuses them
+/// at the command line, so the wire only ever carries the board bound's
+/// worth.
+pub fn send_ble_tx_gap(fd: &Fd, gap_ms: u16) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_ble_tx_gap(gap_ms);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_BLE_TX_GAP),
     )?;
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
@@ -705,10 +754,11 @@ pub(crate) mod testing {
         media_profile_answer, media_query_answer, node_name_answer, node_name_query_answer,
         position_source_query_answer, telemetry_target_answer, ControlAction, IdentityReportWire,
         MediaProfileWire, Persist, NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED,
-        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_CAPABILITIES, TYPE_FIXED_POSITION,
-        TYPE_IDENTITY_QUERY, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_NODE_NAME,
-        TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY,
-        TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
+        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_ANNOUNCE, TYPE_BLE_TX_GAP,
+        TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY, TYPE_MEDIA_PROFILE,
+        TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY,
+        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
+        TYPE_WALL_TIME,
     };
     use leviculum_core::node_name::{truncate_on_char_boundary, NodeName, BLE_NAME_MAX_LEN};
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
@@ -742,6 +792,8 @@ pub(crate) mod testing {
         TYPE_NODE_NAME,
         TYPE_NODE_NAME_QUERY,
         TYPE_IDENTITY_QUERY,
+        TYPE_ANNOUNCE,
+        TYPE_BLE_TX_GAP,
     ];
 
     /// The scripted board's probe and LXMF destination hashes. Distinct
@@ -1030,6 +1082,13 @@ pub(crate) mod testing {
                     Some(position_source_query_answer(true, *sources.lock().unwrap()))
                 }
                 ControlAction::TxSpacing(_) => Some(encode_ack(TYPE_TX_SPACING)),
+                // The scripted board has a calendar clock, so a host
+                // announce request is acked; the clockless case is its
+                // own stub ([`clockless_firmware_stub`]), because the
+                // no-clock refusal is the answer the desk most needs to
+                // read correctly.
+                ControlAction::AnnounceNow => Some(encode_ack(TYPE_ANNOUNCE)),
+                ControlAction::BleTxGap(_) => Some(encode_ack(TYPE_BLE_TX_GAP)),
                 // The media gate, run exactly as the board runs it: apply,
                 // then answer from the state that is already in force.
                 ControlAction::MediaProfile(profile) => {
@@ -1300,6 +1359,50 @@ pub(crate) mod testing {
                 _ => None,
             }
         })
+    }
+
+    /// Whether a #376 announce request reached the stub.
+    pub fn announce_frame_seen(seen: &Seen) -> bool {
+        seen.lock().unwrap().iter().any(|f| {
+            matches!(
+                classify_control_frame(f, FIRMWARE_ACCEPTS),
+                ControlAction::AnnounceNow
+            )
+        })
+    }
+
+    /// The BLE transmit gap the stub decoded, if a #376 frame reached it.
+    pub fn ble_tx_gap_frame(seen: &Seen) -> Option<u16> {
+        seen.lock().unwrap().iter().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::BleTxGap(ms) => Some(ms),
+                _ => None,
+            }
+        })
+    }
+
+    /// A scripted device whose calendar clock is still unseeded: it runs
+    /// the firmware's decision function, but the main-loop clock gate
+    /// withholds the announce and answers the named `no-clock` refusal —
+    /// the case the #376 desk most needs the tool to state correctly,
+    /// because a fresh board on a bench with no GNSS view is exactly
+    /// this board.
+    pub fn clockless_firmware_stub(pty: &Pty, seen: Seen) {
+        spawn_stub(pty, move |frame_bytes| {
+            seen.lock().unwrap().push(frame_bytes.to_vec());
+            match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
+                ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
+                ControlAction::AnnounceNow => Some(encode_refusal(
+                    TYPE_ANNOUNCE,
+                    leviculum_core::envelope::REFUSE_NO_CLOCK,
+                )),
+                ControlAction::Refuse {
+                    refused_type,
+                    reason,
+                } => Some(encode_refusal(refused_type, reason)),
+                _ => None,
+            }
+        });
     }
 
     /// The radio config the stub was sent, if a config frame reached it.
@@ -1599,6 +1702,120 @@ mod tests {
         assert!(!caps.accepts(leviculum_core::envelope::TYPE_TX_SPACING));
         assert_eq!(
             send_tx_spacing(&fd, 60).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Announce-now and the BLE transmit gap (Codeberg #376)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_announce_request_is_acked_and_reaches_the_board() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_announce(&fd).unwrap(), ControlOutcome::Acked);
+        assert!(announce_frame_seen(&seen));
+    }
+
+    #[test]
+    fn a_clockless_board_refuses_the_announce_by_name_not_by_timeout() {
+        // The desk's most important reading: "the board withheld for lack
+        // of a clock" must arrive as a spoken refusal, not as a run-down
+        // window a bench would misread as dead firmware.
+        let pty = Pty::open();
+        clockless_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let started = Instant::now();
+        assert_eq!(
+            send_announce(&fd).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_NO_CLOCK
+            }
+        );
+        assert!(started.elapsed() < CONTROL_TIMING.window);
+    }
+
+    #[test]
+    fn a_board_without_the_announce_command_refuses_it_by_name() {
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(leviculum_core::envelope::TYPE_ANNOUNCE));
+        assert_eq!(
+            send_announce(&fd).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn a_ble_tx_gap_is_acked_and_the_value_reaches_the_board() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_ble_tx_gap(&fd, 20).unwrap(), ControlOutcome::Acked);
+        // The number on the wire is the number asked for — a sweep point
+        // that arrives changed is worse than one that does not arrive.
+        assert_eq!(ble_tx_gap_frame(&seen), Some(20));
+    }
+
+    #[test]
+    fn a_zero_gap_travels_as_a_value_rather_than_as_nothing_sent() {
+        // Zero puts a board back on the default, so it has to be a frame
+        // the board acks, not a skipped command.
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(send_ble_tx_gap(&fd, 0).unwrap(), ControlOutcome::Acked);
+        assert_eq!(ble_tx_gap_frame(&seen), Some(0));
+    }
+
+    #[test]
+    fn a_gap_beyond_the_board_bound_is_refused_by_value() {
+        // The stub runs the firmware's own decision function, so this is
+        // the board-side bound (#376 "reject the rest on the board"), not
+        // a CLI parse: 5001 ms arrives, is decoded, and is refused with
+        // the named value reason.
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        assert_eq!(
+            send_ble_tx_gap(&fd, leviculum_core::envelope::BLE_TX_GAP_MAX_MS + 1).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_VALUE
+            }
+        );
+        // …and the refused value never classified into an action, so a
+        // board that shares this decision function never applied it.
+        assert_eq!(ble_tx_gap_frame(&seen), None);
+    }
+
+    #[test]
+    fn a_board_without_the_gap_knob_refuses_it_by_name() {
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(leviculum_core::envelope::TYPE_BLE_TX_GAP));
+        assert_eq!(
+            send_ble_tx_gap(&fd, 20).unwrap(),
             ControlOutcome::Refused {
                 reason: REFUSE_UNKNOWN_TYPE
             }

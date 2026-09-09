@@ -36,6 +36,7 @@
 
 pub mod adv;
 pub mod drain;
+pub mod gap;
 pub mod peer;
 pub mod registry;
 pub mod window;
@@ -45,6 +46,7 @@ pub use adv::{
     LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
 };
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
+pub use gap::TxGap;
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,

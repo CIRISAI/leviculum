@@ -845,6 +845,156 @@ fn send_tx_spacing_to(fd: &crate::sys::Fd, spacing_ms: u16) -> io::Result<Sessio
     })
 }
 
+/// The `--announce` session (#376): no flash — find the boards already
+/// running and ask each to announce its LXMF delivery destination now,
+/// on all its interfaces, exactly as its telemetry path does before a
+/// report. One-shot, nothing persisted.
+///
+/// The bench instrument for the direct-announce loss: it separates "the
+/// announce never left the board" from "it left and was not taken"
+/// without waiting out the board's own announce cadence. The clock gate
+/// is the telemetry path's: a board without a calendar clock withholds,
+/// answers the named `no-clock` refusal, and says
+/// `[ANNOUNCE] withheld reason=no-clock` on its debug port — the tool
+/// repeats that reading rather than reporting a generic refusal.
+pub fn announce(catalogue: &Catalogue, sysfs: &Sysfs, ui: &mut dyn Ui) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --announce talks to flashed boards; a board in its \
+             bootloader has nothing to announce.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_announce_to(&fd))
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: announce sent. The board logs [ANNOUNCE] sent dst=… reason=host and \
+                 the usual BLE_TX_PKT lines on its debug port (if00); read those to see which \
+                 carriers took it."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the announce — {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer the announce frame, so whether it announced \
+                 is unknown — read its debug port."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so no announce was \
+                 requested. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no announce command. Flash \
+                 the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_announce_to(fd: &crate::sys::Fd) -> io::Result<SessionReply> {
+    use crate::envelope;
+    envelope::probed(fd, leviculum_core::envelope::TYPE_ANNOUNCE, |fd| {
+        envelope::send_announce(fd)
+    })
+}
+
+/// The `--set-ble-tx-gap` session (#376): no flash — find the boards
+/// already running and tell each what gap to leave between the last
+/// fragment of one packet and the first fragment of the next packet on
+/// the same BLE connection.
+///
+/// The BLE sibling of [`set_tx_spacing`], and shaped like it: a bench
+/// instrument, deliberately volatile — the value is not persisted, so a
+/// reset or power cycle puts the board back on 0 (no gap). A measurement
+/// must not be able to leave a board silently paced after the session
+/// that paced it.
+pub fn set_ble_tx_gap(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    gap_ms: u16,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --set-ble-tx-gap talks to flashed boards; a board in \
+             its bootloader has no Bluetooth links to pace.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_ble_tx_gap_to(&fd, gap_ms))
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked if gap_ms == 0 => ui.say(&format!(
+                "{port}: BLE transmit gap back to the default — the board imposes no gap \
+                 between packets on a connection."
+            )),
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: BLE transmit gap set to {gap_ms} ms. The board logs [BLE ] \
+                 tx_gap_ms={gap_ms} now and BLE_TX_GAP conn=… waited_ms=… on its debug port \
+                 (if00) for every packet it defers. Not persisted: a reset returns it to 0."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the BLE transmit gap — {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer the BLE transmit-gap frame, so it is still \
+                 on whatever gap it had."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so no gap was sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but has no BLE transmit-gap knob. \
+                 Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_ble_tx_gap_to(fd: &crate::sys::Fd, gap_ms: u16) -> io::Result<SessionReply> {
+    use crate::envelope;
+    envelope::probed(fd, leviculum_core::envelope::TYPE_BLE_TX_GAP, |fd| {
+        envelope::send_ble_tx_gap(fd, gap_ms)
+    })
+}
+
 /// The `--set-tx-power` session (Codeberg #349): set the transmit power on
 /// every running LNode, no flashing, then exit.
 ///

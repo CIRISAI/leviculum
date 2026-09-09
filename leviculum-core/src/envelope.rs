@@ -188,6 +188,39 @@ pub const TYPE_NODE_NAME_QUERY: u8 = 0x0D;
 /// says "no probe responder" is an answer a derivation cannot give.
 /// Read-only, safe mid-measurement like [`TYPE_MEDIA_QUERY`].
 pub const TYPE_IDENTITY_QUERY: u8 = 0x0E;
+/// Announce-now command (Codeberg #376); empty payload. The board
+/// announces its LXMF delivery destination immediately, on all
+/// interfaces, exactly as the telemetry path does before a report —
+/// same app data, same clock gate. Without a calendar clock the
+/// announce is withheld ([`REFUSE_NO_CLOCK`]) rather than sent: the
+/// emission timestamp inside the announce is what peers rank paths by,
+/// and an uptime-stamped announce would poison the very path the bench
+/// is trying to observe.
+///
+/// A bench instrument: it separates "the announce never left the
+/// board" from "it left and the receiver did not take it" without
+/// waiting out the board's own announce cadence. One-shot, nothing is
+/// persisted.
+pub const TYPE_ANNOUNCE: u8 = 0x0F;
+/// BLE inter-packet transmit gap (Codeberg #376); payload is the gap
+/// in milliseconds, one big-endian u16 like [`TYPE_TX_SPACING`]. The
+/// firmware's BLE drain leaves at least this gap between the last
+/// fragment of one packet and the first fragment of the next packet on
+/// the same connection handle; `0` (the default) imposes nothing.
+///
+/// A bench instrument like [`TYPE_TX_SPACING`], and volatile like it:
+/// not persisted, a reset restores `0`. Values above
+/// [`BLE_TX_GAP_MAX_MS`] are refused with [`REFUSE_VALUE`] — the bound
+/// lives in [`classify_control_frame`], so every binary and every
+/// host-side stub refuses the same values.
+pub const TYPE_BLE_TX_GAP: u8 = 0x10;
+
+/// The largest [`TYPE_BLE_TX_GAP`] a board accepts. Five seconds is
+/// already far beyond any honest inter-packet gap (the keepalive
+/// interval is in that region); anything larger is a typo, not an
+/// experiment, and gets a named refusal instead of a wedged-looking
+/// link.
+pub const BLE_TX_GAP_MAX_MS: u16 = 5_000;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -320,6 +353,15 @@ pub const REFUSE_UNSUPPORTED: u8 = 0x05;
 /// the answer (the flash write already exhausted its own retries) and
 /// distinct from [`REFUSE_VALUE`] because the value was fine.
 pub const REFUSE_PERSIST: u8 = 0x06;
+/// The command needs a calendar clock and the board has none yet.
+///
+/// Named rather than folded into [`REFUSE_VALUE`] (there is no value)
+/// or [`REFUSE_BUSY`] (waiting alone cannot help a board with no time
+/// source): the fix is specific — seed the clock, via a GNSS fix or
+/// `--set-time` ([`TYPE_WALL_TIME`]) — and the host can only say so if
+/// the refusal says which problem it has. First consumer:
+/// [`TYPE_ANNOUNCE`], whose clock gate is the telemetry path's.
+pub const REFUSE_NO_CLOCK: u8 = 0x07;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -413,6 +455,26 @@ pub fn encode_tx_spacing(spacing_ms: u16) -> Vec<u8> {
 /// is no refusable range here and the only malformed frame is one of the
 /// wrong length.
 pub fn decode_tx_spacing_payload(payload: &[u8]) -> Option<u16> {
+    let bytes: [u8; 2] = payload.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
+}
+
+/// Encode a complete announce-now frame (#376).
+pub fn encode_announce() -> Vec<u8> {
+    encode_frame(TYPE_ANNOUNCE, &[])
+}
+
+/// Encode a complete BLE transmit-gap frame (#376).
+pub fn encode_ble_tx_gap(gap_ms: u16) -> Vec<u8> {
+    encode_frame(TYPE_BLE_TX_GAP, &gap_ms.to_be_bytes())
+}
+
+/// Decode a BLE transmit-gap payload: exactly 2 bytes, u16 big-endian.
+///
+/// Shape only — the [`BLE_TX_GAP_MAX_MS`] bound is a value judgement
+/// and belongs to [`classify_control_frame`], which refuses it with
+/// [`REFUSE_VALUE`] rather than calling the frame malformed.
+pub fn decode_ble_tx_gap_payload(payload: &[u8]) -> Option<u16> {
     let bytes: [u8; 2] = payload.try_into().ok()?;
     Some(u16::from_be_bytes(bytes))
 }
@@ -1259,6 +1321,20 @@ pub enum ControlAction {
     /// Envelope identity query: answer via [`identity_query_answer`].
     /// Read-only, like [`MediaQuery`](Self::MediaQuery).
     IdentityQuery,
+    /// Envelope announce-now (Codeberg #376): the main loop — the one
+    /// place the node lives — announces the LXMF delivery destination
+    /// on all interfaces exactly as the telemetry path does, and
+    /// answers `encode_ack(TYPE_ANNOUNCE)`; without a calendar clock it
+    /// withholds and answers
+    /// `encode_refusal(TYPE_ANNOUNCE, REFUSE_NO_CLOCK)`.
+    AnnounceNow,
+    /// Envelope BLE transmit gap (Codeberg #376): hand the value to the
+    /// BLE interface layer, which serves it per connection between
+    /// packets, and answer `encode_ack(TYPE_BLE_TX_GAP)`. A measurement
+    /// knob like [`TxSpacing`](Self::TxSpacing), not persisted: a reset
+    /// returns the board to `0`. The value is already inside
+    /// [`BLE_TX_GAP_MAX_MS`] — the classifier refused anything larger.
+    BleTxGap(u16),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1379,6 +1455,24 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
                 malformed
             }
         }
+        TYPE_ANNOUNCE => {
+            if frame.payload.is_empty() {
+                ControlAction::AnnounceNow
+            } else {
+                malformed
+            }
+        }
+        TYPE_BLE_TX_GAP => match decode_ble_tx_gap_payload(frame.payload) {
+            // The bound is enforced here in the shared decision
+            // function, so every binary and the host-side test stub
+            // refuse the same values by the same rule.
+            Some(gap_ms) if gap_ms <= BLE_TX_GAP_MAX_MS => ControlAction::BleTxGap(gap_ms),
+            Some(_) => ControlAction::Refuse {
+                refused_type: TYPE_BLE_TX_GAP,
+                reason: REFUSE_VALUE,
+            },
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1409,6 +1503,8 @@ mod tests {
         TYPE_NODE_NAME,
         TYPE_NODE_NAME_QUERY,
         TYPE_IDENTITY_QUERY,
+        TYPE_ANNOUNCE,
+        TYPE_BLE_TX_GAP,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -1896,6 +1992,108 @@ mod tests {
             classify_control_frame(&encode_tx_spacing(60), ACCEPTED_PRE_236),
             ControlAction::Refuse {
                 refused_type: TYPE_TX_SPACING,
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn the_announce_frame_classifies_and_stays_under_a_packet() {
+        let bytes = encode_announce();
+        // Under the 19-byte minimum Reticulum packet, like every other
+        // empty-payload command: firmware that does not know the type can
+        // never take it for a packet.
+        assert!(bytes.len() < 19);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::AnnounceNow
+        );
+    }
+
+    #[test]
+    fn an_announce_frame_with_a_payload_is_refused_as_malformed() {
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_ANNOUNCE, &[0x01]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_ANNOUNCE,
+                reason: REFUSE_MALFORMED
+            }
+        );
+    }
+
+    #[test]
+    fn firmware_without_the_announce_command_refuses_it_by_name() {
+        assert_eq!(
+            classify_control_frame(&encode_announce(), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_ANNOUNCE,
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
+    }
+
+    #[test]
+    fn the_ble_tx_gap_frame_round_trips_and_classifies() {
+        let bytes = encode_ble_tx_gap(20);
+        assert!(bytes.len() < 19);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::BleTxGap(20)
+        );
+    }
+
+    #[test]
+    fn the_ble_tx_gap_payload_is_two_bytes_big_endian() {
+        // The byte order is the contract a non-Rust host would implement
+        // against, so it is asserted on the bytes and not on a round trip.
+        let bytes = encode_ble_tx_gap(0x1234);
+        assert_eq!(&bytes[ENVELOPE_HEADER_LEN..], &[0x12, 0x34]);
+    }
+
+    #[test]
+    fn zero_and_the_bound_are_legal_gaps_and_above_the_bound_is_refused_by_value() {
+        // 0 is the default ("impose nothing"), not an absent value, and
+        // the bound itself is still a legal experiment.
+        for gap_ms in [0u16, 1, 20, 500, BLE_TX_GAP_MAX_MS] {
+            assert_eq!(
+                classify_control_frame(&encode_ble_tx_gap(gap_ms), ACCEPTED),
+                ControlAction::BleTxGap(gap_ms)
+            );
+        }
+        // One past the bound and the top of the wire type: both are a
+        // typo, not an experiment, and both get the named value refusal
+        // rather than a wedged-looking link.
+        for gap_ms in [BLE_TX_GAP_MAX_MS + 1, u16::MAX] {
+            assert_eq!(
+                classify_control_frame(&encode_ble_tx_gap(gap_ms), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_BLE_TX_GAP,
+                    reason: REFUSE_VALUE
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_ble_tx_gap_payload_of_the_wrong_size_is_refused_as_malformed() {
+        for payload in [vec![], vec![0x00], vec![0x00, 0x14, 0x00]] {
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_BLE_TX_GAP, &payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_BLE_TX_GAP,
+                    reason: REFUSE_MALFORMED
+                },
+                "payload {payload:?} was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_without_the_ble_tx_gap_knob_refuses_it_by_name() {
+        assert_eq!(
+            classify_control_frame(&encode_ble_tx_gap(20), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_BLE_TX_GAP,
                 reason: REFUSE_UNKNOWN_TYPE
             }
         );

@@ -46,6 +46,9 @@ Commands (host → board):
 | 0x0B | POSITION_SOURCE_QUERY | empty (a query) — answered with POSITION_SOURCE_REPORT |
 | 0x0C | NODE_NAME        | see below — set or clear the operator-chosen name |
 | 0x0D | NODE_NAME_QUERY  | empty (a query) — answered with NODE_NAME_REPORT |
+| 0x0E | IDENTITY_QUERY   | empty (a query) — answered with IDENTITY_REPORT |
+| 0x0F | ANNOUNCE         | empty — announce the LXMF delivery destination now (#376) |
+| 0x10 | BLE_TX_GAP       | BLE inter-packet gap in ms, u16 BE (2 B), 0..=5000 (#376) |
 
 Responses (board → host):
 
@@ -58,14 +61,41 @@ Responses (board → host):
 | 0x85 | MEDIA_REPORT      | `[running_flags, configured_flags]` in the MEDIA_PROFILE flag encoding |
 | 0x86 | POSITION_SOURCE_REPORT | one flag byte (bit0 fixed position set, bit1 GNSS built in and active) |
 | 0x87 | NODE_NAME_REPORT  | `[flags, mesh_len, mesh…, ble_len, ble…]` — see below |
+| 0x88 | IDENTITY_REPORT   | `[flags, identity(16), probe(16), lxmf(16)]`, 49 B fixed |
 
 Refusal reasons: `0x01` unknown type, `0x02` malformed, `0x03` value
 refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
 type but this binary carries no consumer for it — retrying or rebooting
 cannot help, only different firmware can), `0x06` not persisted (see
-below). The version in the capability report (`1`) names the envelope
-framing itself; new frame types extend the accepted list without bumping
-it.
+below), `0x07` no calendar clock (the command needs one and the board has
+none yet — seed it with a GNSS fix or `--set-time` and retry). The
+version in the capability report (`1`) names the envelope framing itself;
+new frame types extend the accepted list without bumping it.
+
+### ANNOUNCE (0x0F) and BLE_TX_GAP (0x10) — the #376 bench instruments
+
+`ANNOUNCE` makes the board announce its LXMF delivery destination
+immediately, on all interfaces, exactly as the telemetry path does before
+a report — same destination, same app data, and the same clock gate:
+without a calendar clock the board withholds the announce, logs
+`[ANNOUNCE] withheld reason=no-clock` on the debug port and refuses with
+reason `0x07`. (The gate is not cosmetic: the emission timestamp inside
+the announce is what peers rank paths by — see
+`docs/src/protocol-notes/announce-dedup-and-path-replacement.md` — so an
+uptime-stamped announce would poison the path under measurement.) On
+success the board logs `[ANNOUNCE] sent dst=<hex8> reason=host` and the
+usual `BLE_TX_PKT` lines, and acks. One-shot; nothing is persisted.
+Host side: `lnflash --announce`.
+
+`BLE_TX_GAP` sets the gap the BLE drain leaves between the last fragment
+of one packet and the first fragment of the next packet **on the same
+connection handle**. `0` (the boot value) imposes nothing; values above
+5000 ms are refused with reason `0x03`. Interface-layer only, per
+connection — the fan-out and the core never learn of it — and volatile
+like TX_SPACING: a reset restores 0. The board logs
+`[BLE ] tx_gap_ms=<n>` when the value takes effect and
+`BLE_TX_GAP conn=<h> waited_ms=<n>` once per deferred packet. Host side:
+`lnflash --set-ble-tx-gap <ms>`.
 
 ### NODE_NAME (0x0C) and NODE_NAME_REPORT (0x87)
 
