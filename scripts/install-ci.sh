@@ -85,6 +85,45 @@ if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "[install-ci]       (needed only for the leviculum-core/fuzz targets; see docs/src/development-testing.md)"
 fi
 
+# Optional test dependency: btvirt hosts the periculum `ble_room_*` cells
+# (periculum #49): N virtual LE controllers on one emulated air, so N lnsd
+# daemons can prove BLE mesh formation with no boards. Debian does not
+# package it; it is built from the bluez source tree MATCHING the installed
+# bluez (mismatched daemon/emulator versions are their own bug class):
+#
+#   apt-get source bluez            # needs a deb-src line; 5.82 as of 2026-09
+#   sudo apt install libreadline-dev python3-docutils
+#   cd bluez-*/ && ./configure --enable-testing --disable-systemd \
+#       --disable-cups --disable-obex --disable-hid2hci --disable-mesh \
+#       --disable-udev
+#   make -j"$(nproc)" emulator/btvirt
+#   sudo install -m 755 emulator/btvirt /usr/local/bin/btvirt
+#
+# Prerequisites the cells need beyond the binary (one-time provisioning):
+#   - kernel hci_vhci module, loaded at boot and group-writable:
+#       echo hci_vhci | sudo tee /etc/modules-load.d/hci_vhci.conf
+#       echo 'KERNEL=="vhci", GROUP="bluetooth", MODE="0660"' | \
+#         sudo tee /etc/udev/rules.d/60-vhci-bluetooth.rules
+#     (the executing user must be in the bluetooth group)
+#   - the SYSTEM bluetoothd running: it must own the vhci adapters the
+#     moment btvirt creates them — lnsd reaches controllers only through
+#     BlueZ, and the cells do not start their own daemon
+#   - NO BLE MIDI GATT service on the bench, or agentless SMP pairing
+#     kills every room connection before the Columba handshake
+#     (root-caused 2026-09-09). Two registrars to silence:
+#       * bluetoothd's midi plugin: systemd drop-in overriding ExecStart
+#         with `/usr/libexec/bluetooth/bluetoothd --noplugin=midi`
+#       * WirePlumber's bluez monitors, SYSTEM-WIDE (the GDM session runs
+#         its own instance): /etc/wireplumber/wireplumber.conf.d/ snippet
+#         with `monitor.bluez = disabled` and `monitor.bluez-midi =
+#         disabled` in the main profile
+# Warn-only: only the bench that runs the BLE room needs any of it.
+if ! command -v btvirt >/dev/null 2>&1 && [ ! -x /usr/local/bin/btvirt ]; then
+    echo "[install-ci] Note: optional test dependency 'btvirt' not found"
+    echo "[install-ci] Hint: build from the matching bluez source tree (see comment above"
+    echo "[install-ci]       this check); needed only for the periculum ble_room cells"
+fi
+
 # 2. Activate git hooks (developer-machine mode only)
 if [[ "$VM_MODE" -eq 0 ]]; then
     git config core.hooksPath .githooks
