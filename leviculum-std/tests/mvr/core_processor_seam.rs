@@ -13,7 +13,7 @@
 //! installs A's path from its announce and sends one single packet.
 //!
 //! A registered processor on A answers that event in the same tick with
-//! `send_proof_on_interface`. If the seam works, B sees
+//! `send_proof_on_peer`. If the seam works, B sees
 //! `PacketDeliveryConfirmed`. `no_processor_means_no_proof` is the negative
 //! control on the identical scenario: with no processor registered, nothing
 //! answers, and B must see no confirmation. Without that control the positive
@@ -49,17 +49,18 @@ impl CoreProcessor for ProofResponder {
             packet_hash,
             destination_hash,
             interface_index,
+            peer,
         } = event
         else {
             return TickOutput::empty();
         };
-        match core.send_proof_on_interface(packet_hash, destination_hash, *interface_index) {
+        match core.send_proof_on_peer(packet_hash, destination_hash, *interface_index, *peer) {
             Ok(output) => {
                 self.answered.fetch_add(1, Ordering::Relaxed);
                 output
             }
             Err(e) => {
-                eprintln!("mvr196: send_proof_on_interface failed: {e:?}");
+                eprintln!("mvr196: send_proof_on_peer failed: {e:?}");
                 TickOutput::empty()
             }
         }

@@ -259,9 +259,9 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    (`leviculum-lxmf/src/router.rs:1359-1363`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
-   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1110-1132`) or from
+   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1115-1137`) or from
    `ResourceCompleted { is_sender: true }`
-   (`leviculum-lxmf/src/node.rs:1004-1015`). It proves the bytes arrived at
+   (`leviculum-lxmf/src/node.rs:1009-1020`). It proves the bytes arrived at
    the destination identity. It does not prove an LXMF client parsed them
    and it certainly does not prove a human read them. There is no
    read-receipt field in LXMF at all
@@ -470,7 +470,7 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1499`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1527`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`

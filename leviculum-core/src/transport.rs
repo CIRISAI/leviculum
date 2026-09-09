@@ -1618,6 +1618,17 @@ pub enum TransportEvent {
         destination_hash: [u8; TRUNCATED_HASHBYTES],
         /// The interface the packet was received on
         interface_index: usize,
+        /// The peer link the packet arrived through, when a multi-peer
+        /// interface named one (Codeberg #376).
+        ///
+        /// Copied from [`Transport::process_incoming_from_peer`]'s
+        /// `ingress_peer` AT EMISSION, because proving is deferred: the
+        /// event is queued here and answered by `NodeCore` after
+        /// `process_incoming` has returned and `ingress_peer` is `None`
+        /// again. Without this copy the proof leaves as a broadcast and
+        /// a neighbour board forwards it back — the relayed duplicate
+        /// #376 exists to remove.
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     },
 
     /// A proof was received for a sent packet
@@ -2324,6 +2335,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// * `receiving_interface` - If `Some`, send proof on this interface (used for
     ///   auto-proofs where we know the receiving interface). If `None`,
     ///   fall back to path table lookup (used for app-initiated proofs).
+    /// * `receiving_peer` - The peer link the proven packet arrived through
+    ///   (Codeberg #376), as carried by
+    ///   [`TransportEvent::ProofRequested::peer`]. Only read alongside
+    ///   `receiving_interface`; a path-routed proof takes the path's own
+    ///   `via_peer` instead. `None` means "no addressee known", which a
+    ///   multi-peer interface serves by reaching every live link, exactly
+    ///   as before #376.
     ///
     /// # Returns
     /// `Ok(())` if the proof was sent, `Err` if there's no path to the destination
@@ -2333,6 +2351,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         destination_hash: &[u8; TRUNCATED_HASHBYTES],
         identity: &Identity,
         receiving_interface: Option<usize>,
+        receiving_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
         let proof_data = identity
             .create_proof(packet_hash)
@@ -2354,11 +2373,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         //
         // The #376 delivery hint comes from the same choice: proving on the
         // interface the packet arrived on addresses the peer it arrived
-        // from (`ingress_peer`, set for the duration of
-        // `process_incoming_from_peer` and `None` for a deferred prove),
-        // proving over a path addresses the peer that path was learned on.
+        // FROM, proving over a path addresses the peer that path was
+        // learned on.
+        //
+        // The ingress peer is passed in, never read off `self.ingress_peer`
+        // here: every prove is deferred past the end of
+        // `process_incoming_from_peer` (the queued
+        // `TransportEvent::ProofRequested`, and for `ProofStrategy::App` a
+        // further hop through the application), by which time
+        // `self.ingress_peer` is `None` again. `receiving_peer` is that
+        // value copied at emission and carried along with the interface it
+        // belongs to, so the two always describe the same arrival.
         let (interface_index, peer) = match receiving_interface {
-            Some(iface) => (iface, self.ingress_peer),
+            Some(iface) => (iface, receiving_peer),
             None => self
                 .storage
                 .get_path(destination_hash)
@@ -2369,6 +2396,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             event = "PROOF_SEND",
             pkt = %HexShort(&proof_dest),
             iface = %self.iface_name(interface_index),
+            // #376: which peer this proof is addressed at, so a log says
+            // whether the deferred proof kept its arrival's peer or went
+            // out unaddressed.
+            peer = ?peer.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
         );
 
         // ph=None: the proof packet's own bytes are hashed nowhere else on
@@ -5132,6 +5163,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                     data: buf[..len].to_vec(),
                                     // A relayed announce toward a local IPC
                                     // client: no addressee, no #376 hint.
+                                    // Genuinely absent, not merely unstored
+                                    // — a shared-instance socket carries one
+                                    // client, and an announce is a broadcast
+                                    // twice over.
                                     peer: None,
                                 });
                             }
@@ -5900,6 +5935,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // No #376 hint: the link table names an interface, not
                     // the peer behind it, so this repeat keeps the pre-#376
                     // every-live-link behaviour on a multi-peer carrier.
+                    //
+                    // Knowable, not free: both interfaces are learned while
+                    // relaying the LinkRequest, when `ingress_peer` names
+                    // the peer for the initiator side — so a `LinkEntry`
+                    // could carry a peer PER DIRECTION (measured: entry 88
+                    // B, one more peer field at most 112 B, times the
+                    // firmware's 8 link slots). Two fields and a direction
+                    // argument is a batch of its own, and it is the same
+                    // class as this one, not a different one.
                     None,
                 );
             } else if packet.context == PacketContext::Lrproof {
@@ -5947,6 +5991,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             ph8(&cache_hash),
                             // The reverse table records the interface the
                             // original packet came in on, not its peer.
+                            //
+                            // Knowable at insert: the entry is written while
+                            // relaying the original packet, when
+                            // `ingress_peer` names the peer it came from —
+                            // one more field on `ReverseEntry` (measured: 24
+                            // B, at most 48 B with a peer, times the
+                            // firmware's 16 reverse slots) would let a
+                            // relayed proof take the initiator's link alone.
+                            // Next step for #376, together with the link
+                            // table above; this batch carries the peer for
+                            // proofs a node makes ITSELF.
                             None,
                         );
                     }
@@ -6093,6 +6148,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     packet_hash: full_packet_hash,
                     destination_hash: dest_hash,
                     interface_index,
+                    peer: self.ingress_peer,
                 });
             }
             // Early return: Python falls through to "general transport handling"
@@ -6131,6 +6187,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 packet_hash: full_packet_hash,
                 destination_hash: dest_hash,
                 interface_index,
+                peer: self.ingress_peer,
             });
 
             return Ok(());
@@ -6273,6 +6330,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         &mut forwarded,
                         ph8(&full_packet_hash),
                         // Link-table repeat: interface known, peer not.
+                        // Same knowable-but-not-stored case as the LRPROOF
+                        // repeat above; see the note there.
                         None,
                     );
                 }
@@ -9181,7 +9240,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // No #376 hint: the announce entry records the
                         // requesting INTERFACE, never the peer behind it, and
                         // a path response is announce-shaped anyway — every
-                        // live link is the right audience.
+                        // live link is the right audience. Deliberate, not
+                        // pending: the requester's peer could be stamped on
+                        // the announce entry, but addressing the response at
+                        // it would WITHHOLD a path from the other peers on
+                        // the same carrier, which is a delivery regression,
+                        // not a duplicate saved.
                         self.push_packet(target_iface, buf[..len].to_vec(), None, None);
                         // Python records sent_announce() at transmit time for
                         // every announce, including targeted path responses
@@ -17815,7 +17879,7 @@ mod tests {
             let packet_hash = [0xAA; 32];
 
             transport
-                .send_proof(&packet_hash, &dest_hash, &identity, None)
+                .send_proof(&packet_hash, &dest_hash, &identity, None, None)
                 .unwrap();
 
             let actions = transport.drain_actions();

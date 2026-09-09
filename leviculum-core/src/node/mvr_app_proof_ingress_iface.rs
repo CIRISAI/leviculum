@@ -2,7 +2,8 @@
 //!
 //! `ProofStrategy::App` hands proof emission to the application:
 //! `NodeEvent::PacketProofRequested` now carries the ingress
-//! `interface_index`, and `send_proof_on_interface` mirrors Python's
+//! `interface_index` (and, since #376, the ingress peer), and
+//! `send_proof_on_peer` mirrors Python's
 //! `packet.prove()`, which routes the proof over the packet's
 //! `receiving_interface` instead of the path table. On a multi-interface
 //! node the distinction is load-bearing: the prover has NO path-table entry
@@ -126,7 +127,7 @@ fn app_proof_leaves_on_ingress_interface() {
 
     // Deliver on the SECOND receiver interface.
     let recv_out = receiver.handle_packet(InterfaceId(iface_b), &raw);
-    let (packet_hash, event_dest, event_iface) = recv_out
+    let (packet_hash, event_dest, event_iface, event_peer) = recv_out
         .events
         .iter()
         .find_map(|e| match e {
@@ -134,7 +135,8 @@ fn app_proof_leaves_on_ingress_interface() {
                 packet_hash,
                 destination_hash,
                 interface_index,
-            } => Some((*packet_hash, *destination_hash, *interface_index)),
+                peer,
+            } => Some((*packet_hash, *destination_hash, *interface_index, *peer)),
             _ => None,
         })
         .expect("ProofStrategy::App must emit PacketProofRequested");
@@ -142,11 +144,17 @@ fn app_proof_leaves_on_ingress_interface() {
         event_iface, iface_b,
         "PacketProofRequested must carry the ingress interface index"
     );
+    assert_eq!(
+        event_peer, None,
+        "the packet arrived through `handle_packet`, which names no peer, \
+         so the event must not manufacture a #376 delivery hint"
+    );
 
-    // App proves on the reported ingress interface.
+    // App proves on the reported ingress interface, with the peer the same
+    // event reported (none here).
     let proof_out = receiver
-        .send_proof_on_interface(&packet_hash, &event_dest, event_iface)
-        .expect("send_proof_on_interface must succeed without a path entry");
+        .send_proof_on_peer(&packet_hash, &event_dest, event_iface, event_peer)
+        .expect("send_proof_on_peer must succeed without a path entry");
 
     let mut proof_raw = None;
     for action in &proof_out.actions {

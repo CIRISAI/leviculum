@@ -918,9 +918,14 @@ impl LxmfNode {
                 packet_hash,
                 destination_hash,
                 interface_index,
+                peer,
             } if *destination_hash == self.delivery_destination => {
+                // #376: prove back at the peer the message arrived from,
+                // not at every link on the carrier. On a BLE mesh the
+                // proof for a delivered LXMF message would otherwise
+                // reach the neighbour boards too, which forward it.
                 output.core.merge(
-                    node.send_proof_on_interface(packet_hash, destination_hash, *interface_index)
+                    node.send_proof_on_peer(packet_hash, destination_hash, *interface_index, *peer)
                         .map_err(|_| LxmfNodeError::ProofFailed)?,
                 );
             }

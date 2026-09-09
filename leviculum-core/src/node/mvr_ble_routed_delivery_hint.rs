@@ -41,6 +41,20 @@
 //! 1 node, 1 mock BLE interface, deterministic, sub-second. Two peers
 //! announce over the same interface; the observable is the `peer` field
 //! of the emitted `SendPacket` actions.
+//!
+//! ## Part 3: the deferred proof
+//!
+//! Same issue, one packet later. A probe arriving over a BLE peer is
+//! answered by a proof that is NOT generated inside
+//! `process_incoming_from_peer` — the core queues
+//! `TransportEvent::ProofRequested` and answers it after the incoming
+//! call has returned, when `ingress_peer` is `None` again. The rig
+//! (2026-09-09 15:32:13.701, T114 with lnsd as its only peer) showed
+//! every proof leaving as `BLE_TX_FLOOD`. So the event carries the
+//! arrival's peer, and the proof is addressed at it. A peer whose link
+//! has since died is not downgraded to a flood: the interface drops it
+//! and says so (`leviculum-nrf/ble-tx/src/registry.rs`,
+//! `a_hint_for_a_peer_with_no_link_drops_instead_of_flooding`).
 
 extern crate std;
 
@@ -51,13 +65,13 @@ use std::vec::Vec;
 use rand_core::OsRng;
 
 use crate::constants::{MTU, TRUNCATED_HASHBYTES};
-use crate::destination::{Destination, DestinationType, Direction};
+use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
 use crate::embedded_storage::EmbeddedStorage;
 use crate::identity::Identity;
 use crate::node::{NodeCore, NodeCoreBuilder};
 use crate::packet::{Packet, PacketType};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
-use crate::transport::{Action, InterfaceId, TickOutput};
+use crate::transport::{Action, InterfaceId, PathEntry, TickOutput};
 
 type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
 
@@ -255,5 +269,187 @@ fn an_announce_carries_no_delivery_hint() {
         hinted.is_empty(),
         "a relayed announce must reach every peer on the medium, so no \
          SendPacket for it may carry a delivery hint (got {hinted:?})"
+    );
+}
+
+/// Every proof packet in this output, as (interface, delivery hint).
+fn proof_sends(out: &TickOutput) -> Vec<(InterfaceId, Option<[u8; TRUNCATED_HASHBYTES]>)> {
+    out.actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::SendPacket { iface, data, peer } => Packet::unpack(data)
+                .ok()
+                .filter(|p| p.flags.packet_type == PacketType::Proof)
+                .map(|_| (*iface, *peer)),
+            Action::Broadcast { .. } => None,
+        })
+        .collect()
+}
+
+/// A node that proves what it receives, and a sender that can address it.
+///
+/// The receiver has ONE interface and NO path back to the sender: the
+/// only thing it knows about where the probe came from is the arrival
+/// itself, which is exactly the field situation (a phone probing a board
+/// it has a link to).
+struct Probe {
+    receiver: Box<EmbeddedNode>,
+    ble: usize,
+    raw: Vec<u8>,
+}
+
+fn make_probe() -> Probe {
+    let mut receiver = make_node();
+    let ble = add_iface(&mut receiver, "ble_nrf", 0);
+
+    let recv_identity = Identity::generate(&mut OsRng);
+    let mut dest = Destination::new(
+        Some(recv_identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["probe"],
+    )
+    .unwrap();
+    // What a Columba telemetry destination uses: the node proves every
+    // packet itself, without asking the application.
+    dest.set_proof_strategy(ProofStrategy::All);
+    let dest_hash = *dest.hash();
+    let recv_pub = dest
+        .identity()
+        .expect("the receiver destination owns an identity")
+        .public_key_bytes();
+    receiver.register_destination(dest);
+
+    // The sender is scaffolding: it exists only to produce one correctly
+    // encrypted probe addressed at the receiver.
+    let mut sender = NodeCoreBuilder::new().build_boxed(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        EmbeddedStorage::new(),
+    );
+    let sender_iface = add_iface(&mut sender, "S_mesh", 9);
+    sender.transport.insert_path(
+        dest_hash.into_bytes(),
+        PathEntry {
+            hops: 1,
+            expires_ms: u64::MAX,
+            interface_index: sender_iface,
+            random_blobs: Vec::new(),
+            next_hop: None,
+            via_peer: None,
+        },
+    );
+    sender.remember_identity(
+        dest_hash,
+        Identity::from_public_key_bytes(&recv_pub).unwrap(),
+    );
+    sender.register_destination(
+        Destination::new(
+            Some(Identity::from_public_key_bytes(&recv_pub).unwrap()),
+            Direction::Out,
+            DestinationType::Single,
+            "mvrapp",
+            &["probe"],
+        )
+        .unwrap(),
+    );
+
+    let (_, out) = sender
+        .send_single_packet(&dest_hash, b"telemetry probe")
+        .expect("the scaffolding sender has a path");
+    let raw = out
+        .actions
+        .iter()
+        .map(|a| match a {
+            Action::SendPacket { data, .. } | Action::Broadcast { data, .. } => data.clone(),
+        })
+        .next()
+        .expect("the probe must have been emitted");
+
+    Probe { receiver, ble, raw }
+}
+
+/// The proof answering a probe leaves addressed at the peer the probe
+/// arrived from — even though it is generated AFTER
+/// `process_incoming_from_peer` returned and `ingress_peer` is `None`
+/// again.
+///
+/// Rig signature this pins: with lnsd as the T114's only peer, the proof
+/// for a probe leaves as `BLE_TX_ROUTE peer=<lnsd> conn=… len=115`. Before
+/// this, every proof was a `BLE_TX_FLOOD` (rig, 2026-09-09 15:32:13.701)
+/// — invisible with one link, a relayed duplicate with a neighbour board
+/// on the medium.
+#[test]
+fn a_deferred_proof_names_the_peer_the_probe_arrived_from() {
+    let mut probe = make_probe();
+    let phone_link = [0xB9u8; TRUNCATED_HASHBYTES];
+
+    let out =
+        probe
+            .receiver
+            .handle_packet_from_peer(InterfaceId(probe.ble), phone_link, &probe.raw);
+
+    let proofs = proof_sends(&out);
+    assert_eq!(proofs.len(), 1, "one probe, one proof: {proofs:?}");
+    assert_eq!(proofs[0].0, InterfaceId(probe.ble));
+    assert_eq!(
+        proofs[0].1,
+        Some(phone_link),
+        "the proof must name the peer the probe arrived from. Proving is \
+         deferred (the queued TransportEvent::ProofRequested is answered \
+         after process_incoming returned), so the peer has to be carried \
+         with the event; without it the proof floods every live link and a \
+         neighbour board forwards it back (#376)"
+    );
+}
+
+/// The hint is the ARRIVAL's, not a path's: the receiver has no path
+/// entry for the prober at all, and still addresses the proof.
+#[test]
+fn the_proof_hint_survives_having_no_path_to_the_prober() {
+    let mut probe = make_probe();
+    let phone_link = [0xB9u8; TRUNCATED_HASHBYTES];
+
+    let out =
+        probe
+            .receiver
+            .handle_packet_from_peer(InterfaceId(probe.ble), phone_link, &probe.raw);
+
+    let proof_dest = out
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SendPacket { data, .. } => Packet::unpack(data)
+                .ok()
+                .filter(|p| p.flags.packet_type == PacketType::Proof)
+                .map(|p| p.destination_hash),
+            Action::Broadcast { .. } => None,
+        })
+        .expect("a proof must have been emitted");
+    assert!(
+        probe.receiver.transport.path(&proof_dest).is_none(),
+        "the proof's destination (the truncated packet hash) has no path \
+         entry, so the hint cannot have come from the path table"
+    );
+    assert_eq!(proof_sends(&out)[0].1, Some(phone_link));
+}
+
+/// Negative control: a probe that arrives without a named peer (every
+/// single-peer interface, and a BLE packet received before the identity
+/// handshake) is proved without a hint — the core never invents one.
+#[test]
+fn a_probe_without_a_peer_is_proved_without_a_hint() {
+    let mut probe = make_probe();
+
+    let out = probe
+        .receiver
+        .handle_packet(InterfaceId(probe.ble), &probe.raw);
+
+    let proofs = proof_sends(&out);
+    assert_eq!(proofs.len(), 1, "one probe, one proof: {proofs:?}");
+    assert_eq!(
+        proofs[0].1, None,
+        "an arrival with no peer must not manufacture one"
     );
 }

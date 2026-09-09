@@ -298,6 +298,13 @@ fn project(ev: NodeEvent) -> lev_event_t {
             packet_hash,
             destination_hash,
             interface_index,
+            // The #376 delivery hint stops at the FFI boundary: `lev_event_t`
+            // has no field for a peer, and the C API's reply
+            // (`lev_send_proof`) routes over the path table anyway, which
+            // carries its own `via_peer`. Adding it here is an ABI change,
+            // registered as such in `PROJECTION_GAPS`
+            // (tests/event_projection_coverage.rs).
+            peer: _,
         } => {
             let mut e = lev_event_t::bare(LEV_EVENT_PACKET_PROOF_REQUESTED, is_control);
             e.dest_hash = Some(*destination_hash.as_bytes());

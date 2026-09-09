@@ -869,6 +869,17 @@ impl Link {
     }
 
     /// Get the interface this link is attached to
+    ///
+    /// An interface, not a peer: every packet an established link sends
+    /// (`NodeCore::route_link_packet`, `send_establishment_proof`,
+    /// channel data) goes out with no #376 delivery hint, so on a BLE
+    /// carrier it reaches every live link, not just the neighbour the
+    /// link is with. The peer IS knowable — the LinkRequest arrives
+    /// through `Transport::process_incoming_from_peer` — but it would
+    /// have to travel on the link-establishment transport events to
+    /// reach here, next to the `interface_index` these two setters take.
+    /// That plumbing is the next #376 step, not part of the deferred
+    /// proof this one carried.
     pub fn attached_interface(&self) -> Option<usize> {
         self.attached_interface
     }

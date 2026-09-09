@@ -7465,6 +7465,7 @@ mod tests {
             packet_hash: [0x11; 32],
             destination_hash: leviculum_core::DestinationHash::new([0xCD; 16]),
             interface_index: 3,
+            peer: None,
         });
 
         dispatch_output(

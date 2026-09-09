@@ -99,12 +99,29 @@ const INTENTIONALLY_UNPROJECTED: &[Unprojected] = &[
 /// Empty is the correct steady state. The eight entries this register opened
 /// with are all discharged (`lev_interface_stats_id` + `lev_event_interface_id`,
 /// `lev_event_close_reason`, `lev_event_transfer_size`/`_data_size`,
-/// `lev_event_segment_index`/`_total_segments`). The one entry left arrived from
-/// the other list, where its reason had stopped being true.
-const PROJECTION_GAPS: &[Unprojected] = &[Unprojected {
-    variant: "ResourceFailed",
-    field: "error",
-    why: "moved here from INTENTIONALLY_UNPROJECTED, whose reason no longer \
+/// `lev_event_segment_index`/`_total_segments`). Of the two left, one arrived
+/// from the other list where its reason had stopped being true, and one
+/// (`PacketProofRequested::peer`) waits on an ABI addition rather than on a
+/// wider `project()` arm.
+const PROJECTION_GAPS: &[Unprojected] = &[
+    Unprojected {
+        variant: "PacketProofRequested",
+        field: "peer",
+        why: "the peer link the proven packet arrived through (Codeberg \
+              #376). A C app on a multi-peer carrier needs it to answer the \
+              one neighbour that probed it instead of every live link, but \
+              the field alone would be inert: the ABI's only prove call, \
+              lev_send_proof, routes over the path table (which carries its \
+              own via_peer) and has no ingress form at all, so the projected \
+              interface_id is already unusable for proving. Closing this \
+              takes a peer-aware prove entry point plus a peer field on \
+              lev_event_t, i.e. the Rust NodeCore::send_proof_on_peer \
+              mirrored into C — an ABI addition, not a wider project() arm",
+    },
+    Unprojected {
+        variant: "ResourceFailed",
+        field: "error",
+        why: "moved here from INTENTIONALLY_UNPROJECTED, whose reason no longer \
           holds: it argued that every variant means re-request and that \
           lev_event_t has nowhere to put a discriminant. Neither is true. \
           ResourceError has 17 variants and they do not share a recovery — \
@@ -116,7 +133,8 @@ const PROJECTION_GAPS: &[Unprojected] = &[Unprojected {
           in this batch because naming a recovery for each of 17 variants is a \
           reference-checked audit, not a mechanical mapping, and a wrong \
           recovery in a doc comment is worse than no accessor",
-}];
+    },
+];
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);

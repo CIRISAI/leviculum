@@ -200,6 +200,13 @@ pub enum NodeEvent {
         destination_hash: DestinationHash,
         /// Interface the packet was received on
         interface_index: usize,
+        /// The peer link the packet arrived through, when the interface
+        /// named one (Codeberg #376). Hand it back together with
+        /// `interface_index` to
+        /// [`NodeCore::send_proof_on_peer`](crate::node::NodeCore::send_proof_on_peer)
+        /// so the proof reaches that one neighbour instead of every live
+        /// link; `None` on every single-peer interface.
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     },
 
     /// Application should decide whether to prove this link data packet

@@ -1061,20 +1061,46 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         packet_hash: &[u8; 32],
         destination_hash: &DestinationHash,
     ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
-        self.send_proof_inner(packet_hash, destination_hash, None)
+        self.send_proof_inner(packet_hash, destination_hash, None, None)
     }
 
     /// Send a proof for a received single packet on the interface it arrived on.
     ///
     /// This mirrors Python's `packet.prove()` behaviour for application-level
     /// proofs, where the packet context carries the return interface.
+    ///
+    /// On a multi-peer interface prefer
+    /// [`send_proof_on_peer`](Self::send_proof_on_peer): this entry point
+    /// names no addressee, so the proof reaches every live link (Codeberg
+    /// #376).
     pub fn send_proof_on_interface(
         &mut self,
         packet_hash: &[u8; 32],
         destination_hash: &DestinationHash,
         interface_index: usize,
     ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
-        self.send_proof_inner(packet_hash, destination_hash, Some(interface_index))
+        self.send_proof_inner(packet_hash, destination_hash, Some(interface_index), None)
+    }
+
+    /// [`send_proof_on_interface`](Self::send_proof_on_interface) that also
+    /// names the peer link the proven packet arrived through (Codeberg
+    /// #376).
+    ///
+    /// Pass the `interface_index` and `peer` of the same
+    /// [`NodeEvent::PacketProofRequested`] unchanged: they describe one
+    /// arrival, and the peer alone is meaningless. A `None` peer is the
+    /// pre-#376 behaviour (every live link); a peer whose link has since
+    /// died is NOT downgraded to that — the interface drops the proof and
+    /// reports the miss, because the surviving links are not a route to
+    /// that neighbour.
+    pub fn send_proof_on_peer(
+        &mut self,
+        packet_hash: &[u8; 32],
+        destination_hash: &DestinationHash,
+        interface_index: usize,
+        peer: Option<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
+    ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
+        self.send_proof_inner(packet_hash, destination_hash, Some(interface_index), peer)
     }
 
     fn send_proof_inner(
@@ -1082,6 +1108,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         packet_hash: &[u8; 32],
         destination_hash: &DestinationHash,
         receiving_interface: Option<usize>,
+        receiving_peer: Option<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
     ) -> Result<crate::transport::TickOutput, crate::transport::TransportError> {
         let identity = self
             .destinations
@@ -1094,6 +1121,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             destination_hash.as_bytes(),
             identity,
             receiving_interface,
+            receiving_peer,
         )?;
 
         Ok(self.process_events_and_actions())
@@ -3469,6 +3497,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 packet_hash,
                 destination_hash,
                 interface_index,
+                peer,
             } => {
                 let dest_hash = DestinationHash::new(destination_hash);
                 let proof_strategy = self
@@ -3482,11 +3511,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         if let Some(identity) =
                             self.destinations.get(&dest_hash).and_then(|d| d.identity())
                         {
+                            // #376: the arrival's peer travels with the
+                            // event, so the auto-proof is addressed at the
+                            // peer that sent the packet even though
+                            // `ingress_peer` is long cleared by now.
                             if let Err(e) = self.transport.send_proof(
                                 &packet_hash,
                                 &destination_hash,
                                 identity,
                                 Some(interface_index),
+                                peer,
                             ) {
                                 crate::tracing::warn!(
                                     "failed to send auto-proof for PROVE_ALL: {}",
@@ -3500,6 +3534,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             packet_hash,
                             destination_hash: dest_hash,
                             interface_index,
+                            peer,
                         });
                     }
                     ProofStrategy::None => {}
@@ -7476,6 +7511,7 @@ mod tests {
                     packet_hash,
                     destination_hash,
                     interface_index,
+                    peer: _,
                 } => Some((*packet_hash, *destination_hash, *interface_index)),
                 _ => None,
             })

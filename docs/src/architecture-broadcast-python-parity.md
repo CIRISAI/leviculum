@@ -266,7 +266,7 @@ in `path_table` is routed to a single specific interface via
 `SendPacket`, not broadcast. This is what happens when a
 path-response is specifically addressed to the path-requester
 rather than broadcast. In our Rust code this corresponds to
-the `target_interface: Some(idx)` branch at `transport.rs:4172-4122`.
+the `target_interface: Some(idx)` branch at `transport.rs:4203-4153`.
 
 ### Held announces during path-response scheduling
 
@@ -451,14 +451,14 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | Packet-hash dedup on RX | `Transport.py:1227` | `transport.rs:1272` | ✓ | Identical semantics, rolling window |
 | `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `constants.rs:117` |
 | `PATHFINDER_RW` jitter | 0.5 s | 500 ms (+ optional airtime factor) | ≈ | Option α permitted timing divergence |
-| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `constants.rs:133`; enforcement at `transport.rs:4062` |
+| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `constants.rs:133`; enforcement at `transport.rs:4093` |
 | `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `constants.rs:246`; impl at `transport.rs:287-296, 4125` |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `constants.rs:148`; `node/mod.rs:1014-1048` |
 | mgmt-announce initial 15 s trick | `Transport.py:247` | `node/mod.rs:75` + constant | ✓ | Verified by B4 audit |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2541-2587` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
-| Path-response targeted | `transport.rs:4172-4122` | same mechanism | ✓ | Preserved |
+| Path-response targeted | `transport.rs:4203-4153` | same mechanism | ✓ | Preserved |
 | Interface modes (FULL/ROAMING/…) | 5 modes | none (all = FULL) | ⚠ | Documented gap; separate task |
 | `block_rebroadcasts` | per-entry flag | `AnnounceEntry.block_rebroadcasts` | ✓ | Verified by B7 audit |
 
@@ -482,8 +482,8 @@ in the non-local-client path.
 announce. Achievable in two ways:
 
 - A. Set `PATHFINDER_RETRIES = 1` **and** change the entry-insert
-  at `transport.rs:2089-2025` from `retries: 1` to `retries: 0`.
-  Guards at `transport.rs:4061-3997` already read
+  at `transport.rs:2100-2036` from `retries: 1` to `retries: 0`.
+  Guards at `transport.rs:4092-4028` already read
   `retries > PATHFINDER_RETRIES` and `local_rebroadcasts >=
   LOCAL_REBROADCASTS_MAX`; both fire at the right count.
 - B. Set `PATHFINDER_RETRIES = 2` and leave insert at
