@@ -117,6 +117,10 @@ fi
 #         its own instance): /etc/wireplumber/wireplumber.conf.d/ snippet
 #         with `monitor.bluez = disabled` and `monitor.bluez-midi =
 #         disabled` in the main profile
+#   - btmon usable by the executing user, for the room's optional HCI
+#     capture (PERICULUM_BLE_ROOM_BTMON): the monitor channel needs
+#     CAP_NET_RAW, granted once with
+#       sudo setcap cap_net_raw+ep /usr/bin/btmon
 # Warn-only: only the bench that runs the BLE room needs any of it.
 if ! command -v btvirt >/dev/null 2>&1 && [ ! -x /usr/local/bin/btvirt ]; then
     echo "[install-ci] Note: optional test dependency 'btvirt' not found"

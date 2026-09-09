@@ -29,7 +29,7 @@
 pub(crate) mod bluez;
 pub(crate) mod links;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ use super::{
 };
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
-use links::{Addr, Admission, IdentityHash, Inbound, LinkTable, Role, ScanScheduler};
+use links::{Addr, Admission, DialQueue, IdentityHash, Inbound, LinkTable, Role, ScanScheduler};
 
 /// Outbound channel depth, matching the other interfaces' default.
 const BLE_BUFFER_SIZE: usize = 256;
@@ -290,7 +290,9 @@ impl BleTask {
         let mut scheduler = ScanScheduler::new(0);
         let mut notifiers: Vec<CharacteristicNotifier> = Vec::new();
         let mut central_pipes: HashMap<Addr, CentralPipe> = HashMap::new();
-        let mut dialling: HashSet<Addr> = HashSet::new();
+        // One connection setup in flight per adapter, jittered (#49
+        // part 3). Seeded from entropy; tests seed the queue directly.
+        let mut dial_queue = DialQueue::new(rand_core::RngCore::next_u64(&mut rand_core::OsRng));
         let mut backoff_until: HashMap<Addr, u64> = HashMap::new();
         // BLE_SCAN_DECISION is logged once per (address, decision) change,
         // not per sighting — a waiting peer advertises several times a
@@ -301,6 +303,11 @@ impl BleTask {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            // The head dial's start time, re-read each pass: any event
+            // may arm, consume or postpone it. `None` parks the arm.
+            let dial_at = dial_queue
+                .next_deadline_ms()
+                .map(|ms| start + Duration::from_millis(ms));
             tokio::select! {
                 outgoing = outgoing_rx.recv() => {
                     let Some(packet) = outgoing else {
@@ -319,7 +326,7 @@ impl BleTask {
                         &mut scheduler,
                         &mut notifiers,
                         &mut central_pipes,
-                        &mut dialling,
+                        &mut dial_queue,
                         &mut backoff_until,
                         &mut last_decision,
                         &ev_tx,
@@ -327,6 +334,21 @@ impl BleTask {
                     )
                     .await;
                     self.reconcile_advertising(&adapter, &table, &mut adv).await;
+                }
+                _ = async {
+                    match dial_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.pump_dials(
+                        &mut dial_queue,
+                        &table,
+                        &adapter,
+                        &backoff_until,
+                        &ev_tx,
+                        now_ms(Instant::now()),
+                    );
                 }
                 _ = tick.tick() => {
                     let now = now_ms(Instant::now());
@@ -373,7 +395,7 @@ impl BleTask {
                         &mut scheduler,
                         &table,
                         &adapter,
-                        &mut dialling,
+                        &mut dial_queue,
                         &backoff_until,
                         &ev_tx,
                         now,
@@ -396,7 +418,7 @@ impl BleTask {
         scheduler: &mut ScanScheduler,
         notifiers: &mut Vec<CharacteristicNotifier>,
         central_pipes: &mut HashMap<Addr, CentralPipe>,
-        dialling: &mut HashSet<Addr>,
+        dial_queue: &mut DialQueue,
         backoff_until: &mut HashMap<Addr, u64>,
         last_decision: &mut HashMap<Addr, links::ScanDecision>,
         ev_tx: &mpsc::Sender<Ev>,
@@ -452,13 +474,14 @@ impl BleTask {
                 // device on the air right now.
                 let Some(rssi) = rssi else { return };
                 // The fallback clock's busy input (#375 part 3, the
-                // eager spec): only a dial of ours in flight or a
-                // handshake still pending holds the clock at zero. A
-                // handshaked link does not — its address is kept out
-                // of the window by knows_addr below, and the clock
-                // must keep running so a linked-but-losing-the-sort
-                // board can still fallback-dial a third party.
-                let busy = table.has_pending_handshakes() || !dialling.is_empty();
+                // eager spec): only a dial of ours in flight or queued
+                // — either way its outcome is about to reset the clock
+                // — or a handshake still pending holds the clock at
+                // zero. A handshaked link does not — its address is
+                // kept out of the window by knows_addr below, and the
+                // clock must keep running so a linked-but-losing-the-
+                // sort board can still fallback-dial a third party.
+                let busy = table.has_pending_handshakes() || !dial_queue.is_idle();
                 let (mode, announce) = scheduler.mode(busy, now);
                 if let Some(after_ms) = announce {
                     tracing::info!(
@@ -490,7 +513,7 @@ impl BleTask {
                     || rssi < self.opts.min_rssi
                     || table.is_full()
                     || table.knows_addr(&addr.0)
-                    || dialling.contains(&addr.0)
+                    || dial_queue.knows(&addr.0)
                     || backoff_until.get(&addr.0).is_some_and(|until| *until > now)
                 {
                     return;
@@ -503,7 +526,7 @@ impl BleTask {
                     scheduler,
                     table,
                     adapter,
-                    dialling,
+                    dial_queue,
                     backoff_until,
                     ev_tx,
                     now,
@@ -520,13 +543,13 @@ impl BleTask {
                 match admission {
                     Admission::Accept => {
                         scheduler.note_reset(now);
-                        // The dial landed: from here it is a table link,
-                        // not a dial in flight, so it leaves the busy
-                        // set (the eager spec's clock keeps running
-                        // while links are live). CentralGone still
-                        // fires at the session's end; its remove is
-                        // then a no-op.
-                        dialling.remove(&addr.0);
+                        // The dial landed: the handshake completing ends
+                        // the setup, so the queue's one-in-flight slot
+                        // frees here (the eager spec's clock keeps
+                        // running while links are live). CentralGone
+                        // still fires at the session's end; its release
+                        // is then a no-op.
+                        dial_queue.release(&addr.0, now);
                         let first_link = displaced.is_none();
                         if let Some((identity, old_addr, role)) = displaced {
                             self.log_link_down(&identity, role, "displaced");
@@ -568,9 +591,11 @@ impl BleTask {
             }
             Ev::CentralGone { addr } => {
                 // A dial or link ended either way: fresh strict phase,
-                // as the firmware resets its clock at teardown.
+                // as the firmware resets its clock at teardown. A setup
+                // that timed out or failed frees the queue's slot here
+                // (a completed one already freed it at admission).
                 scheduler.note_reset(now);
-                dialling.remove(&addr.0);
+                dial_queue.release(&addr.0, now);
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
                     self.log_link_down(&identity, role, "disconnected");
@@ -583,10 +608,13 @@ impl BleTask {
     }
 
     /// Close the scheduler's collection window if its bound has passed
-    /// and dial its choice — the lowest eligible address, strict
-    /// verdicts first, elected by the same [`CandidateTable`] the
-    /// firmware and the #375 simulation use. Logs `BLE_SCAN_WINDOW`
-    /// once per window that ends in a dial, like the firmware.
+    /// and defer its choice into the dial queue — the lowest eligible
+    /// address, strict verdicts first, elected by the same
+    /// [`CandidateTable`] the firmware and the #375 simulation use. Logs
+    /// `BLE_SCAN_WINDOW` once per window that ends in a dial, like the
+    /// firmware, and `BLE_DIAL_QUEUE` for the deferred dial (#49 part 3:
+    /// every dial defers — at least its pre-connect jitter, plus any
+    /// setup already in flight).
     ///
     /// The eligibility filters ran when each candidate was collected;
     /// they run again here because the window is seconds long and the
@@ -600,37 +628,73 @@ impl BleTask {
         scheduler: &mut ScanScheduler,
         table: &LinkTable,
         adapter: &bluer::Adapter,
-        dialling: &mut HashSet<Addr>,
+        dial_queue: &mut DialQueue,
         backoff_until: &HashMap<Addr, u64>,
         ev_tx: &mpsc::Sender<Ev>,
         now: u64,
     ) {
-        let Some((addr, decision, seen)) = scheduler.poll(now) else {
-            return;
-        };
-        if table.is_full()
-            || table.knows_addr(&addr)
-            || dialling.contains(&addr)
-            || backoff_until.get(&addr).is_some_and(|until| *until > now)
-        {
-            return;
+        if let Some((addr, decision, seen)) = scheduler.poll(now) {
+            if !(table.is_full()
+                || table.knows_addr(&addr)
+                || dial_queue.knows(&addr)
+                || backoff_until.get(&addr).is_some_and(|until| *until > now))
+            {
+                tracing::info!(
+                    event = "BLE_SCAN_WINDOW",
+                    iface = %self.name,
+                    seen = seen,
+                    chosen = %hex12(&addr),
+                    rule = decision.as_str(),
+                );
+                if let Some(queued) = dial_queue.enqueue(addr, decision, now) {
+                    tracing::info!(
+                        event = "BLE_DIAL_QUEUE",
+                        iface = %self.name,
+                        depth = queued.depth,
+                        wait_ms = queued.wait_ms,
+                    );
+                }
+            }
         }
-        tracing::info!(
-            event = "BLE_SCAN_WINDOW",
-            iface = %self.name,
-            seen = seen,
-            chosen = %hex12(&addr),
-            rule = decision.as_str(),
-        );
-        dialling.insert(addr);
-        let central = bluez::CentralTask {
-            adapter: adapter.clone(),
-            addr: Address(addr),
-            own_identity: self.identity_hash,
-            ev_tx: ev_tx.clone(),
-            iface: self.name.clone(),
-        };
-        tokio::spawn(central.run());
+        self.pump_dials(dial_queue, table, adapter, backoff_until, ev_tx, now);
+    }
+
+    /// Start the dial the queue hands out, if any: one connection setup
+    /// in flight per adapter (#49 part 3). A popped dial whose
+    /// eligibility re-check fails — the world moved while it waited out
+    /// its jitter or a setup ahead of it — is dropped, its release
+    /// arming the next queued dial.
+    fn pump_dials(
+        &self,
+        dial_queue: &mut DialQueue,
+        table: &LinkTable,
+        adapter: &bluer::Adapter,
+        backoff_until: &HashMap<Addr, u64>,
+        ev_tx: &mpsc::Sender<Ev>,
+        now: u64,
+    ) {
+        while let Some((addr, _decision)) = dial_queue.pop_ready(now) {
+            if table.is_full()
+                || table.knows_addr(&addr)
+                || backoff_until.get(&addr).is_some_and(|until| *until > now)
+            {
+                tracing::debug!(
+                    "BLE {}: queued dial to {} no longer eligible, dropped",
+                    self.name,
+                    Address(addr)
+                );
+                dial_queue.release(&addr, now);
+                continue;
+            }
+            let central = bluez::CentralTask {
+                adapter: adapter.clone(),
+                addr: Address(addr),
+                own_identity: self.identity_hash,
+                ev_tx: ev_tx.clone(),
+                iface: self.name.clone(),
+            };
+            tokio::spawn(central.run());
+        }
     }
 
     /// Apply the table's advertising verdict (#49 item 1, the firmware's

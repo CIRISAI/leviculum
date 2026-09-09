@@ -698,6 +698,196 @@ impl ScanScheduler {
     }
 }
 
+// ---------------------------------------------------------------------
+// The dial queue — one connection setup in flight, jittered (#49 part 3)
+// ---------------------------------------------------------------------
+
+/// Pre-connect jitter bounds. Every dial waits a uniform random delay in
+/// `[DIAL_JITTER_MIN_MS, DIAL_JITTER_MAX_MS]` from the moment it becomes
+/// startable (head of the queue, no setup in flight).
+///
+/// The jitter's job is to spread N centrals that elected the same peer
+/// out of the same sighting: their collection windows
+/// (`SCAN_WINDOW_COLLECT_MS`, 3 s) close within one window length of
+/// each other, so a spread up to ~2/3 of a window decorrelates the
+/// connect attempts arriving at that peripheral instead of stacking them
+/// into one connection event — the overlap btvirt mishandles (periculum
+/// #49) and a real controller serves slower. The floor keeps the delay
+/// from degenerating to "immediately" for everyone; the ceiling stays an
+/// order of magnitude under the 20 s central setup budget
+/// (`bluez::SETUP_TIMEOUT`), so a serialised queue still drains several
+/// dials per timeout period, and far under the 30 s fallback clock
+/// (`SCAN_FALLBACK_AFTER_MS`), which the queued attempt holds at zero
+/// while it waits.
+pub(crate) const DIAL_JITTER_MIN_MS: u64 = 250;
+/// Upper jitter bound; see [`DIAL_JITTER_MIN_MS`].
+pub(crate) const DIAL_JITTER_MAX_MS: u64 = 2_000;
+
+/// What [`DialQueue::enqueue`] admitted, for the driver's
+/// `BLE_DIAL_QUEUE` line: how many dials now wait (this one included)
+/// and the jitter this dial will serve before it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DialQueued {
+    pub(crate) depth: usize,
+    pub(crate) wait_ms: u64,
+}
+
+/// One deferred dial.
+#[derive(Debug)]
+struct QueuedDial {
+    addr: Addr,
+    decision: ConnectDecision,
+    /// Drawn at enqueue (so the driver can log it), served from the
+    /// moment the dial becomes startable.
+    jitter_ms: u64,
+    /// Absolute start time, armed when the dial reaches the head of the
+    /// queue with no setup in flight. `None` = still blocked.
+    deadline_ms: Option<u64>,
+}
+
+/// Serialises central-role connection setups: at most ONE in flight per
+/// adapter — from the dial until the handshake completes or the setup
+/// times out — with a bounded random pre-connect jitter before every
+/// dial. Media-aware interface behaviour: BLE connection setup is the
+/// carrier's most collision-sensitive phase (a peripheral serving
+/// overlapping incoming connections is exactly where btvirt phantoms and
+/// where a real controller's throughput dies), and the firmware's
+/// SoftDevice enforces one `LE Create Connection` at a time in hardware
+/// — this queue is the same policy for a BlueZ host. Pure state machine:
+/// the caller passes `now_ms`, spawns the dial [`Self::pop_ready`] hands
+/// back, and reports the setup's end via [`Self::release`].
+///
+/// No TTL on queued dials: the driver re-checks eligibility (table,
+/// backoff, known addresses) when a dial pops, and a stale entry it
+/// drops releases the slot to the next one, so the queue cannot wedge.
+pub(crate) struct DialQueue {
+    rng: Xorshift64,
+    in_flight: Option<Addr>,
+    queue: Vec<QueuedDial>,
+}
+
+impl DialQueue {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self {
+            rng: Xorshift64::new(seed),
+            in_flight: None,
+            queue: Vec::new(),
+        }
+    }
+
+    /// Whether `addr` is already queued or being set up (then a sighting
+    /// of it must not be dialled again — the same contract as
+    /// [`LinkTable::knows_addr`]).
+    pub(crate) fn knows(&self, addr: &Addr) -> bool {
+        self.in_flight.as_ref() == Some(addr) || self.queue.iter().any(|d| &d.addr == addr)
+    }
+
+    /// Whether nothing is queued or in flight — the queue's half of the
+    /// fallback clock's busy input: a deferred dial's outcome is about
+    /// to reset the clock exactly like an in-flight one's (#375 part 3).
+    pub(crate) fn is_idle(&self) -> bool {
+        self.in_flight.is_none() && self.queue.is_empty()
+    }
+
+    /// Defer one elected dial. Returns what to log, or `None` when the
+    /// address is already queued or in flight (nothing changed).
+    pub(crate) fn enqueue(
+        &mut self,
+        addr: Addr,
+        decision: ConnectDecision,
+        now_ms: u64,
+    ) -> Option<DialQueued> {
+        if self.knows(&addr) {
+            return None;
+        }
+        let jitter_ms =
+            DIAL_JITTER_MIN_MS + self.rng.next() % (DIAL_JITTER_MAX_MS - DIAL_JITTER_MIN_MS + 1);
+        self.queue.push(QueuedDial {
+            addr,
+            decision,
+            jitter_ms,
+            deadline_ms: None,
+        });
+        self.arm_head(now_ms);
+        Some(DialQueued {
+            depth: self.queue.len(),
+            wait_ms: jitter_ms,
+        })
+    }
+
+    /// The dial to start now, if its jitter has been served and no setup
+    /// is in flight. The returned address IS the in-flight setup from
+    /// here on; the caller either spawns the connection or, when the
+    /// re-check refuses it, calls [`Self::release`] so the next dial can
+    /// arm.
+    pub(crate) fn pop_ready(&mut self, now_ms: u64) -> Option<(Addr, ConnectDecision)> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        let ready = self
+            .queue
+            .first()
+            .is_some_and(|d| d.deadline_ms.is_some_and(|deadline| now_ms >= deadline));
+        if !ready {
+            return None;
+        }
+        let dial = self.queue.remove(0);
+        self.in_flight = Some(dial.addr);
+        Some((dial.addr, dial.decision))
+    }
+
+    /// The setup at `addr` ended — handshake complete, setup timeout,
+    /// connect failure, or the driver's re-check refusing the popped
+    /// dial. Frees the slot and starts the next queued dial's jitter.
+    /// Idempotent: releases of addresses not in flight (e.g. the
+    /// `CentralGone` that follows a completed handshake's session end)
+    /// change nothing.
+    pub(crate) fn release(&mut self, addr: &Addr, now_ms: u64) {
+        if self.in_flight.as_ref() == Some(addr) {
+            self.in_flight = None;
+            self.arm_head(now_ms);
+        }
+    }
+
+    /// When the head dial wants to start, for the driver's timer. `None`
+    /// while a setup is in flight or nothing is queued.
+    pub(crate) fn next_deadline_ms(&self) -> Option<u64> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        self.queue.first().and_then(|d| d.deadline_ms)
+    }
+
+    /// Start the head dial's jitter if it is startable and not armed yet.
+    fn arm_head(&mut self, now_ms: u64) {
+        if self.in_flight.is_some() {
+            return;
+        }
+        if let Some(head) = self.queue.first_mut() {
+            if head.deadline_ms.is_none() {
+                head.deadline_ms = Some(now_ms + head.jitter_ms);
+            }
+        }
+    }
+}
+
+/// Fast non-cryptographic PRNG (xorshift64), the tcp.rs helper with a
+/// caller-provided seed so tests are deterministic.
+struct Xorshift64(u64);
+
+impl Xorshift64 {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1) // xorshift has no escape from the all-zero state
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,6 +1532,137 @@ mod tests {
         assert!(
             !t.has_pending_handshakes(),
             "a live link must not suspend the clock"
+        );
+    }
+
+    /// The #49 part 3 serialisation contract: one connection setup in
+    /// flight per adapter, released on completion and on timeout alike
+    /// (both end in the same [`DialQueue::release`], driven from the
+    /// driver's `CentralIdentity`-accept and `CentralGone` events).
+    #[test]
+    fn the_dial_queue_admits_one_setup_and_releases_on_completion_and_timeout() {
+        let mut q = DialQueue::new(7);
+        assert!(q.is_idle());
+
+        let a = q
+            .enqueue(ADDR_1, ConnectDecision::InitiateLowerAddress, 1_000)
+            .expect("first dial queues");
+        assert_eq!(a.depth, 1);
+        assert!((DIAL_JITTER_MIN_MS..=DIAL_JITTER_MAX_MS).contains(&a.wait_ms));
+        assert!(!q.is_idle(), "a queued dial is busy");
+        assert!(q.knows(&ADDR_1));
+
+        // The jitter is served before the dial starts.
+        assert_eq!(q.pop_ready(1_000 + a.wait_ms - 1), None);
+        let popped = q.pop_ready(1_000 + a.wait_ms);
+        assert_eq!(
+            popped,
+            Some((ADDR_1, ConnectDecision::InitiateLowerAddress))
+        );
+        assert!(q.knows(&ADDR_1), "in flight still blocks re-dialling");
+
+        // A second dial queues behind the in-flight setup and cannot
+        // start however long it waits.
+        let b = q
+            .enqueue(ADDR_2, ConnectDecision::InitiateFallback, 2_000)
+            .expect("second dial queues");
+        assert_eq!(b.depth, 1, "one dial waiting behind the setup");
+        assert_eq!(q.next_deadline_ms(), None, "no start while in flight");
+        assert_eq!(q.pop_ready(1_000_000), None);
+
+        // Completion releases the slot; the timeout path is the same
+        // release from the driver's CentralGone. The next dial serves
+        // its OWN jitter from the release, not from its enqueue.
+        q.release(&ADDR_1, 30_000);
+        assert_eq!(q.next_deadline_ms(), Some(30_000 + b.wait_ms));
+        assert_eq!(q.pop_ready(30_000 + b.wait_ms - 1), None);
+        assert_eq!(
+            q.pop_ready(30_000 + b.wait_ms),
+            Some((ADDR_2, ConnectDecision::InitiateFallback))
+        );
+        q.release(&ADDR_2, 60_000);
+        assert!(q.is_idle());
+
+        // Stale releases (CentralGone after a completed session) are
+        // no-ops.
+        q.release(&ADDR_1, 61_000);
+        assert!(q.is_idle());
+    }
+
+    /// The jitter contract: within `[DIAL_JITTER_MIN_MS,
+    /// DIAL_JITTER_MAX_MS]` on every draw, deterministic per seed, and
+    /// actually random across seeds.
+    #[test]
+    fn the_dial_jitter_stays_in_bounds_and_is_seeded() {
+        let draws = |seed: u64| -> Vec<u64> {
+            let mut q = DialQueue::new(seed);
+            (0..32u64)
+                .map(|i| {
+                    let addr = [0xD0, 0, 0, 0, 0, i as u8];
+                    let queued = q
+                        .enqueue(addr, ConnectDecision::InitiateLowerAddress, i * 10_000)
+                        .expect("fresh address queues");
+                    let (popped, _) = q.pop_ready(i * 10_000 + queued.wait_ms).expect("ready");
+                    q.release(&popped, i * 10_000 + queued.wait_ms);
+                    queued.wait_ms
+                })
+                .collect()
+        };
+        let a = draws(7);
+        assert!(a
+            .iter()
+            .all(|w| (DIAL_JITTER_MIN_MS..=DIAL_JITTER_MAX_MS).contains(w)));
+        assert_eq!(a, draws(7), "same seed, same jitter sequence");
+        assert_ne!(a, draws(8), "different seeds draw differently");
+    }
+
+    /// Duplicate elections do not stack: an address already queued or in
+    /// flight is refused (and the driver logs nothing for it).
+    #[test]
+    fn a_known_address_does_not_enqueue_twice() {
+        let mut q = DialQueue::new(7);
+        let a = q
+            .enqueue(ADDR_1, ConnectDecision::InitiateLowerAddress, 0)
+            .expect("first");
+        assert_eq!(
+            q.enqueue(ADDR_1, ConnectDecision::InitiateFallback, 1),
+            None
+        );
+        assert!(q.pop_ready(a.wait_ms).is_some());
+        assert_eq!(
+            q.enqueue(ADDR_1, ConnectDecision::InitiateFallback, 2),
+            None,
+            "in flight blocks too"
+        );
+        q.release(&ADDR_1, 10_000);
+        assert!(
+            q.enqueue(ADDR_1, ConnectDecision::InitiateFallback, 10_001)
+                .is_some(),
+            "after the setup ends the address may be dialled again"
+        );
+    }
+
+    /// The driver's eligibility re-check refusing a popped dial releases
+    /// the slot and the NEXT queued dial arms from that moment.
+    #[test]
+    fn a_refused_popped_dial_arms_the_next_one() {
+        let mut q = DialQueue::new(7);
+        let a = q
+            .enqueue(ADDR_1, ConnectDecision::InitiateLowerAddress, 0)
+            .expect("first");
+        let b = q
+            .enqueue(ADDR_2, ConnectDecision::InitiateLowerAddress, 0)
+            .expect("second");
+        assert_eq!(b.depth, 2);
+        let t_pop = a.wait_ms;
+        assert!(q.pop_ready(t_pop).is_some());
+        // The driver's re-check says no (table filled meanwhile): the
+        // release lets ADDR_2 serve its jitter from now.
+        q.release(&ADDR_1, t_pop);
+        assert_eq!(q.next_deadline_ms(), Some(t_pop + b.wait_ms));
+        assert_eq!(
+            q.pop_ready(t_pop + b.wait_ms).map(|(addr, _)| addr),
+            Some(ADDR_2)
         );
     }
 
