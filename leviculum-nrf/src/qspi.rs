@@ -69,11 +69,35 @@
 //! §10-24) — so the first read may be the thing that woke it. Both
 //! answers go on the log line, `id=` and `id2=`, and one boot then says
 //! whether the part is asleep, awake, or not there at all.
+//!
+//! # The second opinion on `no-answer`
+//!
+//! `id=00:00:00 id2=00:00:00 state=no-answer` is where that sentence runs
+//! out. It says nobody drove MISO — it does not say why, and the two
+//! reasons lead to completely different work:
+//!
+//! | The hand-clocked read says | conclusion |
+//! |---|---|
+//! | the expected id | the part is there and the QSPI setup does not reach it. That is our bug, and it would be on the other board too. |
+//! | all zeros | nothing drives MISO under either driver. The part is absent or unpowered on this unit, and no code fixes that. |
+//! | something else | a third thing, and the bytes are the evidence for whatever it is. |
+//!
+//! So before it gives up, that path drops the peripheral, takes the same
+//! pins back as ordinary GPIOs, and asks 0x9F again by hand at 250 kHz
+//! (`bitbang_second_opinion` below, shifter in
+//! [`leviculum_qspi_bitbang`]).
+//! One extra `[QSPI] BITBANG` line, then `None` exactly as before. It
+//! reads an identifier and writes nothing — the only opcode the shifter
+//! knows is 0x9F, and there is no path from here to one that erases.
+//!
+//! **Only on that path.** A board whose part answers reaches `state=ok`
+//! without a single GPIO write from any of this, and its boot is not a
+//! cycle slower.
 
 use embassy_nrf::qspi::{self, Config, Frequency, Qspi};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
 
-use embassy_nrf::gpio::AnyPin;
+use embassy_nrf::gpio::{AnyPin, Flex, OutputDrive, Pull};
 
 bind_interrupts!(pub struct QspiIrqs {
     QSPI => qspi::InterruptHandler<peripherals::QSPI>;
@@ -192,6 +216,26 @@ pub fn identify_at_boot(
     io3: Peri<'static, AnyPin>,
     part: &'static FlashPart,
 ) -> Option<Qspi<'static>> {
+    // Second handles on the six pins, for the `no-answer` path alone.
+    //
+    // SAFETY: the only use is in `bitbang_second_opinion`, and the only
+    // caller of that is the branch below, which runs strictly AFTER the
+    // `Qspi` built from the originals has been dropped. The two drivers
+    // therefore never hold the bus at the same time. `AnyPin` is a byte,
+    // so the copies cost nothing on the path that never uses them —
+    // taking them here rather than inside the branch is only because
+    // `Qspi::new` consumes the originals.
+    let spare = unsafe {
+        [
+            sck.clone_unchecked(),
+            csn.clone_unchecked(),
+            io0.clone_unchecked(),
+            io1.clone_unchecked(),
+            io2.clone_unchecked(),
+            io3.clone_unchecked(),
+        ]
+    };
+
     let mut config = Config::default();
     config.frequency = part.speed.frequency();
     config.capacity = part.capacity;
@@ -251,12 +295,20 @@ pub fn identify_at_boot(
         // Two silent reads after a release is not "some other part is
         // fitted" — it is nothing on the bus driving MISO at all, which is
         // a statement about the board rather than about the part number.
-        let state = if jedec == [0u8; 3] {
+        let silent = jedec == [0u8; 3];
+        let state = if silent {
             "no-answer"
         } else {
             "unexpected-part"
         };
         log_part(part, Some(first), second, false, state);
+        if silent {
+            // The peripheral is out of answers; the pins are not. Drop it
+            // first — the bit-bang needs the QSPI off the pins, and
+            // `Drop` is what deactivates it and deconfigures them.
+            drop(flash);
+            bitbang_second_opinion(spare);
+        }
         return None;
     }
 
@@ -293,6 +345,159 @@ pub fn identify_at_boot(
 
     log_part(part, Some(first), second, true, "ok");
     Some(flash)
+}
+
+/// Half a bit-bang clock period, in core cycles at the nRF52840's 64 MHz.
+///
+/// 128 cycles is 2 us, so a nominal 250 kHz — 32x under the slower
+/// candidate part's own single-line ceiling (the MX25R1635F's 8 MHz in
+/// ultra-low-power mode) and far under anything about the wiring that
+/// could plausibly be marginal. That is the point: this runs once, on a
+/// board that has already failed to answer, and a diagnostic that is
+/// itself near a timing limit proves nothing. `asm::delay` plus the GPIO
+/// writes make the real clock somewhat slower than the nominal figure,
+/// which only ever helps here.
+const BITBANG_HALF_PERIOD_CYCLES: u32 = 128;
+
+/// The nRF52840 core clock in kHz, for the nominal bit-bang frequency.
+const CORE_CLOCK_KHZ: u32 = 64_000;
+
+/// What goes on the `clk_khz=` field: nominal, from the half period above.
+const BITBANG_CLK_KHZ: u32 = CORE_CLOCK_KHZ / (2 * BITBANG_HALF_PERIOD_CYCLES);
+
+/// The four pins the hand-clocked read drives, as
+/// [`leviculum_qspi_bitbang::Bus`] wants them.
+///
+/// IO2 and IO3 are not here: they carry no edges, they are held high for
+/// the whole transfer by the caller, and giving the shifter the ability to
+/// move them would only be a way to get them wrong.
+struct GpioBus {
+    sck: Flex<'static>,
+    csn: Flex<'static>,
+    io0: Flex<'static>,
+    io1: Flex<'static>,
+}
+
+impl leviculum_qspi_bitbang::Bus for GpioBus {
+    fn set_sck(&mut self, high: bool) {
+        self.sck.set_level(high.into());
+    }
+
+    fn set_cs(&mut self, high: bool) {
+        self.csn.set_level(high.into());
+    }
+
+    fn set_io0(&mut self, high: bool) {
+        self.io0.set_level(high.into());
+    }
+
+    fn read_io1(&mut self) -> bool {
+        self.io1.is_high()
+    }
+
+    fn settle(&mut self) {
+        cortex_m::asm::delay(BITBANG_HALF_PERIOD_CYCLES);
+    }
+}
+
+/// Ask the pins directly, once, and say what they answered.
+///
+/// Only reached from the `state=no-answer` branch of [`identify_at_boot`],
+/// and only after the `Qspi` is dropped. One read of opcode 0x9F at
+/// [`BITBANG_CLK_KHZ`], one `[QSPI] BITBANG` line, no retry and no second
+/// opcode: the caller returns `None` either way, so a ladder of attempts
+/// would produce more lines and no more information than the first.
+///
+/// # Reading the answer
+///
+/// See the table in the module docs. Two details of the wiring below feed
+/// into it and are worth having in front of you:
+///
+/// - IO1 is read with a **pull-down**. Without one, an undriven wire is a
+///   floating input and the bytes would be noise rather than evidence, so
+///   `00:00:00` has to be made to mean something: it means the wire never
+///   left the level the nRF's own internal pull put it at. A part that is
+///   present drives IO1 push-pull and wins against a pull of that order
+///   easily, so it cannot suppress a real answer — which also
+///   makes `ff:ff:ff` a genuine "something else" here and not the
+///   idle reading it would be under a pull-up.
+/// - IO2 and IO3 are driven high for the whole transfer. They are the
+///   part's WP# and HOLD#, and a part with HOLD# low suspends the transfer
+///   and answers nothing. The QSPI peripheral was doing this implicitly
+///   through `CINSTRCONF.LIO2`/`LIO3`
+///   (`embassy-nrf-0.9.0/src/qspi.rs:290`); by hand it is explicit.
+///
+/// One ambiguity this does not resolve, and should not be read past: a
+/// part still in Deep Power Down answers nothing here either, because the
+/// only opcode it would honour is 0xAB and this sends 0x9F. That is not
+/// worth a second opcode. `identify_at_boot` already sent 0xAB and pulsed
+/// CS# low three times before reaching this branch, so on any board where
+/// the QSPI reaches the part the part is awake — and on a board where it
+/// does not, the interesting row of the table is the one where the
+/// hand-clocked read *succeeds*, which no amount of sleep can fake.
+///
+/// # What it leaves behind
+///
+/// Exactly the pin states `Qspi::drop` left: SCK, IO0..IO3 disconnected
+/// (`Flex::drop` writes the same `PIN_CNF` that `gpio::deconfigure_pin`
+/// does), and CS# still an output driven high. That last one is not an
+/// oversight in either place — embassy leaves CSN driven on purpose, so a
+/// part in Deep Power Down does not read a floating CS# as a select and
+/// wake up on its own — so this path restores it rather than "cleaning it
+/// up" into a state its caller never had. A later `Qspi::new` on these
+/// pins therefore starts from the same place it would have without this
+/// function.
+fn bitbang_second_opinion(pins: [Peri<'static, AnyPin>; 6]) {
+    let [sck, csn, io0, io1, io2, io3] = pins;
+
+    // WP# and HOLD# first, before anything can be selected.
+    let mut wp = Flex::new(io2);
+    wp.set_high();
+    wp.set_as_output(OutputDrive::HighDrive);
+    let mut hold = Flex::new(io3);
+    hold.set_high();
+    hold.set_as_output(OutputDrive::HighDrive);
+
+    // CS# is already an output driven high, so setting the level before
+    // the direction keeps it that way through the handover: no glitch a
+    // sleeping part could read as a select.
+    let mut csn = Flex::new(csn);
+    csn.set_high();
+    csn.set_as_output(OutputDrive::HighDrive);
+
+    let mut sck = Flex::new(sck);
+    sck.set_low();
+    sck.set_as_output(OutputDrive::HighDrive);
+
+    let mut io0 = Flex::new(io0);
+    io0.set_low();
+    io0.set_as_output(OutputDrive::HighDrive);
+
+    let mut io1 = Flex::new(io1);
+    io1.set_as_input(Pull::Down);
+
+    let mut bus = GpioBus { sck, csn, io0, io1 };
+    let id = leviculum_qspi_bitbang::read_jedec_id(&mut bus);
+
+    let GpioBus { sck, csn, io0, io1 } = bus;
+    // Give the pins back. Dropping a `Flex` disconnects it, which is what
+    // `Qspi::drop` did to these five; CS# is the exception it deliberately
+    // left driven, so it is the one that persists.
+    drop(sck);
+    drop(io0);
+    drop(io1);
+    drop(wp);
+    drop(hold);
+    csn.persist();
+
+    crate::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!(
+            "BITBANG id={} clk_khz={}",
+            JedecId(Some(id)),
+            BITBANG_CLK_KHZ
+        ),
+    );
 }
 
 /// One JEDEC id read (opcode 0x9F). `None` is a transaction the peripheral

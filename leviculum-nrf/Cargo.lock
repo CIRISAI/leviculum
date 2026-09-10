@@ -1009,6 +1009,7 @@ dependencies = [
  "leviculum-lxmf",
  "leviculum-media-state",
  "leviculum-persist-ack",
+ "leviculum-qspi-bitbang",
  "leviculum-queue-budget",
  "leviculum-record-log",
  "leviculum-rx-arming",
@@ -1027,6 +1028,10 @@ dependencies = [
 
 [[package]]
 name = "leviculum-persist-ack"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-qspi-bitbang"
 version = "0.1.0"
 
 [[package]]

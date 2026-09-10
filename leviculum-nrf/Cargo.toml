@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "qspi-bitbang"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -86,6 +86,12 @@ leviculum-boot-trace = { path = "boot-trace" }
 # with default features so the simulation and its `alloc` stay out of the
 # image.
 leviculum-record-log = { path = "record-log" }
+# The hand-clocked JEDEC-id read the QSPI failure path falls back to
+# (#384): which edge launches a bit and which samples it. An off-by-one
+# there returns a plausible wrong part number instead of failing, so the
+# edges live in a crate a host test can drive against a replaying fake
+# part; the firmware supplies six GPIOs and a delay.
+leviculum-qspi-bitbang = { path = "qspi-bitbang" }
 # When a control-envelope ack may claim the record reached flash (#358).
 # The ordering between the task that answers the frame and the task that
 # writes the page is the whole defect, and the firmware crate runs no host
