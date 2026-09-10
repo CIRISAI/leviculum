@@ -7,11 +7,15 @@
 # board's alias used from another board. Both were true of `e5d62b95`, and
 # its T114 QSPI map was still wrong: IO2 and IO3 named P1.00/P1.01 where the
 # part has WP#/HOLD# on P0.07/P0.05. A map that is consistently wrong is
-# consistent, so no check that only reads our own tree could have seen it.
-# The board did: with the peripheral pointed at the wrong HOLD#, the part's
-# real HOLD# stayed in its reset state, nothing drove MISO, and the JEDEC
-# read came back `id=00:00:00`. That is one boot log nobody has to be looking
-# at for this gate to fire instead.
+# consistent, so no check that only reads our own tree could have seen it,
+# and only this gate reads the reference.
+#
+# It was NOT the `id=00:00:00` on the T114's boot line. That reading was
+# blamed on the wrong IO3 leaving the part held, and the blame was wrong:
+# `blocking_custom_instruction` runs single-line, so a JEDEC read uses SCK,
+# CS, IO0 and IO1 only — all four correct in the old map. The pins had to be
+# fixed for the quad path regardless, and the flash's silence is a separate
+# question that `qspi.rs` answers with a deep-power-down release.
 #
 # Three claims, in the order they can fail:
 #
@@ -42,6 +46,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$ROOT" "${1:-}" <<'PY'
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -226,6 +231,30 @@ def self_test():
     return rc
 
 
+def tree_revision(tree):
+    """What the checkout calls itself, or None if it will not say.
+
+    Refuses a revision belonging to an *enclosing* repository: git walks
+    upwards, so a variant tree sitting inside some other checkout would
+    otherwise be reported at that checkout's revision — a provenance line
+    that lies is worse than one that says it does not know.
+    """
+
+    def git(*args):
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(tree), *args], capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout.strip() or None if r.returncode == 0 else None
+
+    top = git("rev-parse", "--show-toplevel")
+    if top is None or Path(top).resolve() != Path(tree).resolve():
+        return None
+    return git("describe", "--tags", "--always", "--dirty") or git("rev-parse", "--short", "HEAD")
+
+
 def find_variants(root):
     """The Meshtastic checkout, or None. Never a hard-coded home directory."""
     candidates = []
@@ -260,6 +289,11 @@ if tree is None:
     print(f"{TAG} note no Meshtastic checkout found — set $MESHTASTIC_TREE to")
     print(f"{TAG} re-derive {table_path.relative_to(root)} from its variant")
     print(f"{TAG} headers. The recorded numbers are still gated against ours.")
+else:
+    # Which tree answered, on the run's own output. Two hosts here carry
+    # different Meshtastic revisions, so claim 3 can pass on one and fail on
+    # the other; without this line, neither run says which one it read.
+    print(f"{TAG} note upstream {tree} at {tree_revision(tree) or 'an unknown revision'}")
 
 checked = 0
 for board, spec in table.items():

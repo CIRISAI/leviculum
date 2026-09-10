@@ -123,13 +123,15 @@ nrf-gap-device-name:
 # Board pin-map gate. The two pin greps that existed before it were both
 # internal-consistency checks, and `e5d62b95` passed them with the T114's QSPI
 # IO2/IO3 named P1.00/P1.01 where the part has WP#/HOLD# on P0.07/P0.05: a map
-# that is consistently wrong is consistent. The board is the only thing that
-# disagreed, with `id=00:00:00` — a held part drives MISO for nothing, not even
-# a JEDEC read. So this compares the QSPI and LoRa pins against the Meshtastic
-# variant headers instead, and separately against the `p.P0_07` arguments the
-# bins actually pass, which are not the aliases. Numbers and scope in
-# leviculum-nrf/reference-pins.toml; the upstream half needs a Meshtastic
-# checkout ($MESHTASTIC_TREE) and says so when there is none.
+# that is consistently wrong is consistent, so nothing that reads only our own
+# tree can see it. Only the reference can. So this compares the QSPI and LoRa
+# pins against the Meshtastic variant headers, and separately against the
+# `p.P0_07` arguments the bins actually pass, which are not the aliases. (The
+# T114's `id=00:00:00` was once blamed on that wrong IO3; it cannot be — the
+# JEDEC read is single-line and never touches IO2/IO3. See qspi.rs §Deep power
+# down.) Numbers and scope in leviculum-nrf/reference-pins.toml; the upstream
+# half needs a Meshtastic checkout ($MESHTASTIC_TREE), names the revision it
+# read, and says so when there is none.
 nrf-board-pins:
     bash scripts/check-nrf-board-pins.sh
 

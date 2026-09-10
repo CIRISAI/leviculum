@@ -48,6 +48,27 @@
 //! `WIPWAIT` makes it wait for the part to finish. One byte of data, so
 //! the Macronix configuration registers — which hold the ultra-low-power
 //! bit — keep their values.
+//!
+//! # Deep power down
+//!
+//! Both parts have a Deep Power Down state in which they answer nothing,
+//! drive nothing, and — this is the part that bites — survive a warm
+//! reset. Firmware that put the part to sleep once leaves it asleep for
+//! every boot after, and the symptom is a JEDEC read that succeeds and
+//! returns `00:00:00`: the peripheral clocked the opcode out, and nothing
+//! on the bus ever pulled MISO high. A wrong pin map looks the same from
+//! the log line, which is why the pins are gated separately
+//! (`scripts/check-nrf-board-pins.sh`) and why this boots with a release.
+//!
+//! So [`identify_at_boot`] sends Release from Deep Power Down (0xAB)
+//! before it asks anything, waits out the parts' recovery time, and reads
+//! JEDEC. A release sent to an awake part is a no-op, so it is
+//! unconditional rather than a flag. A first read that still comes back
+//! silent earns exactly one retry, because on the Macronix part it is the
+//! CS# pulse and not the opcode that does the releasing (rev. 1.6,
+//! §10-24) — so the first read may be the thing that woke it. Both
+//! answers go on the log line, `id=` and `id2=`, and one boot then says
+//! whether the part is asleep, awake, or not there at all.
 
 use embassy_nrf::qspi::{self, Config, Frequency, Qspi};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
@@ -66,6 +87,28 @@ const CMD_READ_STATUS: u8 = 0x05;
 const CMD_WRITE_STATUS: u8 = 0x01;
 /// Quad Enable, bit 6 of the status register on both parts.
 const STATUS_QE: u8 = 0x40;
+/// Release from Deep Power Down (opcode 0xAB). `RES` in the Macronix
+/// datasheet, `RDPD` in the ISSI one; same opcode, same effect on a
+/// sleeping part.
+const CMD_RELEASE_DEEP_POWER_DOWN: u8 = 0xAB;
+
+/// Core cycles to wait for a part to come out of Deep Power Down.
+///
+/// 1 ms at the nRF52840's 64 MHz core, against datasheet recovery times of
+/// 35 us and 3 us:
+///
+/// - MX25R1635F: `tRDP`, "Recovery Time for Release from deep power down
+///   mode", 35 us max — Macronix datasheet rev. 1.6 (2018-12-12), Table 17
+///   "AC Characteristics".
+/// - IS25LP080D: `tRES1`, "Release deep power down", 3 us max. Taken from
+///   the IS25LP128 datasheet (ISSI rev. A, Table 9.5 AC characteristics),
+///   which is the same IS25LP family and command set; the 080D sheet
+///   itself was not reachable from these machines.
+///
+/// 28x the larger of the two is deliberate. This runs once per boot, so
+/// the margin costs nothing measurable, and a value trimmed to the
+/// datasheet would buy nothing.
+const RELEASE_WAIT_CYCLES: u32 = 64_000;
 
 /// The two bus speeds we use, in a form a `const` board table can hold.
 ///
@@ -125,12 +168,15 @@ pub const IS25LP080D: FlashPart = FlashPart {
     speed: Speed::M32,
 };
 
-/// Bring the QSPI up, identify the part, and hand back a NorFlash device.
+/// Bring the QSPI up, wake the part, identify it, and hand back a NorFlash
+/// device.
 ///
 /// `None` means the part did not answer with the JEDEC id this board
-/// expects. The `Qspi` is dropped on that path, which deactivates the
-/// peripheral and leaves the pins deconfigured, so nothing can write to a
-/// part whose geometry we do not know.
+/// expects — `state=no-answer` if it said nothing at all even after the
+/// deep-power-down release, `state=unexpected-part` if it named itself and
+/// named something else. The `Qspi` is dropped on either path, which
+/// deactivates the peripheral and leaves the pins deconfigured, so nothing
+/// can write to a part whose geometry we do not know.
 ///
 /// Emits one `[QSPI]` line either way, ungated like `SD_RAM_FLOOR`: a
 /// board that comes up with an unexpected part has to say so in a boot
@@ -156,20 +202,61 @@ pub fn identify_at_boot(
     // `embassy-nrf-0.9.0/src/qspi.rs`).
     let mut flash = Qspi::new(qspi, QspiIrqs, sck, csn, io0, io1, io2, io3, config);
 
-    let mut jedec = [0u8; 3];
+    // Wake it before asking it anything. A part sleeping in Deep Power
+    // Down ignores every other command and rides through a warm reset, so
+    // without this a board that was ever put to sleep answers 00:00:00 for
+    // the rest of its life. Harmless on a part that is already awake,
+    // which is why it is in the boot path and not behind a flag.
+    if flash
+        .blocking_custom_instruction(CMD_RELEASE_DEEP_POWER_DOWN, &[], &mut [])
+        .is_err()
+    {
+        log_part(part, None, None, false, "release-failed");
+        return None;
+    }
+    cortex_m::asm::delay(RELEASE_WAIT_CYCLES);
+
     // Custom instructions run on the single-line SPI path regardless of
     // the quad read/write opcodes configured above, so this works before
     // QE is set.
-    if flash
-        .blocking_custom_instruction(CMD_READ_JEDEC_ID, &[], &mut jedec)
-        .is_err()
-    {
-        log_part(part, &[0, 0, 0], false, "read-failed");
-        return None;
-    }
+    let first = match read_jedec(&mut flash) {
+        Some(id) => id,
+        None => {
+            log_part(part, None, None, false, "read-failed");
+            return None;
+        }
+    };
 
+    // A silent first answer earns exactly one more read, because on the
+    // Macronix part the release is the CS# pulse rather than the opcode
+    // ("returns to Stand-by mode if CS# pulses low for tCRDP", rev. 1.6
+    // §10-24) and the recovery time runs from that pulse. So the read
+    // above may be the thing that woke the part, and the read below is the
+    // first one it could have answered. Both go on the log line.
+    let second = if first == [0u8; 3] {
+        cortex_m::asm::delay(RELEASE_WAIT_CYCLES);
+        match read_jedec(&mut flash) {
+            Some(id) => Some(id),
+            None => {
+                log_part(part, Some(first), None, false, "read-failed");
+                return None;
+            }
+        }
+    } else {
+        None
+    };
+
+    let jedec = second.unwrap_or(first);
     if jedec != part.jedec {
-        log_part(part, &jedec, false, "unexpected-part");
+        // Two silent reads after a release is not "some other part is
+        // fitted" — it is nothing on the bus driving MISO at all, which is
+        // a statement about the board rather than about the part number.
+        let state = if jedec == [0u8; 3] {
+            "no-answer"
+        } else {
+            "unexpected-part"
+        };
+        log_part(part, Some(first), second, false, state);
         return None;
     }
 
@@ -178,7 +265,7 @@ pub fn identify_at_boot(
         .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut status)
         .is_err()
     {
-        log_part(part, &jedec, false, "status-read-failed");
+        log_part(part, Some(first), second, false, "status-read-failed");
         return None;
     }
     if status[0] & STATUS_QE == 0 {
@@ -187,7 +274,7 @@ pub fn identify_at_boot(
             .blocking_custom_instruction(CMD_WRITE_STATUS, &[want], &mut [])
             .is_err()
         {
-            log_part(part, &jedec, false, "quad-enable-failed");
+            log_part(part, Some(first), second, false, "quad-enable-failed");
             return None;
         }
         // Read it back rather than assume: the quad opcodes this driver is
@@ -199,28 +286,62 @@ pub fn identify_at_boot(
             .is_err()
             || check[0] & STATUS_QE == 0
         {
-            log_part(part, &jedec, false, "quad-enable-refused");
+            log_part(part, Some(first), second, false, "quad-enable-refused");
             return None;
         }
     }
 
-    log_part(part, &jedec, true, "ok");
+    log_part(part, Some(first), second, true, "ok");
     Some(flash)
+}
+
+/// One JEDEC id read (opcode 0x9F). `None` is a transaction the peripheral
+/// refused; three zero bytes are a transaction that worked and found
+/// nobody driving the bus.
+fn read_jedec(flash: &mut Qspi<'static>) -> Option<[u8; 3]> {
+    let mut jedec = [0u8; 3];
+    flash
+        .blocking_custom_instruction(CMD_READ_JEDEC_ID, &[], &mut jedec)
+        .ok()?;
+    Some(jedec)
+}
+
+/// A JEDEC id on the boot line: `c2:28:15`, or `none` for a read that was
+/// never made — the second read only happens when the first was silent,
+/// and a release that fails means neither did.
+struct JedecId(Option<[u8; 3]>);
+
+impl core::fmt::Display for JedecId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(id) => write!(f, "{:02x}:{:02x}:{:02x}", id[0], id[1], id[2]),
+            None => f.write_str("none"),
+        }
+    }
 }
 
 /// The one boot line. Same shape as `SD_RAM_FLOOR`: every value that went
 /// into the verdict is on it, so the verdict is checkable from a capture.
-fn log_part(part: &FlashPart, jedec: &[u8; 3], matched: bool, state: &str) {
+///
+/// `id` is the read after the deep-power-down release, `id2` the retry it
+/// earns by being silent. `id2=none` therefore means the first read was
+/// answered — the part was awake, or the release woke it — and anything
+/// else means the first read was not, so a capture says which of the two
+/// spoke without anyone having to know the sequence.
+fn log_part(
+    part: &FlashPart,
+    first: Option<[u8; 3]>,
+    second: Option<[u8; 3]>,
+    matched: bool,
+    state: &str,
+) {
     crate::log::log_fmt_critical(
         "[QSPI] ",
         format_args!(
-            "JEDEC id={:02x}:{:02x}:{:02x} expect={:02x}:{:02x}:{:02x} part={} bytes={} clk={}MHz match={} state={}",
-            jedec[0],
-            jedec[1],
-            jedec[2],
-            part.jedec[0],
-            part.jedec[1],
-            part.jedec[2],
+            "JEDEC id={} id2={} expect={} part={} bytes={} clk={}MHz match={} state={}",
+            JedecId(first),
+            JedecId(second),
+            JedecId(Some(part.jedec)),
             part.name,
             part.capacity,
             part.speed.mhz(),
