@@ -107,10 +107,10 @@ pub type QspiCs = peripherals::P1_15;
 pub type QspiIo0 = peripherals::P1_12;
 /// QSPI flash IO1 (MISO)
 pub type QspiIo1 = peripherals::P1_13;
-/// QSPI flash IO2
-pub type QspiIo2 = peripherals::P1_00;
+/// QSPI flash IO2 (WP#)
+pub type QspiIo2 = peripherals::P0_07;
 /// QSPI flash IO3 (HOLD#, must be HIGH before QSPI activation)
-pub type QspiIo3 = peripherals::P1_01;
+pub type QspiIo3 = peripherals::P0_05;
 
 // Battery / ADC
 /// Battery voltage sense (AIN2)

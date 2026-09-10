@@ -238,8 +238,8 @@ async fn main(spawner: Spawner) {
         p.P1_15.into(), // CSN
         p.P1_12.into(), // IO0
         p.P1_13.into(), // IO1
-        p.P1_00.into(), // IO2
-        p.P1_01.into(), // IO3 / HOLD#
+        p.P0_07.into(), // IO2 / WP#
+        p.P0_05.into(), // IO3 / HOLD#
         t114::CONFIG.qspi_part,
     ) {
         leviculum_nrf::qspi::log_head(&mut flash);
