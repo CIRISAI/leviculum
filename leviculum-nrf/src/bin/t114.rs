@@ -964,11 +964,11 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// peripherals exist. The T114 has the L76K (#69), so a fix contributes
 /// position, speed, bearing and the HDOP the accuracy gate reads.
 ///
-/// The battery field stays empty even though the ADC has had a task
-/// since #380 and its reading is on the panel and in the `BATTERY` log
-/// line. Filling it is a change to what this node puts on the air, and
-/// #380 part 1 is a measurement change only; it is a one-line follow-on
-/// (the V2 does it at `bin/rak4631.rs`) whenever that is wanted.
+/// The battery field is filled from the same ADC task the panel and the
+/// `BATTERY` log line read (#380). A pack voltage on the air is the one
+/// reading that reaches an operator who is still in the field, which is
+/// the situation #380 exists for. Same source and same shape as the V2
+/// at `bin/rak4631.rs`, so the two boards report the field alike.
 ///
 /// The die temperature it does have: every nRF52840 carries one and the
 /// SoftDevice is enabled on both boards, so it is read here through the
@@ -982,9 +982,12 @@ where
     C: leviculum_core::traits::Clock,
     S: leviculum_core::traits::Storage,
 {
-    // Without the gnss feature nothing mutates this; the die temperature
-    // is set in the initialiser, so it does not lift the gate.
-    #[cfg_attr(not(feature = "gnss"), allow(unused_mut, clippy::let_and_return))]
+    // Without the gnss and battery features nothing mutates this; the die
+    // temperature is set in the initialiser, so it does not lift the gate.
+    #[cfg_attr(
+        not(any(feature = "gnss", feature = "battery")),
+        allow(unused_mut, clippy::let_and_return)
+    )]
     let mut readings = leviculum_nrf::telemetry::Readings {
         // A timebase below the plausibility floor is uptime seconds, not a
         // calendar estimate — the anchor model's "never ahead" rule has
@@ -1014,6 +1017,12 @@ where
             Some(GnssPresence::Fix)
         )
     };
+    #[cfg(feature = "battery")]
+    {
+        readings.battery_percent = leviculum_nrf::baseboard::BATTERY_STATE
+            .try_get()
+            .map(|b| b.percent);
+    }
     (readings, has_fix)
 }
 
