@@ -382,6 +382,26 @@ pub enum NodeEvent {
     /// An interface went offline
     InterfaceDown(usize),
 
+    /// A peer's outbound circuit opened or closed (leviculum#66).
+    ///
+    /// Emitted when the per-interface breaker starts shedding traffic to a
+    /// peer that is not draining, and again when it recovers. This is the
+    /// push half of the backpressure contract: a producer that keeps sending
+    /// into a shedding peer is generating work that will be thrown away, and
+    /// without this it has no way to find that out — the discard is silent by
+    /// design at the interface layer.
+    ///
+    /// Proofs keep flowing while the circuit is open, so a congested peer
+    /// still gets its delivery confirmations.
+    PeerCongested {
+        /// The interface whose circuit changed state.
+        interface_id: usize,
+        /// True when the circuit opened (shedding), false when it closed.
+        congested: bool,
+        /// Packets shed on this interface since the node started.
+        shed_packets: u64,
+    },
+
     /// Frames were **destroyed** because their interface died (#25).
     ///
     /// The driver cannot re-home these bytes: a queued/in-flight frame is bound
@@ -498,6 +518,7 @@ impl NodeEvent {
             | NodeEvent::PacketProofRequested { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
+            | NodeEvent::PeerCongested { .. }
             | NodeEvent::InterfaceDown(_)
             | NodeEvent::FramesDropped { .. } => None,
         }
@@ -542,6 +563,12 @@ impl NodeEvent {
             | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
             | NodeEvent::ResourceProgress { .. } => EventClass::Data,
+
+            // Peer congestion — at most a couple per episode, and the whole
+            // reason it exists is to tell a producer it is being shed. A
+            // dropped congestion notice leaves the producer generating work
+            // that will be thrown away, which is the bug this event fixes.
+            NodeEvent::PeerCongested { .. } => EventClass::Control,
 
             // Link lifecycle and identity — at most one per link, must not be
             // lost or links wedge.
@@ -629,6 +656,7 @@ impl NodeEvent {
         match self {
             NodeEvent::AnnounceReceived { .. } => "AnnounceReceived",
             NodeEvent::PathFound { .. } => "PathFound",
+            NodeEvent::PeerCongested { .. } => "PeerCongested",
             NodeEvent::PathRequestReceived { .. } => "PathRequestReceived",
             NodeEvent::PathLost { .. } => "PathLost",
             NodeEvent::PacketReceived { .. } => "PacketReceived",

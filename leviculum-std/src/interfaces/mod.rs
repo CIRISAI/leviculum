@@ -151,6 +151,14 @@ pub(crate) struct InterfaceCounters {
     /// Payload bytes of those dropped frames, in the same currency as
     /// `tx_bytes` (Python `tx_dropped_bytes`, the `txdrb` stats key).
     pub tx_dropped_bytes: AtomicU64,
+    /// Packets shed by this interface's open outbound circuit (leviculum#66).
+    /// Distinct from `tx_queue_drops`: a shed packet never reached a queue and
+    /// never paid for IFAC masking.
+    pub shed_packets: AtomicU64,
+    /// Whether that circuit is currently open (shedding). Published by the
+    /// event loop so `interface_stats()` can report it without taking the
+    /// loop's own state under a lock.
+    pub circuit_open: std::sync::atomic::AtomicBool,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
 }
@@ -163,6 +171,8 @@ impl InterfaceCounters {
             test_direct_ingress_drops: AtomicU64::new(0),
             tx_queue_drops: AtomicU64::new(0),
             tx_dropped_bytes: AtomicU64::new(0),
+            shed_packets: AtomicU64::new(0),
+            circuit_open: std::sync::atomic::AtomicBool::new(false),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,

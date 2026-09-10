@@ -46,6 +46,7 @@
 //! }
 //! ```
 
+mod breaker;
 mod builder;
 mod completions;
 mod interface_build;
@@ -226,6 +227,11 @@ pub struct PlaneStats {
     pub retry_queue_cap: usize,
     /// Packets discarded by a full retry queue since the node started.
     pub retry_dropped_total: u64,
+    /// Packets shed by an open per-peer circuit since the node started
+    /// (leviculum#66). A rising `shed_packets_total` with a flat
+    /// `retry_dropped_total` is the breaker working: the same traffic is
+    /// being discarded, but without paying to mask it first.
+    pub shed_packets_total: u64,
 }
 
 impl PlaneStats {
@@ -251,6 +257,10 @@ pub(crate) struct PlaneCounters {
     /// Packets currently queued for retry across all interfaces — the
     /// number that climbs *before* drops start.
     retry_queued: AtomicUsize,
+    /// Packets shed by an open per-peer circuit (leviculum#66). Unlike
+    /// `retry_dropped`, these never paid for an IFAC signature and never
+    /// entered a retry queue — that saving is the point of the breaker.
+    shed_packets: AtomicU64,
 }
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
@@ -913,6 +923,13 @@ pub struct InterfaceStatusSnapshot {
     /// Whether the announce ingress burst limiter is currently active (Codeberg
     /// #87; Python ic_burst_active).
     pub burst_active: bool,
+    /// Whether this peer's outbound circuit is open — new directed traffic is
+    /// being shed before masking (leviculum#66). Proofs still go out.
+    pub circuit_open: bool,
+    /// Packets shed by that circuit since the node started. Per-interface on
+    /// purpose: a saturated peer is a property of one peer, and a node-wide
+    /// total cannot say which one.
+    pub shed_packets: u64,
     /// Effective configured bitrate in bits per second (Codeberg #93), or `None`
     /// when the interface has no configured bitrate and reporting falls back to
     /// the medium default guess.
@@ -2145,6 +2162,10 @@ impl ReticulumNode {
                 .plane_counters
                 .retry_dropped
                 .load(std::sync::atomic::Ordering::Relaxed),
+            shed_packets_total: self
+                .plane_counters
+                .shed_packets
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -3092,6 +3113,14 @@ impl ReticulumNode {
                     tx_bytes,
                     held_announces: e.held_announces,
                     burst_active: e.burst_active,
+                    circuit_open: bytes
+                        .get(&e.id)
+                        .map(|c| c.circuit_open.load(Ordering::Relaxed))
+                        .unwrap_or(false),
+                    shed_packets: bytes
+                        .get(&e.id)
+                        .map(|c| c.shed_packets.load(Ordering::Relaxed))
+                        .unwrap_or(0),
                     configured_bitrate: e.configured_bitrate,
                     kind: e.kind,
                 }
@@ -4044,6 +4073,8 @@ async fn run_event_loop(
     // benchmarks can read it out of the capture without extra
     // instrumentation.
     let mut retry_queue_max_depth: BTreeMap<usize, usize> = BTreeMap::new();
+    // leviculum#66: per-peer outbound circuit breakers, one per interface.
+    let mut breakers: BTreeMap<usize, breaker::PeerBreaker> = BTreeMap::new();
 
     // Clone IFAC configs from core so dispatch_output can apply IFAC outside the lock.
     // This is the canonical source of truth for "what IFAC config does interface N have
@@ -4177,6 +4208,7 @@ async fn run_event_loop(
                 &completions,
                 &mut assembler,
                 &plane_counters,
+                &mut breakers,
                 core_processor.as_mut(),
             );
             tighten_next_poll(&mut next_poll, processor_delay);
@@ -4303,6 +4335,7 @@ async fn run_event_loop(
                             &completions,
             &mut assembler,
             &plane_counters,
+                            &mut breakers,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -4356,6 +4389,7 @@ async fn run_event_loop(
                                     &completions,
             &mut assembler,
             &plane_counters,
+                                    &mut breakers,
                                     core_processor.as_mut(),
                                 ));
                             }
@@ -4403,6 +4437,7 @@ async fn run_event_loop(
                     &completions,
             &mut assembler,
             &plane_counters,
+                    &mut breakers,
                     core_processor.as_mut(),
                 );
                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -4470,6 +4505,7 @@ async fn run_event_loop(
                     &completions,
             &mut assembler,
             &plane_counters,
+                    &mut breakers,
                     core_processor.as_mut(),
                 );
                 // The processor's periodic output goes out on the driver's own
@@ -4496,6 +4532,7 @@ async fn run_event_loop(
                             &completions,
             &mut assembler,
             &plane_counters,
+                            &mut breakers,
                             None,
                         );
                     }
@@ -4539,6 +4576,7 @@ async fn run_event_loop(
                             &completions,
             &mut assembler,
             &plane_counters,
+                            &mut breakers,
                             core_processor.as_mut(),
                         );
                     }
@@ -4650,7 +4688,7 @@ async fn run_event_loop(
                         core.handle_interface_up(iface_idx)
                     };
                     refresh_ifac!();
-                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
+                    tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, &mut breakers, core_processor.as_mut()));
                 }
             }
 
@@ -4672,7 +4710,7 @@ async fn run_event_loop(
                     core.handle_interface_up(iface_id.0)
                 };
                 refresh_ifac!();
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, &mut breakers, core_processor.as_mut()));
             }
 
             // Branch 6c: Per-peer loss on a multi-peer interface (Codeberg
@@ -4688,7 +4726,7 @@ async fn run_event_loop(
                     core.handle_interface_peer_lost(iface_id, peer)
                 };
                 refresh_ifac!();
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, &mut breakers, core_processor.as_mut()));
             }
 
             // Branch 6b: Tunnel synthesize initiation (Codeberg #64).
@@ -4703,7 +4741,7 @@ async fn run_event_loop(
                     core.send_tunnel_synthesize(iface_id.0)
                 };
                 refresh_ifac!();
-                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, core_processor.as_mut()));
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, &mut assembler, &plane_counters, &mut breakers, core_processor.as_mut()));
             }
 
             // Branch 7: Periodic storage flush (persist identities + packet
@@ -4797,6 +4835,7 @@ async fn run_event_loop(
                             &completions,
             &mut assembler,
             &plane_counters,
+                            &mut breakers,
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
@@ -4881,6 +4920,7 @@ async fn run_event_loop(
                                     &completions,
             &mut assembler,
             &plane_counters,
+                                    &mut breakers,
                                     core_processor.as_mut(),
                                 );
                                 tighten_next_poll(&mut next_poll, processor_delay);
@@ -5136,11 +5176,50 @@ fn dispatch_output(
     completions: &CompletionRegistry,
     assembler: &mut SegmentAssembler,
     plane_counters: &PlaneCounters,
+    breakers: &mut BTreeMap<usize, breaker::PeerBreaker>,
     core_processor: Option<&mut processor::ProcessorSlot>,
 ) -> Option<Duration> {
     // Drain retry queues before dispatching new actions
     let drain_now_ms = inner.lock_recover().now_ms();
     drain_retry_queues(retry_queues, registry, drain_now_ms);
+
+    // leviculum#66: ask each peer's breaker BEFORE handing the actions to
+    // `dispatch_actions`, because that is where masking happens. A packet
+    // shed here costs a state check; the same packet shed one layer down has
+    // already paid an Ed25519 signature and an HKDF mask stream for a frame
+    // the interface was never going to take.
+    let mut shed_by_iface: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut attempted_by_iface: BTreeMap<usize, u64> = BTreeMap::new();
+    output.actions.retain(|action| {
+        let leviculum_core::transport::Action::SendPacket { iface, data } = action else {
+            // Only directed traffic is breakable. A broadcast is not aimed at
+            // the congested peer in particular, and `dispatch_actions` never
+            // re-queues one anyway.
+            return true;
+        };
+        let b = breakers.entry(iface.0).or_default();
+        match b.admits(drain_now_ms, data) {
+            breaker::Admit::Send => {
+                *attempted_by_iface.entry(iface.0).or_default() += 1;
+                true
+            }
+            breaker::Admit::Shed => {
+                *shed_by_iface.entry(iface.0).or_default() += 1;
+                false
+            }
+        }
+    });
+    for (iface_idx, n) in &shed_by_iface {
+        plane_counters
+            .shed_packets
+            .fetch_add(*n, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            iface = iface_idx,
+            peer = registry.name_of(InterfaceId(*iface_idx)),
+            shed = *n,
+            "outbound circuit open — shedding before mask"
+        );
+    }
 
     // Dispatch new actions to interfaces (protocol logic in core)
     let mut ifaces: Vec<&mut dyn leviculum_core::traits::Interface> = registry
@@ -5159,6 +5238,84 @@ fn dispatch_output(
     // so a consumer's (correct) retry/backoff path was never told the dispatch
     // failed and could never engage. Count the losses per interface and EMIT
     // them, so the sender can re-send on a fresh link.
+    // leviculum#66: feed the breakers. A tick counts as one failure if the
+    // interface refused anything on it, and as a success only if it refused
+    // nothing — tick granularity, not packet granularity, so "three tries"
+    // means three rounds of being refused rather than three frames inside a
+    // single congested burst.
+    let mut refused_by_iface: BTreeMap<usize, u64> = BTreeMap::new();
+    for (iface_id, error) in &result.errors {
+        if matches!(error, InterfaceError::BufferFull) {
+            *refused_by_iface.entry(iface_id.0).or_default() += 1;
+        }
+    }
+    let mut breaker_events: Vec<NodeEvent> = Vec::new();
+    for (iface_idx, attempted) in &attempted_by_iface {
+        let refused = refused_by_iface.get(iface_idx).copied().unwrap_or(0);
+        let b = breakers.entry(*iface_idx).or_default();
+        let was_open = b.state(drain_now_ms) != breaker::BreakerState::Closed;
+        if refused > 0 {
+            b.on_send_failed(drain_now_ms);
+        } else if *attempted > 0 {
+            b.on_send_ok();
+        }
+        let is_open = b.state(drain_now_ms) != breaker::BreakerState::Closed;
+        if was_open != is_open {
+            let shed_packets = b.shed_packets();
+            let state = b.state(drain_now_ms);
+            if is_open {
+                tracing::warn!(
+                    iface = iface_idx,
+                    peer = registry.name_of(InterfaceId(*iface_idx)),
+                    state = state.label(),
+                    cooldown_ms = b.cooldown_ms(),
+                    trips = b.trips(),
+                    shed_bytes = b.shed_bytes(),
+                    "outbound circuit OPEN — this peer is not draining, so new \
+                     directed traffic to it is shed before masking. Proofs still \
+                     go out; a probe follows after the cooldown"
+                );
+            } else {
+                tracing::info!(
+                    iface = iface_idx,
+                    peer = registry.name_of(InterfaceId(*iface_idx)),
+                    state = state.label(),
+                    shed_packets,
+                    shed_bytes = b.shed_bytes(),
+                    "outbound circuit closed — peer is draining again"
+                );
+            }
+            breaker_events.push(NodeEvent::PeerCongested {
+                interface_id: *iface_idx,
+                congested: is_open,
+                shed_packets,
+            });
+        }
+    }
+    if let Some(sink) = event_sink.as_mut() {
+        for ev in breaker_events {
+            sink.emit(ev);
+        }
+    }
+
+    // Publish the per-interface breaker gauges. Per interface on purpose: a
+    // peer that will not drain is a property of that one peer, and #66's
+    // canonical had 129 healthy peers beside the one that dropped 34k/day —
+    // a node-wide total cannot name which.
+    if !attempted_by_iface.is_empty() || !shed_by_iface.is_empty() {
+        for h in registry.handles_mut_slice() {
+            if let Some(b) = breakers.get_mut(&h.info.id.0) {
+                let open = b.state(drain_now_ms) != breaker::BreakerState::Closed;
+                h.counters
+                    .circuit_open
+                    .store(open, std::sync::atomic::Ordering::Relaxed);
+                h.counters
+                    .shed_packets
+                    .store(b.shed_packets(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     let mut disconnected_drops: BTreeMap<usize, usize> = BTreeMap::new();
     for (iface_id, error) in &result.errors {
         match error {
@@ -5385,6 +5542,7 @@ fn dispatch_output(
             completions,
             assembler,
             plane_counters,
+            breakers,
             // The `/status` response is the driver's own; it is not the
             // processor's business and must not re-enter the tap.
             None,
@@ -5418,6 +5576,7 @@ fn dispatch_output(
             completions,
             assembler,
             plane_counters,
+            breakers,
             None,
         );
     }
@@ -6483,6 +6642,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
     }
@@ -6572,6 +6732,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
 
@@ -7923,6 +8084,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -7991,6 +8153,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -8041,6 +8204,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -8092,6 +8256,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -8163,6 +8328,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -8244,6 +8410,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         )
         .expect("the tap asked for a deadline; the driver must be told");
@@ -8306,6 +8473,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
 
@@ -8364,6 +8532,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
         std::panic::set_hook(previous_hook);
@@ -8410,6 +8579,7 @@ mod tests {
             &CompletionRegistry::new(),
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             Some(&mut slot),
         );
         assert!(
@@ -8874,6 +9044,196 @@ mod tests {
     /// registered waiter resolves AND the primary `EventReceiver` still gets
     /// the same event. An observer that consumed would starve the stream the
     /// application already reads.
+    /// leviculum#66 — an open circuit sheds directed data BEFORE the packet
+    /// reaches `dispatch_actions`, which is where IFAC masking happens. This
+    /// is the CPU claim in the issue: a pinned queue was paying an Ed25519
+    /// signature per packet it then discarded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_open_circuit_sheds_data_before_it_is_masked() {
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+
+        // Trip the breaker for interface 7 the way three refused ticks would.
+        let mut breakers: BTreeMap<usize, breaker::PeerBreaker> = BTreeMap::new();
+        let b = breakers.entry(7).or_default();
+        for _ in 0..breaker::BREAKER_TRIP_THRESHOLD {
+            b.on_send_failed(0);
+        }
+        assert_eq!(b.state(0), breaker::BreakerState::Open);
+
+        let mut output = TickOutput::empty();
+        // A data packet (type bits 0b00) and a proof (0b11) to the same peer.
+        output.actions.push(Action::SendPacket {
+            iface: InterfaceId(7),
+            data: vec![0x00, 0x00, 1, 2, 3],
+        });
+        output.actions.push(Action::SendPacket {
+            iface: InterfaceId(7),
+            data: vec![0x03, 0x00, 9, 9],
+        });
+
+        let counters = PlaneCounters::default();
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &counters,
+            &mut breakers,
+            None,
+        );
+
+        let b = breakers.get_mut(&7).expect("breaker for the peer");
+        assert_eq!(
+            b.shed_packets(),
+            1,
+            "the data packet must be shed before masking"
+        );
+        assert_eq!(
+            counters
+                .shed_packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the node-wide shed gauge must see it"
+        );
+    }
+
+    /// leviculum#66 — a proof is never shed, in any breaker state. Dropping the
+    /// confirmation the producer is waiting on makes it retransmit, which
+    /// raises the offered load exactly when it is already too high.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_open_circuit_never_sheds_a_proof() {
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+
+        let mut breakers: BTreeMap<usize, breaker::PeerBreaker> = BTreeMap::new();
+        let b = breakers.entry(7).or_default();
+        for _ in 0..breaker::BREAKER_TRIP_THRESHOLD {
+            b.on_send_failed(0);
+        }
+
+        let mut output = TickOutput::empty();
+        for _ in 0..5 {
+            output.actions.push(Action::SendPacket {
+                iface: InterfaceId(7),
+                data: vec![0x03, 0x00, 9, 9],
+            });
+        }
+
+        dispatch_output(
+            output,
+            &mut registry,
+            None,
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
+            &mut breakers,
+            None,
+        );
+
+        assert_eq!(
+            breakers.get(&7).expect("breaker").shed_packets(),
+            0,
+            "proofs outrank the circuit"
+        );
+    }
+
+    /// leviculum#66 — recovery is announced on the event stream, so a producer
+    /// learns it may resume without polling. `PeerCongested` is Control class
+    /// precisely so this notice cannot be dropped under load.
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_the_circuit_emits_a_congestion_event() {
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+        let (mut sink, mut rx) = sink_and_receiver(8, 8);
+
+        let mut breakers: BTreeMap<usize, breaker::PeerBreaker> = BTreeMap::new();
+        let b = breakers.entry(7).or_default();
+        for _ in 0..breaker::BREAKER_TRIP_THRESHOLD {
+            b.on_send_failed(0);
+        }
+        // Let the cooldown lapse so the next send is the half-open probe.
+        assert_eq!(
+            b.state(breaker::BREAKER_COOLDOWN_BASE_MS),
+            breaker::BreakerState::HalfOpen
+        );
+
+        let mut output = TickOutput::empty();
+        output.actions.push(Action::SendPacket {
+            iface: InterfaceId(7),
+            data: vec![0x00, 0x00, 1, 2, 3],
+        });
+
+        dispatch_output(
+            output,
+            &mut registry,
+            Some(&mut sink),
+            &core,
+            &mut BTreeMap::new(),
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            &mut BTreeMap::new(),
+            &completions,
+            &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+            &PlaneCounters::default(),
+            &mut breakers,
+            None,
+        );
+
+        // No interface answered, so nothing was refused: the probe counts as a
+        // success and the circuit closes.
+        let mut saw = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let NodeEvent::PeerCongested {
+                interface_id,
+                congested,
+                ..
+            } = ev
+            {
+                assert_eq!(interface_id, 7);
+                assert!(!congested, "the circuit closed, so this is recovery");
+                saw = true;
+            }
+        }
+        assert!(saw, "recovery must be announced on the event stream");
+        assert_eq!(
+            breakers.get_mut(&7).expect("breaker").state(0),
+            breaker::BreakerState::Closed
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn dispatch_output_resolves_registered_link_waiter_and_still_forwards_event() {
         let (core, _td) = shared_test_core();
@@ -8908,6 +9268,7 @@ mod tests {
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
 
@@ -8957,6 +9318,7 @@ mod tests {
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
 
@@ -9056,6 +9418,7 @@ mod tests {
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
 
@@ -9100,6 +9463,7 @@ mod tests {
             &completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
 
@@ -9338,6 +9702,7 @@ mod tests {
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
         assert!(
@@ -9372,6 +9737,7 @@ mod tests {
             &node.completions,
             &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
             &PlaneCounters::default(),
+            &mut BTreeMap::new(),
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
