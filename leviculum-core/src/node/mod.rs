@@ -100,6 +100,8 @@ mod mvr_offline_iface_no_path;
 #[cfg(test)]
 mod mvr_orphaned_path_cache;
 #[cfg(test)]
+mod mvr_overheard_direct_data;
+#[cfg(test)]
 mod mvr_path_response_hops;
 #[cfg(test)]
 mod mvr_path_response_retries;

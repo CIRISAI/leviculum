@@ -6342,6 +6342,47 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // links (link_ids never appear in path_table), fall through to
             // the delivery code below.
             if packet.flags.dest_type != DestinationType::Link {
+                // Path-forward ONLY when the packet names us as the next hop
+                // (Python Transport.py:1559-1560). A destination one hop from
+                // the sender goes out as HEADER_1 with no transport id at all
+                // (`Transport.outbound`, Transport.py:1134-1166), so no
+                // transport node is addressed and none may repeat it. Holding
+                // a path to that destination is not an invitation: on a shared
+                // medium every transport node in earshot otherwise doubles the
+                // traffic, and the duplicate lands on top of the destination's
+                // own answer (#383, measured as 3 of 30 probes delivered where
+                // the reference delivered 30 of 30).
+                //
+                // The one HEADER_1 packet that IS ours to route is the one
+                // whose destination sits behind a local client: the previous
+                // hop stripped the transport id because clients are made to
+                // look directly reachable, and the reference synthesizes it
+                // back before this branch (Transport.py:1543-1548). Foreign
+                // transport ids never reach here, `process_incoming_inner`
+                // already dropped them, so the condition is written the way
+                // Python writes it rather than folded down.
+                //
+                // Note what this does NOT key on: the hop count of our path.
+                // The last hop of a chain A-B-C, where A cannot hear C,
+                // arrives addressed to us with a ONE hop path onward, and
+                // `Path::needs_relay()` is false for it. That predicate
+                // answers how to rewrite the header when forwarding, not
+                // whether to forward at all; consulting it here would silence
+                // every chain topology on the mesh.
+                let designated_hop = packet.transport_id == Some(*self.identity.hash());
+                if !(designated_hop || (packet.transport_id.is_none() && for_local)) {
+                    crate::tracing::trace!(
+                        "Ignoring overheard data packet for <{}> on {}, no transport header addresses us",
+                        HexShort(&dest_hash),
+                        self.iface_name(interface_index)
+                    );
+                    // Same account as the HEADER_2 copies bound elsewhere: a
+                    // counter, no per-packet event. This is correct
+                    // overhearing on a shared medium, not loss, and it is the
+                    // highest-volume path there is.
+                    self.stats.record_drop(DropReason::OverheardTransportId);
+                    return Ok(());
+                }
                 crate::tracing::trace!(
                     "Data packet for <{}> forwarding via path table",
                     HexShort(&dest_hash)

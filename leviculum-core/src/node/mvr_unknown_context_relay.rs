@@ -138,6 +138,47 @@ fn data_packet(hash: &DestinationHash, context: u8, payload: Vec<u8>) -> Vec<u8>
     raw
 }
 
+/// The same packet as it reaches a transport node legitimately: HEADER_2,
+/// addressed at the relay by name.
+///
+/// A HEADER_1 packet is never path-forwarded by a transport node (#383,
+/// `Transport.py:1559-1560`): a destination one hop from the sender is
+/// broadcast directly and every node in earshot that repeated it would only
+/// bury the answer. So the scaffold for a relay test has to address the relay
+/// — the context byte, not the transport header, is what these tests are
+/// about.
+fn relayed_data_packet(
+    hash: &DestinationHash,
+    relay_id: [u8; crate::constants::TRUNCATED_HASHBYTES],
+    context: u8,
+    payload: Vec<u8>,
+) -> Vec<u8> {
+    let packet = Packet {
+        flags: PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type2,
+            context_flag: false,
+            transport_type: TransportType::Transport,
+            dest_type: DestinationType::Single,
+            packet_type: PacketType::Data,
+        },
+        hops: 0,
+        transport_id: Some(relay_id),
+        destination_hash: hash.into_bytes(),
+        context: PacketContext::from_byte(context),
+        data: PacketData::Owned(payload),
+    };
+    let mut buf = [0u8; crate::constants::MTU];
+    let len = packet.pack(&mut buf).expect("pack");
+    let raw = buf[..len].to_vec();
+    assert_eq!(
+        raw[34], context,
+        "scaffold: the context byte must survive pack() verbatim (HEADER_2 \
+         puts it 16 bytes further in)"
+    );
+    raw
+}
+
 fn outbound(output: &TickOutput) -> Vec<Vec<u8>> {
     output
         .actions
@@ -181,7 +222,8 @@ fn unknown_context_packet_is_relayed() {
         "scaffold: the relay must have learned the path from the announce"
     );
 
-    let raw = data_packet(&dest_hash, UNKNOWN_CTX, std::vec![0xAAu8; 64]);
+    let relay_id = *relay.identity().hash();
+    let raw = relayed_data_packet(&dest_hash, relay_id, UNKNOWN_CTX, std::vec![0xAAu8; 64]);
     let sent = outbound(&relay.handle_packet(InterfaceId(from_far), &raw));
 
     assert_eq!(
@@ -220,8 +262,10 @@ fn known_context_packet_is_relayed_control() {
     let (_endpoint, dest_hash, _pub_view, announce_raw) = make_endpoint();
     let (mut relay, _to_dest, from_far) = relay_with_path(&announce_raw);
 
-    let raw = data_packet(
+    let relay_id = *relay.identity().hash();
+    let raw = relayed_data_packet(
         &dest_hash,
+        relay_id,
         PacketContext::None.to_byte(),
         std::vec![
             0xAAu8;
@@ -304,7 +348,8 @@ fn unknown_context_packet_participates_in_dedup() {
     let (_endpoint, dest_hash, _pub_view, announce_raw) = make_endpoint();
     let (mut relay, _to_dest, from_far) = relay_with_path(&announce_raw);
 
-    let raw = data_packet(&dest_hash, UNKNOWN_CTX, std::vec![0xCCu8; 64]);
+    let relay_id = *relay.identity().hash();
+    let raw = relayed_data_packet(&dest_hash, relay_id, UNKNOWN_CTX, std::vec![0xCCu8; 64]);
 
     let first = outbound(&relay.handle_packet(InterfaceId(from_far), &raw));
     assert_eq!(first.len(), 1, "scaffold: the first copy must be forwarded");
@@ -335,12 +380,18 @@ fn distinct_unknown_context_packet_still_relays_control() {
     let (_endpoint, dest_hash, _pub_view, announce_raw) = make_endpoint();
     let (mut relay, _to_dest, from_far) = relay_with_path(&announce_raw);
 
-    let first = data_packet(&dest_hash, UNKNOWN_CTX, std::vec![0xCCu8; 64]);
+    let relay_id = *relay.identity().hash();
+    let first = relayed_data_packet(&dest_hash, relay_id, UNKNOWN_CTX, std::vec![0xCCu8; 64]);
     let _ = relay.handle_packet(InterfaceId(from_far), &first);
     let _ = relay.handle_packet(InterfaceId(from_far), &first);
 
     // Different context byte AND different payload: a genuinely new packet.
-    let other = data_packet(&dest_hash, OTHER_UNKNOWN_CTX, std::vec![0xDDu8; 64]);
+    let other = relayed_data_packet(
+        &dest_hash,
+        relay_id,
+        OTHER_UNKNOWN_CTX,
+        std::vec![0xDDu8; 64],
+    );
     let sent = outbound(&relay.handle_packet(InterfaceId(from_far), &other));
 
     assert_eq!(
