@@ -13,11 +13,13 @@
 //!
 //! Which of the two links that peer keeps is [`PeerRegistry::link_up`]'s
 //! second job, and the rule is [`judge_duplicate`]: who opened the
-//! connection decides, and silence on the old link decides only when we
-//! opened it. That needs a liveness clock, so the registry carries one
-//! per slot ([`PeerRegistry::note_heard`]), fed by the caller's inbound
-//! path for EVERY frame, keepalives included, exactly as lnsd's
-//! `LinkTable` feeds `last_heard_ms`.
+//! connection decides, and nothing else does. The registry still
+//! carries a liveness clock per slot ([`PeerRegistry::note_heard`]),
+//! fed by the caller's inbound path for EVERY frame, keepalives
+//! included, exactly as lnsd's `LinkTable` feeds `last_heard_ms`: it is
+//! reported with every duplicate decision, and it is what the callers'
+//! expiry sweeps read through [`PeerRegistry::silence_ms`] to tear a
+//! link down that has stopped answering altogether.
 //!
 //! The rules are pure and their failure modes are sequences (a flap, a
 //! displacement, the runtime carrier-off teardown that drops every live
@@ -52,15 +54,18 @@ pub struct PeerRegistry<const N: usize> {
 }
 
 /// A link that has delivered NOTHING — no packet fragment, no
-/// keepalive — for this long is dead, and only then may a dial of ours
-/// displace it (see [`judge_duplicate`]).
+/// keepalive — for this long is dead, and is torn down: it is the
+/// EXPIRY bound, on both stacks (lnsd's `LinkTable::expire`, the
+/// firmware session's `link_silent` arm), and since #382 it decides
+/// nothing else. [`judge_duplicate`] does not read it — a duplicate is
+/// decided by who opened the connection and by nothing else — so no
+/// link is ever displaced for being quiet; a link that stops answering
+/// is removed by the sweep, whether or not anybody dials it.
 ///
 /// Three missed keepalives at the protocol's 15 s cadence
-/// (`leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS`), which is
-/// also lnsd's link-expiry timer: a link that qualifies for
-/// displacement here is exactly a link lnsd's `expire` sweep is already
-/// about to remove, so the two cannot disagree about when a link is
-/// over. lnsd imports this constant rather than keeping its own.
+/// (`leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS`). One
+/// constant, imported by lnsd rather than duplicated, so the two stacks
+/// cannot disagree about when a link is over.
 ///
 /// It replaced a 30 s clock that measured PAYLOAD silence only
 /// (Codeberg #382). The measurement that killed that clock: over 14.1 h
@@ -96,8 +101,9 @@ pub enum Duplicate {
     Displace,
 }
 
-/// Decide a duplicate identity from WHO opened the connection, and only
-/// then from how long the old link has been silent (Codeberg #382).
+/// Decide a duplicate identity from WHO opened the connection, and
+/// from nothing else — no clock is consulted in either direction
+/// (Codeberg #382).
 ///
 /// The two field failures of 2026-09-09 were the two directions of this
 /// question, and each names its own answer:
@@ -110,26 +116,45 @@ pub enum Duplicate {
 ///   the first, and it has already built the replacement — so the cost
 ///   of displacing is one link swapped for an equivalent one, while the
 ///   cost of refusing is a peer that hears nothing until the old link
-///   expires. No clock is consulted: the peer's own action is better
-///   evidence than any timer of ours.
-/// - **Outgoing — refuse, unless the old link is dead.** Our dial is
-///   evidence of nothing. An advertisement carries no identity and the
-///   peer rotates its address, so a dial that lands on an identity we
-///   already hold is most likely our own fallback dial finding the peer
-///   beside us. Displacing there killed the phone's working link every
-///   ~95 s (13bea3e5). The one exception is a link that has delivered
-///   nothing at all for [`LINK_TIMEOUT_MS`] — no payload AND no
-///   keepalive — which is not "quiet" but gone.
+///   expires. The peer's own action is better evidence than any timer
+///   of ours.
+/// - **Outgoing — refuse, always.** Our dial is evidence of nothing.
+///   An advertisement carries no identity and the peer rotates its
+///   address, so a dial that lands on an identity we already hold is
+///   most likely our own fallback dial finding the peer beside us.
+///   Displacing there killed the phone's working link every ~95 s
+///   (13bea3e5), and the surviving "unless the old link looks dead"
+///   clause went on doing it: the 2026-09-09 T114 refused one such dial
+///   at 12:34:20 and displaced the same phone's link forty seconds
+///   later, handing the peer a link Columba lists as `Unknown` at
+///   MTU 20 in place of a fully negotiated one, purely because the old
+///   link had been quiet. How quiet the peer has been is not evidence
+///   about the peer's intent, and our own dial is not evidence at all,
+///   so the two together cannot add up to one.
 ///
-/// Silence on payload alone is deliberately NOT part of this: an idle
-/// phone sends payload minutes apart (the distribution is on
+/// **A dead link is still cleared — by expiry, not here.** The liveness
+/// clock ([`PeerRegistry::note_heard`], fed per inbound FRAME including
+/// the 1-byte keepalive since 381fa5a0) is read by two sweeps that tear
+/// a link down once it has delivered neither payload nor keepalive for
+/// [`LINK_TIMEOUT_MS`]: lnsd's `LinkTable::expire`
+/// (`leviculum-std/src/interfaces/ble/links.rs`), driven from the
+/// interface tick in the same module's `mod.rs`, which disconnects the
+/// device and reports the peer lost; and the firmware's per-session
+/// silence arm `link_silent` (`leviculum-nrf/src/ble/columba.rs`),
+/// which disconnects and reports through the same `peer_link_down`
+/// range loss takes. That arm exists BECAUSE of this rule: until it
+/// landed the board had no expiry sweep at all and the displacement
+/// clause was the only thing that ever cleared such a link — which is
+/// exactly why the clause could not simply be deleted on its own.
+///
+/// Silence on payload alone is deliberately no part of any of this: an
+/// idle phone sends payload minutes apart (the distribution is on
 /// [`LINK_TIMEOUT_MS`]), so the old 30 s payload clock fired on healthy
 /// links. The keepalive is what a live peer emits whether or not it has
 /// anything to say, which is exactly what "alive" needs to mean.
-pub const fn judge_duplicate(origin: Origin, old_silence_ms: u64) -> Duplicate {
+pub const fn judge_duplicate(origin: Origin) -> Duplicate {
     match origin {
         Origin::Incoming => Duplicate::Displace,
-        Origin::Outgoing if old_silence_ms >= LINK_TIMEOUT_MS => Duplicate::Displace,
         Origin::Outgoing => Duplicate::Refuse,
     }
 }
@@ -149,10 +174,11 @@ pub enum LinkUp {
         old_slot: usize,
         old_silence_ms: u64,
     },
-    /// NOT registered: our own dial reached an identity whose link on
-    /// `old_slot` was last heard from `old_silence_ms` ago, inside
-    /// [`LINK_TIMEOUT_MS`], so it is alive and keeps the peer. The
-    /// caller drops THIS connection.
+    /// NOT registered: our own dial reached an identity that already
+    /// holds a link, on `old_slot`, and that link keeps the peer
+    /// whatever `old_silence_ms` says — the age is reported, never
+    /// consulted (see [`judge_duplicate`]). The caller drops THIS
+    /// connection.
     Refused {
         old_slot: usize,
         old_silence_ms: u64,
@@ -195,8 +221,7 @@ impl<const N: usize> PeerRegistry<N> {
     /// advertisement is unknowable before connecting, so that residual
     /// dial is inherent. It is resolved post-connect by
     /// [`link_up`](Self::link_up)'s identity duplicate rule, which
-    /// refuses such a dial unless the old link has stopped answering
-    /// altogether.
+    /// refuses such a dial outright.
     pub fn addr_linked(&self, addr_value: u64) -> bool {
         self.addrs.iter().flatten().any(|a| *a == addr_value)
     }
@@ -211,9 +236,11 @@ impl<const N: usize> PeerRegistry<N> {
     ///
     /// A second connection from an identity we already hold is decided
     /// by [`judge_duplicate`]: an incoming one displaces the old link,
-    /// an outgoing one is [`LinkUp::Refused`] unless the old link has
-    /// been silent — on payload AND keepalives — for
-    /// [`LINK_TIMEOUT_MS`]. Neither edge of a displacement is a peer
+    /// an outgoing one is [`LinkUp::Refused`], and no clock enters
+    /// either decision. The old link's silence is still MEASURED and
+    /// carried out on both variants — it is the number a capture checks
+    /// the decision against, and the number that would show us wrong —
+    /// but it is not consulted. Neither edge of a displacement is a peer
     /// transition — the peer was never gone — which is why `Displaced`
     /// carries no `first` flag.
     ///
@@ -230,8 +257,11 @@ impl<const N: usize> PeerRegistry<N> {
             .position(|id| *id == Some(peer))
             .filter(|old| *old != slot);
         if let Some(old_slot) = old {
+            // Measured for the log line on BOTH branches, consulted on
+            // neither: it is the evidence a capture would convict the
+            // rule with, not an input to it (#382).
             let old_silence_ms = now_ms.saturating_sub(self.last_heard_ms[old_slot]);
-            if judge_duplicate(origin, old_silence_ms) == Duplicate::Refuse {
+            if judge_duplicate(origin) == Duplicate::Refuse {
                 return LinkUp::Refused {
                     old_slot,
                     old_silence_ms,
@@ -251,7 +281,9 @@ impl<const N: usize> PeerRegistry<N> {
     }
 
     /// A slot's peer delivered a frame at `now_ms` — the liveness clock
-    /// [`link_up`](Self::link_up)'s duplicate rule reads.
+    /// the expiry reads through [`silence_ms`](Self::silence_ms), and
+    /// the one [`link_up`](Self::link_up) reports (never consults) with
+    /// each duplicate decision.
     ///
     /// EVERY inbound frame, keepalives included (Codeberg #382). A
     /// keepalive is the one thing a peer with nothing to say still
@@ -266,6 +298,23 @@ impl<const N: usize> PeerRegistry<N> {
     /// reassembling still proves the link delivers.
     pub fn note_heard(&mut self, slot: usize, now_ms: u64) {
         self.last_heard_ms[slot] = now_ms;
+    }
+
+    /// How long the slot's link has delivered nothing at all — no
+    /// payload, no keepalive — at `now_ms`. `None` while the slot holds
+    /// no identity: a connection that has not handshaked yet has no
+    /// liveness clock to read, and the slot's previous tenant's clock
+    /// is not it.
+    ///
+    /// The expiry sweep's input. lnsd's `LinkTable::expire` makes the
+    /// same subtraction over its own rows; the firmware has no sweep
+    /// task, so its per-session silence arm asks the registry directly
+    /// (`leviculum_nrf::ble::columba::link_silent`). A link at or past
+    /// [`LINK_TIMEOUT_MS`] here is torn down — that, not a displacement,
+    /// is what clears a dead link since #382.
+    pub fn silence_ms(&self, slot: usize, now_ms: u64) -> Option<u64> {
+        self.slots[slot]?;
+        Some(now_ms.saturating_sub(self.last_heard_ms[slot]))
     }
 
     /// Clear a slot. `Some(identity)` iff that took the identity's LAST
@@ -374,10 +423,10 @@ mod tests {
     const A: [u8; 16] = [0xaa; 16];
     const B: [u8; 16] = [0xbb; 16];
 
-    /// The number itself, pinned. It is the link timeout the interfaces
-    /// already run on — three missed keepalives — not a second constant
-    /// beside it, so a link that may be displaced is exactly a link
-    /// lnsd's expiry sweep is about to remove.
+    /// The number itself, pinned. It is the link timeout both
+    /// interfaces expire on — three missed keepalives — not a second
+    /// constant beside it, and since #382 it is an expiry bound only:
+    /// [`judge_duplicate`] cannot reach it.
     #[test]
     fn the_dead_link_bound_is_the_link_timeout_itself() {
         assert_eq!(LINK_TIMEOUT_MS, 45_000);
@@ -400,9 +449,9 @@ mod tests {
 
     /// The 2026-09-09 evening field T114, as a unit: the phone's own
     /// link is up and answering, our fallback dial reaches the same
-    /// identity from its rotated address, and the LIVE link keeps the
-    /// peer. Our dial is evidence of nothing, so it loses however long
-    /// the phone has had nothing to SAY.
+    /// identity from its rotated address, and the EXISTING link keeps
+    /// the peer. Our dial is evidence of nothing, so it loses however
+    /// long the phone has had nothing to say.
     #[test]
     fn our_own_dial_is_refused_while_the_old_link_still_answers() {
         let mut reg = PeerRegistry::<4>::new();
@@ -420,6 +469,14 @@ mod tests {
                 old_silence_ms: LINK_TIMEOUT_MS - 1
             },
             "ten minutes without payload is a quiet phone, not a dead link"
+        );
+        assert_eq!(
+            reg.link_up(1, A, Origin::Outgoing, t + 1),
+            LinkUp::Refused {
+                old_slot: 0,
+                old_silence_ms: 1
+            },
+            "and a link that answered a millisecond ago, the same"
         );
         assert_eq!(reg.slot_for(&A), Some(0), "the old link still holds it");
         assert!(
@@ -454,75 +511,94 @@ mod tests {
         assert_eq!(reg.slot_for(&A), Some(1), "the new link holds the peer");
     }
 
-    /// A dial of ours still wins against a link that has stopped
-    /// answering altogether — no payload AND no keepalive. On the board
-    /// this is the only mechanism that clears such a link, because the
-    /// firmware has no expiry sweep and a SoftDevice supervision
-    /// timeout may be minutes away.
+    /// The other half of the field pair, and the one 381fa5a0 left
+    /// standing: the old link is STALE — nothing at all for many times
+    /// the link timeout — and our dial is refused all the same.
+    ///
+    /// Staleness is not a reason, for two independent reasons. First,
+    /// it is not evidence about the peer: the age is measured on OUR
+    /// receive path, so a link that has heard nothing is equally a peer
+    /// that has left, a peer whose keepalives we are dropping, and a
+    /// peer that is fine — and the 2026-09-09 T114 shows which one it
+    /// usually was, having refused this dial at 12:34:20 and displaced
+    /// the same living phone forty seconds later. Second, it is not
+    /// NEEDED: a link this stale is one the expiry
+    /// ([`PeerRegistry::silence_ms`] at [`LINK_TIMEOUT_MS`], swept by
+    /// lnsd's `LinkTable::expire` and by the firmware session's
+    /// `link_silent` arm) is already tearing down on its own schedule,
+    /// dial or no dial. Displacing here can only ever be the same
+    /// removal done earlier on worse evidence — and done by REPLACING
+    /// the peer's link with one it never advertised, which is the part
+    /// that cost MTU and identity in the field.
     #[test]
-    fn our_own_dial_displaces_a_link_that_stopped_answering() {
+    fn our_own_dial_is_refused_even_when_the_old_link_stopped_answering() {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 1_000);
+        let now = 1_000 + 4 * LINK_TIMEOUT_MS;
         assert_eq!(
-            reg.link_up(1, A, Origin::Outgoing, 1_000 + 4 * LINK_TIMEOUT_MS),
-            LinkUp::Displaced {
+            reg.link_up(1, A, Origin::Outgoing, now),
+            LinkUp::Refused {
                 old_slot: 0,
                 old_silence_ms: 4 * LINK_TIMEOUT_MS
-            }
+            },
+            "no age refutes the asymmetry: our dial is evidence of nothing"
         );
-        assert_eq!(reg.peer_count(), 1, "one peer across the hand-over");
-        assert_eq!(reg.link_down(0), None, "the old link's death is churn");
-        assert_eq!(reg.slot_for(&A), Some(1), "the new link holds the peer");
+        assert_eq!(reg.slot_for(&A), Some(0), "the old link still holds it");
+        // And it does not survive: the expiry the caller runs sees the
+        // very same age and is what takes the link away.
+        assert_eq!(reg.silence_ms(0, now), Some(4 * LINK_TIMEOUT_MS));
+        assert!(reg.silence_ms(0, now).is_some_and(|s| s >= LINK_TIMEOUT_MS));
     }
 
-    /// The boundary sits exactly at the constant, and only for our own
-    /// dials: one millisecond under it the old link still answers, at
-    /// it the link is over. Same comparison lnsd's `admit` makes
-    /// through the same function, so a phone that walks between the two
-    /// stacks meets one rule.
+    /// No clock is an input any more, in either direction, and the
+    /// function's signature is where that is enforced: there is nothing
+    /// left to pass it. Same rule lnsd's `admit` calls, so a phone that
+    /// walks between the two stacks meets one rule.
     #[test]
-    fn the_dead_link_boundary_is_the_link_timeout_and_only_binds_our_dials() {
-        assert_eq!(
-            judge_duplicate(Origin::Outgoing, LINK_TIMEOUT_MS - 1),
-            Duplicate::Refuse
-        );
-        assert_eq!(
-            judge_duplicate(Origin::Outgoing, LINK_TIMEOUT_MS),
-            Duplicate::Displace
-        );
-        assert_eq!(judge_duplicate(Origin::Incoming, 0), Duplicate::Displace);
-        assert_eq!(
-            judge_duplicate(Origin::Incoming, LINK_TIMEOUT_MS - 1),
-            Duplicate::Displace
-        );
+    fn the_duplicate_rule_reads_origin_and_nothing_else() {
+        assert_eq!(judge_duplicate(Origin::Outgoing), Duplicate::Refuse);
+        assert_eq!(judge_duplicate(Origin::Incoming), Duplicate::Displace);
 
-        let mut fresh = PeerRegistry::<4>::new();
-        fresh.link_up(0, A, Origin::Incoming, 0);
-        assert!(matches!(
-            fresh.link_up(1, A, Origin::Outgoing, LINK_TIMEOUT_MS - 1),
-            LinkUp::Refused { .. }
-        ));
-
-        let mut gone = PeerRegistry::<4>::new();
-        gone.link_up(0, A, Origin::Incoming, 0);
-        assert!(matches!(
-            gone.link_up(1, A, Origin::Outgoing, LINK_TIMEOUT_MS),
-            LinkUp::Displaced { .. }
-        ));
+        // Across the whole range of ages a registry can present, the
+        // outcome never moves.
+        for age in [0, 1, LINK_TIMEOUT_MS - 1, LINK_TIMEOUT_MS, 3_600_000] {
+            let mut reg = PeerRegistry::<4>::new();
+            reg.link_up(0, A, Origin::Incoming, 0);
+            assert!(
+                matches!(
+                    reg.link_up(1, A, Origin::Outgoing, age),
+                    LinkUp::Refused { .. }
+                ),
+                "outgoing duplicate at age {age} must be refused"
+            );
+            let mut reg = PeerRegistry::<4>::new();
+            reg.link_up(0, A, Origin::Incoming, 0);
+            assert!(
+                matches!(
+                    reg.link_up(1, A, Origin::Incoming, age),
+                    LinkUp::Displaced { .. }
+                ),
+                "incoming duplicate at age {age} must displace"
+            );
+        }
     }
 
     /// The keepalive is the whole point of #382: a peer with nothing to
-    /// report still sends one every 15 s, and each one slides the
-    /// boundary, so a link the caller keeps feeding can never be
-    /// displaced by a dial of ours however old it is.
+    /// report still sends one every 15 s, so a link the caller keeps
+    /// feeding never comes near the expiry bound — and a dial of ours
+    /// could not have taken it even if it had.
     #[test]
-    fn a_keepalive_alone_keeps_a_link_out_of_reach_of_our_dial() {
+    fn a_keepalive_alone_keeps_a_link_alive_and_out_of_reach_of_our_dial() {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 0);
         let mut t = 0;
         for _ in 0..100 {
             t += KEEPALIVE_INTERVAL_MS;
             reg.note_heard(0, t);
+            assert!(
+                reg.silence_ms(0, t).is_some_and(|s| s < LINK_TIMEOUT_MS),
+                "the expiry never comes for a link that keeps answering"
+            );
         }
         assert!(
             matches!(
@@ -531,10 +607,40 @@ mod tests {
             ),
             "25 minutes of keepalives and no payload is a healthy link"
         );
-        assert!(matches!(
-            reg.link_up(1, A, Origin::Outgoing, t + LINK_TIMEOUT_MS),
-            LinkUp::Displaced { .. }
-        ));
+        assert!(
+            matches!(
+                reg.link_up(1, A, Origin::Outgoing, t + 10 * LINK_TIMEOUT_MS),
+                LinkUp::Refused { .. }
+            ),
+            "and past the expiry bound the answer is still ours to not give"
+        );
+    }
+
+    /// The expiry's own input, which is the mechanism item 2 of #382
+    /// hands the dead-link job to: no identity, no clock; a registered
+    /// link starts at zero and ages from what it last delivered.
+    #[test]
+    fn silence_is_reported_only_for_a_slot_that_holds_a_link() {
+        let mut reg = PeerRegistry::<4>::new();
+        assert_eq!(
+            reg.silence_ms(0, 10_000),
+            None,
+            "an un-handshaked connection has no liveness clock to read"
+        );
+        reg.link_up(0, A, Origin::Incoming, 10_000);
+        assert_eq!(reg.silence_ms(0, 10_000), Some(0));
+        assert_eq!(
+            reg.silence_ms(0, 10_000 + LINK_TIMEOUT_MS),
+            Some(LINK_TIMEOUT_MS)
+        );
+        reg.note_heard(0, 10_000 + LINK_TIMEOUT_MS);
+        assert_eq!(reg.silence_ms(0, 10_000 + LINK_TIMEOUT_MS), Some(0));
+        reg.link_down(0);
+        assert_eq!(
+            reg.silence_ms(0, 99_000),
+            None,
+            "and a freed slot's stale clock is nobody's evidence"
+        );
     }
 
     /// A same-slot re-registration must not name its own slot: the

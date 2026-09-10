@@ -183,20 +183,39 @@ Two consequences of dialling against the sort are deliberate:
     (`BLE_LINK_DUP … action=displace origin=incoming`). A peer that
     opens a second connection has, by its own one-link-per-identity
     rule, given up on the first, and it has already built the
-    replacement. No clock is consulted: the peer's own action is better
-    evidence than any timer of ours;
+    replacement. The peer's own action is better evidence than any
+    timer of ours;
   - an **outgoing** duplicate — our own dial — is REFUSED
-    (`action=refuse origin=outgoing`) unless the old link has delivered
-    nothing at all, payload AND keepalives, for `LINK_TIMEOUT_MS`
-    (45 s, three missed keepalives). Our dial is evidence of nothing:
-    an advertisement carries no identity and the peer rotates its
-    address, so a dial that lands on an identity we already hold is
+    (`action=refuse origin=outgoing`), always. Our dial is evidence of
+    nothing: an advertisement carries no identity and the peer rotates
+    its address, so a dial that lands on an identity we already hold is
     most likely our own fallback dial finding the peer beside us. The
     refused address goes into the dead-end table for its TTL so the
     scanner does not immediately re-offer it.
 
-  Every line carries `origin=` and `old_silence_ms=`, so a capture
-  shows the evidence the decision rested on.
+  **No clock is consulted in either direction.** How long the old link
+  has been quiet is measured on OUR receive path, so it is not evidence
+  about the peer's intent, and the field showed what that costs: a T114
+  on 973372dd refused such a dial at 12:34:20 and displaced the same
+  phone's link at 12:35:00, forty seconds later, purely because the old
+  link had carried no payload — handing the peer a link Columba lists as
+  `Unknown` at MTU 20, from an address it never advertised, in place of
+  the fully negotiated `BLEPeerInterface[…]` one. A link that has really
+  stopped answering is removed by the **expiry**, not by a displacement:
+  `last_heard_ms` counts every inbound frame including the peer's
+  keepalive, and a link that delivers neither payload nor keepalive for
+  `LINK_TIMEOUT_MS` (45 s, three missed keepalives) is torn down by
+  lnsd's `LinkTable::expire` and by the firmware session's `link_silent`
+  arm — whether or not anybody dials the identity, which is the point.
+  The firmware arm is new with this rule (`BLE_LINK_EXPIRE role=<r>
+  slot=<n> conn=<h> silence_ms=<n>`): before it, the displacement clause
+  was the board's only mechanism for clearing such a link, so the clause
+  could not be deleted on its own.
+
+  Every duplicate line still carries `origin=` and `old_silence_ms=`,
+  on both branches. `origin=` is the decision; `old_silence_ms=` is
+  reported precisely because it is NOT consulted — it is the
+  measurement that would show the rule wrong.
 
   The two 2026-09-09 field T114s are the two directions, and each one
   broke the rule that ignored direction. In the morning the phone
@@ -216,15 +235,18 @@ Two consequences of dialling against the sort are deliberate:
   anything. Keepalives are evidence, and the same log shows them
   arriving: only 2 of those 502 links were ever closed by the silence
   timer, so the other 500 were kept alive by something the peer sent,
-  which is the keepalive. Since the liveness bound is now the link
-  timeout itself, a link the duplicate rule calls dead is exactly a
-  link lnsd's expiry sweep is about to remove — one clock, not two.
-  The decisions are pinned by
+  which is the keepalive. `LINK_TIMEOUT_MS` survives as that expiry
+  bound alone — one clock on both stacks, and none in the duplicate
+  rule. The decisions are pinned by
   `our_own_dial_is_refused_while_the_old_link_still_answers`,
+  `our_own_dial_is_refused_even_when_the_old_link_stopped_answering`,
   `an_incoming_duplicate_displaces_the_old_link_however_fresh_it_is`,
-  `a_keepalive_alone_keeps_a_link_out_of_reach_of_our_dial` and
-  `the_dead_link_boundary_is_the_link_timeout_and_only_binds_our_dials`
-  in the registry, and by `our_dial_is_refused_where_the_peers_own_dial_displaces`
+  `the_duplicate_rule_reads_origin_and_nothing_else`,
+  `a_keepalive_alone_keeps_a_link_alive_and_out_of_reach_of_our_dial`
+  and `silence_is_reported_only_for_a_slot_that_holds_a_link` in the
+  registry, and by `our_dial_is_refused_where_the_peers_own_dial_displaces`,
+  `our_dial_is_refused_even_when_the_old_link_stopped_answering` and
+  `the_peers_own_dial_still_displaces_however_fresh_the_old_link_is`
   in `leviculum-std/src/interfaces/ble/links.rs`.
 
 The simulation that motivated the fallback is a host test:

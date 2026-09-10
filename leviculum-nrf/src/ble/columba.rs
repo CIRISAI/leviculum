@@ -31,8 +31,8 @@ use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
     ConnectDecision, LinkUp, Origin, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED,
-    CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_LEN,
+    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -494,7 +494,7 @@ async fn gatt_events(
                         Origin::Incoming,
                     ) {
                         // Refused (#376): this identity's existing link
-                        // is alive and keeps the peer. Nothing was
+                        // keeps the peer. Nothing was
                         // registered, so the teardown below reports
                         // nothing; dropping the connection here ends
                         // `gatt_server::run` and takes this session
@@ -627,16 +627,16 @@ async fn gatt_events(
     // ble=off`): the link is disconnected exactly as if the peer had
     // walked out of range — the teardown below reports the loss through
     // the same `peer_link_down`, so the core's cull is identical. The
-    // fourth is a displacement (#376): a newer connection of this
-    // link's identity took over, the displacer already logged and moved
-    // the queue, ending the old link is this arm's whole job — and the
-    // shared teardown below is churn, not a loss, because the new link
-    // is already registered.
+    // fourth is [`link_over`]: a displacement (#376), where the
+    // displacer already logged and moved the queue and the teardown
+    // below is churn because the new link is already registered — or
+    // the expiry (#382), where nothing was heard for LINK_TIMEOUT_MS
+    // and the teardown IS the peer loss.
     match select4(
         inbound,
         outbound,
         super::carrier_off(CarrierWaiter::Session(slot_index)),
-        displaced(slot_index, conn_handle),
+        link_over(slot_index, conn_handle),
     )
     .await
     {
@@ -648,7 +648,8 @@ async fn gatt_events(
             // Already-disconnected is fine; the teardown is the same.
             let _ = conn.disconnect();
         }
-        Either4::Fourth(()) => {
+        Either4::Fourth(end) => {
+            log_link_end("peripheral", slot_index, conn_handle, end);
             let _ = conn.disconnect();
         }
         Either4::First(_) | Either4::Second(_) => {}
@@ -688,11 +689,13 @@ async fn gatt_events(
 /// (13bea3e5). So an INCOMING duplicate displaces the old link — the
 /// peer's own one-link rule makes its second connection better evidence
 /// than any timer of ours — and an OUTGOING one is refused
-/// (`BLE_LINK_DUP … action=refuse`) unless the old link has delivered
-/// nothing at all, keepalives included, for
-/// [`leviculum_ble_tx::LINK_TIMEOUT_MS`]. Every line carries `origin=`
-/// and the old link's `old_silence_ms`, which is the whole decision in
-/// two fields.
+/// (`BLE_LINK_DUP … action=refuse`), always: no clock enters either
+/// branch. A dead link is cleared by the expiry instead
+/// ([`link_silent`] at [`leviculum_ble_tx::LINK_TIMEOUT_MS`], the sweep
+/// lnsd runs over its rows), which removes it whether or not anything
+/// dials it. Every line still carries `origin=` and the old link's
+/// `old_silence_ms`: the decision, and the measurement that would show
+/// the decision wrong.
 ///
 /// The first/last-link rules live host-tested in
 /// [`leviculum_ble_tx::registry`]; this is the one firmware instance,
@@ -723,9 +726,9 @@ static DISPLACE_WAKES: [Signal<CriticalSectionRawMutex, u16>; MAX_LINKS] =
     [const { Signal::new() }; MAX_LINKS];
 
 /// Resolve when this session's link has been displaced by a newer
-/// connection of the same identity (#376) — the fourth arm of both
-/// session selects. A latched wake for a different handle is a stale
-/// leftover from a previous tenancy: consumed and ignored.
+/// connection of the same identity (#376). A latched wake for a
+/// different handle is a stale leftover from a previous tenancy:
+/// consumed and ignored.
 async fn displaced(slot_index: usize, conn_handle: u16) {
     let wake = &DISPLACE_WAKES[slot_index];
     loop {
@@ -735,17 +738,93 @@ async fn displaced(slot_index: usize, conn_handle: u16) {
     }
 }
 
+/// Resolve when this session's link has delivered NOTHING — no packet
+/// fragment, no keepalive — for [`LINK_TIMEOUT_MS`], returning that
+/// silence: the board's link expiry (#382).
+///
+/// The board has no sweep task, so the expiry is an arm of the session
+/// it ends, reading the same liveness clock [`note_heard`] feeds and
+/// making the same comparison lnsd's `LinkTable::expire` makes over its
+/// rows. It has to exist for its own sake: until #382 the only thing on
+/// the board that ever removed a link which had stopped answering was
+/// the duplicate rule's displacement clause — a link was cleared only
+/// if we happened to dial its identity again — and that clause is gone,
+/// because our own dial was never evidence about the peer. A SoftDevice
+/// supervision timeout does not cover this: it ends a link whose
+/// CONTROLLER has stopped acknowledging (4 s in the central role,
+/// `ConnectConfig::default`; the peer's choice in the peripheral one),
+/// while what expires here is a link whose radio is fine and whose
+/// Columba peer has gone away.
+///
+/// It sleeps exactly to the earliest instant the link could be over,
+/// so a healthy link costs one wake per [`LINK_TIMEOUT_MS`] and a
+/// keepalive-fed one never fires at all. A slot whose identity is not
+/// registered yet — a peripheral connection between the connect event
+/// and the handshake — has no clock to read and is re-checked one
+/// keepalive interval later; the previous tenant's clock is never
+/// mistaken for this link's.
+async fn link_silent(slot_index: usize) -> u64 {
+    loop {
+        let now_ms = Instant::now().as_millis();
+        match LIVE_PEERS.lock(|peers| peers.borrow().silence_ms(slot_index, now_ms)) {
+            Some(silence_ms) if silence_ms >= LINK_TIMEOUT_MS => return silence_ms,
+            Some(silence_ms) => Timer::after_millis(LINK_TIMEOUT_MS - silence_ms).await,
+            None => Timer::after_millis(KEEPALIVE_INTERVAL_MS).await,
+        }
+    }
+}
+
+/// Why the fourth arm of both session selects ended the link: the peer
+/// built a replacement, or the link stopped delivering anything at all.
+/// Both end in a disconnect; they differ in what the capture is owed.
+enum LinkEnd {
+    /// A newer connection of this identity took the peer over (#376);
+    /// the displacer has already logged the decision.
+    Displaced,
+    /// Nothing was heard on this link for [`LINK_TIMEOUT_MS`] — the
+    /// silence, in ms, so a capture can tell an expiry from a range
+    /// loss and see how far past the bound it ran.
+    Expired(u64),
+}
+
+/// One line for an expiry, none for a displacement — that one is
+/// already on the wire as `BLE_LINK_DUP … action=displace`, logged by
+/// the displacer with the evidence it decided on. `silence_ms=` is the
+/// expiry's evidence, in the same spelling
+/// `BLE_LINK_DUP … old_silence_ms=` uses, so one grep reads both.
+fn log_link_end(role: &str, slot_index: usize, conn_handle: u16, end: LinkEnd) {
+    if let LinkEnd::Expired(silence_ms) = end {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_LINK_EXPIRE role={} slot={} conn={} silence_ms={}",
+                role, slot_index, conn_handle, silence_ms
+            ),
+        );
+    }
+}
+
+/// The fourth arm of both session selects: the two ways a link ends
+/// without either side's carrier going away.
+async fn link_over(slot_index: usize, conn_handle: u16) -> LinkEnd {
+    match select(displaced(slot_index, conn_handle), link_silent(slot_index)).await {
+        Either::First(()) => LinkEnd::Displaced,
+        Either::Second(silence_ms) => LinkEnd::Expired(silence_ms),
+    }
+}
+
 /// Register a slot's peer and, when this is the identity's FIRST link,
 /// report the arrival to the main loop so the transport learns about
 /// the peer behind the new link (Codeberg #365) — the mirror
 /// of [`peer_link_down`]'s last-link rule.
 ///
 /// A second link from an identity we already hold is decided by
-/// `origin` and the old link's silence (#382, see [`LIVE_PEERS`]):
-/// `false` means REFUSED — a dial of ours reached a link that still
-/// answers, it keeps the peer, and the caller must drop the connection
-/// it just made, address included ([`note_dead_end`]). `true` means the
-/// link is registered, either plainly or after displacing the old one.
+/// `origin` alone (#382, see [`LIVE_PEERS`]): `false` means REFUSED —
+/// a dial of ours reached an identity that already holds a link, that
+/// link keeps the peer however quiet it has been, and the caller must
+/// drop the connection it just made, address included
+/// ([`note_dead_end`]). `true` means the link is registered, either
+/// plainly or after displacing the old one.
 /// Either way the decision is logged as one `BLE_LINK_DUP` line
 /// carrying `origin=` and the old link's `old_silence_ms`, so a capture
 /// shows which branch fired and on what evidence.
@@ -1344,9 +1423,10 @@ async fn central_link(
         return;
     }
     // An identity we already hold is decided by [`peer_link_up`] below,
-    // once the slot exists: the live link keeps the peer and this dial
-    // is refused, unless the old link has stopped answering (#382):
-    // this dial of ours is evidence of nothing.
+    // once the slot exists: the existing link keeps the peer and this
+    // dial is refused, whatever the age of that link (#382). This dial
+    // of ours is evidence of nothing; a link that has really stopped
+    // answering is the expiry's business ([`link_silent`]).
 
     // From here the link is real: register it exactly as the peripheral
     // side does — a drain-table claim (whose index is the link identity
@@ -1384,8 +1464,8 @@ async fn central_link(
         peer_id,
         Origin::Outgoing,
     ) {
-        // Refused (#376): this identity's existing link is alive and
-        // keeps the peer. Nothing was registered, so the teardown is
+        // Refused (#376): this identity's existing link keeps the
+        // peer. Nothing was registered, so the teardown is
         // silent — release what this dial did claim and back the
         // address off, or the scanner re-offers it within seconds.
         note_dead_end(peer_value, "dup_refused");
@@ -1627,14 +1707,13 @@ async fn run_central_session(
     // Third arm: the runtime carrier switch, as on the peripheral side —
     // disconnect, and let [`central_link`]'s teardown report the loss
     // through the same `peer_link_down` that range loss takes. Fourth:
-    // a displacement (#376) — a newer connection of this identity took
-    // over, already logged by the displacer; the teardown behind it is
-    // churn because the new link is already registered.
+    // [`link_over`], the displacement (#376) and the expiry (#382), the
+    // same two on this side of the connection as on the other.
     match select4(
         inbound,
         outbound,
         super::carrier_off(CarrierWaiter::Session(slot_index)),
-        displaced(slot_index, conn_handle),
+        link_over(slot_index, conn_handle),
     )
     .await
     {
@@ -1645,7 +1724,8 @@ async fn run_central_session(
             );
             let _ = conn.disconnect();
         }
-        Either4::Fourth(()) => {
+        Either4::Fourth(end) => {
+            log_link_end("central", slot_index, conn_handle, end);
             let _ = conn.disconnect();
         }
         Either4::First(_) | Either4::Second(_) => {}
