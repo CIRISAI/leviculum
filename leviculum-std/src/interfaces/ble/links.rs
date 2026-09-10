@@ -45,6 +45,14 @@ pub(crate) type IdentityHash = [u8; 16];
 /// pins its `LOCAL_CAPS` the same way).
 pub(crate) const LOCAL_CAPS: u8 = 0x00;
 
+// The daemon advertises no free-slot count (#375 item 3): its capacity
+// is ONE budget shared by both roles (`max_links`, configurable), not
+// the boards' three dedicated incoming slots, so a count in the boards'
+// units would be a different quantity wearing the same bits. With the
+// validity bit clear a peer reads "no slot information" and ranks lnsd
+// exactly as it did before item 3 — which is the correct answer here,
+// not a placeholder. It READS the count from peers, below.
+
 /// Default cap on simultaneous BLE links, both roles counted together.
 /// A policy bound, not a resource one: BlueZ has no SoftDevice-style hard
 /// connection slots, but every link costs airtime and the protocol's
@@ -678,6 +686,11 @@ pub(crate) struct ScanDecision {
     /// is meaningless).
     pub(crate) caps_record: bool,
     pub(crate) caps: u8,
+    /// Free incoming slots the peer advertised (#375 item 3), `None`
+    /// when it said nothing about them. A preference for the collection
+    /// window and nothing else: no decision about whether a link is
+    /// permitted may depend on it, here or on a board.
+    pub(crate) free_slots: Option<u8>,
 }
 
 /// Decide who connects, from the properties BlueZ hands a scanner.
@@ -736,6 +749,7 @@ pub(crate) fn decide_from_scan(
         decision,
         caps_record: parsed.caps.is_some(),
         caps: parsed.caps.unwrap_or(0),
+        free_slots: parsed.free_slots(),
     })
 }
 
@@ -807,11 +821,20 @@ impl ScanScheduler {
 
     /// An eligible sighting — initiate verdict, every driver filter
     /// passed. The first one opens the window; all of them collect.
-    pub(crate) fn offer(&mut self, addr: Addr, decision: ConnectDecision, now_ms: u64) {
+    /// `free_slots` is what the peer advertised (#375 item 3), which
+    /// orders the window's choice: emptiest peer first, equal counts
+    /// falling back to the address.
+    pub(crate) fn offer(
+        &mut self,
+        addr: Addr,
+        decision: ConnectDecision,
+        free_slots: Option<u8>,
+        now_ms: u64,
+    ) {
         let (_, table) = self
             .window
             .get_or_insert_with(|| (now_ms + SCAN_WINDOW_COLLECT_MS, CandidateTable::new()));
-        table.offer(addr_value_display(&addr), decision, addr);
+        table.offer(addr_value_display(&addr), decision, free_slots, addr);
     }
 
     /// Close the window once its bound has passed: the dial target —
@@ -1360,7 +1383,7 @@ mod tests {
         let mut s = ScanScheduler::new(0);
         assert_eq!(s.poll(10_000), None, "no window before a candidate");
 
-        s.offer(ADDR_2, ConnectDecision::InitiateLowerAddress, 1_000);
+        s.offer(ADDR_2, ConnectDecision::InitiateLowerAddress, None, 1_000);
         assert_eq!(
             s.poll(1_000 + SCAN_WINDOW_COLLECT_MS - 1),
             None,
@@ -1368,10 +1391,11 @@ mod tests {
         );
         // A lower-addressed strict candidate and an even lower fallback
         // candidate arrive during the window.
-        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, 2_000);
+        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, None, 2_000);
         s.offer(
             [0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
             ConnectDecision::InitiateFallback,
+            None,
             2_500,
         );
         let (addr, decision, seen) = s
@@ -1381,6 +1405,59 @@ mod tests {
         assert_eq!(decision, ConnectDecision::InitiateLowerAddress);
         assert_eq!(seen, 3);
         assert_eq!(s.poll(60_000), None, "the window is consumed");
+    }
+
+    /// #375 item 3 on lnsd's side: the count a board advertises is
+    /// parsed out of the BlueZ manufacturer payload and orders the
+    /// window, ahead of the address.
+    #[test]
+    fn the_window_prefers_the_peer_with_the_most_free_slots() {
+        use leviculum_ble_tx::{with_free_slots, PERIPH_SLOTS};
+
+        // BlueZ hands the payload with the company ID stripped, so it
+        // is version byte then capability byte — the shape the boards
+        // put on the air.
+        let record = |free: u8| vec![0x03, with_free_slots(0x00, free)];
+        // Below both peers, so the sort permits dialling either one and
+        // the window's ORDER is what the assertions are about.
+        let local = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let nearly_full =
+            decide_from_scan(&local, &ADDR_1, true, Some(&record(1)), ScanMode::Strict)
+                .expect("a Columba peer");
+        let empty = decide_from_scan(
+            &local,
+            &ADDR_2,
+            true,
+            Some(&record(PERIPH_SLOTS)),
+            ScanMode::Strict,
+        )
+        .expect("a Columba peer");
+        assert_eq!(nearly_full.free_slots, Some(1), "decoded off the record");
+        assert_eq!(empty.free_slots, Some(PERIPH_SLOTS));
+        assert!(ADDR_1 < ADDR_2, "the fuller peer is also the lower address");
+
+        let mut s = ScanScheduler::new(0);
+        s.offer(ADDR_1, nearly_full.decision, nearly_full.free_slots, 1_000);
+        s.offer(ADDR_2, empty.decision, empty.free_slots, 1_100);
+        let (addr, _, seen) = s
+            .poll(1_000 + SCAN_WINDOW_COLLECT_MS)
+            .expect("window closes at its bound");
+        assert_eq!(addr, ADDR_2, "the emptiest peer wins over the lowest");
+        assert_eq!(seen, 2);
+
+        // A board that advertises no count is not read as "zero free":
+        // it ties with the emptiest and the address decides, as before.
+        let silent = decide_from_scan(&local, &ADDR_1, true, Some(&[0x03, 0x00]), ScanMode::Strict)
+            .expect("a Columba peer");
+        assert_eq!(silent.free_slots, None);
+        let mut s = ScanScheduler::new(0);
+        s.offer(ADDR_1, silent.decision, silent.free_slots, 1_000);
+        s.offer(ADDR_2, empty.decision, empty.free_slots, 1_100);
+        assert_eq!(
+            s.poll(1_000 + SCAN_WINDOW_COLLECT_MS).map(|(a, _, _)| a),
+            Some(ADDR_1),
+            "silence keeps its pre-item-3 standing"
+        );
     }
 
     /// The dial-time clock rule, shared with the firmware's central
@@ -1395,6 +1472,7 @@ mod tests {
         s.offer(
             ADDR_1,
             ConnectDecision::InitiateFallback,
+            None,
             SCAN_FALLBACK_AFTER_MS,
         );
         let closed = SCAN_FALLBACK_AFTER_MS + SCAN_WINDOW_COLLECT_MS;
@@ -1406,7 +1484,12 @@ mod tests {
         );
 
         // The strict counterpart restarts the phase.
-        s.offer(ADDR_1, ConnectDecision::InitiateLowerAddress, closed + 2);
+        s.offer(
+            ADDR_1,
+            ConnectDecision::InitiateLowerAddress,
+            None,
+            closed + 2,
+        );
         let closed2 = closed + 2 + SCAN_WINDOW_COLLECT_MS;
         assert!(s.poll(closed2).is_some());
         assert_eq!(

@@ -26,21 +26,38 @@
 //!   verdicts, via the same [`CandidateTable`] the firmware and lnsd
 //!   use — the policy is shared by construction.
 //!
-//! Measured on this seed stream (disconnected/linkless orders per 1000):
+//! Item 3 added a third question — **which of several free peers?** —
+//! and with it [`TargetChoice::MostFreeSlots`]: every board advertises
+//! how many incoming slots it still has, and the window prefers the
+//! emptiest one, equal counts falling back to the address as before.
 //!
-//! | spec  | choice   | n=10        | n=20        |
-//! |-------|----------|-------------|-------------|
-//! | eager | first    | 2 / 0       | 48 / 0      |
-//! | eager | lowest   | 0 / 0       | 0 / 0       |
-//! | quiet | first    | 126 / 0     | 328 / 0     |
-//! | quiet | lowest   | 28 / 0      | 78 / 0      |
-//! | strict (control) | 210 / 84    | 400 / 80    |
+//! Measured on this seed stream (disconnected/linkless orders per 1000,
+//! and saturated boards — boards that ended with all three incoming
+//! slots spent — summed over the same 1000 orders):
+//!
+//! | spec  | choice   | n=10           | n=20            |
+//! |-------|----------|----------------|-----------------|
+//! | eager | first    | 2 / 0 / 1514   | 48 / 0 / 3632   |
+//! | eager | lowest   | 0 / 0 / 976    | 0 / 0 / 2538    |
+//! | eager | mostfree | 0 / 0 / 498    | 0 / 0 / 914     |
+//! | quiet | first    | 126 / 0 / 1462 | 328 / 0 / 3496  |
+//! | quiet | lowest   | 28 / 0 / 976   | 78 / 0 / 2488   |
+//! | strict (control) | 210 / 84 / 1450 | 400 / 80 / 3486 |
 //!
 //! What the assertions below hold on to:
 //!
 //! - **The lowest-eligible window closes the saturated-cycle lock**:
 //!   eager/lowest is 0/1000 at both sizes, and under quiet it cuts the
 //!   splits by ~4× against first-seen.
+//! - **The slot preference does not regress convergence and halves
+//!   saturation**: eager/mostfree stays at 0/1000 disconnected and
+//!   0/1000 linkless at both sizes, and the boards that end with every
+//!   incoming slot spent fall from 976 to 498 at n=10 and from 2538 to
+//!   914 at n=20. Saturation is the quantity item 3 is about: the sim
+//!   reads a peer's capacity directly instead of dialling and being
+//!   refused, so the refusals themselves are invisible here, but every
+//!   one of them happens at a board the searchers piled onto — and the
+//!   pile-ups are what halved.
 //! - **The quiet spec has a real, bounded cost in this harness**:
 //!   28/1000 and 78/1000 disconnected orders against eager/lowest's
 //!   0/0 — well beyond noise. The mechanism: quiet suppresses exactly
@@ -70,8 +87,10 @@ use leviculum_ble_tx::{
     should_initiate, CandidateTable, ConnectDecision, ScanMode, WINDOW_CANDIDATES,
 };
 
-/// The firmware's incoming-slot count (`PERIPH_LINKS`, #372).
-const PERIPH_SLOTS: usize = 3;
+/// The firmware's incoming-slot count (`PERIPH_LINKS`, #372), taken
+/// from the shared constant the advertised record is bounded by rather
+/// than restated — since #375 item 3 the two are one fact.
+const PERIPH_SLOTS: usize = leviculum_ble_tx::PERIPH_SLOTS as usize;
 
 /// The fallback bound, in scan rounds. The firmware bounds the strict
 /// search in time (`SCAN_FALLBACK_AFTER_MS` = 30 s over 5 s retry
@@ -108,8 +127,14 @@ enum TargetChoice {
     FirstSeen,
     /// One scan window collected, then the lowest-addressed eligible
     /// candidate, strict verdicts before fallback verdicts — the real
-    /// [`CandidateTable`] policy.
+    /// [`CandidateTable`] policy as item 2 shipped it, with no peer
+    /// advertising a slot count.
     LowestEligible,
+    /// The shipped policy since #375 item 3: the same window and the
+    /// same table, with every board advertising how many incoming slots
+    /// it still has, so the fullest peers sort behind the emptiest ones
+    /// and only equal counts fall back to the address.
+    MostFreeSlots,
 }
 
 /// xorshift64* — deterministic, seedable, no dependency.
@@ -234,11 +259,18 @@ fn run_sim(n: usize, seed: u64, spec: FallbackSpec, choice: TargetChoice) -> Vec
                     }
                     // One round IS one collected window here: every
                     // eligible advertiser was heard, the table chooses.
-                    TargetChoice::LowestEligible => {
+                    // `LowestEligible` replays item 2 by having nobody
+                    // advertise a count; `MostFreeSlots` is the shipped
+                    // policy, every board stating its free slots.
+                    TargetChoice::LowestEligible | TargetChoice::MostFreeSlots => {
                         let mut window: CandidateTable<usize, WINDOW_CANDIDATES> =
                             CandidateTable::new();
                         for &(p, decision) in &candidates {
-                            window.offer(boards[p].addr, decision, p);
+                            let free = (choice == TargetChoice::MostFreeSlots).then(|| {
+                                u8::try_from(PERIPH_SLOTS - boards[p].incoming.len())
+                                    .expect("slots fit a byte")
+                            });
+                            window.offer(boards[p].addr, decision, free, p);
                         }
                         window
                             .into_best()
@@ -299,12 +331,20 @@ struct Outcome {
     disconnected: usize,
     /// Orders where some board ended with no BLE link at all.
     linkless: usize,
+    /// Boards, summed over all orders, that ended with every incoming
+    /// slot spent. A saturated board is where the real refusals happen
+    /// (#375 item 3: several searchers race into the same last slot),
+    /// so this is the load-spread the slot preference is FOR — the
+    /// connectivity columns cannot show it, because the sim reads a
+    /// peer's capacity directly instead of dialling and being refused.
+    saturated: usize,
 }
 
 fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice) -> Outcome {
     let mut outcome = Outcome {
         disconnected: 0,
         linkless: 0,
+        saturated: 0,
     };
     for seed in 0..ORDERS {
         let boards = run_sim(n, 0xB1E5_0000 + seed, spec, choice);
@@ -317,6 +357,10 @@ fn measure(n: usize, spec: FallbackSpec, choice: TargetChoice) -> Outcome {
         {
             outcome.linkless += 1;
         }
+        outcome.saturated += boards
+            .iter()
+            .filter(|b| b.incoming.len() >= PERIPH_SLOTS)
+            .count();
     }
     outcome
 }
@@ -353,15 +397,27 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
             TargetChoice::LowestEligible,
             "quiet/lowest",
         ),
+        (
+            FallbackSpec::Eager,
+            TargetChoice::MostFreeSlots,
+            "eager/mostfree",
+        ),
     ];
     let mut rates = std::collections::HashMap::new();
-    println!("spec/choice     n=10 disc/linkless   n=20 disc/linkless   (per {ORDERS})");
+    println!(
+        "spec/choice     n=10 disc/linkless/sat   n=20 disc/linkless/sat   (per {ORDERS} orders)"
+    );
     for (spec, choice, label) in configs {
         let at10 = measure(10, spec, choice);
         let at20 = measure(20, spec, choice);
         println!(
-            "{label:<15} {:>4} / {:<10} {:>4} / {:<10}",
-            at10.disconnected, at10.linkless, at20.disconnected, at20.linkless
+            "{label:<15} {:>4} / {:<4} / {:<8} {:>4} / {:<4} / {:<8}",
+            at10.disconnected,
+            at10.linkless,
+            at10.saturated,
+            at20.disconnected,
+            at20.linkless,
+            at20.saturated
         );
         rates.insert(label, (at10, at20));
     }
@@ -372,13 +428,46 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
         (0, 0),
         "eager/lowest: the lowest-eligible window must close the saturation lock"
     );
+    let (at10, at20) = &rates["eager/mostfree"];
+    assert_eq!(
+        (at10.disconnected, at20.disconnected),
+        (0, 0),
+        "eager/mostfree: the slot preference regressed convergence"
+    );
+    assert_eq!(
+        (at10.saturated, at20.saturated),
+        (498, 914),
+        "eager/mostfree saturation moved: the documented spread is stale, re-measure"
+    );
+    let spread = (
+        rates["eager/lowest"].0.saturated,
+        rates["eager/lowest"].1.saturated,
+    );
+    // A direction, not a re-statement of the pinned pair: at least a
+    // 40 % cut at both sizes (measured 49 % and 64 %), so the claim
+    // survives a re-seeded instrument while a lost preference does not.
+    assert!(
+        at10.saturated * 10 <= spread.0 * 6 && at20.saturated * 10 <= spread.1 * 6,
+        "the slot preference must cut saturated boards by at least 40 % \
+         (mostfree {} / {}, lowest {} / {})",
+        at10.saturated,
+        at20.saturated,
+        spread.0,
+        spread.1
+    );
     let (at10, at20) = &rates["quiet/lowest"];
     assert_eq!(
         (at10.disconnected, at20.disconnected),
         (28, 78),
         "quiet/lowest moved: the quiet spec's documented cost is stale, re-measure"
     );
-    for label in ["eager/first", "eager/lowest", "quiet/first", "quiet/lowest"] {
+    for label in [
+        "eager/first",
+        "eager/lowest",
+        "eager/mostfree",
+        "quiet/first",
+        "quiet/lowest",
+    ] {
         let (at10, at20) = &rates[label];
         assert_eq!(
             (at10.linkless, at20.linkless),
@@ -394,40 +483,44 @@ fn the_two_spec_table_the_window_closes_the_lock_and_quiet_costs_a_pinned_rest()
     );
 }
 
-/// The shipped configuration (eager fallback + lowest-eligible window,
-/// #375 part 3) at both sizes: no board is EVER left without a BLE
-/// link, and no arrival order ends disconnected — every order forms one
-/// connected component. Eager is safe to ship because the doomed dial
-/// that forced part 2's quiet spec is closed at its root: the §4.5
-/// exclusion keeps a live connection's address out of the scanner and
-/// the dead-end table backs off a fallback target that will not
-/// connect. The quiet rows in the module table stay as the record of
-/// what the suspension cost (28 and 78 all-linked splits per 1000).
+/// The shipped configuration at both sizes: no board is EVER left
+/// without a BLE link, and no arrival order ends disconnected — every
+/// order forms one connected component. Eager is safe to ship because
+/// the doomed dial that forced part 2's quiet spec is closed at its
+/// root: the §4.5 exclusion keeps a live connection's address out of
+/// the scanner and the dead-end table backs off a fallback target that
+/// will not connect. The quiet rows in the module table stay as the
+/// record of what the suspension cost (28 and 78 all-linked splits per
+/// 1000).
+///
+/// BOTH windows are replayed: `LowestEligible` is what item 2 shipped,
+/// `MostFreeSlots` what item 3 ships. Item 3 refines the ORDER inside a
+/// class, so every arrival order must still converge — this is the
+/// no-regression assertion the batch is held to, and it runs over the
+/// same 2000 replayed orders that established the item 2 result rather
+/// than a new instrument.
 #[test]
-fn the_shipped_config_eager_lowest_connects_every_order_and_strands_nobody() {
-    for n in [10usize, 20] {
-        let mut split = 0usize;
-        for seed in 0..ORDERS {
-            let boards = run_sim(
-                n,
-                0xB1E5_0000 + seed,
-                FallbackSpec::Eager,
-                TargetChoice::LowestEligible,
+fn the_shipped_config_connects_every_order_and_strands_nobody() {
+    for choice in [TargetChoice::LowestEligible, TargetChoice::MostFreeSlots] {
+        for n in [10usize, 20] {
+            let mut split = 0usize;
+            for seed in 0..ORDERS {
+                let boards = run_sim(n, 0xB1E5_0000 + seed, FallbackSpec::Eager, choice);
+                for (i, b) in boards.iter().enumerate() {
+                    assert!(
+                        b.outgoing.is_some() || !b.incoming.is_empty(),
+                        "board {i} ended with no BLE link at n={n}, seed {seed}, {choice:?}"
+                    );
+                }
+                if !is_connected(&boards) {
+                    split += 1;
+                }
+            }
+            assert_eq!(
+                split, 0,
+                "eager/{choice:?} left {split} of {ORDERS} orders disconnected at n={n}"
             );
-            for (i, b) in boards.iter().enumerate() {
-                assert!(
-                    b.outgoing.is_some() || !b.incoming.is_empty(),
-                    "board {i} ended with no BLE link at n={n}, seed {seed}"
-                );
-            }
-            if !is_connected(&boards) {
-                split += 1;
-            }
         }
-        assert_eq!(
-            split, 0,
-            "eager/lowest left {split} of {ORDERS} orders disconnected at n={n}"
-        );
     }
 }
 

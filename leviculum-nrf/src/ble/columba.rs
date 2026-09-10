@@ -19,6 +19,7 @@
 //! the [`super`] module docs for the seam and what still crosses it.
 
 use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
@@ -30,10 +31,11 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, judge_supervision_timeout, manufacturer_data, parse_peer_advertisement,
-    should_initiate, CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
-    ConnParamsReqLine, ConnectDecision, LinkPhase, LinkRole, LinkUp, Origin, PeerRegistry,
-    ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
-    MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    should_initiate, with_free_slots, CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine,
+    ConnParamsReq, ConnParamsReqLine, ConnectDecision, LinkPhase, LinkRole, LinkUp, Origin,
+    PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
+    LINK_TIMEOUT_MS, MANUFACTURER_DATA_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -137,17 +139,62 @@ const RETICULUM_SVC_UUID_LE: [u8; 16] = [
     0xe3, 0x28, 0xda, 0xc5, 0x42, 0x8f, 0x7f, 0x91, 0x94, 0x4a, 0x2d, 0x44, 0x00, 0x5b, 0x14, 0x37,
 ];
 
-/// The capability bits this node advertises AND feeds into its own side
-/// of the connection decision — one constant so the record on the air
-/// and the [`should_initiate`] input cannot disagree.
+/// The FIXED capability bits this node advertises AND feeds into its
+/// own side of the connection decision — one constant so the record on
+/// the air and the [`should_initiate`] input cannot disagree.
 ///
 /// Zero since phase B: [`super`]'s `gap_role_count` now grants one
 /// central role, we can initiate, so `PERIPHERAL_ONLY` (bit 0) is
 /// cleared in the same commit — the two are one fact stated twice, and
 /// they must not drift.
+///
+/// The advertised byte is this plus the live free-slot count
+/// ([`capability_record`], #375 item 3). The decision input stays the
+/// bare constant on purpose: [`should_initiate`] reads bit 0 and
+/// nothing else, and a rule about who MAY dial must not acquire a
+/// second, time-varying input.
 const LOCAL_CAPS: u8 = 0;
 
-/// The v0.3.0 capability record this node advertises.
+/// Peripheral link slots currently spent on a session.
+///
+/// Claimed by [`PeripheralSlot`] while a peripheral task serves a link,
+/// so [`free_peripheral_slots`] can put the remainder on the air (#375
+/// item 3). It is NOT a gate: how many links may exist is decided by
+/// the number of peripheral tasks and the SoftDevice's `conn_cfg`, as
+/// before, and nothing consults this counter to accept or refuse.
+static PERIPH_BUSY: AtomicU8 = AtomicU8::new(0);
+
+/// The record's slot count and the task pool are the same fact.
+const _: () = assert!(super::PERIPH_LINKS == PERIPH_SLOTS as usize);
+
+/// A peripheral slot held for the life of one session: claimed while
+/// the accepting task still holds [`ADV_LOCK`], released when the
+/// session ends. Claiming BEFORE the lock is dropped is what keeps the
+/// advertised count from ever over-stating — the next task builds its
+/// advertisement only after acquiring that lock, so it can never
+/// publish a slot this one has already taken.
+struct PeripheralSlot;
+
+impl PeripheralSlot {
+    fn claim() -> Self {
+        PERIPH_BUSY.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for PeripheralSlot {
+    fn drop(&mut self) {
+        PERIPH_BUSY.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Incoming link slots this board still has free, for the advertised
+/// capability record.
+fn free_peripheral_slots() -> u8 {
+    PERIPH_SLOTS.saturating_sub(PERIPH_BUSY.load(Ordering::Relaxed))
+}
+
+/// The v0.3.0 capability record this node advertises right now.
 ///
 /// The record STAYS in the advertisement with the flag cleared, rather
 /// than being dropped: a peer that sees no manufacturer data at all
@@ -156,7 +203,39 @@ const LOCAL_CAPS: u8 = 0;
 /// (v0.3.0 §3.2; asserted host-side by [`leviculum_ble_tx::adv`]'s
 /// `clearing_the_flag_leaves_the_record_and_its_size_alone`). See
 /// [`leviculum_ble_tx::adv`] for the layout and the byte budget.
-const CAPABILITY_AD: [u8; MANUFACTURER_DATA_LEN] = manufacturer_data(LOCAL_CAPS);
+///
+/// Since #375 item 3 the same byte carries [`free_peripheral_slots`] in
+/// bits 1-3, so a searching peer can prefer the emptiest board instead
+/// of picking blind and being refused. The record does not grow — the
+/// bits were spare — and the count is a hint only: what it is read for
+/// is the ORDER of eligible targets (`leviculum_ble_tx::window`),
+/// never for whether a link may be accepted.
+fn capability_record() -> [u8; MANUFACTURER_DATA_LEN] {
+    manufacturer_data(with_free_slots(LOCAL_CAPS, free_peripheral_slots()))
+}
+
+/// The advertising PDU as it stands at this instant: the two fixed AD
+/// structures and the live capability record.
+///
+/// Built per advertising start rather than once at boot, which is what
+/// makes the slot count on the air current without a single extra
+/// advertising restart: a peripheral task starts advertising exactly
+/// when the count it would publish has changed — it took over from a
+/// task that just accepted a link, or its own session just ended — and
+/// the SoftDevice is handed the fresh bytes in the same
+/// `sd_ble_gap_adv_set_configure` it was already about to perform. No
+/// running advertisement is ever stopped to rewrite it, so no
+/// advertising interval is dropped and nothing needs rate-limiting.
+fn advertisement_now() -> LegacyAdvertisementPayload {
+    LegacyAdvertisementBuilder::new()
+        .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
+        .services_128(ServiceList::Complete, &[RETICULUM_SVC_UUID_LE])
+        .raw(
+            AdvertisementDataType::MANUFACTURER_SPECIFIC_DATA,
+            &capability_record(),
+        )
+        .build()
+}
 
 // The advertisement builder panics on overflow, on a board, at boot. The
 // budget is arithmetic over constants, so it is decided here instead.
@@ -200,18 +279,13 @@ pub fn spawn(
     // read it before exchanging frames over rx/tx.
     let _ = server.inner.reticulum_service.identity_set(&identity_hash);
 
-    static ADV_DATA: StaticCell<LegacyAdvertisementPayload> = StaticCell::new();
     static SCAN_DATA: StaticCell<LegacyAdvertisementPayload> = StaticCell::new();
-    let adv: &'static LegacyAdvertisementPayload = ADV_DATA.init(
-        LegacyAdvertisementBuilder::new()
-            .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
-            .services_128(ServiceList::Complete, &[RETICULUM_SVC_UUID_LE])
-            .raw(
-                AdvertisementDataType::MANUFACTURER_SPECIFIC_DATA,
-                &CAPABILITY_AD,
-            )
-            .build(),
-    );
+    // The advertisement itself is built per advertising start, by
+    // [`advertisement_now`], because its capability record carries a
+    // live slot count. This one is the boot witness for the line below:
+    // it measures the same builder on the same AD structures, so the
+    // byte budget is still reported from bytes and not from arithmetic.
+    let adv = advertisement_now();
     let name = crate::name::boot_gap_name();
     let scan: &'static LegacyAdvertisementPayload = SCAN_DATA.init(
         LegacyAdvertisementBuilder::new()
@@ -227,17 +301,19 @@ pub fn spawn(
     crate::log::log_fmt_critical(
         "[BLE ] ",
         format_args!(
-            "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={} periph_links={}",
+            "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={} periph_links={} \
+             free_slots={}",
             adv.as_ref().len(),
             scan.as_ref().len(),
             LEGACY_AD_CAPACITY,
-            u8::from(CAPABILITY_AD[3] & CAP_PERIPHERAL_ONLY != 0),
+            u8::from(capability_record()[3] & CAP_PERIPHERAL_ONLY != 0),
             super::PERIPH_LINKS,
+            free_peripheral_slots(),
         ),
     );
 
     for index in 0..super::PERIPH_LINKS {
-        spawner.must_spawn(peripheral_task(sd, server, adv, scan, index));
+        spawner.must_spawn(peripheral_task(sd, server, scan, index));
     }
     // Phase B (#255): the central half — scan, decide, initiate. Both
     // halves of the protocol spawn here, behind the one entry point the
@@ -265,7 +341,6 @@ static ADV_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 async fn peripheral_task(
     sd: &'static Softdevice,
     server: &'static NotifyAwareServer,
-    adv: &'static LegacyAdvertisementPayload,
     scan: &'static LegacyAdvertisementPayload,
     index: usize,
 ) {
@@ -289,6 +364,10 @@ async fn peripheral_task(
                 format_args!("BLE_CARRIER_GATE role=peripheral adv={index} state=on"),
             );
         }
+        // Held for the whole session below, claimed under ADV_LOCK: see
+        // [`PeripheralSlot`] for why the claim may not wait until after
+        // the lock is released.
+        let mut held_slot: Option<PeripheralSlot> = None;
         let conn = {
             let _adv_turn = ADV_LOCK.lock().await;
             // The carrier can flip off while this task waits for the
@@ -298,6 +377,12 @@ async fn peripheral_task(
                 continue;
             }
             let config = peripheral::Config::default();
+            // Built here, not at boot: the capability record carries
+            // this board's free-slot count, which is current exactly
+            // now (#375 item 3). The payload lives across the await
+            // below, which is what the SoftDevice's pointer into it
+            // requires.
+            let adv = advertisement_now();
             let advertisement = peripheral::ConnectableAdvertisement::ScannableUndirected {
                 adv_data: adv.as_ref(),
                 scan_data: scan.as_ref(),
@@ -308,7 +393,10 @@ async fn peripheral_task(
             )
             .await
             {
-                Either::First(Ok(conn)) => Some(conn),
+                Either::First(Ok(conn)) => {
+                    held_slot = Some(PeripheralSlot::claim());
+                    Some(conn)
+                }
                 Either::First(Err(_)) => None,
                 // Carrier switched off while advertising: dropping the
                 // advertise future is what stops the advertisement (the
@@ -355,6 +443,11 @@ async fn peripheral_task(
                 Timer::after_millis(1000).await;
             }
         }
+        // The slot is free again. The next advertisement this board
+        // starts states the higher count; a task already advertising
+        // keeps the older, LOWER one until it resolves, which
+        // understates our capacity for a while and never overstates it.
+        drop(held_slot);
     }
 }
 
@@ -1356,6 +1449,23 @@ fn note_dead_end(addr: u64, reason: &str) {
     );
 }
 
+/// A peer's advertised free-slot count as the `BLE_SCAN_DECISION` line
+/// prints it: the number, or `unknown` when the peer said nothing.
+///
+/// Its own token rather than a sentinel number, because every number
+/// in that position is also a real answer and a capture must not have
+/// to know which one means "no answer".
+struct FreeSlots(Option<u8>);
+
+impl core::fmt::Display for FreeSlots {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(free) => write!(f, "{free}"),
+            None => f.write_str("unknown"),
+        }
+    }
+}
+
 /// Whether the scanner must skip this address (see [`note_dead_end`]).
 fn dead_end(addr: u64) -> bool {
     DEAD_ENDS.lock(|table| table.borrow().contains(addr))
@@ -1423,6 +1533,7 @@ async fn find_peer_to_initiate(
             peer_value,
             scan_mode_now(),
         );
+        let free_slots = parsed.free_slots();
         if last_logged.get() != Some((peer_value, decision)) {
             last_logged.set(Some((peer_value, decision)));
             crate::log::log_fmt(
@@ -1432,10 +1543,20 @@ async fn find_peer_to_initiate(
                     // caps_record=0 is a v2.2 peer with no readable
                     // v0.3.0 record — distinct from an explicit
                     // dual-role record advertising caps=0x00.
-                    "BLE_SCAN_DECISION addr={:012x} caps_record={} caps={:#04x} rule={} initiate={}",
+                    //
+                    // free_slots is the DECODED count (#375 item 3), so
+                    // a capture shows what the choice below saw and not
+                    // just the raw byte. `unknown` is its own token, not
+                    // a zero: a peer that said nothing about its slots
+                    // is ranked as if it had them all free, and reading
+                    // that as "0 free" in a capture would invert the
+                    // conclusion drawn from it.
+                    "BLE_SCAN_DECISION addr={:012x} caps_record={} caps={:#04x} free_slots={} \
+                     rule={} initiate={}",
                     peer_value,
                     u8::from(parsed.caps.is_some()),
                     parsed.caps.unwrap_or(0),
+                    FreeSlots(free_slots),
                     decision.as_str(),
                     u8::from(decision.initiate()),
                 ),
@@ -1447,7 +1568,9 @@ async fn find_peer_to_initiate(
         if !decision.initiate() || dead_end(peer_value) || addr_already_linked(peer_value) {
             return false;
         }
-        window.borrow_mut().offer(peer_value, decision, peer)
+        window
+            .borrow_mut()
+            .offer(peer_value, decision, free_slots, peer)
     };
     // Phase 1: scan until the first eligible candidate opens the
     // window. A strict pass that never finds one never ends — that is

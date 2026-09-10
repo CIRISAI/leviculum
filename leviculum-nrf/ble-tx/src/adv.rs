@@ -27,6 +27,41 @@
 //! bit is *cleared* in phase B, when the firmware actually gains the
 //! central role and can hold up its end of the sort (#255).
 //!
+//! # Free peripheral slots (#375 item 3)
+//!
+//! A searching board used to pick its target blind: it could not tell a
+//! peer with three free incoming slots from one with its last one free,
+//! so several searchers raced into the same board and all but one were
+//! refused. Capability bits 1 to 3 close that: bits 1-2 carry the
+//! advertiser's free-slot count (0 to [`PERIPH_SLOTS`]) and bit 3 says
+//! the count is there at all. [`with_free_slots`] writes them,
+//! [`free_slots`] reads them back, and [`crate::window`] is the only
+//! consumer — the count refines which eligible peer is dialled first
+//! and nothing else. It is a HINT: it can be stale by the time a
+//! dialler acts on it, so the duplicate and refusal paths never look at
+//! it and a board that advertised a free slot and has none by the time
+//! the connection lands refuses exactly as before.
+//!
+//! Taking the bits needs no version bump, because neither reader can
+//! misread them:
+//!
+//! - **Columba does not read the record at all.** `BleScanner.performScan`
+//!   filters on the service UUID and never touches manufacturer-specific
+//!   data (`rns-host/.../ble/client/BleScanner.kt:257`); nothing in the
+//!   Columba tree calls `getManufacturerSpecificData`.
+//! - **Our own older firmware masks.** [`crate::peer::should_initiate`]
+//!   tests `caps & CAP_PERIPHERAL_ONLY != 0`, never `caps == 0`, so a
+//!   board predating this change ignores the new bits instead of
+//!   misreading them.
+//!
+//! Bit 3 is what keeps an OLD record honest in the other direction: a
+//! v0.3.0 board advertising `caps = 0x01` has bits 1-2 clear, and
+//! without a validity bit that would read as "zero free slots" — the
+//! worst possible answer, since it would sort a perfectly free board
+//! last. With bit 3 clear it reads as "no slot information" and keeps
+//! today's behaviour. Bit budget: bit 0 the flag, bits 1-2 the count,
+//! bit 3 its validity, **four bits (4-7) still free**.
+//!
 //! # The byte budget
 //!
 //! A legacy advertising PDU carries 31 bytes of AD structures, and every
@@ -80,6 +115,58 @@ pub const PROTOCOL_VERSION: u8 = 0x03;
 /// address-sort rule does not apply to it — connect regardless of how
 /// the addresses compare.
 pub const CAP_PERIPHERAL_ONLY: u8 = 1 << 0;
+
+/// Incoming (peripheral) link slots a board offers: the firmware's
+/// `ble::PERIPH_LINKS` (#372), restated here because the record's
+/// encoding is bounded by it and the record lives in this crate. The
+/// firmware asserts the two agree at compile time.
+pub const PERIPH_SLOTS: u8 = 3;
+
+/// Capability bits 1-2: how many incoming link slots the advertiser
+/// still has free, 0 to [`PERIPH_SLOTS`] — two bits, exactly the range
+/// [`PERIPH_SLOTS`] allows.
+pub const CAP_FREE_SLOTS_MASK: u8 = 0b0000_0110;
+
+/// Where [`CAP_FREE_SLOTS_MASK`] sits.
+const CAP_FREE_SLOTS_SHIFT: u32 = 1;
+
+/// Capability bit 3: the advertiser filled in [`CAP_FREE_SLOTS_MASK`].
+///
+/// Without it a pre-#375 record (`caps = 0x01`, bits 1-2 clear) would
+/// read as "zero free slots" instead of "no slot information" — see the
+/// module docs.
+pub const CAP_FREE_SLOTS_VALID: u8 = 1 << 3;
+
+/// Put a free-slot count into a capability byte, leaving every other
+/// bit — [`CAP_PERIPHERAL_ONLY`] above all — as it was.
+///
+/// A count above [`PERIPH_SLOTS`] saturates rather than wrapping into
+/// the neighbouring bits: the caller's arithmetic is not this record's
+/// business, and a truncated count that silently corrupted bit 3 would
+/// be a wire bug.
+#[must_use]
+pub const fn with_free_slots(caps: u8, free: u8) -> u8 {
+    let free = if free > PERIPH_SLOTS {
+        PERIPH_SLOTS
+    } else {
+        free
+    };
+    (caps & !(CAP_FREE_SLOTS_MASK | CAP_FREE_SLOTS_VALID))
+        | CAP_FREE_SLOTS_VALID
+        | (free << CAP_FREE_SLOTS_SHIFT)
+}
+
+/// Read a free-slot count back out. `None` is "this advertiser said
+/// nothing about its slots" — an older board, another implementation,
+/// or one that chose not to — and is never "zero slots".
+#[must_use]
+pub const fn free_slots(caps: u8) -> Option<u8> {
+    if caps & CAP_FREE_SLOTS_VALID == 0 {
+        None
+    } else {
+        Some((caps & CAP_FREE_SLOTS_MASK) >> CAP_FREE_SLOTS_SHIFT)
+    }
+}
 
 /// Length of the manufacturer-data payload: company ID (2, little
 /// endian) + version (1) + capability bits (1).
@@ -154,6 +241,57 @@ mod tests {
         let scan_response = ad_structure_len(DEVICE_NAME_LEN);
         assert_eq!(scan_response, 13);
         assert!(scan_response <= LEGACY_AD_CAPACITY);
+    }
+
+    #[test]
+    fn every_free_slot_count_round_trips_with_the_flag_either_way() {
+        // The two live in the same byte and must not touch each other:
+        // the count survives the flag, the flag survives the count.
+        for free in 0..=PERIPH_SLOTS {
+            for base in [0u8, CAP_PERIPHERAL_ONLY] {
+                let caps = with_free_slots(base, free);
+                assert_eq!(free_slots(caps), Some(free), "count round-trip");
+                assert_eq!(
+                    caps & CAP_PERIPHERAL_ONLY,
+                    base,
+                    "the free-slot bits disturbed bit 0"
+                );
+                // And the payload carries it unchanged, as one byte.
+                assert_eq!(manufacturer_data(caps)[3], caps);
+            }
+        }
+    }
+
+    #[test]
+    fn a_record_without_the_validity_bit_says_nothing_about_slots() {
+        // What a board predating #375 item 3 advertises: bit 0 only.
+        assert_eq!(free_slots(CAP_PERIPHERAL_ONLY), None, "not zero slots");
+        assert_eq!(free_slots(0), None, "nor is a cleared record");
+        // Even with the count bits set: without bit 3 they are not ours
+        // to read (a future implementation may mean something else by
+        // them), so the answer is still "no information".
+        assert_eq!(free_slots(CAP_FREE_SLOTS_MASK), None);
+        // Zero free slots is a statement, and a distinct one.
+        assert_eq!(free_slots(with_free_slots(0, 0)), Some(0));
+    }
+
+    #[test]
+    fn an_over_large_count_saturates_instead_of_corrupting_its_neighbours() {
+        let caps = with_free_slots(CAP_PERIPHERAL_ONLY, 7);
+        assert_eq!(free_slots(caps), Some(PERIPH_SLOTS));
+        assert_eq!(caps & CAP_PERIPHERAL_ONLY, CAP_PERIPHERAL_ONLY);
+        assert_eq!(caps & 0xF0, 0, "bits 4-7 are still free");
+    }
+
+    #[test]
+    fn the_record_uses_four_of_the_eight_capability_bits() {
+        // The budget the module docs state, held here so it cannot rot:
+        // bit 0 the flag, 1-2 the count, 3 its validity, 4-7 unclaimed.
+        let claimed = CAP_PERIPHERAL_ONLY | CAP_FREE_SLOTS_MASK | CAP_FREE_SLOTS_VALID;
+        assert_eq!(claimed, 0b0000_1111);
+        assert_eq!(claimed.count_zeros(), 4, "bits left for the next batch");
+        // Two bits is exactly the range PERIPH_SLOTS needs.
+        assert_eq!(CAP_FREE_SLOTS_MASK >> CAP_FREE_SLOTS_SHIFT, PERIPH_SLOTS);
     }
 
     #[test]

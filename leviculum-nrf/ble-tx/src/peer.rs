@@ -56,6 +56,17 @@
 //! rotated-address reconnect. The rule stays pure: whether the bound
 //! has elapsed is measured by the caller and handed in as the mode,
 //! never measured here.
+//!
+//! # The free-slot hint (#375 item 3)
+//!
+//! The rule here answers "may I dial this peer at all?"; it says
+//! nothing about *which* permitted peer to prefer. That second question
+//! is [`crate::window`]'s, and since #375 item 3 its answer reads the
+//! free-slot count out of the same capability byte — see
+//! [`PeerAdvertisement::free_slots`] and [`crate::adv`] for the
+//! encoding. The two stay separate on purpose: the count is a hint that
+//! can be stale, and no decision about whether a link is *permitted*
+//! may ever depend on it.
 
 use crate::adv::{COMPANY_ID, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION};
 use crate::CAP_PERIPHERAL_ONLY;
@@ -80,6 +91,18 @@ pub struct PeerAdvertisement {
     /// a v2.2 peer that never spoke v0.3.0 — and per v0.3.0 §3.2 it
     /// means "assume full capability, fall back to the address sort".
     pub caps: Option<u8>,
+}
+
+impl PeerAdvertisement {
+    /// How many incoming link slots this peer says it still has free
+    /// (#375 item 3), or `None` when it said nothing about them — an
+    /// older board, a phone, another implementation. The distinction
+    /// matters: [`crate::window`] must not sort a silent peer as if it
+    /// had answered "zero".
+    #[must_use]
+    pub fn free_slots(&self) -> Option<u8> {
+        self.caps.and_then(crate::adv::free_slots)
+    }
 }
 
 /// Walk one advertising PDU's AD structures.
@@ -316,6 +339,47 @@ mod tests {
         let parsed = parse_peer_advertisement(pdu, &SERVICE_UUID_LE);
         assert!(parsed.offers_service);
         assert_eq!(parsed.caps, None);
+    }
+
+    #[test]
+    fn the_free_slot_count_rides_the_same_record_as_the_flag() {
+        use crate::adv::{with_free_slots, PERIPH_SLOTS};
+        for free in 0..=PERIPH_SLOTS {
+            let pdu = own_advertisement(with_free_slots(0, free));
+            let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+            assert!(parsed.offers_service);
+            assert_eq!(parsed.free_slots(), Some(free));
+            // The record did not grow: the count went into spare bits.
+            assert_eq!(pdu.len(), ADV_BYTES_USED);
+            // And a peripheral-only peer can still say both things.
+            let both = own_advertisement(with_free_slots(CAP_PERIPHERAL_ONLY, free));
+            let parsed = parse_peer_advertisement(&both, &SERVICE_UUID_LE);
+            assert_eq!(parsed.free_slots(), Some(free));
+            assert_eq!(
+                should_initiate(0, 1, parsed.caps, 2, ScanMode::Strict),
+                ConnectDecision::InitiatePeripheralOnlyPeer,
+                "the count must not disturb the capability override"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pre_item_3_record_reads_as_no_slot_information() {
+        // Exactly what a board that predates #375 item 3 advertises:
+        // the four-byte record with bit 0 set and nothing else.
+        let pdu = own_advertisement(CAP_PERIPHERAL_ONLY);
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+        assert_eq!(parsed.caps, Some(CAP_PERIPHERAL_ONLY), "the record is read");
+        assert_eq!(parsed.free_slots(), None, "but it claims no slot count");
+        // A peer with no record at all is the same silence.
+        assert_eq!(
+            PeerAdvertisement {
+                offers_service: true,
+                caps: None
+            }
+            .free_slots(),
+            None
+        );
     }
 
     #[test]

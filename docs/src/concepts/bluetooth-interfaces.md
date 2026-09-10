@@ -156,12 +156,48 @@ initiate a cross-component dial.
 
 Which eligible advertiser gets dialled is not first-heard-wins: the
 scanner collects one bounded window (`BLE_SCAN_WINDOW`) and dials the
-lowest eligible address, strict verdicts before fallback verdicts, via
-a `CandidateTable` shared by the firmware, lnsd and the simulation.
-First-heard-wins is what produced the saturated-cycle lock — fallback
-dials closing cycles inside their own component until nobody scans —
-measured at 48 of 1000 arrival orders for twenty boards; the window's
-choice removes it entirely.
+best eligible candidate, via a `CandidateTable` shared by the firmware,
+lnsd and the simulation. Best is, in order: strict verdicts before
+fallback verdicts, then the peer with the MOST free incoming slots,
+then the lowest address. First-heard-wins is what produced the
+saturated-cycle lock — fallback dials closing cycles inside their own
+component until nobody scans — measured at 48 of 1000 arrival orders
+for twenty boards; the window's choice removes it entirely.
+
+The free-slot count is the middle term, and boards put it on the air
+themselves: capability bits 1-2 of the v0.3.0 record carry how many of
+the three incoming slots are still free, bit 3 says the count is
+present at all (`leviculum-nrf/ble-tx/src/adv.rs`). Without it a
+searching board picks blind between a peer with three free slots and
+one with its last one free, so several searchers elect the same board
+and all but one are refused. In the arrival-order simulation the
+preference leaves connectivity untouched (0 of 1000 orders
+disconnected at both sizes, as before) and halves the boards that end
+saturated: 976 to 498 at ten boards, 2538 to 914 at twenty.
+
+Three properties keep it honest:
+
+- **It is a hint, never a permission.** Nothing in the duplicate or
+  refusal path reads it. A board that advertised a free slot and has
+  none by the time the connection lands refuses exactly as before.
+- **It can understate, never overstate.** The advertisement is rebuilt
+  at each advertising start, and an incoming link can only land on the
+  board that is currently advertising — which then stops and lets the
+  next free task advertise the new, lower count. A slot freed while
+  another task is mid-advertisement stays unannounced until that
+  advertisement resolves, so the air can lag behind a board that got
+  emptier, never behind one that got fuller. No running advertisement
+  is stopped to rewrite it, so no advertising interval is dropped.
+- **Silence is not zero.** A peer that advertises no count — an older
+  board, a phone, lnsd, another implementation — is ranked as if all
+  its slots were free, the same "assume full capability" the v0.3.0
+  §3.2 rule applies to the capability flags, so it keeps exactly its
+  pre-#375 standing. Bit 3 exists precisely so that an older record
+  with only bit 0 set cannot be read as "zero slots free".
+
+lnsd reads the count but advertises none: its capacity is one budget
+shared by both roles (`max_links`), not the boards' three dedicated
+incoming slots, so the same bits would mean a different quantity.
 
 Two consequences of dialling against the sort are deliberate:
 

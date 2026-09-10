@@ -530,6 +530,10 @@ impl BleTask {
                         addr = %hex12(&addr.0),
                         caps = %format_args!("{:#04x}", decision.caps),
                         caps_record = u8::from(decision.caps_record),
+                        free_slots = %match decision.free_slots {
+                            Some(free) => format!("{free}"),
+                            None => "unknown".to_string(),
+                        },
                         initiate = u8::from(decision.decision.initiate()),
                         rule = decision.decision.as_str(),
                     );
@@ -545,8 +549,9 @@ impl BleTask {
                 }
                 // Eligible: into the collection window instead of an
                 // immediate dial — the firmware's window, the same
-                // CandidateTable, the same lowest-eligible choice.
-                scheduler.offer(addr.0, decision.decision, now);
+                // CandidateTable, the same choice: emptiest advertised
+                // peer first, then lowest address (#375 item 3).
+                scheduler.offer(addr.0, decision.decision, decision.free_slots, now);
                 self.dial_window_choice(
                     scheduler,
                     table,

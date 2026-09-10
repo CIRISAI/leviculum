@@ -44,8 +44,9 @@ pub mod registry;
 pub mod window;
 
 pub use adv::{
-    ad_structure_len, manufacturer_data, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, COMPANY_ID,
-    LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
+    ad_structure_len, free_slots, manufacturer_data, with_free_slots, ADV_BYTES_USED,
+    CAP_FREE_SLOTS_MASK, CAP_FREE_SLOTS_VALID, CAP_PERIPHERAL_ONLY, COMPANY_ID, LEGACY_AD_CAPACITY,
+    MANUFACTURER_DATA_LEN, PERIPH_SLOTS, PROTOCOL_VERSION,
 };
 pub use conn_params::{
     judge_supervision_timeout, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
