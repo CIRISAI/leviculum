@@ -40,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every BLE link on a board says what it actually runs at (#385). At
+  the connection event, in both roles, the firmware logs
+  `BLE_CONN_PARAMS conn=<h> role=central|peripheral interval_ms=<n.nn>
+  latency=<n> timeout_ms=<n>` — the connection interval, slave latency
+  and supervision timeout the central chose, since neither stack
+  requests any of them. The supervision timeout is how long a
+  disturbance may last before the link dies, and until now the only way
+  to learn it was to read the peer's kernel: possible for a BlueZ
+  central on the bench (where a board and lnsd a metre apart lost their
+  link 36 times in 16.2 hours, every connection at a 45 ms interval
+  with a 420 ms supervision timeout), impossible for a phone. Both time
+  fields are converted from their two different raw scales (1.25 ms
+  steps for the interval, 10 ms for the timeout) so the line carries
+  milliseconds only. No parameter is requested or changed by this: it
+  is a measurement. lnsd has no counterpart, because BlueZ publishes
+  none of the three over D-Bus.
+
 - A board announces itself on a new BLE connection and on a timer, not
   only before a telemetry report (#376). When a peer completes its
   identity handshake the node announces its delivery destination to

@@ -30,9 +30,9 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
-    ConnectDecision, LinkUp, Origin, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED,
-    CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS, MANUFACTURER_DATA_LEN,
-    SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    ConnParams, ConnParamsLine, ConnectDecision, LinkRole, LinkUp, Origin, PeerRegistry, ScanMode,
+    TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -322,6 +322,7 @@ async fn peripheral_task(
         match conn {
             Some(conn) => {
                 crate::info!("BLE: connected");
+                log_conn_params(&conn, LinkRole::Peripheral);
                 gatt_events(&conn, server, &incoming_tx).await;
                 // The ATT MTU the peer and we settled on, reported here
                 // rather than at connect because the Exchange MTU Request
@@ -338,6 +339,41 @@ async fn peripheral_task(
             }
         }
     }
+}
+
+/// Say what a link that just came up actually runs at (#385).
+///
+/// Nothing in either stack requests connection parameters, so these are
+/// the central's choice inherited whole — and the supervision timeout
+/// among them is precisely how long a disturbance may last before the
+/// link dies. On the bench the values could be read out of the central's
+/// kernel because the central was BlueZ; against a phone the board is
+/// the only side that can be asked, and before this line it was never
+/// asked. Emitted once per link, next to `BLE: connected` on the
+/// peripheral side and next to the successful dial on the central one.
+///
+/// `max_conn_interval` is the interval and not half of a range: the
+/// SoftDevice sets both bounds to the actual interval in every event it
+/// reports parameters in (S140 bindings, `ble_gap_conn_params_t` doc
+/// comment), and `Connection::conn_params` returns what those events
+/// stored.
+fn log_conn_params(conn: &Connection, role: LinkRole) {
+    let raw = conn.conn_params();
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "{}",
+            ConnParamsLine {
+                conn: conn.handle().unwrap_or(u16::MAX),
+                role,
+                params: ConnParams {
+                    interval_units: raw.max_conn_interval,
+                    latency: raw.slave_latency,
+                    timeout_units: raw.conn_sup_timeout,
+                },
+            }
+        ),
+    );
 }
 
 /// Run one inbound frame through a link's defragmenter, and say so when
@@ -1383,6 +1419,7 @@ async fn central_link(
             return;
         }
     };
+    log_conn_params(&conn, LinkRole::Central);
 
     // v2.2 §Connection Phase, in the spec's order: service discovery
     // (3), read the Identity characteristic (4) — with the checks the

@@ -35,6 +35,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod adv;
+pub mod conn_params;
 pub mod drain;
 pub mod gap;
 pub mod hold;
@@ -46,6 +47,7 @@ pub use adv::{
     ad_structure_len, manufacturer_data, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, COMPANY_ID,
     LEGACY_AD_CAPACITY, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
 };
+pub use conn_params::{ConnParams, ConnParamsLine, LinkRole};
 pub use drain::{DrainRouter, DrainSlot, NO_CONN_HANDLE};
 pub use gap::{effective_tx_gap_ms, TxGap, DEFAULT_TX_GAP_MS};
 pub use hold::TxHold;
