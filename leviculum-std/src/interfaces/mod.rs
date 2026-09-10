@@ -182,6 +182,14 @@ pub(crate) struct InterfaceCounters {
     /// frame once; only a frame unaccounted for twice is also counted as a
     /// drop. Always 0 on a medium whose driver keeps no airtime ledger.
     pub tx_unaccounted: Counter64,
+    /// Packets shed by this interface's open outbound circuit (leviculum#66).
+    /// Distinct from `tx_queue_drops`: a shed packet never reached a queue and
+    /// never paid for IFAC masking.
+    pub shed_packets: Counter64,
+    /// Whether that circuit is currently open (shedding). Published by the
+    /// event loop so `interface_stats()` can report it without taking the
+    /// loop's own state under a lock.
+    pub circuit_open: std::sync::atomic::AtomicBool,
     speed: std::sync::Mutex<SpeedState>,
     radio: std::sync::Mutex<Option<RadioStats>>,
     /// The owning task's latest census of its own tables (597), `None` for
@@ -219,6 +227,8 @@ impl InterfaceCounters {
             tx_queue_dedup: Counter64::new(0),
             tx_stale_drops: Counter64::new(0),
             tx_unaccounted: Counter64::new(0),
+            shed_packets: Counter64::new(0),
+            circuit_open: std::sync::atomic::AtomicBool::new(false),
             speed: std::sync::Mutex::new(SpeedState {
                 prev_rx: 0,
                 prev_tx: 0,
