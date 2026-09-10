@@ -120,6 +120,19 @@ nrf-evt-max-size:
 nrf-gap-device-name:
     bash scripts/check-nrf-gap-device-name.sh
 
+# Board pin-map gate. The two pin greps that existed before it were both
+# internal-consistency checks, and `e5d62b95` passed them with the T114's QSPI
+# IO2/IO3 named P1.00/P1.01 where the part has WP#/HOLD# on P0.07/P0.05: a map
+# that is consistently wrong is consistent. The board is the only thing that
+# disagreed, with `id=00:00:00` — a held part drives MISO for nothing, not even
+# a JEDEC read. So this compares the QSPI and LoRa pins against the Meshtastic
+# variant headers instead, and separately against the `p.P0_07` arguments the
+# bins actually pass, which are not the aliases. Numbers and scope in
+# leviculum-nrf/reference-pins.toml; the upstream half needs a Meshtastic
+# checkout ($MESHTASTIC_TREE) and says so when there is none.
+nrf-board-pins:
+    bash scripts/check-nrf-board-pins.sh
+
 # SoftDevice guard for the flash runner. Our image is linked at 0x27000 and a
 # factory board still carrying S140 6.1.1 forwards to 0x26000, so writing to
 # one soft-bricks it (docs/src/concepts/lnode-flashing.md). The runner refuses
@@ -167,6 +180,7 @@ nrf-shellcheck:
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/check-nrf-evt-max-size.sh \
+        scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh
 
@@ -419,7 +433,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
