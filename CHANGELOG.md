@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [0.26.0+ciris.1] — CIRIS fork
+
+### Added — a peer that will not drain is shed, not absorbed (leviculum#66)
+
+The canonical showed one peer of 130 taking every one of 34,390 dropped
+packets in 24 h — ~24/s sustained, with no idle hour in the window — while the
+other 129 dropped none. The producer is legitimate and cannot be upgraded yet,
+which is exactly the case a deep absorbing queue handles worst: there is no
+catching up, so the queue sits at its cap discarding continuously, the depth
+buys nothing, and the discard is silent to whatever is producing.
+
+Reticulum puts flow control at Link/Channel and leaves the interface layer
+best-effort, so this does not try to make the interface reliable. It makes the
+shedding cheap and visible, and leaves reliability to the layer that owns it.
+
+- **Shed before masking.** `dispatch_actions` masks a packet — an Ed25519
+  signature plus an HKDF mask stream — and only then discovers the interface
+  will not take it, so a pinned queue paid full IFAC crypto for every packet
+  it was about to discard. The breaker runs before that, so a shed packet
+  costs a state check instead of a signature.
+- **Three refused ticks open the circuit.** The cooldown starts at 500 ms and
+  doubles per failed probe to a 5 minute ceiling — deliberately the cadence a
+  backed-off producer should trickle at, so the probe and the trickle meet
+  rather than beat against each other. One packet is spent per probe.
+- **Proofs are never shed, in any state.** A proof is the delivery
+  confirmation the producer is waiting on; drop it and the producer
+  retransmits, raising the offered load exactly when it is already too high.
+  New data yields; confirmations of data already accepted do not.
+- **The signal is pushed, not polled.** `NodeEvent::PeerCongested` is Control
+  class, so the notice that a peer is being shed cannot itself be dropped
+  under load. `interface_stats()` gains per-interface `circuit_open` and
+  `shed_packets`; `plane_stats()` gains `shed_packets_total`. Per interface on
+  purpose — #66 had 129 healthy peers beside the one that dropped, and a
+  node-wide total cannot name which.
+
+The threshold and the AIMD shape follow the reference channel rather than a
+private scheme (`Channel.py`: window +1 per delivery, −1 per timeout,
+`pow(1.5, tries-1)` backoff scaled by RTT and queue depth, teardown after
+`_max_tries`).
+
+This is the leviculum half. The producer half — honouring `try_send`'s `Busy`
+instead of the absorbing `send()`, backing off exponentially to a trickle — is
+the consumer's, and is being raised on CIRISEdge.
+
 ## [0.25.0+ciris.1] — CIRIS fork
 
 ### Fixed — the retry queue is diagnosable and quiet (leviculum#63)

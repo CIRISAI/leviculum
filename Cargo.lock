@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-cli"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-ffi"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "cbindgen",
  "hex",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "futures",
  "hex",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf-node"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
@@ -2019,11 +2019,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-micron"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 
 [[package]]
 name = "leviculum-proxy"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "bluer",
  "clap",
@@ -2133,7 +2133,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lnflash"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -4296,7 +4296,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vectors-verify"
-version = "0.25.0+ciris.1"
+version = "0.26.0+ciris.1"
 dependencies = [
  "hex",
  "leviculum-core",
