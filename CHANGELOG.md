@@ -40,6 +40,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A board asks for a supervision timeout it can survive (#385). A link
+  a peripheral board holds is the one end that can do anything about
+  the parameters it was handed, and the two cases where those
+  parameters are bad or unknown are exactly the two where the board is
+  the peripheral: an lnsd central gives it BlueZ's 420 ms — nine
+  connection events at the 45 ms interval both stacks measured, and 36
+  link deaths in 16.2 hours on the bench — and a phone gives it
+  something nobody has measured yet. The board now compares the
+  timeout the link came up with against a 2000 ms floor and, only if
+  it falls short, asks the central for 4000 ms, the same value the
+  firmware's own central role already asks for. Conditional by design:
+  a central that negotiates something sane is left alone, because an
+  update request that fights a good value is a regression. Both the
+  decision and its outcome are logged as `BLE_CONN_PARAMS_REQ conn=<h>
+  timeout_ms=<n> result=sent|refused|skipped`, and because a central
+  may honour the request, ignore it, or answer with something else
+  entirely, a peripheral link re-reads its parameters at teardown and
+  repeats `BLE_CONN_PARAMS` marked `when=close`: a link that opened at
+  420 ms and closed at 4000 ms was granted what it asked for, one that
+  closed at 420 ms was not, and the request line alone says neither.
+  Board-to-board links are untouched — their central already asks for
+  4 s, so they only ever log `result=skipped`.
+
 - The boards say what their battery is doing (#380). Once at boot and
   then every 30 s, both the Pocket V2 and the T114 log `BATTERY
   mv=<n> min_mv=<n> max_mv=<n> pct=<n> cells=<n>S`. The pack is

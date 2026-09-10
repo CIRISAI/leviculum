@@ -32,6 +32,75 @@
 //! usual reason — the firmware crate cross-compiles and runs no host
 //! tests, so a wrong scale there would be found by a reader of a field
 //! log, months later, if at all. Here it fails a test.
+//!
+//! # Asking for a timeout the link can survive
+//!
+//! The measurement half of #385 produced two numbers that do not sit
+//! well together: a link opened by lnsd runs at `interval_ms=45.00
+//! timeout_ms=420`, and 420 ms at a 45 ms interval is about nine
+//! connection events. Nine missed events end the link. Board-to-board
+//! links do not have the problem — `ConnectConfig::default` asks for
+//! 4 s in the central role — and the host cannot set these values
+//! through the API lnsd uses at all, so the only end that can do
+//! anything about it is the peripheral, which is exactly what our
+//! board is in the two cases that are bad (lnsd, 420 ms) or unknown
+//! (a phone, unmeasured).
+//!
+//! [`judge_supervision_timeout`] is that decision, and it is
+//! deliberately CONDITIONAL: it reads the value it is about to act on
+//! every time, and asks for nothing when the link already came up with
+//! a timeout it can survive.
+//!
+//! ## What is asked for: 4000 ms
+//!
+//! The same 4 s that `ConnectConfig::default` asks for in the central
+//! role, so the two roles agree on one number instead of the stack
+//! carrying a third. It is bounded on both sides by facts rather than
+//! by custom:
+//!
+//! - From above by our own link expiry. `registry::LINK_TIMEOUT_MS` is
+//!   45 s, and a supervision timeout is exactly how long it takes the
+//!   controller to notice a peer that has genuinely gone. At 4 s the
+//!   controller notices a decade of seconds before the keepalive clock
+//!   would, so the two mechanisms never race to explain the same
+//!   death; a timeout up near 45 s would put them in a photo finish,
+//!   and one at 32 s (the largest the spec allows) would delay the
+//!   news of a dead peer by 32 s for nothing.
+//! - From below by what it has to survive. 420 ms is about nine
+//!   connection events at the measured interval; 4000 ms is about
+//!   ninety.
+//!
+//! ## The floor: 2000 ms
+//!
+//! The floor is NOT the requested value, and the gap between them is
+//! the whole point. A central that already negotiates something sane
+//! must be left alone — an update request that fights a good value is
+//! a regression, and no board carrying this build has yet been near a
+//! phone, so what Columba picks is not knowable here. With the floor
+//! set equal to the request, a link that came up at 3900 ms would be
+//! interrupted to gain 100 ms, and one at 5000 ms would be dragged
+//! DOWN to 4000.
+//!
+//! Half the requested value is where the two considerations cross.
+//! Between 2 s and 4 s a link is within a factor of two of what we
+//! would ask for, so the most a request could win is that factor —
+//! which does not pay for the risk of a refusal, or of a central that
+//! answers by renegotiating something worse than what it had. Below
+//! 2 s the distance is more than a factor of two, and 420 ms, the
+//! value that started this, is off by nearly ten.
+//!
+//! ## The ask is always arithmetically legal when it is made
+//!
+//! The spec bounds a supervision timeout from below by the interval:
+//! it must exceed `(1 + latency) × interval × 2`. Any measured set
+//! that is itself legal AND below the 2000 ms floor therefore has
+//! `(1 + latency) × interval × 2 < 2000 < 4000`, so 4000 ms is legal
+//! at that same interval and latency — the ask can never be rejected
+//! as arithmetic. The timeout is asked for alone for the same kind of
+//! reason: interval and latency are copied from what the link already
+//! runs at, because we have no complaint about either, and a request
+//! that also moved a field we do not care about could be refused over
+//! that field.
 
 use core::fmt;
 
@@ -113,9 +182,18 @@ impl ConnParams {
 pub struct ConnParamsLine {
     /// The connection handle, matching the `conn=` of every other
     /// per-link line (`BLE_TX_GAP`, `BLE_LINK_DUP`, `BLE: RX`).
+    ///
+    /// Passed in rather than read off the `Connection` at render time:
+    /// at [`LinkPhase::Close`] the handle is already gone (the
+    /// SoftDevice clears it on the disconnect event, unlike the
+    /// parameters themselves), and a close line that could not be
+    /// matched to its open line would say nothing about whether the
+    /// request was honoured.
     pub conn: u16,
     pub role: LinkRole,
     pub params: ConnParams,
+    /// Connect or teardown; see [`LinkPhase`].
+    pub phase: LinkPhase,
 }
 
 impl fmt::Display for ConnParamsLine {
@@ -130,7 +208,146 @@ impl fmt::Display for ConnParamsLine {
             hundredths % 100,
             self.params.latency,
             self.params.timeout_ms(),
+        )?;
+        f.write_str(self.phase.suffix())
+    }
+}
+
+/// The supervision timeout a peripheral link has to reach before it is
+/// left alone, in milliseconds. Half of
+/// [`REQUESTED_SUPERVISION_TIMEOUT_UNITS`]; the module comment says why
+/// the two are not the same number.
+pub const SUPERVISION_TIMEOUT_FLOOR_MS: u32 = 2_000;
+
+/// What a peripheral below the floor asks for, in the SoftDevice's
+/// 10 ms units: 400 units = 4000 ms, the value
+/// `central::ConnectConfig::default` already asks for in the central
+/// role.
+pub const REQUESTED_SUPERVISION_TIMEOUT_UNITS: u16 = 400;
+
+/// The verdict of [`judge_supervision_timeout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnParamsAsk {
+    /// The link came up with a timeout at or above
+    /// [`SUPERVISION_TIMEOUT_FLOOR_MS`]: ask for nothing. Carries the
+    /// value that passed, because that value — and not the one we would
+    /// have asked for — is what the `skipped` log line has to state.
+    Keep {
+        /// The measured supervision timeout, in milliseconds.
+        timeout_ms: u32,
+    },
+    /// Below the floor: send a connection parameter update request for
+    /// exactly this set. `interval_units` and `latency` are the
+    /// measured ones; only the timeout differs.
+    Ask(ConnParams),
+}
+
+/// Should this peripheral link ask its central for a longer
+/// supervision timeout?
+///
+/// A pure function of the parameters the link actually came up at, so
+/// the rule is exercised on the host rather than only through the
+/// SoftDevice, and so the boundary can be tested from both sides. The
+/// firmware's only job is to read `conn.conn_params()`, hand the
+/// numbers here, and perform the verdict.
+pub const fn judge_supervision_timeout(measured: ConnParams) -> ConnParamsAsk {
+    let timeout_ms = measured.timeout_ms();
+    if timeout_ms >= SUPERVISION_TIMEOUT_FLOOR_MS {
+        ConnParamsAsk::Keep { timeout_ms }
+    } else {
+        ConnParamsAsk::Ask(ConnParams {
+            interval_units: measured.interval_units,
+            latency: measured.latency,
+            timeout_units: REQUESTED_SUPERVISION_TIMEOUT_UNITS,
+        })
+    }
+}
+
+/// What became of the request, for the `result=` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnParamsReq {
+    /// The request left the board. NOT that it was granted: on a
+    /// peripheral `set_conn_params` only starts the L2CAP connection
+    /// parameter update procedure, and the central may honour it,
+    /// ignore it, or answer with something else entirely. Which of the
+    /// three happened is readable only from the `when=close` line.
+    Sent,
+    /// The SoftDevice would not take the request — a busy link, a
+    /// connection already gone. Local, and not retried: the link runs
+    /// on at the timeout it has.
+    Refused,
+    /// Not asked for: the value the link came up at already passes
+    /// [`SUPERVISION_TIMEOUT_FLOOR_MS`].
+    Skipped,
+}
+
+impl ConnParamsReq {
+    /// The `result=` token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ConnParamsReq::Sent => "sent",
+            ConnParamsReq::Refused => "refused",
+            ConnParamsReq::Skipped => "skipped",
+        }
+    }
+}
+
+/// The `BLE_CONN_PARAMS_REQ` line's body, byte-exact — the decision
+/// [`judge_supervision_timeout`] made and what came of it.
+///
+/// One line per peripheral link, always: a link that asks and a link
+/// that does not both say so, because "no line" is indistinguishable
+/// from "this build does not have the feature" in a field capture.
+pub struct ConnParamsReqLine {
+    /// The connection handle, matching the `conn=` of the
+    /// `BLE_CONN_PARAMS` line the decision was made from.
+    pub conn: u16,
+    /// The supervision timeout this line is about, in milliseconds: on
+    /// `sent`/`refused` the value asked for, on `skipped` the value
+    /// that passed the floor. Both are the number a reader wants next
+    /// to that word, and [`ConnParamsAsk`] hands the right one to each.
+    pub timeout_ms: u32,
+    pub result: ConnParamsReq,
+}
+
+impl fmt::Display for ConnParamsReqLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BLE_CONN_PARAMS_REQ conn={} timeout_ms={} result={}",
+            self.conn,
+            self.timeout_ms,
+            self.result.as_str(),
         )
+    }
+}
+
+/// Which end of a link's life a [`ConnParamsLine`] was read at.
+///
+/// The accepted values are what matter, not the request, so the line is
+/// emitted twice: once when the link comes up, once when it ends. A
+/// link that opened at 420 ms and closed at 4000 ms says the request
+/// was honoured; one that closed at 420 ms says it was not; neither is
+/// knowable any other way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkPhase {
+    /// Read at connect. Renders NO marker, so the line stays
+    /// byte-identical to the one `a7456002` measured and the captures
+    /// grepped against it keep matching.
+    Open,
+    /// Re-read as the link ends, next to the disconnect line where
+    /// `att_mtu()` is already re-read for the same reason.
+    Close,
+}
+
+impl LinkPhase {
+    /// What the phase appends to the line — a leading space and the
+    /// `when=` token, or nothing at all.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            LinkPhase::Open => "",
+            LinkPhase::Close => " when=close",
+        }
     }
 }
 
@@ -229,6 +446,7 @@ mod tests {
                     latency,
                     timeout_units: 10,
                 },
+                phase: LinkPhase::Open,
             };
             assert!(line
                 .to_string()
@@ -247,6 +465,7 @@ mod tests {
                 latency: 0,
                 timeout_units: 42,
             },
+            phase: LinkPhase::Open,
         };
         assert_eq!(
             line.to_string(),
@@ -271,6 +490,7 @@ mod tests {
                     latency: 0,
                     timeout_units: 10,
                 },
+                phase: LinkPhase::Open,
             }
             .to_string()
         };
@@ -285,5 +505,219 @@ mod tests {
     fn roles_spell_themselves() {
         assert_eq!(LinkRole::Central.as_str(), "central");
         assert_eq!(LinkRole::Peripheral.as_str(), "peripheral");
+    }
+
+    /// The measured bench case, the one this half of #385 exists for:
+    /// 420 ms is below the floor, so the link asks — and it asks for
+    /// 4000 ms while leaving the interval and the latency exactly as
+    /// the central set them.
+    #[test]
+    fn the_measured_bench_link_asks_for_four_seconds() {
+        let measured = ConnParams {
+            interval_units: 36,
+            latency: 0,
+            timeout_units: 42,
+        };
+        assert_eq!(
+            judge_supervision_timeout(measured),
+            ConnParamsAsk::Ask(ConnParams {
+                interval_units: 36,
+                latency: 0,
+                timeout_units: 400,
+            })
+        );
+        match judge_supervision_timeout(measured) {
+            ConnParamsAsk::Ask(asked) => assert_eq!(asked.timeout_ms(), 4000),
+            other => panic!("expected an ask, got {other:?}"),
+        }
+    }
+
+    /// The boundary, from below: one unit under the floor is 1990 ms
+    /// and asks.
+    #[test]
+    fn one_unit_below_the_floor_asks() {
+        let measured = ConnParams {
+            interval_units: 36,
+            latency: 0,
+            timeout_units: 199,
+        };
+        assert_eq!(measured.timeout_ms(), SUPERVISION_TIMEOUT_FLOOR_MS - 10);
+        assert!(matches!(
+            judge_supervision_timeout(measured),
+            ConnParamsAsk::Ask(_)
+        ));
+    }
+
+    /// The boundary, from above: exactly the floor is good enough, and
+    /// the verdict carries the value that passed rather than the one
+    /// that would have been asked for. "At or above", not "above" — a
+    /// link sitting precisely on the number we picked as sufficient is
+    /// sufficient by construction, and interrupting it would gain the
+    /// factor of two the floor was chosen to forgo.
+    #[test]
+    fn exactly_the_floor_is_kept() {
+        let measured = ConnParams {
+            interval_units: 36,
+            latency: 0,
+            timeout_units: 200,
+        };
+        assert_eq!(measured.timeout_ms(), SUPERVISION_TIMEOUT_FLOOR_MS);
+        assert_eq!(
+            judge_supervision_timeout(measured),
+            ConnParamsAsk::Keep {
+                timeout_ms: SUPERVISION_TIMEOUT_FLOOR_MS
+            }
+        );
+    }
+
+    /// A central that already negotiates BETTER than we would ask for
+    /// is left alone — the request is conditional precisely so a good
+    /// value is never dragged down to ours. 5000 ms and the spec's
+    /// maximum 32 s both keep.
+    #[test]
+    fn a_better_timeout_than_ours_is_never_fought() {
+        for units in [500, 3200] {
+            let measured = ConnParams {
+                interval_units: 36,
+                latency: 0,
+                timeout_units: units,
+            };
+            assert_eq!(
+                judge_supervision_timeout(measured),
+                ConnParamsAsk::Keep {
+                    timeout_ms: u32::from(units) * 10
+                }
+            );
+        }
+    }
+
+    /// The floor is half the requested value, and the requested value
+    /// is what `ConnectConfig::default` asks for in the central role.
+    /// Both numbers are load-bearing in the module comment's argument;
+    /// a change to either without a change to that argument fails here.
+    #[test]
+    fn floor_is_half_of_what_is_asked_for() {
+        let asked_ms = u32::from(REQUESTED_SUPERVISION_TIMEOUT_UNITS) * 10;
+        assert_eq!(asked_ms, 4_000);
+        assert_eq!(SUPERVISION_TIMEOUT_FLOOR_MS * 2, asked_ms);
+    }
+
+    /// The ask stays well inside our own link expiry: whatever the
+    /// controller notices, it notices long before `LINK_TIMEOUT_MS`
+    /// (45 s), so the supervision timeout and the keepalive clock never
+    /// race to explain the same dead peer.
+    #[test]
+    fn the_ask_stays_well_inside_our_own_link_expiry() {
+        let asked_ms = u64::from(REQUESTED_SUPERVISION_TIMEOUT_UNITS) * 10;
+        assert!(
+            asked_ms * 4 < crate::registry::LINK_TIMEOUT_MS,
+            "asked {asked_ms} ms is not comfortably inside {} ms",
+            crate::registry::LINK_TIMEOUT_MS
+        );
+    }
+
+    /// Whenever the rule decides to ask, what it asks for is legal at
+    /// the link's own interval: the spec's lower bound on a supervision
+    /// timeout is `(1 + latency) × interval × 2`, and a measured set
+    /// that is itself legal and below the floor cannot have a bound
+    /// above the floor — let alone above the 4000 ms asked for. Swept
+    /// over the interval range and a spread of latencies, keeping only
+    /// the sets a controller could legally report.
+    #[test]
+    fn what_is_asked_for_is_legal_wherever_it_is_asked() {
+        let mut asked = 0;
+        for interval_units in (6..=3200).step_by(7) {
+            for latency in [0, 1, 4, 100, 499] {
+                // The spec's bound on the measured set itself, in ms.
+                let bound = (u64::from(latency) + 1) * u64::from(interval_units) * 125 * 2 / 100;
+                for timeout_units in [10, 41, 42, 100, 199, 200, 400, 3200] {
+                    let measured = ConnParams {
+                        interval_units,
+                        latency,
+                        timeout_units,
+                    };
+                    if u64::from(measured.timeout_ms()) <= bound {
+                        continue; // not a set any controller may report
+                    }
+                    if let ConnParamsAsk::Ask(ask) = judge_supervision_timeout(measured) {
+                        assert!(
+                            u64::from(ask.timeout_ms()) > bound,
+                            "asked {} ms at interval {interval_units} latency {latency}, \
+                             below the spec bound {bound} ms",
+                            ask.timeout_ms()
+                        );
+                        asked += 1;
+                    }
+                }
+            }
+        }
+        // A sweep that never reached the asking branch would prove
+        // nothing at all.
+        assert!(asked > 0, "the sweep never exercised an ask");
+    }
+
+    /// All three outcomes render byte-exactly, and the number next to
+    /// each word is the one that word is about.
+    #[test]
+    fn request_line_is_byte_exact() {
+        assert_eq!(
+            ConnParamsReqLine {
+                conn: 1,
+                timeout_ms: 4000,
+                result: ConnParamsReq::Sent,
+            }
+            .to_string(),
+            "BLE_CONN_PARAMS_REQ conn=1 timeout_ms=4000 result=sent"
+        );
+        assert_eq!(
+            ConnParamsReqLine {
+                conn: 1,
+                timeout_ms: 4000,
+                result: ConnParamsReq::Refused,
+            }
+            .to_string(),
+            "BLE_CONN_PARAMS_REQ conn=1 timeout_ms=4000 result=refused"
+        );
+        assert_eq!(
+            ConnParamsReqLine {
+                conn: 2,
+                timeout_ms: 5000,
+                result: ConnParamsReq::Skipped,
+            }
+            .to_string(),
+            "BLE_CONN_PARAMS_REQ conn=2 timeout_ms=5000 result=skipped"
+        );
+    }
+
+    /// The close line is the acceptance evidence, so it has to be
+    /// tellable from the open line and matchable to it: same `conn=`,
+    /// plus the `when=close` marker that the open line does not carry.
+    #[test]
+    fn close_line_is_marked_and_open_line_is_unchanged() {
+        let render = |phase, timeout_units| {
+            ConnParamsLine {
+                conn: 1,
+                role: LinkRole::Peripheral,
+                params: ConnParams {
+                    interval_units: 36,
+                    latency: 0,
+                    timeout_units,
+                },
+                phase,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            render(LinkPhase::Open, 42),
+            "BLE_CONN_PARAMS conn=1 role=peripheral interval_ms=45.00 latency=0 timeout_ms=420"
+        );
+        assert_eq!(
+            render(LinkPhase::Close, 400),
+            "BLE_CONN_PARAMS conn=1 role=peripheral interval_ms=45.00 latency=0 timeout_ms=4000 \
+             when=close"
+        );
+        // The honoured and the ignored close, side by side: the only
+        // difference a reader has to see is the timeout.
+        assert!(render(LinkPhase::Close, 42).ends_with("timeout_ms=420 when=close"));
     }
 }

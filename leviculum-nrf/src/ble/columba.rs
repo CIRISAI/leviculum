@@ -29,9 +29,10 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, manufacturer_data, parse_peer_advertisement, should_initiate, CandidateTable,
-    ConnParams, ConnParamsLine, ConnectDecision, LinkRole, LinkUp, Origin, PeerRegistry, ScanMode,
-    TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    addr_value, judge_supervision_timeout, manufacturer_data, parse_peer_advertisement,
+    should_initiate, CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
+    ConnParamsReqLine, ConnectDecision, LinkPhase, LinkRole, LinkUp, Origin, PeerRegistry,
+    ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
     MANUFACTURER_DATA_LEN, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
@@ -322,7 +323,14 @@ async fn peripheral_task(
         match conn {
             Some(conn) => {
                 crate::info!("BLE: connected");
-                log_conn_params(&conn, LinkRole::Peripheral);
+                // Read once, before the session: the handle is gone by
+                // the time the link ends (`on_disconnected` clears it,
+                // unlike the parameters), and the close line has to
+                // carry the same `conn=` as the open one or it cannot
+                // be matched to the request it is evidence about.
+                let handle = conn.handle().unwrap_or(u16::MAX);
+                log_conn_params(&conn, handle, LinkRole::Peripheral, LinkPhase::Open);
+                ask_for_a_survivable_timeout(&conn, handle);
                 gatt_events(&conn, server, &incoming_tx).await;
                 // The ATT MTU the peer and we settled on, reported here
                 // rather than at connect because the Exchange MTU Request
@@ -333,6 +341,15 @@ async fn peripheral_task(
                 // board — without it, "is our conn_cfg in force?" can only be
                 // answered by reading crate source.
                 crate::info!("BLE: disconnected att_mtu={}", conn.att_mtu());
+                // And the parameters the link ACTUALLY ran on when it
+                // ended, re-read for the same reason and from the same
+                // still-live state (#385): a link that opened at 420 ms
+                // and closes at 4000 ms says the update request was
+                // honoured, one that closes at 420 ms says it was not,
+                // and neither is knowable from the request alone —
+                // a central may honour it, ignore it, or answer with
+                // something else entirely, all without telling us.
+                log_conn_params(&conn, handle, LinkRole::Peripheral, LinkPhase::Close);
             }
             None => {
                 Timer::after_millis(1000).await;
@@ -341,36 +358,112 @@ async fn peripheral_task(
     }
 }
 
-/// Say what a link that just came up actually runs at (#385).
+/// Say what a link actually runs at (#385).
 ///
-/// Nothing in either stack requests connection parameters, so these are
-/// the central's choice inherited whole — and the supervision timeout
-/// among them is precisely how long a disturbance may last before the
-/// link dies. On the bench the values could be read out of the central's
-/// kernel because the central was BlueZ; against a phone the board is
-/// the only side that can be asked, and before this line it was never
-/// asked. Emitted once per link, next to `BLE: connected` on the
-/// peripheral side and next to the successful dial on the central one.
+/// Except for the peripheral's supervision-timeout request
+/// ([`ask_for_a_survivable_timeout`]), neither stack asks for
+/// connection parameters, so these are the central's choice inherited
+/// whole — and the supervision timeout among them is precisely how
+/// long a disturbance may last before the link dies. On the bench the
+/// values could be read out of the central's kernel because the
+/// central was BlueZ; against a phone the board is the only side that
+/// can be asked, and before this line it was never asked.
 ///
-/// `max_conn_interval` is the interval and not half of a range: the
-/// SoftDevice sets both bounds to the actual interval in every event it
-/// reports parameters in (S140 bindings, `ble_gap_conn_params_t` doc
-/// comment), and `Connection::conn_params` returns what those events
-/// stored.
-fn log_conn_params(conn: &Connection, role: LinkRole) {
-    let raw = conn.conn_params();
+/// A central link says this once, next to the successful dial. A
+/// peripheral link says it twice — [`LinkPhase::Open`] next to
+/// `BLE: connected`, [`LinkPhase::Close`] at teardown next to the
+/// `att_mtu` line — because on that side the parameters can still
+/// change under us, and the closing pair is the only evidence of what
+/// the central did with the request.
+fn log_conn_params(conn: &Connection, handle: u16, role: LinkRole, phase: LinkPhase) {
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
             "{}",
             ConnParamsLine {
-                conn: conn.handle().unwrap_or(u16::MAX),
+                conn: handle,
                 role,
-                params: ConnParams {
-                    interval_units: raw.max_conn_interval,
-                    latency: raw.slave_latency,
-                    timeout_units: raw.conn_sup_timeout,
-                },
+                params: live_conn_params(conn),
+                phase,
+            }
+        ),
+    );
+}
+
+/// The parameters this connection is running on right now, in the
+/// units [`ConnParams`] speaks.
+///
+/// `max_conn_interval` is the interval and not half of a range: the
+/// SoftDevice sets both bounds to the actual interval in every event
+/// it reports parameters in (S140 bindings, `ble_gap_conn_params_t`
+/// doc comment), and `Connection::conn_params` returns what those
+/// events stored.
+///
+/// It returns what they stored MOST RECENTLY, which is what makes the
+/// close reading worth taking: the SoftDevice keeps the struct current —
+/// it overwrites the stored copy on every `BLE_GAP_EVT_CONN_PARAM_UPDATE`
+/// (`nrf-softdevice/src/ble/gap.rs`), which is exactly the event a
+/// central's answer to our update request arrives in, and it does not
+/// clear it on disconnect. So the same call reads the negotiated set at
+/// connect and the accepted set at teardown.
+fn live_conn_params(conn: &Connection) -> ConnParams {
+    let raw = conn.conn_params();
+    ConnParams {
+        interval_units: raw.max_conn_interval,
+        latency: raw.slave_latency,
+        timeout_units: raw.conn_sup_timeout,
+    }
+}
+
+/// Ask the central for a supervision timeout this link can survive —
+/// but only if the one it came up with is too short (#385).
+///
+/// The peripheral is the only end with a lever here: the host cannot
+/// set connection parameters through the API lnsd uses, and a phone
+/// picks whatever it picks. `judge_supervision_timeout` holds the rule
+/// and the numbers, with the argument for both in its module comment;
+/// this function is the driver that performs its verdict and says what
+/// happened either way.
+///
+/// Conditional by design. A central that already negotiates something
+/// sane is left alone, because an update request that fights a good
+/// value is a regression, and what Columba chooses has never been
+/// measured. A refused request is not retried: on a peripheral this is
+/// an L2CAP connection parameter update request, and a central that
+/// says no means it.
+///
+/// `result=sent` claims only that the request left the board. Whether
+/// it was honoured is stated by the `when=close` line at teardown, and
+/// nowhere else.
+fn ask_for_a_survivable_timeout(conn: &Connection, handle: u16) {
+    let (timeout_ms, result) = match judge_supervision_timeout(live_conn_params(conn)) {
+        ConnParamsAsk::Keep { timeout_ms } => (timeout_ms, ConnParamsReq::Skipped),
+        ConnParamsAsk::Ask(ask) => {
+            let requested = nrf_softdevice::raw::ble_gap_conn_params_t {
+                // Both bounds at the interval the link already runs at:
+                // the ask is about the timeout alone, and a request
+                // that also moved the interval could be refused over a
+                // field we have no complaint about.
+                min_conn_interval: ask.interval_units,
+                max_conn_interval: ask.interval_units,
+                slave_latency: ask.latency,
+                conn_sup_timeout: ask.timeout_units,
+            };
+            let result = match conn.set_conn_params(requested) {
+                Ok(()) => ConnParamsReq::Sent,
+                Err(_) => ConnParamsReq::Refused,
+            };
+            (ask.timeout_ms(), result)
+        }
+    };
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "{}",
+            ConnParamsReqLine {
+                conn: handle,
+                timeout_ms,
+                result,
             }
         ),
     );
@@ -1419,7 +1512,12 @@ async fn central_link(
             return;
         }
     };
-    log_conn_params(&conn, LinkRole::Central);
+    log_conn_params(
+        &conn,
+        conn.handle().unwrap_or(u16::MAX),
+        LinkRole::Central,
+        LinkPhase::Open,
+    );
 
     // v2.2 §Connection Phase, in the spec's order: service discovery
     // (3), read the Identity characteristic (4) — with the checks the
