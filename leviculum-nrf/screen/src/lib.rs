@@ -66,6 +66,13 @@ pub struct StatusModel<'a> {
     pub tx: u32,
     pub battery: BatteryStatus,
     pub gnss: GnssStatus,
+    /// Live BLE peer count for line 3's `B:` field, or `None` on a
+    /// board without BLE at all — then line 3 keeps its historical
+    /// `RX:`/`TX:` shape and spends no character on a medium the board
+    /// does not have. The firmware feeds this from the same claimed
+    /// drain slots the `BLE_COUNTERS` log line prints as `links=`, so
+    /// screen and log cannot disagree.
+    pub ble_peers: Option<u8>,
     pub heartbeat: bool,
 }
 
@@ -94,6 +101,9 @@ pub struct FrameKey {
     // text with otherwise identical field values, so the variant itself
     // must key the frame.
     gnss_kind: u8,
+    // BLE peer count, verbatim — a peer coming or going must repaint on
+    // the spot rather than waiting for the 5 s heartbeat to bump the key.
+    ble_peers: Option<u8>,
     heartbeat: bool,
 }
 
@@ -141,6 +151,7 @@ impl StatusModel<'_> {
             bat_pct,
             bat_dv,
             gnss_kind,
+            ble_peers: self.ble_peers,
             heartbeat: self.heartbeat,
         }
     }
@@ -160,8 +171,22 @@ impl StatusModel<'_> {
         let mut line2 = heapless::String::<24>::new();
         let _ = write!(line2, "ID: {}", self.id_short);
 
+        // Line 3 carries the traffic counters and, on a BLE board, the
+        // peer count. The narrower of the two backends (the T114's
+        // 120 px framebuffer, 20 FONT_6X10 characters) sets the budget;
+        // the short labels keep the three-field form at 19 characters
+        // with five-digit counts, both columns still fixed-width. A
+        // board without BLE renders the historical two-field line
+        // unchanged, trailing space included in neither form.
         let mut line3 = heapless::String::<24>::new();
-        let _ = write!(line3, "RX: {:<5} TX: {:<5}", self.rx, self.tx);
+        match self.ble_peers {
+            Some(peers) => {
+                let _ = write!(line3, "R:{:<5} T:{:<5} B:{}", self.rx, self.tx, peers);
+            }
+            None => {
+                let _ = write!(line3, "RX: {:<5} TX: {:<5}", self.rx, self.tx);
+            }
+        }
 
         let mut line4 = heapless::String::<24>::new();
         match self.battery {

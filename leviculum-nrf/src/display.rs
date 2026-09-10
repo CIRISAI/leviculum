@@ -287,6 +287,15 @@ pub async fn display_task(
             tx,
             battery,
             gnss,
+            // Same source as the `links=` field of the `BLE_COUNTERS`
+            // log line, so the screen and the capture can never
+            // disagree. Not behind a cfg: `ble` is an ungated module
+            // and both BSP features pull `softdevice`, so no
+            // configuration of this crate builds without BLE — the
+            // painter's `None` arm exists for a board that one day has
+            // none, not for a feature combination reachable today.
+            // `MAX_LINKS` is 4, so the saturation never bites.
+            ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
             heartbeat,
         };
 

@@ -43,6 +43,7 @@ fn t114_model(heartbeat: bool) -> StatusModel<'static> {
         tx: 5,
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
+        ble_peers: None,
         heartbeat,
     }
 }
@@ -73,6 +74,7 @@ fn golden_v2_normal_frame() {
             valid: true,
             coords: Some((53.07516, 8.80777)),
         },
+        ble_peers: None,
         heartbeat: false,
     };
     let mut fb = V2Fb::new();
@@ -91,6 +93,7 @@ fn golden_v2_no_data_frame() {
         tx: 0,
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoData,
+        ble_peers: None,
         heartbeat: true,
     };
     let mut fb = V2Fb::new();
@@ -111,6 +114,7 @@ fn golden_v2_no_hardware_frame() {
         tx: 1,
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoHardware,
+        ble_peers: None,
         heartbeat: false,
     };
     let mut fb = V2Fb::new();
@@ -130,6 +134,7 @@ fn frame_key_distinguishes_gnss_states() {
         tx: 0,
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoData,
+        ble_peers: None,
         heartbeat: false,
     };
     let no_hw = StatusModel {
@@ -153,6 +158,7 @@ fn golden_long_name_truncation() {
         tx: 4294967295,
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
+        ble_peers: None,
         heartbeat: false,
     };
     let mut fb = T114Fb::new();
@@ -252,6 +258,7 @@ fn frame_key_quantization() {
             valid: true,
             coords: Some((53.075160, 8.807770)),
         },
+        ble_peers: None,
         heartbeat: false,
     };
     let jitter = StatusModel {
@@ -283,4 +290,83 @@ fn frame_key_quantization() {
         ..base
     };
     assert_ne!(base.key(), beat.key());
+}
+
+#[test]
+fn line3_with_ble_peers_fits_the_narrow_backend() {
+    // The narrower of the two backends sets the character budget:
+    // FONT_6X10 is 6 px wide, the T114 framebuffer is FB_W = 120 px
+    // (20 characters) and the V2's OLED 128 px (21). Five-digit RX/TX
+    // is the worst case that still keeps the columns aligned, and the
+    // peer count is one digit (MAX_LINKS = 4).
+    let model = StatusModel {
+        title: "leviculum T114",
+        id_short: "fc06c10642",
+        rx: 12345,
+        tx: 67890,
+        battery: BatteryStatus::FeatureOff,
+        gnss: GnssStatus::FeatureOff,
+        ble_peers: Some(3),
+        heartbeat: false,
+    };
+    let line3 = model.lines()[2].clone();
+    assert_eq!(line3.as_str(), "R:12345 T:67890 B:3");
+    assert!(
+        line3.len() <= 20,
+        "line 3 is {} chars, past the T114's 20-character budget: {:?}",
+        line3.len(),
+        line3.as_str()
+    );
+}
+
+#[test]
+fn line3_without_ble_is_the_historical_line() {
+    // A board with no BLE must not pay a character for a medium it does
+    // not have: byte-identical to the historical "RX: {:<5} TX: {:<5}",
+    // trailing space included in neither.
+    for (rx, tx) in [(0u32, 0u32), (17, 5), (12345, 67890)] {
+        let model = StatusModel {
+            title: "leviculum RAK4631",
+            id_short: "fc06c10642",
+            rx,
+            tx,
+            battery: BatteryStatus::FeatureOff,
+            gnss: GnssStatus::FeatureOff,
+            ble_peers: None,
+            heartbeat: false,
+        };
+        assert_eq!(
+            model.lines()[2].as_str(),
+            format!("RX: {:<5} TX: {:<5}", rx, tx)
+        );
+    }
+}
+
+#[test]
+fn frame_key_tracks_ble_peers() {
+    // A peer coming or going has to repaint on the spot instead of
+    // waiting up to 5 s for the heartbeat phase to bump the key.
+    let base = StatusModel {
+        title: "leviculum T114",
+        id_short: "fc06c10642",
+        rx: 17,
+        tx: 5,
+        battery: BatteryStatus::FeatureOff,
+        gnss: GnssStatus::FeatureOff,
+        ble_peers: Some(0),
+        heartbeat: false,
+    };
+    let joined = StatusModel {
+        ble_peers: Some(1),
+        ..base
+    };
+    assert_ne!(base.key(), joined.key());
+
+    // And the "no BLE at all" model is a third, distinct frame — not
+    // the same key as zero peers, since it renders a different line.
+    let no_ble = StatusModel {
+        ble_peers: None,
+        ..base
+    };
+    assert_ne!(base.key(), no_ble.key());
 }

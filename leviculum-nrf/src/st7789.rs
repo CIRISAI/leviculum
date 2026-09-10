@@ -373,6 +373,13 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             // the "(no feature)" line the V2 shows in that configuration.
             battery: BatteryStatus::FeatureOff,
             gnss,
+            // Same source as the `links=` field of the `BLE_COUNTERS`
+            // log line, so the panel and the capture can never
+            // disagree. Not behind a cfg, for the reason spelled out at
+            // the V2's model (`display.rs`): `bsp-t114` implies
+            // `softdevice`, so this build always has BLE. `MAX_LINKS`
+            // is 4, so the saturation never bites.
+            ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
             heartbeat,
         };
 
