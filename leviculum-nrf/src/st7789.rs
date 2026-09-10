@@ -368,10 +368,19 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             id_short: id_short.as_str(),
             rx: crate::lora::LORA_RX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
             tx: crate::lora::LORA_TX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
-            // No battery gauge task on this board yet: the ADC divider is
-            // wired but nothing reads it, so the shared painter renders
-            // the "(no feature)" line the V2 shows in that configuration.
-            battery: BatteryStatus::FeatureOff,
+            // Same mapping the V2 makes (`display.rs`), off the same
+            // watch: since #380 the ADC divider on this board has a task
+            // reading it. Read through `try_get` like the GNSS watches
+            // above rather than a receiver, so the panel costs no watch
+            // capacity. `bsp-t114` implies `battery`, so there is no
+            // cfg here for the same reason `ble_peers` has none.
+            battery: match crate::baseboard::BATTERY_STATE.try_get() {
+                Some(b) if b.voltage_mv > 0 => BatteryStatus::Data {
+                    percent: b.percent,
+                    voltage_mv: b.voltage_mv,
+                },
+                _ => BatteryStatus::NoData,
+            },
             gnss,
             // Same source as the `links=` field of the `BLE_COUNTERS`
             // log line, so the panel and the capture can never

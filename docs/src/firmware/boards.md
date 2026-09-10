@@ -256,11 +256,11 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS) | `leviculum-nrf/Cargo.toml:224` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:224` |
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:212` |
 | `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:226` |
 | `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114) | `leviculum-nrf/Cargo.toml:227` |
-| `battery` | battery telemetry on baseboard | `leviculum-nrf/Cargo.toml:233` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:233` |
 | `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:234` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface

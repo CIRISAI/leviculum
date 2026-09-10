@@ -40,6 +40,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The boards say what their battery is doing (#380). Once at boot and
+  then every 30 s, both the Pocket V2 and the T114 log `BATTERY
+  mv=<n> min_mv=<n> max_mv=<n> pct=<n> cells=<n>S`. The pack is
+  sampled at 1 Hz and the line reports the extremes of the period as
+  well as the filtered value, so a sag under transmit load is visible
+  instead of averaged away. Before this the monitor fed the display and
+  said nothing else: a Pocket V2 that restarted twice during a 90
+  minute field walk on battery produced zero battery lines, so how
+  close the pack had been to the edge could not be asked afterwards.
+  This is a margin instrument, not a brownout detector — the sampler is
+  a second apart, the transient that resets a board is microseconds
+  wide, and the reset takes the log with it.
+
+- The T114 reads its own battery at all (#380). The monitor was typed
+  to the Pocket V2's ADC pin and had the Pocket's 1.73 divider baked
+  into its arithmetic; it now takes the pin, the divider multiplier and
+  the divider-enable pin from the board file, which was already
+  declaring all three. The T114's enable pin is held high only for the
+  duration of a sample, so its 490 kΩ divider does not sit across the
+  pack between them. The pack voltage also appears on the T114's status
+  panel, which used to render "(no feature)".
+
 - Every BLE link on a board says what it actually runs at (#385). At
   the connection event, in both roles, the firmware logs
   `BLE_CONN_PARAMS conn=<h> role=central|peripheral interval_ms=<n.nn>
@@ -144,6 +166,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request was clamped, on its critical log path (#349).
 
 ### Fixed
+
+- A battery reading can no longer be rescaled by a change nobody
+  notices (#380). The conversion divided by a full scale of 3600 mV,
+  which was true only because `ChannelConfig::single_ended` happens to
+  default to the internal 0.6 V reference and a gain of 1/6; nothing in
+  our code said so and nothing checked it, so an embassy release that
+  moved either default would have shifted every reading on every board
+  by a fixed factor and left all of them plausible. Both are now set
+  explicitly, and the full-scale millivolts are derived from the
+  configured gain rather than written down beside it, with host tests
+  pinning what that gain makes of each board's divider.
+
+- An implausible battery reading no longer classifies the pack as 2S
+  (#380). The classifier's doc promised a warning on an out-of-range
+  reading and the code had no way to give one. It mattered little at
+  the Pocket V2's 6.2 V range and a great deal at the T114's 14.7 V:
+  an unenabled divider or a floating input reads far above any pack,
+  was called 2S, and then halved every per-cell voltage for the rest of
+  the boot. Such a reading now falls back to 1S and says so.
 
 - `lnflash` confirms a flash against a build line the board emitted
   *after* the reset the tool triggered, and no longer reports a good

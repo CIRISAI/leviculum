@@ -439,7 +439,10 @@ async fn main(spawner: Spawner) {
     }
     #[cfg(feature = "battery")]
     {
-        leviculum_nrf::battery::init(&spawner, p.SAADC, p.P0_05);
+        // No divider-enable pin on the RAK19026 baseboard: the 1.5/2.5
+        // divider sits permanently across the pack, so nothing to switch
+        // (`boards/rak4631.rs`, which has no `AdcCtrl`).
+        leviculum_nrf::battery::init(&spawner, p.SAADC, p.P0_05, None, rak4631::ADC_MULTIPLIER);
         info!("battery task spawned");
     }
 

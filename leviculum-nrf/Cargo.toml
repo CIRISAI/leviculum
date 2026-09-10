@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "qspi-bitbang"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "qspi-bitbang", "battery-scale"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -92,6 +92,13 @@ leviculum-record-log = { path = "record-log" }
 # edges live in a crate a host test can drive against a replaying fake
 # part; the firmware supplies six GPIOs and a delay.
 leviculum-qspi-bitbang = { path = "qspi-bitbang" }
+# What a raw SAADC count means in millivolts at a battery terminal
+# (#380): the configured ADC gain, the board's divider, the 1S/2S
+# classification and the `BATTERY` line. Here rather than in `battery.rs`
+# because the full scale is derived from the gain the channel is set to,
+# and the whole point is that the two cannot drift apart — which only a
+# host test can hold them to.
+leviculum-battery-scale = { path = "battery-scale" }
 # When a control-envelope ack may claim the record reached flash (#358).
 # The ordering between the task that answers the frame and the task that
 # writes the page is the whole defect, and the firmware crate runs no host
@@ -111,12 +118,16 @@ embedded-hal-async = "1"
 
 # Cortex-M support.
 #
-# `critical-section-single-core` is opt-in via the `bsp-t114` feature
-# (T114 has no BLE; full PRIMASK-based IRQ mask in CS is the standard
-# cortex-m idiom). The Pocket V2 build pulls a SoftDevice-aware impl
-# from `nrf-softdevice` instead via the `bsp-rak4631` feature. Both
-# build paths arrive at exactly one `critical_section::Impl` in the
-# linked binary; mutex enforced by `compile_error!` in `lib.rs`.
+# Plain `cortex-m`, with no `critical-section-single-core`: BOTH BSPs run
+# the SoftDevice, so both take the SoftDevice-aware impl that the
+# `softdevice` aggregator below pulls in
+# (`nrf-softdevice/critical-section-impl`), and that is the only
+# `critical_section::Impl` either binary links. The note that stood here
+# until #380 — "`critical-section-single-core` is opt-in via `bsp-t114`
+# (T114 has no BLE)" — described a build that stopped existing when
+# `bsp-t114` started pulling `softdevice`; cortex-m's feature is not
+# selected on either path. BSP mutex enforced by `compile_error!` in
+# `lib.rs`.
 # Bug #32 history: the prior `nrf-mpsl/critical-section-impl` (selective
 # mask, kept BLE-priority IRQs running during app CS) caused
 # Mutex<RefCell<…>> reentrance panics; resolved by SoftDevice migration.
@@ -193,10 +204,10 @@ ignored = ["cortex-m-rt", "nrf-softdevice"]
 default = []
 
 # BSP selection — exactly one must be enabled. Mutex enforced via
-# `compile_error!` in `lib.rs`. Each BSP feature also selects the
-# critical-section impl that's appropriate for that board's runtime
-# (cortex-m's full-mask single-core impl on T114; SoftDevice-aware impl
-# on Pocket V2, added Day 2-3 of bug32-softdevice-spike).
+# `compile_error!` in `lib.rs`. Both go through `softdevice` below and
+# therefore share one critical-section impl, the SoftDevice-aware one
+# added Day 2-3 of bug32-softdevice-spike; see the `cortex-m` block
+# above for why neither picks cortex-m's single-core impl.
 # Internal aggregator for the SoftDevice + nrf-softdevice feature set.
 # Both BSPs depend on this; expressing it once here keeps the BSP-feature
 # definitions free of SoftDevice-flag drift.
@@ -251,7 +262,11 @@ bsp-rak4631 = ["softdevice"]
 # baseboard part, and a receiver that is absent or unpowered reports
 # itself as `no-hardware` at runtime rather than needing its own UF2
 # (#69, #240).
-bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss"]
+# `battery` is unconditional for the same universal-build reason as the
+# panel and the L76K: the 100/490 divider and its enable pin are on every
+# T114, not on an optional baseboard, so one UF2 serves every board and a
+# board whose reading is implausible says so at runtime (#380).
+bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss", "battery"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
 gnss = [

@@ -108,12 +108,12 @@ pub static GNSS_PRESENCE: Watch<CriticalSectionRawMutex, GnssPresenceState, 3> =
 /// Battery snapshot published by the SAADC task and consumed by the display.
 ///
 /// `voltage_mv` is the pack voltage in millivolts at the battery terminal
-/// (already multiplied by the 1.73 hardware divider compensation).
-/// `percent` is mapped from `voltage_mv` via the per-cell LiPo OCV curve
-/// in `battery.rs`, scaled by the detected cell count.
-/// `cell_count` is 1 or 2; on the WisMesh Pocket V2 the value is detected
-/// at first boot from the read voltage and persisted, so subsequent
-/// boots get a stable result.
+/// (already through the board's own divider multiplier — 1.73 on the
+/// Pocket V2, 4.916 on the T114). `percent` is mapped from `voltage_mv`
+/// via the per-cell LiPo OCV curve in `leviculum-battery-scale`, scaled
+/// by the detected cell count. `cell_count` is 1 or 2, classified from
+/// the first reading of each boot; it is not persisted, so a boot whose
+/// first reading is implausible falls back to 1S and says so.
 #[cfg(feature = "battery")]
 #[derive(Clone, Copy, Debug)]
 pub struct BatteryState {

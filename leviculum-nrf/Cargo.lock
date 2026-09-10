@@ -911,6 +911,10 @@ name = "leviculum-announce-policy"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-battery-scale"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-ble-tx"
 version = "0.1.0"
 dependencies = [
@@ -998,6 +1002,7 @@ dependencies = [
  "heapless 0.8.0",
  "heapless 0.9.3",
  "leviculum-announce-policy",
+ "leviculum-battery-scale",
  "leviculum-ble-tx",
  "leviculum-boot-trace",
  "leviculum-channel-access",

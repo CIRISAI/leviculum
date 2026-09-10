@@ -429,6 +429,23 @@ async fn main(spawner: Spawner) {
         info!("gnss task spawned (L76K)");
     }
 
+    // Battery sense on AIN2 (P0.04) through the 100/490 divider the
+    // T114's `ADC_MULTIPLIER` of 4.916 encodes, with P0.06 as the
+    // divider's enable — the pin the RAK does not have, held high only
+    // for the duration of a sample so 490 kΩ does not sit across the
+    // pack between them (`boards/t114.rs`).
+    #[cfg(feature = "battery")]
+    {
+        leviculum_nrf::battery::init(
+            &spawner,
+            p.SAADC,
+            p.P0_04,
+            Some(p.P0_06.into()),
+            t114::ADC_MULTIPLIER,
+        );
+        info!("battery task spawned");
+    }
+
     let (hu, hf) = leviculum_nrf::heap_stats();
     info!("heap u={} f={}", hu, hf);
     leviculum_nrf::log_stack("post-init");
@@ -944,10 +961,14 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// separately rather than having to infer it from the numbers.
 ///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. The T114 has the L76K (#69) and no battery gauge
-/// (the ADC has no task), so a fix contributes position, speed, bearing
-/// and the HDOP the accuracy gate reads, and the battery field stays
-/// empty.
+/// peripherals exist. The T114 has the L76K (#69), so a fix contributes
+/// position, speed, bearing and the HDOP the accuracy gate reads.
+///
+/// The battery field stays empty even though the ADC has had a task
+/// since #380 and its reading is on the panel and in the `BATTERY` log
+/// line. Filling it is a change to what this node puts on the air, and
+/// #380 part 1 is a measurement change only; it is a one-line follow-on
+/// (the V2 does it at `bin/rak4631.rs`) whenever that is wanted.
 ///
 /// The die temperature it does have: every nRF52840 carries one and the
 /// SoftDevice is enabled on both boards, so it is read here through the

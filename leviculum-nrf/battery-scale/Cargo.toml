@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-battery-scale"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "What a raw SAADC count means in millivolts at a battery terminal: the configured ADC gain, the board's divider, the cell count and the log line. Host-testable"
+
+[dependencies]
