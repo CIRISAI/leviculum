@@ -626,3 +626,52 @@ fn count_separates_live_from_purged() {
     log.purge(&recs[3]).unwrap();
     assert_eq!(log.count().unwrap(), (3, 2));
 }
+
+#[test]
+fn program_operations_per_page_are_counted_and_bounded() {
+    // The commit word is re-programmed with three of its four bytes already
+    // at their final values. That changes no bit, but it is still a program
+    // operation, and a NOR page accepts only so many of those between
+    // erases — a datasheet number for the part, which we do not have for
+    // either MX25R1635F or IS25LP080D. So this does not argue the exposure,
+    // it measures it, on the workload that maximises it: bodyless records,
+    // the smallest stride the format allows, so as many commit words as
+    // possible land in one 256-byte page, each of them programmed three
+    // times (record write, commit, purge).
+    let mut log = fresh(SECTORS);
+    let mut written = 0u32;
+    while log.sector_room() >= MIN_STRIDE {
+        log.append(&key(written), written, 0, &[]).unwrap();
+        written += 1;
+    }
+    assert_eq!(log.active_sector(), 0, "the sector must not have rolled");
+    for record in collect(&mut log) {
+        log.purge(&record).unwrap();
+    }
+
+    let sim = log.into_flash();
+    let counts = sim.page_programs();
+    // 19, and the arithmetic is worth writing down because it is what moves
+    // if the format does. A 44-byte stride puts six records in a 256-byte
+    // page: six record writes, six commits, six purges, plus the tail of
+    // the record that started in the page before. Page 0 of the sector is
+    // lower (17) despite its extra 12-byte header program, because the
+    // header pushes one record's commit word out of it.
+    assert_eq!(
+        sim.max_page_programs(),
+        19,
+        "program operations per page changed: {:?}. Re-derive the number \
+         rather than relaxing it — it is what a datasheet's partial-program \
+         limit gets compared against.",
+        &counts[..SECTOR_SIZE as usize / crate::sim::PAGE_SIZE as usize]
+    );
+    assert_eq!(counts[0], 17, "{counts:?}");
+    // Every page of an untouched sector is still at zero, so the counter is
+    // measuring this sector and not accumulating over the part.
+    assert!(
+        counts[(SECTOR_SIZE / crate::sim::PAGE_SIZE) as usize..]
+            .iter()
+            .all(|c| *c == 0),
+        "{counts:?}"
+    );
+}

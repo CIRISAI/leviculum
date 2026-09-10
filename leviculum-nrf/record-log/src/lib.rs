@@ -82,10 +82,22 @@
 //!    forward from the record offset.
 //! 2. The 4-byte word at record offset 36 — `timestamp[2..4]`, `tag`,
 //!    `flags` — is programmed again, identical except that `flags` goes
-//!    `0xFF` → `0xFE`. NOR programming only clears bits, so re-programming
-//!    the three unchanged bytes is a no-op on the part and the flags byte is
-//!    the only bit that moves. 4 bytes because that is the smallest unit the
-//!    QSPI peripheral will write.
+//!    `0xFF` → `0xFE`. NOR programming only clears bits, so the three
+//!    unchanged bytes come out of it holding what they already held and the
+//!    flags byte is the only bit that moves. 4 bytes because that is the
+//!    smallest unit the QSPI peripheral will write.
+//!
+//!    No bit changing is not the same as nothing happening: the part still
+//!    takes a program pulse, on cells that are already at zero. How many
+//!    such partial programs a page accepts between erases is a datasheet
+//!    property, and no datasheet for either MX25R1635F or IS25LP080D is on
+//!    these machines — so the exposure is measured rather than argued.
+//!    The host-side `SimNor` counts program operations per 256-byte page
+//!    since that page's last erase, and the test
+//!    `program_operations_per_page_are_counted_and_bounded` asserts the
+//!    worst case this format can produce: 19, on bodyless records at the
+//!    minimum stride. When a datasheet turns up, the check is a comparison
+//!    against that number instead of a re-derivation.
 //!
 //! A record therefore counts as present **iff** its flags byte reads `0xFE`
 //! or `0xFC` *and* its CRC checks. Any cut before step 2 finishes leaves

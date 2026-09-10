@@ -19,9 +19,15 @@
 //!    completed record and no partial one" a testable claim at every offset
 //!    rather than at three hand-picked ones.
 //!
-//! It also counts erases per sector, which is the wear pin: round-robin
-//! reclaim is only level wear if the counts stay within one of each other,
-//! and a store with a fixed metadata sector fails that immediately.
+//! It also counts two things the log cannot see from the inside. Erases per
+//! sector are the wear pin: round-robin reclaim is only level wear if the
+//! counts stay within one of each other, and a store with a fixed metadata
+//! sector fails that immediately. Program operations per [`PAGE_SIZE`] page
+//! since that page was last erased are the exposure the commit word buys:
+//! re-programming a byte to the value it already holds changes no bit but is
+//! still a program, and how many of those a page accepts between erases is a
+//! datasheet property of the part. [`SimNor::max_page_programs`] turns that
+//! from an argument into a number.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -34,6 +40,11 @@ use crate::{PROGRAM_UNIT, SECTOR_SIZE};
 
 /// The erased state of a NOR cell.
 pub const ERASED: u8 = 0xFF;
+
+/// Program-page size. A NOR page program applies to one page and no more,
+/// so a write spanning two pages is two program operations on the part —
+/// which is the unit a datasheet's partial-program limit is stated in.
+pub const PAGE_SIZE: u32 = 256;
 
 /// What a simulated part refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +68,8 @@ impl NorFlashError for SimError {
 pub struct SimNor {
     data: Vec<u8>,
     erases: Vec<u32>,
+    /// Program operations each page has taken since it was last erased.
+    page_programs: Vec<u32>,
     /// Program/erase bytes left before the lights go out. `None` = mains.
     budget: Option<usize>,
     /// Program/erase bytes this part has done since it was made. What the
@@ -71,6 +84,7 @@ impl SimNor {
         Self {
             data: vec![ERASED; (sectors * SECTOR_SIZE) as usize],
             erases: vec![0; sectors as usize],
+            page_programs: vec![0; (sectors * SECTOR_SIZE / PAGE_SIZE) as usize],
             budget: None,
             spent: 0,
             dark: false,
@@ -103,6 +117,19 @@ impl SimNor {
     /// Erases per sector, index by sector. The wear pin reads this.
     pub fn erase_counts(&self) -> &[u32] {
         &self.erases
+    }
+
+    /// Program operations per page since that page was last erased, indexed
+    /// by page. A write that spans two pages counts on both.
+    pub fn page_programs(&self) -> &[u32] {
+        &self.page_programs
+    }
+
+    /// The most program operations any one page has taken since its last
+    /// erase. This is the number a part's partial-program limit is compared
+    /// against.
+    pub fn max_page_programs(&self) -> u32 {
+        self.page_programs.iter().copied().max().unwrap_or(0)
     }
 
     /// Raw contents, for a byte-exact digest or a deliberate corruption.
@@ -147,6 +174,17 @@ impl SimNor {
             self.dark = true;
         }
         done
+    }
+
+    /// The pages `len` bytes from `offset` touch. Empty for `len == 0`: a
+    /// cut before the first byte applies no pulse to anything.
+    fn pages(offset: u32, len: usize) -> core::ops::Range<usize> {
+        if len == 0 {
+            return 0..0;
+        }
+        let first = (offset / PAGE_SIZE) as usize;
+        let last = ((offset as usize + len - 1) / PAGE_SIZE as usize) + 1;
+        first..last
     }
 
     fn check_live(&self) -> Result<(), SimError> {
@@ -214,6 +252,14 @@ impl NorFlash for SimNor {
             let done = self.charge(SECTOR_SIZE as usize);
             let base = sector as usize;
             self.data[base..base + done].fill(ERASED);
+            // Only a page erased end to end starts counting again. A cut
+            // mid-erase leaves the page it stopped in with the programs it
+            // had, which is the conservative reading and the one the part
+            // will hold us to on the retry.
+            let erase_base = sector / PAGE_SIZE;
+            for page in erase_base..(sector + done as u32) / PAGE_SIZE {
+                self.page_programs[page as usize] = 0;
+            }
             if done < SECTOR_SIZE as usize {
                 return Err(SimError::PowerCut);
             }
@@ -243,6 +289,9 @@ impl NorFlash for SimNor {
             return Err(SimError::OutOfBounds);
         }
         let done = self.charge(bytes.len());
+        for page in Self::pages(offset, done) {
+            self.page_programs[page] += 1;
+        }
         for (i, byte) in bytes[..done].iter().enumerate() {
             let cell = &mut self.data[offset as usize + i];
             assert!(
