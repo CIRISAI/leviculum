@@ -262,6 +262,26 @@ async fn main(spawner: Spawner) {
         ));
     }
 
+    // QSPI NOR (IS25LP080D, 1 MB, on the RAK4631 module) — Codeberg #384
+    // part 1: identify the part, prove the bus, say what is on it. Nothing
+    // writes to it yet. Before LoRa so a hang inside `Qspi::new` leaves the
+    // marker above as the last line of the capture and of the persistent
+    // tail.
+    log_critical!("[STG] qspi-init");
+    if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
+        p.QSPI,
+        p.P0_03.into(), // SCK
+        p.P0_26.into(), // CSN
+        p.P0_30.into(), // IO0
+        p.P0_29.into(), // IO1
+        p.P0_28.into(), // IO2
+        p.P0_02.into(), // IO3 / HOLD#
+        rak4631::CONFIG.qspi_part,
+    ) {
+        leviculum_nrf::qspi::log_head(&mut flash);
+        leviculum_nrf::qspi::log_store(flash, rak4631::CONFIG.qspi_part);
+    }
+
     // LoRa (SPIM2; same instance the T114 uses, dictated by the shared
     // lora::init signature). Pin map is RAK4631-module-internal.
     let lora = leviculum_nrf::lora::init(

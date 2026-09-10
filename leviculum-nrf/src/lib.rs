@@ -29,6 +29,7 @@ pub mod log;
 pub mod lora;
 pub mod media;
 pub mod name;
+pub mod qspi;
 pub mod radio_store;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's
@@ -111,6 +112,11 @@ pub fn set_irq_priorities() {
     Interrupt::SPI2.set_priority(Priority::P5);
     Interrupt::SPIM3.set_priority(Priority::P5);
     Interrupt::UARTE0.set_priority(Priority::P5);
+    // QSPI: `Qspi::new` enables this IRQ whether or not anything awaits it,
+    // so it gets a priority here like every other peripheral we own rather
+    // than keeping the reset default of 0 — which is inside the
+    // SoftDevice's reserved band.
+    Interrupt::QSPI.set_priority(Priority::P5);
 
     // GPIOTE + RTC1 already at P2 via embassy_nrf config; assert
     // explicitly so the [NVIC_PRIO] log line reflects the same state
@@ -128,7 +134,7 @@ pub fn log_irq_priorities() {
     log::log_fmt_critical(
         "[NVIC_PRIO] ",
         format_args!(
-            "rng={:?} usbd={:?} twispi0={:?} saadc={:?} spi2={:?} spim3={:?} uarte0={:?} gpiote={:?} rtc1={:?}",
+            "rng={:?} usbd={:?} twispi0={:?} saadc={:?} spi2={:?} spim3={:?} uarte0={:?} qspi={:?} gpiote={:?} rtc1={:?}",
             Interrupt::RNG.get_priority(),
             Interrupt::USBD.get_priority(),
             Interrupt::TWISPI0.get_priority(),
@@ -136,6 +142,7 @@ pub fn log_irq_priorities() {
             Interrupt::SPI2.get_priority(),
             Interrupt::SPIM3.get_priority(),
             Interrupt::UARTE0.get_priority(),
+            Interrupt::QSPI.get_priority(),
             Interrupt::GPIOTE.get_priority(),
             Interrupt::RTC1.get_priority(),
         ),

@@ -1010,6 +1010,7 @@ dependencies = [
  "leviculum-media-state",
  "leviculum-persist-ack",
  "leviculum-queue-budget",
+ "leviculum-record-log",
  "leviculum-rx-arming",
  "leviculum-screen",
  "leviculum-sd-policy",
@@ -1031,6 +1032,13 @@ version = "0.1.0"
 [[package]]
 name = "leviculum-queue-budget"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-record-log"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+]
 
 [[package]]
 name = "leviculum-rx-arming"

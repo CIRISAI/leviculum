@@ -41,4 +41,8 @@ pub struct BoardConfig {
     pub lora_spi_freq_hz: u32,
     /// SX1262 maximum TX power in dBm.
     pub lora_max_power_dbm: i8,
+    /// The QSPI NOR part this board carries: its JEDEC id, its density and
+    /// the bus clock it is driven at. The boot probe refuses to hand out a
+    /// device whose id does not match this ([`crate::qspi`]).
+    pub qspi_part: &'static crate::qspi::FlashPart,
 }

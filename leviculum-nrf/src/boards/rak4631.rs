@@ -134,6 +134,7 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     lora_tcxo_voltage_reg: 0x07, // 3.3 V (RNode MODE_TCXO_3_3V_6X for BOARD_RAK4631)
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,
+    qspi_part: &crate::qspi::IS25LP080D,
 };
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.

@@ -227,6 +227,25 @@ async fn main(spawner: Spawner) {
         ));
     }
 
+    // QSPI NOR (MX25R1635F, 2 MB) — Codeberg #384 part 1: identify the
+    // part, prove the bus, say what is on it. Nothing writes to it yet.
+    // Before LoRa so a hang inside `Qspi::new` leaves the marker above as
+    // the last line of the capture and of the persistent tail.
+    log_critical!("[STG] qspi-init");
+    if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
+        p.QSPI,
+        p.P1_14.into(), // SCK
+        p.P1_15.into(), // CSN
+        p.P1_12.into(), // IO0
+        p.P1_13.into(), // IO1
+        p.P1_00.into(), // IO2
+        p.P1_01.into(), // IO3 / HOLD#
+        t114::CONFIG.qspi_part,
+    ) {
+        leviculum_nrf::qspi::log_head(&mut flash);
+        leviculum_nrf::qspi::log_store(flash, t114::CONFIG.qspi_part);
+    }
+
     // LoRa (SPIM2. SPIM3 has a MISO read bug on T114)
     log_critical!("[STG] lora-init");
     let lora = leviculum_nrf::lora::init(
