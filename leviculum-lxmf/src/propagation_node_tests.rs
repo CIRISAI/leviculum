@@ -349,3 +349,31 @@ fn a_forgotten_id_is_accepted_again_as_new() {
         other => panic!("expected acceptance, got {other:?}"),
     }
 }
+
+/// The clockless-bring-up epoch guard (#384 part 3): a record stored at
+/// uptime seconds survives the first real time seed instead of reading as
+/// 30 days old in one jump; records with plausible timestamps still
+/// expire normally against a plausible clock.
+#[test]
+fn a_time_seed_does_not_mass_expire_uptime_era_records() {
+    let floor = leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+    let mut seeded = node(64 * 1024);
+    // Stored while the calendar was uptime seconds.
+    let early = accepted_id(&seeded.handle_upload(&envelope(7, 1), 300, no_validation));
+    // Stored after a seed, long enough ago to be genuinely expired.
+    let old = accepted_id(&seeded.handle_upload(&envelope(7, 2), floor + 10, no_validation));
+
+    let now = floor + 40 * DAY;
+    let evicted = seeded.tick(now);
+    assert_eq!(evicted.len(), 1, "only the plausibly-old record expires");
+    assert_eq!(evicted[0].transient_id, old);
+    assert!(seeded.store().contains(&early).unwrap());
+
+    // Within one clockless boot, expiry still works: same epoch on both
+    // sides of the comparison.
+    let mut clockless = node(64 * 1024);
+    let stored = accepted_id(&clockless.handle_upload(&envelope(7, 3), 100, no_validation));
+    let evicted = clockless.tick(100 + 31 * DAY);
+    assert_eq!(evicted.len(), 1);
+    assert_eq!(evicted[0].transient_id, stored);
+}

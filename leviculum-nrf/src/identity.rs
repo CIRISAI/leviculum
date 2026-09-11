@@ -34,6 +34,21 @@ use leviculum_core::envelope::IdentityReportWire;
 static HASHES: Mutex<CriticalSectionRawMutex, Cell<Option<IdentityReportWire>>> =
     Mutex::new(Cell::new(None));
 
+/// The `lxmf.propagation` destination hash, when this boot runs the role
+/// (#384 part 3). Beside rather than inside [`HASHES`] because the wire
+/// report ([`IdentityReportWire`]) is a frozen envelope answer; the
+/// banner is prose and may grow a field.
+static PN_HASH: Mutex<CriticalSectionRawMutex, Cell<Option<[u8; 16]>>> =
+    Mutex::new(Cell::new(None));
+
+/// Publish the propagation destination for the periodic banner, so a
+/// reader attached at any time — periculum's `lxmf_pn_board` above all —
+/// can resolve the board-hosted mailbox without catching the boot
+/// window.
+pub fn note_propagation(hash: [u8; 16]) {
+    PN_HASH.lock(|cell| cell.set(Some(hash)));
+}
+
 /// Lowercase hex of an optional 16-byte hash for the banner line;
 /// `none` for a destination this boot did not register.
 struct MaybeHex16(Option<[u8; 16]>);
@@ -72,11 +87,13 @@ pub fn note_boot_identity(identity: [u8; 16], probe: Option<[u8; 16]>, lxmf: Opt
 /// does not exist.
 pub fn log_banner() {
     if let Some(report) = HASHES.lock(|cell| cell.get()) {
+        let pn = PN_HASH.lock(|cell| cell.get());
         crate::log_critical!(
-            "[IDENTITY] identity={} probe={} lxmf={}",
+            "[IDENTITY] identity={} probe={} lxmf={} lxmf_propagation={}",
             MaybeHex16(Some(report.identity)),
             MaybeHex16(report.probe),
-            MaybeHex16(report.lxmf)
+            MaybeHex16(report.lxmf),
+            MaybeHex16(pn)
         );
     }
 }

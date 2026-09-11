@@ -588,8 +588,12 @@ impl Engine {
         due.max(now_ms + 1)
     }
 
-    fn seed_clock<R, C, S>(&self, node: &mut NodeCore<R, C, S>, unix_secs: u64, from: &'static str)
-    where
+    fn seed_clock<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        unix_secs: u64,
+        from: &'static str,
+    ) where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
@@ -603,6 +607,25 @@ impl Engine {
                 "[INFO!] ",
                 format_args!("[TIME_SEED] source=overheard via={from} unix={unix_secs}"),
             );
+            self.on_clock_seeded(node.emission_secs());
+        }
+    }
+
+    /// The calendar just jumped from uptime seconds to real time: refresh
+    /// every uptime-era peer liveness stamp so the 14-day unreachability
+    /// cull does not read the jump as fourteen days of silence. "Heard
+    /// this boot" is the honest reading of those stamps.
+    fn on_clock_seeded(&mut self, now: u64) {
+        let floor = leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+        let mut refreshed: Vec<[u8; 16]> = Vec::new();
+        for peer in self.peers.iter_mut() {
+            if peer.last_heard < floor && now >= floor {
+                peer.last_heard = now;
+                refreshed.push(peer.destination_hash);
+            }
+        }
+        for destination in refreshed {
+            self.persist_peer(&destination);
         }
     }
 
@@ -855,6 +878,16 @@ impl Engine {
             }
             _ => {}
         }
+    }
+
+    /// Forget per-link state before an engine-initiated close: the
+    /// `LinkClosed` that close produces rides the engine's own output and
+    /// is never fed back to `on_events`, so the cleanup the remote-close
+    /// path does there has to happen here by hand.
+    fn drop_link_state(&mut self, link_id: &LinkId) {
+        self.pending_proofs.remove(link_id);
+        self.validated_links.remove(link_id);
+        self.inbound_transfers.retain(|held| held != link_id);
     }
 
     fn owns_link<R, C, S>(&self, node: &NodeCore<R, C, S>, link_id: &LinkId) -> bool
@@ -1245,6 +1278,7 @@ impl Engine {
         let Some(remote) = self.validated_links.get(link_id).copied() else {
             // Multi-message without a validated peering key: torn down
             // (`reference/LXMF/LXMF/LXMRouter.py:2381-2389`).
+            self.drop_link_state(link_id);
             out.merge(node.close_link(link_id));
             return;
         };
@@ -1255,6 +1289,7 @@ impl Engine {
         if self.sync_batch.is_some() {
             // One batch at a time; the gate throttled `/offer`s, so a
             // second batch here is a peer ignoring the throttle.
+            self.drop_link_state(link_id);
             out.merge(node.close_link(link_id));
             return;
         }
@@ -1459,20 +1494,18 @@ impl Engine {
             self.next_announce_at_ms = Some(now_ms + 60_000);
             return;
         }
-        if !node.has_plausible_wall_clock() {
-            // Module docs, item 6: withheld until any source seeds the
-            // calendar; logged once per condition, not once a minute.
-            if !self.announce_withheld_logged {
-                self.announce_withheld_logged = true;
-                crate::log::log_fmt_critical(
-                    "PN ",
-                    format_args!("announce withheld reason=no-clock"),
-                );
-            }
-            self.next_announce_at_ms = Some(now_ms + 60_000);
-            return;
-        }
         self.announce_withheld_logged = false;
+        // NOT clock-gated (instruction item 6): a clockless board still
+        // announces, with its uptime timebase. A peer treats the small
+        // timebase as merely old — creation is unconditional, only
+        // updates are ordered by it (`peer`,
+        // `reference/LXMF/LXMF/LXMRouter.py:2016`) — and the first
+        // contact the announce invites is exactly what delivers a seed
+        // (an upload's envelope timestamp, a peer's announce timebase).
+        // The age-based bookkeeping the jump would break is epoch-guarded
+        // where it lives (expiry in `PropagationNode::tick`, the peer
+        // cull refresh in `seed_clock`). [TIME_SOURCE] in the periodic
+        // banner says which clock stamped any given announce.
         let app_data = self.role.announce_app_data(node.emission_secs());
         if let Ok(send) = node.announce_destination(&self.dest_hash, Some(&app_data)) {
             out.merge(send);
@@ -1503,7 +1536,7 @@ impl Engine {
         S: Storage,
     {
         let mut out = TickOutput::default();
-        if !node.has_plausible_wall_clock() || !crate::record_store::mounted() {
+        if !crate::record_store::mounted() {
             return out;
         }
         let app_data = self.role.announce_app_data(node.emission_secs());
@@ -1807,11 +1840,13 @@ impl Engine {
                         if let Ok((_, send)) = node.send_packet_on_link(&link_id, &reject) {
                             out.merge(send);
                         }
+                        self.drop_link_state(&link_id);
                         out.merge(node.close_link(&link_id));
                     }
                     UploadOutcome::PeerSyncForm => {
                         // Multi-message on the packet path: nonconforming
                         // (`reference/LXMF/LXMF/LXMRouter.py:2382-2385`).
+                        self.drop_link_state(&link_id);
                         out.merge(node.close_link(&link_id));
                     }
                     UploadOutcome::Malformed(_) => {}
@@ -2050,6 +2085,7 @@ impl Engine {
                 // Invalid stamps throttle the sender
                 // (`reference/LXMF/LXMF/LXMRouter.py:2440-2450`).
                 self.gate.throttle(remote, node.emission_secs());
+                self.drop_link_state(&link_id);
                 out.merge(node.close_link(&link_id));
             }
         }

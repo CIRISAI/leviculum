@@ -606,10 +606,25 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// (`clean_message_store`, `reference/LXMF/LXMF/LXMRouter.py:1156-1160`)
     /// and prune the processed-ID cache
     /// (`clean_transient_id_caches`, `:1011`).
+    ///
+    /// Expiry is epoch-guarded for the board's clockless bring-up (#384
+    /// part 3, instruction item 6): a message stored while the node's
+    /// calendar was still uptime seconds carries an implausibly small
+    /// `received_at`, and the first real time seed would otherwise make
+    /// every such record "30 days old" in one jump and mass-expire a
+    /// store the node just proved it accepted. A record whose timestamp
+    /// sits below the plausibility floor while `now_secs` sits above it
+    /// is therefore never expired by age — its space is still reclaimed
+    /// by the store's own displacement (host) or page reclaim (board),
+    /// so the guard costs retention policy, never capacity.
     pub fn tick(&mut self, now_secs: u64) -> Vec<Eviction> {
         let expiry = self.config.message_expiry_secs;
+        let floor = leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
         let mut expired = Vec::new();
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
+            if meta.received_at < floor && now_secs >= floor {
+                return;
+            }
             if now_secs.saturating_sub(meta.received_at) > expiry {
                 expired.push(Eviction {
                     transient_id: meta.transient_id,

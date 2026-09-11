@@ -525,6 +525,7 @@ async fn main(spawner: Spawner) {
             ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
             ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
         ));
+        leviculum_nrf::identity::note_propagation(*pn.destination_hash().as_bytes());
         spawner.must_spawn(leviculum_nrf::pn::miner_task());
     } else {
         log_critical!("PN role=off reason=identity-underivable");
