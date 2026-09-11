@@ -114,11 +114,18 @@ pub static GNSS_PRESENCE: Watch<CriticalSectionRawMutex, GnssPresenceState, 3> =
 /// by the detected cell count. `cell_count` is 1 or 2, classified from
 /// the first reading of each boot; it is not persisted, so a boot whose
 /// first reading is implausible falls back to 1S and says so.
+///
+/// `percent` is `None` when `voltage_mv` is outside the band `cell_count`
+/// implies (`leviculum_battery_scale::pack_percent`): the percentage is
+/// derived through the classification, so a pack the classification
+/// cannot explain gets no percentage rather than a wrong one. The voltage
+/// is never withheld — it is a measurement, not a derivation, and it is
+/// what a reader can still act on.
 #[cfg(feature = "battery")]
 #[derive(Clone, Copy, Debug)]
 pub struct BatteryState {
     pub voltage_mv: u16,
-    pub percent: u8,
+    pub percent: Option<u8>,
     pub cell_count: u8,
 }
 
@@ -127,7 +134,7 @@ impl BatteryState {
     pub const fn empty() -> Self {
         Self {
             voltage_mv: 0,
-            percent: 0,
+            percent: None,
             cell_count: 1,
         }
     }

@@ -29,11 +29,21 @@ use embedded_graphics::{
 
 /// Battery line source. `FeatureOff` renders the historical
 /// "Bat: -- (no feature)", `NoData` the runtime "Bat: --".
+///
+/// `Data`'s percent is optional and its voltage is not, which is the
+/// asymmetry #380 put there: the voltage is what the ADC measured, the
+/// percentage is derived from it through a cell-count classification, and
+/// a reading the classification cannot explain gets no percentage. The
+/// panel then shows the voltage with `--%` beside it rather than a number
+/// nobody can check.
 #[derive(Clone, Copy, Debug)]
 pub enum BatteryStatus {
     FeatureOff,
     NoData,
-    Data { percent: u8, voltage_mv: u16 },
+    Data {
+        percent: Option<u8>,
+        voltage_mv: u16,
+    },
 }
 
 /// GNSS line source. `NoData` is the "receiver not heard from yet"
@@ -119,7 +129,7 @@ impl StatusModel<'_> {
             BatteryStatus::Data {
                 percent,
                 voltage_mv,
-            } => (Some(percent), Some(voltage_mv / 100)),
+            } => (percent, Some(voltage_mv / 100)),
             _ => (None, None),
         };
         let (sat, valid, coords) = match self.gnss {
@@ -202,7 +212,17 @@ impl StatusModel<'_> {
             } => {
                 let v_int = voltage_mv / 1000;
                 let v_frac = (voltage_mv % 1000) / 10;
-                let _ = write!(line4, "Bat: {:>3}% {}.{:02}V", percent, v_int, v_frac);
+                // Same column layout either way, so the line does not
+                // reflow when the percentage comes and goes: " 51%" and
+                // " --%" are both three characters plus the sign.
+                match percent {
+                    Some(percent) => {
+                        let _ = write!(line4, "Bat: {:>3}% {}.{:02}V", percent, v_int, v_frac);
+                    }
+                    None => {
+                        let _ = write!(line4, "Bat:  --% {}.{:02}V", v_int, v_frac);
+                    }
+                }
             }
         }
 

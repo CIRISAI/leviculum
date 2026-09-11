@@ -5,7 +5,14 @@
 //! Once at boot and then every 30 s:
 //!
 //! ```text
-//! BATTERY mv=<ewma> min_mv=<n> max_mv=<n> pct=<n> cells=<n>S t=<ms>
+//! BATTERY mv=<ewma> min_mv=<n> max_mv=<n> pct=<n|none> cells=<n>S t=<ms>
+//! ```
+//!
+//! and, only when that `pct=` starts or stops being derivable, one line
+//! of its own:
+//!
+//! ```text
+//! BATTERY_PCT reportable=<0|1> pack_mv=<n> cells=<n>S band_lo_mv=<n> band_hi_mv=<n> t=<ms>
 //! ```
 //!
 //! Before this the module sampled the pack, fed [`BATTERY_STATE`] for
@@ -33,6 +40,27 @@
 //! measured. Whether transmitting at 22 dBm closes that distance needs a
 //! boot counter in non-volatile storage and is not this.
 //!
+//! # Why a percentage can be missing
+//!
+//! The cell count is one reading's worth of decision, taken at boot and
+//! held for the boot; every per-cell voltage after it is the pack voltage
+//! divided by it. `119067f1` caught the first reading that is not a pack
+//! at all. What it could not catch is a first reading that is inside the
+//! plausible band and still wrong, or a classification that was right at
+//! boot and is not any more — and the percentage that goes on the air
+//! carries neither a unit nor a cell count, so nothing a remote reader
+//! has can tell a wrong one from a right one.
+//!
+//! So the percentage is reported only while the pack voltage stays inside
+//! the band its classification implies
+//! ([`leviculum_battery_scale::pack_percent`]). Outside it the board
+//! publishes no percentage and says so once, on the transition rather
+//! than once per sample. The voltage is never withheld: `mv=` is a
+//! measurement and stays whatever the ADC said, and it is the number a
+//! reader can still act on. Nor is the classification revised — that is a
+//! boot-time decision and re-taking it at runtime is a different
+//! question; this only declines to build on it.
+//!
 //! # Where the numbers live
 //!
 //! Nothing quantitative is in this file. The ADC gain, the conversion,
@@ -51,8 +79,8 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 
 use leviculum_battery_scale::{
-    cell_mv_to_percent, classify_cell_count, AdcGain, BatteryEwma, BatteryLine, BatteryScale,
-    BatteryWindow,
+    classify_cell_count, pack_percent, AdcGain, BatteryEwma, BatteryLine, BatteryPercentLine,
+    BatteryScale, BatteryWindow,
 };
 
 use crate::baseboard::{BatteryState, BATTERY_STATE};
@@ -127,6 +155,24 @@ async fn sample_pack_mv(
     scale.raw_to_battery_mv(buf[0])
 }
 
+/// Say, on a line of its own, that the percentage just started or
+/// stopped being derivable.
+///
+/// Critical rather than gated: these lines are rare by construction — one
+/// per transition, not one per sample — and each of them is what explains
+/// a gap in the `pct=` series that a capture would otherwise have to
+/// guess at. A field board has no host to open the `RUNTIME_DRAIN_OPEN`
+/// gate, and this is precisely the run in which the gap appears.
+fn log_percent_gate(pack_mv: u16, cell_count: u8, reportable: bool) {
+    crate::log::log_fmt_critical(
+        "[BAT] ",
+        format_args!(
+            "{}",
+            BatteryPercentLine::new(pack_mv, cell_count, reportable)
+        ),
+    );
+}
+
 #[embassy_executor::task]
 pub async fn battery_task(
     saadc_periph: Peri<'static, peripherals::SAADC>,
@@ -192,19 +238,19 @@ pub async fn battery_task(
     let mut ewma = BatteryEwma::new(first_mv);
     let mut window = BatteryWindow::new(first_mv);
 
-    let publish = |mv: u16| {
+    let publish = |mv: u16, percent: Option<u8>| {
         sender.send(BatteryState {
             voltage_mv: mv,
-            percent: cell_mv_to_percent(mv / cell_count as u16),
+            percent,
             cell_count,
         });
     };
-    let report = |mv: u16, window: &BatteryWindow, at_boot: bool| {
+    let report = |mv: u16, percent: Option<u8>, window: &BatteryWindow, at_boot: bool| {
         let line = BatteryLine {
             mv,
             min_mv: window.min_mv(),
             max_mv: window.max_mv(),
-            percent: cell_mv_to_percent(mv / cell_count as u16),
+            percent,
             cells: cell_count,
         };
         // Same gate argument as the `init` line above: the boot one
@@ -219,8 +265,18 @@ pub async fn battery_task(
     // Say it once at boot rather than 30 s in: a board that resets
     // before the first period is up would otherwise report nothing at
     // all, which is exactly the boot worth hearing about.
-    publish(first_mv);
-    report(first_mv, &window, true);
+    let mut percent = pack_percent(first_mv, cell_count);
+    let mut reportable = percent.is_some();
+    publish(first_mv, percent);
+    report(first_mv, percent, &window, true);
+    if !reportable {
+        // Only the withheld state earns a line at boot. A boot that CAN
+        // derive a percentage has already said so, with `pct=` on the
+        // `BATTERY` line immediately above; a boot that cannot is the
+        // anomaly, and it is critical for the same reason `init` is — a
+        // board on battery in a field has no host to open the drain gate.
+        log_percent_gate(first_mv, cell_count, false);
+    }
 
     let mut samples: u32 = 0;
     loop {
@@ -230,11 +286,23 @@ pub async fn battery_task(
         window.observe(pack_mv);
         samples = samples.wrapping_add(1);
 
+        // Judged on the same number the percentage would be derived from,
+        // in the same iteration it is derived in, so the line and the
+        // published state can never disagree about which side of the band
+        // the pack is on. Every sample, not every report: the transition
+        // is the event, and waiting up to 30 s to mention it would put it
+        // in the wrong place on a merged timeline.
+        percent = pack_percent(filtered, cell_count);
+        if percent.is_some() != reportable {
+            reportable = percent.is_some();
+            log_percent_gate(filtered, cell_count, reportable);
+        }
+
         if samples.is_multiple_of(SAMPLES_PER_PUBLISH) {
-            publish(filtered);
+            publish(filtered, percent);
         }
         if samples.is_multiple_of(SAMPLES_PER_REPORT) {
-            report(filtered, &window, false);
+            report(filtered, percent, &window, false);
             // Seed the next window with the sample that closed this one,
             // so no sample falls between two windows.
             window.restart(pack_mv);

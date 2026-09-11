@@ -36,6 +36,45 @@
 //! ADC gain choice and not ours — gain and divider are independent, so
 //! our 3600 stays right beside their 4.916.
 //!
+//! # What the percentage guard costs
+//!
+//! The cell count is decided from one reading at boot, and for the rest
+//! of that boot every per-cell voltage is the pack voltage divided by
+//! it. A wrong count therefore halves or doubles the percentage, and the
+//! percentage that goes on the air carries neither a unit nor the count
+//! it was divided by — a remote reader cannot tell a wrong one from a
+//! right one. So [`pack_percent`] declines to derive a percentage from a
+//! pack voltage the classified cell count cannot produce, and the caller
+//! reports nothing rather than a number.
+//!
+//! The band's edges come from the curve below rather than from constants
+//! of their own, because the guard and the percentage have to agree
+//! about what a cell is. A cell that reads more than one step of the
+//! curve's own top segment above its 100 % point ([`CELL_CEILING_MV`],
+//! 4.33 V) is not a cell of a pack this size; the step is the headroom
+//! the table itself offers, and it clears the 4.2 V a charger holds
+//! during constant-voltage without admitting a reading that is a whole
+//! extra cell wide.
+//!
+//! The floor is the decision that costs something, and it is deliberate.
+//! The curve's bottom point is 3.0 V per cell and everything at or below
+//! it reads 0 %: that is a real pack state — a nearly-empty one — and
+//! not a measurement fault. A node that went quiet about its battery
+//! exactly when the battery was about to give out would be worse than
+//! one that reported zero. So the curve's floor is NOT the guard's
+//! floor. The guard's floor is the protection cut-off
+//! ([`PLAUSIBLE_FLOOR_MV`], 2.5 V per cell), below which a LiPo's own
+//! protection circuit has opened and no live pack delivers current, so a
+//! reading there is a floating input or a divider that did not settle
+//! rather than an empty battery. Between the two, 2.5 to 3.0 V per cell,
+//! the percentage is reported and it is 0 — which is the whole span in
+//! which a live pack can be flat.
+//!
+//! What the guard does not do is re-classify. A pack that leaves its
+//! band says so once and stays classified as it was; deciding the cell
+//! count again at runtime is a different question from declining to
+//! build on the answer already given.
+//!
 //! # What this crate cannot see
 //!
 //! Nothing here is a brownout detector. The board that reset twice on a
@@ -255,6 +294,69 @@ pub fn cell_mv_to_percent(cell_mv: u16) -> u8 {
     0
 }
 
+/// The per-cell reading the curve calls 100 %: its top breakpoint.
+pub const CURVE_TOP_MV: u16 = OCV_CURVE[0].0;
+
+/// The per-cell reading the curve's bottom sentinel sits at. At or below
+/// it [`cell_mv_to_percent`] answers 0 %, and that answer is a pack
+/// state and not an error — see the crate doc for why this is not the
+/// guard's floor.
+pub const CURVE_FLOOR_MV: u16 = OCV_CURVE[OCV_CURVE.len() - 1].0;
+
+/// The highest per-cell voltage [`pack_band_mv`] admits: the curve's top
+/// point carried one step of the curve's own top segment further
+/// (4190 + 140 mV). The curve clamps above its top point instead of
+/// saying how far above is still a cell, so the step is the only
+/// headroom the table offers; it clears the 4.2 V a charger holds during
+/// constant-voltage and stops far short of the 6.0 V that would be a
+/// second cell.
+pub const CELL_CEILING_MV: u16 = CURVE_TOP_MV + (OCV_CURVE[0].0 - OCV_CURVE[1].0);
+
+/// The lowest per-cell voltage [`pack_band_mv`] admits. Deliberately
+/// *below* [`CURVE_FLOOR_MV`]: an over-discharged pack is a real state
+/// that must still report 0 %, and only a reading under the protection
+/// cut-off stops being a live pack at all. The crate doc argues it.
+pub const CELL_FLOOR_MV: u16 = PLAUSIBLE_FLOOR_MV;
+
+/// The pack voltages a `cells`-cell pack can produce, inclusive, or
+/// `None` for a cell count no pack has (0, or one whose band leaves the
+/// u16 millivolts the whole ADC path speaks).
+///
+/// This is the range the classification *implies*, which is a different
+/// and much tighter thing than the range [`classify_cell_count`] accepts:
+/// the classifier only has to place a reading on one side of the 1S/2S
+/// gap, while this has to say whether the reading can be that many cells
+/// at all. 5.5 V classifies as 1S — it is under the 2S floor — and is
+/// not one cell of anything.
+pub const fn pack_band_mv(cells: u8) -> Option<(u16, u16)> {
+    if cells == 0 {
+        return None;
+    }
+    let n = cells as u32;
+    let hi = CELL_CEILING_MV as u32 * n;
+    if hi > u16::MAX as u32 {
+        return None;
+    }
+    Some(((CELL_FLOOR_MV as u32 * n) as u16, hi as u16))
+}
+
+/// The charge estimate for a pack reading, or `None` when the reading is
+/// outside what `cells` cells can produce.
+///
+/// `None` is not "unknown battery": the voltage is a measurement and the
+/// caller keeps publishing it. It is "this percentage would be derived
+/// through a classification the evidence no longer supports", which is
+/// the one case in which a number is worse than no number — a percentage
+/// carries neither its unit nor its cell count, so a reader far away has
+/// nothing to check it against.
+pub fn pack_percent(pack_mv: u16, cells: u8) -> Option<u8> {
+    let (lo, hi) = pack_band_mv(cells)?;
+    if pack_mv < lo || pack_mv > hi {
+        return None;
+    }
+    Some(cell_mv_to_percent(pack_mv / cells as u16))
+}
+
 /// A live 1S pack never reads below this. A LiPo's own protection
 /// circuit opens near 2.5 V and the board's regulator gives out before
 /// that, so a reading under it is not a battery: it is a floating input,
@@ -426,8 +528,12 @@ pub struct BatteryLine {
     pub min_mv: u16,
     /// See [`Self::min_mv`].
     pub max_mv: u16,
-    /// Charge estimate from the OCV curve, per cell.
-    pub percent: u8,
+    /// Charge estimate from the OCV curve, per cell, or `None` when the
+    /// pack voltage is outside the band the classified cell count implies
+    /// ([`pack_percent`]). It renders as `pct=none`: the key stays in the
+    /// line so a field capture can still be split on it, and the absence
+    /// is stated rather than left to a reader to notice.
+    pub percent: Option<u8>,
     /// Cells in series, as classified at boot.
     pub cells: u8,
 }
@@ -436,8 +542,70 @@ impl fmt::Display for BatteryLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "BATTERY mv={} min_mv={} max_mv={} pct={} cells={}S",
-            self.mv, self.min_mv, self.max_mv, self.percent, self.cells,
+            "BATTERY mv={} min_mv={} max_mv={} pct=",
+            self.mv, self.min_mv, self.max_mv,
+        )?;
+        match self.percent {
+            Some(percent) => write!(f, "{}", percent)?,
+            None => write!(f, "none")?,
+        }
+        write!(f, " cells={}S", self.cells)
+    }
+}
+
+/// The `BATTERY_PCT` line's body, byte-exact.
+///
+/// Said once when the percentage starts or stops being derivable, not
+/// once per reading: the sampler runs at 1 Hz, and a pack resting just
+/// outside its band would otherwise put a line a second into the capture
+/// and bury the transition that is the whole information. The pack
+/// voltage and the band it was judged against travel with it, so the line
+/// says why on its own without a reader having to know the constants.
+pub struct BatteryPercentLine {
+    /// Whether a percentage is being reported from here on.
+    pub reportable: bool,
+    /// The reading that flipped it.
+    pub pack_mv: u16,
+    /// Cells in series, as classified at boot — unchanged by this, which
+    /// is the point: the board declines to build on the classification,
+    /// it does not revise it.
+    pub cells: u8,
+    /// The band `cells` implies, inclusive, as [`pack_band_mv`] gives it.
+    pub lo_mv: u16,
+    /// See [`Self::lo_mv`].
+    pub hi_mv: u16,
+}
+
+impl BatteryPercentLine {
+    /// Build the line for one reading and the boot's classification.
+    ///
+    /// The band comes from [`pack_band_mv`], so the line cannot state
+    /// edges the guard does not use. A cell count that has no band at all
+    /// renders as `0..0`, which is what it is — the classifier never
+    /// produces one, and a line that lied about it would be worse than
+    /// one that shows an empty band.
+    pub fn new(pack_mv: u16, cells: u8, reportable: bool) -> Self {
+        let (lo_mv, hi_mv) = pack_band_mv(cells).unwrap_or((0, 0));
+        Self {
+            reportable,
+            pack_mv,
+            cells,
+            lo_mv,
+            hi_mv,
+        }
+    }
+}
+
+impl fmt::Display for BatteryPercentLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BATTERY_PCT reportable={} pack_mv={} cells={}S band_lo_mv={} band_hi_mv={}",
+            u8::from(self.reportable),
+            self.pack_mv,
+            self.cells,
+            self.lo_mv,
+            self.hi_mv,
         )
     }
 }
@@ -624,6 +792,139 @@ mod tests {
         assert_eq!(cell_mv_to_percent(3845), 57);
     }
 
+    /// The band's edges are the curve's, not numbers of their own. If
+    /// the table is ever re-borrowed from a newer Meshtastic, the guard
+    /// moves with it — which is the reason it was derived rather than
+    /// written down.
+    #[test]
+    fn the_band_edges_come_from_the_curve() {
+        assert_eq!(CURVE_TOP_MV, 4190);
+        assert_eq!(CURVE_FLOOR_MV, 3000);
+        // The curve's top segment is (4050, 90) → (4190, 100): a 140 mV
+        // step, carried once past full.
+        assert_eq!(CELL_CEILING_MV, 4330);
+        // Comfortably above the 4.2 V a charger holds, and nowhere near
+        // the 6.0 V that would be a second cell. `const` blocks because
+        // both sides are constants and clippy is right that the check
+        // belongs at compile time.
+        const { assert!(CELL_CEILING_MV > 4200) };
+        const { assert!(CELL_CEILING_MV < TWO_S_FLOOR_MV) };
+    }
+
+    /// The floor is the protection cut-off and NOT the curve's floor.
+    /// The crate doc argues why; this is the assertion that keeps a later
+    /// "tidy-up" from moving it up to 3000 and silencing every
+    /// nearly-empty node.
+    #[test]
+    fn the_bands_floor_sits_below_the_curves_floor() {
+        assert_eq!(CELL_FLOOR_MV, PLAUSIBLE_FLOOR_MV);
+        const { assert!(CELL_FLOOR_MV < CURVE_FLOOR_MV) };
+        assert_eq!(pack_band_mv(1), Some((2500, 4330)));
+        assert_eq!(pack_band_mv(2), Some((5000, 8660)));
+    }
+
+    /// A reading inside the band yields a percentage.
+    #[test]
+    fn a_reading_inside_the_band_yields_a_percentage() {
+        assert_eq!(pack_percent(4200, 1), Some(100));
+        assert_eq!(pack_percent(3800, 1), Some(50));
+        // The same pack voltages doubled, on a 2S classification that is
+        // actually right.
+        assert_eq!(pack_percent(8400, 2), Some(100));
+        assert_eq!(pack_percent(7600, 2), Some(50));
+    }
+
+    /// The case that motivated the guard (#380): the boot reading
+    /// classified 2S, the pack is a 1S one. Dividing by two lands the
+    /// per-cell voltage at 1.95 V, the curve clamps it to 0 %, and a
+    /// remote reader sees a nearly-full pack reported as flat — with
+    /// nothing in the number to say it is wrong.
+    #[test]
+    fn a_two_cell_classification_with_a_one_cell_voltage_yields_nothing() {
+        let pack_mv = 3900;
+        // What the old code would have published, for the record.
+        assert_eq!(cell_mv_to_percent(pack_mv / 2), 0);
+        assert_eq!(pack_percent(pack_mv, 2), None);
+        // And the same reading against the classification it really is.
+        assert_eq!(pack_percent(pack_mv, 1), Some(cell_mv_to_percent(3900)));
+    }
+
+    /// The mirror case: a 1S classification carrying a voltage no single
+    /// cell reaches. It is inside the plausible band the boot classifier
+    /// checks (2.5–9 V) and under the 2S floor, so the classifier calls
+    /// it 1S and is happy; the curve clamps it to 100 % and a half-empty
+    /// 2S pack reports full.
+    #[test]
+    fn a_one_cell_classification_with_an_over_cell_voltage_yields_nothing() {
+        let pack_mv = 5500;
+        assert!(classify_cell_count(pack_mv).plausible);
+        assert_eq!(classify_cell_count(pack_mv).cells, 1);
+        assert_eq!(cell_mv_to_percent(pack_mv), 100);
+        assert_eq!(pack_percent(pack_mv, 1), None);
+    }
+
+    /// Both edges of both bands, from both sides.
+    #[test]
+    fn the_band_boundaries_hold_from_both_sides() {
+        for cells in [1u8, 2] {
+            let (lo, hi) = pack_band_mv(cells).expect("band for a real cell count");
+            assert_eq!(pack_percent(lo - 1, cells), None, "{cells}S just under lo");
+            assert!(pack_percent(lo, cells).is_some(), "{cells}S at lo");
+            assert!(pack_percent(hi, cells).is_some(), "{cells}S at hi");
+            assert_eq!(pack_percent(hi + 1, cells), None, "{cells}S just over hi");
+        }
+    }
+
+    /// The floor decision, made concrete: a 1S pack between the
+    /// protection cut-off and the curve's floor is a real, nearly-empty
+    /// pack. It reports 0 %, because a node that goes quiet about its
+    /// battery exactly then is worse than one that reports zero.
+    #[test]
+    fn a_nearly_empty_pack_reports_zero_rather_than_nothing() {
+        assert_eq!(pack_percent(2900, 1), Some(0));
+        assert_eq!(pack_percent(2500, 1), Some(0));
+        // Same on 2S: 2.5 V/cell is flat, not a fault.
+        assert_eq!(pack_percent(5000, 2), Some(0));
+        // Below the cut-off no live pack delivers current, so this is a
+        // measurement fault and not an empty battery.
+        assert_eq!(pack_percent(2400, 1), None);
+    }
+
+    /// A cell count no classifier produces still has to answer, and the
+    /// answer is "no band" rather than a division by zero.
+    #[test]
+    fn a_cell_count_of_zero_has_no_band_and_no_percentage() {
+        assert_eq!(pack_band_mv(0), None);
+        assert_eq!(pack_percent(3700, 0), None);
+        // And one whose band would leave the millivolt range the ADC path
+        // speaks at all.
+        assert_eq!(pack_band_mv(16), None);
+        assert_eq!(pack_percent(60_000, 16), None);
+    }
+
+    /// The guard admits every reading the classifier calls a good pack of
+    /// the count it just classified — otherwise a board would boot into
+    /// the withheld state on a perfectly ordinary pack.
+    #[test]
+    fn every_plausible_classification_agrees_with_its_own_band() {
+        for pack_mv in PLAUSIBLE_FLOOR_MV..=PLAUSIBLE_CEILING_MV {
+            let class = classify_cell_count(pack_mv);
+            if !class.plausible {
+                continue;
+            }
+            let got = pack_percent(pack_mv, class.cells);
+            // The classifier's 1S range runs to 5999 mV, well past what
+            // one cell can be; those are exactly the readings the guard
+            // exists to catch, so they are allowed to be None.
+            let (lo, hi) = pack_band_mv(class.cells).expect("band");
+            if (lo..=hi).contains(&pack_mv) {
+                assert!(got.is_some(), "{pack_mv} mV as {}S", class.cells);
+            } else {
+                assert!(got.is_none(), "{pack_mv} mV as {}S", class.cells);
+            }
+        }
+    }
+
     /// Five steps of the 1 Hz filter must land where one step of the old
     /// 5 s filter landed, or the display's smoothing changed under it.
     #[test]
@@ -673,12 +974,54 @@ mod tests {
             mv: 3812,
             min_mv: 3604,
             max_mv: 3840,
-            percent: 51,
+            percent: Some(51),
             cells: 1,
         };
         assert_eq!(
             line.to_string(),
             "BATTERY mv=3812 min_mv=3604 max_mv=3840 pct=51 cells=1S"
+        );
+    }
+
+    /// The withheld form of the same line. The voltage is untouched —
+    /// only the derived number is gone — and the `pct=` key survives so a
+    /// capture split on keys does not lose a column.
+    #[test]
+    fn a_withheld_percentage_renders_as_none_and_keeps_the_voltage() {
+        let line = BatteryLine {
+            mv: 3900,
+            min_mv: 3860,
+            max_mv: 3940,
+            percent: None,
+            cells: 2,
+        };
+        assert_eq!(
+            line.to_string(),
+            "BATTERY mv=3900 min_mv=3860 max_mv=3940 pct=none cells=2S"
+        );
+    }
+
+    /// The bytes of the state-change line, both ways round, with the band
+    /// it was judged against.
+    #[test]
+    fn the_percent_gate_line_renders_the_documented_shape() {
+        assert_eq!(
+            BatteryPercentLine::new(3900, 2, false).to_string(),
+            "BATTERY_PCT reportable=0 pack_mv=3900 cells=2S band_lo_mv=5000 band_hi_mv=8660"
+        );
+        assert_eq!(
+            BatteryPercentLine::new(7400, 2, true).to_string(),
+            "BATTERY_PCT reportable=1 pack_mv=7400 cells=2S band_lo_mv=5000 band_hi_mv=8660"
+        );
+    }
+
+    /// A cell count with no band renders an empty one rather than
+    /// inventing edges.
+    #[test]
+    fn a_cell_count_without_a_band_renders_an_empty_band() {
+        assert_eq!(
+            BatteryPercentLine::new(3900, 0, false).to_string(),
+            "BATTERY_PCT reportable=0 pack_mv=3900 cells=0S band_lo_mv=0 band_hi_mv=0"
         );
     }
 }

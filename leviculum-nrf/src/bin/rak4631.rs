@@ -1041,9 +1041,13 @@ where
     };
     #[cfg(feature = "battery")]
     {
+        // `and_then`, not `map`: the published percentage is itself an
+        // Option since #380, and a pack whose voltage its classification
+        // cannot explain sends no battery sensor at all rather than a
+        // number a collector cannot check.
         readings.battery_percent = leviculum_nrf::baseboard::BATTERY_STATE
             .try_get()
-            .map(|b| b.percent);
+            .and_then(|b| b.percent);
     }
     (readings, has_fix)
 }

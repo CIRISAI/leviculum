@@ -66,7 +66,7 @@ fn golden_v2_normal_frame() {
         rx: 12345,
         tx: 678,
         battery: BatteryStatus::Data {
-            percent: 87,
+            percent: Some(87),
             voltage_mv: 4012,
         },
         gnss: GnssStatus::Data {
@@ -80,6 +80,36 @@ fn golden_v2_normal_frame() {
     let mut fb = V2Fb::new();
     model.paint(&mut fb, 128).unwrap();
     check_golden("v2_normal", &render_ascii(&fb));
+}
+
+/// The #380 case on the panel: the pack voltage is a measurement and
+/// stays, the percentage is derived through a cell-count classification
+/// the reading does not support and is withheld. "Bat: --% 3.90V" is
+/// distinguishable at a glance from both "Bat: --" (nothing read yet) and
+/// from a number, which is the whole point — a wrong percentage looks
+/// exactly like a right one.
+#[test]
+fn golden_v2_battery_without_percent_frame() {
+    let model = StatusModel {
+        title: "leviculum RAK4631",
+        id_short: "fc06c10642",
+        rx: 12345,
+        tx: 678,
+        battery: BatteryStatus::Data {
+            percent: None,
+            voltage_mv: 3900,
+        },
+        gnss: GnssStatus::Data {
+            sats: 7,
+            valid: true,
+            coords: Some((53.07516, 8.80777)),
+        },
+        ble_peers: None,
+        heartbeat: false,
+    };
+    let mut fb = V2Fb::new();
+    model.paint(&mut fb, 128).unwrap();
+    check_golden("v2_battery_no_percent", &render_ascii(&fb));
 }
 
 #[test]
@@ -250,7 +280,7 @@ fn frame_key_quantization() {
         rx: 1,
         tx: 2,
         battery: BatteryStatus::Data {
-            percent: 80,
+            percent: Some(80),
             voltage_mv: 3950,
         },
         gnss: GnssStatus::Data {
@@ -263,7 +293,7 @@ fn frame_key_quantization() {
     };
     let jitter = StatusModel {
         battery: BatteryStatus::Data {
-            percent: 80,
+            percent: Some(80),
             voltage_mv: 3999, // same 100 mV bucket (39 dV)
         },
         gnss: GnssStatus::Data {
@@ -290,6 +320,25 @@ fn frame_key_quantization() {
         ..base
     };
     assert_ne!(base.key(), beat.key());
+
+    // Losing the percentage must repaint: the same voltage with no
+    // percent beside it is a different frame, and a key that ignored it
+    // would leave a stale number on the panel until the next heartbeat.
+    let withheld = StatusModel {
+        battery: BatteryStatus::Data {
+            percent: None,
+            voltage_mv: 3950,
+        },
+        ..base
+    };
+    assert_ne!(base.key(), withheld.key());
+    // And it is not the same as having heard nothing at all: that frame
+    // carries no voltage either.
+    let nothing = StatusModel {
+        battery: BatteryStatus::NoData,
+        ..base
+    };
+    assert_ne!(withheld.key(), nothing.key());
 }
 
 #[test]

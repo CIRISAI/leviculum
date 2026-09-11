@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A battery percentage that cannot be checked from far away is no longer
+  sent (#380). The cell count is decided from one reading at boot and
+  held for the boot, and every per-cell voltage after it is the pack
+  voltage divided by it — so a wrong count halves or doubles the
+  percentage, and the percentage carries neither a unit nor the count it
+  was divided by. Both boards now report a charge percentage only while
+  the measured pack voltage stays inside the band its classification
+  implies; outside it the `BATTERY` line reads `pct=none`, the telemetry
+  report carries no battery sensor at all, and the panel shows `--%`
+  beside the voltage. The state change is said once, on its own line,
+  `BATTERY_PCT reportable=0|1 pack_mv=<n> cells=<n>S band_lo_mv=<n>
+  band_hi_mv=<n>`, rather than once per sample. The band comes from the
+  OCV curve that already computes the percentage, so the guard and the
+  percentage cannot disagree about what a cell is: its ceiling is the
+  curve's 100 % point carried one step of its own top segment further
+  (4.33 V per cell), and its floor sits deliberately BELOW the curve's
+  floor, at the 2.5 V per cell protection cut-off — a pack between 2.5
+  and 3.0 V is nearly empty, which is a real state that must report 0 %
+  rather than go quiet exactly when the battery is about to give out.
+  The voltage itself is never withheld: it is a measurement, not a
+  derivation. Nor is the classification revised at runtime; this only
+  declines to build on it.
+
 - A second BLE connection from an identity a node already holds a link
   to is decided by who opened it (#376, #382). An INCOMING duplicate
   displaces the old link: a peer that opens a second connection has, by
@@ -65,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The boards say what their battery is doing (#380). Once at boot and
   then every 30 s, both the Pocket V2 and the T114 log `BATTERY
-  mv=<n> min_mv=<n> max_mv=<n> pct=<n> cells=<n>S`. The pack is
+  mv=<n> min_mv=<n> max_mv=<n> pct=<n>|none cells=<n>S`. The pack is
   sampled at 1 Hz and the line reports the extremes of the period as
   well as the filtered value, so a sag under transmit load is visible
   instead of averaged away. Before this the monitor fed the display and
