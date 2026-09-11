@@ -302,15 +302,66 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
+/// Decode a hex string, or `None` for anything that is not one.
+///
+/// The input is a filename from the storage directory, which means it is
+/// whatever the filesystem holds and not what this store wrote. It is read
+/// as bytes: `&s[i..i + 2]` panicked on any name whose character crossed
+/// that boundary (`"\u{1F600}"` is four bytes, so an even length and a
+/// slice inside a character), and one stray file with a non-ASCII name
+/// took the node down on enumeration (Codeberg #336).
 pub(crate) fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
         .collect()
 }
+
+/// Name a directory entry the store could not interpret, once per name.
+///
+/// Enumeration runs again on every restore and every key listing, so a line
+/// per pass would turn one stray file into a log flood. The memo is per
+/// process and capped: past [`UNREADABLE_ENTRY_LOG_CAP`] the store stops
+/// naming entries rather than grow a set whose size is chosen by whoever
+/// drops files in the directory. Skipping is unchanged and unconditional —
+/// this only decides whether the skip is audible (Codeberg #336).
+pub(crate) fn note_unreadable_entry(dir: &Path, name: &std::ffi::OsStr) {
+    use std::sync::{LazyLock, Mutex};
+
+    static SEEN: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    let path = dir.join(name);
+    let Ok(mut seen) = SEEN.lock() else {
+        return;
+    };
+    if seen.len() >= UNREADABLE_ENTRY_LOG_CAP || !seen.insert(path.clone()) {
+        return;
+    }
+    tracing::warn!("Skipping unreadable storage entry: {}", path.display());
+    if seen.len() == UNREADABLE_ENTRY_LOG_CAP {
+        tracing::warn!(
+            "{UNREADABLE_ENTRY_LOG_CAP} unreadable storage entries named; \
+             further ones are skipped silently"
+        );
+    }
+}
+
+/// How many distinct unreadable entries [`note_unreadable_entry`] names
+/// before it goes quiet.
+const UNREADABLE_ENTRY_LOG_CAP: usize = 32;
 
 /// Test seam: stalls/observes the off-lock write (compiled out of release).
 #[cfg(test)]
@@ -957,6 +1008,25 @@ mod tests {
     fn temp_storage() -> Storage {
         let path = temp_dir().join(format!("reticulum_test_{}", std::process::id()));
         Storage::new(&path).unwrap()
+    }
+
+    /// Codeberg #336: the names come off the filesystem, so `hex_decode`
+    /// reads bytes. The old body sliced the `&str` at even byte offsets,
+    /// which panics whenever a character straddles one — and an emoji is
+    /// four bytes, so the length check waved it through first.
+    #[test]
+    fn hex_decode_survives_a_name_it_cannot_interpret() {
+        assert_eq!(hex_decode("a7b2"), Some(vec![0xa7, 0xb2]));
+        assert_eq!(hex_decode("A7B2"), Some(vec![0xa7, 0xb2]));
+
+        // Four bytes, even length, and every slice boundary inside the
+        // character: this is the input that took the node down.
+        assert_eq!(hex_decode("\u{1F600}"), None);
+        assert_eq!(hex_decode("ä"), None);
+        assert_eq!(hex_decode("abc"), None);
+        // from_str_radix accepted a sign, so "+f" used to decode to 0x0f
+        // and name a key nothing wrote.
+        assert_eq!(hex_decode("+f"), None);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use leviculum_core::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use leviculum_core::ratchet_store::{KnownRatchetEntry, RatchetStore};
 
 use crate::error::Error;
-use crate::storage::{atomic_write, hex_decode, hex_encode};
+use crate::storage::{atomic_write, hex_decode, hex_encode, note_unreadable_entry};
 
 pub(crate) const RATCHETS_DIR: &str = "ratchets";
 pub(crate) const RATCHETKEYS_DIR: &str = "ratchetkeys";
@@ -105,7 +105,10 @@ impl RatchetStore for FileRatchetStore {
         for entry in dir.flatten() {
             let name = match entry.file_name().into_string() {
                 Ok(n) => n,
-                Err(_) => continue,
+                Err(_) => {
+                    note_unreadable_entry(&self.ratchets_dir, &entry.file_name());
+                    continue;
+                }
             };
             // Skip temp files
             if name.ends_with(".tmp") || name.ends_with(".out") {
@@ -118,7 +121,10 @@ impl RatchetStore for FileRatchetStore {
                     arr.copy_from_slice(&b);
                     arr
                 }
-                _ => continue,
+                _ => {
+                    note_unreadable_entry(&self.ratchets_dir, &entry.file_name());
+                    continue;
+                }
             };
 
             let data = match std::fs::read(entry.path()) {
@@ -170,7 +176,10 @@ impl RatchetStore for FileRatchetStore {
         for entry in dir.flatten() {
             let name = match entry.file_name().into_string() {
                 Ok(n) => n,
-                Err(_) => continue,
+                Err(_) => {
+                    note_unreadable_entry(&self.ratchetkeys_dir, &entry.file_name());
+                    continue;
+                }
             };
             if name.ends_with(".tmp") {
                 continue;
@@ -182,7 +191,10 @@ impl RatchetStore for FileRatchetStore {
                     arr.copy_from_slice(&b);
                     arr
                 }
-                _ => continue,
+                _ => {
+                    note_unreadable_entry(&self.ratchetkeys_dir, &entry.file_name());
+                    continue;
+                }
             };
 
             let data = match std::fs::read(entry.path()) {
@@ -208,5 +220,53 @@ impl RatchetStore for FileRatchetStore {
         Self::ensure_dir(&self.ratchetkeys_dir);
         let hex_name = hex_encode(dest_hash);
         atomic_write(&self.ratchetkeys_dir.join(&hex_name), serialized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codeberg #336: both ratchet directories are enumerated on every
+    /// restore, and both used to panic inside the hex decode on a name the
+    /// store did not write — a four-byte character has an even length, so
+    /// the length check let it through and the slice landed inside it.
+    /// Skip it, keep the entries that are ours, and stay up.
+    #[test]
+    fn a_foreign_filename_is_skipped_rather_than_fatal() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FileRatchetStore::new(dir.path());
+        FileRatchetStore::ensure_dir(&store.ratchets_dir);
+        FileRatchetStore::ensure_dir(&store.ratchetkeys_dir);
+
+        let dest = [0xA7u8; TRUNCATED_HASHBYTES];
+        store
+            .save_known_ratchet(
+                &dest,
+                &KnownRatchetEntry {
+                    ratchet: [0x42; RATCHET_SIZE],
+                    received_at_secs: 1_700_000_000.0,
+                },
+            )
+            .expect("save ratchet");
+        store
+            .save_dest_ratchet_keys(&dest, b"private ratchet key")
+            .expect("save ratchet key");
+
+        for target in [&store.ratchets_dir, &store.ratchetkeys_dir] {
+            std::fs::write(target.join("\u{1F600}"), b"not ours").expect("stray file");
+            let raw = std::ffi::OsStr::from_bytes(b"\xff\xfe").to_owned();
+            std::fs::write(target.join(raw), b"not ours either").expect("stray file");
+        }
+
+        let known = store.load_known_ratchets().expect("load ratchets");
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].0, dest);
+        assert_eq!(known[0].1.ratchet, [0x42; RATCHET_SIZE]);
+
+        let keys = store.load_dest_ratchet_keys().expect("load ratchet keys");
+        assert_eq!(keys, vec![(dest, b"private ratchet key".to_vec())]);
     }
 }

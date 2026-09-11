@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use leviculum_lxmf::storage::{LxmfStorage, StorageError};
 
-use crate::storage::{atomic_write, hex_decode, hex_encode};
+use crate::storage::{atomic_write, hex_decode, hex_encode, note_unreadable_entry};
 
 /// A directory of LXMF key-value entries.
 pub struct FileLxmfStorage {
@@ -90,10 +90,12 @@ impl LxmfStorage for FileLxmfStorage {
         let mut keys = Vec::new();
         for entry in directory.flatten() {
             let Ok(name) = entry.file_name().into_string() else {
+                note_unreadable_entry(&self.dir, &entry.file_name());
                 continue;
             };
             // A rename that lost its race, or a file this store did not write.
             let Some(key) = hex_decode(&name) else {
+                note_unreadable_entry(&self.dir, &entry.file_name());
                 continue;
             };
             if key.starts_with(prefix) {
@@ -124,6 +126,32 @@ mod tests {
             *byte = seed.wrapping_add(index as u8);
         }
         Identity::from_private_key_bytes(&private).expect("deterministic identity")
+    }
+
+    /// Codeberg #336: the directory holds whatever the filesystem holds.
+    /// A foreign name used to panic enumeration inside the hex decode and
+    /// take the node down; it is skipped, and the entries this store did
+    /// write are still listed.
+    #[test]
+    fn a_foreign_filename_is_skipped_rather_than_fatal() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut storage = FileLxmfStorage::new(dir.path()).expect("open store");
+        storage.store(b"lxmf/peers/anna", b"Anna").expect("store");
+        storage.flush().expect("flush");
+
+        // Four bytes, even length, and no slice boundary that is also a
+        // character boundary — the name the old decode panicked on.
+        std::fs::write(dir.path().join("\u{1F600}"), b"not ours").expect("stray file");
+        // A name that is not UTF-8 at all, which no String can hold.
+        let raw = std::ffi::OsStr::from_bytes(b"\xff\xfe").to_owned();
+        std::fs::write(dir.path().join(raw), b"not ours either").expect("stray file");
+
+        assert_eq!(
+            storage.keys(b"lxmf/peers/").expect("keys"),
+            vec![b"lxmf/peers/anna".to_vec()]
+        );
     }
 
     #[test]
