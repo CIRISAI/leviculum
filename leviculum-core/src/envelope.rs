@@ -225,6 +225,52 @@ pub const TYPE_BLE_TX_GAP: u8 = 0x10;
 /// link.
 pub const BLE_TX_GAP_MAX_MS: u16 = 5_000;
 
+/// Record-store erase storm (Codeberg #384); payload is a record count
+/// and a body size, two big-endian u16s (see [`encode_store_storm`]).
+/// The board appends that many synthetic records of that size to its
+/// message store, tagged so a later batch can purge them, and reports
+/// what it did on its debug port.
+///
+/// A bench instrument like [`TYPE_TX_SPACING`] and [`TYPE_BLE_TX_GAP`],
+/// and volatile like them: nothing is persisted as configuration, the
+/// storm happens once when asked, and a reset leaves the board doing
+/// nothing. What it measures is the one cost the store imposes on the
+/// rest of the board — a 4 KiB page erase takes the flash for ~85 ms
+/// (nRF52840 PS, NVMC) and the SoftDevice schedules it between radio
+/// events — so the question "what does a store under load do to BLE
+/// throughput and LoRa airtime" needs a way to provoke the erases
+/// without waiting for a mesh to fill the region.
+///
+/// Bounded on both fields ([`STORE_STORM_MAX_RECORDS`],
+/// [`STORE_STORM_MAX_BYTES`]) and `records == 0` is refused too: the
+/// bounds live in [`classify_control_frame`], so every binary and every
+/// host-side stub refuses the same values by the same rule. A board that
+/// is already running a storm answers [`REFUSE_BUSY`] — the classifier
+/// cannot know that, only the board can.
+pub const TYPE_STORE_STORM: u8 = 0x11;
+
+/// The most records one [`TYPE_STORE_STORM`] may ask for.
+///
+/// A thousand field-sized records is about six laps of the 16-page region
+/// `memory.x` reserves (11 records to a page), which is more erase storm
+/// than any single measurement point needs and still finite — the board
+/// cannot be asked for work it would still be doing at the end of the
+/// run. A longer sweep is more requests, which is also what makes each
+/// point's start visible in a capture.
+pub const STORE_STORM_MAX_RECORDS: u16 = 1_000;
+
+/// The largest body one storm record may carry.
+///
+/// A synthetic record stands in for a stored message; the 2026-09-09
+/// field walk measured a median of 304 B. 1 KiB covers that with room
+/// and stays well inside what one page can hold, which is the reason the
+/// bound is this number rather than the record log's own per-page
+/// maximum: a value judgement here must not encode another crate's
+/// geometry. `leviculum_nrf::record_store` asserts at compile time that
+/// this bound fits that geometry, so the two cannot drift apart
+/// silently.
+pub const STORE_STORM_MAX_BYTES: u16 = 1_024;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -470,6 +516,40 @@ pub fn encode_announce() -> Vec<u8> {
 /// Encode a complete BLE transmit-gap frame (#376).
 pub fn encode_ble_tx_gap(gap_ms: u16) -> Vec<u8> {
     encode_frame(TYPE_BLE_TX_GAP, &gap_ms.to_be_bytes())
+}
+
+/// What one [`TYPE_STORE_STORM`] asks for: how many synthetic records, and
+/// how many body bytes each (Codeberg #384).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreStormWire {
+    /// Records to append. `0` is refused — a storm of nothing is a typo.
+    pub records: u16,
+    /// Body bytes per record. `0` is a legal record (the header alone),
+    /// and it is the one that measures the store's per-record floor.
+    pub size: u16,
+}
+
+/// Encode a complete record-store storm frame (#384).
+pub fn encode_store_storm(storm: &StoreStormWire) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4);
+    payload.extend_from_slice(&storm.records.to_be_bytes());
+    payload.extend_from_slice(&storm.size.to_be_bytes());
+    encode_frame(TYPE_STORE_STORM, &payload)
+}
+
+/// Decode a record-store storm payload: exactly 4 bytes, two u16s
+/// big-endian.
+///
+/// Shape only. Both bounds ([`STORE_STORM_MAX_RECORDS`],
+/// [`STORE_STORM_MAX_BYTES`]) and the `records == 0` refusal are value
+/// judgements and belong to [`classify_control_frame`], which answers
+/// them with [`REFUSE_VALUE`] rather than calling the frame malformed.
+pub fn decode_store_storm_payload(payload: &[u8]) -> Option<StoreStormWire> {
+    let bytes: [u8; 4] = payload.try_into().ok()?;
+    Some(StoreStormWire {
+        records: u16::from_be_bytes([bytes[0], bytes[1]]),
+        size: u16::from_be_bytes([bytes[2], bytes[3]]),
+    })
 }
 
 /// Decode a BLE transmit-gap payload: exactly 2 bytes, u16 big-endian.
@@ -1370,6 +1450,15 @@ pub enum ControlAction {
     /// returns the board to `0`. The value is already inside
     /// [`BLE_TX_GAP_MAX_MS`] — the classifier refused anything larger.
     BleTxGap(u16),
+    /// Envelope record-store storm (Codeberg #384): hand the request to
+    /// the store task, which appends that many synthetic records to the
+    /// board's message store, and answer `encode_ack(TYPE_STORE_STORM)`.
+    /// A board whose store is not mounted, or which is already running a
+    /// storm, answers `encode_refusal(.., REFUSE_BUSY)` — the classifier
+    /// cannot see either condition, so unlike the value bounds they are
+    /// the firmware's to check. Both fields are already inside their
+    /// bounds: the classifier refused anything else.
+    StoreStorm(StoreStormWire),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1508,6 +1597,26 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             },
             None => malformed,
         },
+        TYPE_STORE_STORM => match decode_store_storm_payload(frame.payload) {
+            // Both bounds here in the shared decision function, for the
+            // reason the BLE gap's is: every binary and every host-side
+            // stub then refuses the same values. `records == 0` joins
+            // them — it asks for no work at all, which is a typo rather
+            // than an experiment, and acking it would report a storm
+            // that never happened.
+            Some(storm)
+                if storm.records > 0
+                    && storm.records <= STORE_STORM_MAX_RECORDS
+                    && storm.size <= STORE_STORM_MAX_BYTES =>
+            {
+                ControlAction::StoreStorm(storm)
+            }
+            Some(_) => ControlAction::Refuse {
+                refused_type: TYPE_STORE_STORM,
+                reason: REFUSE_VALUE,
+            },
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1540,6 +1649,7 @@ mod tests {
         TYPE_IDENTITY_QUERY,
         TYPE_ANNOUNCE,
         TYPE_BLE_TX_GAP,
+        TYPE_STORE_STORM,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -3160,5 +3270,118 @@ mod tests {
             };
             assert_eq!(refused.1, REFUSE_UNKNOWN_TYPE);
         }
+    }
+    // -----------------------------------------------------------------
+    // The record-store erase storm (Codeberg #384)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_store_storm_frame_round_trips_and_classifies() {
+        let storm = StoreStormWire {
+            records: 250,
+            size: 304,
+        };
+        let bytes = encode_store_storm(&storm);
+        // Nine bytes: under the 19-byte minimum Reticulum wire packet, so
+        // firmware that does not know the type cannot take it for one, and
+        // an old board times out rather than acting on it.
+        assert_eq!(bytes.len(), ENVELOPE_HEADER_LEN + 4);
+        assert!(bytes.len() < 19);
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED),
+            ControlAction::StoreStorm(storm)
+        );
+    }
+
+    #[test]
+    fn every_storm_inside_both_bounds_survives_the_wire() {
+        // Including both bound values themselves, and a zero size: a
+        // header-only record is a legal record and the one that measures
+        // the store's per-record floor.
+        for records in [1u16, 2, 11, 176, STORE_STORM_MAX_RECORDS] {
+            for size in [0u16, 1, 304, STORE_STORM_MAX_BYTES] {
+                let storm = StoreStormWire { records, size };
+                assert_eq!(
+                    decode_store_storm_payload(
+                        decode_frame(&encode_store_storm(&storm)).unwrap().payload
+                    ),
+                    Some(storm)
+                );
+                assert_eq!(
+                    classify_control_frame(&encode_store_storm(&storm), ACCEPTED),
+                    ControlAction::StoreStorm(storm)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_storm_outside_its_bounds_is_refused_by_value_not_executed() {
+        // Each of the three value refusals, separately, because each is a
+        // different mistake: asking for no work at all, asking for more
+        // work than the instrument will do, and asking for a record the
+        // region's pages could not hold.
+        for storm in [
+            StoreStormWire {
+                records: 0,
+                size: 304,
+            },
+            StoreStormWire {
+                records: STORE_STORM_MAX_RECORDS + 1,
+                size: 304,
+            },
+            StoreStormWire {
+                records: 1,
+                size: STORE_STORM_MAX_BYTES + 1,
+            },
+            StoreStormWire {
+                records: u16::MAX,
+                size: u16::MAX,
+            },
+        ] {
+            assert_eq!(
+                classify_control_frame(&encode_store_storm(&storm), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_STORE_STORM,
+                    reason: REFUSE_VALUE,
+                },
+                "{storm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_storm_payload_of_the_wrong_length_is_malformed_not_a_value_refusal() {
+        // The distinction matters to a host: a malformed frame is a bug in
+        // the sender, a value refusal is a number the operator chose.
+        for payload in [&[][..], &[0x00][..], &[0, 1, 0, 1, 0][..]] {
+            assert_eq!(decode_store_storm_payload(payload), None, "{payload:02x?}");
+            assert_eq!(
+                classify_control_frame(&encode_frame(TYPE_STORE_STORM, payload), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: TYPE_STORE_STORM,
+                    reason: REFUSE_MALFORMED,
+                },
+                "{payload:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_board_without_the_storm_frame_refuses_it_by_name() {
+        // The capability rule: a firmware with no store must not ack a
+        // storm, or a measurement run records erase-storm points that
+        // never happened.
+        let bytes = encode_store_storm(&StoreStormWire {
+            records: 10,
+            size: 304,
+        });
+        assert_eq!(
+            classify_control_frame(&bytes, ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_STORE_STORM,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
     }
 }

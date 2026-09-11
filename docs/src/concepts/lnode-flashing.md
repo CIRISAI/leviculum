@@ -182,14 +182,31 @@ the ordinary mass-storage path, without touching the bootloader.
 `leviculum-nrf/memory.x` used to contradict this, computing safe
 application space as `0xEC000 - 0x27000` (788 KiB) — 8 KiB the
 bootloader would have refused to write. It now links the application
-against the bootloader's own window, `0xEA000 - 0x27000` = `0xC3000`
-(780 KiB); the image is 344 KiB, so the change costs nothing today.
+against the bootloader's own window minus the record store's region,
+`0xDA000 - 0x27000` = `0xB3000` (716 KiB); the image is ~660 KiB, so the
+change costs nothing today and the gate prints the remaining gap on every
+push (`scripts/check-nrf-store-gap.sh`).
 
 Everything at or above `0xEA000` survives every UF2 flash, because the
-bootloader declines those blocks. Both persistence pages live there:
-identity at `0xEC000` and the radio configuration at `0xEB000`
-(`leviculum-nrf/src/boards/t114.rs`, `radio_store.rs`). A user's chosen
-frequency therefore survives a firmware update as well as a reset.
+bootloader declines those blocks. All three persistence pages live there:
+identity at `0xEC000`, the radio configuration at `0xEB000` and the
+telemetry target / fixed position / media profile at `0xEA000`
+(`leviculum-nrf/src/boards/t114.rs`, `radio_store.rs`, `telemetry.rs`). A
+user's chosen frequency therefore survives a firmware update as well as a
+reset.
+
+The record store (#384, `0xDA000`–`0xEA000`, 16 pages) survives one too,
+but for a different reason, and the difference matters because it is the
+weaker guarantee of the two. The store sits **inside** the writable
+window, so `USER_FLASH_END` does not protect it. What protects it is that
+the bootloader erases only the pages it writes: `flash_nrf5x_write`
+buffers one page and `flash_nrf5x_flush` (upstream
+`src/flash_nrf5x.c`) erases and programs exactly that page, and only when
+its content differs. Our `.uf2` carries blocks from `0x27000` to the end
+of the image and none above it, so no page of the store is ever a target
+and no erase reaches one. That holds as long as the image stops below
+`0xDA000`, which `memory.x`'s `ASSERT`s make a link error and the gate
+above reports as a number.
 
 Family IDs seen in practice:
 
@@ -210,7 +227,7 @@ reset button (commit `43d25830`).
 ## The SoftDevice
 
 Our firmware links against S140 v7.x and places its application at
-`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:30`). A board
+`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:78`). A board
 carrying S140 6.1.1
 puts the boundary at `0x26000` instead, so the version is not cosmetic.
 

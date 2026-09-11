@@ -99,6 +99,18 @@ lint-nrf:
 nrf-stack-frames:
     bash scripts/check-nrf-stack-frames.sh
 
+# Record-store gap gate (Codeberg #384). The store's 64 KiB region sits directly
+# above the firmware image, inside the window a UF2 may write, so an image that
+# grew into it would take the board's message store with it on the next flash.
+# The linker already refuses the three ways memory.x can say that wrong (see the
+# ASSERTs there, and the script's header for what it adds on top): what this
+# gate contributes is the remaining gap as a NUMBER for both bins on every run,
+# measured on the image as flashed and against the bounds the firmware itself
+# mounts. A link error is a cliff with no warning track.
+# Reads the linked ELFs nrf-stack-frames already built, so it costs seconds.
+nrf-store-gap:
+    bash scripts/check-nrf-store-gap.sh
+
 # BLE event-buffer gate. nrf-softdevice sizes the `sd_ble_evt_get` buffer from
 # a cargo feature, defaults to 128 bytes when none is picked, and panics rather
 # than truncating when an event does not fit. Our characteristics are 251 bytes
@@ -183,6 +195,7 @@ nrf-shellcheck:
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/check-nrf-evt-max-size.sh \
+        scripts/check-nrf-store-gap.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
@@ -457,7 +470,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

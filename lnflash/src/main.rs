@@ -112,6 +112,25 @@ struct Cli {
     )]
     set_ble_tx_gap: Option<u16>,
 
+    /// Ask every running LNode to append synthetic records to its message
+    /// store, then exit. No flashing. COUNT[,BYTES] — how many records and
+    /// how many body bytes each; BYTES defaults to 304, the median stored
+    /// object the 2026-09-09 field walk measured. A bench instrument for
+    /// #384: it provokes the flash erases a filling store causes, so their
+    /// cost to BLE throughput and LoRa airtime can be measured without
+    /// waiting for a mesh to fill the region. The records are tagged as
+    /// synthetic so a later purge can find them; nothing is persisted as
+    /// configuration. The board acks the request and appends on its own
+    /// task — watch its debug port (if00) for STORE storm and STORE
+    /// op_fail lines.
+    #[arg(
+        long,
+        value_name = "COUNT[,BYTES]",
+        value_parser = parse_storm,
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap"]
+    )]
+    store_storm: Option<leviculum_core::envelope::StoreStormWire>,
+
     /// Set the transmit power, in dBm, on every running LNode, then exit.
     /// No flashing. Reads the board's current radio settings first and sends
     /// them back with only the power changed, so nothing else moves; a board
@@ -303,6 +322,64 @@ struct Cli {
     /// testing against a captured tree; no board is ever touched through it.
     #[arg(long, value_name = "DIR", hide = true)]
     sysfs: Option<PathBuf>,
+}
+
+/// Parse what `--store-storm` was given: `COUNT[,BYTES]` (#384).
+///
+/// Both bounds are the board's, named from
+/// [`leviculum_core::envelope`], and refused here as well as there: a
+/// value the board would turn down must not cost a port open and a frame
+/// first, and `lnflash` is the tool an operator types numbers into. The
+/// default size is the median stored object the 2026-09-09 field walk
+/// measured, so `--store-storm 200` is a storm of field-sized records.
+fn parse_storm(text: &str) -> Result<leviculum_core::envelope::StoreStormWire, String> {
+    use leviculum_core::envelope::{
+        StoreStormWire, STORE_STORM_MAX_BYTES, STORE_STORM_MAX_RECORDS,
+    };
+    /// The 2026-09-09 field walk's median stored object: 272 B of
+    /// `lxmf_data` plus a 32-byte propagation stamp.
+    const DEFAULT_BYTES: u16 = 304;
+    const SHAPE: &str = "a storm is COUNT[,BYTES]: how many records, and how many body bytes \
+                         each (default 304)";
+
+    let tokens: Vec<&str> = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let (count, bytes) = match tokens.as_slice() {
+        [count] => (*count, None),
+        [count, bytes] => (*count, Some(*bytes)),
+        _ => {
+            return Err(format!(
+                "{SHAPE}; {:?} has {} value(s)",
+                text.trim(),
+                tokens.len()
+            ))
+        }
+    };
+    let records: u16 = count
+        .parse()
+        .map_err(|_| format!("{SHAPE}; {count:?} is not a record count"))?;
+    let size: u16 = match bytes {
+        Some(bytes) => bytes
+            .parse()
+            .map_err(|_| format!("{SHAPE}; {bytes:?} is not a size in bytes"))?,
+        None => DEFAULT_BYTES,
+    };
+    if records == 0 {
+        return Err("a storm of 0 records would append nothing".to_string());
+    }
+    if records > STORE_STORM_MAX_RECORDS {
+        return Err(format!(
+            "{records} records is more than the board accepts ({STORE_STORM_MAX_RECORDS})"
+        ));
+    }
+    if size > STORE_STORM_MAX_BYTES {
+        return Err(format!(
+            "{size} B is larger than the board accepts ({STORE_STORM_MAX_BYTES})"
+        ));
+    }
+    Ok(StoreStormWire { records, size })
 }
 
 fn main() -> ExitCode {
@@ -535,6 +612,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
+    if let Some(storm) = cli.store_storm {
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::store_storm(&catalogue, &sysfs, ui, storm)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
     if let Some(dbm) = cli.set_tx_power {
         // The wire field is one signed byte; the CLI takes an i32 so a value
         // outside it is named here rather than wrapping into a plausible one.
@@ -713,6 +803,7 @@ fn exit_code(outcomes: &[flow::Outcome]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviculum_core::envelope::StoreStormWire;
 
     use lnflash::transport::Written;
     use lnflash::verify::Verdict;
@@ -1154,6 +1245,129 @@ mod tests {
                 gap(&["--set-ble-tx-gap", value]).is_err(),
                 "{value} was accepted"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The record-store erase storm (Codeberg #384)
+    // -----------------------------------------------------------------
+
+    fn storm(args: &[&str]) -> Result<Option<StoreStormWire>, String> {
+        let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+            .map_err(|err| err.to_string())?;
+        Ok(cli.store_storm)
+    }
+
+    #[test]
+    fn without_the_storm_flag_no_board_is_asked_for_one() {
+        // The control: a plain flash writes nothing to any store.
+        assert_eq!(storm(&[]).unwrap(), None);
+        assert_eq!(storm(&["--yes"]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_count_alone_takes_the_field_median_as_its_size() {
+        // The common case on the bench is "N field-sized records", so the
+        // size is optional and its default is the measured median rather
+        // than a round number.
+        assert_eq!(
+            storm(&["--store-storm", "200"]).unwrap(),
+            Some(StoreStormWire {
+                records: 200,
+                size: 304
+            })
+        );
+    }
+
+    #[test]
+    fn a_count_and_a_size_are_both_carried_verbatim() {
+        // Separators as in --set-position: comma or whitespace, because a
+        // shell-quoted "200 1024" is what a script ends up passing.
+        for text in ["11,1024", "11 1024"] {
+            assert_eq!(
+                storm(&["--store-storm", text]).unwrap(),
+                Some(StoreStormWire {
+                    records: 11,
+                    size: 1024
+                }),
+                "{text}"
+            );
+        }
+        // Both bounds are still legal experiments, and a zero-byte body is
+        // a legal record — it measures the per-record floor.
+        assert_eq!(
+            storm(&[
+                "--store-storm",
+                &format!(
+                    "{},{}",
+                    leviculum_core::envelope::STORE_STORM_MAX_RECORDS,
+                    leviculum_core::envelope::STORE_STORM_MAX_BYTES
+                )
+            ])
+            .unwrap()
+            .unwrap()
+            .records,
+            leviculum_core::envelope::STORE_STORM_MAX_RECORDS
+        );
+        assert_eq!(
+            storm(&["--store-storm", "5,0"]).unwrap(),
+            Some(StoreStormWire {
+                records: 5,
+                size: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_storm_the_board_would_refuse_is_a_usage_error_first() {
+        // The board refuses each of these by name (REFUSE_VALUE); the
+        // command line refuses them first so no port is opened and no
+        // frame is sent on the way to a wire refusal.
+        for value in [
+            "0",      // appends nothing
+            "0,304",  // the same, with a size
+            "1001",   // past STORE_STORM_MAX_RECORDS
+            "1,1025", // past STORE_STORM_MAX_BYTES
+            "70000",  // past u16 entirely
+            "ten",    // not a number
+            "1,2,3",  // three values
+            "",       // nothing at all
+        ] {
+            assert!(
+                storm(&["--store-storm", value]).is_err(),
+                "{value:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_separator_is_tolerated_exactly_as_set_position_tolerates_one() {
+        // Not a special case: both parsers drop empty tokens, and one flag
+        // inventing a stricter rule than the other is the kind of
+        // inconsistency an operator discovers at the wrong moment.
+        assert_eq!(
+            storm(&["--store-storm", "10,"]).unwrap(),
+            Some(StoreStormWire {
+                records: 10,
+                size: 304
+            })
+        );
+    }
+
+    #[test]
+    fn the_storm_session_is_not_combinable_with_the_other_sessions() {
+        // It ends the run after talking to the boards, like every other
+        // configure-only session, so any pair would silently drop one.
+        for args in [
+            vec!["--store-storm", "10", "--set-time"],
+            vec!["--store-storm", "10", "--announce"],
+            vec!["--store-storm", "10", "--set-tx-spacing", "60"],
+            vec!["--store-storm", "10", "--set-ble-tx-gap", "20"],
+            vec!["--store-storm", "10", "--set-media", "ble=off"],
+            vec!["--store-storm", "10", "--watch"],
+        ] {
+            let err = storm(&args).unwrap_err();
+            assert!(err.contains("cannot be used with"), "{args:?}: {err}");
         }
     }
 

@@ -78,10 +78,11 @@ leviculum-rx-arming = { path = "rx-arming" }
 # RESETREAS decode and the byte-exact BOOT_TRACE line, host-testable like
 # log-line. The firmware keeps only the volatile `.uninit` I/O.
 leviculum-boot-trace = { path = "boot-trace" }
-# The forward-only record log for a QSPI NOR — which neither board turned
-# out to carry (#384), so nothing mounts it yet; kept because the part is
-# an add-on away and the NorFlash shape is the internal flash's too.
-# The store, not the propagation node: bytes with a key, no LXMF. It lives
+# The forward-only record log. Written for a QSPI NOR, which neither board
+# turned out to carry (#384), so it drives the nRF52840's own flash: the
+# 64 KiB region `memory.x` reserves behind the image, mounted at boot by
+# `src/record_store.rs`. The store, not the propagation node — bytes with a
+# key, no LXMF, and nothing stores messages in it yet. It lives
 # in its own crate because its whole safety argument — power cut at every
 # byte offset, program-once bits, level wear — is only provable over a
 # simulated part on the host, which the firmware crate cannot run. Pulled

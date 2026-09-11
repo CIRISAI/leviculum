@@ -400,6 +400,34 @@ pub fn send_ble_tx_gap(fd: &Fd, gap_ms: u16) -> io::Result<ControlOutcome> {
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Ask the board to append N synthetic records to its message store (#384,
+/// `TYPE_STORE_STORM`).
+///
+/// A bench instrument like [`send_tx_spacing`] and [`send_ble_tx_gap`], and
+/// volatile like them: nothing is persisted as configuration, the storm
+/// happens once, and the records it writes are tagged so a later purge can
+/// find them. The board acks the *request* — the records land asynchronously,
+/// on the store's own task, and what reports them is the board's
+/// `STORE storm …` debug line. Values outside
+/// [`leviculum_core::envelope::STORE_STORM_MAX_RECORDS`] /
+/// [`leviculum_core::envelope::STORE_STORM_MAX_BYTES`] come back as a named
+/// value refusal; the CLI refuses them first. A board whose store is not
+/// mounted, or which is still running a storm, answers
+/// [`leviculum_core::envelope::REFUSE_BUSY`].
+pub fn send_store_storm(
+    fd: &Fd,
+    storm: leviculum_core::envelope::StoreStormWire,
+) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_store_storm(&storm);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_STORE_STORM),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// What a board said about its media profile: the carriers it is running
 /// right now and the ones a reboot would come up with.
 ///
@@ -758,7 +786,7 @@ pub(crate) mod testing {
         TYPE_BLE_TX_GAP, TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY,
         TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
         TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET,
-        TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
+        TYPE_STORE_STORM, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::node_name::{truncate_on_char_boundary, NodeName, BLE_NAME_MAX_LEN};
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
@@ -794,6 +822,7 @@ pub(crate) mod testing {
         TYPE_IDENTITY_QUERY,
         TYPE_ANNOUNCE,
         TYPE_BLE_TX_GAP,
+        TYPE_STORE_STORM,
     ];
 
     /// The scripted board's probe and LXMF destination hashes. Distinct
@@ -1107,6 +1136,12 @@ pub(crate) mod testing {
                 // read correctly.
                 ControlAction::AnnounceNow => Some(encode_ack(TYPE_ANNOUNCE)),
                 ControlAction::BleTxGap(_) => Some(encode_ack(TYPE_BLE_TX_GAP)),
+                // The scripted board has its store mounted and no storm
+                // running, so the request is accepted. The board's two
+                // BUSY cases — no store, or a storm still running — are
+                // not representable here, which is the honest shape: the
+                // stub is the host's contract with a working board.
+                ControlAction::StoreStorm(_) => Some(encode_ack(TYPE_STORE_STORM)),
                 // The media gate, run exactly as the board runs it: apply,
                 // then answer from the state that is already in force.
                 ControlAction::MediaProfile(profile) => {
@@ -1397,6 +1432,16 @@ pub(crate) mod testing {
         seen.lock().unwrap().iter().find_map(|f| {
             match classify_control_frame(f, FIRMWARE_ACCEPTS) {
                 ControlAction::BleTxGap(ms) => Some(ms),
+                _ => None,
+            }
+        })
+    }
+
+    /// The storm one of the `seen` frames asked for, if any (#384).
+    pub fn store_storm_frame(seen: &Seen) -> Option<leviculum_core::envelope::StoreStormWire> {
+        seen.lock().unwrap().iter().find_map(|f| {
+            match classify_control_frame(f, FIRMWARE_ACCEPTS) {
+                ControlAction::StoreStorm(storm) => Some(storm),
                 _ => None,
             }
         })
@@ -1849,6 +1894,75 @@ mod tests {
         // …and the refused value never classified into an action, so a
         // board that shares this decision function never applied it.
         assert_eq!(ble_tx_gap_frame(&seen), None);
+    }
+
+    // -----------------------------------------------------------------
+    // The record-store erase storm (Codeberg #384)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_storm_is_acked_and_both_of_its_numbers_reach_the_board() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let storm = leviculum_core::envelope::StoreStormWire {
+            records: 176,
+            size: 304,
+        };
+        assert_eq!(send_store_storm(&fd, storm).unwrap(), ControlOutcome::Acked);
+        // Both numbers, not just the count: a storm of the right length
+        // and the wrong record size measures a different erase rate, and
+        // would look like a successful point.
+        assert_eq!(store_storm_frame(&seen), Some(storm));
+    }
+
+    #[test]
+    fn a_storm_outside_the_board_bounds_is_refused_by_value_and_never_acted_on() {
+        // The stub runs the firmware's own decision function, so this is
+        // the board-side bound rather than the CLI parse: the frame
+        // arrives, decodes, and is refused with the named value reason
+        // without ever becoming an action.
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let storm = leviculum_core::envelope::StoreStormWire {
+            records: leviculum_core::envelope::STORE_STORM_MAX_RECORDS + 1,
+            size: 304,
+        };
+        assert_eq!(
+            send_store_storm(&fd, storm).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_VALUE
+            }
+        );
+        assert_eq!(store_storm_frame(&seen), None);
+    }
+
+    #[test]
+    fn a_board_without_a_store_refuses_the_storm_by_name() {
+        let pty = Pty::open();
+        pre_236_firmware_stub(&pty, seen());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let caps = probe_capabilities(&fd).unwrap().unwrap();
+        assert!(!caps.accepts(leviculum_core::envelope::TYPE_STORE_STORM));
+        assert_eq!(
+            send_store_storm(
+                &fd,
+                leviculum_core::envelope::StoreStormWire {
+                    records: 10,
+                    size: 304,
+                }
+            )
+            .unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_UNKNOWN_TYPE
+            }
+        );
     }
 
     #[test]

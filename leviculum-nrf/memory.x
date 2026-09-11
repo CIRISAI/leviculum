@@ -6,28 +6,83 @@
 /* storage flash. Old (v6.1.1) numbers in comments for reference.         */
 MEMORY
 {
-    /* Application starts after SoftDevice S140 v7.3.0 at 0x27000 (156K).    */
-    /* (Was v6.1.1 at 0x26000=152K.)                                         */
-    /* Heltec reserves 0xED000-0xF4000 (28K) for license/version data        */
-    /* (HARD_VERSION_ADDR, HT_LICENSE_ADDR in variant.h). Bootloader at      */
-    /* 0xF4000. The bootloader's own USER_FLASH_END is 0xEA000: it declines  */
-    /* every block at or above that address, so 0xEA000-0xF4000 survives a   */
-    /* UF2 flash untouched (docs/src/concepts/lnode-flashing.md:139-167).    */
-    /* All persistence pages live in that band and therefore survive a       */
-    /* firmware update:                                                      */
-    /*   0xEC000  identity          (BoardConfig::identity_flash_page)       */
-    /*   0xEB000  radio config      (BoardConfig::radio_config_flash_page)   */
-    /*   0xEA000  telemetry target (+0x000, #236), user-set fixed           */
-    /*            position (+0x100) and media profile (+0x200) — layout    */
-    /*            in leviculum_nrf::telemetry, whose compile-time           */
-    /*            assertion checks the three records do not overlap         */
-    /*            (BoardConfig::telemetry_flash_page)                        */
-    /* 0xEA000 is USER_FLASH_END itself: the bootloader declines every block  */
-    /* AT or above it, so the page is the lowest one still safe from a UF2.  */
-    /* Safe app space = the bootloader's window, 0xEA000 - 0x27000 =         */
-    /* 0xC3000 (780K). Was 0xC5000 (788K), which promised 8K the bootloader  */
-    /* would have refused to write and reached into both pages above.        */
-    FLASH : ORIGIN = 0x00027000, LENGTH = 0xC3000
+    /* ---------------------------------------------------------------- */
+    /* The flash map, from the bottom up                                  */
+    /*                                                                    */
+    /*   0x00000  MBR (one page, Nordic's; declined by the bootloader)    */
+    /*   0x01000  SoftDevice S140 v7.3.0 (was v6.1.1 at 0x01000-0x26000)  */
+    /*   0x27000  FLASH      - the firmware image, 0xB3000 (716 KiB)      */
+    /*   0xDA000  STORE      - the record log, 0x10000 (64 KiB, 16 pages) */
+    /*   0xEA000  telemetry target / fixed position / media profile       */
+    /*   0xEB000  radio config                                           */
+    /*   0xEC000  identity                                               */
+    /*   0xED000  Heltec license/version data (28 KiB, T114 only)        */
+    /*   0xF4000  bootloader                                             */
+    /*                                                                    */
+    /* Application starts after SoftDevice S140 v7.3.0 at 0x27000 (156K). */
+    /* (Was v6.1.1 at 0x26000=152K.) Heltec reserves 0xED000-0xF4000      */
+    /* (28K) for license/version data (HARD_VERSION_ADDR,                 */
+    /* HT_LICENSE_ADDR in variant.h). Bootloader at 0xF4000.              */
+    /*                                                                    */
+    /* The bootloader's own USER_FLASH_END is 0xEA000: it declines every   */
+    /* block at or above that address, so 0xEA000-0xF4000 survives a UF2   */
+    /* flash untouched (docs/src/concepts/lnode-flashing.md, §What a UF2   */
+    /* is allowed to write). All three persistence pages live in that band */
+    /* and therefore survive a firmware update:                           */
+    /*   0xEC000  identity          (BoardConfig::identity_flash_page)    */
+    /*   0xEB000  radio config      (BoardConfig::radio_config_flash_page)*/
+    /*   0xEA000  telemetry target (+0x000, #236), user-set fixed         */
+    /*            position (+0x100) and media profile (+0x200) - layout   */
+    /*            in leviculum_nrf::telemetry, whose compile-time         */
+    /*            assertion checks the three records do not overlap       */
+    /*            (BoardConfig::telemetry_flash_page)                     */
+    /* 0xEA000 is USER_FLASH_END itself: the bootloader declines every     */
+    /* block AT or above it, so the page is the lowest one still safe from */
+    /* a UF2.                                                             */
+    /*                                                                    */
+    /* STORE is the record log's region (#384,                            */
+    /* leviculum_nrf::record_store). It is carved from the TOP of the      */
+    /* application window, below those three pages, and it is INSIDE the   */
+    /* bootloader's writable window - so unlike them it is not protected   */
+    /* by USER_FLASH_END. What protects it is that a UF2 erases only the   */
+    /* pages it writes: the Adafruit bootloader buffers one page at a time */
+    /* and `flash_nrf5x_flush` (Adafruit_nRF52_Bootloader                  */
+    /* src/flash_nrf5x.c) erases and writes exactly that cached page, and  */
+    /* only when its content differs. Our .uf2 carries blocks for          */
+    /* 0x27000..<image end> and nothing else, so no block ever targets a   */
+    /* page at or above 0xDA000 and no erase reaches one. The ASSERT below */
+    /* is what keeps that true as the image grows: it fails the LINK if    */
+    /* FLASH would reach into STORE, and scripts/check-nrf-store-gap.sh    */
+    /* reports the remaining gap for both bins on every `just fast`.       */
+    /*                                                                    */
+    /* Size: ONE number, 0x10000 = 16 pages = 64 KiB, and it is here       */
+    /* rather than in Rust. `__srecord_store`/`__erecord_store` below are  */
+    /* what the firmware reads, so moving the region or resizing it is one */
+    /* edit in one file and no constant anywhere can disagree with it.     */
+    /* Cost, against the 10 000-cycle page endurance the record log is     */
+    /* designed to: 16 pages round-robin at the duty the 2026-09-09 field   */
+    /* walk measured (22.4 messages/hour, 11 field-sized records a page)    */
+    /* is 1 115 erases per page per year - 9 years. 68 pages would have     */
+    /* bought 38 years and cost the image 212 KiB of headroom it may need   */
+    /* for BLE and LXMF; 16 pages leave 0x37230 (220 KiB) of gap at the     */
+    /* image of d51443e3 and can be widened downward later, because a       */
+    /* region that grows at its BASE is a region whose existing records all */
+    /* move. Widening it upward is impossible (0xEA000 is fixed), so the    */
+    /* reformat that a base change implies is the deliberate price of the   */
+    /* smaller default, and `mount` treats a region that is not ours as     */
+    /* unformatted rather than as corrupt.                                 */
+    /* Safe app space = the bootloader's window minus the store,           */
+    /* 0xDA000 - 0x27000 = 0xB3000 (716K). Was 0xC3000 (780K) when the     */
+    /* whole window was the image's, and 0xC5000 (788K) before that, which */
+    /* promised 8K the bootloader would have refused to write.             */
+    FLASH : ORIGIN = 0x00027000, LENGTH = 0xB3000
+
+    /* The record log's region (#384). No section is placed here: the       */
+    /* firmware reads the two symbols below at runtime and drives the pages */
+    /* through `nrf_softdevice::Flash`. A MEMORY region rather than two     */
+    /* bare symbols so that the ASSERTs can be written in terms of ORIGIN   */
+    /* and LENGTH and cannot drift from the numbers they check.             */
+    STORE : ORIGIN = 0x000DA000, LENGTH = 0x10000
 
     /*
      * RETAINED holds the cross-boot records (boot-trace breadcrumbs,
@@ -148,6 +203,32 @@ SECTIONS
  * whose fit verdict compares against __sretained. */
 __sretained = ORIGIN(RETAINED);
 __eretained = ORIGIN(RETAINED) + LENGTH(RETAINED);
+
+/* The record log's bounds (#384), as linker symbols rather than as Rust
+ * constants. `leviculum_nrf::record_store::region()` reads these two and
+ * nothing else knows the addresses, so the map above is the single place the
+ * region is decided and an image that outgrows its half gets a link error
+ * instead of a store that silently sits under the firmware. Absolute symbols
+ * (value, not content): Rust takes their ADDRESSES, which is what these
+ * numbers are. */
+__srecord_store = ORIGIN(STORE);
+__erecord_store = ORIGIN(STORE) + LENGTH(STORE);
+
+/* The two edges of the store region, held against a future edit of either
+ * line. The first is what the linker already refuses on our behalf once the
+ * image grows: the image is linked into FLASH, and FLASH stops where the store
+ * starts, so `.text` reaching the store is "will not fit in region FLASH".
+ * This ASSERT covers the other direction — somebody enlarging FLASH without
+ * moving the store. */
+ASSERT(ORIGIN(FLASH) + LENGTH(FLASH) <= ORIGIN(STORE),
+       "the firmware image window (FLASH) reaches into the record-log region (STORE)");
+ASSERT(ORIGIN(STORE) + LENGTH(STORE) <= 0xEA000,
+       "the record-log region (STORE) reaches into the persistence pages at USER_FLASH_END (0xEA000)");
+/* The log drives whole 4 KiB pages and needs at least two of them to reclaim
+ * (`RecordLog::open` answers `BadRegion` otherwise, which on a board means a
+ * store that never mounts). A region of 4095 bytes would link fine. */
+ASSERT(ORIGIN(STORE) % 4096 == 0 && LENGTH(STORE) % 4096 == 0 && LENGTH(STORE) >= 8192,
+       "STORE must be a whole number of 4 KiB pages, page-aligned, at least two pages");
 
 /* The band is only bootloader-safe below the double-reset word; and the
  * stack floor (ORIGIN(RAM)) must sit on top of RETAINED, or the stack

@@ -31,6 +31,10 @@ pub mod media;
 pub mod name;
 pub mod qspi;
 pub mod radio_store;
+/// The board's message store (#384): the record log mounted on the flash
+/// region `memory.x` reserves behind the image. Nothing is stored in it yet —
+/// the module carries the mount and the bench instrument that exercises it.
+pub mod record_store;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's
 // `display` feature): the panel is write-only, presence detection is

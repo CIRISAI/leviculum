@@ -46,22 +46,29 @@
 //! because a tenth of the erase budget is a tenth of the room for getting
 //! this wrong.
 //!
-//! Take the region this store would live in: from the first page boundary
-//! behind the firmware image to `USER_FLASH_END`, **68 pages of 4 KiB**
-//! (`0xA6000`..`0xEA000` against the Pocket image of de6e74ed). At the duty
-//! the 2026-09-09 field walk measured — 22.4 messages/hour, 196 224 a year —
-//! and 11 field-sized records to a page:
+//! Take the region this store lives in: the **16 pages of 4 KiB**
+//! `leviculum-nrf/memory.x` reserves at `0xDA000`..`0xEA000`, between the
+//! firmware image and the three persistence pages. At the duty the 2026-09-09
+//! field walk measured — 22.4 messages/hour, 196 224 a year — and 11
+//! field-sized records to a page, that is 17 838 page erases a year:
 //!
 //! | | Erases/year | Budget | Life |
 //! |---|---|---|---|
-//! | Spread over the 68 pages | 262 per page | 10 000 | **38 years** |
+//! | Spread over the 16 pages | 1 115 per page | 10 000 | **9 years** |
+//! | Spread over 68 pages (the whole window, for scale) | 262 per page | 10 000 | 38 years |
 //! | One fixed metadata page | 196 224 | 10 000 | **18.6 days** |
 //!
 //! **A single fixed metadata page, rewritten on every accepted record,
 //! spends its whole budget in eighteen days.** On the external part the same
 //! line read six months, which is long enough to sound survivable; eighteen
-//! days is not. So there is no superblock, no index page, no head pointer
-//! and no sequence counter at a fixed address. Everything this log needs to
+//! days is not. The first two rows are the same design; the third is a
+//! different one, and it is the one this format exists to avoid. (Why 16
+//! pages rather than the 68 the window could hold is a separate trade —
+//! image headroom against store life — and it is argued where the number
+//! lives, in `memory.x`.)
+//!
+//! So there is no superblock, no index page, no head pointer and no sequence
+//! counter at a fixed address. Everything this log needs to
 //! mount itself is recovered by reading the page headers, and a page header
 //! is written exactly once per erase of the page it heads — which is the
 //! definition of level wear.
@@ -157,14 +164,35 @@
 //! flash is `nrf_softdevice::Flash`, which is. That makes cancellation a
 //! safety question rather than a style one: a `select!` that drops an
 //! in-flight `append` at an `.await` leaves the record uncommitted, which is
-//! byte-for-byte the state a power cut leaves — the commit word is still
-//! `0xFF`, the next mount seals the page, and nothing is lost but the room.
-//! There is no repair pass to run and no torn-append state to detect,
+//! byte-for-byte what a power cut leaves **on the part** — the commit word is
+//! still `0xFF`, the next mount seals the page, and nothing is lost but the
+//! room. There is no repair pass to run and no torn-append state to detect,
 //! because the commit is one word and one word cannot be half-written.
 //!
-//! The cheap discipline on top of that (`cancel_safety_is_the_power_cut_case`
-//! in the tests pins it): give the store its own task and reach it by
-//! channel, so no caller's timeout can drop a future mid-append.
+//! What a power cut also does, and a cancellation does not, is take the
+//! in-RAM cursor with it. A dropped future runs no code, so it cannot move
+//! the cursor on its way out, and the **same handle** then still believes the
+//! record's offset is free; the next append programs over words that already
+//! hold half a record, which needs bits raised. So [`RecordLog::append`]
+//! seals its page *before* its first program run and puts the cursor back
+//! only on a path that reaches the end — success, or a failure that landed
+//! nothing. The cost is the rest of one page per cancellation, and a
+//! cancellation is the only way to pay it for nothing (a drop at the first
+//! await has written no byte). `a_dropped_append_seals_its_page_on_the_same_handle`
+//! pins it at every drop point, with
+//! `the_unsealed_cursor_programs_over_a_half_written_record` as the negative
+//! control; `cancel_safety_is_the_power_cut_case` covers the reboot case, and
+//! passed before the cursor was sealed precisely because a remount recomputes
+//! it.
+//!
+//! The cheap discipline on top of that: give the store its own task and reach
+//! it by channel, so no caller's timeout can drop a future mid-append. On
+//! `nrf_softdevice::Flash` that is not merely cheap but mandatory — its write
+//! and erase futures arm a `DropBomb` (nrf-softdevice 5949a5b,
+//! `nrf-softdevice/src/flash.rs`) and **panic** if dropped in flight, so a
+//! caller that could cancel an append would be a caller that could panic the
+//! board. The sealing rule above is what makes the awaits *between*
+//! operations safe, which are the ones a drop can actually reach there.
 
 #![no_std]
 
@@ -429,6 +457,34 @@ impl<F: NorFlash> RecordLog<F> {
         );
         commit.0[COMMIT_FLAGS_IX] = FLAG_LIVE;
 
+        // Seal the page BEFORE the first program run, and put the cursor
+        // back only on a path that runs to its end.
+        //
+        // A future dropped at one of the awaits below runs no code of its
+        // own: there is no `Err` to inspect and no destructor on this
+        // function's body. Whatever the cursor holds at the moment of the
+        // drop is what the next call on this handle believes, so it has to
+        // already be the sealed value — the same place a failure and a power
+        // cut leave it. Set it afterwards and a cancelled append leaves
+        // `cursor` pointing at an offset whose words may already hold half a
+        // record, and the next append on the **same handle** programs over
+        // them, which needs bits raised; the remount a reboot performs is
+        // what used to hide that
+        // (`a_dropped_append_seals_its_page_on_the_same_handle`, and its
+        // negative control next to it).
+        //
+        // The cost is the rest of one page per cancellation, paid even by a
+        // drop at the very first await, which has put nothing down. That is
+        // the price of a state that is correct without running code, and the
+        // discipline in §Cancellation — give the store its own task, reach it
+        // by channel — is what keeps the case off the field in the first
+        // place. On `nrf_softdevice::Flash` it is not even reachable inside
+        // an operation: its write and erase futures arm a `DropBomb` and
+        // panic if dropped, so the only droppable awaits there are the ones
+        // between operations.
+        let resume = self.cursor;
+        self.cursor = SECTOR_SIZE;
+
         // Everything except the commit word, which stays erased so that its
         // one write is the commit and its second is a later purge. `touched`
         // is what tells a failure that landed nothing from one that left
@@ -465,19 +521,20 @@ impl<F: NorFlash> RecordLog<F> {
             // different record would be programming over a half-written one,
             // which needs bits raised.
             //
-            // So a partly-written record seals its page, exactly as a power
-            // cut does, and the retry lands in a fresh one. The cost is the
-            // rest of one page per failed append that got as far as its
-            // first program; a failure on that first program costs nothing,
-            // which is the common case when the radio is busy enough to make
-            // the SoftDevice refuse.
-            if touched {
-                self.cursor = SECTOR_SIZE;
+            // So a partly-written record keeps the page sealed, exactly as a
+            // power cut does, and the retry lands in a fresh one — the page
+            // is already sealed above, and this is the one path that may
+            // un-seal it. The cost is the rest of one page per failed append
+            // that got as far as its first program; a failure on that first
+            // program costs nothing, which is the common case when the radio
+            // is busy enough to make the SoftDevice refuse.
+            if !touched {
+                self.cursor = resume;
             }
             return Err(error);
         }
 
-        self.cursor += stride;
+        self.cursor = resume + stride;
         Ok(offset)
     }
 
@@ -608,6 +665,24 @@ impl<F: NorFlash> RecordLog<F> {
     /// Bytes still free in the active page.
     pub fn sector_room(&self) -> u32 {
         SECTOR_SIZE - self.cursor
+    }
+
+    /// Bytes that can be appended before reclaim has to erase a page that
+    /// still holds records: the room left in the active page plus the pages
+    /// this log has never reached.
+    ///
+    /// "Free" is a slightly awkward word for a forward-only log, and this is
+    /// the honest reading of it: after the first lap there are no unused
+    /// pages left, every further append costs the oldest one, and the number
+    /// is therefore just the active page's room — which is what a board
+    /// reporting `free_bytes=` should say rather than a figure that hides the
+    /// wrap. Derived from [`Self::sequence`] because that is what records how
+    /// far round the region the log has come: page *n* is first headed at
+    /// sequence *n*, so `sectors - 1 - seq` pages are still untouched until
+    /// the count runs out.
+    pub fn free_bytes(&self) -> u32 {
+        let virgin = self.sectors.saturating_sub(1 + self.seq);
+        self.sector_room() + virgin * SECTOR_PAYLOAD
     }
 
     /// The device, for an owner that needs it for something else — reading

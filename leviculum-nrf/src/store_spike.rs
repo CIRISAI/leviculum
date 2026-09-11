@@ -30,14 +30,20 @@ use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash,
 
 use crate::flash::SharedFlash;
 
-/// First page boundary behind the Pocket image of de6e74ed. Placeholder: the
-/// real base has to come from the linker, not from a constant somebody has
-/// to remember to move.
-const SPIKE_BASE: u32 = 0xA_6000;
-/// `USER_FLASH_END` minus the three pages already spoken for (identity,
-/// radio config, telemetry) is where the region would stop; here it is only
-/// large enough to be a legal region.
-const SPIKE_LEN: u32 = 8 * 4096;
+/// The region both candidates are weighed on: the real one, from the linker
+/// (`memory.x`'s `STORE`, read by [`crate::record_store::region`]).
+///
+/// It used to be a pair of constants here, with a comment promising that the
+/// real base would come from the linker one day. It does now, and the harness
+/// takes it from the same place the firmware does — a size measurement against
+/// a different region than the shipped one measures a different build.
+///
+/// A build with one of these features therefore has TWO owners of the store
+/// region: this harness and `record_store`'s task. That is the same reason as
+/// ever not to flash one.
+fn spike_region() -> (u32, u32) {
+    crate::record_store::region()
+}
 
 /// A borrowed flash handle that still carries the marker traits.
 ///
@@ -97,9 +103,10 @@ pub async fn exercise(shared: &'static SharedFlash) {
 async fn run(flash: Borrowed<'_>) -> &'static str {
     use leviculum_record_log::RecordLog;
 
+    let (base, len) = spike_region();
     let body = [0xA5u8; 304];
     let key = [0x11u8; leviculum_record_log::KEY_LEN];
-    let Ok(mut log) = RecordLog::open(flash, SPIKE_BASE, SPIKE_LEN).await else {
+    let Ok(mut log) = RecordLog::open(flash, base, len).await else {
         return "open failed";
     };
     if log.append(&key, 1, 0, &body).await.is_err() {
@@ -131,9 +138,10 @@ async fn run(flash: Borrowed<'_>) -> &'static str {
     use sequential_storage::cache::Cache;
     use sequential_storage::queue::{QueueConfig, QueueStorage};
 
+    let (base, len) = spike_region();
     let body = [0xA5u8; 304];
     let mut buf = [0u8; 320];
-    let Ok(config) = QueueConfig::try_new(SPIKE_BASE..SPIKE_BASE + SPIKE_LEN) else {
+    let Ok(config) = QueueConfig::try_new(base..base + len) else {
         return "bad region";
     };
     let mut queue = QueueStorage::new(flash, config, Cache::new_uncached());

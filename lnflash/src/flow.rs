@@ -1039,6 +1039,93 @@ fn send_ble_tx_gap_to(fd: &crate::sys::Fd, gap_ms: u16) -> io::Result<SessionRep
     })
 }
 
+/// The `--store-storm` session (#384): no flash — find the boards already
+/// running and ask each to append N synthetic records of a given size to its
+/// message store.
+///
+/// The instrument for the erase-storm measurement. A 4 KiB page erase holds the
+/// flash for ~85 ms and the SoftDevice has to fit it between radio events, so
+/// "what does a store under load cost BLE and LoRa" is a question about erases,
+/// and waiting for a mesh to fill 16 pages is not a way to ask it.
+///
+/// Shaped like [`set_tx_spacing`] and [`set_ble_tx_gap`]: nothing is persisted,
+/// and the session ends after the boards have answered. What it does NOT do is
+/// wait for the records — the board acks the request and its store task writes
+/// them on its own time, which is the whole point of the instrument (the
+/// measurement runs during the writing). The board's `STORE storm …` line on
+/// if00 is what says how it went.
+pub fn store_storm(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    storm: leviculum_core::envelope::StoreStormWire,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --store-storm talks to flashed boards; a board in \
+             its bootloader has no store mounted.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_store_storm_to(&fd, storm))
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: storm accepted — {} records of {} B are being appended now. The \
+                 board logs STORE storm records=… appended=… and one STORE op_fail line per \
+                 flash operation the SoftDevice refused, on its debug port (if00). The \
+                 records are tagged as synthetic; nothing is persisted as configuration.",
+                storm.records, storm.size
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the storm — {}. A busy board is either still \
+                 running the previous storm or has no store mounted this boot; its STORE \
+                 mount line on if00 says which.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer the storm frame, so assume nothing was \
+                 appended."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so no storm was \
+                 sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but carries no message store. \
+                 Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_store_storm_to(
+    fd: &crate::sys::Fd,
+    storm: leviculum_core::envelope::StoreStormWire,
+) -> io::Result<SessionReply> {
+    use crate::envelope;
+    envelope::probed(fd, leviculum_core::envelope::TYPE_STORE_STORM, |fd| {
+        envelope::send_store_storm(fd, storm)
+    })
+}
+
 /// The `--set-tx-power` session (Codeberg #349): set the transmit power on
 /// every running LNode, no flashing, then exit.
 ///
@@ -3103,6 +3190,71 @@ convert = "hex-to-uf2"
         assert!(ok, "{}", ui.transcript());
         assert!(
             ui.transcript().contains("telemetry on"),
+            "{}",
+            ui.transcript()
+        );
+    }
+
+    #[test]
+    fn a_storm_session_reaches_every_board_and_says_what_was_accepted() {
+        // The whole host path for #384's instrument: two running boards,
+        // the capability probe, the storm frame, the ack, and a transcript
+        // an operator can act on. The stub runs the firmware's own
+        // decision function, so the numbers asserted here are the numbers
+        // a board would have classified.
+        let t114_pty = crate::sys::testpty::Pty::open();
+        let rak_pty = crate::sys::testpty::Pty::open();
+        let t114_seen = crate::envelope::testing::seen();
+        let rak_seen = crate::envelope::testing::seen();
+        crate::envelope::testing::envelope_firmware_stub(&t114_pty, t114_seen.clone());
+        crate::envelope::testing::envelope_firmware_stub(&rak_pty, rak_seen.clone());
+        let dev = dev_tree(&[
+            ("ttyACM2", &t114_pty.slave_path),
+            ("ttyACM4", &rak_pty.slave_path),
+        ]);
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+
+        let storm = leviculum_core::envelope::StoreStormWire {
+            records: 176,
+            size: 304,
+        };
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let ok = store_storm(&catalogue(), &sysfs, &mut ui, storm).unwrap();
+        assert!(ok, "{}", ui.transcript());
+        // Both boards, both numbers.
+        for seen in [&t114_seen, &rak_seen] {
+            assert_eq!(
+                crate::envelope::testing::store_storm_frame(seen),
+                Some(storm)
+            );
+        }
+        let said = ui.transcript();
+        assert!(said.contains("storm accepted"), "{said}");
+        assert!(said.contains("176 records of 304 B"), "{said}");
+        // The instrument is useless without the line that reports it, so
+        // the session has to name where to read the result.
+        assert!(said.contains("STORE storm"), "{said}");
+    }
+
+    #[test]
+    fn a_storm_with_no_running_board_is_a_failed_session_not_a_quiet_one() {
+        // A bench script that asked for a storm and got silence would
+        // record a measurement point that never happened.
+        let empty = TempDir::new().unwrap();
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let ok = store_storm(
+            &catalogue(),
+            &Sysfs::new(empty.path()),
+            &mut ui,
+            leviculum_core::envelope::StoreStormWire {
+                records: 10,
+                size: 304,
+            },
+        )
+        .unwrap();
+        assert!(!ok, "{}", ui.transcript());
+        assert!(
+            ui.transcript().contains("No running LNode"),
             "{}",
             ui.transcript()
         );

@@ -20,6 +20,15 @@
 > is a question about LXMF and not about a part. Read the rest as the
 > costing of a part that would have to arrive first: a board with one,
 > or an add-on such as RAK's WisBlock RAK15001.
+>
+> **A store exists anyway, on the internal flash, since 2026-09-11.** 64
+> KiB behind the firmware image (`leviculum-nrf/memory.x`'s `STORE`,
+> mounted at boot by `leviculum-nrf/src/record_store.rs`), 16 pages
+> round-robin, ~9 years of page-erase budget at the duty the field walk
+> measured. Two orders of magnitude less room than this page costed, so it
+> is not the propagation store §4 onward describes — it is the part of one
+> that is worth having whether or not the node ever exists (§6), and
+> nothing stores messages in it yet.
 
 Both our boards were thought to carry a QSPI NOR flash we have never
 driven: 1 MB on the Pocket V2 (IS25LP080D) and 2 MB on the T114

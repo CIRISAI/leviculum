@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- LNode boards keep a message store on their internal flash (#384): 64 KiB
+  behind the firmware image, mounted at boot and formatted once, not yet
+  used for messages. `lnflash --store-storm <count>[,<bytes>]` appends
+  synthetic records to it, which is the instrument for measuring what the
+  store's page erases cost Bluetooth throughput and LoRa airtime.
+
 ### Changed
 
 - The T114 no longer drives six pins as a flash bus (#384). It fits no

@@ -366,6 +366,14 @@ async fn main(spawner: Spawner) {
         t114::CONFIG.telemetry_flash_page,
     );
 
+    // The message store (#384): mounts the record log on the region
+    // `memory.x` reserves behind the image, formats it once if it is not ours,
+    // and then does nothing until something asks it to append — nothing does
+    // yet except the `--store-storm` bench instrument. Borrows the same
+    // one-and-only SoftDevice flash handle as the two stores above, per
+    // operation rather than per append (see `record_store` module docs).
+    leviculum_nrf::record_store::spawn_store_task(&spawner, shared_flash);
+
     // Codeberg #384 size harness, behind a throwaway non-default feature:
     // appends, iterates and removes once so the linker keeps the candidate
     // store's code and `arm-none-eabi-size` can weigh it. No shipped build

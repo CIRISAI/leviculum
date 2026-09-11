@@ -54,10 +54,21 @@ async fn fresh(sectors: u32) -> RecordLog<SimNor> {
         .unwrap()
 }
 
-async fn collect(log: &mut RecordLog<SimNor>) -> Vec<Record> {
+/// Generic over the device because the cancellation sweeps drive the log
+/// through [`Yielding`] rather than over [`SimNor`] directly, and the records
+/// they have to read back are the same records.
+async fn collect<F: NorFlash>(log: &mut RecordLog<F>) -> Vec<Record>
+where
+    F::Error: core::fmt::Debug,
+{
     let mut out = Vec::new();
     log.for_each(|r| out.push(*r)).await.unwrap();
     out
+}
+
+/// Every record's key, in the order [`RecordLog::for_each`] visits them.
+fn keys_of(records: &[Record]) -> Vec<[u8; KEY_LEN]> {
+    records.iter().map(|r| r.key).collect()
 }
 
 /// The wear pin itself: the spread between the most- and least-erased page.
@@ -882,8 +893,12 @@ fn cancel_safety_is_the_power_cut_case() {
     block_on(async {
         let sectors = 4u32;
         let region = sectors * SECTOR_SIZE;
-        let mut points = 0usize;
-        for stop in 1..=4usize {
+        // Measured, not assumed: every flash operation of the append is one
+        // drop point, and a hardcoded count covers the first few and calls
+        // that "every". This sweep used to stop at 4 of the 6.
+        let points = cancel_points(sectors, 200, 2).await;
+        assert_eq!(points, 6, "header run, four body windows, commit");
+        for stop in 1..=points {
             let mut log = RecordLog::open(Yielding::new(SimNor::new(sectors)), 0, region)
                 .await
                 .unwrap();
@@ -904,7 +919,6 @@ fn cancel_safety_is_the_power_cut_case() {
                     );
                 }
             }
-            points += 1;
 
             // No repair pass, no recovery call: just reopen, exactly as a
             // reboot would.
@@ -920,7 +934,256 @@ fn cancel_safety_is_the_power_cut_case() {
             log.append(&key(3), 3, 1, &body(3, 200)).await.unwrap();
             assert_eq!(collect(&mut log).await.len(), 3, "stop={stop}");
         }
-        assert_eq!(points, 4);
+    });
+}
+
+/// How many points an append can be dropped at, measured over [`Yielding`]:
+/// one per flash operation, because that wrapper returns `Pending` once before
+/// each. The sibling of [`append_ops`] for the cancellation sweeps, and the
+/// reason neither of them hardcodes its count.
+async fn cancel_points(sectors: u32, body_len: usize, pre: u32) -> usize {
+    let region = sectors * SECTOR_SIZE;
+    let mut log = RecordLog::open(Yielding::new(SimNor::new(sectors)), 0, region)
+        .await
+        .unwrap();
+    for i in 0..pre {
+        log.append(&key(i), i, 1, &body(i, body_len)).await.unwrap();
+    }
+    let before = log.flash_mut().ops();
+    log.append(&key(pre), pre, 1, &body(pre, body_len))
+        .await
+        .unwrap();
+    log.flash_mut().ops() - before
+}
+
+/// Poll `fut` `stop` times and drop it where it stands, asserting it had not
+/// finished first — otherwise the "drop" is a completed append and the case
+/// the caller thinks it is testing does not exist.
+fn drop_after_polls<T>(fut: impl Future<Output = T>, stop: usize, stop_label: usize) {
+    let mut fut = core::pin::pin!(fut);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    for _ in 0..stop {
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "stop={stop_label}: the append finished before the drop"
+        );
+    }
+}
+
+#[test]
+fn a_dropped_append_seals_its_page_on_the_same_handle() {
+    // `cancel_safety_is_the_power_cut_case` above drops an append and then
+    // REMOUNTS, which recovers the cursor from the part — so it cannot see the
+    // one thing a cancellation does that a power cut does not: leave a live
+    // handle whose cursor still points at the offset the dropped append was
+    // writing. Nothing on flash differs between the two cases; the difference
+    // is entirely in RAM, and a remount erases it.
+    //
+    // This is that case. Same handle, no remount, dropped at every one of the
+    // append's operations in turn, and then the next append on that handle
+    // has to land somewhere that needs no bit raised. The negative control
+    // below is the same sweep against the body this one replaced.
+    block_on(async {
+        let sectors = 4u32;
+        let region = sectors * SECTOR_SIZE;
+        let points = cancel_points(sectors, 200, 2).await;
+        assert_eq!(points, 6, "header run, four body windows, commit");
+
+        for stop in 1..=points {
+            let mut log = RecordLog::open(Yielding::new(SimNor::new(sectors)), 0, region)
+                .await
+                .unwrap();
+            for i in 0..2u32 {
+                log.append(&key(i), i, 1, &body(i, 200)).await.unwrap();
+            }
+
+            let k = key(2);
+            let b = body(2, 200);
+            drop_after_polls(log.append(&k, 2, 1, &b), stop, stop);
+
+            // The same handle, straight on. A different record on purpose:
+            // re-appending the cancelled one would be programming the same
+            // values over themselves and would pass with no sealing at all —
+            // the point `a_failed_operation_at_every_step_of_an_append` makes
+            // about its own retry.
+            log.append(&key(3), 3, 9, &body(3, 200)).await.unwrap();
+            assert_eq!(
+                log.active_sector(),
+                1,
+                "stop={stop}: the cancelled append's page must be sealed, \
+                 so the next record belongs in the page after it"
+            );
+
+            let recs = collect(&mut log).await;
+            assert_eq!(
+                keys_of(&recs),
+                vec![key(0), key(1), key(3)],
+                "stop={stop}: the cancelled record is absent and no other moved"
+            );
+            for rec in &recs {
+                let n = u32::from_le_bytes(rec.key[0..4].try_into().unwrap());
+                let mut out = vec![0u8; rec.len as usize];
+                log.read_body(rec, &mut out).await.unwrap();
+                assert_eq!(out, body(n, 200), "stop={stop}");
+            }
+            // The budget this part actually has. A second write to a word
+            // that already holds a value is legal once; a sealed page means
+            // the words of the half-written record are never written again at
+            // all, so nothing here should even reach two.
+            assert!(
+                log.flash_mut().inner_mut().max_word_writes() <= WRITES_PER_WORD,
+                "stop={stop}"
+            );
+
+            // And a reboot agrees with what the live handle did.
+            let flash = log.into_flash().into_inner();
+            let mut log = RecordLog::open(flash, 0, region).await.unwrap();
+            assert_eq!(
+                keys_of(&collect(&mut log).await),
+                vec![key(0), key(1), key(3)],
+                "stop={stop}: the mount disagrees with the handle"
+            );
+        }
+    });
+}
+
+/// [`RecordLog::append`]'s body as it stood before the cursor was sealed in
+/// advance (commit 59c36129), to the letter: the cursor is moved on the way
+/// out, and only the `Err` path seals. Nothing but the negative control below
+/// calls it — it exists so that control tests the real previous code rather
+/// than a description of it.
+async fn append_without_presealing<F: NorFlash>(
+    log: &mut RecordLog<F>,
+    key: &[u8; KEY_LEN],
+    time: u32,
+    tag: u8,
+    body: &[u8],
+) -> Result<u32, Error<F::Error>> {
+    if body.len() > MAX_BODY {
+        return Err(Error::BodyTooLarge);
+    }
+    let stride = record_stride(body.len()) as u32;
+    if stride > SECTOR_SIZE - log.cursor {
+        log.advance().await?;
+    }
+    let offset = log.base + log.active * SECTOR_SIZE + log.cursor;
+
+    let mut header = [ERASED; HEADER_LEN];
+    header[0..2].copy_from_slice(&(body.len() as u16).to_le_bytes());
+    header[2..34].copy_from_slice(key);
+    header[34..38].copy_from_slice(&time.to_le_bytes());
+    header[38] = tag;
+    header[39] = ERASED;
+    let crc = crc16_update(crc16_update(CRC_INIT, &header[0..39]), body);
+    header[40..42].copy_from_slice(&crc.to_le_bytes());
+
+    let mut commit = Aligned([0u8; PROGRAM_UNIT as usize]);
+    commit
+        .0
+        .copy_from_slice(&header[COMMIT_OFF as usize..COMMIT_OFF as usize + PROGRAM_UNIT as usize]);
+    commit.0[COMMIT_FLAGS_IX] = FLAG_LIVE;
+
+    let mut touched = false;
+    let mut outcome = log
+        .program_run(offset, &header[0..COMMIT_OFF as usize], &[], &mut touched)
+        .await;
+    if outcome.is_ok() {
+        outcome = log
+            .program_run(
+                offset + AFTER_COMMIT,
+                &header[AFTER_COMMIT as usize..HEADER_LEN],
+                body,
+                &mut touched,
+            )
+            .await;
+    }
+    if outcome.is_ok() {
+        outcome = log
+            .flash
+            .write(offset + COMMIT_OFF, &commit.0)
+            .await
+            .map_err(Error::Flash);
+    }
+    if let Err(error) = outcome {
+        if touched {
+            log.cursor = SECTOR_SIZE;
+        }
+        return Err(error);
+    }
+    log.cursor += stride;
+    Ok(offset)
+}
+
+#[test]
+#[should_panic(expected = "would raise a bit")]
+fn the_unsealed_cursor_programs_over_a_half_written_record() {
+    // The negative control for the test above, and for the whole sealing
+    // rule: the previous body, the same drop, the same handle. The cancelled
+    // append left the header and the body of record 2 on the part and the
+    // cursor still in front of them, so record 3's header is programmed over
+    // record 2's — and the simulated part refuses to raise the bits that
+    // would take, which on the real flash is the word quietly keeping its old
+    // value and the store reading back something it never wrote.
+    //
+    // Dropped at the commit, the last of the six points: the one that has
+    // written the most and committed nothing.
+    block_on(async {
+        let sectors = 4u32;
+        let region = sectors * SECTOR_SIZE;
+        let mut log = RecordLog::open(Yielding::new(SimNor::new(sectors)), 0, region)
+            .await
+            .unwrap();
+        for i in 0..2u32 {
+            log.append(&key(i), i, 1, &body(i, 200)).await.unwrap();
+        }
+        let k = key(2);
+        let b = body(2, 200);
+        drop_after_polls(append_without_presealing(&mut log, &k, 2, 1, &b), 6, 6);
+        let _ = append_without_presealing(&mut log, &key(3), 3, 9, &body(3, 200)).await;
+    });
+}
+
+#[test]
+fn free_bytes_counts_the_untouched_pages_until_the_log_wraps() {
+    // What a board prints at `STORE mount free_bytes=`. The number has to
+    // fall to the active page's room once the region has been round once,
+    // because from then on an append costs the oldest page rather than unused
+    // space — reporting anything larger would tell a field operator there is
+    // room where there is only reclaim.
+    block_on(async {
+        let sectors = 4u32;
+        let mut log = fresh(sectors).await;
+        // Fresh: the active page's payload plus the three pages behind it.
+        assert_eq!(log.free_bytes(), 4 * SECTOR_PAYLOAD);
+
+        let body_len = 1000usize;
+        let per_page = SECTOR_PAYLOAD as usize / record_stride(body_len);
+        // 4084 payload bytes / a 1044-byte stride: three, with 952 over.
+        assert_eq!(per_page, 3, "three 1000-byte records to a page");
+
+        // One record: the same, less its stride.
+        log.append(&key(0), 0, 1, &body(0, body_len)).await.unwrap();
+        assert_eq!(
+            log.free_bytes(),
+            4 * SECTOR_PAYLOAD - record_stride(body_len) as u32
+        );
+
+        // Fill the region exactly once. The last page is active, nothing is
+        // untouched any more, and what is left is that page's own room.
+        for i in 1..(sectors as usize * per_page) as u32 {
+            log.append(&key(i), i, 1, &body(i, body_len)).await.unwrap();
+        }
+        assert_eq!(log.active_sector(), sectors - 1);
+        assert_eq!(log.sequence(), sectors - 1);
+        assert_eq!(log.free_bytes(), log.sector_room());
+
+        // And past the wrap it stays the active page's room: reclaim is not
+        // free space.
+        log.append(&key(100), 100, 1, &body(100, body_len))
+            .await
+            .unwrap();
+        assert_eq!(log.active_sector(), 0, "the oldest page was reclaimed");
+        assert_eq!(log.free_bytes(), log.sector_room());
     });
 }
 

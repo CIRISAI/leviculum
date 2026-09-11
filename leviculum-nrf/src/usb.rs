@@ -75,6 +75,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_IDENTITY_QUERY,
     envelope::TYPE_ANNOUNCE,
     envelope::TYPE_BLE_TX_GAP,
+    envelope::TYPE_STORE_STORM,
 ];
 
 /// nRF52840 FICR base address
@@ -914,6 +915,40 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: ble-tx-gap answer write failed");
+                                    }
+                                }
+                                ControlAction::StoreStorm(storm) => {
+                                    // The store task owns the log and is the
+                                    // only thing that may hold an append (its
+                                    // module docs say why: a dropped
+                                    // `nrf_softdevice::Flash` operation panics
+                                    // the board). So this hands the request
+                                    // over and answers; it does not wait for
+                                    // the records, and the ack says "the storm
+                                    // was accepted", not "the records are on
+                                    // the page" — what reports the second is
+                                    // the board's own `STORE storm …` line.
+                                    //
+                                    // A refusal means the store is not mounted
+                                    // or a storm is still running. BUSY rather
+                                    // than UNSUPPORTED: both conditions end,
+                                    // and a measurement script that retries is
+                                    // doing the right thing.
+                                    let answer = if crate::record_store::request_storm(
+                                        storm.records,
+                                        storm.size,
+                                    ) {
+                                        envelope::encode_ack(envelope::TYPE_STORE_STORM)
+                                    } else {
+                                        envelope::encode_refusal(
+                                            envelope::TYPE_STORE_STORM,
+                                            envelope::REFUSE_BUSY,
+                                        )
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: store-storm answer write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

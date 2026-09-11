@@ -49,6 +49,7 @@ Commands (host → board):
 | 0x0E | IDENTITY_QUERY   | empty (a query) — answered with IDENTITY_REPORT |
 | 0x0F | ANNOUNCE         | empty — announce the LXMF delivery destination now (#376) |
 | 0x10 | BLE_TX_GAP       | BLE inter-packet gap in ms, u16 BE (2 B), 0..=5000 (#376) |
+| 0x11 | STORE_STORM      | record count and body size, two u16 BE (4 B), 1..=1000 and 0..=1024 (#384) |
 
 Responses (board → host):
 
@@ -98,6 +99,41 @@ and the core never learn of it — and volatile like TX_SPACING: a reset
 restores the default. The board logs `[BLE ] tx_gap_ms=<n>` when the
 value takes effect and `BLE_TX_GAP conn=<h> waited_ms=<n>` once per
 deferred packet. Host side: `lnflash --set-ble-tx-gap <ms>`.
+
+### STORE_STORM (0x11) — the #384 bench instrument
+
+Appends `records` synthetic records of `size` body bytes each to the
+board's message store (`leviculum-nrf/src/record_store.rs`, the record log
+on the 64 KiB region `memory.x` reserves behind the image). Nothing else
+writes to that store yet: there is no LXMF propagation node, and this frame
+exists so the one cost the store imposes on the rest of the board can be
+measured before anything depends on it. That cost is erases — a 4 KiB page
+erase holds the flash for ~85 ms (nRF52840 PS, NVMC) and the SoftDevice
+has to fit it between radio events — so the question "what does a filling
+store do to BLE throughput and LoRa airtime" needs a way to provoke the
+erases without waiting for a mesh to fill 16 pages.
+
+Bounds are in `classify_control_frame`, so every binary refuses the same
+values: `records` must be 1..=1000 and `size` 0..=1024, and anything else
+is refused with reason `0x03`. A board whose store did not mount, or which
+is still running the previous storm, refuses with `0x04` (busy) — those two
+conditions are the firmware's to see, not the classifier's.
+
+The ack means **the request was accepted**, not that the records are on
+the page: the store task appends them on its own time, which is the point
+(the measurement runs while it writes). What reports the result is the
+board's debug port:
+
+```text
+STORE mount state=<ours|formatted> pages=<n> live=<n> free_bytes=<n> t=<ms>
+STORE storm records=<n> size=<n> appended=<n> failed=<n> seq=<n> ms=<n>
+STORE op_fail op=<erase|write> attempt=<n> t=<ms>
+STORE stats appends=<n> fails=<n> sealed_pages=<n> t=<ms>
+```
+
+Nothing is persisted as configuration, and the records carry a synthetic
+tag so a later purge can find them. Host side:
+`lnflash --store-storm <count>[,<bytes>]`.
 
 ### NODE_NAME (0x0C) and NODE_NAME_REPORT (0x87)
 
