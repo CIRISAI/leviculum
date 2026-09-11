@@ -398,6 +398,13 @@ async fn main(spawner: Spawner) {
         rak4631::CONFIG.telemetry_flash_page,
     );
 
+    // Codeberg #384 size harness, behind a throwaway non-default feature:
+    // appends, iterates and removes once so the linker keeps the candidate
+    // store's code and `arm-none-eabi-size` can weigh it. No shipped build
+    // enables this.
+    #[cfg(any(feature = "store-spike-record-log", feature = "store-spike-sequential"))]
+    leviculum_nrf::store_spike::exercise(shared_flash).await;
+
     // Optional baseboard peripherals (RAK19026 VC). Each spawn is gated on
     // its own feature; absent features leave the bare-module build clean.
     #[cfg(feature = "display")]

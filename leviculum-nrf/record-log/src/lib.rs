@@ -1,4 +1,4 @@
-//! A forward-only record log on 4 KB NOR sectors.
+//! A forward-only record log on 4 KiB flash pages.
 //!
 //! # What a record is at this layer
 //!
@@ -16,34 +16,73 @@
 //! (`docs/src/concepts/propagation-node-on-a-board.md`, §6), so it must not
 //! be reachable only through an LXMF-shaped door.
 //!
+//! # Which part this is for, and what that changed
+//!
+//! This crate was written for an external QSPI NOR part. Neither board
+//! carries one (#384, commit 081522b2), so the region it drives is the
+//! nRF52840's own flash behind the firmware image — and three of the
+//! numbers the design was argued from are different there. The argument
+//! survives; the numbers had to be recomputed, and the endurance one got an
+//! order of magnitude worse.
+//!
+//! | | External NOR (as written) | nRF52840 internal (now) |
+//! |---|---|---|
+//! | Erase unit | 4 KiB sector | 4 KiB page |
+//! | Endurance | 100 000 cycles | **10 000 cycles** |
+//! | Program unit | 1 byte (4 via QSPI DMA) | **1 word, always** |
+//! | Writes per unit between erases | datasheet unknown | **2** |
+//! | Erase time | 58–70 ms typ | 85 ms |
+//!
+//! Source for the right-hand column: nRF52840 Product Specification, NVMC
+//! chapter (10 000 erase cycles per page, 85 ms page erase, 41 µs word
+//! write, a word writable at most twice between erases). With the
+//! SoftDevice enabled the NVMC is *Restricted* and only `sd_flash_write` /
+//! `sd_flash_page_erase` may touch it (S140 SDS, Hardware peripherals),
+//! which is also where the word-at-a-time rule becomes absolute.
+//!
 //! # Why forward-only, and why round-robin reclaim
 //!
-//! Both parts we drive are rated 100 000 erase cycles per sector. At the
-//! duty the 2026-09-09 field walk measured — 22.4 messages/hour — the data
-//! itself costs a sector erase every eleven records and outlives the board
-//! by three orders of magnitude. **A single fixed metadata sector, rewritten
-//! on every accepted record, spends its whole budget in 6.1 months at that
-//! same duty** (the paper's endurance table). So there is no superblock, no
-//! index sector, no head pointer and no sequence counter at a fixed address.
-//! Everything this log needs to mount itself is recovered by reading the
-//! sector headers, and a sector header is written exactly once per erase of
-//! the sector it heads — which is the definition of level wear.
+//! The argument is unchanged and the recomputed numbers make it sharper,
+//! because a tenth of the erase budget is a tenth of the room for getting
+//! this wrong.
 //!
-//! Reclaim is round-robin over the region: when the active sector cannot fit
-//! the next record, the *next* sector by index is erased and becomes active,
-//! dropping the oldest records with it. Every sector is therefore erased
-//! once per lap, and `SimNor::erase_counts` in the tests pins that with its
-//! own negative control.
+//! Take the region this store would live in: from the first page boundary
+//! behind the firmware image to `USER_FLASH_END`, **68 pages of 4 KiB**
+//! (`0xA6000`..`0xEA000` against the Pocket image of de6e74ed). At the duty
+//! the 2026-09-09 field walk measured — 22.4 messages/hour, 196 224 a year —
+//! and 11 field-sized records to a page:
+//!
+//! | | Erases/year | Budget | Life |
+//! |---|---|---|---|
+//! | Spread over the 68 pages | 262 per page | 10 000 | **38 years** |
+//! | One fixed metadata page | 196 224 | 10 000 | **18.6 days** |
+//!
+//! **A single fixed metadata page, rewritten on every accepted record,
+//! spends its whole budget in eighteen days.** On the external part the same
+//! line read six months, which is long enough to sound survivable; eighteen
+//! days is not. So there is no superblock, no index page, no head pointer
+//! and no sequence counter at a fixed address. Everything this log needs to
+//! mount itself is recovered by reading the page headers, and a page header
+//! is written exactly once per erase of the page it heads — which is the
+//! definition of level wear.
+//!
+//! Reclaim is round-robin over the region: when the active page cannot fit
+//! the next record, the *next* page by index is erased and becomes active,
+//! dropping the oldest records with it. Every page is therefore erased once
+//! per lap, and `SimNor::erase_counts` in the tests pins that with its own
+//! negative control.
 //!
 //! # On-flash layout
 //!
 //! Every offset in the region is a multiple of `PROGRAM_UNIT` (4). That is
-//! not a taste: the nRF52840 QSPI peripheral asserts that a program or read
-//! address, its length, and the RAM buffer behind it are all 4-byte aligned
-//! (`start_write`/`start_read`, `embassy-nrf-0.9.0/src/qspi.rs`), so a store
-//! that hands it a 42-byte header at an odd offset panics inside the driver.
+//! not a taste, and the reason for it changed with the part: the QSPI
+//! peripheral's DMA alignment assertions are gone, and in their place is
+//! `sd_flash_write`, which takes a word-aligned destination and a **length
+//! in words** (S140 SDS, SoC library) — there is no call that writes three
+//! bytes. `nrf_softdevice::Flash` publishes exactly that as
+//! `WRITE_SIZE = 4`.
 //!
-//! ## Sector header, 12 bytes, written once per erase
+//! ## Page header, 12 bytes, written once per erase
 //!
 //! | Offset | Bytes | Field |
 //! |---|---|---|
@@ -53,9 +92,9 @@
 //! | 9 | 1 | reserved, 0 |
 //! | 10 | 2 | CRC-16 over bytes 0..10 |
 //!
-//! The sequence is what makes a fixed metadata sector unnecessary: the
-//! active sector is the one with the highest sequence, and the oldest is the
-//! one after it round-robin. Mounting is a read of `sectors` × 12 bytes.
+//! The sequence is what makes a fixed metadata page unnecessary: the active
+//! page is the one with the highest sequence, and the oldest is the one
+//! after it round-robin. Mounting is a read of `pages` × 12 bytes.
 //!
 //! ## Record, 42-byte header then the body then 0xFF padding to a multiple of 4
 //!
@@ -74,43 +113,58 @@
 //! tag). The destination hash is not a field: it is the first bytes of the
 //! body, exactly as the reference reads it back from the head of its file.
 //!
-//! ## How a torn write is recognised
+//! ## How a torn write is recognised, in two writes per word
 //!
-//! A record is written in two steps and committed by the second:
+//! A record is written in three programs and committed by the last:
 //!
-//! 1. Header (with `flags` left at `0xFF`), body and padding are programmed
-//!    forward from the record offset.
-//! 2. The 4-byte word at record offset 36 — `timestamp[2..4]`, `tag`,
-//!    `flags` — is programmed again, identical except that `flags` goes
-//!    `0xFF` → `0xFE`. NOR programming only clears bits, so the three
-//!    unchanged bytes come out of it holding what they already held and the
-//!    flags byte is the only bit that moves. 4 bytes because that is the
-//!    smallest unit the QSPI peripheral will write.
+//! 1. Header bytes `0..36` — everything up to but not including the commit
+//!    word.
+//! 2. Header bytes `40..42` (the CRC), the body, and 0xFF padding to the
+//!    record's stride. Programmed from offset 40, which is word-aligned, so
+//!    the commit word at `36..40` is stepped over and left erased.
+//! 3. The commit word at offset 36 — `timestamp[2..4]`, `tag`, `flags` —
+//!    with `flags` already `0xFE`.
 //!
-//!    No bit changing is not the same as nothing happening: the part still
-//!    takes a program pulse, on cells that are already at zero. How many
-//!    such partial programs a page accepts between erases is a datasheet
-//!    property, and no datasheet for either MX25R1635F or IS25LP080D is on
-//!    these machines — so the exposure is measured rather than argued.
-//!    The host-side `SimNor` counts program operations per 256-byte page
-//!    since that page's last erase, and the test
-//!    `program_operations_per_page_are_counted_and_bounded` asserts the
-//!    worst case this format can produce: 19, on bodyless records at the
-//!    minimum stride. When a datasheet turns up, the check is a comparison
-//!    against that number instead of a re-derivation.
+//! **The skip in step 2 is the whole reason this format fits the internal
+//! flash.** The obvious implementation programs the header in one run and
+//! then re-programs the commit word to flip its flags byte: two writes of
+//! that word, which is the entire budget the nRF52840 allows between
+//! erases, leaving none for a purge. Leaving the word erased until it is the
+//! commit spends one write on the commit and keeps the second for
+//! [`RecordLog::purge`] — which is why `purge` is the one operation bounded
+//! on [`MultiwriteNorFlash`] rather than plain `NorFlash`.
 //!
-//! A record therefore counts as present **iff** its flags byte reads `0xFE`
-//! or `0xFC` *and* its CRC checks. Any cut before step 2 finishes leaves
-//! `0xFF` there and the record is not seen — deterministically, not with
-//! 1-in-65536 confidence. The CRC is then doing what a CRC should: catching
-//! a bit the part dropped, not standing in for a commit protocol.
+//! It costs one extra flash operation per append (three rather than two).
+//! At 41 µs a word and the SoftDevice's per-operation scheduling round trip,
+//! that is not the cost that matters; the erase is.
 //!
-//! Recovery adds one rule. After the last valid record in the active sector,
-//! if the remainder of that sector is not still erased, the sector is
-//! *sealed* — the cursor jumps to the next sector — because programming over
-//! a half-written record would need to raise bits, which NOR cannot do. The
-//! cost is at most one partly-used sector per power cut; the alternative is
+//! A record counts as present **iff** its flags byte reads `0xFE` or `0xFC`
+//! *and* its CRC checks. Any cut before step 3 leaves `0xFF` there and the
+//! record is not seen — deterministically, not with 1-in-65536 confidence.
+//! The CRC is then doing what a CRC should: catching a bit the part dropped,
+//! not standing in for a commit protocol.
+//!
+//! Recovery adds one rule. After the last valid record in the active page,
+//! if the remainder of that page is not still erased, the page is *sealed* —
+//! the cursor jumps to the next page — because programming over a
+//! half-written record would need to raise bits, which flash cannot do. The
+//! cost is at most one partly-used page per power cut; the alternative is
 //! silent corruption.
+//!
+//! # Cancellation
+//!
+//! Every method here is `async` because the only legal way to write this
+//! flash is `nrf_softdevice::Flash`, which is. That makes cancellation a
+//! safety question rather than a style one: a `select!` that drops an
+//! in-flight `append` at an `.await` leaves the record uncommitted, which is
+//! byte-for-byte the state a power cut leaves — the commit word is still
+//! `0xFF`, the next mount seals the page, and nothing is lost but the room.
+//! There is no repair pass to run and no torn-append state to detect,
+//! because the commit is one word and one word cannot be half-written.
+//!
+//! The cheap discipline on top of that (`cancel_safety_is_the_power_cut_case`
+//! in the tests pins it): give the store its own task and reach it by
+//! channel, so no caller's timeout can drop a future mid-append.
 
 #![no_std]
 
@@ -123,25 +177,25 @@ pub mod sim;
 #[cfg(test)]
 mod tests;
 
-use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
 
-/// Erase granularity of both parts, and the only one this log supports.
+/// Erase granularity of the part, and the only one this log supports.
 pub const SECTOR_SIZE: u32 = 4096;
-/// Smallest unit that may be programmed or read, in bytes.
+/// Smallest unit that may be programmed, in bytes.
 ///
-/// Set by the nRF52840 QSPI peripheral, not by the NOR parts (which program
-/// single bytes happily).
+/// Set by `sd_flash_write`, which takes a word-aligned address and a length
+/// in words.
 pub const PROGRAM_UNIT: u32 = 4;
 /// Length of the per-record header.
 pub const HEADER_LEN: usize = 42;
-/// Length of the per-sector header, written once per erase of that sector.
+/// Length of the per-page header, written once per erase of that page.
 pub const SECTOR_HEADER_LEN: u32 = 12;
 /// Length of a record key.
 pub const KEY_LEN: usize = 32;
 
-/// Bytes of a sector available to records.
+/// Bytes of a page available to records.
 pub const SECTOR_PAYLOAD: u32 = SECTOR_SIZE - SECTOR_HEADER_LEN;
-/// Largest body this layer will store. A record never straddles a sector.
+/// Largest body this layer will store. A record never straddles a page.
 pub const MAX_BODY: usize = SECTOR_PAYLOAD as usize - HEADER_LEN;
 /// Stride of a record with an empty body — the smallest room a record needs.
 pub const MIN_STRIDE: u32 = align_up(HEADER_LEN) as u32;
@@ -154,7 +208,7 @@ const VERSION: u8 = 1;
 const FLAG_ERASED: u8 = 0xFF;
 /// Committed and current.
 pub const FLAG_LIVE: u8 = 0xFE;
-/// Committed and withdrawn. Still occupies its bytes until its sector is
+/// Committed and withdrawn. Still occupies its bytes until its page is
 /// reclaimed; that is the whole point of a forward-only log.
 pub const FLAG_PURGED: u8 = 0xFC;
 
@@ -162,6 +216,8 @@ pub const FLAG_PURGED: u8 = 0xFC;
 const COMMIT_OFF: u32 = 36;
 /// Index of the flags byte inside the commit word.
 const COMMIT_FLAGS_IX: usize = 3;
+/// First byte after the commit word: where the second program run starts.
+const AFTER_COMMIT: u32 = COMMIT_OFF + PROGRAM_UNIT;
 
 const CRC_INIT: u16 = 0xFFFF;
 const CRC_POLY: u16 = 0x1021;
@@ -203,10 +259,10 @@ pub fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
 pub enum Error<E> {
     /// The device said no.
     Flash(E),
-    /// Body longer than [`MAX_BODY`]; a record never straddles a sector.
+    /// Body longer than [`MAX_BODY`]; a record never straddles a page.
     BodyTooLarge,
-    /// Region base or length is not a whole number of sectors, or the
-    /// region is shorter than the two sectors reclaim needs.
+    /// Region base or length is not a whole number of pages, or the region
+    /// is shorter than the two pages reclaim needs.
     BadRegion,
     /// The region does not fit inside the device.
     OutOfBounds,
@@ -251,9 +307,9 @@ impl Record {
 
 /// A 4-byte-aligned scratch buffer.
 ///
-/// The QSPI peripheral DMAs straight out of (and into) the buffer we hand
-/// it and asserts `ptr % 4 == 0`, so every buffer that reaches the device
-/// goes through one of these.
+/// Kept aligned although the internal flash no longer demands it: the
+/// firmware may yet drive a part behind a DMA engine that does, and an
+/// aligned buffer costs nothing.
 #[repr(align(4))]
 struct Aligned<const N: usize>([u8; N]);
 
@@ -261,31 +317,31 @@ struct Aligned<const N: usize>([u8; N]);
 /// 64 keeps the stack cost of a scan at one cache-line-ish buffer.
 const WINDOW: usize = 64;
 
-/// A forward-only record log over a region of a NOR part.
+/// A forward-only record log over a region of flash.
 pub struct RecordLog<F> {
     flash: F,
     base: u32,
     sectors: u32,
     active: u32,
     seq: u32,
-    /// Offset of the next record *within* the active sector.
+    /// Offset of the next record *within* the active page.
     cursor: u32,
 }
 
 impl<F: NorFlash> RecordLog<F> {
     /// Mount the log on `[base, base + len)` without writing anything.
     ///
-    /// `Ok(None)` means no sector in the region carries a header this log
+    /// `Ok(None)` means no page in the region carries a header this log
     /// wrote — an unformatted region, or somebody else's data. Use this
     /// where formatting would be a decision rather than a detail: the
-    /// firmware's boot probe reads the part it has never driven before and
+    /// firmware's boot probe reads a region it has never driven before and
     /// must not erase whatever is on it.
-    pub fn mount(mut flash: F, base: u32, len: u32) -> Result<Option<Self>, Error<F::Error>> {
+    pub async fn mount(mut flash: F, base: u32, len: u32) -> Result<Option<Self>, Error<F::Error>> {
         let sectors = check_region::<F>(base, len, flash.capacity())?;
-        let Some((active, seq)) = find_active(&mut flash, base, sectors)? else {
+        let Some((active, seq)) = find_active(&mut flash, base, sectors).await? else {
             return Ok(None);
         };
-        let cursor = scan_tail(&mut flash, base + active * SECTOR_SIZE)?;
+        let cursor = scan_tail(&mut flash, base + active * SECTOR_SIZE).await?;
         Ok(Some(Self {
             flash,
             base,
@@ -296,23 +352,23 @@ impl<F: NorFlash> RecordLog<F> {
         }))
     }
 
-    /// Mount the log on `[base, base + len)`, formatting it if no sector
-    /// there carries a valid header.
+    /// Mount the log on `[base, base + len)`, formatting it if no page there
+    /// carries a valid header.
     ///
-    /// Reads `sectors` × 12 bytes of sector headers plus one scan of the
-    /// active sector. Writes nothing unless the region is unformatted, in
-    /// which case it costs one erase and one 12-byte header.
-    pub fn open(mut flash: F, base: u32, len: u32) -> Result<Self, Error<F::Error>> {
+    /// Reads `pages` × 12 bytes of page headers plus one scan of the active
+    /// page. Writes nothing unless the region is unformatted, in which case
+    /// it costs one erase and one 12-byte header.
+    pub async fn open(mut flash: F, base: u32, len: u32) -> Result<Self, Error<F::Error>> {
         let sectors = check_region::<F>(base, len, flash.capacity())?;
-        let (active, seq) = match find_active(&mut flash, base, sectors)? {
+        let (active, seq) = match find_active(&mut flash, base, sectors).await? {
             Some(found) => found,
             None => {
-                erase_sector(&mut flash, base)?;
-                write_sector_header(&mut flash, base, 0)?;
+                erase_sector(&mut flash, base).await?;
+                write_sector_header(&mut flash, base, 0).await?;
                 (0, 0)
             }
         };
-        let cursor = scan_tail(&mut flash, base + active * SECTOR_SIZE)?;
+        let cursor = scan_tail(&mut flash, base + active * SECTOR_SIZE).await?;
         Ok(Self {
             flash,
             base,
@@ -324,7 +380,7 @@ impl<F: NorFlash> RecordLog<F> {
     }
 
     /// How many records are on the part: `(live, purged)`.
-    pub fn count(&mut self) -> Result<(u32, u32), Error<F::Error>> {
+    pub async fn count(&mut self) -> Result<(u32, u32), Error<F::Error>> {
         let mut live = 0u32;
         let mut purged = 0u32;
         self.for_each(|record| {
@@ -333,15 +389,16 @@ impl<F: NorFlash> RecordLog<F> {
             } else {
                 purged += 1;
             }
-        })?;
+        })
+        .await?;
         Ok((live, purged))
     }
 
     /// Append a record and commit it. Returns its absolute device offset.
     ///
-    /// Reclaims the next sector round-robin if the active one cannot hold
-    /// the record; the records in that sector are gone when it returns.
-    pub fn append(
+    /// Reclaims the next page round-robin if the active one cannot hold the
+    /// record; the records in that page are gone when it returns.
+    pub async fn append(
         &mut self,
         key: &[u8; KEY_LEN],
         time: u32,
@@ -353,7 +410,7 @@ impl<F: NorFlash> RecordLog<F> {
         }
         let stride = record_stride(body.len()) as u32;
         if stride > SECTOR_SIZE - self.cursor {
-            self.advance()?;
+            self.advance().await?;
         }
         let offset = self.base + self.active * SECTOR_SIZE + self.cursor;
 
@@ -366,55 +423,82 @@ impl<F: NorFlash> RecordLog<F> {
         let crc = crc16_update(crc16_update(CRC_INIT, &header[0..39]), body);
         header[40..42].copy_from_slice(&crc.to_le_bytes());
 
-        self.program_record(offset, &header, body)?;
-
-        // The commit. Three of these four bytes are re-programmed to the
-        // values they already hold, which on NOR clears no further bit;
-        // the fourth is the flags byte going 0xFF -> 0xFE.
         let mut commit = Aligned([0u8; PROGRAM_UNIT as usize]);
         commit.0.copy_from_slice(
             &header[COMMIT_OFF as usize..COMMIT_OFF as usize + PROGRAM_UNIT as usize],
         );
         commit.0[COMMIT_FLAGS_IX] = FLAG_LIVE;
-        self.flash
-            .write(offset + COMMIT_OFF, &commit.0)
-            .map_err(Error::Flash)?;
+
+        // Everything except the commit word, which stays erased so that its
+        // one write is the commit and its second is a later purge. `touched`
+        // is what tells a failure that landed nothing from one that left
+        // bytes behind; see below.
+        let mut touched = false;
+        let mut outcome = self
+            .program_run(offset, &header[0..COMMIT_OFF as usize], &[], &mut touched)
+            .await;
+        if outcome.is_ok() {
+            outcome = self
+                .program_run(
+                    offset + AFTER_COMMIT,
+                    &header[AFTER_COMMIT as usize..HEADER_LEN],
+                    body,
+                    &mut touched,
+                )
+                .await;
+        }
+        if outcome.is_ok() {
+            outcome = self
+                .flash
+                .write(offset + COMMIT_OFF, &commit.0)
+                .await
+                .map_err(Error::Flash);
+        }
+
+        if let Err(error) = outcome {
+            // A failed operation on this part leaves no bytes behind — the
+            // SoftDevice's timeout means the write did not happen — but the
+            // operations *before* it did, and their words have spent one of
+            // their two writes. Retrying at the same offset would spend the
+            // second on bytes that already hold the right value, and a third
+            // if it ever failed again; worse, a caller that retries with a
+            // different record would be programming over a half-written one,
+            // which needs bits raised.
+            //
+            // So a partly-written record seals its page, exactly as a power
+            // cut does, and the retry lands in a fresh one. The cost is the
+            // rest of one page per failed append that got as far as its
+            // first program; a failure on that first program costs nothing,
+            // which is the common case when the radio is busy enough to make
+            // the SoftDevice refuse.
+            if touched {
+                self.cursor = SECTOR_SIZE;
+            }
+            return Err(error);
+        }
 
         self.cursor += stride;
         Ok(offset)
     }
 
-    /// Mark a record withdrawn. Clears one further bit of its flags byte;
-    /// the bytes stay put until the sector is reclaimed.
-    pub fn purge(&mut self, record: &Record) -> Result<(), Error<F::Error>> {
-        if record.flags == FLAG_PURGED {
-            return Ok(());
-        }
-        let mut commit = Aligned([0u8; PROGRAM_UNIT as usize]);
-        commit.0[0..2].copy_from_slice(&record.time.to_le_bytes()[2..4]);
-        commit.0[2] = record.tag;
-        commit.0[COMMIT_FLAGS_IX] = FLAG_PURGED;
-        self.flash
-            .write(record.offset + COMMIT_OFF, &commit.0)
-            .map_err(Error::Flash)?;
-        Ok(())
-    }
-
-    /// Visit every record still on the part, oldest sector first.
+    /// Visit every record still on the part, oldest page first.
     ///
     /// Purged records are visited too — the caller decides. Reading a body
     /// needs `&mut self`, so the closure gets the header and the caller
     /// reads bodies afterwards from the [`Record`] it kept.
-    pub fn for_each(&mut self, mut visit: impl FnMut(&Record)) -> Result<(), Error<F::Error>> {
+    pub async fn for_each(
+        &mut self,
+        mut visit: impl FnMut(&Record),
+    ) -> Result<(), Error<F::Error>> {
         for step in 1..=self.sectors {
             let idx = (self.active + step) % self.sectors;
             let sector = self.base + idx * SECTOR_SIZE;
-            if read_sector_header(&mut self.flash, sector)?.is_none() {
+            if read_sector_header(&mut self.flash, sector).await?.is_none() {
                 continue;
             }
             let mut off = SECTOR_HEADER_LEN;
             while SECTOR_SIZE - off >= MIN_STRIDE {
-                match probe_record(&mut self.flash, sector + off, SECTOR_SIZE - off)? {
+                match probe_record(&mut self.flash, sector + off, SECTOR_SIZE - off).await? {
                     Some((record, intact)) => {
                         off += record.stride();
                         if intact {
@@ -430,41 +514,52 @@ impl<F: NorFlash> RecordLog<F> {
 
     /// Read a record's body into `out`. Returns the number of bytes read,
     /// which is `min(out.len(), record.len)`.
-    pub fn read_body(&mut self, record: &Record, out: &mut [u8]) -> Result<usize, Error<F::Error>> {
+    pub async fn read_body(
+        &mut self,
+        record: &Record,
+        out: &mut [u8],
+    ) -> Result<usize, Error<F::Error>> {
         let want = core::cmp::min(out.len(), record.len as usize);
         let mut written = 0usize;
         read_span(&mut self.flash, record.body_offset(), want, |chunk| {
             out[written..written + chunk.len()].copy_from_slice(chunk);
             written += chunk.len();
-        })?;
+        })
+        .await?;
         Ok(want)
     }
 
-    /// Erase the next sector round-robin and make it active.
-    fn advance(&mut self) -> Result<(), Error<F::Error>> {
+    /// Erase the next page round-robin and make it active.
+    async fn advance(&mut self) -> Result<(), Error<F::Error>> {
         let next = (self.active + 1) % self.sectors;
         let seq = self.seq.wrapping_add(1);
         let sector = self.base + next * SECTOR_SIZE;
-        erase_sector(&mut self.flash, sector)?;
-        write_sector_header(&mut self.flash, sector, seq)?;
+        erase_sector(&mut self.flash, sector).await?;
+        write_sector_header(&mut self.flash, sector, seq).await?;
         self.active = next;
         self.seq = seq;
         self.cursor = SECTOR_HEADER_LEN;
         Ok(())
     }
 
-    /// Program header, body and 0xFF padding as one forward run of
-    /// 4-byte-aligned writes out of an aligned window.
-    fn program_record(
+    /// Program `head` followed by `tail` as one forward run of word-sized
+    /// writes out of an aligned window, padding the last word with `0xFF`.
+    ///
+    /// `offset` must be word-aligned. Padding is free: programming `0xFF`
+    /// clears no bit. `touched` is set once any write has succeeded, so the
+    /// caller can tell a failure that left bytes on the part from one that
+    /// did not.
+    async fn program_run(
         &mut self,
         offset: u32,
-        header: &[u8; HEADER_LEN],
-        body: &[u8],
+        head: &[u8],
+        tail: &[u8],
+        touched: &mut bool,
     ) -> Result<(), Error<F::Error>> {
         let mut window = Aligned([FLAG_ERASED; WINDOW]);
         let mut filled = 0usize;
         let mut at = offset;
-        for part in [header.as_slice(), body] {
+        for part in [head, tail] {
             let mut rest = part;
             while !rest.is_empty() {
                 let take = core::cmp::min(WINDOW - filled, rest.len());
@@ -472,7 +567,11 @@ impl<F: NorFlash> RecordLog<F> {
                 filled += take;
                 rest = &rest[take..];
                 if filled == WINDOW {
-                    self.flash.write(at, &window.0).map_err(Error::Flash)?;
+                    self.flash
+                        .write(at, &window.0)
+                        .await
+                        .map_err(Error::Flash)?;
+                    *touched = true;
                     at += WINDOW as u32;
                     filled = 0;
                 }
@@ -480,32 +579,33 @@ impl<F: NorFlash> RecordLog<F> {
         }
         if filled > 0 {
             let total = align_up(filled);
-            // Padding stays erased: programming 0xFF clears no bit.
             window.0[filled..total].fill(FLAG_ERASED);
             self.flash
                 .write(at, &window.0[..total])
+                .await
                 .map_err(Error::Flash)?;
+            *touched = true;
         }
         Ok(())
     }
 
-    /// Index of the sector records are currently appended to.
+    /// Index of the page records are currently appended to.
     pub fn active_sector(&self) -> u32 {
         self.active
     }
 
-    /// Sequence number of the active sector: how many sectors this log has
+    /// Sequence number of the active page: how many pages this log has
     /// erased since it was formatted.
     pub fn sequence(&self) -> u32 {
         self.seq
     }
 
-    /// Sectors in the region.
+    /// Pages in the region.
     pub fn sectors(&self) -> u32 {
         self.sectors
     }
 
-    /// Bytes still free in the active sector.
+    /// Bytes still free in the active page.
     pub fn sector_room(&self) -> u32 {
         SECTOR_SIZE - self.cursor
     }
@@ -523,22 +623,45 @@ impl<F: NorFlash> RecordLog<F> {
     }
 }
 
+impl<F: MultiwriteNorFlash> RecordLog<F> {
+    /// Mark a record withdrawn. Clears one further bit of its flags byte;
+    /// the bytes stay put until the page is reclaimed.
+    ///
+    /// This is the second and last write the commit word gets between
+    /// erases, which is the whole of the nRF52840's budget for it — hence
+    /// the [`MultiwriteNorFlash`] bound, and hence the commit word being
+    /// skipped rather than pre-programmed during the append.
+    pub async fn purge(&mut self, record: &Record) -> Result<(), Error<F::Error>> {
+        if record.flags == FLAG_PURGED {
+            return Ok(());
+        }
+        let mut commit = Aligned([0u8; PROGRAM_UNIT as usize]);
+        commit.0[0..2].copy_from_slice(&record.time.to_le_bytes()[2..4]);
+        commit.0[2] = record.tag;
+        commit.0[COMMIT_FLAGS_IX] = FLAG_PURGED;
+        self.flash
+            .write(record.offset + COMMIT_OFF, &commit.0)
+            .await
+            .map_err(Error::Flash)
+    }
+}
+
 /// Whether `[base, base + len)` already carries this log's format.
 ///
 /// Reads only, and borrows the device rather than taking it — which is
 /// what lets a caller ask the question before deciding whether formatting
 /// is its to do, and what lets a test assert that asking cost nothing.
-pub fn is_formatted<F: NorFlash>(
+pub async fn is_formatted<F: NorFlash>(
     flash: &mut F,
     base: u32,
     len: u32,
 ) -> Result<bool, Error<F::Error>> {
     let sectors = check_region::<F>(base, len, flash.capacity())?;
-    Ok(find_active(flash, base, sectors)?.is_some())
+    Ok(find_active(flash, base, sectors).await?.is_some())
 }
 
 /// Check the region against the device's geometry and its own bounds,
-/// returning the number of sectors in it.
+/// returning the number of pages in it.
 fn check_region<F: NorFlash>(base: u32, len: u32, capacity: usize) -> Result<u32, Error<F::Error>> {
     let unit = PROGRAM_UNIT as usize;
     if F::ERASE_SIZE != SECTOR_SIZE as usize
@@ -561,19 +684,19 @@ fn check_region<F: NorFlash>(base: u32, len: u32, capacity: usize) -> Result<u32
     Ok(len / SECTOR_SIZE)
 }
 
-/// The active sector and its sequence: the highest sequence on the part.
+/// The active page and its sequence: the highest sequence on the part.
 ///
 /// This read is the whole of the log's mount state. Nothing on the part
-/// records where the head is, which is exactly why no sector wears faster
+/// records where the head is, which is exactly why no page wears faster
 /// than the rest.
-fn find_active<F: ReadNorFlash>(
+async fn find_active<F: ReadNorFlash>(
     flash: &mut F,
     base: u32,
     sectors: u32,
 ) -> Result<Option<(u32, u32)>, Error<F::Error>> {
     let mut best: Option<(u32, u32)> = None;
     for idx in 0..sectors {
-        if let Some(seq) = read_sector_header(flash, base + idx * SECTOR_SIZE)? {
+        if let Some(seq) = read_sector_header(flash, base + idx * SECTOR_SIZE).await? {
             if best.is_none_or(|(_, s)| seq > s) {
                 best = Some((idx, seq));
             }
@@ -582,13 +705,13 @@ fn find_active<F: ReadNorFlash>(
     Ok(best)
 }
 
-/// Read a sector header. `Some(sequence)` iff it is intact.
-fn read_sector_header<F: ReadNorFlash>(
+/// Read a page header. `Some(sequence)` iff it is intact.
+async fn read_sector_header<F: ReadNorFlash>(
     flash: &mut F,
     sector: u32,
 ) -> Result<Option<u32>, Error<F::Error>> {
     let mut buf = Aligned([0u8; SECTOR_HEADER_LEN as usize]);
-    flash.read(sector, &mut buf.0).map_err(Error::Flash)?;
+    flash.read(sector, &mut buf.0).await.map_err(Error::Flash)?;
     if u32::from_le_bytes([buf.0[0], buf.0[1], buf.0[2], buf.0[3]]) != MAGIC || buf.0[8] != VERSION
     {
         return Ok(None);
@@ -602,7 +725,7 @@ fn read_sector_header<F: ReadNorFlash>(
     ])))
 }
 
-fn write_sector_header<F: NorFlash>(
+async fn write_sector_header<F: NorFlash>(
     flash: &mut F,
     sector: u32,
     seq: u32,
@@ -614,18 +737,19 @@ fn write_sector_header<F: NorFlash>(
     buf.0[9] = 0;
     let crc = crc16_update(CRC_INIT, &buf.0[0..10]);
     buf.0[10..12].copy_from_slice(&crc.to_le_bytes());
-    flash.write(sector, &buf.0).map_err(Error::Flash)
+    flash.write(sector, &buf.0).await.map_err(Error::Flash)
 }
 
-fn erase_sector<F: NorFlash>(flash: &mut F, sector: u32) -> Result<(), Error<F::Error>> {
+async fn erase_sector<F: NorFlash>(flash: &mut F, sector: u32) -> Result<(), Error<F::Error>> {
     flash
         .erase(sector, sector + SECTOR_SIZE)
+        .await
         .map_err(Error::Flash)
 }
 
 /// Read `len` bytes from `off` — which need not be aligned — handing them to
 /// `sink` in windows.
-fn read_span<F: ReadNorFlash>(
+async fn read_span<F: ReadNorFlash>(
     flash: &mut F,
     mut off: u32,
     mut len: usize,
@@ -638,6 +762,7 @@ fn read_span<F: ReadNorFlash>(
         let span = align_up(core::cmp::min(len + skip, WINDOW));
         flash
             .read(start, &mut buf.0[..span])
+            .await
             .map_err(Error::Flash)?;
         let take = core::cmp::min(len, span - skip);
         sink(&buf.0[skip..skip + take]);
@@ -649,24 +774,24 @@ fn read_span<F: ReadNorFlash>(
 
 /// Read the record at `at`.
 ///
-/// `None` means there is no record here and the scan of this sector ends:
-/// the flags byte is still erased (nothing was ever committed here) or it
-/// holds a value no commit produces, or the length is one no record could
-/// have had. `Some((record, intact))` means a record was committed here and
+/// `None` means there is no record here and the scan of this page ends: the
+/// flags byte is still erased (nothing was ever committed here) or it holds
+/// a value no commit produces, or the length is one no record could have
+/// had. `Some((record, intact))` means a record was committed here and
 /// occupies `record.stride()` bytes whether or not its CRC still checks —
 /// `intact` says whether it does. A record whose body lost a bit therefore
 /// costs itself and not the records behind it.
 ///
-/// `room` is what is left of the sector from `at`; a header claiming a body
-/// that would straddle the sector boundary is not a record.
-fn probe_record<F: ReadNorFlash>(
+/// `room` is what is left of the page from `at`; a header claiming a body
+/// that would straddle the page boundary is not a record.
+async fn probe_record<F: ReadNorFlash>(
     flash: &mut F,
     at: u32,
     room: u32,
 ) -> Result<Option<(Record, bool)>, Error<F::Error>> {
     debug_assert!(room >= MIN_STRIDE);
     let mut buf = Aligned([0u8; align_up(HEADER_LEN)]);
-    flash.read(at, &mut buf.0).map_err(Error::Flash)?;
+    flash.read(at, &mut buf.0).await.map_err(Error::Flash)?;
 
     let flags = buf.0[39];
     if flags != FLAG_LIVE && flags != FLAG_PURGED {
@@ -681,7 +806,8 @@ fn probe_record<F: ReadNorFlash>(
     let mut crc = crc16_update(CRC_INIT, &buf.0[0..39]);
     read_span(flash, at + HEADER_LEN as u32, len as usize, |chunk| {
         crc = crc16_update(crc, chunk);
-    })?;
+    })
+    .await?;
 
     let mut key = [0u8; KEY_LEN];
     key.copy_from_slice(&buf.0[2..34]);
@@ -698,27 +824,27 @@ fn probe_record<F: ReadNorFlash>(
 
 /// Where the next record goes in `sector`, given what survived.
 ///
-/// Walks the committed records, then checks that the rest of the sector is
-/// still erased. If it is not — a cut left a half-written record there —
-/// the sector is sealed by returning [`SECTOR_SIZE`], because programming
-/// over those bytes would have to raise bits.
-fn scan_tail<F: ReadNorFlash>(flash: &mut F, sector: u32) -> Result<u32, Error<F::Error>> {
+/// Walks the committed records, then checks that the rest of the page is
+/// still erased. If it is not — a cut left a half-written record there — the
+/// page is sealed by returning [`SECTOR_SIZE`], because programming over
+/// those bytes would have to raise bits.
+async fn scan_tail<F: ReadNorFlash>(flash: &mut F, sector: u32) -> Result<u32, Error<F::Error>> {
     let mut off = SECTOR_HEADER_LEN;
     while SECTOR_SIZE - off >= MIN_STRIDE {
-        match probe_record(flash, sector + off, SECTOR_SIZE - off)? {
+        match probe_record(flash, sector + off, SECTOR_SIZE - off).await? {
             // A record with a bad CRC still owns its bytes, so the cursor
             // steps over it exactly like an intact one.
             Some((record, _)) => off += record.stride(),
             None => break,
         }
     }
-    if off < SECTOR_SIZE && !span_is_erased(flash, sector + off, SECTOR_SIZE - off)? {
+    if off < SECTOR_SIZE && !span_is_erased(flash, sector + off, SECTOR_SIZE - off).await? {
         return Ok(SECTOR_SIZE);
     }
     Ok(off)
 }
 
-fn span_is_erased<F: ReadNorFlash>(
+async fn span_is_erased<F: ReadNorFlash>(
     flash: &mut F,
     off: u32,
     len: u32,
@@ -728,6 +854,7 @@ fn span_is_erased<F: ReadNorFlash>(
         if chunk.iter().any(|b| *b != FLAG_ERASED) {
             clean = false;
         }
-    })?;
+    })
+    .await?;
     Ok(clean)
 }

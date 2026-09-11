@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "qspi-bitbang", "battery-scale"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "store-spike", "qspi-bitbang", "battery-scale"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -155,6 +155,10 @@ embedded-storage = "0.3"
 # legal way to write internal flash while the SoftDevice is enabled
 # (`radio_store`). Same version nrf-softdevice itself pulls.
 embedded-storage-async = "0.4"
+# #384 spike only, and optional: the size harness below builds this
+# candidate into the image so `arm-none-eabi-size` can weigh it. No default
+# build pulls it, and nothing outside `store_spike.rs` names it.
+sequential-storage = { version = "8.0.1", optional = true }
 
 # Optional baseboard peripherals (RAK19026 VC on the WisMesh Pocket V2).
 # All gated behind features so the bare nRF52840 + SX1262 build (T114, or a
@@ -279,6 +283,14 @@ gnss = [
 ]
 battery = []
 rak-baseboard = ["display", "gnss", "battery"]
+
+# Codeberg #384 size harness. Throwaway, mutually exclusive, never default:
+# each drags one candidate store's code into both firmware bins so its
+# `.text`/`.rodata` cost can be measured against the same bin without it.
+# `src/store_spike.rs` says how to run the measurement. Do not flash a build
+# with either of these on.
+store-spike-record-log = []
+store-spike-sequential = ["dep:sequential-storage"]
 
 [profile.release]
 opt-level = "z"      # optimize for size

@@ -38,6 +38,10 @@ pub mod rng;
 // t114 UF2 serves both populations. See `st7789.rs` module docs.
 #[cfg(feature = "bsp-t114")]
 pub mod st7789;
+// #384 size harness, behind a throwaway non-default feature. See the module
+// docs: no shipped build enables it and none of it is in the default image.
+#[cfg(any(feature = "store-spike-record-log", feature = "store-spike-sequential"))]
+pub mod store_spike;
 pub mod sx1262;
 /// Telemetry reporting (Codeberg #236): the target lifecycle, the flash
 /// record, and the wiring from this board's sensors into an LXMF report.

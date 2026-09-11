@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"
-description = "Forward-only record log on 4 KB NOR sectors, host-testable over a simulated part"
+description = "Forward-only record log on 4 KiB flash pages, host-testable over a simulated part"
 
 [features]
 default = []
-# The simulated NOR part. On by default for `cargo test` (the `test` cfg
+# The simulated flash part. On by default for `cargo test` (the `test` cfg
 # pulls it in unconditionally); a downstream integration test that wants
 # the same device enables the feature explicitly. The firmware never
 # does, so the simulation and its `alloc` use stay out of the image.
 sim = []
 
 [dependencies]
-embedded-storage = "0.3"
+# Async NorFlash, because the only legal way to write the nRF52840's
+# internal flash with the SoftDevice enabled is `nrf_softdevice::Flash`,
+# which is async (#384). Same version nrf-softdevice and the firmware
+# crate pull; the error types come re-exported from `embedded-storage`.
+embedded-storage-async = "0.4"

@@ -1,0 +1,17 @@
+[package]
+name = "leviculum-store-spike"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Spike (#384): the same acceptance suite run over both candidate stores on one simulated nRF52840 flash"
+
+[dependencies]
+# The candidate we wrote, and the simulated part both candidates run on.
+# `sim` explicitly: the feature exists so a downstream test can have the
+# same device the crate tests itself against.
+leviculum-record-log = { path = "../record-log", features = ["sim"] }
+# The candidate off the shelf. Its queue is what #384 weighs against ours.
+sequential-storage = "8.0.1"
+embedded-storage-async = "0.4"

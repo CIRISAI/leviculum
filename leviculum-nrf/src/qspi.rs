@@ -859,15 +859,15 @@ pub fn log_head(flash: &mut Qspi<'static>) {
 /// deactivates the peripheral (and, on the way out, works around
 /// nRF52840 anomaly 122) instead of holding the part out of its standby
 /// current for a store no one has mounted yet.
-pub fn log_store(flash: Qspi<'static>, part: &FlashPart) {
+pub async fn log_store(flash: Qspi<'static>, part: &FlashPart) {
     use leviculum_record_log::{RecordLog, SECTOR_SIZE};
 
     let sectors = part.capacity / SECTOR_SIZE;
-    match RecordLog::mount(flash, 0, part.capacity) {
+    match RecordLog::mount(flash, 0, part.capacity).await {
         Ok(Some(mut log)) => {
             let active = log.active_sector();
             let seq = log.sequence();
-            match log.count() {
+            match log.count().await {
                 Ok((live, purged)) => crate::log::log_fmt_critical(
                     "[QSPI] ",
                     format_args!(

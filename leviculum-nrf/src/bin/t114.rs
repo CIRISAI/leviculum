@@ -366,6 +366,13 @@ async fn main(spawner: Spawner) {
         t114::CONFIG.telemetry_flash_page,
     );
 
+    // Codeberg #384 size harness, behind a throwaway non-default feature:
+    // appends, iterates and removes once so the linker keeps the candidate
+    // store's code and `arm-none-eabi-size` can weigh it. No shipped build
+    // enables this.
+    #[cfg(any(feature = "store-spike-record-log", feature = "store-spike-sequential"))]
+    leviculum_nrf::store_spike::exercise(shared_flash).await;
+
     // ST7789 status display — blind-driven (the panel is write-only, no
     // probe possible; see leviculum_nrf::st7789 module docs). Safe and
     // default-on for panel-less boards, so this single UF2 serves both
