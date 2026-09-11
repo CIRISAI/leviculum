@@ -108,7 +108,7 @@
 //!   walks a work queue of `TickOutput`s, routing every event through
 //!   `LxmfRouter::handle_event` and pushing the output that produces back onto
 //!   the queue.
-//! * `absorb` (leviculum-lxmf-node/src/processor.rs:394) is the same loop
+//! * `absorb` (leviculum-lxmf-node/src/processor.rs:437) is the same loop
 //!   inside a real hook: it re-feeds each event to the router *and* forwards
 //!   it on the returned `TickOutput`, under a round cap —
 //!   `MAX_ABSORB_ROUNDS` (leviculum-lxmf-node/src/processor.rs:84).
