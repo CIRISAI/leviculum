@@ -782,6 +782,137 @@ def gen_announce_vectors():
 
 
 # --------------------------------------------------------------------------
+# Propagation-node vectors (frozen): the NODE side of the client exchange
+# (leviculum#384 part 1). The `/get` responses come from the genuine
+# `LXMRouter.message_get_request` handler running over a seeded message
+# store; the stamp verdicts come from the genuine `LXStamper` validator.
+# --------------------------------------------------------------------------
+
+def _deterministic_pn_stamp(transient_id, cost):
+    """Find a stamp valid at `cost` without entropy: candidate i is
+    SHA-256(transient_id || i), tested by the reference's own validity
+    predicate over the reference's own PN workblock (LXStamper.py:73-96).
+    Real clients draw candidates from os.urandom (LXStamper.py:188); the
+    search rule is not wire-visible, only the found stamp is."""
+    workblock = LXStamper.stamp_workblock(
+        transient_id, expand_rounds=LXStamper.WORKBLOCK_EXPAND_ROUNDS_PN
+    )
+    counter = 0
+    while True:
+        stamp = RNS.Identity.full_hash(transient_id + counter.to_bytes(8, "big"))
+        if LXStamper.stamp_valid(stamp, cost, workblock):
+            return stamp, LXStamper.stamp_value(workblock, stamp), counter
+        counter += 1
+
+
+def gen_propagation_node_vectors():
+    import tempfile
+
+    _, dst_id = make_identities()
+    dst_delivery = RNS.Destination(
+        dst_id, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery"
+    )
+
+    # Deterministic destination-encrypted bodies. The node's store path never
+    # decrypts — it stores the ciphertext exactly as received
+    # (LXMRouter.py:2510-2515) — so a pinned pattern stands in for the
+    # ciphertext. Both are longer than LXMF_OVERHEAD (112), the validator's
+    # lower bound (LXStamper.py:86).
+    lxmf_big = dst_delivery.hash + bytes((i * 7) & 0xFF for i in range(120))
+    lxmf_small = dst_delivery.hash + bytes(range(100))
+    tid_big = RNS.Identity.full_hash(lxmf_big)
+    tid_small = RNS.Identity.full_hash(lxmf_small)
+
+    stamp_cost = 8
+    stamp, stamp_value, rounds = _deterministic_pn_stamp(tid_big, stamp_cost)
+    stamped_big = lxmf_big + stamp
+    stamped_small = lxmf_small + bytes(range(0x40, 0x60))
+
+    envelope = msgpack.packb([FIXED_TIMESTAMP, [stamped_big]])
+    validated = LXStamper.validate_pn_stamps([stamped_big], stamp_cost)
+    at_zero = LXStamper.validate_pn_stamps([stamped_big], 0)
+    rejected = LXStamper.validate_pn_stamps([stamped_big], stamp_value + 1)
+    add({
+        "id": "VEC-PN-UPLOAD",
+        "title": "Client upload envelope as the node receives it",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:2234-2255 (propagation_packet); "
+                    "LXStamper.py:84-96 (validate_pn_stamp); "
+                    "LXMRouter.py:2257-2260 (invalid-stamp reject)",
+        "structure": "msgpack([timestamp, [lxmf_data || stamp]])",
+        "envelope_hex": envelope.hex(),
+        "lxmf_data_hex": lxmf_big.hex(),
+        "stamp_hex": stamp.hex(),
+        "stamp_search_rounds": rounds,
+        "transient_id_hex": tid_big.hex(),
+        "destination_hex": dst_delivery.hash.hex(),
+        "stamp_cost": stamp_cost,
+        "stamp_value": stamp_value,
+        "validator_accepts_at_cost": bool(
+            len(validated) == 1 and validated[0][0] == tid_big
+            and validated[0][2] == stamp_value
+        ),
+        "validator_value_at_cost_0": at_zero[0][2],
+        "validator_rejects_above_value": len(rejected) == 0,
+        "invalid_stamp_reject_hex": msgpack.packb(
+            [LXMPeer.ERROR_INVALID_STAMP]
+        ).hex(),
+    })
+
+    # The `/get` handler itself, over a seeded two-message store. Same
+    # no-__init__ construction as VEC-ANN-STAMP-COST-WINDOW: the handler
+    # reads propagation_entries, the filesystem, and one counter.
+    store_dir = tempfile.mkdtemp(prefix="pn-vectors-")
+    router = LXMRouter.__new__(LXMRouter)
+    router.auth_required = False
+    router.client_propagation_messages_served = 0
+    router.propagation_entries = {}
+    for tid, stamped, value in [
+        (tid_big, stamped_big, stamp_value),
+        (tid_small, stamped_small, 0),
+    ]:
+        path = os.path.join(store_dir, f"{tid.hex()}_{FIXED_TIMESTAMP}_{value}")
+        with open(path, "wb") as f:
+            f.write(stamped)
+        router.propagation_entries[tid] = [
+            dst_delivery.hash, path, FIXED_TIMESTAMP, len(stamped), [], [], value,
+        ]
+
+    list_value = router.message_get_request("/get", [None, None], b"", dst_id, 0)
+    # 0.2 kB client limit: 24 + len(small)+16 fits, the big one is skipped
+    # (LXMRouter.py:1526-1547), so the fetch response carries the small
+    # message only, stamp stripped (:1549).
+    fetch_value = router.message_get_request(
+        "/get", [[tid_small, tid_big], [], 0.2], b"", dst_id, 0
+    )
+    ack_value = router.message_get_request("/get", [None, [tid_small]], b"", dst_id, 0)
+    list_after = router.message_get_request("/get", [None, None], b"", dst_id, 0)
+    stranger_value = router.message_get_request(
+        "/get", [None, None], b"", RNS.Identity.from_bytes(SRC_PRV), 0
+    )
+    add({
+        "id": "VEC-PN-GET-EXCHANGE",
+        "title": "Node /get responses from the genuine handler over a seeded store",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:1482-1560 (message_get_request); "
+                    ":1500 (size-ascending list); :1508-1519 (purge on "
+                    "confirmation only); :1549 (stamp stripped)",
+        "structure": "response bytes are msgpack.packb(handler return)",
+        "store_transient_ids_hex": [tid_small.hex(), tid_big.hex()],
+        "list_response_hex": msgpack.packb(list_value).hex(),
+        "fetch_limit_kb": 0.2,
+        "fetch_response_hex": msgpack.packb(fetch_value).hex(),
+        "ack_response_hex": msgpack.packb(ack_value).hex(),
+        "list_after_ack_response_hex": msgpack.packb(list_after).hex(),
+        "stranger_list_response_hex": msgpack.packb(stranger_value).hex(),
+        "store_size_after_ack": len(router.propagation_entries),
+        "purged_file_gone": not os.path.exists(
+            os.path.join(store_dir, f"{tid_small.hex()}_{FIXED_TIMESTAMP}_0")
+        ),
+    })
+
+
+# --------------------------------------------------------------------------
 # Determinism self-check for frozen vectors.
 # --------------------------------------------------------------------------
 
@@ -794,6 +925,7 @@ def assert_determinism():
     gen_stamp_vectors()
     gen_propagation_client_vectors()
     gen_announce_vectors()
+    gen_propagation_node_vectors()
     for v in VECTORS:
         again = json.dumps(v, sort_keys=True)
         if snapshot[v["id"]] != again:
@@ -811,6 +943,7 @@ def main():
     gen_stamp_vectors()
     gen_propagation_client_vectors()
     gen_announce_vectors()
+    gen_propagation_node_vectors()
     assert_determinism()
 
     doc = {

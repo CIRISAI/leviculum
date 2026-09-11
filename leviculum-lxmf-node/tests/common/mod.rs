@@ -96,6 +96,11 @@ pub struct Setup {
     /// leaves the job queue in [`Helper::builds`], so a test can observe
     /// dispatches and play the worker itself.
     pub build_worker: bool,
+    /// Run this helper's node as a transport, so it can stand in for the
+    /// daemon in a hub topology (the propagation loopback's shape). The
+    /// production helper is always a non-transport shared-instance client;
+    /// in these tests the helper IS the node, and a hub needs to relay.
+    pub transport: bool,
 }
 
 impl Setup {
@@ -105,6 +110,7 @@ impl Setup {
             wire,
             defer_resource_builds: false,
             build_worker: true,
+            transport: false,
         }
     }
 }
@@ -118,12 +124,59 @@ impl Helper {
         let (lines_tx, lines_rx) = mpsc::channel::<Out>();
         let (inputs_tx, inputs_rx) = mpsc::channel::<Input>();
         let (builds_tx, builds_rx) = mpsc::channel::<BuildJob>();
-        // The stamp and shutdown queues are unbounded senders whose receivers
-        // are dropped immediately: no peer here advertises a stamp cost, and
-        // the test decides when the node stops. A send on either fails rather
-        // than blocks, which is exactly the behaviour a hook needs.
-        let (stamps_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        // The shutdown queue's receiver is dropped immediately: the test
+        // decides when the node stops. A send fails rather than blocks,
+        // which is exactly the behaviour a hook needs.
         let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        // The stamp worker mirrors main.rs. It used to be a dropped
+        // receiver ("no peer here advertises a stamp cost"), but a
+        // PROPAGATED message always carries a propagation stamp — at an
+        // announced cost of 0 the mine is a single random draw — so the
+        // propagation loopback needs the worker running.
+        let (stamps_tx, mut stamps_rx) =
+            tokio::sync::mpsc::unbounded_channel::<leviculum_lxmf_node::processor::StampJob>();
+        {
+            let stamp_inputs = inputs_tx.clone();
+            std::thread::spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => return,
+                };
+                runtime.block_on(async move {
+                    use leviculum_lxmf_node::processor::StampJob;
+                    while let Some(job) = stamps_rx.recv().await {
+                        let mut executor =
+                            leviculum_lxmf::CooperativeStamper::cooperative(rand_core::OsRng);
+                        let input = match job {
+                            StampJob::Delivery(request) => {
+                                match request.generate_with(&mut executor).await {
+                                    Ok(stamp) => Input::StampReady { request, stamp },
+                                    Err(e) => Input::StampFailed {
+                                        request,
+                                        detail: format!("{e:?}"),
+                                    },
+                                }
+                            }
+                            StampJob::Propagation(request) => {
+                                match request.generate_with(&mut executor).await {
+                                    Ok(stamp) => Input::PropagationStampReady { request, stamp },
+                                    Err(e) => Input::PropagationStampFailed {
+                                        request,
+                                        detail: format!("{e:?}"),
+                                    },
+                                }
+                            }
+                        };
+                        if stamp_inputs.send(input).is_err() {
+                            return;
+                        }
+                    }
+                });
+            });
+        }
 
         let builds = if setup.build_worker {
             let worker_inputs = inputs_tx.clone();
@@ -137,6 +190,7 @@ impl Helper {
             HelperConfig {
                 display_name: setup.display_name.as_bytes().to_vec(),
                 defer_resource_builds: setup.defer_resource_builds,
+                pn_store_dir: storage.path().join("pn-messagestore"),
             },
             Emitter::new(lines_tx, Instant::now()),
             inputs_rx,
@@ -146,7 +200,7 @@ impl Helper {
         );
 
         let mut builder = ReticulumNodeBuilder::new()
-            .enable_transport(false)
+            .enable_transport(setup.transport)
             .storage_path(storage.path().to_path_buf())
             .core_processor(processor);
         builder = match setup.wire {
@@ -212,6 +266,12 @@ impl Helper {
 
     pub fn find(&self, name: &str) -> Option<&Event> {
         self.events.iter().find(|event| event.name == name)
+    }
+
+    /// The most recent event of this name — for probes emitted repeatedly,
+    /// where only the latest answer is the current state (`lxmf_pn_store`).
+    pub fn find_last(&self, name: &str) -> Option<&Event> {
+        self.events.iter().rev().find(|event| event.name == name)
     }
 
     /// A received message matching the driver's own predicate: right source,

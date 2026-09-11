@@ -48,12 +48,17 @@ use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{DestinationHash, Storage as _};
-use leviculum_lxmf::router::{LxmfRouter, RouterConfig, RouterError, RouterEvent, RouterOutput};
+use leviculum_lxmf::router::{
+    LxmfRouter, PropagationClientConfig, RouterConfig, RouterError, RouterEvent, RouterOutput,
+};
 use leviculum_lxmf::{
     announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
-    PendingResourceBuild, Verification,
+    PendingResourceBuild, PropagationNodeConfig, PropagationStampRequest, PropagationTransport,
+    Verification,
 };
 use leviculum_std::driver::{CoreProcessor, StdNodeCore};
+use leviculum_std::FilePropagationStore;
+use lnpnd::engine::{Engine as PnEngine, EngineConfig as PnEngineConfig, EngineEvent as PnEvent};
 
 use crate::protocol::{self, b64_encode, hex_encode, Command};
 
@@ -144,6 +149,9 @@ impl Emitter {
 #[derive(Debug, Clone, Copy)]
 pub enum StampJob {
     Delivery(DeliveryStampRequest),
+    /// A propagation stamp for an outbound PROPAGATED message, mined at the
+    /// selected node's announced cost (leviculum#384).
+    Propagation(PropagationStampRequest),
 }
 
 /// One deferred Resource build on its way to the build worker.
@@ -174,6 +182,16 @@ pub enum Input {
         request: DeliveryStampRequest,
         detail: String,
     },
+    /// A propagation stamp the executor finished mining.
+    PropagationStampReady {
+        request: PropagationStampRequest,
+        stamp: [u8; 32],
+    },
+    /// The executor gave up on a propagation stamp.
+    PropagationStampFailed {
+        request: PropagationStampRequest,
+        detail: String,
+    },
     /// A Resource transfer the build worker finished, on its way back to
     /// [`LxmfRouter::commit_resource_build`].
     ResourceBuildReady { built: Box<BuiltResource> },
@@ -201,6 +219,16 @@ impl std::fmt::Debug for Input {
                 .finish(),
             Input::StampFailed { request, detail } => f
                 .debug_struct("StampFailed")
+                .field("request", request)
+                .field("detail", detail)
+                .finish(),
+            Input::PropagationStampReady { request, stamp } => f
+                .debug_struct("PropagationStampReady")
+                .field("request", request)
+                .field("stamp", stamp)
+                .finish(),
+            Input::PropagationStampFailed { request, detail } => f
+                .debug_struct("PropagationStampFailed")
                 .field("request", request)
                 .field("detail", detail)
                 .finish(),
@@ -272,6 +300,9 @@ pub struct HelperConfig {
     /// on its own thread, and the result comes back as
     /// [`Input::ResourceBuildReady`]. Off by default, like the router flag.
     pub defer_resource_builds: bool,
+    /// Where a `pn_enable`d propagation node keeps its message store —
+    /// the same `FilePropagationStore` `lnpnd` runs in production.
+    pub pn_store_dir: std::path::PathBuf,
 }
 
 /// A `wait_for_peer` the helper has not answered yet.
@@ -314,6 +345,17 @@ pub struct LxmfHelperProcessor {
     /// worker's answer. See [`Self::dispatch_resource_builds`] for the
     /// invariant this set carries.
     builds_inflight: HashSet<[u8; 32]>,
+    /// The embedded propagation-node engine, once `pn_enable` ran. It is
+    /// `lnpnd`'s production engine verbatim — the helper delegates both
+    /// hooks to it and translates its events into `EVENT` lines, so the
+    /// conformance corpus exercises the shipped role, not a test double.
+    pn: Option<PnEmbed>,
+}
+
+/// The embedded propagation node and its event drain.
+struct PnEmbed {
+    engine: PnEngine<FilePropagationStore>,
+    events: Receiver<PnEvent>,
 }
 
 impl LxmfHelperProcessor {
@@ -340,6 +382,7 @@ impl LxmfHelperProcessor {
             state: State::Unregistered(Box::new(Identity::generate(&mut rand_core::OsRng))),
             waits: Vec::new(),
             builds_inflight: HashSet::new(),
+            pn: None,
         }
     }
 
@@ -462,6 +505,21 @@ impl LxmfHelperProcessor {
                 // async. The result comes back as `Input::StampReady`.
                 let _ = self.stamps.send(StampJob::Delivery(request));
             }
+            RouterEvent::PropagationStampPending(request) => {
+                // Same disposition as the delivery stamp: mined off the lock
+                // at the propagation node's announced cost, coming back as
+                // `Input::PropagationStampReady`.
+                let _ = self.stamps.send(StampJob::Propagation(request));
+            }
+            RouterEvent::PropagationSyncComplete(result) => {
+                self.emitter.event(
+                    "lxmf_sync_done",
+                    &[
+                        ("count", result.received.to_string()),
+                        ("duplicates", result.duplicates.to_string()),
+                    ],
+                );
+            }
             RouterEvent::ResourceBuildPending(id) => {
                 // Announcement only. The handoff itself is drained from
                 // `take_resource_builds` at the end of the hook
@@ -583,6 +641,24 @@ impl LxmfHelperProcessor {
                     "stamp generation failed for {}: {detail}",
                     hex_encode(&request.message_id)
                 )),
+                Ok(Input::PropagationStampReady { request, stamp }) => {
+                    match ready.router.set_outbound_propagation_stamp_result(
+                        &request,
+                        stamp,
+                        core.now_ms(),
+                    ) {
+                        Ok(output) => self.absorb(ready, core, output, out),
+                        Err(e) => self
+                            .emitter
+                            .error(&format!("propagation stamp rejected: {e:?}")),
+                    }
+                }
+                Ok(Input::PropagationStampFailed { request, detail }) => {
+                    self.emitter.error(&format!(
+                        "propagation stamp generation failed for {}: {detail}",
+                        hex_encode(&request.message_id)
+                    ))
+                }
                 Ok(Input::ResourceBuildReady { built }) => {
                     // The answer is in: from here the id is no longer in
                     // flight, whatever the commit says — a refusal means the
@@ -636,10 +712,127 @@ impl LxmfHelperProcessor {
                 peer,
                 body,
                 body_b64,
-            } => self.send(ready, core, peer, body, body_b64, out),
+            } => self.send(
+                ready,
+                core,
+                peer,
+                body,
+                body_b64,
+                out,
+                DeliveryMethod::Direct,
+            ),
+            Command::PnEnable {
+                announce_delay_secs,
+            } => self.pn_enable(core, announce_delay_secs, out),
+            Command::PnStoreSize => match self.pn.as_ref().and_then(|pn| pn.engine.store_count()) {
+                Some(size) => self
+                    .emitter
+                    .event("lxmf_pn_store", &[("size", size.to_string())]),
+                None => self.emitter.error("propagation node not enabled"),
+            },
+            Command::SetPn { node } => {
+                // Same precondition and polling contract as Python's
+                // lxmf_set_propagation_node: the announce must have been
+                // recalled first.
+                if core.storage().get_identity(&node).is_none() {
+                    self.emitter
+                        .error(&format!("identity for {} not known", hex_encode(&node)));
+                    return;
+                }
+                match ready
+                    .router
+                    .set_outbound_propagation_node(core, Some(DestinationHash::new(node)))
+                {
+                    Ok(output) => {
+                        self.absorb(ready, core, output, out);
+                        self.emitter
+                            .event("lxmf_pn_selected", &[("peer", hex_encode(&node))]);
+                    }
+                    Err(e) => self.emitter.error(&format!("set_pn failed: {e:?}")),
+                }
+            }
+            Command::SendPropagated {
+                peer,
+                body,
+                body_b64,
+            } => self.send(
+                ready,
+                core,
+                peer,
+                body,
+                body_b64,
+                out,
+                DeliveryMethod::Propagated,
+            ),
+            Command::Sync => {
+                match ready
+                    .router
+                    .request_messages_from_propagation_node(core, None)
+                {
+                    Ok(output) => self.absorb(ready, core, output, out),
+                    Err(e) => self.emitter.error(&format!("sync failed: {e:?}")),
+                }
+            }
             Command::Quit => {
                 self.emitter.event("lxmf_shutdown", &[]);
                 let _ = self.shutdown.send(Shutdown::Quit);
+            }
+        }
+    }
+
+    /// Bring up the embedded propagation node and force its registration so
+    /// `lxmf_pn_ready` carries the destination hash immediately.
+    fn pn_enable(
+        &mut self,
+        core: &mut StdNodeCore,
+        announce_delay_secs: Option<u64>,
+        out: &mut TickOutput,
+    ) {
+        if self.pn.is_some() {
+            self.emitter.error("propagation node already enabled");
+            return;
+        }
+        let store = match FilePropagationStore::open(
+            &self.config.pn_store_dir,
+            // 5 MB, the limit the interop harness gives the Python control
+            // node (`set_message_storage_limit(megabytes=5)`).
+            5_000_000,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                self.emitter.error(&format!("pn store: {e}"));
+                return;
+            }
+        };
+        let (mut engine, events) = PnEngine::new(PnEngineConfig {
+            identity: Identity::generate(&mut rand_core::OsRng),
+            node_config: PropagationNodeConfig {
+                name: Some(self.config.display_name.clone()),
+                ..PropagationNodeConfig::default()
+            },
+            store,
+            announce_interval_secs: lnpnd::engine::DEFAULT_ANNOUNCE_INTERVAL_SECS,
+            announce_delay_secs: announce_delay_secs.unwrap_or(lnpnd::engine::ANNOUNCE_DELAY_SECS),
+        });
+        // One tick registers the destination and the `/get` handler; the
+        // Ready event is drained right below.
+        out.merge(engine.on_tick(core, core.now_ms()));
+        self.pn = Some(PnEmbed { engine, events });
+        self.drain_pn_events();
+    }
+
+    /// Translate the engine's events into the helper protocol.
+    fn drain_pn_events(&mut self) {
+        let Some(pn) = self.pn.as_ref() else {
+            return;
+        };
+        while let Ok(event) = pn.events.try_recv() {
+            match event {
+                PnEvent::Ready { destination_hash } => self
+                    .emitter
+                    .event("lxmf_pn_ready", &[("hash", hex_encode(&destination_hash))]),
+                PnEvent::Broken { detail } => self.emitter.error(&format!("pn broken: {detail}")),
+                other => self.emitter.log(format!("[lxmf-node] pn event: {other:?}")),
             }
         }
     }
@@ -671,6 +864,7 @@ impl LxmfHelperProcessor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send(
         &mut self,
         ready: &mut Ready,
@@ -679,6 +873,7 @@ impl LxmfHelperProcessor {
         body: Vec<u8>,
         body_b64: String,
         out: &mut TickOutput,
+        method: DeliveryMethod,
     ) {
         // Same precondition and same wording as Python (`periculum/assets/scripts/lxmf_node.py:162-164`):
         // without the peer's identity there is nothing to encrypt to, and the
@@ -700,7 +895,7 @@ impl LxmfHelperProcessor {
             b"test".to_vec(),
             body,
             Vec::new(),
-            DeliveryMethod::Direct,
+            method,
         ) {
             Ok(message) => message,
             Err(e) => {
@@ -817,15 +1012,30 @@ fn register(
     let delivery_hash = *destination.hash().as_bytes();
     let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
         .map_err(|e| format!("register delivery destination: {e:?}"))?;
+    let mut router = LxmfRouter::new(
+        node,
+        identity_hash,
+        RouterConfig {
+            defer_resource_builds,
+            ..RouterConfig::default()
+        },
+    );
+    // The propagation *client* is always on (leviculum#384): `set_pn`,
+    // `send_propagated` and `sync` need it, and Python's helper gets the
+    // same capability for free from LXMRouter. It registers a second local
+    // destination that accepts no links, so scenarios that never use the
+    // verbs cannot observe it.
+    let client_copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the propagation identity: {e:?}"))?;
+    let transport_destination = PropagationTransport::destination(client_copy)
+        .map_err(|e| format!("propagation destination: {e:?}"))?;
+    let transport = PropagationTransport::register(core, transport_destination)
+        .map_err(|e| format!("register propagation client: {e:?}"))?;
+    router
+        .enable_propagation_client(transport, PropagationClientConfig::default())
+        .map_err(|e| format!("enable propagation client: {e:?}"))?;
     Ok(Ready {
-        router: LxmfRouter::new(
-            node,
-            identity_hash,
-            RouterConfig {
-                defer_resource_builds,
-                ..RouterConfig::default()
-            },
-        ),
+        router,
         delivery_hash,
     })
 }
@@ -847,6 +1057,10 @@ impl CoreProcessor for LxmfHelperProcessor {
         self.poll_waits(&mut ready, core, &mut out);
         self.dispatch_resource_builds(&mut ready);
         self.state = State::Ready(ready);
+        if let Some(pn) = self.pn.as_mut() {
+            out.merge(pn.engine.on_event(core, event));
+        }
+        self.drain_pn_events();
         out
     }
 
@@ -865,6 +1079,10 @@ impl CoreProcessor for LxmfHelperProcessor {
         self.dispatch_resource_builds(&mut ready);
 
         self.state = State::Ready(ready);
+        if let Some(pn) = self.pn.as_mut() {
+            out.merge(pn.engine.on_tick(core, now_ms));
+        }
+        self.drain_pn_events();
         // Always a fresh future instant. The helper always has something to
         // wake for — at minimum the command queue, which nothing else pokes.
         let poll = now_ms.saturating_add(POLL_INTERVAL_MS);
@@ -898,6 +1116,7 @@ mod tests {
             HelperConfig {
                 display_name: name.as_bytes().to_vec(),
                 defer_resource_builds: false,
+                pn_store_dir: std::env::temp_dir().join(format!("pn-test-{name}")),
             },
             Emitter::new(lines_tx, Instant::now()),
             inputs_rx,

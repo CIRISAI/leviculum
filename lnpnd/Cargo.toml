@@ -1,0 +1,44 @@
+[package]
+name = "lnpnd"
+# Versioned independently of the leviculum stack, like lnmsg and lnomad: a
+# mailbox daemon's releases track its own storage format and operator
+# surface, not the protocol core it is built from.
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LXMF propagation node daemon for Reticulum — the host-side mailbox role"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# The propagation-node role, the store trait, and the wire codecs.
+leviculum-lxmf = { path = "../leviculum-lxmf" }
+# The driver seam. Uploads arrive as `LinkDataReceived`, which is a
+# Data-class event the public receiver may drop under load, so the role runs
+# as a `CoreProcessor` inside the driver's tick — the same reasoning as
+# lnmsg's engine (docs/src/concepts/lnmsg-architecture.md §3).
+leviculum-std = { path = "../leviculum-std" }
+leviculum-core = { path = "../leviculum-core" }
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
+# `block_on` for stamp validation inside the hook; see engine.rs for the
+# budget note.
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+hex = "0.4"
+
+[lib]
+name = "lnpnd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lnpnd"
+path = "src/main.rs"

@@ -2016,6 +2016,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
+ "lnpnd",
  "rand_core 0.6.4",
  "tempfile",
  "tokio",
@@ -2191,6 +2192,22 @@ dependencies = [
  "toml",
  "tui-input",
  "unicode-width",
+]
+
+[[package]]
+name = "lnpnd"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures",
+ "hex",
+ "leviculum-core",
+ "leviculum-lxmf",
+ "leviculum-std",
+ "rand_core 0.6.4",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

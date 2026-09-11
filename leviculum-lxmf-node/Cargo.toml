@@ -21,6 +21,10 @@ path = "src/main.rs"
 leviculum-core = { path = "../leviculum-core", default-features = true }
 leviculum-std = { path = "../leviculum-std" }
 leviculum-lxmf = { path = "../leviculum-lxmf" }
+# The embedded propagation node behind `pn_enable` is lnpnd's production
+# engine, so the conformance corpus exercises the shipped role rather than a
+# helper-local reimplementation (leviculum#384).
+lnpnd = { path = "../lnpnd" }
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
 tokio.workspace = true
 

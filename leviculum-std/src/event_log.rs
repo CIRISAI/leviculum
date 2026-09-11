@@ -455,6 +455,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LNMSG_DONE",
         required_keys: &["id", "outcome", "code"],
     },
+    // lnpnd propagation-node events (Codeberg #384 part 1), one line per
+    // accepted upload, per `/get`, per eviction. `tid` is the first 16 hex
+    // chars of the transient ID, the same shortening the journey contract
+    // uses for `ph`; `dst` is the mailbox destination hash.
+    EventSchema {
+        name: "PN_ACCEPT",
+        required_keys: &["tid", "dst", "bytes", "value", "dup", "via"],
+    },
+    EventSchema {
+        name: "PN_GET",
+        required_keys: &["dst", "form", "count", "bytes", "purged"],
+    },
+    EventSchema {
+        name: "PN_EVICT",
+        required_keys: &["tid", "bytes", "age_s", "reason"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.

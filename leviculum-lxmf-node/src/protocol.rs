@@ -39,6 +39,30 @@ pub enum Command {
         body: Vec<u8>,
         body_b64: String,
     },
+    /// `pn_enable [announce_delay_secs]` — run the LXMF propagation-node
+    /// role on this helper (leviculum#384): the lxmd path,
+    /// `enable_propagation()`, on the Python side; `lnpnd`'s engine here.
+    /// Emits `lxmf_pn_ready hash=<hex>`. The optional delay overrides the
+    /// reference's 20 s first-announce deferral for fast tests.
+    PnEnable { announce_delay_secs: Option<u64> },
+    /// `pn_store_size` — emit `lxmf_pn_store size=<n>`, the number of
+    /// messages the node's store currently holds.
+    PnStoreSize,
+    /// `set_pn <hex>` — select the outbound propagation node. Errors until
+    /// the node's identity is known from an announce, so the driver can poll.
+    /// Emits `lxmf_pn_selected peer=<hex>`.
+    SetPn { node: [u8; 16] },
+    /// `send_propagated <hex> <body_b64>` — like `send`, via the selected
+    /// propagation node's mailbox.
+    SendPropagated {
+        peer: [u8; 16],
+        body: Vec<u8>,
+        body_b64: String,
+    },
+    /// `sync` — drain this client's mailbox from the selected propagation
+    /// node (list, fetch, confirm-purge). Emits
+    /// `lxmf_sync_done count=<n> duplicates=<n>` when the round completes.
+    Sync,
     /// `quit`
     Quit,
 }
@@ -96,6 +120,41 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
                 body_b64: body_b64.to_string(),
             }))
         }
+        "pn_enable" => {
+            let announce_delay_secs =
+                match parts.next() {
+                    None => None,
+                    Some(value) => Some(value.parse().map_err(|_| {
+                        CommandError::new(format!("invalid announce delay: {value}"))
+                    })?),
+                };
+            Ok(Some(Command::PnEnable {
+                announce_delay_secs,
+            }))
+        }
+        "pn_store_size" => Ok(Some(Command::PnStoreSize)),
+        "set_pn" => {
+            let Some(hash) = parts.next() else {
+                return Err(CommandError::new("usage: set_pn <hex>"));
+            };
+            Ok(Some(Command::SetPn {
+                node: parse_destination_hash(hash)?,
+            }))
+        }
+        "send_propagated" => {
+            let (Some(hash), Some(body_b64)) = (parts.next(), parts.next()) else {
+                return Err(CommandError::new("usage: send_propagated <hex> <body_b64>"));
+            };
+            let peer = parse_destination_hash(hash)?;
+            let body = b64_decode(body_b64)
+                .map_err(|e| CommandError::new(format!("invalid base64 body: {e}")))?;
+            Ok(Some(Command::SendPropagated {
+                peer,
+                body,
+                body_b64: body_b64.to_string(),
+            }))
+        }
+        "sync" => Ok(Some(Command::Sync)),
         "quit" => Ok(Some(Command::Quit)),
         other => Err(CommandError::new(format!("unknown command: {other}"))),
     }

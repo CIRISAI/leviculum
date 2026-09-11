@@ -13,6 +13,7 @@ members = [
     "leviculum-proxy",
     "lnflash",
     "lnmsg",
+    "lnpnd",
     "vectors-verify",
 ]
 
@@ -32,6 +33,7 @@ default-members = [
     "leviculum-proxy",
     "lnflash",
     "lnmsg",
+    "lnpnd",
     "vectors-verify",
 ]
 

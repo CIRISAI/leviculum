@@ -173,6 +173,7 @@ async fn run(args: Args) -> Result<(), String> {
         HelperConfig {
             display_name: args.display_name.clone().into_bytes(),
             defer_resource_builds: args.defer_resource_builds,
+            pn_store_dir: storage_dir.join("pn-messagestore"),
         },
         emitter.clone(),
         inputs_rx,
@@ -239,14 +240,27 @@ async fn run(args: Args) -> Result<(), String> {
             }
         };
         runtime.block_on(async move {
-            while let Some(StampJob::Delivery(request)) = stamps_rx.recv().await {
+            while let Some(job) = stamps_rx.recv().await {
                 let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-                let input = match request.generate_with(&mut executor).await {
-                    Ok(stamp) => Input::StampReady { request, stamp },
-                    Err(e) => Input::StampFailed {
-                        request,
-                        detail: format!("{e:?}"),
-                    },
+                let input = match job {
+                    StampJob::Delivery(request) => {
+                        match request.generate_with(&mut executor).await {
+                            Ok(stamp) => Input::StampReady { request, stamp },
+                            Err(e) => Input::StampFailed {
+                                request,
+                                detail: format!("{e:?}"),
+                            },
+                        }
+                    }
+                    StampJob::Propagation(request) => {
+                        match request.generate_with(&mut executor).await {
+                            Ok(stamp) => Input::PropagationStampReady { request, stamp },
+                            Err(e) => Input::PropagationStampFailed {
+                                request,
+                                detail: format!("{e:?}"),
+                            },
+                        }
+                    }
                 };
                 if stamp_inputs.send(input).is_err() {
                     return;

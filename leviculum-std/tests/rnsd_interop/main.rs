@@ -71,6 +71,7 @@ mod pipe_interop_tests;
 mod plain_broadcast_tests;
 mod probe_tests;
 mod proof_tests;
+mod propagation_node_interop_tests;
 mod protocol_tests;
 mod python_parity_tests;
 mod python_rnstatus_server_tests;

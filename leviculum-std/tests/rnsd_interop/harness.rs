@@ -2621,6 +2621,33 @@ impl TestDaemon {
         .await?;
         Ok(())
     }
+
+    /// Start the Python client's mailbox drain from its selected propagation
+    /// node (`request_messages_from_propagation_node`): list, fetch, then
+    /// the confirm-purge round. Progress is polled with
+    /// [`Self::lxmf_propagation_transfer_state`].
+    pub async fn lxmf_request_from_propagation_node(&self) -> Result<(), HarnessError> {
+        self.query("lxmf_request_from_propagation_node", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// The Python client's propagation transfer state
+    /// (`PR_*` constants, LXMRouter.py:65-78) and the message count of the
+    /// last completed sync.
+    pub async fn lxmf_propagation_transfer_state(
+        &self,
+    ) -> Result<(u64, Option<u64>), HarnessError> {
+        let result = self
+            .query("lxmf_propagation_transfer_state", serde_json::json!({}))
+            .await?;
+        let state = result
+            .get("state")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| HarnessError::ParseError("missing transfer state".into()))?;
+        let last_result = result.get("last_result").and_then(|v| v.as_u64());
+        Ok((state, last_result))
+    }
 }
 
 /// Python LXMF client info returned by `lxmf_init`.

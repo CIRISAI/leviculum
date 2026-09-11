@@ -451,6 +451,44 @@
       "valid": true,
       "decoded_pn_name": "Node",
       "decoded_pn_stamp_cost": 16
+    },
+    {
+      "id": "VEC-PN-UPLOAD",
+      "title": "Client upload envelope as the node receives it",
+      "kind": "frozen",
+      "citation": "LXMRouter.py:2234-2255 (propagation_packet); LXStamper.py:84-96 (validate_pn_stamp); LXMRouter.py:2257-2260 (invalid-stamp reject)",
+      "structure": "msgpack([timestamp, [lxmf_data || stamp]])",
+      "envelope_hex": "92cb41d954fc4000000091c4a8cf0b2a4a8d2a0b6978b71290da7cc80e00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a410dc63659e6e18fd73017dbd2cf2cfa07a135805a31976bd7ac1d3edeb2c6233c",
+      "lxmf_data_hex": "cf0b2a4a8d2a0b6978b71290da7cc80e00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41",
+      "stamp_hex": "0dc63659e6e18fd73017dbd2cf2cfa07a135805a31976bd7ac1d3edeb2c6233c",
+      "stamp_search_rounds": 105,
+      "transient_id_hex": "de8802f165d292d0b07b08faf665f910dabf473aee55e904ee457619509c3013",
+      "destination_hex": "cf0b2a4a8d2a0b6978b71290da7cc80e",
+      "stamp_cost": 8,
+      "stamp_value": 8,
+      "validator_accepts_at_cost": true,
+      "validator_value_at_cost_0": 8,
+      "validator_rejects_above_value": true,
+      "invalid_stamp_reject_hex": "91ccf5"
+    },
+    {
+      "id": "VEC-PN-GET-EXCHANGE",
+      "title": "Node /get responses from the genuine handler over a seeded store",
+      "kind": "frozen",
+      "citation": "LXMRouter.py:1482-1560 (message_get_request); :1500 (size-ascending list); :1508-1519 (purge on confirmation only); :1549 (stamp stripped)",
+      "structure": "response bytes are msgpack.packb(handler return)",
+      "store_transient_ids_hex": [
+        "1cd127390fc0616caf02ebf5814dfd65a192e22252d3a627b6b7101398b65da1",
+        "de8802f165d292d0b07b08faf665f910dabf473aee55e904ee457619509c3013"
+      ],
+      "list_response_hex": "92c4201cd127390fc0616caf02ebf5814dfd65a192e22252d3a627b6b7101398b65da1c420de8802f165d292d0b07b08faf665f910dabf473aee55e904ee457619509c3013",
+      "fetch_limit_kb": 0.2,
+      "fetch_response_hex": "91c474cf0b2a4a8d2a0b6978b71290da7cc80e000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+      "ack_response_hex": "90",
+      "list_after_ack_response_hex": "91c420de8802f165d292d0b07b08faf665f910dabf473aee55e904ee457619509c3013",
+      "stranger_list_response_hex": "90",
+      "store_size_after_ack": 1,
+      "purged_file_gone": true
     }
   ]
 }

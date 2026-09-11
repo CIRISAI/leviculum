@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- lnpnd, an LXMF propagation node daemon (#384): the store-and-forward
+  mailbox role on a running Reticulum shared instance. It announces
+  `lxmf.propagation`, accepts client uploads (proving each packet only
+  after the message is durably stored), answers `/get` with the
+  list/fetch/confirm rounds of the reference protocol, and evicts by the
+  reference's age-times-size weight. Stamp and peering costs default to 0
+  and are settable (`--stamp-cost`, `--peering-cost`); announced limits
+  default to the small honest values the propagation-node concept page
+  derives (4 kB per transfer, 32 kB per sync). Verified byte-for-byte
+  against the Python reference's own handlers and end-to-end against
+  genuine Python LXMF clients.
+
+- The propagation-node role and its store boundary in `leviculum-lxmf`
+  (#384): `PropagationNode` (announce, upload accept, mailbox drain,
+  eviction) over a `PropagationStore` trait whose verbs mirror the
+  boards' record log one-for-one, so the on-board node of a later part is
+  an adapter rather than a redesign. Host stores: in-memory, and a
+  file-backed one that fsyncs before the upload proof leaves — a power
+  cut during an upload reopens with every completed message and no
+  partial one.
+
+- The `lxmf-node` test helper speaks the propagation protocol (#384):
+  `pn_enable` runs lnpnd's engine, and `set_pn` / `send_propagated` /
+  `sync` drive the router's propagation client, mirroring the same verbs
+  in periculum's Python helper so one driver tests either stack's node.
+
 - LNode boards keep a message store on their internal flash (#384): 64 KiB
   behind the firmware image, mounted at boot and formatted once, not yet
   used for messages. `lnflash --store-storm <count>[,<bytes>]` appends

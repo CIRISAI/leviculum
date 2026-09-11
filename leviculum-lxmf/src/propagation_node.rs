@@ -1,0 +1,595 @@
+//! The propagation-node role: announce, upload accept, mailbox drain
+//! (Codeberg #384, part 1).
+//!
+//! This is the *node* half of the exchange whose client half lives in
+//! [`crate::propagation`] and [`crate::propagation_client`]: the state
+//! machine a host (and later a board) runs to be somebody else's mailbox. It
+//! performs no I/O and owns no links; the caller feeds it decoded transport
+//! inputs and dispatches what it returns. Storage goes through
+//! [`PropagationStore`], so the same role runs on a directory of files today
+//! and the boards' record log in part 3.
+//!
+//! What this module deliberately does **not** implement is node↔node peering:
+//! `/offer`, peering keys, and outbound sync are part 2 (the design, with
+//! numbers, is in `docs/src/concepts/propagation-node-on-a-board.md` §5).
+//! The reference admits a multi-message transfer only against a validated
+//! peering key (`reference/LXMF/LXMF/LXMRouter.py:2377-2385`); until part 2,
+//! that form is answered the way the reference answers it without a key —
+//! the link is torn down.
+//!
+//! Every wire fact carries its `file:line` into the reference at the point
+//! it is implemented. The reference pin is 795fdaa (LXMF 1.1.0).
+
+use alloc::vec::Vec;
+
+use crate::{
+    constants::{DESTINATION_LENGTH, STAMP_SIZE},
+    msgpack,
+    propagation::{
+        MessageGetRequest, MessageGetResponse, MessageListResponse, PropagationError,
+        PropagationNodeAnnounce, PropagationSignal, PropagationUpload, TransferLimit, TransientId,
+    },
+    propagation_store::{PropagationStore, StoredMessage},
+    storage::StorageError,
+};
+
+/// Announce metadata key carrying the node's display name
+/// (`PN_META_NAME`, `reference/LXMF/LXMF/LXMF.py:133`).
+pub const PN_META_NAME: u64 = 0x01;
+
+/// Messages expire after 30 days
+/// (`MESSAGE_EXPIRY`, `reference/LXMF/LXMF/LXMRouter.py:38`).
+pub const MESSAGE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// How long a processed transient ID is remembered for duplicate detection:
+/// six times the message expiry, as the reference prunes its own cache
+/// (`clean_transient_id_caches`, `reference/LXMF/LXMF/LXMRouter.py:1011`).
+pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
+
+/// Configuration of the role. The numeric defaults are the concept paper's
+/// §2 recommendation ("What we announce",
+/// `docs/src/concepts/propagation-node-on-a-board.md`): field 3 = 4 is the
+/// largest whole kilobyte whose worst case still fits the one flash page a
+/// board record may not straddle, and field 4 = 32 is about a hundred median
+/// field messages — well under a lap of the 64 KiB region. The host uses the
+/// same numbers so a peer sees one node class, not two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropagationNodeConfig {
+    /// Announce field 3: per-transfer limit in kilobytes of 1000 bytes
+    /// (the offering peer reads it that way,
+    /// `propagation_transfer_limit`, `reference/LXMF/LXMF/LXMPeer.py:370`).
+    pub transfer_limit_kb: u64,
+    /// Announce field 4: per-sync limit in kilobytes, enforced by us against
+    /// inbound resources (`propagation_resource_advertised`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
+    pub sync_limit_kb: u64,
+    /// Announce field 5[0]: the propagation stamp cost clients mine to.
+    /// Default 0: accepted without work, user-settable. The reference clamps
+    /// its own to ≥13 (`PROPAGATION_COST_MIN`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:52`, applied at `:137`); announcing
+    /// below that is wire-legal and honoured — a peer's accepted cost is
+    /// `max(0, cost − flexibility)` — and is this project's chosen policy
+    /// (concept paper §1, "We would be the first to advertise cheap").
+    pub stamp_cost: u8,
+    /// Announce field 5[1]: how far below our cost a stamp may fall and
+    /// still be accepted (`PROPAGATION_COST_FLEX`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:53`, default 3).
+    pub stamp_cost_flexibility: u8,
+    /// Announce field 5[2]: the peering cost another node mines to `/offer`
+    /// us batches. Default 0 under the same policy as `stamp_cost`; unlike
+    /// the propagation cost, the reference applies **no lower clamp** to its
+    /// peering cost (`LXMRouter.py:137` clamps `propagation_cost` only), so
+    /// 0 here conflicts with nothing in the reference.
+    pub peering_cost: u8,
+    /// Announce metadata: the node's display name, UTF-8.
+    pub name: Option<Vec<u8>>,
+    /// Message expiry. [`MESSAGE_EXPIRY_SECS`] unless a test shortens it.
+    pub message_expiry_secs: u64,
+}
+
+impl Default for PropagationNodeConfig {
+    fn default() -> Self {
+        Self {
+            transfer_limit_kb: 4,
+            sync_limit_kb: 32,
+            stamp_cost: 0,
+            stamp_cost_flexibility: 3,
+            peering_cost: 0,
+            name: None,
+            message_expiry_secs: MESSAGE_EXPIRY_SECS,
+        }
+    }
+}
+
+/// One message removed by expiry or displacement, for the host's `PN_EVICT`
+/// log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Eviction {
+    pub transient_id: TransientId,
+    pub size: u32,
+    pub age_secs: u64,
+    pub reason: EvictionReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionReason {
+    /// Older than the message expiry
+    /// (`clean_message_store`, `reference/LXMF/LXMF/LXMRouter.py:1156-1160`).
+    Expired,
+    /// Culled by `age × size` weight to make room for a new message
+    /// (`get_weight`, `reference/LXMF/LXMF/LXMRouter.py:1056-1067`;
+    /// cull loop `:1188-1218`).
+    Displaced,
+}
+
+/// What one upload envelope led to. The caller owes the wire actions named
+/// on each variant; the role has already done the storage side.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UploadOutcome {
+    /// Stored (or already held). **Prove the packet now** — and only now:
+    /// the reference proves after storing (`packet.prove`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2255`), which is what makes a power
+    /// cut mid-upload a client retry instead of a lost message. A duplicate
+    /// is proven too: validation gates the proof, not storage newness
+    /// (`:2252-2255` proves whenever every stamp validated;
+    /// `lxmf_propagation` `:2496` merely declines to store again).
+    Accepted {
+        transient_id: TransientId,
+        destination_hash: [u8; DESTINATION_LENGTH],
+        size: u32,
+        stamp_value: u8,
+        duplicate: bool,
+        /// Messages displaced to make room, oldest-heaviest first.
+        evicted: Vec<Eviction>,
+    },
+    /// The stamp does not satisfy `max(0, cost − flexibility)`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2242`). Send `reject` as a raw
+    /// link packet and tear the link down (`:2257-2260`). Do not prove.
+    InvalidStamp { reject: Vec<u8> },
+    /// More than one message in the transfer: the `/offer` peer-sync form,
+    /// which requires a validated peering key we do not implement until
+    /// part 2. Tear the link down, as the reference does for the keyless
+    /// case (`reference/LXMF/LXMF/LXMRouter.py:2382-2385`). Do not prove.
+    PeerSyncForm,
+    /// Undecodable envelope. Drop silently — the reference logs and ignores
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2262-2264`). Do not prove.
+    Malformed(PropagationError),
+    /// The store could not hold the message even after eviction. Do not
+    /// prove: an unproven upload is retried by the client, an accepted-and-
+    /// dropped one is silently lost (concept paper §1, "acceptance is proven
+    /// and retention is not").
+    StoreFailed(StorageError),
+}
+
+/// Why a `/get` could not be answered. Either way the caller responds with
+/// msgpack nil, which is how the reference answers a request its handler
+/// could not process (`reference/LXMF/LXMF/LXMRouter.py:1558-1560`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GetError {
+    /// The request bytes did not decode.
+    Request(PropagationError),
+    /// The store failed mid-request.
+    Store(StorageError),
+}
+
+impl From<PropagationError> for GetError {
+    fn from(error: PropagationError) -> Self {
+        Self::Request(error)
+    }
+}
+
+impl From<StorageError> for GetError {
+    fn from(error: StorageError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl core::fmt::Display for GetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Request(error) => write!(f, "get request: {error}"),
+            Self::Store(error) => write!(f, "get store: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for GetError {}
+
+/// A `/get` answered. `response` is the exact msgpack the request response
+/// must carry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetOutcome {
+    /// The list form (`wants` and `haves` both absent,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1491-1504`).
+    List { response: Vec<u8>, count: usize },
+    /// The fetch/acknowledge form: `purged` were deleted on the client's
+    /// explicit confirmation, `served` go out in `response` with their
+    /// stamps stripped.
+    Fetch {
+        response: Vec<u8>,
+        served: Vec<TransientId>,
+        served_bytes: u64,
+        purged: Vec<TransientId>,
+    },
+}
+
+/// The propagation-node role over one [`PropagationStore`].
+pub struct PropagationNode<S> {
+    store: S,
+    config: PropagationNodeConfig,
+    /// Recently processed transient IDs and when, for duplicate detection
+    /// beyond the store's own lifetime (a drained-and-purged message must
+    /// not be re-accepted from a stale retry,
+    /// `locally_processed_transient_ids`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2496,2499`).
+    ///
+    /// **Deviation:** the reference persists this set across restarts; ours
+    /// is RAM-only and starts empty. Wire format is untouched; semantically
+    /// a client that re-uploads an already-drained message after our restart
+    /// sees it accepted again, which its own `has_message` filter already
+    /// tolerates (`message_list_response`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1581`). What it buys is Priority 1
+    /// on the board: no per-message state outside the log — a rewritten
+    /// metadata page is the 18.6-day endurance failure the concept paper's
+    /// §2 forbids — and the host keeps the same shape so both run one code
+    /// path.
+    processed: alloc::collections::BTreeMap<TransientId, u64>,
+}
+
+impl<S: PropagationStore> PropagationNode<S> {
+    pub fn new(store: S, config: PropagationNodeConfig) -> Self {
+        Self {
+            store,
+            config,
+            processed: alloc::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Mutable store access, for seeding, migration, and tests. The role's
+    /// own bookkeeping holds no shadow copy of the store, so mutating it
+    /// directly cannot desynchronise anything.
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
+
+    pub fn config(&self) -> &PropagationNodeConfig {
+        &self.config
+    }
+
+    /// The minimum stamp value an upload must prove:
+    /// `max(0, cost − flexibility)`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2242`).
+    pub fn min_accepted_cost(&self) -> u8 {
+        self.config
+            .stamp_cost
+            .saturating_sub(self.config.stamp_cost_flexibility)
+    }
+
+    /// The seven-field announce app-data, exactly as the reference builds it
+    /// (`get_propagation_node_app_data`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:324-336`): field 0 legacy `False`,
+    /// field 1 the current timebase, field 2 `True` (the role is live and
+    /// serves strangers), fields 3 and 4 the limits, field 5
+    /// `[stamp_cost, flexibility, peering_cost]`, field 6 the metadata map
+    /// with the name under [`PN_META_NAME`].
+    pub fn announce_app_data(&self, now_secs: u64) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        if let Some(name) = &self.config.name {
+            let mut raw = Vec::with_capacity(name.len() + 2);
+            msgpack::bin(&mut raw, name);
+            metadata.push((PN_META_NAME, raw));
+        }
+        let announce = PropagationNodeAnnounce {
+            legacy_support: false,
+            timebase: now_secs,
+            enabled: true,
+            transfer_limit_kb: self.config.transfer_limit_kb,
+            sync_limit_kb: self.config.sync_limit_kb,
+            stamp_cost: self.config.stamp_cost as u64,
+            stamp_cost_flexibility: self.config.stamp_cost_flexibility as u64,
+            peering_cost: self.config.peering_cost as u64,
+            metadata,
+        };
+        // The encoder fails only on malformed raw metadata, and ours is a
+        // single msgpack bin built two lines up.
+        announce.encode().unwrap_or_default()
+    }
+
+    /// Whether an advertised inbound resource may transfer at all: refused
+    /// before it moves when larger than the announced per-sync limit
+    /// (`propagation_resource_advertised`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2220-2224`; a kilobyte is 1000
+    /// bytes there too).
+    pub fn accepts_resource_of(&self, data_size: u64) -> bool {
+        data_size <= self.config.sync_limit_kb * 1000
+    }
+
+    /// Accept one client upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`,
+    /// `propagation_packet`, `reference/LXMF/LXMF/LXMRouter.py:2234-2255`),
+    /// from either the raw-link-packet or the single-message resource path.
+    ///
+    /// `validate` is called only when [`Self::min_accepted_cost`] is above
+    /// zero, with the transient ID and the 32-byte stamp; it returns the
+    /// stamp's value if valid at that cost (`validate_pn_stamp`,
+    /// `reference/LXMF/LXMF/LXStamper.py:84-96`, over the
+    /// [`crate::constants::WORKBLOCK_EXPAND_ROUNDS_PN`]-round workblock) or
+    /// `None`. At cost 0 the work is skipped entirely and the stored stamp
+    /// value is 0 — the reference expands the workblock even then to record
+    /// the true value (`LXStamper.py:95`); ours is a deviation that touches
+    /// no wire byte and only the local value used when offering to peers
+    /// (`reference/LXMF/LXMF/LXMPeer.py:340`), which part 2's design accounts
+    /// for (concept paper §5).
+    pub fn handle_upload(
+        &mut self,
+        envelope: &[u8],
+        now_secs: u64,
+        validate: impl FnOnce(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
+    ) -> UploadOutcome {
+        let upload = match PropagationUpload::decode(envelope) {
+            Ok(upload) => upload,
+            Err(PropagationError::MultipleMessages) => return UploadOutcome::PeerSyncForm,
+            Err(error) => return UploadOutcome::Malformed(error),
+        };
+        let transient_id = *upload.transient_id();
+
+        let min_cost = self.min_accepted_cost();
+        let stamp_value = if min_cost == 0 {
+            0
+        } else {
+            match validate(&transient_id, upload.propagation_stamp()) {
+                Some(value) => value.min(u8::MAX as u16) as u8,
+                None => {
+                    return UploadOutcome::InvalidStamp {
+                        reject: PropagationSignal::InvalidStamp.encode(),
+                    }
+                }
+            }
+        };
+
+        let mut destination_hash = [0u8; DESTINATION_LENGTH];
+        destination_hash.copy_from_slice(&upload.unstamped_lxmf()[..DESTINATION_LENGTH]);
+
+        let mut body =
+            Vec::with_capacity(upload.unstamped_lxmf().len() + upload.propagation_stamp().len());
+        body.extend_from_slice(upload.unstamped_lxmf());
+        body.extend_from_slice(upload.propagation_stamp());
+        let size = body.len() as u32;
+
+        let duplicate = self.processed.contains_key(&transient_id)
+            || self.store.contains(&transient_id).unwrap_or(false);
+        if duplicate {
+            return UploadOutcome::Accepted {
+                transient_id,
+                destination_hash,
+                size,
+                stamp_value,
+                duplicate: true,
+                evicted: Vec::new(),
+            };
+        }
+
+        let mut evicted = Vec::new();
+        let mut result = self
+            .store
+            .append(&transient_id, now_secs, stamp_value, &body);
+        if result == Err(StorageError::Full) {
+            evicted = self.make_room(body.len() as u64, now_secs);
+            result = self
+                .store
+                .append(&transient_id, now_secs, stamp_value, &body);
+        }
+        if let Err(error) = result {
+            return UploadOutcome::StoreFailed(error);
+        }
+        self.processed.insert(transient_id, now_secs);
+
+        UploadOutcome::Accepted {
+            transient_id,
+            destination_hash,
+            size,
+            stamp_value,
+            duplicate: false,
+            evicted,
+        }
+    }
+
+    /// Answer one `/get` request for the client whose delivery destination
+    /// hash is `remote_delivery_hash` (derived by the caller from the
+    /// link-identified identity, as the reference derives it,
+    /// `message_get_request`, `reference/LXMF/LXMF/LXMRouter.py:1487`).
+    ///
+    /// A decode error maps to the reference's behaviour of answering a
+    /// request it cannot parse with `None`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1558-1560`); the caller sends
+    /// msgpack nil.
+    pub fn handle_get(
+        &mut self,
+        request: &[u8],
+        remote_delivery_hash: &[u8; DESTINATION_LENGTH],
+        now_secs: u64,
+    ) -> Result<GetOutcome, GetError> {
+        let request = MessageGetRequest::decode(request)?;
+
+        // Both fields absent: the list form
+        // (reference/LXMF/LXMF/LXMRouter.py:1489-1504).
+        if request.wants.is_none() && request.haves.is_none() {
+            let mut available: Vec<(TransientId, u32)> = Vec::new();
+            self.store.for_each(&mut |meta: &StoredMessage| {
+                if &meta.destination_hash == remote_delivery_hash {
+                    available.push((meta.transient_id, meta.size));
+                }
+            })?;
+            // Smallest first (:1500), so a limited later fetch drains the
+            // most messages.
+            available.sort_by_key(|(_, size)| *size);
+            let ids: Vec<TransientId> = available.into_iter().map(|(id, _)| id).collect();
+            let count = ids.len();
+            let response = MessageListResponse::TransientIds(ids).encode()?;
+            return Ok(GetOutcome::List { response, count });
+        }
+
+        // One directory pass for the whole request; membership below is
+        // asked of this snapshot rather than of the store per ID.
+        let mut owned: alloc::collections::BTreeSet<TransientId> =
+            alloc::collections::BTreeSet::new();
+        self.store.for_each(&mut |meta: &StoredMessage| {
+            if &meta.destination_hash == remote_delivery_hash {
+                owned.insert(meta.transient_id);
+            }
+        })?;
+
+        // Deletion happens here and only here: on the client's explicit
+        // `haves` confirmation, which it sends only after taking local
+        // delivery (`message_get_response` builds `haves` from what it
+        // ingested and requests `[None, haves]`,
+        // reference/LXMF/LXMF/LXMRouter.py:1622-1638; the purge loop is
+        // :1508-1519). A crash mid-transfer therefore deletes nothing.
+        let mut purged = Vec::new();
+        if let Some(haves) = &request.haves {
+            for transient_id in haves {
+                if owned.contains(transient_id) && self.store.purge(transient_id).unwrap_or(false) {
+                    purged.push(*transient_id);
+                }
+            }
+        }
+
+        // The client's transfer limit arrives in kilobytes of 1000 bytes as
+        // element 2 (:1526-1530); our own announced per-sync limit caps the
+        // response as well. The second cap is ours, not the reference's —
+        // wire-compatible under the deviation rule: a response shorter than
+        // the request is the protocol's normal shape (skipped IDs are
+        // re-requested on the next sync, :1547 skips them the same way), and
+        // bounding one response resource at what we advertise as one sync
+        // keeps a slow link's transfer inside the budget the announce names.
+        let client_limit = request.transfer_limit_kb.map(|limit| match limit {
+            TransferLimit::Integer(kb) => (kb as f64) * 1000.0,
+            TransferLimit::Float(kb) => kb * 1000.0,
+        });
+        let our_limit = (self.config.sync_limit_kb * 1000) as f64;
+        let limit = client_limit.map_or(our_limit, |client| client.min(our_limit));
+
+        // Overheads exactly as the reference budgets them (:1532-1533).
+        let per_message_overhead = 16.0;
+        let mut cumulative_size = 24.0;
+
+        let mut served = Vec::new();
+        let mut bodies = Vec::new();
+        let mut served_bytes = 0u64;
+        if let Some(wants) = &request.wants {
+            for transient_id in wants {
+                if !owned.contains(transient_id) || purged.contains(transient_id) {
+                    // Gone or never ours to give: skipped silently, the
+                    // response is simply shorter (:1535 membership test; the
+                    // concept paper's §1 records that absence has no error).
+                    continue;
+                }
+                let Some(body) = self.store.read_body(transient_id)? else {
+                    continue;
+                };
+                let lxm_size = body.len() as f64;
+                let next_size = cumulative_size + lxm_size + per_message_overhead;
+                if next_size > limit {
+                    // Too big for this round; the reference keeps scanning
+                    // rather than stopping (:1547 `pass`).
+                    continue;
+                }
+                cumulative_size = next_size;
+                // Serve the message without its propagation stamp
+                // (:1549 strips `STAMP_SIZE` from the tail).
+                let unstamped = body[..body.len() - STAMP_SIZE].to_vec();
+                served_bytes += unstamped.len() as u64;
+                served.push(*transient_id);
+                bodies.push(unstamped);
+            }
+        }
+
+        // Keep the duplicate guard alive for what was just confirmed
+        // drained, so a client retry of the original upload is not
+        // re-stored.
+        for transient_id in &purged {
+            self.processed.insert(*transient_id, now_secs);
+        }
+
+        let response = MessageGetResponse::Messages(bodies).encode()?;
+        Ok(GetOutcome::Fetch {
+            response,
+            served,
+            served_bytes,
+            purged,
+        })
+    }
+
+    /// Periodic maintenance: purge expired messages
+    /// (`clean_message_store`, `reference/LXMF/LXMF/LXMRouter.py:1156-1160`)
+    /// and prune the processed-ID cache
+    /// (`clean_transient_id_caches`, `:1011`).
+    pub fn tick(&mut self, now_secs: u64) -> Vec<Eviction> {
+        let expiry = self.config.message_expiry_secs;
+        let mut expired = Vec::new();
+        let _ = self.store.for_each(&mut |meta: &StoredMessage| {
+            if now_secs.saturating_sub(meta.received_at) > expiry {
+                expired.push(Eviction {
+                    transient_id: meta.transient_id,
+                    size: meta.size,
+                    age_secs: now_secs.saturating_sub(meta.received_at),
+                    reason: EvictionReason::Expired,
+                });
+            }
+        });
+        expired.retain(|eviction| self.store.purge(&eviction.transient_id).unwrap_or(false));
+
+        self.processed
+            .retain(|_, received| now_secs.saturating_sub(*received) <= PROCESSED_ID_EXPIRY_SECS);
+        expired
+    }
+
+    /// Cull by the reference's weight until at least `needed` bytes are
+    /// free: `age_weight × size` with
+    /// `age_weight = max(1, age / 4 days)` (`get_weight`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1056-1067`; the prioritised-list
+    /// factor is omitted — this node has no prioritised list). The trigger
+    /// differs from the reference by necessity: it culls when a *configured*
+    /// limit is exceeded on a periodic job (`:1183-1218`), our store has a
+    /// hard capacity and culls when an append reports [`StorageError::Full`].
+    fn make_room(&mut self, needed: u64, now_secs: u64) -> Vec<Eviction> {
+        let mut weighted: Vec<(f64, Eviction)> = Vec::new();
+        let _ = self.store.for_each(&mut |meta: &StoredMessage| {
+            let age_secs = now_secs.saturating_sub(meta.received_at);
+            let age_weight = (age_secs as f64 / (4.0 * 24.0 * 60.0 * 60.0)).max(1.0);
+            weighted.push((
+                age_weight * meta.size as f64,
+                Eviction {
+                    transient_id: meta.transient_id,
+                    size: meta.size,
+                    age_secs,
+                    reason: EvictionReason::Displaced,
+                },
+            ));
+        });
+        weighted.sort_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+
+        let mut evicted = Vec::new();
+        for (_, eviction) in weighted {
+            if self.store.free_space() >= needed {
+                break;
+            }
+            if self.store.purge(&eviction.transient_id).unwrap_or(false) {
+                evicted.push(eviction);
+            }
+        }
+        evicted
+    }
+}
+
+#[cfg(test)]
+#[path = "propagation_node_tests.rs"]
+mod tests;

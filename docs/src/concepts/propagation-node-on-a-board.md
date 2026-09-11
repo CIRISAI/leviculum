@@ -859,3 +859,162 @@ datasheet did not.
 What it still owes is a board. Three of the numbers above are arithmetic
 or datasheet figures — the scan time, the erase storm's cost, the UF2
 survival — and a rig run replaces each of them with a measurement.
+
+## 5. Peering: the design part 2 builds
+
+Peering is the core of the role — a node that does not peer is a
+mailbox, not a mesh (Lead decision, 2026-09-11). This section is the
+binding design for part 2 of leviculum#384: first what the reference
+actually keeps and exchanges, measured against the pinned tree
+(795fdaa), then our design inside this page's constraints. Part 1
+implemented the role without peering but with this section already
+written, so part 2 extends the tree instead of reworking it.
+
+### What the reference keeps, per peer and per message
+
+`LXMPeer.to_bytes` (`LXMPeer.py:138-175`) persists, per peer: the
+destination hash, the peering key and its value, the peering timebase,
+alive flag, last-heard, sync strategy, metadata, the announced transfer
+and sync limits, the announced stamp cost, flexibility and peering
+cost, the last sync attempt, and six statistics counters (link
+establishment rate, sync transfer rate, offered / outgoing / incoming,
+rx/tx bytes) — plus the two sets the §1 analysis flagged:
+`handled_ids` and `unhandled_ids`. Those two are not stored on the
+peer at all at runtime: they live *per message*, as lists of peer
+hashes in `propagation_entries[4]` and `[5]`
+(`LXMRouter.py:2518`; membership filtered per peer in
+`LXMPeer.handled_messages`, `LXMPeer.py:574-588`), 16 bytes per peer
+per message, filled by `flush_peer_distribution_queue`
+(`LXMRouter.py:2472`) which enqueues every accepted message for every
+peer. At this store's 176 messages and the reference's 20-peer default
+that is the 112 640 B that §2 measured against 39 308 B of free heap:
+the one reference structure we cannot carry.
+
+A sync round exchanges three things (`LXMPeer.sync`,
+`LXMPeer.py:267-390`): a `/offer` request carrying
+`[peering_key, [transient_id, …]]` with the ids filtered by the peer's
+minimum stamp value and packed under its announced limits
+(`:334-385`); the response `True` / `False` / wanted-sublist
+(`offer_request`, `LXMRouter.py:2266-2329`, which answers out of its
+own `propagation_entries` membership); then one Reticulum Resource
+whose body is `msgpack([timestamp, [lxmf_data ‖ stamp, …]])`
+(`:457-468`). Only on the concluded transfer are the sent ids moved
+handled (`resource_concluded`, `LXMPeer.py:492-517`); ids the peer
+declined were moved handled already at the response (`offer_response`,
+`LXMPeer.py:443-448`). An id purged from the store before its offer is
+silently dropped at the next sync (`:348-352`) — forgetting needs no
+verb between peers either.
+
+### Our peer record, and the cap
+
+Per peer we keep what is wire-visible plus the minimum liveness state,
+and nothing statistical:
+
+| Field | Bytes |
+|---|---|
+| destination hash | 16 |
+| peering key + value | 34 |
+| announced limits (transfer, sync) | 8 |
+| announced costs (stamp, flexibility, peering) | 3 |
+| cursor into the store sequence | 6 |
+| last heard, next attempt, backoff, state | 9 |
+| **per peer** | **76**, call it 80 aligned |
+
+During one sync (one at a time on the board) the offer list is 32 B
+per offered id, bounded by the store: 176 ids is 5 632 B, ~6 KiB with
+msgpack overhead. Against §2's worst observed free heap of 39 308 B,
+an 8 KiB budget slice for peering — a fifth of the worst case — gives
+`80·N + 6 144 ≤ 8 192`, N ≤ 25. **Board cap: 16 peers** (margin for
+the offer list of a fuller future store); **host config default: 20**,
+the reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable. The
+board table is RAM-only: persisting it would need flash writes on
+peer-state churn, and §2's endurance table prices any
+frequently-rewritten fixed page at 18.6 days. The cost of forgetting
+peers at reboot is bounded and rare: autopeering re-forms from the
+next announce each side hears, and one full re-offer per re-formed
+peer (≤ 6 KiB, ~20 s of SF8 airtime) is answered with "want none" for
+everything already delivered. The host persists its table in a file,
+as the reference does (`LXMRouter.py:599-631`).
+
+### The cursor, instead of per-peer sets
+
+The record log is append-ordered: pages carry a monotone sequence
+written once per erase (`SECTOR_HEADER_LEN` header,
+`leviculum-nrf/record-log/src/lib.rs:220`), records within a page are
+ordered by offset. **A store position is therefore the pair
+`(page_sequence: u32, offset: u16)`, and each peer holds one cursor:
+everything at or below it has been offered and concluded.** A sync
+offers every live id newer than the cursor (one `for_each` scan, §2
+prices it at 8-33 ms); on the concluded transfer — or on a "want
+none" response — the cursor advances to the newest offered position.
+That replaces both per-peer sets with 6 bytes per peer, and it cannot
+lose messages: a message is either at or below a concluded cursor
+(offered once), evicted (absent everywhere, the reference's own
+behaviour at `:348-352`), or ahead of the cursor (offered next round).
+
+What a Python peer observes: offers that may include ids it already
+holds — including messages it itself sent us, since a cursor cannot
+encode the reference's `from_peer` exclusion
+(`flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
+wire-legal and self-limiting: `offer_request` answers out of its own
+store membership (`:2317-2318`) and declines them, and the cost is
+offer-list bytes, not message bodies. The round-robin page reclaim
+also means a cursor's page can be erased and reused while the cursor
+still names the old sequence; page sequences are monotone, so a
+cursor pointing into a reclaimed page simply reads as "older than
+everything live" and the next offer is a full offer — the reboot case
+again, bounded the same way.
+
+**One accept-path consequence, decided now:** part 1 stores stamp
+value 0 for messages accepted at cost 0 (the validator short-circuits,
+`leviculum-lxmf/src/stamp.rs:198`, where the reference computes the
+true value even at cost 0, `LXStamper.py:95`). The offering side drops
+ids whose stored value is below the *peer's* minimum
+(`LXMPeer.py:340`), and a default Python peer's minimum is 13 − 3 =
+10, so a store full of value-0 records would offer that peer nothing.
+Part 2 therefore computes the true stamp value at accept time whenever
+any known peer requires more than 0 — 41 000 SHA-256 compressions per
+message, §2's orientation says 0.8-2.5 s on the board, free on the
+host — and keeps the shortcut otherwise. The record tag is written
+once at append, so the decision is per-message at accept, not
+retrofittable; a store accepted cheap stays cheap until it turns over
+(at most 30 days).
+
+### Peering *with* a Python node: the price of its key
+
+Outbound peering requires mining a key at the peer's announced peering
+cost over the 25-round peering workblock
+(`WORKBLOCK_EXPAND_ROUNDS_PEERING`, `LXStamper.py:14`;
+`generate_peering_key`, `LXMPeer.py:242-265`). The reference announces
+18 by default and accepts configuration up to 26 (`PEERING_COST`,
+`MAX_PEERING_COST`, `LXMRouter.py:50-51`). With our precomputed-
+digest-state miner (§2): 925 compressions for the workblock plus ~2
+per trial, expected 2^cost trials —
+
+| Peer's cost | Compressions | On the board (at §2's 20/40/60 cycles/byte orientation) |
+|---|---|---|
+| 18 | ~5.3 × 10^5 | 10 s / 21 s / 32 s |
+| 26 | ~1.3 × 10^8 | **45 min / 89 min / 134 min** |
+
+One-off per peer and persistable — but on the board the table above is
+RAM-only, so a cost-26 Python neighbour costs the better part of an
+hour of the single core *per reboot*. Part 2 therefore persists mined
+peering keys (and only them) in the record log itself as tagged
+records: append-only, no fixed page, at 50 B of body (a 92 B stride
+under §2's record header) a negligible tenant. The SHA-256 throughput figure that pins this table's real
+column is §4's owed measurement, still owed here.
+
+Our own announced peering cost defaults to 0, the same policy as the
+stamp cost and this time without even a reference counter-argument:
+the `PROPAGATION_COST_MIN` clamp applies to the propagation cost only
+(`LXMRouter.py:137`); the peering cost is passed through unclamped, so
+0 is a value the reference itself can be configured to and validates
+trivially (`validate_peering_key` with target 0 accepts any key,
+`LXStamper.py:73-82`).
+
+One client-side quirk of announcing cost 0, observed against the live
+reference (part 1's interop run): `get_outbound_propagation_cost`
+treats 0 as falsy (`LXMRouter.py:429`), re-requests the path, logs
+"stamp cost still unavailable" — and then proceeds correctly, mining a
+free stamp and uploading. Cost 0 is honoured on the wire; the
+reference client just grumbles first.

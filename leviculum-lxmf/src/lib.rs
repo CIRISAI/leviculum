@@ -13,9 +13,12 @@
 //! list, download, and acknowledgement exchange in both directions,
 //! [`PropagationSignal`] carries a node's refusal of an upload, and
 //! [`PropagationNodeAnnounce`] both encodes a node's own discovery data and
-//! decodes another node's. A host built on these codecs still owns its own
-//! mailbox storage, stamp validation, links and resources: this crate
-//! performs no I/O.
+//! decodes another node's. The node side of the same exchange is
+//! [`propagation_node::PropagationNode`] (leviculum#384 part 1): the role
+//! that stores uploads and answers `/get`, over the
+//! [`propagation_store::PropagationStore`] boundary a host directory or the
+//! boards' record log implements. A host built on these still owns links,
+//! resources and stamp-validation scheduling: this crate performs no I/O.
 //!
 //! What the crate does **not** implement is the *node ↔ node* direction. A
 //! Python propagation node syncs with its peers over a second endpoint,
@@ -44,6 +47,8 @@ pub mod node;
 pub mod paper;
 pub mod propagation;
 pub mod propagation_client;
+pub mod propagation_node;
+pub mod propagation_store;
 pub mod router;
 pub mod stamp;
 pub mod storage;
@@ -71,6 +76,11 @@ pub use propagation_client::{
     PropagationUploadFailure, PropagationUploadRepresentation, UploadSendParams,
     PROPAGATION_ASPECT,
 };
+pub use propagation_node::{
+    Eviction, EvictionReason, GetError, GetOutcome, PropagationNode, PropagationNodeConfig,
+    UploadOutcome, MESSAGE_EXPIRY_SECS, PN_META_NAME,
+};
+pub use propagation_store::{MemoryPropagationStore, PropagationStore, StoredMessage};
 pub use router::{
     BuiltResource, DeliveryStampRequest, InboundStampRequest, PendingResourceBuild,
     PropagationStampRequest,
