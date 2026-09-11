@@ -13,7 +13,7 @@
 //!
 //! That is a deliberate line. The store is the part of a propagation node
 //! that is worth having whether or not the node ever exists
-//! (`docs/src/concepts/propagation-node-on-a-board.md`, §6), so it must not
+//! (`docs/src/concepts/propagation-node-on-a-board.md`, §4), so it must not
 //! be reachable only through an LXMF-shaped door.
 //!
 //! # Which part this is for, and what that changed

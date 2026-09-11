@@ -1,46 +1,30 @@
-# An LXMF propagation node on a board with 1 to 2 MB of flash
+# An LXMF propagation node on the boards' internal flash
 
-> **Superseded in its premise, 2026-09-11: neither board has a flash
-> part.** This page was written believing both boards carried one.
-> Neither does. Both maps came from an `EXTERNAL_FLASH_DEVICES` line in
-> a vendor variant header, and on both vendors that line is a template
-> default under a comment denying the part: Heltec commented the T114's
-> QSPI pins out, RAK wrote "No onboard flash" over the RAK4631's and
-> marked its pins "occupied by GPIO's". Three units — two T114s and the
-> field Pocket — answered nothing to `05h`, `9Fh`, `90h` or the
-> datasheet reset while every pin followed our drive. The full evidence
-> is in `leviculum-nrf/src/boards/t114.rs` (`CONFIG`,
-> `leviculum-nrf/src/boards/t114.rs:167`) and
-> `leviculum-nrf/src/boards/rak4631.rs` (`CONFIG`,
-> `leviculum-nrf/src/boards/rak4631.rs:145`), and both firmwares now
-> print `[QSPI] NONE board=<b>` instead of probing. **Every capacity,
-> life-time and scan figure below is therefore void**, and so is the
-> recommendation that rests on them. What survives is the protocol
-> analysis in §1 to §3 — what the propagation role obliges us to, which
-> is a question about LXMF and not about a part. Read the rest as the
-> costing of a part that would have to arrive first: a board with one,
-> or an add-on such as RAK's WisBlock RAK15001.
->
-> **A store exists anyway, on the internal flash, since 2026-09-11.** 64
-> KiB behind the firmware image (`leviculum-nrf/memory.x`'s `STORE`,
-> mounted at boot by `leviculum-nrf/src/record_store.rs`), 16 pages
-> round-robin, ~9 years of page-erase budget at the duty the field walk
-> measured. Two orders of magnitude less room than this page costed, so it
-> is not the propagation store §4 onward describes — it is the part of one
-> that is worth having whether or not the node ever exists (§6), and
-> nothing stores messages in it yet.
+This page used to cost the store on a QSPI NOR part — 1 MB on the Pocket
+V2, 2 MB on the T114. Neither board carries one: both beliefs came from
+an `EXTERNAL_FLASH_DEVICES` line that is a template default on both
+vendors, and three units answered nothing to a JEDEC read (081522b2; the
+evidence sits in the board files, `CONFIG`,
+`leviculum-nrf/src/boards/t114.rs:167` and `CONFIG`,
+`leviculum-nrf/src/boards/rak4631.rs:145`). So the store went where there
+is flash: **16 pages of the nRF52840's own flash between the firmware
+image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:85`,
+landed in 81fcb46e; the log format chosen in 59c36129). Every capacity,
+endurance and scan figure below is recomputed for that region, and the
+region is two orders of magnitude smaller than the part this page first
+costed: **176 field-sized messages, not 5 544.** If a board or an add-on
+ever brings a QSPI part, the arithmetic is the same arithmetic with a
+bigger region and a tenfold larger erase budget; nothing below assumes
+one.
 
-Both our boards were thought to carry a QSPI NOR flash we have never
-driven: 1 MB on the Pocket V2 (IS25LP080D) and 2 MB on the T114
-(MX25R1635F). Both beliefs were wrong, for the same reason, and the
-banner above says so. Codeberg #384 asks the obvious question: should
-such a flash hold an LXMF propagation node, so the mesh has a store
-when the recipient is not reachable? The walk that prompted it had a
-link built from one phone to another across two of our nodes and a
-hill, which is exactly the topology where a store matters.
+Codeberg #384 asks whether such a store should hold an LXMF propagation
+node, so the mesh has somewhere to put a message when the recipient is
+not reachable. The walk that prompted it had a link built from one phone
+to another across two of our nodes and a hill, which is exactly the
+topology where a store matters.
 
 This page establishes what the role obliges us to, measures what it
-would cost on these two parts, sets out the options, and recommends
+costs on the region we now have, sets out the options, and recommends
 one. It is a design document. Nothing here is a status page; what is
 open belongs on the tracker.
 
@@ -230,6 +214,63 @@ not.
 
 ## 2. The numbers
 
+### Where the store lives
+
+One file decides it. `leviculum-nrf/memory.x` carves `STORE` out of the
+top of the application window and exports `__srecord_store` /
+`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:147`)
+reads those two symbols, and nothing else in the tree knows the
+addresses.
+
+| Address | Length | What |
+|---|---|---|
+| `0x00000` | 4 KiB | MBR |
+| `0x01000` | 152 KiB | SoftDevice S140 v7.3.0 |
+| `0x27000` | `0xB3000`, 716 KiB | `FLASH` — the firmware image window |
+| `0xDA000` | `0x10000`, 64 KiB, **16 pages** | `STORE` — the record log |
+| `0xEA000` | 4 KiB | telemetry target / fixed position / media profile |
+| `0xEB000` | 4 KiB | radio configuration |
+| `0xEC000` | 4 KiB | identity |
+| `0xED000` | 28 KiB | Heltec license/version data, T114 only |
+| `0xF4000` | — | bootloader |
+
+Source for every row: the map at the head of `memory.x` (`FLASH`,
+`leviculum-nrf/memory.x:78`; `STORE`, `leviculum-nrf/memory.x:85`).
+
+**The gap between image end and store start**, as
+`scripts/check-nrf-store-gap.sh` reports it on every `just fast` — this
+run, on the tree at 81fcb46e:
+
+```text
+[store-gap] t114     image ends 0xa55a0, store 0xda000..0xea000 (16 pages), gap 215648 B (210 KiB)
+[store-gap] rak4631  image ends 0xa6c08, store 0xda000..0xea000 (16 pages), gap 209912 B (204 KiB)
+```
+
+The gate measures the PT_LOAD segments the `.uf2` is built from, not the
+sections the linker charged to `FLASH`, and it reads the region's bounds
+from the symbols the firmware itself mounts. An image that grew into the
+region would be a link error before it could be a lost store: three
+`ASSERT`s in `memory.x` hold the edges (`ASSERT`,
+`leviculum-nrf/memory.x:223`).
+
+**Why the region survives a UF2 update — and what is not yet proven.**
+The store sits *inside* the bootloader's writable window, so
+`USER_FLASH_END` (`0xEA000`) does not protect it the way it protects the
+three persistence pages above. What protects it is that the Adafruit
+bootloader erases only the pages it writes: `flash_nrf5x_write` buffers
+one page and `flash_nrf5x_flush` (upstream `src/flash_nrf5x.c`) erases
+and programs exactly that page, and only when its content differs. Our
+`.uf2` carries blocks from `0x27000` to the end of the image and none
+above it, so no page of the store is ever a block's target and no erase
+reaches one (`docs/src/concepts/lnode-flashing.md`, §What a UF2 is
+allowed to write).
+
+That is an argument from the bootloader's source, and it is **not yet a
+board proof**: nobody has written records to a board, flashed a new
+`.uf2` over it and remounted. Until that run exists, treat "the store
+survives a firmware update" as expected rather than as established. It
+is in the batch list in §4.
+
 ### What our messages actually weigh
 
 Measured, not assumed. Source: the two field logs from the 2026-09-09
@@ -270,164 +311,210 @@ exists to refuse.
 
 ### How many fit
 
-The store's own structure, stated rather than waved at. A
-log-structured record store on 4 KB erase sectors, appended in place,
-reclaimed a whole sector at a time. Per record:
+From the record log as built, not from the costing this page first did.
+The header is still the 42 bytes that costing tabulated; what changed
+with the part is the region, the page header, and that every offset is a
+multiple of a word because `sd_flash_write` takes a length in words.
 
 | Field | Bytes |
 |---|---|
-| body length | 2 |
-| transient ID | 32 |
-| receive timestamp | 4 |
-| stamp value | 1 |
-| flags (live / purged) | 1 |
-| CRC-16 | 2 |
-| **header total** | **42** |
+| body length, u16 LE | 2 |
+| key — the transient ID | 32 |
+| timestamp, u32 LE | 4 |
+| tag — the stamp value | 1 |
+| flags: `0xFF` uncommitted, `0xFE` live, `0xFC` purged | 1 |
+| CRC-16 over the header and the body | 2 |
+| **header total** (`HEADER_LEN`) | **42** |
+| body | `len` |
+| padding to a multiple of 4 | 0 to 3 |
 
-The destination hash is not duplicated: it is the first 16 bytes of the
-body, as it is in the reference, which reads it back from the head of
-the file (`LXMRouter.py:581`).
+(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:218`; the layout is
+tabulated at `leviculum-nrf/record-log/src/lib.rs:108-119`.) The
+destination hash is not a field: it is the first 16 bytes of the body,
+as it is in the reference, which reads it back from the head of its file
+(`LXMRouter.py:2498`).
 
-At the measured median body of 304 B a record is 346 B. Records do not
-straddle a sector, so 11 fit in a 4 KB sector with 290 B of tail
-(7.1 %). Reserving 8 sectors for the superblock pair and spares:
+Each page carries a 12-byte header written once per erase
+(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:220`), which
+leaves 4 084 B of the 4 096 for records (`SECTOR_PAYLOAD`,
+`leviculum-nrf/record-log/src/lib.rs:225`). A record never straddles a
+page.
 
-| Board | Part | Sectors | Usable | Messages | Message bytes |
-|---|---|---|---|---|---|
-| T114 | MX25R1635F, 2 MB | 512 | 504 | **5 544** | 1 646 KiB |
-| Pocket V2 | IS25LP080D, 1 MB | 256 | 248 | **2 728** | 810 KiB |
+At the measured median body of 304 B the stride is
+`align_up(42 + 304)` = **348 B** (`record_stride`,
+`leviculum-nrf/record-log/src/lib.rs:259`), so 4 084 / 348 = 11 records
+to a page with 256 B of tail (6.3 %).
 
-Allowing records to straddle sectors buys about 7 % (5 966 and 2 935)
-at the cost of a harder recovery scan. Not worth it.
+| Body | Stride | Per page | In the 16-page region |
+|---|---|---|---|
+| 304 B — the field median | 348 B | 11 | **176** |
+| 256 B — the smallest the walk produced | 300 B | 13 | 208 |
+| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:227`) | 4 084 B | 1 | 16 |
 
-For scale: one message at the reference's default per-transfer limit of
-256 KB would occupy 79 % of the T114's usable store and would not fit
-on the Pocket at all once the reserve is taken. That is the argument
-for announcing a small field 3, not a preference.
+The 176 is the count at the brim. Reclaim is round-robin — when the
+active page cannot fit the next record the *next* page is erased and
+becomes active — so a store in steady state holds between 166 (just
+after a reclaim: fifteen full pages and one record) and 176.
 
-### What an index costs in the heap
+Where the 64 KiB goes at that fill: 53 504 B of message body, 7 392 B of
+record headers, 352 B of record padding, 192 B of page headers and
+4 096 B of per-page tail. **52 KiB of the 64 is message.**
 
-Measured heap, from the same field run, on the Pocket at the end of
-12.69 h:
+For scale in the other direction: one message at the reference's default
+per-transfer limit of 256 kB (`PROPAGATION_LIMIT`, `LXMRouter.py:55`) is
+63 times the largest body this format can hold at all. That is the
+argument for announcing a small field 3, and it is now an argument about
+a hard bound rather than a preference — see *What we announce* below.
 
-```
+### Endurance
+
+The budget got an order of magnitude worse with the part: **10 000 erase
+cycles per page** on the nRF52840, against 100 000 on the NOR parts this
+page first costed (nRF52840 Product Specification, NVMC chapter, quoted
+at `leviculum-nrf/record-log/src/lib.rs:37`).
+
+Duty, measured: 284 messages from two moving trackers over 12.69 h =
+22.4 messages/hour = 196 224 a year. At 11 field-sized records to a
+page, that is 17 838 page erases a year, and where they land is the
+whole design:
+
+| | Erases/year | Budget | Life |
+|---|---|---|---|
+| Spread over the 16 pages | 1 115 per page | 10 000 | **9 years** |
+| Spread over 68 pages (the whole window, for scale) | 262 per page | 10 000 | 38 years |
+| One fixed metadata page | 196 224 | 10 000 | **18.6 days** |
+
+(The table is the spike's, recomputed for the region as landed:
+`leviculum-nrf/record-log/src/lib.rs:55-59`.)
+
+Read the last row twice. **The message data is not the endurance risk; a
+fixed metadata page is.** A store that keeps its head pointer, its index
+or its sequence counter at a fixed address and rewrites it on every
+accepted record spends its entire budget in eighteen days at the duty we
+actually measured in the field. On the external part the same line read
+six months, which is long enough to sound survivable. It is why this
+format has no superblock, no index page and no head pointer: everything
+the log needs to mount itself is recovered by reading the page headers,
+and a page header is written exactly once per erase of the page it
+heads.
+
+**16 pages is a size choice, and it has a price.** 68 pages — the rest
+of the application window — would have bought 38 years and cost the
+image 212 KiB of headroom it may want for BLE and LXMF; the gate above
+says 210 KiB of gap is what remains at 16. Widening the region upward is
+impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
+widening it downward moves every record, so a later resize is a
+reformat. That is the deliberate price of the smaller default, and
+`mount` (`leviculum-nrf/src/record_store.rs:376`) already treats a
+region that is not ours as unformatted rather than as corrupt, so the
+reformat is a boot line and not an incident.
+
+The 9 years is at the field walk's telemetry duty and scales with it:
+ten times that duty is **11 months**, a hundred times is **33 days**.
+Those are the numbers to re-run when a real message mix exists rather
+than a telemetry one.
+
+### Writing next to the radio
+
+With the SoftDevice enabled the NVMC is *Restricted*: only
+`sd_flash_write` / `sd_flash_page_erase` may touch this flash (S140 SDS,
+Hardware peripherals), which is also where a word becomes the only
+program unit and two writes per word between erases the only budget
+(`leviculum-nrf/record-log/src/lib.rs:37-41`). A page erase is 85 ms, a
+word write 41 µs (same source).
+
+Per median record the log does three program runs — the header up to the
+commit word, then the CRC and the body from the far side of it, then the
+commit word itself — 87 words in all, 3.6 ms of NVMC time, and one
+85 ms erase every eleventh record.
+
+**But NVMC time is not the cost that matters here.** The SoftDevice
+schedules flash work between radio events and fails the operation
+outright when it finds no gap (S140 SDS, Flash API timing), so a refusal
+is a statement about the next few milliseconds of radio traffic and not
+about the part. The store answers it with four attempts and a doubling
+delay — 50, 100, 200 ms (`FLASH_ATTEMPTS`,
+`leviculum-nrf/src/record_store.rs:134`) — and prints every refusal and
+a running count on its debug port.
+
+A refusal part way through an append **seals the page**: the rest of it
+is given up, because programming over bytes already down would have to
+raise bits. The spike's sweep puts a number on how often that is the
+outcome — of the twenty places a refused operation can land inside one
+append, three leave the page usable and seventeen give up the rest of it
+(`sealed`, `leviculum-nrf/store-spike/tests/record_log.rs:360`). What
+sealing costs in wear is the endurance arithmetic with fewer records to
+a page: a board that sealed on every append would erase a page per
+message, 196 224 erases a year over 16 pages, and spend the nine years
+in **10 months**. That is the upper bound, not an expectation; it is
+also the reason the refusal counter is on the debug port rather than
+silent.
+
+**What the erase storm does to BLE and LoRa is to be measured on the
+rig, and this page will not predict it.** The instrument is already in
+the firmware: `STORE_STORM` (`TYPE_STORE_STORM`,
+`leviculum-core/src/envelope.rs:250`) appends N synthetic records of a
+given size, bounded at 1 000 records of 1 024 B
+(`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:272`) and
+tagged so a later batch can purge exactly those (`TAG_BENCH`,
+`leviculum-nrf/src/record_store.rs:81`); `lnflash --store-storm
+COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:327`).
+The numbers owed are a connected phone's throughput and a LoRa link's
+delivery rate across a storm, measured against the same run without one.
+
+### Scan, and what it costs in RAM
+
+**Reads do not go through the SoftDevice's flash scheduler at all.** The
+internal flash is memory-mapped and the read is a `memcpy` that cannot
+fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:263`) —
+unlike a write or an erase, it never waits for a gap between radio
+events. That single fact removes the RAM index the QSPI costing needed:
+a lookup is a scan, and a scan is free of the radio.
+
+The RAM it would have competed with, measured on the Pocket at the end
+of the 12.69 h field run:
+
+```text
 [HEAP] used=58612 free=39692 watermark=58996 size=98304
 ```
 
 96 KiB of heap, 58 996 B at the high-water mark, so **39 308 B of free
-heap in the worst observed moment.**
+heap in the worst observed moment.** Against a 176-message region:
 
-A reference-shaped in-RAM index costs, per message, 32 B of transient
-ID as the key plus 16 B destination hash, 4 B offset, 2 B size, 4 B
-timestamp and 1 B stamp value: 59 B, before any map overhead.
-
-| Board | At capacity | Full RAM index | One peer's unhandled set |
-|---|---|---|---|
-| T114 | 5 544 messages | 319 KiB | 173 KiB |
-| Pocket | 2 728 messages | 157 KiB | 85 KiB |
-
-**The full index does not fit — it is eight times the whole heap on the
-T114, and the per-peer sets are worse, because there is one pair of
-them per peer and the reference peers with up to 20**
-(`MAX_PEERS`, `LXMRouter.py:43`). 39 308 B holds 666 full entries; a
-defensible 8 KiB budget holds 138.
-
-What does fit, in order of preference:
-
-1. **No RAM index at all: an on-flash directory, scanned.** The record
-   headers *are* the directory. A `/get` list request scans the store
-   for records whose body begins with the caller's delivery
-   destination hash. Cost is a sequential read of the part, and that
-   is affordable (below).
-2. **A bounded RAM cache of the newest N.** 138 entries in 8 KiB
-   answers the common case — a phone that syncs every few minutes
-   wants the recent tail — and falls back to the scan for the rest.
-3. **A Bloom filter over transient IDs**, to answer "do I already have
-   this?" on the accept path without a scan. 5 544 entries at 1 % false
-   positive is about 6.6 KiB, and a false positive costs one scan, not
-   a wrong answer.
-
-Not on the list: per-peer handled/unhandled sets. They cannot be made
-to fit and they are bookkeeping, not protocol.
-
-### Endurance
-
-Datasheet figures, both parts, both cited.
-
-| | IS25LP080D (Pocket) | MX25R1635F (T114) |
+| | Bytes | Against 39 308 B free |
 |---|---|---|
-| Density | 8 Mbit / 1 MB | 16 Mbit / 2 MB |
-| Endurance | 100 000 cycles min (JEDEC A117) | 100 000 cycles min |
-| Retention | 20 years | 20 years |
-| Sector erase, 4 KB | 70 ms typ / 300 ms max | 58 ms typ / 240 ms max |
-| Block erase, 32 KB | 0.1 s / 0.5 s | 1 s / 3 s |
-| Block erase, 64 KB | 0.15 s / 1.0 s | 0.8 s / 3.5 s |
-| Chip erase | 2 s / 6 s | 30 s / 60 s |
-| Page program, 256 B | 0.2 ms / 0.8 ms | 3.2 ms / 10 ms |
-| Standby current | 8 µA typ | 5 µA typ (ultra-low-power mode) |
+| A reference-shaped full index: 32 B key + 16 B destination + 4 B offset + 2 B size + 4 B timestamp + 1 B stamp = 59 B an entry | 10 384 | fits |
+| The reference's per-message peer sets, 20 peers × 2 sets × 16 B a hash (`MAX_PEERS`, `LXMRouter.py:43`) | 112 640 | does not fit |
 
-Sources: ISSI *IS25LP080D / IS25WP080D/040D/020D* data sheet, Rev. B4,
-2018-02-15, §9.9 Program/Erase Performance and §9.10 Reliability
-Characteristics; Macronix *MX25R1635F* data sheet, Rev. 1.6,
-2018-12-12, key-features list and the Ultra Low Power Mode AC
-characteristics table. Both parts erase in 4 KB sectors and 32/64 KB
-blocks.
+So the arithmetic that killed the RAM index on a 2 MB part no longer
+kills it on 64 KiB: a full index of this region would fit in a quarter
+of the free heap. It is still not worth having — the heap has other
+claimants and the scan that replaces it is cheap — but the honest
+statement is "unnecessary", not "impossible". What remains impossible is
+the second row: the peer sets scale with peers, and we control neither
+how many peer with us nor, therefore, that number.
 
-Note the asymmetry: the Macronix part is the low-power one and pays for
-it in write time. Programming a page costs 16× what it costs on the
-ISSI part, and a chip erase costs 15×.
+**What a full scan costs.** `for_each`
+(`leviculum-nrf/record-log/src/lib.rs:546`) walks every page, reads each
+record's 42-byte header and then its body, because `probe_record`
+(`leviculum-nrf/record-log/src/lib.rs:862`) checks the CRC over both. A
+full region is therefore one pass over at most 64 KiB.
 
-**The write pattern a log-structured store produces** is: append 346 B,
-which touches one or two 256-byte pages; erase one 4 KB sector when the
-allocator wraps onto it. Reclaim is round-robin over the whole part, so
-wear is level by construction — that is the wear levelling, and it is
-free, provided nothing is ever written to a *fixed* location.
+**This is arithmetic, not a measurement, and the assumption is stated:**
+the read is a `memcpy` from mapped flash, so the work is the bit-serial
+CRC-16 at eight shift-and-test steps a byte (`crc16_update`,
+`leviculum-nrf/record-log/src/lib.rs:271`) — 524 288 steps for the whole
+region, and at one to four cycles a step on the Cortex-M4 at 64 MHz that
+is **8 to 33 ms**. The measured number is owed and nearly free, because
+the mount already performs exactly this scan and reports what it found
+(`count`, `leviculum-nrf/record-log/src/lib.rs:411`).
 
-Duty, measured: 284 messages from two moving trackers over 12.69 h =
-**22.4 messages/hour**.
+Either way the conclusion is the same and it is not close: a `/get` list
+request costing tens of milliseconds of CPU, and nothing of the radio
+scheduler, is not a design constraint. The on-flash directory is the
+design.
 
-| Duty | Messages/year | Sector erases/year | T114 life | Pocket life | One fixed index sector |
-|---|---|---|---|---|---|
-| measured (×1) | 196 000 | 16 561 | 3 092 years | 1 546 years | **6.1 months** |
-| ×10 (a busy 20-node mesh) | 1 960 000 | 165 606 | 309 years | 155 years | **18 days** |
-| ×100 | 19 600 000 | 1 656 063 | 31 years | 15 years | **3 days** |
-
-Read the last column twice. **The message data is not the endurance
-risk; a fixed metadata sector is.** A store that keeps its head pointer,
-its index, or its sequence counter in one sector and rewrites it on
-every accepted message spends its whole 100 000-cycle budget in six
-months at the duty we actually measured in the field. A store that
-writes only forward and reclaims round-robin outlives the board by
-three orders of magnitude.
-
-This is the single most important engineering constraint on the page,
-and it is a constraint on the store, not on LXMF.
-
-### Time
-
-**Flash.** Filling the part once, from the table above:
-
-- T114: 512 sector erases × 58 ms = 29.7 s, plus 8 192 page programs ×
-  3.2 ms = 26.2 s. **56 s.**
-- Pocket: 256 × 70 ms = 17.9 s, plus 4 096 × 0.2 ms = 0.8 s.
-  **19 s.**
-
-Per accepted message: one or two page programs (6.4 ms worst case on
-the T114, 0.4 ms on the Pocket) and, once every eleven messages, one
-sector erase (58 / 70 ms). Both parts can suspend an erase, so the
-erase does not have to block the radio; but the simpler answer is that
-58 ms of flash-busy time every eleven messages is 0.5 % of the airtime
-those eleven messages cost.
-
-**Reading.** (Void with the rest of the costing: neither part is
-fitted.) The nRF52840 QSPI runs to 32 MHz and embassy-nrf exposes
-it (`Frequency`, `embassy-nrf-0.9.0/src/qspi.rs`). The Macronix part in
-its default ultra-low-power mode caps quad reads at 8 MHz — 4 MB/s —
-and the ISSI part allows 133 MHz, so 32 MHz is the controller's limit
-there: 16 MB/s. **A full-store scan is 0.5 s on the T114 and 0.07 s on
-the Pocket.** That is what makes the on-flash directory viable: a
-`/get` list request that costs half a second of QSPI is not a problem;
-a 319 KiB RAM index is.
+### Draining it: LoRa and BLE
 
 **LoRa.** Measured, from the field log: a telemetry message crossing a
 hop is 291 bytes on the wire, split into 254 + 37 byte frames, and the
@@ -441,17 +528,17 @@ floors at 18, `LORA_PREAMBLE_SYMBOLS_MIN`,
 `leviculum-core/src/rnode.rs:776`).
 
 At 904 ms per message and the 10 % duty-cycle cap the firmware enforces
-(`[LORA_AIRTIME_LOCK] lt=1000 lt_cap=10.00%` in the same run):
+(`[LORA_AIRTIME_LOCK] lt=1000 lt_cap=10.00%` in the same run), the full
+region is 176 × 904 ms = **2.7 minutes of pure airtime, 27 minutes of
+wall clock** — with zero retransmissions, zero link setup and no other
+traffic on the channel.
 
-| Board | Full store | Pure airtime | Wall clock at 10 % duty |
-|---|---|---|---|
-| T114 | 5 544 messages | 1.39 h | **13.9 h** |
-| Pocket | 2 728 messages | 0.68 h | **6.8 h** |
-
-with zero retransmissions, zero link setup and no other traffic on the
-channel. **A store nobody can drain in a reasonable time is a museum,
-and over LoRa a full store is a museum.** Only the delta between two
-meeting nodes is ever transferable in a walk-past.
+That reverses a conclusion the QSPI costing drew. A full 2 MB store was
+13.9 h of wall clock at the duty cap, which is a museum; **a 64 KiB
+store is drainable in half an hour.** In a walk-past it is still only
+the delta between two nodes that moves, but the whole store is no longer
+out of reach, and that makes the single-message upload path (§3) a
+usable way for two boards to meet rather than a consolation prize.
 
 **BLE.** The negotiated MTU is bounded by measurement rather than
 assumed: the SoftDevice is configured with an ATT MTU ceiling of 256
@@ -461,16 +548,16 @@ into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default
 (`DEFAULT_MTU`, `leviculum-core/src/framing/ble.rs:89`;
 `payload_per_fragment`, `leviculum-core/src/framing/ble.rs:107`). At
-177 bytes per fragment a 304-byte message is 2 notifications, so a full
-store is 11 088 notifications on the T114 and 5 456 on the Pocket.
+177 bytes per fragment a 304-byte message is 2 notifications, so the
+full region is 352 notifications.
 
-**The sustained notification rate is not measured and this page will
-not invent it.** The field run carried sparse traffic — the tightest
-observed spacing is two packets in the same millisecond, which is a
-burst, not a rate. What can be said is the shape: at 10 notifications/s
-a full T114 store is 18 minutes and at 100/s it is under two minutes,
-so BLE is not the binding constraint, and the measurement is owed
-rather than critical. It is named in §5.
+**The sustained notification rate is still not measured and this page
+will not invent it.** The field run carried sparse traffic — the
+tightest observed spacing is two packets in the same millisecond, which
+is a burst, not a rate. The shape is all that can be said: at 10
+notifications/s the full region is 35 seconds. BLE is not the binding
+constraint on a store this size, and the measurement is owed rather than
+critical. It is named in §4.
 
 ### What accepting a message costs in CPU
 
@@ -516,9 +603,47 @@ Converting compressions to seconds needs a SHA-256 throughput on the
 nRF52840 at 64 MHz that **we have not measured**. For orientation only,
 at 20 / 40 / 60 cycles per byte the stamp validation is 0.8 / 1.6 /
 2.5 s and the peering key is 10 / 21 / 32 s. The measurement is owed
-(§5); the conclusion that survives any plausible value is that
+(§4); the conclusion that survives any plausible value is that
 per-message stamp validation at a nonzero cost is seconds of the only
 core we have, and a peering key is a one-off we can afford.
+
+### What we announce
+
+Field 3 of the propagation announce, the per-transfer limit, is parsed
+with `int()` (`propagation_transfer_limit`,
+`reference/LXMF/LXMF/Handlers.py:61`), so the only values that exist on
+the wire are whole kilobytes. The offering peer enforces it against
+`lxm_size + 16` and reads a kilobyte as 1 000 bytes
+(`propagation_transfer_limit`, `reference/LXMF/LXMF/LXMPeer.py:370`),
+where `lxm_size` is the stored object — `lxmf_data` with the stamp
+appended, which is exactly what our record body holds
+(`propagation_entries`, `LXMRouter.py:2518`).
+
+Our hard bound is one page: a record never straddles one, so a body
+above `MAX_BODY` = 4 042 B cannot be stored at all. Against the
+reference's arithmetic that bounds field 3:
+
+| Announced field 3 | Largest `lxm_size` a peer will offer | Fits a page? |
+|---|---|---|
+| 3 | 2 984 B | yes, 1 058 B spare |
+| **4** | **3 984 B** | **yes, 58 B spare** |
+| 5 | 4 984 B | no — 942 B over |
+
+**Announce 4.** It is the largest whole kilobyte whose worst case still
+fits the page a record may not straddle, and it is thirteen times the
+measured field median. Announcing the reference's 256 would be the
+failure §1 names: a proof of acceptance the store cannot honour.
+
+Field 4, the per-sync limit, bounds one resource rather than one
+message, and its bound is the region. 176 messages is 53 504 B of body,
+so a sync allowed to carry more than that laps the log inside a single
+transfer and overwrites its own earlier records. **Announce 32** — about
+a hundred median messages, well under a lap, and about three times what
+five minutes of a LoRa walk-past can carry at the duty cap.
+
+Field 5, the stamp cost, stays open: it is the one field whose right
+value depends on a measurement we do not have (SHA-256 throughput on the
+board, above), and both the cost and the reason for it belong in §4.
 
 ## 3. The options
 
@@ -528,23 +653,31 @@ Four, and the fourth is doing nothing on the board.
 |---|---|---|---|---|
 | What Sideband sees | a normal propagation node | a normal propagation node with small limits | nothing; not a PN | the PC's node, if in range |
 | Announces `lxmf.propagation` | yes | yes | no | n/a |
-| RAM at capacity | 319 KiB index + 173 KiB per peer | on-flash directory + 8 KiB cache + 6.6 KiB filter | same as B, smaller | 0 |
+| RAM at capacity | 10 KiB index + 113 KiB of peer sets at 20 peers | an on-flash directory, scanned; no index | same as B | 0 |
 | Peers | autopeer, up to 20 | autopeer, capped low | none | as configured |
 | Stamp cost advertised | 16 | 0, or a low nonzero once measured | n/a | 16 |
 | Two boards meet, no phone | works, if both can peer | **works** | works, but only between our own boards | **does not work** |
 | Board switched off mid-transfer | client retries; nothing lost | client retries; nothing lost | our own protocol, our own problem | n/a |
 | Verdict | impossible | viable | not compatible | insufficient |
 
-**A, the full node, is dead on two independent counts.** The per-peer
-handled/unhandled sets are 173 KiB *per peer* at capacity against
-39 KiB of free heap, and there is no cap we control on who peers with
-us: any Python router within four hops that hears our announce peers
-automatically (`AUTOPEER_MAXDEPTH`, `LXMRouter.py:45`;
-`LXMFPropagationAnnounceHandler`, `Handlers.py:35`). Worse, every
-message we accept is enqueued for every peer
-(`flush_peer_distribution_queue`, `LXMRouter.py:2472`), so a store we
-filled from a phone over BLE would be re-offered over a 10 %-duty LoRa
-link to everyone in range. That is not a tuning problem.
+**A, the full node, is still out, but the smaller region moved which
+argument does it.** On the 2 MB costing the RAM index alone was eight
+times the whole heap; on 176 messages it is 10 KiB against 39 KiB free,
+so message count no longer decides anything. **Peer count does.** The
+handled/unhandled sets are held per message as lists of peer hashes
+(`propagation_entries`, `LXMRouter.py:2518`), which is 112 640 B at
+176 messages and the reference's 20 peers, and there is no cap we
+control on who peers with us: any Python router within four hops that
+hears our announce peers automatically (`AUTOPEER_MAXDEPTH`,
+`LXMRouter.py:45`; `LXMFPropagationAnnounceHandler`, `Handlers.py:35`).
+A number we do not control is not a budget.
+
+The count that is untouched by the region shrinking is the one that
+actually kills A: every message we accept is enqueued for every peer
+(`flush_peer_distribution_queue`, `LXMRouter.py:2472`), so a store
+filled from a phone over BLE in seconds would be re-offered over a
+10 %-duty LoRa link to everyone in range, at 904 ms a message. That is
+not a tuning problem.
 
 **B, the bounded node, is the only option that satisfies the framing.**
 Everything it needs is already expressible in the announce: a small
@@ -610,101 +743,119 @@ reason is worth recording because it constrains our implementation:
 
 The one thing that is *not* safe is a store whose own recovery is
 unsound. A power cut in the middle of an append must leave a store that
-reopens with every completed record and no partial one, which is what
-the per-record CRC and the forward-only log are for.
+reopens with every completed record and no partial one, and the log as
+built delivers that with a one-word commit rather than with a
+probability: a record counts as present only if its flags byte reads
+live or purged, that byte sits in a single word programmed last, and a
+word cannot be half-written (`FLAG_LIVE`,
+`leviculum-nrf/record-log/src/lib.rs:238`). Any cut before that word
+leaves the record invisible, deterministically; the CRC is then
+catching a dropped bit rather than standing in for a commit protocol.
 
 ## 4. The recommendation
 
-**Option B, but not yet as LXMF: build the store first, and the role
-second.** The numbers say the flash is ample (5 544 messages on the
-T114, 2 728 on the Pocket, against a measured field duty of 22
-messages/hour), the endurance is ample by three orders of magnitude
-*provided* nothing is written to a fixed sector (a fixed index sector
-dies in six months at exactly the duty we measured), and the binding
-constraint is neither: it is the 39 KiB of free heap, which rules out
-the reference's index shape and forces an on-flash directory that a
-0.5 s scan makes perfectly affordable. Every one of those conclusions
-is about the store and none of them is about LXMF, so the store is
-what the first batch builds — and it is needed by lnmsg's mailbox and
-by telemetry retention whatever we decide about propagation. The role
-itself waits on two measurements we do not have and cannot fake: the
-sustained BLE notification rate, which decides whether a phone can
-drain the store in a usable time, and the SHA-256 throughput on the
-board, which decides whether we can ever advertise a nonzero stamp cost
-and keep the spam brake the protocol was designed around.
+**Option B, and the store it needs now exists.** The region is 176
+field-sized messages with 9 years of page-erase budget at the measured
+field duty, provided nothing is ever written to a fixed page — a fixed
+metadata page dies in 18.6 days, and the format has none. Reads never
+touch the SoftDevice's flash scheduler, so a lookup is a scan of tens of
+milliseconds and there is no RAM index to fit. A full region drains over
+LoRa in half an hour of wall clock at the duty cap, which is the
+difference between a store and a museum. None of those conclusions is
+about LXMF; all of them are about the store, which is why the store came
+first and is why it is worth having whether or not the propagation node
+ever exists — `lnmsg`'s mailbox and telemetry retention want the same
+16 pages.
 
-### The first batch, and its acceptance
+What stands between here and the role is not arithmetic. It is three
+things nobody has measured on a board: what an erase storm does to BLE
+and LoRa while it runs, whether the region really survives a UF2, and
+the two rates that decide the stamp cost and the phone drain.
 
-**Batch: drive the QSPI flash and land a log-structured record store.
-No LXMF, nothing announced on `lxmf.propagation`.**
+### The sequence, as it now stands
 
-1. A QSPI driver behind the existing storage trait shape, at the
-   part's own bus speed. **On neither board we have**: both declare
-   `qspi_part: None` and neither has pin aliases any more (`CONFIG`,
-   `leviculum-nrf/src/boards/t114.rs:167`; `CONFIG`,
-   `leviculum-nrf/src/boards/rak4631.rs:145`), because neither carries a
-   part. This batch therefore cannot start until a board or an add-on
-   brings one; everything below that says "both boards" is void until
-   then.
-2. A forward-only record log: 4 KB sectors, 42-byte header as
-   tabulated, CRC per record, round-robin sector reclaim, **no fixed
-   metadata sector anywhere**.
-3. An on-flash directory: lookup by destination-hash prefix is a
-   sector scan, plus a bounded RAM cache of the newest entries sized
-   against the measured free heap.
+1. **Store region and mount — done.** The log format was chosen against
+   the internal flash in 59c36129 and given its region, its linker
+   symbols and its boot-time mount in 81fcb46e. Nothing stores messages
+   in it: no LXMF, nothing announced. The gap gate prints the remaining
+   headroom for both bins on every `just fast`.
+2. **The erase storm under BLE and LoRa load, on the rig — owed, and it
+   is the next batch.** The instrument is in the firmware already
+   (`STORE_STORM`, above). Acceptance: a phone connected over BLE and a
+   LoRa link under traffic, each run twice — once with a storm of
+   field-sized records and once without — reported as throughput and
+   delivery rate with the event volumes on both sides, not as pass or
+   fail. A storm that costs the radio nothing measurable and a storm
+   that costs it everything are both results; a run that cannot tell
+   them apart is not.
+3. **UF2 survival, on a board — owed, and cheap.** Write records, flash
+   a `.uf2` built from a different commit, remount, and assert the same
+   record count and a byte-exact digest of the region. The bootloader
+   source says it must survive (§2); this is the run that makes it
+   established rather than expected. It belongs with the next firmware
+   flash on the rig, not in a batch of its own.
+4. **Then the role, on top of a store that has been measured.** The
+   accept path with the limits this page recommends (field 3 = 4, field
+   4 = 32), `/get` list and fetch answered from a scan rather than an
+   index, `/offer` with a peer cap of our own, and no per-peer sets
+   anywhere. Acceptance: a Sideband client and a Python `rnsd` both use
+   the board as their propagation node without knowing it is small, and
+   a power cut during an upload leaves a store that reopens with every
+   completed record and no partial one.
 
-Acceptance, all four:
+Steps 2 and 3 are measurements, step 4 is the feature, and the order is
+not negotiable: a propagation node that lands before the storm is
+measured is a node whose failure mode is a radio that stutters when
+somebody sends a message.
 
-- **Host tests** over a simulated NOR device with real semantics
-  (erase to `0xFF`, program-once bits, 4 KB granularity): append, scan,
-  reclaim, and a power-cut injected at *every* byte offset of a record
-  write, each of which must reopen with every completed record and no
-  partial one.
-- **A wear pin with its own negative control**: write enough records to
-  wrap the part twice and assert that the per-sector erase counts
-  differ by at most one. The negative control pins a fixed sector and
-  asserts the check fails.
-- **On the rig**: fill the part on both boards, power-cycle, read back,
-  and report the record count and a byte-exact digest of the store.
-- **Two measurements reported as numbers, not as pass/fail**:
-  sustained BLE notification throughput to a phone, and SHA-256
-  bytes/second on the nRF52840 at 64 MHz. These are the inputs to the
-  decision about the role; a batch that lands the store without them
-  has not finished.
+### The open questions, none of them closed by this page
 
-### What would change this, and what to measure again
-
-- **SHA-256 throughput on the board.** If it is at the fast end, a
-  nonzero propagation stamp cost is affordable and B keeps the spam
-  brake. If it is at the slow end, B has to advertise cost 0 and rely
-  on the transfer limit and the cull, and that trade must be written
-  down as a deviation with its reason.
-- **Sustained BLE notification rate.** If a full store cannot be
-  drained in minutes, the bounded capacity should be cut to what can
-  be, and the number to cut it to comes from this measurement.
-- **Message-size distribution beyond telemetry.** The 284 samples here
-  are all telemetry. A run carrying real Sideband text and a phone that
-  sends an image will move the median and, more importantly, will show
-  how often the advertised transfer limit actually bites.
+- **Whether the region survives a UF2 on a board.** Argued from the
+  bootloader's source, not yet run. Step 3 above.
+- **What an erase storm costs BLE and LoRa.** The one number that could
+  still make a propagation node on the board a bad idea. Step 2 above.
+- **SHA-256 throughput on the nRF52840 at 64 MHz.** Decides whether we
+  can advertise a nonzero stamp cost and keep the only spam brake the
+  protocol has. At 20 / 40 / 60 cycles a byte, validating one stamp is
+  0.8 / 1.6 / 2.5 s of the only core we have; the spread is too wide to
+  decide on.
+- **The sustained BLE notification rate.** Decides whether a phone can
+  drain 352 notifications in a usable time. Expected to be comfortable,
+  unmeasured.
+- **The message-size distribution beyond telemetry.** Every body figure
+  on this page comes from 284 telemetry messages. A run carrying real
+  Sideband text, and a phone that sends an image, will move the median
+  and will show how often field 3 actually bites.
 - **Whether autopeering can be bounded in practice.** The reference
-  peers with anyone within four hops. B assumes a `max_peers` we
-  enforce ourselves keeps that survivable; a mesh test with three or
-  more Python routers in range would show whether it does.
+  peers with anyone within four hops (`AUTOPEER_MAXDEPTH`,
+  `LXMRouter.py:45`). B assumes a cap we enforce ourselves keeps the
+  peer-set arithmetic survivable; three Python routers in range would
+  show whether it does.
+- **Whether 16 pages is the right size.** 68 would buy 38 years and cost
+  the image 212 KiB of headroom. The number lives in `memory.x` and the
+  trade is argued there; changing it later is a reformat, which `mount`
+  handles as an unformatted region.
 
-### One correction this page owes
+### What this page corrected, and what it still owes
 
-Codeberg #384 states that "a search of `leviculum-nrf` finds no QSPI".
-When this page was written, both board files declared six QSPI pins and
-named a part. Both were wrong, and wrong the same way: a vendor variant
-header's `EXTERNAL_FLASH_DEVICES` line was read as a statement that a
-part is fitted, when on both vendors it is a template default under a
-comment denying one. Neither board answered a JEDEC read on any unit we
-own. Both sets of aliases are gone and the reasons are in the board
-files where they were (`CONFIG`,
+Codeberg #384 observed that a search of `leviculum-nrf` finds no QSPI.
+It was right, and for a reason neither board file admitted at the time:
+a vendor variant header's `EXTERNAL_FLASH_DEVICES` line was read as a
+statement that a part is fitted, when on both vendors it is a template
+default under a comment denying one. Neither board answered a JEDEC read
+on any unit we own; both sets of pin aliases are gone and the reasons
+are in the board files (`CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:167`; `CONFIG`,
 `leviculum-nrf/src/boards/rak4631.rs:145`).
 
-The correction this page owes on top of that one is its own premise: it
-costed a store on two parts, and there are none. The protocol half
-stands, the arithmetic half is a costing for a part that has yet to
-arrive, and the recommendation is not actionable until one does.
+The larger correction was this page's own premise. It costed a store on
+two parts that do not exist, and the recommendation rested on figures
+that were an order of magnitude too generous in capacity and an order of
+magnitude too generous in erase budget. The protocol half needed no
+change, which is the useful lesson: the analysis that was about LXMF
+survived the part being wrong, and everything that was about a
+datasheet did not.
+
+What it still owes is a board. Three of the numbers above are arithmetic
+or datasheet figures — the scan time, the erase storm's cost, the UF2
+survival — and a rig run replaces each of them with a measurement.
