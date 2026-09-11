@@ -22,13 +22,19 @@ leviculum-screen = { path = "screen", optional = true }
 # Pure SoftDevice-ownership policy (error code + SD-enabled -> action),
 # host-unit-tested next to the firmware (Codeberg #249/#250).
 leviculum-sd-policy = { path = "sd-policy" }
-# LXMF, for the telemetry reporter (Codeberg #236). `default-features =
-# false` is load-bearing twice over: it keeps `pow`'s sha2 out (the node
-# advertises a zero stamp cost and mines nothing) and it keeps the bz2
-# content compression out (a send-only producer of empty-content messages
-# never reaches the resource path). Verify both with `cargo tree` before
-# raising the size budget.
-leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
+# LXMF, for the telemetry reporter (#236) and the propagation-node role
+# (#384). `default-features = false` still keeps the bz2 content
+# compression out (encrypted sync payloads do not compress, and the
+# resource path's auto-compression is negotiated); `pow` came IN with the
+# role — the board announces stamp cost 13 (Lead, 2026-09-12) and must
+# validate what it accepts, through the streaming validator that keeps
+# one 256-byte block rather than the reference's materialised workblock.
+# The image cost is sha2, which leviculum-core's crypto already links.
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
+# The propagation store adapters (#384 part 3): the synchronous
+# memory-mapped scan and the flush queues `src/pn.rs` drains through the
+# record-store task. Host-tested against regions the record log wrote.
+leviculum-pn-store = { path = "pn-store" }
 # Pure telemetry cadence policy and target lifecycle, host-testable next
 # to the gnss crates (#236).
 leviculum-telemetry-policy = { path = "telemetry-policy" }

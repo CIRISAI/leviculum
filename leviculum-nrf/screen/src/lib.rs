@@ -83,6 +83,13 @@ pub struct StatusModel<'a> {
     /// drain slots the `BLE_COUNTERS` log line prints as `links=`, so
     /// screen and log cannot disagree.
     pub ble_peers: Option<u8>,
+    /// Live propagation-store fill (message records) for line 3's `S`
+    /// field, or `None` on a board not running the propagation role
+    /// (#384). Rendered beside the peer count because both answer the
+    /// same field question — "is this box doing its mesh job" — and the
+    /// compact label form below is what keeps four fields inside the
+    /// T114's 20-character line.
+    pub pn_fill: Option<u16>,
     pub heartbeat: bool,
 }
 
@@ -114,6 +121,8 @@ pub struct FrameKey {
     // BLE peer count, verbatim — a peer coming or going must repaint on
     // the spot rather than waiting for the 5 s heartbeat to bump the key.
     ble_peers: Option<u8>,
+    // Store fill, verbatim — an accepted or drained message repaints.
+    pn_fill: Option<u16>,
     heartbeat: bool,
 }
 
@@ -162,6 +171,7 @@ impl StatusModel<'_> {
             bat_dv,
             gnss_kind,
             ble_peers: self.ble_peers,
+            pn_fill: self.pn_fill,
             heartbeat: self.heartbeat,
         }
     }
@@ -189,11 +199,24 @@ impl StatusModel<'_> {
         // board without BLE renders the historical two-field line
         // unchanged, trailing space included in neither form.
         let mut line3 = heapless::String::<24>::new();
-        match self.ble_peers {
-            Some(peers) => {
+        match (self.ble_peers, self.pn_fill) {
+            (Some(peers), Some(fill)) => {
+                // Four fields in 20 characters: labels lose their colon
+                // and the counters saturate at four digits — on a status
+                // line they are a liveness indicator, not an odometer.
+                let _ = write!(
+                    line3,
+                    "R{:<4} T{:<4} B{} S{}",
+                    self.rx.min(9999),
+                    self.tx.min(9999),
+                    peers,
+                    fill.min(999)
+                );
+            }
+            (Some(peers), None) => {
                 let _ = write!(line3, "R:{:<5} T:{:<5} B:{}", self.rx, self.tx, peers);
             }
-            None => {
+            (None, _) => {
                 let _ = write!(line3, "RX: {:<5} TX: {:<5}", self.rx, self.tx);
             }
         }

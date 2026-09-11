@@ -428,6 +428,26 @@ pub fn send_store_storm(
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Set the propagation-node costs (#384, `TYPE_PN_CONFIG`).
+///
+/// Persisted by the board before the ack (#358), so a positive answer
+/// means a reset comes up with the merged values. A field carrying the
+/// keep sentinel leaves that cost as persisted; the CLI fills it for
+/// whichever flag the user did not give.
+pub fn send_pn_config(
+    fd: &Fd,
+    wire: leviculum_core::envelope::PnConfigWire,
+) -> io::Result<ControlOutcome> {
+    let payload = leviculum_core::envelope::encode_pn_config(&wire);
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_PN_CONFIG),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// What a board said about its media profile: the carriers it is running
 /// right now and the ones a reboot would come up with.
 ///

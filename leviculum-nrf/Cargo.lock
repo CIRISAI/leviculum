@@ -975,6 +975,7 @@ dependencies = [
  "leviculum-core",
  "rand_core 0.6.4",
  "rmp",
+ "sha2",
 ]
 
 [[package]]
@@ -1014,6 +1015,7 @@ dependencies = [
  "leviculum-lxmf",
  "leviculum-media-state",
  "leviculum-persist-ack",
+ "leviculum-pn-store",
  "leviculum-qspi-bitbang",
  "leviculum-queue-budget",
  "leviculum-record-log",

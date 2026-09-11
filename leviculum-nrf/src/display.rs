@@ -296,6 +296,7 @@ pub async fn display_task(
             // none, not for a feature combination reachable today.
             // `MAX_LINKS` is 4, so the saturation never bites.
             ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
+            pn_fill: crate::pn::fill_indicator(),
             heartbeat,
         };
 

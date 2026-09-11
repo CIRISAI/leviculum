@@ -510,6 +510,26 @@ async fn main(spawner: Spawner) {
         node.probe_dest_hash().map(|h| *h.as_bytes()),
         delivery_hash.as_ref().map(|h| *h.as_bytes()),
     );
+    // The propagation-node role (#384 part 3): register the
+    // `lxmf.propagation` destination and its two request handlers, over
+    // the record-log store the store task mounts. Costs from the config
+    // page (PN_CONFIG line above states which source answered). The
+    // miner task is the peering-key grinder — cooperative, off the main
+    // loop, results harvested by the engine.
+    let pn_config = leviculum_nrf::pn::load_config_at_boot(rak4631::CONFIG.telemetry_flash_page);
+    let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
+    if let Some(pn) = pn_engine.as_ref() {
+        let ph = pn.destination_hash().as_bytes();
+        leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
+            "rak_lxmf_propagation={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
+            ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
+        ));
+        spawner.must_spawn(leviculum_nrf::pn::miner_task());
+    } else {
+        log_critical!("PN role=off reason=identity-underivable");
+    }
+
     // The announce occasions telemetry does not cover (#376): a new BLE
     // peer, and the plain timer. Armed from the node's clock so the first
     // periodic announce is a fixed delay after boot, not after whatever
@@ -557,6 +577,27 @@ async fn main(spawner: Spawner) {
     // 8. Host fixed position (#238 control envelope)
     // 9. Telemetry evaluation tick (only while a target is configured)
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
+
+    // One engine pass: digest a dispatch's events, run the async half
+    // (validation, flash flushes, periodic jobs), and put whatever the
+    // role wants on the wire. A macro because the borrows are the loop's
+    // own locals; expanded only after a dispatch, never inside the
+    // select, so the engine's awaits cannot be cancelled (the DropBomb
+    // rule, `leviculum_nrf::record_store` module docs).
+    macro_rules! pn_step {
+        ($events:expr) => {
+            if let Some(pn) = pn_engine.as_mut() {
+                let mut pn_out = pn.on_events(&mut node, $events);
+                pn_out.merge(pn.settle(&mut node).await);
+                if !pn_out.actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched = dispatch_actions(&mut ifaces, pn_out.actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("pn", &mut node, &dispatched);
+                }
+            }
+        };
+    }
     loop {
         transport_stats.poll(&node);
         // Clamped by the stats deadline so the line is still emitted on a
@@ -566,6 +607,12 @@ async fn main(spawner: Spawner) {
             .map(Instant::from_millis)
             .unwrap_or(Instant::MAX)
             .min(transport_stats.deadline());
+        // The propagation engine's own schedule (queued work, announce,
+        // sync scheduler) rides the same timer arm.
+        let deadline = match pn_engine.as_ref() {
+            Some(pn) => deadline.min(Instant::from_millis(pn.next_deadline_ms(node.now_ms()))),
+            None => deadline,
+        };
 
         let gnss_time_candidate = async {
             #[cfg(feature = "gnss")]
@@ -812,6 +859,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
             }
             Either4::First(Either4::Second(data)) => {
                 // A medium switched off at runtime stops carrying traffic
@@ -836,6 +884,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::First((peer, data)))) => {
                 // The reception itself is already on the log: columba's
@@ -865,6 +914,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::Second(event))) => {
                 // A BLE peer transition (Codeberg #365). Lost: cull the
@@ -905,6 +955,14 @@ async fn main(spawner: Spawner) {
                             delivery_hash.as_ref(),
                             peer,
                         ));
+                        // And the propagation role (#384): the phone
+                        // that just linked is exactly the client that
+                        // should learn its board is a mailbox.
+                        if let Some(pn) = pn_engine.as_mut() {
+                            output
+                                .actions
+                                .extend(pn.on_ble_peer_up(&mut node, 2, peer).actions);
+                        }
                         ("ble-peer-up", output)
                     }
                 };
@@ -912,6 +970,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle(label, &mut node, &dispatched);
+                pn_step!(&output.events);
             }
             Either4::First(Either4::Fourth(())) => {
                 let output = node.handle_timeout();
@@ -952,6 +1011,7 @@ async fn main(spawner: Spawner) {
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
                 leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
+                pn_step!(&output.events);
             }
             Either4::Fourth(Either::First(())) => {
                 // Telemetry evaluation (#236). Everything decided here is

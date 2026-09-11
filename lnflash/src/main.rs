@@ -131,6 +131,37 @@ struct Cli {
     )]
     store_storm: Option<leviculum_core::envelope::StoreStormWire>,
 
+    /// Set the stamp cost the board's propagation node announces (#384),
+    /// on every running LNode, then exit. No flashing. Persisted on the
+    /// config page and read at boot, so it takes effect at the next
+    /// reset — the boot PN_CONFIG line on if00 proves what came up. 0 to
+    /// 254; the default is 13, the reference's own announce floor, and
+    /// the value a store must be accepted at to travel through stock
+    /// Python peers. Combinable with --peering-cost in one call; the
+    /// unset one keeps its persisted value.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u8).range(..=254),
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
+    )]
+    stamp_cost: Option<u8>,
+
+    /// Set the peering cost the board's propagation node announces
+    /// (#384), on every running LNode, then exit. No flashing; persisted
+    /// and boot-read like --stamp-cost. 0 to 254; the default is 1 — not
+    /// 0, because a stock Python peer never syncs toward a node
+    /// announcing peering cost 0 (its readiness check short-circuits on
+    /// the falsy cost), so one bit of work is the cheapest cost a stock
+    /// peer will act on.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u8).range(..=254),
+        conflicts_with_all = ["set_time", "set_telemetry", "set_tx_spacing", "set_tx_power", "set_position", "clear_position", "set_media", "set_name", "clear_name", "watch", "summarize", "announce", "set_ble_tx_gap", "store_storm"]
+    )]
+    peering_cost: Option<u8>,
+
     /// Set the transmit power, in dBm, on every running LNode, then exit.
     /// No flashing. Reads the board's current radio settings first and sends
     /// them back with only the power changed, so nothing else moves; a board
@@ -618,6 +649,24 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
         let all_took_it = flow::store_storm(&catalogue, &sysfs, ui, storm)?;
+        return Ok(if all_took_it {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+
+    if cli.stamp_cost.is_some() || cli.peering_cost.is_some() {
+        use leviculum_core::envelope::{PnConfigWire, PN_COST_KEEP};
+        let wire = PnConfigWire {
+            stamp_cost: cli.stamp_cost.unwrap_or(PN_COST_KEEP),
+            peering_cost: cli.peering_cost.unwrap_or(PN_COST_KEEP),
+        };
+        let sysfs = match &cli.sysfs {
+            Some(path) => Sysfs::new(path),
+            None => Sysfs::new(SYSFS_USB_DEVICES),
+        };
+        let all_took_it = flow::set_pn_config(&catalogue, &sysfs, ui, wire)?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -1352,6 +1401,33 @@ mod tests {
                 size: 304
             })
         );
+    }
+
+    #[test]
+    fn the_pn_cost_flags_parse_alone_and_together() {
+        let costs = |args: &[&str]| -> Result<(Option<u8>, Option<u8>), String> {
+            let cli = Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+                .map_err(|err| err.to_string())?;
+            Ok((cli.stamp_cost, cli.peering_cost))
+        };
+        assert_eq!(costs(&["--stamp-cost", "13"]).unwrap(), (Some(13), None));
+        assert_eq!(costs(&["--peering-cost", "1"]).unwrap(), (None, Some(1)));
+        assert_eq!(
+            costs(&["--stamp-cost", "13", "--peering-cost", "1"]).unwrap(),
+            (Some(13), Some(1))
+        );
+        // 255 is the wire's keep sentinel and the unminable cost; the
+        // CLI refuses it by range before a frame exists.
+        assert!(costs(&["--stamp-cost", "255"]).is_err());
+        assert!(costs(&["--peering-cost", "255"]).is_err());
+        // And the session is not combinable, like every configure-only
+        // session that ends the run.
+        assert!(costs(&["--stamp-cost", "13", "--store-storm", "10"])
+            .unwrap_err()
+            .contains("cannot be used with"));
+        assert!(costs(&["--peering-cost", "1", "--set-time"])
+            .unwrap_err()
+            .contains("cannot be used with"));
     }
 
     #[test]

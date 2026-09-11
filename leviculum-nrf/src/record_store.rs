@@ -63,10 +63,13 @@
 //! `t=<ms>` stamp is appended by [`crate::log`] to every line, so neither
 //! format string carries one.
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::signal::Signal;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use leviculum_record_log::{Error as LogError, RecordLog, KEY_LEN, MAX_BODY};
 
@@ -79,6 +82,14 @@ use leviculum_record_log::{Error as LogError, RecordLog, KEY_LEN, MAX_BODY};
 /// body: a later batch can sweep the region for `tag == TAG_BENCH` and purge
 /// exactly those.
 pub const TAG_BENCH: u8 = 0xB0;
+
+/// The propagation role's tag map (`leviculum-pn-store`) must keep bench
+/// records invisible: above the message clamp and distinct from the peer
+/// tag, or a storm would masquerade as messages or peers.
+const _: () = assert!(
+    TAG_BENCH > leviculum_pn_store::MESSAGE_TAG_MAX && TAG_BENCH != leviculum_pn_store::TAG_PEER,
+    "TAG_BENCH collides with the propagation store's tag map"
+);
 
 /// The largest synthetic record the bench instrument will write, and the bound
 /// the control envelope refuses above
@@ -109,6 +120,68 @@ pub enum Request {
 /// [`request_storm`] rather than queued, because a measurement that silently
 /// ran twice is worse than one that was told no.
 static REQUESTS: Channel<CriticalSectionRawMutex, Request, 1> = Channel::new();
+
+/// One write the propagation engine owes the log (Codeberg #384 part 3):
+/// the flush half of `leviculum-pn-store`'s queued ops. Bodies ride the
+/// heap because a message body is up to a page.
+pub enum PnOp {
+    Append {
+        key: [u8; KEY_LEN],
+        time: u32,
+        tag: u8,
+        body: alloc::vec::Vec<u8>,
+    },
+    /// Purge the record at this **region-relative** offset iff its key
+    /// still matches — the page may have been reclaimed since the caller
+    /// scanned it, and purging whatever now sits there would corrupt a
+    /// stranger record's commit word.
+    Purge { offset: u32, key: [u8; KEY_LEN] },
+}
+
+/// What a completed [`PnOp`] reports back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PnDone {
+    /// The log's `free_bytes` after the op — the engine's fill mirror.
+    pub free_bytes: u32,
+}
+
+/// Depth 1 and one caller: the propagation engine flushes one op at a
+/// time and awaits [`PN_DONE`] before the next, which is what keeps the
+/// reply unambiguous without a ticket.
+static PN_OPS: Channel<CriticalSectionRawMutex, PnOp, 1> = Channel::new();
+static PN_DONE: Signal<CriticalSectionRawMutex, Result<PnDone, ()>> = Signal::new();
+
+/// The log's `free_bytes` as of the mount / the last completed operation,
+/// for callers that need the number without a round trip (the boot line,
+/// the display).
+static FREE_BYTES: AtomicU32 = AtomicU32::new(0);
+
+/// Execute one propagation-store write on the log task.
+///
+/// `Err(())` means the op did not land: the store is not mounted, or the
+/// flash refused it past the retry budget. The engine's contract with
+/// `leviculum-pn-store` is exactly this bool — on an append failure it
+/// un-remembers the id from the role's duplicate cache and sends no
+/// proof; on a purge failure it drops the mask and the record reappears.
+///
+/// Must not be called concurrently with itself (single engine, main
+/// loop); the await is safe to hold across the flash's own retries
+/// because the caller runs in an arm of the main loop, never inside a
+/// `select` that could drop it — and even a drop would only lose the
+/// *reply*: the op itself completes on this task, which owns the log.
+pub async fn pn_execute(op: PnOp) -> Result<PnDone, ()> {
+    if !MOUNTED.load(Ordering::Relaxed) {
+        return Err(());
+    }
+    PN_DONE.reset();
+    PN_OPS.send(op).await;
+    PN_DONE.wait().await
+}
+
+/// The log's `free_bytes` as of the last operation (see [`FREE_BYTES`]).
+pub fn free_bytes_hint() -> u32 {
+    FREE_BYTES.load(Ordering::Relaxed)
+}
 
 /// Set once the log is mounted. Until then there is nothing to append to and
 /// [`request_storm`] refuses.
@@ -318,8 +391,6 @@ impl MultiwriteNorFlash for Device {}
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
-    use embassy_futures::select::{select, Either};
-
     let (base, len) = region();
     let mut log = match mount(flash, base, len).await {
         Some(log) => log,
@@ -328,22 +399,30 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
         // being dropped into a channel nothing reads.
         None => return,
     };
+    FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
     MOUNTED.store(true, Ordering::Relaxed);
 
     let mut ticker = embassy_time::Ticker::every(embassy_time::Duration::from_secs(STATS_PERIOD_S));
     let mut reported = (0u32, 0u32, 0u32);
     loop {
+        use embassy_futures::select::{select3, Either3};
         // The only place this task selects, and therefore the only place a
-        // future of it is ever dropped: both arms are cheap and cancel-safe,
+        // future of it is ever dropped: all arms are cheap and cancel-safe,
         // and an append is never inside one. See the module docs on the
         // `DropBomb`.
-        match select(REQUESTS.receive(), ticker.next()).await {
-            Either::First(Request::Storm { records, size }) => {
+        match select3(REQUESTS.receive(), PN_OPS.receive(), ticker.next()).await {
+            Either3::First(Request::Storm { records, size }) => {
                 STORM_RUNNING.store(true, Ordering::Relaxed);
                 storm(&mut log, records, size).await;
                 STORM_RUNNING.store(false, Ordering::Relaxed);
+                FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
             }
-            Either::Second(()) => {}
+            Either3::Second(op) => {
+                let outcome = pn_perform(&mut log, base, op).await;
+                FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
+                PN_DONE.signal(outcome);
+            }
+            Either3::Third(()) => {}
         }
         let now = (
             APPENDS.load(Ordering::Relaxed),
@@ -362,6 +441,73 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
                 ),
             );
             reported = now;
+        }
+    }
+}
+
+/// Perform one propagation-store write (Codeberg #384 part 3).
+///
+/// The append counts into the same [`APPENDS`] the storms count into; a
+/// failure counts a sealed page exactly as a storm's does. The purge
+/// re-validates the record at its offset before touching its commit word
+/// — a reclaimed page answers "no record" or a different key, and the op
+/// then reports success with nothing to do, because a record that is
+/// already gone is what the purge wanted.
+#[cfg(feature = "softdevice")]
+async fn pn_perform(log: &mut RecordLog<Device>, base: u32, op: PnOp) -> Result<PnDone, ()> {
+    match op {
+        PnOp::Append {
+            key,
+            time,
+            tag,
+            body,
+        } => {
+            let room_before = log.sector_room();
+            match log.append(&key, time, tag, &body).await {
+                Ok(_) => {
+                    APPENDS.fetch_add(1, Ordering::Relaxed);
+                    Ok(PnDone {
+                        free_bytes: log.free_bytes(),
+                    })
+                }
+                Err(err) => {
+                    if room_before > 0 && log.sector_room() == 0 {
+                        SEALED_PAGES.fetch_add(1, Ordering::Relaxed);
+                    }
+                    crate::log::log_fmt(
+                        "STORE ",
+                        format_args!("pn_append_failed reason={}", reason(&err)),
+                    );
+                    Err(())
+                }
+            }
+        }
+        PnOp::Purge { offset, key } => {
+            let at = base.saturating_add(offset);
+            match log.record_at(at).await {
+                Ok(Some(record)) if record.key == key => match log.purge(&record).await {
+                    Ok(()) => Ok(PnDone {
+                        free_bytes: log.free_bytes(),
+                    }),
+                    Err(err) => {
+                        crate::log::log_fmt(
+                            "STORE ",
+                            format_args!("pn_purge_failed reason={}", reason(&err)),
+                        );
+                        Err(())
+                    }
+                },
+                Ok(_) => Ok(PnDone {
+                    free_bytes: log.free_bytes(),
+                }),
+                Err(err) => {
+                    crate::log::log_fmt(
+                        "STORE ",
+                        format_args!("pn_purge_failed reason={}", reason(&err)),
+                    );
+                    Err(())
+                }
+            }
         }
     }
 }

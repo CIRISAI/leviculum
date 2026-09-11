@@ -29,6 +29,10 @@ pub mod log;
 pub mod lora;
 pub mod media;
 pub mod name;
+/// The propagation-node role (#384 part 3): the board twin of lnpnd's
+/// engine, over the record-log adapters of `leviculum-pn-store`.
+#[cfg(feature = "softdevice")]
+pub mod pn;
 pub mod qspi;
 pub mod radio_store;
 /// The board's message store (#384): the record log mounted on the flash

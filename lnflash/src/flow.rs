@@ -1126,6 +1126,76 @@ fn send_store_storm_to(
     })
 }
 
+/// The `--stamp-cost` / `--peering-cost` session (#384): set the
+/// propagation-node costs on every running LNode, then exit.
+///
+/// Persisted, unlike the bench knobs above: the board merges the frame
+/// over its config-page record (a field the CLI did not name keeps its
+/// persisted value), writes the page, and only then acks — so the ack
+/// means "a reset comes up with this". The running role read its costs
+/// at boot; the answer text says so rather than implying a live change.
+pub fn set_pn_config(
+    catalogue: &Catalogue,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    wire: leviculum_core::envelope::PnConfigWire,
+) -> Result<bool, Error> {
+    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    if reachable.is_empty() {
+        ui.say(
+            "No running LNode on the bus. --stamp-cost/--peering-cost talk to flashed              boards; a board in its bootloader has no config page owner.",
+        );
+        return Ok(false);
+    }
+    let mut all_took_it = reachable.unreachable == 0;
+    for board in &reachable.boards {
+        let port = &board.port;
+        let reply = match open_transport(sysfs, &board.device, &board.tty)
+            .and_then(|fd| send_pn_config_to(&fd, wire))
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                ui.say(&format!(
+                    "{port}: the transport port could not be used ({err})"
+                ));
+                all_took_it = false;
+                continue;
+            }
+        };
+        all_took_it &= reply.took_it();
+        match reply {
+            SessionReply::Acked => ui.say(&format!(
+                "{port}: persisted. Takes effect at the next reset; the boot PN_CONFIG                  line on the debug port (if00) proves what came up."
+            )),
+            SessionReply::Refused(reason) => ui.say(&format!(
+                "{port}: the board refused the costs — {}.",
+                crate::envelope::reason_str(reason)
+            )),
+            SessionReply::NoAnswer => ui.say(&format!(
+                "{port}: the board did not answer, so assume nothing was persisted."
+            )),
+            SessionReply::ProbeSilent => ui.say(&format!(
+                "{port}: the board did not answer the capability probe, so nothing was                  sent. {}",
+                crate::envelope::PROBE_SILENCE_HINT
+            )),
+            SessionReply::NotAccepted => ui.say(&format!(
+                "{port}: this firmware speaks the envelope but carries no propagation                  node. Flash the current bundle first."
+            )),
+        }
+    }
+    Ok(all_took_it)
+}
+
+fn send_pn_config_to(
+    fd: &crate::sys::Fd,
+    wire: leviculum_core::envelope::PnConfigWire,
+) -> io::Result<SessionReply> {
+    use crate::envelope;
+    envelope::probed(fd, leviculum_core::envelope::TYPE_PN_CONFIG, |fd| {
+        envelope::send_pn_config(fd, wire)
+    })
+}
+
 /// The `--set-tx-power` session (Codeberg #349): set the transmit power on
 /// every running LNode, no flashing, then exit.
 ///

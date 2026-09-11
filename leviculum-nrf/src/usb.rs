@@ -76,6 +76,7 @@ pub const ACCEPTED_CONTROL_TYPES: &[u8] = &[
     envelope::TYPE_ANNOUNCE,
     envelope::TYPE_BLE_TX_GAP,
     envelope::TYPE_STORE_STORM,
+    envelope::TYPE_PN_CONFIG,
 ];
 
 /// nRF52840 FICR base address
@@ -949,6 +950,34 @@ async fn retic_serial_task(
                                         .await
                                     {
                                         log("SER: store-storm answer write failed");
+                                    }
+                                }
+                                ControlAction::PnConfig(config) => {
+                                    // Merge-and-persist on this task, like
+                                    // the media profile: nothing here needs
+                                    // the node, and the ack must not leave
+                                    // before the record is on the page
+                                    // (#358). The running role read its
+                                    // costs at boot; the ack's meaning is
+                                    // "the next reset comes up with this",
+                                    // which the boot PN_CONFIG line then
+                                    // proves.
+                                    let persist =
+                                        crate::telemetry::confirm(crate::pn::apply_config(config))
+                                            .await;
+                                    let answer = match persist {
+                                        envelope::Persist::Durable => {
+                                            envelope::encode_ack(envelope::TYPE_PN_CONFIG)
+                                        }
+                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                            envelope::TYPE_PN_CONFIG,
+                                            envelope::REFUSE_PERSIST,
+                                        ),
+                                    };
+                                    if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
+                                        .await
+                                    {
+                                        log("SER: pn-config answer write failed");
                                     }
                                 }
                                 ControlAction::TxSpacing(spacing_ms) => {

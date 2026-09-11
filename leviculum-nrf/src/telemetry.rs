@@ -44,6 +44,7 @@ use leviculum_core::media_profile_store::{decode_media_profile, encode_media_pro
 use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::node_name::NodeName;
 use leviculum_core::node_name_store::{decode_node_name, encode_node_name};
+use leviculum_core::pn_config_store::{decode_pn_config, encode_pn_config, StoredPnConfig};
 use leviculum_core::telemetry_target_store::{decode_telemetry_target, encode_telemetry_target};
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::{Action, DispatchResult};
@@ -237,6 +238,7 @@ pub fn inbound_fixed_position_receiver(
 /// +0x100  fixed position record    ("LFPO", fixed_position_store)      24 B
 /// +0x200  media profile record     ("LMED", media_profile_store)        8 B
 /// +0x300  node name record         ("LNAM", node_name_store)          44 B
+/// +0x400  propagation-node config  ("LPNC", pn_config_store)          12 B
 /// ```
 ///
 /// The target keeps offset 0, where every fielded board already has it, so
@@ -258,6 +260,8 @@ const FIXED_POSITION_OFFSET: u32 = 0x100;
 const MEDIA_OFFSET: u32 = 0x200;
 /// See [`TARGET_OFFSET`].
 const NAME_OFFSET: u32 = 0x300;
+/// See [`TARGET_OFFSET`].
+const PN_CONFIG_OFFSET: u32 = 0x400;
 
 /// The page layout's collision check, run by the compiler rather than by
 /// a reviewer reading three offsets: each record must end before the next
@@ -277,7 +281,12 @@ const _: () = {
             <= NAME_OFFSET
     );
     assert!(
-        NAME_OFFSET + leviculum_core::node_name_store::ENCODED_SIZE_ALIGNED as u32 <= PAGE_SIZE
+        NAME_OFFSET + leviculum_core::node_name_store::ENCODED_SIZE_ALIGNED as u32
+            <= PN_CONFIG_OFFSET
+    );
+    assert!(
+        PN_CONFIG_OFFSET + leviculum_core::pn_config_store::ENCODED_SIZE_ALIGNED as u32
+            <= PAGE_SIZE
     );
 };
 
@@ -300,6 +309,8 @@ static PENDING_SAVE_FIXED: Channel<
 static PENDING_SAVE_MEDIA: Channel<CriticalSectionRawMutex, (SaveTicket, MediaProfileWire), 1> =
     Channel::new();
 static PENDING_SAVE_NAME: Channel<CriticalSectionRawMutex, (SaveTicket, Option<NodeName>), 1> =
+    Channel::new();
+static PENDING_SAVE_PN: Channel<CriticalSectionRawMutex, (SaveTicket, StoredPnConfig), 1> =
     Channel::new();
 
 /// One record's persist bookkeeping: the [`PersistGate`] that says whether
@@ -343,6 +354,7 @@ static TARGET_PERSIST: PersistSlot = PersistSlot::new();
 static FIXED_PERSIST: PersistSlot = PersistSlot::new();
 static MEDIA_PERSIST: PersistSlot = PersistSlot::new();
 static NAME_PERSIST: PersistSlot = PersistSlot::new();
+static PN_PERSIST: PersistSlot = PersistSlot::new();
 
 /// A save the caller may wait for with [`confirm`], returned by every
 /// `request_save*`.
@@ -461,6 +473,16 @@ pub fn load_node_name(page: u32) -> Option<NodeName> {
     decode_node_name(&read_name_record(page))
 }
 
+/// Read the persisted propagation-node costs, or `None` if the record is
+/// blank, corrupt, or from another format version — all of which mean
+/// the Lead's compatibility defaults
+/// ([`StoredPnConfig::DEFAULT`], stamp 13 / peering 1). Same read-safety
+/// argument as [`load`]; read at boot, and the boot `PN_CONFIG` line
+/// states which of the two answered.
+pub fn load_pn_config(page: u32) -> Option<StoredPnConfig> {
+    decode_pn_config(&read_pn_record(page))
+}
+
 fn read_target_record(
     page: u32,
 ) -> [u8; leviculum_core::telemetry_target_store::ENCODED_SIZE_ALIGNED] {
@@ -479,6 +501,10 @@ fn read_media_record(page: u32) -> [u8; leviculum_core::media_profile_store::ENC
 
 fn read_name_record(page: u32) -> [u8; leviculum_core::node_name_store::ENCODED_SIZE_ALIGNED] {
     read_record(page + NAME_OFFSET)
+}
+
+fn read_pn_record(page: u32) -> [u8; leviculum_core::pn_config_store::ENCODED_SIZE_ALIGNED] {
+    read_record(page + PN_CONFIG_OFFSET)
 }
 
 fn read_record<const N: usize>(addr: u32) -> [u8; N] {
@@ -546,6 +572,19 @@ pub fn request_save_node_name(name: Option<NodeName>) -> PendingSave {
     save
 }
 
+/// Ask the store task to persist the propagation-node costs. Never
+/// blocks, like [`request_save`]. The caller passes resolved costs — the
+/// keep-sentinel merge against the current record happened on the serial
+/// task, where the frame was classified.
+pub fn request_save_pn_config(config: StoredPnConfig) -> PendingSave {
+    let save = PN_PERSIST.issue();
+    if PENDING_SAVE_PN.try_send((save.ticket, config)).is_err() {
+        let _ = PENDING_SAVE_PN.try_receive();
+        let _ = PENDING_SAVE_PN.try_send((save.ticket, config));
+    }
+    save
+}
+
 /// 4-byte-aligned record buffer. `sd_flash_write` writes whole 32-bit
 /// words and rejects an unaligned source pointer.
 #[repr(align(4))]
@@ -559,15 +598,18 @@ const SAVE_RETRY_MS: u64 = 250;
 #[cfg(feature = "softdevice")]
 #[embassy_executor::task]
 pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
-    use embassy_futures::select::{select4, Either4};
+    use embassy_futures::select::{select, select4, Either, Either4};
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
-        let request = select4(
-            PENDING_SAVE.receive(),
-            PENDING_SAVE_FIXED.receive(),
-            PENDING_SAVE_MEDIA.receive(),
-            PENDING_SAVE_NAME.receive(),
+        let request = select(
+            select4(
+                PENDING_SAVE.receive(),
+                PENDING_SAVE_FIXED.receive(),
+                PENDING_SAVE_MEDIA.receive(),
+                PENDING_SAVE_NAME.receive(),
+            ),
+            PENDING_SAVE_PN.receive(),
         )
         .await;
         // Whichever record the request names, the others are read back off
@@ -577,25 +619,30 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
         let mut fixed = Aligned(read_fixed_record(page));
         let mut media = Aligned(read_media_record(page));
         let mut name = Aligned(read_name_record(page));
+        let mut pn = Aligned(read_pn_record(page));
         // Which record this request names, its ticket, and the word the
         // log line uses. The ticket goes back through the slot on every
         // exit path below — that is what the requester's ack waits on.
         let (slot, ticket, what) = match request {
-            Either4::First((ticket, wire)) => {
+            Either::First(Either4::First((ticket, wire))) => {
                 target = Aligned(encode_telemetry_target(&wire));
                 (&TARGET_PERSIST, ticket, "target")
             }
-            Either4::Second((ticket, position)) => {
+            Either::First(Either4::Second((ticket, position))) => {
                 fixed = Aligned(encode_fixed_position(position.as_ref()));
                 (&FIXED_PERSIST, ticket, "fixed-position")
             }
-            Either4::Third((ticket, profile)) => {
+            Either::First(Either4::Third((ticket, profile))) => {
                 media = Aligned(encode_media_profile(&profile));
                 (&MEDIA_PERSIST, ticket, "media-profile")
             }
-            Either4::Fourth((ticket, chosen)) => {
+            Either::First(Either4::Fourth((ticket, chosen))) => {
                 name = Aligned(encode_node_name(chosen.as_ref()));
                 (&NAME_PERSIST, ticket, "node-name")
+            }
+            Either::Second((ticket, config)) => {
+                pn = Aligned(encode_pn_config(&config));
+                (&PN_PERSIST, ticket, "pn-config")
             }
         };
 
@@ -608,6 +655,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             && read_fixed_record(page) == fixed.0
             && read_media_record(page) == media.0
             && read_name_record(page) == name.0
+            && read_pn_record(page) == pn.0
         {
             crate::log::log_fmt("[TELEMETRY] ", format_args!("persist skipped, unchanged"));
             slot.finish(ticket, Persisted::Durable);
@@ -622,7 +670,8 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 flash.write(page + TARGET_OFFSET, &target.0).await?;
                 flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
                 flash.write(page + MEDIA_OFFSET, &media.0).await?;
-                flash.write(page + NAME_OFFSET, &name.0).await
+                flash.write(page + NAME_OFFSET, &name.0).await?;
+                flash.write(page + PN_CONFIG_OFFSET, &pn.0).await
             }
             .await;
             match result {
@@ -1705,9 +1754,10 @@ impl Reporter {
 pub fn announce_app_data(identity: &Identity) -> Vec<u8> {
     use leviculum_lxmf::announce::DeliveryAnnounce;
     let name = crate::name::mesh_name(identity.hash());
-    // Stamp cost 0: the node mines nothing (the `pow` feature is off), so
-    // advertising a cost it cannot pay itself would be a lie to every
-    // peer that reads it.
+    // Stamp cost 0: the DELIVERY destination requires no work of a
+    // sender. Distinct from the propagation role's announced cost
+    // (`crate::pn`, #384) — that one prices the mailbox, this one prices
+    // messaging the board directly, and the board asks nothing for it.
     DeliveryAnnounce {
         display_name: Some(name.as_bytes().to_vec()),
         stamp_cost: None,

@@ -389,6 +389,7 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             // `softdevice`, so this build always has BLE. `MAX_LINKS`
             // is 4, so the saturation never bites.
             ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
+            pn_fill: crate::pn::fill_indicator(),
             heartbeat,
         };
 

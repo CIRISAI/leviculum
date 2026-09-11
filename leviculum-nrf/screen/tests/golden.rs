@@ -44,6 +44,7 @@ fn t114_model(heartbeat: bool) -> StatusModel<'static> {
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
         ble_peers: None,
+        pn_fill: None,
         heartbeat,
     }
 }
@@ -75,6 +76,7 @@ fn golden_v2_normal_frame() {
             coords: Some((53.07516, 8.80777)),
         },
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let mut fb = V2Fb::new();
@@ -105,6 +107,7 @@ fn golden_v2_battery_without_percent_frame() {
             coords: Some((53.07516, 8.80777)),
         },
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let mut fb = V2Fb::new();
@@ -124,6 +127,7 @@ fn golden_v2_no_data_frame() {
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoData,
         ble_peers: None,
+        pn_fill: None,
         heartbeat: true,
     };
     let mut fb = V2Fb::new();
@@ -145,6 +149,7 @@ fn golden_v2_no_hardware_frame() {
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoHardware,
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let mut fb = V2Fb::new();
@@ -165,6 +170,7 @@ fn frame_key_distinguishes_gnss_states() {
         battery: BatteryStatus::NoData,
         gnss: GnssStatus::NoData,
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let no_hw = StatusModel {
@@ -189,6 +195,7 @@ fn golden_long_name_truncation() {
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let mut fb = T114Fb::new();
@@ -289,6 +296,7 @@ fn frame_key_quantization() {
             coords: Some((53.075160, 8.807770)),
         },
         ble_peers: None,
+        pn_fill: None,
         heartbeat: false,
     };
     let jitter = StatusModel {
@@ -356,6 +364,7 @@ fn line3_with_ble_peers_fits_the_narrow_backend() {
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
         ble_peers: Some(3),
+        pn_fill: None,
         heartbeat: false,
     };
     let line3 = model.lines()[2].clone();
@@ -382,6 +391,7 @@ fn line3_without_ble_is_the_historical_line() {
             battery: BatteryStatus::FeatureOff,
             gnss: GnssStatus::FeatureOff,
             ble_peers: None,
+            pn_fill: None,
             heartbeat: false,
         };
         assert_eq!(
@@ -403,10 +413,12 @@ fn frame_key_tracks_ble_peers() {
         battery: BatteryStatus::FeatureOff,
         gnss: GnssStatus::FeatureOff,
         ble_peers: Some(0),
+        pn_fill: None,
         heartbeat: false,
     };
     let joined = StatusModel {
         ble_peers: Some(1),
+        pn_fill: None,
         ..base
     };
     assert_ne!(base.key(), joined.key());
@@ -415,6 +427,7 @@ fn frame_key_tracks_ble_peers() {
     // the same key as zero peers, since it renders a different line.
     let no_ble = StatusModel {
         ble_peers: None,
+        pn_fill: None,
         ..base
     };
     assert_ne!(base.key(), no_ble.key());
@@ -443,4 +456,36 @@ fn coord_5dp_matches_the_float_formatting_it_replaced() {
         leviculum_screen::write_coord_5dp(&mut s, v).unwrap();
         assert_eq!(s.as_str(), format!("{v:.5}"), "coordinate {v:?}");
     }
+}
+
+#[test]
+fn line3_with_pn_fill_fits_the_narrow_backend() {
+    // Four fields (#384): the compact label form loses the colons and
+    // saturates the counters at four digits, which is what keeps the
+    // worst case inside the T114's 20-character budget.
+    let model = StatusModel {
+        title: "leviculum T114",
+        id_short: "fc06c10642",
+        rx: 123_456,
+        tx: 67_890,
+        battery: BatteryStatus::FeatureOff,
+        gnss: GnssStatus::FeatureOff,
+        ble_peers: Some(4),
+        pn_fill: Some(176),
+        heartbeat: false,
+    };
+    let line3 = model.lines()[2].clone();
+    assert_eq!(line3.as_str(), "R9999 T9999 B4 S176");
+    assert!(
+        line3.len() <= 20,
+        "line 3 is {} chars, past the T114's 20-character budget: {:?}",
+        line3.len(),
+        line3.as_str()
+    );
+    // An accepted or drained message repaints on the spot.
+    let drained = StatusModel {
+        pn_fill: Some(175),
+        ..model
+    };
+    assert_ne!(model.key(), drained.key());
 }

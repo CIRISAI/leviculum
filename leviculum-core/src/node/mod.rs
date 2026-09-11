@@ -116,6 +116,8 @@ mod mvr_probe_announce_phase;
 #[cfg(test)]
 mod mvr_proof_activity;
 #[cfg(test)]
+mod mvr_raw_single_packet;
+#[cfg(test)]
 mod mvr_reboot_relay_nopath_solicit;
 #[cfg(test)]
 mod mvr_relay_pr_from_next_hop;
@@ -1080,6 +1082,65 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         let output = self.process_events_and_actions();
         Ok((packet_hash, len, output))
+    }
+
+    /// Send an already-encrypted single data packet to a SINGLE destination.
+    ///
+    /// [`send_single_packet`](Self::send_single_packet) with the encryption
+    /// step left to the caller: `ciphertext` must be bytes the
+    /// destination's own decryptor accepts — in the propagation node's
+    /// active-delivery case (Codeberg #384) the stored blob minus its
+    /// 16-byte destination-hash prefix, which is byte-identical to what the
+    /// originator's `destination.encrypt(packed[16:])` produced
+    /// (`reference/LXMF/LXMF/LXMessage.py:426-434`). Same packet shape,
+    /// routing and receipt tracking as the encrypting form, so the
+    /// recipient cannot distinguish it from an ordinary opportunistic
+    /// delivery and the caller gets `PacketDeliveryConfirmed` /
+    /// `DeliveryFailed` for the returned hash.
+    pub fn send_raw_single_packet(
+        &mut self,
+        dest_hash: &DestinationHash,
+        ciphertext: &[u8],
+    ) -> Result<([u8; TRUNCATED_HASHBYTES], crate::transport::TickOutput), send::SendError> {
+        use crate::destination::DestinationType;
+        use crate::packet::{
+            HeaderType, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+        };
+
+        let packet = crate::packet::Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Data,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: dest_hash.into_bytes(),
+            context: PacketContext::None,
+            data: PacketData::Owned(ciphertext.to_vec()),
+        };
+        let mut buf = [0u8; crate::constants::MTU];
+        let len = packet
+            .pack(&mut buf)
+            .map_err(|_| send::SendError::TooLarge)?;
+
+        self.transport
+            .send_to_destination(dest_hash.as_bytes(), &buf[..len])
+            .map_err(|e| match e {
+                crate::transport::TransportError::PacingDelay { ready_at_ms } => {
+                    send::SendError::PacingDelay { ready_at_ms }
+                }
+                _ => send::SendError::NoPath,
+            })?;
+
+        let packet_hash = self
+            .transport
+            .create_receipt(&buf[..len], dest_hash.into_bytes());
+        let output = self.process_events_and_actions();
+        Ok((packet_hash, output))
     }
 
     /// Send a proof for a received single packet (`ProofStrategy::App`)
