@@ -1,7 +1,17 @@
-//! The QSPI NOR flash both boards carry and neither has ever driven.
+//! The QSPI NOR flash one of our boards carries and has never driven.
 //!
-//! 2 MB of MX25R1635F on the T114, 1 MB of IS25LP080D on the WisMesh
-//! Pocket V2. Codeberg #384 and
+//! 1 MB of IS25LP080D on the WisMesh Pocket V2, on the RAK4631 module
+//! itself. **Not the T114**: it was long believed to carry 2 MB of
+//! MX25R1635F, and it does not — the manufacturer disabled the bus in
+//! their own board support package, two of the six pins have other
+//! functions in the sibling variant, all six are on the expansion header,
+//! and on the rig nothing ever answered. The evidence is in
+//! `leviculum-nrf/src/boards/t114.rs`, its `CONFIG.qspi_part` is `None`,
+//! and its firmware prints `[QSPI] NONE board=t114` instead of coming
+//! here (Codeberg #384). Everything below is therefore about the Pocket
+//! and about whatever board brings the next part.
+//!
+//! Codeberg #384 and
 //! `docs/src/concepts/propagation-node-on-a-board.md` ask what to put in
 //! it; this module is only the part that gets there — the peripheral, the
 //! part's identity, and the `embedded_storage` NorFlash surface the record
@@ -25,16 +35,18 @@
 //! about 4 KB sectors, a 0xFF erased state and program-once bits, and none
 //! of those are true of a part we have not identified.
 //!
-//! # Why the two frequencies differ
+//! # Why a part carries its own bus speed
 //!
-//! `Speed::M8` on the T114 and `Speed::M32` on the Pocket, and the
-//! asymmetry is the parts', not ours. The Macronix part is the low-power
-//! one: in its default ultra-low-power mode its quad read tops out at
-//! 8 MHz. The ISSI part allows 133 MHz, so the nRF52840's own 32 MHz
-//! ceiling is what binds there. That is 4 MB/s against 16 MB/s, which the
-//! concept paper turns into a 0.5 s full-store scan on the T114 and 0.07 s
-//! on the Pocket — the number that makes an on-flash directory affordable
-//! and a RAM index unnecessary.
+//! `Speed::M32` on the Pocket, because the ISSI part allows 133 MHz and
+//! the nRF52840's own 32 MHz ceiling is what binds there: 16 MB/s, which
+//! the concept paper turns into a 0.07 s full-store scan — the number
+//! that makes an on-flash directory affordable and a RAM index
+//! unnecessary. `Speed::M8` exists for the other kind of part, the
+//! low-power one whose quad read tops out at 8 MHz in its default
+//! ultra-low-power mode (the MX25R1635F is the example, and the reason
+//! the conservative timings below are taken from its datasheet). No
+//! board we have fits one, so nothing selects it today; the asymmetry it
+//! encodes is the parts', not ours.
 //!
 //! # Quad enable
 //!
@@ -238,14 +250,6 @@ pub struct FlashPart {
     pub speed: Speed,
 }
 
-/// Macronix MX25R1635F, 16 Mbit, on the Heltec Mesh Node T114.
-pub const MX25R1635F: FlashPart = FlashPart {
-    name: "MX25R1635F",
-    jedec: [0xC2, 0x28, 0x15],
-    capacity: 2 * 1024 * 1024,
-    speed: Speed::M8,
-};
-
 /// ISSI IS25LP080D, 8 Mbit, on the RAK4631 module (WisMesh Pocket V2).
 pub const IS25LP080D: FlashPart = FlashPart {
     name: "IS25LP080D",
@@ -303,8 +307,8 @@ pub fn identify_at_boot(
     config.capacity = part.capacity;
 
     // `Qspi::new` drives IO3 (the part's HOLD#/RESET#) high before it
-    // activates the interface, which is what the T114 board comment asks
-    // for; every pin goes out high first (`config_pin!`,
+    // activates the interface, which is what a part that reads pin 7 as
+    // RESET# needs; every pin goes out high first (`config_pin!`,
     // `embassy-nrf-0.9.0/src/qspi.rs`).
     let mut flash = Qspi::new(qspi, QspiIrqs, sck, csn, io0, io1, io2, io3, config);
 

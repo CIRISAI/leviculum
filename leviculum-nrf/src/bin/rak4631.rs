@@ -268,18 +268,23 @@ async fn main(spawner: Spawner) {
     // marker above as the last line of the capture and of the persistent
     // tail.
     log_critical!("[STG] qspi-init");
-    if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
-        p.QSPI,
-        p.P0_03.into(), // SCK
-        p.P0_26.into(), // CSN
-        p.P0_30.into(), // IO0
-        p.P0_29.into(), // IO1
-        p.P0_28.into(), // IO2
-        p.P0_02.into(), // IO3 / HOLD#
-        rak4631::CONFIG.qspi_part,
-    ) {
-        leviculum_nrf::qspi::log_head(&mut flash);
-        leviculum_nrf::qspi::log_store(flash, rak4631::CONFIG.qspi_part);
+    // `CONFIG.qspi_part` is `Some` for this board and `None` for the T114,
+    // which fits no part at all (Codeberg #384); a board without one never
+    // touches the bus.
+    if let Some(part) = rak4631::CONFIG.qspi_part {
+        if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
+            p.QSPI,
+            p.P0_03.into(), // SCK
+            p.P0_26.into(), // CSN
+            p.P0_30.into(), // IO0
+            p.P0_29.into(), // IO1
+            p.P0_28.into(), // IO2
+            p.P0_02.into(), // IO3 / HOLD#
+            part,
+        ) {
+            leviculum_nrf::qspi::log_head(&mut flash);
+            leviculum_nrf::qspi::log_store(flash, part);
+        }
     }
 
     // LoRa (SPIM2; same instance the T114 uses, dictated by the shared

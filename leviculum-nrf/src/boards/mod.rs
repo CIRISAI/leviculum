@@ -44,5 +44,11 @@ pub struct BoardConfig {
     /// The QSPI NOR part this board carries: its JEDEC id, its density and
     /// the bus clock it is driven at. The boot probe refuses to hand out a
     /// device whose id does not match this ([`crate::qspi`]).
-    pub qspi_part: &'static crate::qspi::FlashPart,
+    ///
+    /// `None` means the board carries no part, and then nothing may
+    /// configure its QSPI pins at all: on the T114 those six nets are on
+    /// the expansion header and two of them have other functions in the
+    /// sibling variant, so driving them blind is not free. The evidence
+    /// is in [`t114`] where the pin aliases used to be (Codeberg #384).
+    pub qspi_part: Option<&'static crate::qspi::FlashPart>,
 }

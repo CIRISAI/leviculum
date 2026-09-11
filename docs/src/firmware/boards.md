@@ -33,7 +33,7 @@ runs an event-driven main loop that dispatches packets between them:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:189-197`) and
 `leviculum-nrf/src/bin/rak4631.rs:230-238`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:426`.)
+`leviculum-nrf/src/bin/t114.rs:543`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
@@ -265,7 +265,7 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:245`,
+> (`leviculum-nrf/src/bin/t114.rs:314`,
 > `leviculum-nrf/src/bin/rak4631.rs:272`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
 > features (`leviculum-nrf/Cargo.toml:133`,
@@ -334,7 +334,7 @@ RNode configuration on the same LoRa network.
 
 (`leviculum-nrf/README.md:8`. The `eu_medium` profile the firmware loads
 at boot: `leviculum-nrf/src/lora.rs:136-161`, applied at
-`leviculum-nrf/src/bin/t114.rs:235` and
+`leviculum-nrf/src/bin/t114.rs:275` and
 `leviculum-nrf/src/bin/rak4631.rs:264`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to

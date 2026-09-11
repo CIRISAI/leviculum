@@ -1,12 +1,25 @@
 # An LXMF propagation node on a board with 1 to 2 MB of flash
 
-Both our boards carry a QSPI NOR flash we have never driven: 1 MB on
-the Pocket V2 (IS25LP080D) and 2 MB on the T114 (MX25R1635F). Codeberg
-#384 asks the obvious question: should that flash hold an LXMF
-propagation node, so the mesh has a store when the recipient is not
-reachable? The walk that prompted it had a link built from one phone to
-another across two of our nodes and a hill, which is exactly the
-topology where a store matters.
+> **Superseded in one input, 2026-09-11: the T114 has no flash part.**
+> This page was written believing both boards carried one. The T114 does
+> not — Heltec disabled the bus in their own board support package, two
+> of the six pins have other functions in the sibling variant, all six
+> are on the expansion header, and on the rig nothing answered a JEDEC
+> read. The full evidence is in `leviculum-nrf/src/boards/t114.rs`
+> (`CONFIG`, `leviculum-nrf/src/boards/t114.rs:158`), and the firmware
+> now prints `[QSPI] NONE board=t114` instead of probing. **Every T114
+> column, row and life-time figure below is therefore void**; the
+> Pocket's 1 MB IS25LP080D is real and everything about it stands. The
+> argument was not re-run on one part alone — where the conclusion turns
+> on having two, read it as open.
+
+Both our boards were thought to carry a QSPI NOR flash we have never
+driven: 1 MB on the Pocket V2 (IS25LP080D) and, wrongly, 2 MB on the
+T114 (MX25R1635F). Codeberg #384 asks the obvious question: should
+that flash hold an LXMF propagation node, so the mesh has a store when
+the recipient is not reachable? The walk that prompted it had a link
+built from one phone to another across two of our nodes and a hill,
+which is exactly the topology where a store matters.
 
 This page establishes what the role obliges us to, measures what it
 would cost on these two parts, sets out the options, and recommends
@@ -606,13 +619,15 @@ and keep the spam brake the protocol was designed around.
 **Batch: drive the QSPI flash and land a log-structured record store.
 No LXMF, nothing announced on `lxmf.propagation`.**
 
-1. A QSPI driver behind the existing storage trait shape, on both
-   boards, at `Frequency::M8` on the T114 (its part's ultra-low-power
-   quad-read ceiling) and `M32` on the Pocket. The pin aliases already
-   exist and name the right parts (`QspiClk`,
-   `leviculum-nrf/src/boards/t114.rs:103`; `QspiClk`,
-   `leviculum-nrf/src/boards/rak4631.rs:100`); nothing else is wired
-   to those pins on either board.
+1. A QSPI driver behind the existing storage trait shape, on the
+   Pocket, at `M32`. **Not on the T114**: that board carries no QSPI
+   part at all, so it has no pin aliases and its `CONFIG` declares
+   `qspi_part: None` (`CONFIG`, `leviculum-nrf/src/boards/t114.rs:158`).
+   The Pocket's aliases exist and name its part, which sits on the
+   RAK4631 module rather than the carrier (`QspiClk`,
+   `leviculum-nrf/src/boards/rak4631.rs:100`); nothing else is wired to
+   those pins there. Everything below that says "both boards" is
+   therefore the Pocket alone until some other board brings a part.
 2. A forward-only record log: 4 KB sectors, 42-byte header as
    tabulated, CRC per record, round-robin sector reclaim, **no fixed
    metadata sector anywhere**.
@@ -661,10 +676,13 @@ Acceptance, all four:
 ### One correction this page owes
 
 Codeberg #384 states that "a search of `leviculum-nrf` finds no QSPI".
-It finds the pin aliases: both board files already declare the six
-QSPI pins and name the correct part in a comment
-(`QspiClk`, `leviculum-nrf/src/boards/t114.rs:103`; `QspiClk`,
-`leviculum-nrf/src/boards/rak4631.rs:100`). What is absent is a driver,
-a filesystem and any use. The conclusion of the issue is unaffected —
-the flash is untouched — but the starting point is a little further
-along than it says.
+When this page was written, both board files declared six QSPI pins and
+named a part. That was half wrong, and the half that was wrong was the
+T114's: it fits no part, Heltec's own variant header has those pins
+commented out, two of them belong to other functions in the sibling
+variant, all six are on the expansion header, and on the rig nothing
+answered a JEDEC read. The aliases are gone and the reason is in the
+board file where they were (`CONFIG`,
+`leviculum-nrf/src/boards/t114.rs:158`). The Pocket's declaration stands
+(`QspiClk`, `leviculum-nrf/src/boards/rak4631.rs:100`); what is absent
+there is a driver, a filesystem and any use.

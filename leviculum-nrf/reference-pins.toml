@@ -18,18 +18,30 @@
 # the baseboard rather than the module. Those would need a per-pin rule,
 # and a table of exceptions does not gate anything.
 
+# `qspi_part` per board is the part the board file must declare, and it is
+# what decides whether a `[boards.<b>.qspi]` table may exist at all:
+# "none" means the board fits no part, and then the gate demands the
+# opposite of a pin map — no `Qspi*` aliases in the board file, no
+# `qspi::identify_at_boot` call in the bin, `qspi_part: None` in its
+# CONFIG.
+#
+# The T114 is "none" since 2026-09-11 (Codeberg #384). Its six QSPI rows
+# used to be checked against Meshtastic's variant, which enforced a
+# mapping the manufacturer themselves disabled: Heltec's own HT-n5262
+# variant has the QSPI pins commented out, the sibling HT-n5262G gives
+# P1.14 to `PIN_GPS_RESET` and P1.12 to the display backlight, all six
+# nets are on the expansion header, the two published maps disagree on
+# IO2/IO3, and on the rig every pin follows our drive while nothing
+# answers `9Fh`. The full argument, with URLs, is in
+# `leviculum-nrf/src/boards/t114.rs`. A reference is only worth checking
+# against when it is a reference for this board.
+
 [boards.t114]
 board = "leviculum-nrf/src/boards/t114.rs"
 bin = "leviculum-nrf/src/bin/t114.rs"
 variant = "variants/nrf52840/heltec_mesh_node_t114/variant.h"
-
-[boards.t114.qspi]
-sck = { pin = 46, alias = "QspiClk", define = "PIN_QSPI_SCK" }
-cs = { pin = 47, alias = "QspiCs", define = "PIN_QSPI_CS" }
-io0 = { pin = 44, alias = "QspiIo0", define = "PIN_QSPI_IO0" }
-io1 = { pin = 45, alias = "QspiIo1", define = "PIN_QSPI_IO1" }
-io2 = { pin = 7, alias = "QspiIo2", define = "PIN_QSPI_IO2" }
-io3 = { pin = 5, alias = "QspiIo3", define = "PIN_QSPI_IO3" }
+# No QSPI part, and therefore no [boards.t114.qspi] table. See the header.
+qspi_part = "none"
 
 [boards.t114.lora]
 sck = { pin = 19, alias = "LoRaSck", define = "PIN_SPI_SCK" }
@@ -44,6 +56,9 @@ dio1 = { pin = 20, alias = "LoRaDio1", define = "SX126X_DIO1" }
 board = "leviculum-nrf/src/boards/rak4631.rs"
 bin = "leviculum-nrf/src/bin/rak4631.rs"
 variant = "variants/nrf52840/rak4631/variant.h"
+# The part sits on the RAK4631 module, not on the carrier; nothing in the
+# T114's case touches it.
+qspi_part = "IS25LP080D"
 
 [boards.rak4631.qspi]
 sck = { pin = 3, alias = "QspiClk", define = "PIN_QSPI_SCK" }

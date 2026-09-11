@@ -227,24 +227,16 @@ async fn main(spawner: Spawner) {
         ));
     }
 
-    // QSPI NOR (MX25R1635F, 2 MB) — Codeberg #384 part 1: identify the
-    // part, prove the bus, say what is on it. Nothing writes to it yet.
-    // Before LoRa so a hang inside `Qspi::new` leaves the marker above as
-    // the last line of the capture and of the persistent tail.
-    log_critical!("[STG] qspi-init");
-    if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
-        p.QSPI,
-        p.P1_14.into(), // SCK
-        p.P1_15.into(), // CSN
-        p.P1_12.into(), // IO0
-        p.P1_13.into(), // IO1
-        p.P0_07.into(), // IO2 / WP#
-        p.P0_05.into(), // IO3 / HOLD#
-        t114::CONFIG.qspi_part,
-    ) {
-        leviculum_nrf::qspi::log_head(&mut flash);
-        leviculum_nrf::qspi::log_store(flash, t114::CONFIG.qspi_part);
-    }
+    // No QSPI on this board: `CONFIG.qspi_part` is `None`, the six pins
+    // are never configured, and there is no `[STG] qspi-init` stage to
+    // hang in. Said out loud because a capture with no store line at all
+    // would leave the reader guessing which of the two it is looking at —
+    // a part that did not answer, or a board that has none. The evidence
+    // is in `boards/t114.rs` (Codeberg #384).
+    leviculum_nrf::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!("NONE board=t114 reason=not-fitted-see-boards-t114-rs"),
+    );
 
     // LoRa (SPIM2. SPIM3 has a MISO read bug on T114)
     log_critical!("[STG] lora-init");

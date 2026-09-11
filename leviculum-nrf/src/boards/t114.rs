@@ -98,19 +98,37 @@ pub type TftBacklight = peripherals::P0_15;
 /// TFT power enable
 pub type TftPowerEn = peripherals::P0_03;
 
-// QSPI Flash (MX25R1635F, 16 Mbit)
-/// QSPI flash clock
-pub type QspiClk = peripherals::P1_14;
-/// QSPI flash chip-select
-pub type QspiCs = peripherals::P1_15;
-/// QSPI flash IO0 (MOSI)
-pub type QspiIo0 = peripherals::P1_12;
-/// QSPI flash IO1 (MISO)
-pub type QspiIo1 = peripherals::P1_13;
-/// QSPI flash IO2 (WP#)
-pub type QspiIo2 = peripherals::P0_07;
-/// QSPI flash IO3 (HOLD#, must be HIGH before QSPI activation)
-pub type QspiIo3 = peripherals::P0_05;
+// QSPI Flash: NONE. There are deliberately no pin aliases here, and
+// `CONFIG.qspi_part` is `None`, so `bin/t114.rs` never configures P1.14,
+// P1.15, P1.12, P1.13, P0.07 or P0.05 as a flash bus. The five reasons,
+// because this error travelled through three projects by copying and
+// nobody checked it (Codeberg #384):
+//
+// 1. Heltec's own board support package has the QSPI pins commented out
+//    for HT-n5262, the board id our bootloader reports. The two
+//    `EXTERNAL_FLASH_*` defines survive without pins and so do nothing:
+//    the manufacturer disabled the bus in their own software.
+// 2. The sibling variant HT-n5262G has no QSPI at all and gives (32+14)
+//    = P1.14 to `PIN_GPS_RESET` and (32+12) = P1.12 to the display
+//    backlight. In this device family the assignment is not stable.
+// 3. All six nets are on the expansion header P2 (Heltec datasheet
+//    Rev. 1.0 §2.2: 0.05, 0.07, 1.12, 1.13, 1.14, 1.15). Whatever a user
+//    plugs in sits on the bus we would be driving.
+// 4. The two published pin maps disagree on IO2/IO3 — Heltec's own
+//    (commented-out) says P1.00/P1.01, Meshtastic and Heltec's schematic
+//    say P0.07/P0.05. Both have been tried on hardware; both are silent.
+// 5. Our own measurement (`de6e74ed`, rig T114): every pin follows our
+//    drive, the part's SO line follows our own pull in both directions,
+//    and nothing answers `05h`, `9Fh`, `90h` or the `66h`/`99h` reset.
+//
+// So: this board has no answering part, and those pins belong to
+// something else. Do not "add the missing flash" from a variant header.
+// <https://github.com/HelTecAutomation/Heltec_nRF52/blob/master/variants/HT-n5262/variant.h>
+// <https://github.com/HelTecAutomation/Heltec_nRF52/blob/master/variants/HT-n5262G/variant.h>
+//
+// The Pocket (RAK4631) is untouched by all of this: its part is on the
+// module rather than the carrier and its six pins are a different set,
+// so `boards/rak4631.rs` keeps its aliases and its part.
 
 // Battery / ADC
 /// Battery voltage sense (AIN2)
@@ -149,7 +167,8 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,
-    qspi_part: &crate::qspi::MX25R1635F,
+    // No QSPI part on this board. See the block above.
+    qspi_part: None,
 };
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.

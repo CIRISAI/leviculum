@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The T114 no longer drives six pins as a flash bus (#384). It fits no
+  QSPI part: Heltec's own board support package for HT-n5262 — the board
+  id our bootloader reports — has the QSPI pins commented out, the
+  sibling HT-n5262G variant gives two of them to the GPS reset and the
+  display backlight, all six nets are on the expansion header where a
+  user's own hardware sits, the two published pin maps disagree on
+  IO2/IO3, and on the rig every pin followed our drive while nothing
+  answered `9Fh`, `05h`, `90h` or a reset. The firmware now declares
+  `qspi_part: None` for the board, never configures those pins, and says
+  so once at boot instead of probing:
+  `[QSPI] NONE board=t114 reason=not-fitted-see-boards-t114-rs`. The
+  `[STG] qspi-init` stage marker is gone with the stage on that board.
+  The Pocket V2 keeps its part, its probe and its record-log mount — its
+  flash is on the RAK4631 module, on a different set of pins.
+
 - A battery percentage that cannot be checked from far away is no longer
   sent (#380). The cell count is decided from one reading at boot and
   held for the boot, and every per-cell voltage after it is the pack
