@@ -1111,8 +1111,27 @@ impl Reporter {
                 // resolution entirely, which is the whole benefit of
                 // carrying one.
                 if let Some(key) = wire.public_key {
-                    if let Ok(identity) = Identity::from_public_key_bytes(&key) {
-                        node.remember_identity(hash, identity);
+                    match Identity::from_public_key_bytes(&key) {
+                        Ok(identity) => node.remember_identity(hash, identity),
+                        // A host frame carrying an unusable key never gets
+                        // this far: the serial seam refuses it by value
+                        // ([`leviculum_core::envelope::telemetry_target_answer`],
+                        // #338). What reaches here is a flash record written
+                        // before that gate existed, and it has no host to
+                        // refuse to — so it says what it dropped and carries
+                        // on hash-only rather than let the key vanish and the
+                        // state sit in awaiting-key with no reason given.
+                        Err(error) => crate::log::log_fmt(
+                            "[TELEMETRY] ",
+                            format_args!(
+                                "target={:02x}{:02x}{:02x}{:02x} key=rejected reason={}",
+                                wire.dest_hash[0],
+                                wire.dest_hash[1],
+                                wire.dest_hash[2],
+                                wire.dest_hash[3],
+                                error,
+                            ),
+                        ),
                     }
                 }
                 self.target = Some(wire);

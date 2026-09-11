@@ -263,6 +263,7 @@ mod tests {
     use crate::envelope::testing::{
         envelope_firmware_stub, old_firmware_stub, positionless_firmware_stub,
         pre_236_firmware_stub, reporterless_firmware_stub, seen, telemetry_frame,
+        usable_public_key,
     };
     use crate::sys::testpty::Pty;
     use crate::ui::testing::Fake;
@@ -500,10 +501,14 @@ mod tests {
         envelope_firmware_stub(&pty, seen.clone());
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
 
+        // A key the board takes: since #338 a frame whose key is not a
+        // point is refused by value, so a filler pattern would be testing
+        // the refusal path under the name of the ack path.
+        let key = usable_public_key();
         let target = TelemetryTargetWire {
             profile: TELEMETRY_PROFILE_TRACKER,
             dest_hash: ADDRESS_BYTES,
-            public_key: Some(parse_key(&"5e".repeat(64)).unwrap()),
+            public_key: Some(parse_key(&hex(&key)).unwrap()),
         };
         let mut ui = Fake::refusing();
         let resolved = resolve(&mut ui, &TelemetryPlan::Fixed(target))
@@ -516,7 +521,7 @@ mod tests {
 
         let decoded = telemetry_frame(&seen).expect("no telemetry frame reached the stub");
         assert_eq!(decoded, target);
-        assert_eq!(decoded.public_key, Some([0x5E; 64]));
+        assert_eq!(decoded.public_key, Some(key));
         assert_eq!(
             encode_telemetry_target(&decoded).len(),
             ENVELOPE_HEADER_LEN + 82

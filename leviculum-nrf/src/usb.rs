@@ -676,14 +676,37 @@ async fn retic_serial_task(
                                     // frame is a full channel — refuse
                                     // audibly, the host retries.
                                     let wired = crate::telemetry::reporter_wired();
-                                    let delivered =
-                                        wired && crate::telemetry::deliver_target(target);
+                                    // Whether the 64 bytes are a key is a
+                                    // question about the frame, not about the
+                                    // node, so it is answered here — before
+                                    // the frame is delivered or written to the
+                                    // page (#338). Acking it and then sitting
+                                    // in awaiting-key answered a rejected key
+                                    // with silence, and spent airtime
+                                    // resolving over the air the key the
+                                    // operator had just supplied.
+                                    let key_usable = envelope::telemetry_target_key_usable(&target);
+                                    if wired && !key_usable {
+                                        log_fmt(
+                                            "[SER ] ",
+                                            format_args!(
+                                                "telemetry target={:02x}{:02x}{:02x}{:02x} key=rejected",
+                                                target.dest_hash[0],
+                                                target.dest_hash[1],
+                                                target.dest_hash[2],
+                                                target.dest_hash[3],
+                                            ),
+                                        );
+                                    }
+                                    let delivered = wired
+                                        && key_usable
+                                        && crate::telemetry::deliver_target(target);
                                     let persist = persist_outcome(delivered, || {
                                         crate::telemetry::request_save(&target)
                                     })
                                     .await;
                                     let answer = envelope::telemetry_target_answer(
-                                        wired, delivered, persist,
+                                        wired, key_usable, delivered, persist,
                                     );
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await

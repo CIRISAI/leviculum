@@ -752,13 +752,13 @@ pub(crate) mod testing {
         classify_control_frame, encode_ack, encode_capability_report, encode_media_report,
         encode_radio_report, encode_refusal, fixed_position_answer, identity_query_answer,
         media_profile_answer, media_query_answer, node_name_answer, node_name_query_answer,
-        position_source_query_answer, telemetry_target_answer, ControlAction, IdentityReportWire,
-        MediaProfileWire, Persist, NODE_NAME_FLAG_BLE_PENDING, NODE_NAME_FLAG_STORED,
-        POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_ANNOUNCE, TYPE_BLE_TX_GAP,
-        TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY, TYPE_MEDIA_PROFILE,
-        TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_POSITION_SOURCE_QUERY,
-        TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET, TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING,
-        TYPE_WALL_TIME,
+        position_source_query_answer, telemetry_target_answer, telemetry_target_key_usable,
+        ControlAction, IdentityReportWire, MediaProfileWire, Persist, NODE_NAME_FLAG_BLE_PENDING,
+        NODE_NAME_FLAG_STORED, POSITION_SOURCE_FIXED, POSITION_SOURCE_GNSS, TYPE_ANNOUNCE,
+        TYPE_BLE_TX_GAP, TYPE_CAPABILITIES, TYPE_FIXED_POSITION, TYPE_IDENTITY_QUERY,
+        TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
+        TYPE_POSITION_SOURCE_QUERY, TYPE_RADIO_CONFIG, TYPE_RADIO_QUERY, TYPE_RESET,
+        TYPE_TELEMETRY_TARGET, TYPE_TX_SPACING, TYPE_WALL_TIME,
     };
     use leviculum_core::node_name::{truncate_on_char_boundary, NodeName, BLE_NAME_MAX_LEN};
     use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
@@ -1008,6 +1008,18 @@ pub(crate) mod testing {
         envelope_firmware_stub_with_media(pty, seen, media_state());
     }
 
+    /// A public key the firmware gate takes (#338): a real identity's.
+    ///
+    /// `[0x5E; 64]` reads like a key and is not one — its Ed25519 half is
+    /// not a point — and until #338 the board acked it, stored it and then
+    /// sat in awaiting-key. Derived from a fixed private key rather than
+    /// generated, so the frame under test stays byte-stable across runs.
+    pub fn usable_public_key() -> [u8; 64] {
+        leviculum_core::Identity::from_private_key_bytes(&[0x5E; 64])
+            .expect("any 64 bytes are a valid private key")
+            .public_key_bytes()
+    }
+
     /// [`envelope_firmware_stub`] with the name state handed in, so a
     /// test can watch a name change across two conversations on the same
     /// board — and watch the BLE half stay stuck at what the boot built.
@@ -1062,9 +1074,15 @@ pub(crate) mod testing {
                 // The firmware's own answer functions, reporter wired and
                 // the channel taking the frame — the ack direction of the
                 // capability gate.
-                ControlAction::TelemetryTarget(_) => {
-                    Some(telemetry_target_answer(true, true, Persist::Durable))
-                }
+                // #338: the stub mirrors the firmware gate, key check
+                // included, so the host side of a refused key is drivable
+                // without a board.
+                ControlAction::TelemetryTarget(target) => Some(telemetry_target_answer(
+                    true,
+                    telemetry_target_key_usable(&target),
+                    true,
+                    Persist::Durable,
+                )),
                 // The pin IS a position source, so setting one changes what
                 // the next query answers — the runtime path out of
                 // `state=no-position-source`, reproduced here so the host
@@ -1305,9 +1323,12 @@ pub(crate) mod testing {
             seen.lock().unwrap().push(frame_bytes.to_vec());
             match classify_control_frame(frame_bytes, FIRMWARE_ACCEPTS) {
                 ControlAction::CapabilityQuery => Some(encode_capability_report(FIRMWARE_ACCEPTS)),
-                ControlAction::TelemetryTarget(_) => {
-                    Some(telemetry_target_answer(false, false, Persist::Durable))
-                }
+                ControlAction::TelemetryTarget(_) => Some(telemetry_target_answer(
+                    false,
+                    true,
+                    false,
+                    Persist::Durable,
+                )),
                 ControlAction::FixedPosition(_) => {
                     Some(fixed_position_answer(false, false, Persist::Durable))
                 }
@@ -1600,12 +1621,36 @@ mod tests {
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
 
         let target = TelemetryTargetWire {
-            public_key: Some([0x5E; 64]),
+            public_key: Some(usable_public_key()),
             ..hash_only_target()
         };
         assert_eq!(
             send_telemetry_target(&fd, &target).unwrap(),
             ControlOutcome::Acked
+        );
+    }
+
+    /// Codeberg #338: 64 bytes that are not a key come back refused by
+    /// value. Until this, the board acked the frame, stored it, persisted
+    /// it and sat in awaiting-key — the operator supplied a key and got
+    /// silence, then watched an over-the-air resolution they had been told
+    /// they would not need.
+    #[test]
+    fn a_target_whose_key_is_not_a_key_is_refused_rather_than_acked() {
+        let pty = Pty::open();
+        let seen = seen();
+        envelope_firmware_stub(&pty, seen.clone());
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+
+        let target = TelemetryTargetWire {
+            public_key: Some([0x5E; 64]),
+            ..hash_only_target()
+        };
+        assert_eq!(
+            send_telemetry_target(&fd, &target).unwrap(),
+            ControlOutcome::Refused {
+                reason: REFUSE_VALUE
+            }
         );
     }
 

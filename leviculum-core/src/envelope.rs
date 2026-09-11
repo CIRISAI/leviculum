@@ -1145,6 +1145,22 @@ pub fn node_name_query_answer(name_wired: bool, report: NodeNameReport) -> Vec<u
     }
 }
 
+/// Whether the key a telemetry-target frame carries can become an identity.
+///
+/// A hash-only frame carries nothing to check and is usable by definition —
+/// the node resolves the key over the air. A frame that carries 64 bytes is
+/// making a claim, and the claim is checkable here, on the bytes alone,
+/// without the node: either they are an identity or they are not.
+///
+/// Separate from the decode because it is not a framing question. The frame
+/// is well formed; what it says is wrong (Codeberg #338).
+pub fn telemetry_target_key_usable(target: &TelemetryTargetWire) -> bool {
+    match &target.public_key {
+        None => true,
+        Some(key) => crate::identity::Identity::from_public_key_bytes(key).is_ok(),
+    }
+}
+
 /// The answer to a telemetry-target frame, decided by capability first.
 ///
 /// `reporter_wired` is the binary's declaration that it constructs a
@@ -1155,6 +1171,15 @@ pub fn node_name_query_answer(name_wired: bool, report: NodeNameReport) -> Vec<u
 /// and only the reporter can keep it. With a reporter, an undelivered
 /// frame is a full channel: [`REFUSE_BUSY`], the host retries.
 ///
+/// `key_usable` is [`telemetry_target_key_usable`] on the same frame, and
+/// it is asked before delivery because a frame refused here is a frame the
+/// node never applies and never persists. [`REFUSE_VALUE`] rather than
+/// [`REFUSE_MALFORMED`]: the envelope parsed, the value in it did not
+/// survive contact with ed25519 (Codeberg #338). The alternative the board
+/// used to take — ack, store, persist, and sit in awaiting-key — answers a
+/// rejected key with silence and then spends airtime resolving over the air
+/// the very key the operator supplied.
+///
 /// `persist` is the #358 clause: the target is persisted, and the ack is
 /// what a scripted `set`-then-reset acts on, so it may only go out once
 /// the record is on the page.
@@ -1162,9 +1187,16 @@ pub fn node_name_query_answer(name_wired: bool, report: NodeNameReport) -> Vec<u
 /// Pure so the refusal path is provable on the host with a reporter-less
 /// configuration, independent of which BSPs happen to wire a reporter
 /// today.
-pub fn telemetry_target_answer(reporter_wired: bool, delivered: bool, persist: Persist) -> Vec<u8> {
+pub fn telemetry_target_answer(
+    reporter_wired: bool,
+    key_usable: bool,
+    delivered: bool,
+    persist: Persist,
+) -> Vec<u8> {
     if !reporter_wired {
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED)
+    } else if !key_usable {
+        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_VALUE)
     } else if !delivered {
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
     } else if persist == Persist::Durable {
@@ -1669,7 +1701,8 @@ mod tests {
             for persist in [Persist::Durable, Persist::Lost] {
                 assert_eq!(
                     decode_refusal_payload(
-                        &telemetry_target_answer(false, delivered, persist)[ENVELOPE_HEADER_LEN..]
+                        &telemetry_target_answer(false, true, delivered, persist)
+                            [ENVELOPE_HEADER_LEN..]
                     ),
                     Some((TYPE_TELEMETRY_TARGET, REFUSE_UNSUPPORTED))
                 );
@@ -1681,15 +1714,63 @@ mod tests {
     fn a_binary_with_a_reporter_acks_a_delivered_target_and_names_a_full_channel() {
         assert_eq!(
             decode_ack_payload(
-                &telemetry_target_answer(true, true, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+                &telemetry_target_answer(true, true, true, Persist::Durable)[ENVELOPE_HEADER_LEN..]
             ),
             Some(TYPE_TELEMETRY_TARGET)
         );
         assert_eq!(
             decode_refusal_payload(
-                &telemetry_target_answer(true, false, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+                &telemetry_target_answer(true, true, false, Persist::Durable)
+                    [ENVELOPE_HEADER_LEN..]
             ),
             Some((TYPE_TELEMETRY_TARGET, REFUSE_BUSY))
+        );
+    }
+
+    /// Codeberg #338: a target frame that carries a key which is not a key
+    /// is well formed and wrong. The board used to ack it, store it,
+    /// persist it and sit in awaiting-key, so the operator who supplied a
+    /// key got silence and an over-the-air resolution they were told they
+    /// would not need. The value is what failed, so the value is what the
+    /// refusal names.
+    #[test]
+    fn a_target_whose_key_is_not_a_key_is_refused_by_value() {
+        let unusable = TelemetryTargetWire {
+            profile: TELEMETRY_PROFILE_STATION,
+            dest_hash: [0x11; TRUNCATED_HASHBYTES],
+            // The key measured on the rig (2026-08-23): right length,
+            // and its Ed25519 half is not a point.
+            public_key: Some(core::array::from_fn(|i| i as u8)),
+        };
+        assert!(!telemetry_target_key_usable(&unusable));
+
+        assert_eq!(
+            decode_refusal_payload(
+                &telemetry_target_answer(true, false, true, Persist::Durable)
+                    [ENVELOPE_HEADER_LEN..]
+            ),
+            Some((TYPE_TELEMETRY_TARGET, REFUSE_VALUE))
+        );
+
+        // A hash-only frame claims nothing about a key, and a real key
+        // still passes: the gate must not close on the two working cases.
+        let hash_only = TelemetryTargetWire {
+            public_key: None,
+            ..unusable
+        };
+        assert!(telemetry_target_key_usable(&hash_only));
+
+        let identity = crate::identity::Identity::generate(&mut rand_core::OsRng);
+        let usable = TelemetryTargetWire {
+            public_key: Some(identity.public_key_bytes()),
+            ..unusable
+        };
+        assert!(telemetry_target_key_usable(&usable));
+        assert_eq!(
+            decode_ack_payload(
+                &telemetry_target_answer(true, true, true, Persist::Durable)[ENVELOPE_HEADER_LEN..]
+            ),
+            Some(TYPE_TELEMETRY_TARGET)
         );
     }
 
@@ -1700,7 +1781,7 @@ mod tests {
     fn a_target_that_did_not_reach_flash_is_refused_by_its_own_name() {
         assert_eq!(
             decode_refusal_payload(
-                &telemetry_target_answer(true, true, Persist::Lost)[ENVELOPE_HEADER_LEN..]
+                &telemetry_target_answer(true, true, true, Persist::Lost)[ENVELOPE_HEADER_LEN..]
             ),
             Some((TYPE_TELEMETRY_TARGET, REFUSE_PERSIST))
         );
