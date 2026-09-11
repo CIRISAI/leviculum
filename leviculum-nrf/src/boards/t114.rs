@@ -100,7 +100,7 @@ pub type TftPowerEn = peripherals::P0_03;
 
 // QSPI Flash: NONE. There are deliberately no pin aliases here, and
 // `CONFIG.qspi_part` is `None`, so `bin/t114.rs` never configures P1.14,
-// P1.15, P1.12, P1.13, P0.07 or P0.05 as a flash bus. The five reasons,
+// P1.15, P1.12, P1.13, P0.07 or P0.05 as a flash bus. The six reasons,
 // because this error travelled through three projects by copying and
 // nobody checked it (Codeberg #384):
 //
@@ -117,18 +117,27 @@ pub type TftPowerEn = peripherals::P0_03;
 // 4. The two published pin maps disagree on IO2/IO3 — Heltec's own
 //    (commented-out) says P1.00/P1.01, Meshtastic and Heltec's schematic
 //    say P0.07/P0.05. Both have been tried on hardware; both are silent.
-// 5. Our own measurement (`de6e74ed`, rig T114): every pin follows our
-//    drive, the part's SO line follows our own pull in both directions,
-//    and nothing answers `05h`, `9Fh`, `90h` or the `66h`/`99h` reset.
+// 5. Our own measurement (`de6e74ed`): every pin follows our drive, and
+//    nothing drives SO during `05h`, `9Fh` or `90h` — before or after
+//    the datasheet's own `66h`/`99h` reset. Three units say the same
+//    four lines: the rig T114, a second T114 (`183004F712B4A7FE`) and
+//    the field Pocket (`ABFAB3F1807E459B`). The `MISO pullup=1
+//    pulldown=0` row on those captures is NOT part of this argument: a
+//    healthy part holds SO high-impedance while CS# is high, so a
+//    working board reads the same, and that row supports no conclusion
+//    on its own.
+// 6. Heltec's template line is not Heltec's alone. RAK's board support
+//    package for the RAK4631 carries `#define EXTERNAL_FLASH_DEVICES
+//    IS25LP080D` under the comment "No onboard flash", with the QSPI
+//    pins marked "occupied by GPIO's" — the same artefact, on the other
+//    vendor, for a module that also answers nothing. An
+//    `EXTERNAL_FLASH_*` define is a template default, not a statement
+//    that a part is fitted. See `boards/rak4631.rs`.
 //
 // So: this board has no answering part, and those pins belong to
 // something else. Do not "add the missing flash" from a variant header.
 // <https://github.com/HelTecAutomation/Heltec_nRF52/blob/master/variants/HT-n5262/variant.h>
 // <https://github.com/HelTecAutomation/Heltec_nRF52/blob/master/variants/HT-n5262G/variant.h>
-//
-// The Pocket (RAK4631) is untouched by all of this: its part is on the
-// module rather than the carrier and its six pins are a different set,
-// so `boards/rak4631.rs` keeps its aliases and its part.
 
 // Battery / ADC
 /// Battery voltage sense (AIN2)

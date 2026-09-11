@@ -95,19 +95,39 @@ pub type BatteryAdc = peripherals::P0_05;
 /// (multiply ADC volts by 1.73 to recover VBAT in volts).
 pub const ADC_MULTIPLIER: f32 = 1.73;
 
-// QSPI Flash (IS25LP080D, 1 MB, on the RAK4631 module)
-/// QSPI flash clock.
-pub type QspiClk = peripherals::P0_03;
-/// QSPI flash chip-select.
-pub type QspiCs = peripherals::P0_26;
-/// QSPI flash IO0 (MOSI).
-pub type QspiIo0 = peripherals::P0_30;
-/// QSPI flash IO1 (MISO).
-pub type QspiIo1 = peripherals::P0_29;
-/// QSPI flash IO2.
-pub type QspiIo2 = peripherals::P0_28;
-/// QSPI flash IO3.
-pub type QspiIo3 = peripherals::P0_02;
+// QSPI Flash: NONE. There are deliberately no pin aliases here, and
+// `CONFIG.qspi_part` is `None`, so `bin/rak4631.rs` never configures
+// P0.03, P0.26, P0.30, P0.29, P0.28 or P0.02 as a flash bus. RAK says so
+// themselves, in the board support package this map was copied out of
+// (`RAKWireless/RAK-nRF52-Arduino`,
+// `variants/WisCore_RAK4631_Board/variant.h`):
+//
+// ```c
+// // QSPI Pins
+// // QSPI occupied by GPIO's
+// #define PIN_QSPI_SCK 3
+// ...
+// // On-board QSPI Flash
+// // No onboard flash
+// #define EXTERNAL_FLASH_DEVICES IS25LP080D
+// ```
+//
+// The part name is a template line sitting under a comment that denies
+// the part: "No onboard flash", and the pins above it are "occupied by
+// GPIO's". RAK's RAK4631 datasheet lists the QSPI functions on the
+// module pads and names no flash part, and RAK sells flash as a separate
+// WisBlock module (RAK15001) — which is what a module with one on board
+// would not need. Measured on the field Pocket `ABFAB3F1807E459B`
+// (`de6e74ed`): every pin follows our drive, and nothing answers `05h`,
+// `9Fh`, `90h` or the `66h`/`99h` reset, before or after it. Same four
+// lines as both T114s.
+//
+// So: this module has no answering part either. Do not "add the missing
+// flash" from a variant header — `EXTERNAL_FLASH_DEVICES` without a
+// part is exactly how this error travelled through three projects
+// (Codeberg #384; the same template artefact is in Heltec's header, see
+// `boards/t114.rs`).
+// <https://github.com/RAKWireless/RAK-nRF52-Arduino/blob/master/variants/WisCore_RAK4631_Board/variant.h>
 
 /// Create the green LED1 output. **Active HIGH**. Start with Level::Low
 /// so the LED is off at boot.
@@ -134,10 +154,8 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     lora_tcxo_voltage_reg: 0x07, // 3.3 V (RNode MODE_TCXO_3_3V_6X for BOARD_RAK4631)
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,
-    // The part is on the RAK4631 module itself, not on the carrier, and
-    // its six pins are the module's own (Codeberg #384: what took the
-    // T114's part away does not touch this one).
-    qspi_part: Some(&crate::qspi::IS25LP080D),
+    // No QSPI part on this module. See the block above.
+    qspi_part: None,
 };
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.

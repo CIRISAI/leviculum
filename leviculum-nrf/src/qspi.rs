@@ -1,21 +1,33 @@
-//! The QSPI NOR flash one of our boards carries and has never driven.
+//! The QSPI NOR flash neither of our boards turned out to carry.
 //!
-//! 1 MB of IS25LP080D on the WisMesh Pocket V2, on the RAK4631 module
-//! itself. **Not the T114**: it was long believed to carry 2 MB of
-//! MX25R1635F, and it does not — the manufacturer disabled the bus in
-//! their own board support package, two of the six pins have other
-//! functions in the sibling variant, all six are on the expansion header,
-//! and on the rig nothing ever answered. The evidence is in
-//! `leviculum-nrf/src/boards/t114.rs`, its `CONFIG.qspi_part` is `None`,
-//! and its firmware prints `[QSPI] NONE board=t114` instead of coming
-//! here (Codeberg #384). Everything below is therefore about the Pocket
-//! and about whatever board brings the next part.
+//! **As of this commit no board in this tree carries a QSPI part, and
+//! nothing calls [`identify_at_boot`].** Both maps came from an
+//! `EXTERNAL_FLASH_DEVICES` line in a vendor variant header, and on both
+//! vendors that line is a template default sitting under a comment that
+//! denies the part: Heltec commented the T114's QSPI pins out, RAK wrote
+//! "No onboard flash" over the RAK4631's and marked the pins "occupied by
+//! GPIO's". Three units — two T114s and the field Pocket — answer nothing
+//! to `05h`, `9Fh`, `90h` or the datasheet reset while every pin follows
+//! our drive. Both `CONFIG.qspi_part` are `None`, both firmwares print
+//! `[QSPI] NONE board=<b>` at boot instead of coming here, and the
+//! evidence with its URLs is in `leviculum-nrf/src/boards/t114.rs` and
+//! `leviculum-nrf/src/boards/rak4631.rs` (Codeberg #384).
 //!
-//! Codeberg #384 and
+//! This module is kept, with [`leviculum_qspi_bitbang`] and
+//! [`leviculum_record_log`], because the part it drives is a board or an
+//! add-on away — RAK sells the RAK15001 as a WisBlock module — and
+//! because the record log's NorFlash shape is what the internal flash
+//! wants too. It still builds and its host tests still run; it is simply
+//! not reached. Do not re-point a board at it on the strength of a
+//! variant header: `scripts/check-nrf-board-pins.sh` refuses that, and
+//! the day it is right, the check is the place to say so.
+//!
+//! What it drives, when something does: 1 MB of IS25LP080D was what the
+//! Pocket was believed to carry. Codeberg #384 and
 //! `docs/src/concepts/propagation-node-on-a-board.md` ask what to put in
-//! it; this module is only the part that gets there — the peripheral, the
-//! part's identity, and the `embedded_storage` NorFlash surface the record
-//! log ([`leviculum_record_log`]) wants underneath it.
+//! such a part; this module is only the part that gets there — the
+//! peripheral, the part's identity, and the `embedded_storage` NorFlash
+//! surface the record log ([`leviculum_record_log`]) wants underneath it.
 //!
 //! # The storage trait shape
 //!
@@ -37,16 +49,16 @@
 //!
 //! # Why a part carries its own bus speed
 //!
-//! `Speed::M32` on the Pocket, because the ISSI part allows 133 MHz and
-//! the nRF52840's own 32 MHz ceiling is what binds there: 16 MB/s, which
-//! the concept paper turns into a 0.07 s full-store scan — the number
-//! that makes an on-flash directory affordable and a RAM index
-//! unnecessary. `Speed::M8` exists for the other kind of part, the
-//! low-power one whose quad read tops out at 8 MHz in its default
-//! ultra-low-power mode (the MX25R1635F is the example, and the reason
-//! the conservative timings below are taken from its datasheet). No
-//! board we have fits one, so nothing selects it today; the asymmetry it
-//! encodes is the parts', not ours.
+//! `Speed::M32` on the ISSI part, because it allows 133 MHz and the
+//! nRF52840's own 32 MHz ceiling is what binds there: 16 MB/s, which the
+//! concept paper turns into a 0.07 s full-store scan — the number that
+//! makes an on-flash directory affordable and a RAM index unnecessary.
+//! `Speed::M8` exists for the other kind of part, the low-power one whose
+//! quad read tops out at 8 MHz in its default ultra-low-power mode (the
+//! MX25R1635F is the example, and the reason the conservative timings
+//! below are taken from its datasheet). We have no board with either, so
+//! nothing selects either today; the asymmetry it encodes is the parts',
+//! not ours.
 //!
 //! # Quad enable
 //!
@@ -138,13 +150,18 @@
 //!
 //! CS# high, so a part that is present has released IO1 (its SO). The line
 //! is then read once under the nRF's internal pull-up and once under its
-//! pull-down, and what it does under them is the measurement that matters:
+//! pull-down. **This line alone cannot say a part is absent**, and the
+//! first batch registered it as if it could:
 //!
 //! | pullup / pulldown | conclusion |
 //! |---|---|
-//! | 1 / 0 | the line follows our pull: nothing external drives it. Open connection or a dead part. |
-//! | 0 / 0 | something holds it low: a short, the header, or the part itself. |
-//! | 1 / 1 | something holds it high. |
+//! | 1 / 0 | the line follows our pull, which is what a deselected part is *supposed* to do: SO is high-impedance while CS# is high. A healthy board reads this, and so does an empty footprint. No conclusion. |
+//! | 0 / 0 | something holds it low while nothing should: a short, the header, or a part not releasing SO. |
+//! | 1 / 1 | something holds it high while nothing should. |
+//!
+//! So the two rows that mean something are the ones that contradict a
+//! released bus. `1 / 0` is the reading to ignore, and the evidence for
+//! an absent part has to come from the opcodes below, not from here.
 //!
 //! ## `[QSPI] BITBANG id=<hh:hh:hh> clk_khz=..`
 //!
@@ -250,7 +267,10 @@ pub struct FlashPart {
     pub speed: Speed,
 }
 
-/// ISSI IS25LP080D, 8 Mbit, on the RAK4631 module (WisMesh Pocket V2).
+/// ISSI IS25LP080D, 8 Mbit. No board in this tree carries it — the
+/// RAK4631's `EXTERNAL_FLASH_DEVICES` line that named it denies the part
+/// one comment above itself (`boards/rak4631.rs`, Codeberg #384). Kept as
+/// the worked example of a [`FlashPart`] for the add-on that brings one.
 pub const IS25LP080D: FlashPart = FlashPart {
     name: "IS25LP080D",
     jedec: [0x9D, 0x60, 0x14],

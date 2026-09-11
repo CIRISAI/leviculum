@@ -21,8 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so once at boot instead of probing:
   `[QSPI] NONE board=t114 reason=not-fitted-see-boards-t114-rs`. The
   `[STG] qspi-init` stage marker is gone with the stage on that board.
-  The Pocket V2 keeps its part, its probe and its record-log mount — its
-  flash is on the RAK4631 module, on a different set of pins.
+
+- Neither board probes a QSPI flash any more, because neither of them
+  carries one (#384): RAK's own board support package says "No onboard
+  flash" over the RAK4631's QSPI pins and marks them "occupied by
+  GPIO's", the `EXTERNAL_FLASH_DEVICES IS25LP080D` line under it being a
+  template default rather than a fitted part — the same artefact as
+  Heltec's, and the field Pocket answers `05h`, `9Fh`, `90h` and the
+  datasheet reset exactly as silently as both T114s. The Pocket now
+  declares `qspi_part: None` too, drops its aliases and its
+  `[STG] qspi-init` stage, and says
+  `[QSPI] NONE board=rak4631 reason=no-onboard-flash-see-boards-rak4631-rs`
+  once at boot.
 
 - A battery percentage that cannot be checked from far away is no longer
   sent (#380). The cell count is decided from one reading at boot and

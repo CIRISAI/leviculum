@@ -23,18 +23,32 @@
 # "none" means the board fits no part, and then the gate demands the
 # opposite of a pin map — no `Qspi*` aliases in the board file, no
 # `qspi::identify_at_boot` call in the bin, `qspi_part: None` in its
-# CONFIG.
+# CONFIG. A board left with no checked rows at all fails too, so a board
+# can never pass by having everything removed from under it.
 #
-# The T114 is "none" since 2026-09-11 (Codeberg #384). Its six QSPI rows
-# used to be checked against Meshtastic's variant, which enforced a
-# mapping the manufacturer themselves disabled: Heltec's own HT-n5262
-# variant has the QSPI pins commented out, the sibling HT-n5262G gives
+# Both boards are "none" since 2026-09-11 (Codeberg #384), and the two
+# maps were wrong for the same reason: an `EXTERNAL_FLASH_DEVICES` line
+# in a vendor variant header is a template default, not a statement that
+# a part is fitted.
+#
+# T114: Heltec's own HT-n5262 variant has the QSPI pins commented out and
+# keeps only the `EXTERNAL_FLASH_*` defines, the sibling HT-n5262G gives
 # P1.14 to `PIN_GPS_RESET` and P1.12 to the display backlight, all six
-# nets are on the expansion header, the two published maps disagree on
-# IO2/IO3, and on the rig every pin follows our drive while nothing
-# answers `9Fh`. The full argument, with URLs, is in
-# `leviculum-nrf/src/boards/t114.rs`. A reference is only worth checking
-# against when it is a reference for this board.
+# nets are on the expansion header, and the two published maps disagree
+# on IO2/IO3. Its rows used to be checked against Meshtastic's variant,
+# which enforced a mapping the manufacturer themselves had disabled — a
+# reference is only worth checking against when it is a reference for
+# this board.
+#
+# RAK4631: RAK's own `variants/WisCore_RAK4631_Board/variant.h` says "No
+# onboard flash" and marks the QSPI pins "occupied by GPIO's"; RAK sells
+# flash as a separate WisBlock module (RAK15001).
+#
+# On the rig and in the field, three units — both T114s and the Pocket —
+# answer nothing to `05h`, `9Fh`, `90h` or the `66h`/`99h` reset while
+# every pin follows our drive. The full argument, with URLs, is in
+# `leviculum-nrf/src/boards/t114.rs` and
+# `leviculum-nrf/src/boards/rak4631.rs`.
 
 [boards.t114]
 board = "leviculum-nrf/src/boards/t114.rs"
@@ -56,17 +70,9 @@ dio1 = { pin = 20, alias = "LoRaDio1", define = "SX126X_DIO1" }
 board = "leviculum-nrf/src/boards/rak4631.rs"
 bin = "leviculum-nrf/src/bin/rak4631.rs"
 variant = "variants/nrf52840/rak4631/variant.h"
-# The part sits on the RAK4631 module, not on the carrier; nothing in the
-# T114's case touches it.
-qspi_part = "IS25LP080D"
-
-[boards.rak4631.qspi]
-sck = { pin = 3, alias = "QspiClk", define = "PIN_QSPI_SCK" }
-cs = { pin = 26, alias = "QspiCs", define = "PIN_QSPI_CS" }
-io0 = { pin = 30, alias = "QspiIo0", define = "PIN_QSPI_IO0" }
-io1 = { pin = 29, alias = "QspiIo1", define = "PIN_QSPI_IO1" }
-io2 = { pin = 28, alias = "QspiIo2", define = "PIN_QSPI_IO2" }
-io3 = { pin = 2, alias = "QspiIo3", define = "PIN_QSPI_IO3" }
+# No QSPI part, and therefore no [boards.rak4631.qspi] table. See the
+# header.
+qspi_part = "none"
 
 [boards.rak4631.lora]
 sck = { pin = 43, alias = "LoRaSck", define = "PIN_SPI_SCK" }

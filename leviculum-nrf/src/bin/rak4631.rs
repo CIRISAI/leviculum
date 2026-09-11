@@ -262,30 +262,17 @@ async fn main(spawner: Spawner) {
         ));
     }
 
-    // QSPI NOR (IS25LP080D, 1 MB, on the RAK4631 module) — Codeberg #384
-    // part 1: identify the part, prove the bus, say what is on it. Nothing
-    // writes to it yet. Before LoRa so a hang inside `Qspi::new` leaves the
-    // marker above as the last line of the capture and of the persistent
-    // tail.
-    log_critical!("[STG] qspi-init");
-    // `CONFIG.qspi_part` is `Some` for this board and `None` for the T114,
-    // which fits no part at all (Codeberg #384); a board without one never
-    // touches the bus.
-    if let Some(part) = rak4631::CONFIG.qspi_part {
-        if let Some(mut flash) = leviculum_nrf::qspi::identify_at_boot(
-            p.QSPI,
-            p.P0_03.into(), // SCK
-            p.P0_26.into(), // CSN
-            p.P0_30.into(), // IO0
-            p.P0_29.into(), // IO1
-            p.P0_28.into(), // IO2
-            p.P0_02.into(), // IO3 / HOLD#
-            part,
-        ) {
-            leviculum_nrf::qspi::log_head(&mut flash);
-            leviculum_nrf::qspi::log_store(flash, part);
-        }
-    }
+    // No QSPI on this module: `CONFIG.qspi_part` is `None`, the six pins
+    // are never configured, and there is no `[STG] qspi-init` stage to
+    // hang in. Said out loud because a capture with no store line at all
+    // would leave the reader guessing which of the two it is looking at —
+    // a part that did not answer, or a module that has none. RAK's own
+    // board support package says "No onboard flash"; the evidence is in
+    // `boards/rak4631.rs` (Codeberg #384).
+    leviculum_nrf::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!("NONE board=rak4631 reason=no-onboard-flash-see-boards-rak4631-rs"),
+    );
 
     // LoRa (SPIM2; same instance the T114 uses, dictated by the shared
     // lora::init signature). Pin map is RAK4631-module-internal.

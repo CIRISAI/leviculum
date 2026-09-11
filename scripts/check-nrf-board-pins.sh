@@ -30,12 +30,22 @@
 #      one says so rather than passing quietly.
 #   4. Each board declares the part the table records, and a board that
 #      records `qspi_part = "none"` has no pin table, no `Qspi*` alias and
-#      no `identify_at_boot` call anywhere in its bin. That is the T114
-#      since #384: the manufacturer's own variant has those pins commented
-#      out, two of them belong to other functions in the sibling variant,
-#      and all six are on the expansion header, so re-adding them would
-#      drive a stranger's hardware and say `id=00:00:00` about it. A board
-#      with no rows left at all is an error, not a quiet pass.
+#      no `identify_at_boot` call anywhere in its bin. That is BOTH boards
+#      since #384: each vendor's own variant header carries an
+#      `EXTERNAL_FLASH_DEVICES` template line under a comment that denies
+#      the part — Heltec's with the pins commented out, RAK's under "No
+#      onboard flash" — and neither board ever answered a JEDEC read.
+#      Re-adding the T114's six would drive whatever a user has plugged
+#      into its expansion header and say `id=00:00:00` about it.
+#   5. No board in this tree declares a part at all, which is the claim
+#      the opening paragraph of `leviculum-nrf/src/qspi.rs` makes. That is
+#      checked here rather than left to the per-board comparison above,
+#      because the table and the board file can be walked back together
+#      without either of them contradicting the other.
+#
+# A board left with no checked rows at all is an error, not a quiet pass:
+# that is the shape a board takes when everything is removed from under
+# it, and the T114 passed through it when its QSPI rows went.
 #
 # The reference numbers and the scope — QSPI and LoRa, and why not the rest —
 # live in `leviculum-nrf/reference-pins.toml`.
@@ -221,6 +231,52 @@ def check_part(board, declared, board_text, bin_text, spec):
     return out
 
 
+def rows_in(spec):
+    """Pin rows a board's table offers, over the groups the gate knows."""
+    return sum(len(spec[g]) for g in CALL_ORDER if g in spec)
+
+
+def check_rows(board, count):
+    """A board nothing was compared for is a failure, not a pass.
+
+    Removing a board's last pin group takes the gate silently to zero
+    comparisons for it, which is exactly what happened to the T114 when its
+    QSPI rows went (#384) and is what "cleaning up" this file would do to
+    every board at once.
+    """
+    if count:
+        return []
+    return [f"{board}: no pin rows at all — nothing was compared for this board"]
+
+
+def check_tree_parts(table):
+    """No board in this tree carries a QSPI part (#384).
+
+    Both maps came from an `EXTERNAL_FLASH_DEVICES` line in a vendor
+    variant header, and on both vendors that line sits under a comment
+    denying the part. Neither board ever answered `9Fh`. Asserting it here,
+    against the whole table at once, is what the per-board comparison
+    cannot do: that one only says the board file and the table agree, so
+    walking both back together would pass it.
+
+    The day a board really does carry one — a WisBlock RAK15001, say —
+    this is the line to edit, and editing it is the reminder that the
+    opening paragraph of `leviculum-nrf/src/qspi.rs` says the opposite.
+    """
+    out = []
+    for board, spec in sorted(table.items()):
+        declared = spec.get("qspi_part")
+        if declared not in (None, "none"):
+            out.append(
+                f"{board}: reference-pins.toml records qspi_part = "
+                f"\"{declared}\", but no board in this tree carries a QSPI "
+                f"part (#384). If one now does, say so here and correct the "
+                f"opening paragraph of leviculum-nrf/src/qspi.rs, which "
+                f"states that nothing calls the probe."
+            )
+    return out
+
+
 # Positive control. Fixtures are the shapes the real files have, with the
 # e5d62b95 fault re-injected into each of the three layers in turn.
 GOOD_BOARD = """
@@ -287,6 +343,14 @@ PROBE_BIN = """
     ) {
 """
 
+# The fifth layer: a board whose rows have all been removed, and a tree in
+# which some board has been given a part back. Both are table shapes, so
+# the fixtures are tables rather than source text.
+ROWS_SPEC = {"qspi_part": "none", "lora": FIX_QSPI}
+STRIPPED_SPEC = {"qspi_part": "none"}
+NO_PART_TABLE = {"t114": STRIPPED_SPEC, "rak4631": STRIPPED_SPEC}
+PART_TABLE = {"t114": STRIPPED_SPEC, "rak4631": {"qspi_part": "IS25LP080D"}}
+
 
 def self_test():
     rc = 0
@@ -322,6 +386,20 @@ def self_test():
             lambda text: part(bin_text=text),
             NONE_BIN,
             PROBE_BIN,
+        ),
+        (
+            "rows",
+            "a board stripped of every pin row",
+            lambda spec: check_rows("t114", rows_in(spec)),
+            ROWS_SPEC,
+            STRIPPED_SPEC,
+        ),
+        (
+            "tree parts",
+            "a part declared anywhere in the tree",
+            check_tree_parts,
+            NO_PART_TABLE,
+            PART_TABLE,
         ),
     )
     for label, fires_on, probe, good, bad in cases:
@@ -403,6 +481,10 @@ else:
     # the other; without this line, neither run says which one it read.
     print(f"{TAG} note upstream {tree} at {tree_revision(tree) or 'an unknown revision'}")
 
+for problem in check_tree_parts(table):
+    print(f"{TAG} FAIL {table_path.relative_to(root)}: {problem}")
+    rc = 1
+
 checked = 0   # pin rows compared
 parts = 0     # `qspi_part` declarations compared
 for board, spec in table.items():
@@ -473,11 +555,9 @@ for board, spec in table.items():
         board_checked += len(entries)
 
     # A board whose every pin group has been removed would otherwise pass
-    # this loop without a single comparison — the shape the T114 took on
-    # when its QSPI rows went, and the shape the whole file would take if
-    # someone "cleaned it up".
-    if board_checked == 0:
-        print(f"{TAG} FAIL {board}: no pin rows at all — nothing was compared for this board")
+    # this loop without a single comparison.
+    for problem in check_rows(board, board_checked):
+        print(f"{TAG} FAIL {problem}")
         rc = 1
     checked += board_checked
 

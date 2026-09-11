@@ -1,25 +1,34 @@
 # An LXMF propagation node on a board with 1 to 2 MB of flash
 
-> **Superseded in one input, 2026-09-11: the T114 has no flash part.**
-> This page was written believing both boards carried one. The T114 does
-> not — Heltec disabled the bus in their own board support package, two
-> of the six pins have other functions in the sibling variant, all six
-> are on the expansion header, and on the rig nothing answered a JEDEC
-> read. The full evidence is in `leviculum-nrf/src/boards/t114.rs`
-> (`CONFIG`, `leviculum-nrf/src/boards/t114.rs:158`), and the firmware
-> now prints `[QSPI] NONE board=t114` instead of probing. **Every T114
-> column, row and life-time figure below is therefore void**; the
-> Pocket's 1 MB IS25LP080D is real and everything about it stands. The
-> argument was not re-run on one part alone — where the conclusion turns
-> on having two, read it as open.
+> **Superseded in its premise, 2026-09-11: neither board has a flash
+> part.** This page was written believing both boards carried one.
+> Neither does. Both maps came from an `EXTERNAL_FLASH_DEVICES` line in
+> a vendor variant header, and on both vendors that line is a template
+> default under a comment denying the part: Heltec commented the T114's
+> QSPI pins out, RAK wrote "No onboard flash" over the RAK4631's and
+> marked its pins "occupied by GPIO's". Three units — two T114s and the
+> field Pocket — answered nothing to `05h`, `9Fh`, `90h` or the
+> datasheet reset while every pin followed our drive. The full evidence
+> is in `leviculum-nrf/src/boards/t114.rs` (`CONFIG`,
+> `leviculum-nrf/src/boards/t114.rs:167`) and
+> `leviculum-nrf/src/boards/rak4631.rs` (`CONFIG`,
+> `leviculum-nrf/src/boards/rak4631.rs:145`), and both firmwares now
+> print `[QSPI] NONE board=<b>` instead of probing. **Every capacity,
+> life-time and scan figure below is therefore void**, and so is the
+> recommendation that rests on them. What survives is the protocol
+> analysis in §1 to §3 — what the propagation role obliges us to, which
+> is a question about LXMF and not about a part. Read the rest as the
+> costing of a part that would have to arrive first: a board with one,
+> or an add-on such as RAK's WisBlock RAK15001.
 
 Both our boards were thought to carry a QSPI NOR flash we have never
-driven: 1 MB on the Pocket V2 (IS25LP080D) and, wrongly, 2 MB on the
-T114 (MX25R1635F). Codeberg #384 asks the obvious question: should
-that flash hold an LXMF propagation node, so the mesh has a store when
-the recipient is not reachable? The walk that prompted it had a link
-built from one phone to another across two of our nodes and a hill,
-which is exactly the topology where a store matters.
+driven: 1 MB on the Pocket V2 (IS25LP080D) and 2 MB on the T114
+(MX25R1635F). Both beliefs were wrong, for the same reason, and the
+banner above says so. Codeberg #384 asks the obvious question: should
+such a flash hold an LXMF propagation node, so the mesh has a store
+when the recipient is not reachable? The walk that prompted it had a
+link built from one phone to another across two of our nodes and a
+hill, which is exactly the topology where a store matters.
 
 This page establishes what the role obliges us to, measures what it
 would cost on these two parts, sets out the options, and recommends
@@ -401,7 +410,8 @@ erase does not have to block the radio; but the simpler answer is that
 58 ms of flash-busy time every eleven messages is 0.5 % of the airtime
 those eleven messages cost.
 
-**Reading.** The nRF52840 QSPI runs to 32 MHz and embassy-nrf exposes
+**Reading.** (Void with the rest of the costing: neither part is
+fitted.) The nRF52840 QSPI runs to 32 MHz and embassy-nrf exposes
 it (`Frequency`, `embassy-nrf-0.9.0/src/qspi.rs`). The Macronix part in
 its default ultra-low-power mode caps quad reads at 8 MHz — 4 MB/s —
 and the ISSI part allows 133 MHz, so 32 MHz is the controller's limit
@@ -619,15 +629,14 @@ and keep the spam brake the protocol was designed around.
 **Batch: drive the QSPI flash and land a log-structured record store.
 No LXMF, nothing announced on `lxmf.propagation`.**
 
-1. A QSPI driver behind the existing storage trait shape, on the
-   Pocket, at `M32`. **Not on the T114**: that board carries no QSPI
-   part at all, so it has no pin aliases and its `CONFIG` declares
-   `qspi_part: None` (`CONFIG`, `leviculum-nrf/src/boards/t114.rs:158`).
-   The Pocket's aliases exist and name its part, which sits on the
-   RAK4631 module rather than the carrier (`QspiClk`,
-   `leviculum-nrf/src/boards/rak4631.rs:100`); nothing else is wired to
-   those pins there. Everything below that says "both boards" is
-   therefore the Pocket alone until some other board brings a part.
+1. A QSPI driver behind the existing storage trait shape, at the
+   part's own bus speed. **On neither board we have**: both declare
+   `qspi_part: None` and neither has pin aliases any more (`CONFIG`,
+   `leviculum-nrf/src/boards/t114.rs:167`; `CONFIG`,
+   `leviculum-nrf/src/boards/rak4631.rs:145`), because neither carries a
+   part. This batch therefore cannot start until a board or an add-on
+   brings one; everything below that says "both boards" is void until
+   then.
 2. A forward-only record log: 4 KB sectors, 42-byte header as
    tabulated, CRC per record, round-robin sector reclaim, **no fixed
    metadata sector anywhere**.
@@ -677,12 +686,16 @@ Acceptance, all four:
 
 Codeberg #384 states that "a search of `leviculum-nrf` finds no QSPI".
 When this page was written, both board files declared six QSPI pins and
-named a part. That was half wrong, and the half that was wrong was the
-T114's: it fits no part, Heltec's own variant header has those pins
-commented out, two of them belong to other functions in the sibling
-variant, all six are on the expansion header, and on the rig nothing
-answered a JEDEC read. The aliases are gone and the reason is in the
-board file where they were (`CONFIG`,
-`leviculum-nrf/src/boards/t114.rs:158`). The Pocket's declaration stands
-(`QspiClk`, `leviculum-nrf/src/boards/rak4631.rs:100`); what is absent
-there is a driver, a filesystem and any use.
+named a part. Both were wrong, and wrong the same way: a vendor variant
+header's `EXTERNAL_FLASH_DEVICES` line was read as a statement that a
+part is fitted, when on both vendors it is a template default under a
+comment denying one. Neither board answered a JEDEC read on any unit we
+own. Both sets of aliases are gone and the reasons are in the board
+files where they were (`CONFIG`,
+`leviculum-nrf/src/boards/t114.rs:167`; `CONFIG`,
+`leviculum-nrf/src/boards/rak4631.rs:145`).
+
+The correction this page owes on top of that one is its own premise: it
+costed a store on two parts, and there are none. The protocol half
+stands, the arithmetic half is a costing for a part that has yet to
+arrive, and the recommendation is not actionable until one does.

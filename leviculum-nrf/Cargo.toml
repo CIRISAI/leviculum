@@ -78,7 +78,9 @@ leviculum-rx-arming = { path = "rx-arming" }
 # RESETREAS decode and the byte-exact BOOT_TRACE line, host-testable like
 # log-line. The firmware keeps only the volatile `.uninit` I/O.
 leviculum-boot-trace = { path = "boot-trace" }
-# The forward-only record log on the QSPI NOR both boards carry (#384).
+# The forward-only record log for a QSPI NOR — which neither board turned
+# out to carry (#384), so nothing mounts it yet; kept because the part is
+# an add-on away and the NorFlash shape is the internal flash's too.
 # The store, not the propagation node: bytes with a key, no LXMF. It lives
 # in its own crate because its whole safety argument — power cut at every
 # byte offset, program-once bits, level wear — is only provable over a
