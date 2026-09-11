@@ -20,6 +20,15 @@ use alloc::vec::Vec;
 pub enum IdentityError {
     /// Invalid key length
     InvalidKeyLength,
+    /// The key was the right length, but the bytes are not a key: an
+    /// Ed25519 point that is off-curve or non-canonical.
+    ///
+    /// Distinct from [`InvalidKeyLength`](Self::InvalidKeyLength) because
+    /// this error surfaces wherever peer keys arrive — announces, telemetry
+    /// targets, known-destination imports — and the two send whoever reads
+    /// it to opposite places: framing and lengths, or the key material
+    /// itself (Codeberg #339).
+    InvalidKeyMaterial,
     /// Invalid signature
     InvalidSignature,
     /// Decryption failed
@@ -34,6 +43,7 @@ impl core::fmt::Display for IdentityError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             IdentityError::InvalidKeyLength => write!(f, "Invalid key length"),
+            IdentityError::InvalidKeyMaterial => write!(f, "Invalid key material"),
             IdentityError::InvalidSignature => write!(f, "Invalid signature"),
             IdentityError::DecryptionFailed => write!(f, "Decryption failed"),
             IdentityError::NoPrivateKey => write!(f, "No private key available"),
@@ -95,8 +105,10 @@ impl Identity {
         ed25519_pub: &[u8; ED25519_KEY_SIZE],
     ) -> Result<Self, IdentityError> {
         let x25519_public = x25519_dalek::PublicKey::from(*x25519_pub);
+        // The length is already fixed by the array type, so a failure here
+        // is the point, not the framing (Codeberg #339).
         let ed25519_verifying = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pub)
-            .map_err(|_| IdentityError::InvalidKeyLength)?;
+            .map_err(|_| IdentityError::InvalidKeyMaterial)?;
 
         let hash = Self::compute_hash(&x25519_public, &ed25519_verifying);
 
@@ -832,6 +844,25 @@ mod tests {
         let short_bytes = [0u8; 32]; // Should be 64
         let result = Identity::from_public_key_bytes(&short_bytes);
         assert!(matches!(result, Err(IdentityError::InvalidKeyLength)));
+    }
+
+    /// Codeberg #339: the right number of bytes and the wrong bytes is a
+    /// different fault from the wrong number of bytes, and the two send the
+    /// reader to different places. The witness is the key measured on the
+    /// rig: 64 bytes of 0x00..0x3F, whose Ed25519 half is not a point.
+    #[test]
+    fn a_full_length_key_that_is_not_a_point_says_so() {
+        let mut bytes = [0u8; IDENTITY_KEY_SIZE];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+
+        let error = Identity::from_public_key_bytes(&bytes).err();
+
+        assert!(
+            matches!(error, Some(IdentityError::InvalidKeyMaterial)),
+            "the length was right, so the length must not be blamed: {error:?}"
+        );
     }
 
     #[test]
