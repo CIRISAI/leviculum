@@ -1166,12 +1166,16 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             let now_ms = embassy_time::Instant::now().as_millis();
             airtime.update(now_ms);
             if airtime.is_locked() {
+                // Integer milliseconds, not the fractions: the tracker's own
+                // ledger unit, and the only float formatting on the LoRa
+                // path — printing the f32 fractions here was what linked
+                // core's flt2dec into the image.
                 crate::log::log_fmt(
                     "[LORA_AIRTIME_LOCK] ",
                     format_args!(
                         "st={} lt={} holding",
-                        airtime.short_term_airtime(),
-                        airtime.long_term_airtime()
+                        airtime.short_term_airtime_ms(),
+                        airtime.long_term_airtime_ms()
                     ),
                 );
                 let hold_ms = post_tx_rx_window_ms(&config);

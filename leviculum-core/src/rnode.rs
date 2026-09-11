@@ -1410,6 +1410,8 @@ pub struct AirtimeTracker {
     lt_limit: f32,
     short_term: f32,
     long_term: f32,
+    short_term_ms: u32,
+    long_term_ms: u32,
     locked: bool,
 }
 
@@ -1428,6 +1430,8 @@ impl AirtimeTracker {
             lt_limit: 0.0,
             short_term: 0.0,
             long_term: 0.0,
+            short_term_ms: 0,
+            long_term_ms: 0,
             locked: false,
         }
     }
@@ -1476,13 +1480,14 @@ impl AirtimeTracker {
         let nb = (cb + 1) % AIRTIME_BINS;
         self.bins[nb] = 0;
 
-        self.short_term =
-            (self.bins[cb] as f32 + self.bins[pb] as f32) / (2.0 * AIRTIME_BINLEN_MS as f32);
+        self.short_term_ms = self.bins[cb] as u32 + self.bins[pb] as u32;
+        self.short_term = self.short_term_ms as f32 / (2.0 * AIRTIME_BINLEN_MS as f32);
 
         let mut sum: u32 = 0;
         for &b in self.bins.iter() {
             sum += b as u32;
         }
+        self.long_term_ms = sum;
         self.long_term = sum as f32 / AIRTIME_LONGTERM_MS as f32;
 
         self.locked = false;
@@ -1507,6 +1512,23 @@ impl AirtimeTracker {
     /// Long-term airtime fraction from the last [`update`](Self::update).
     pub fn long_term_airtime(&self) -> f32 {
         self.long_term
+    }
+
+    /// Keyed-on-air milliseconds across the current and previous bins from
+    /// the last [`update`](Self::update): the numerator of
+    /// [`short_term_airtime`](Self::short_term_airtime), over a fixed
+    /// `2 * AIRTIME_BINLEN_MS` window. Integer, so a log line can carry it
+    /// without pulling a float formatter into the firmware.
+    pub fn short_term_airtime_ms(&self) -> u32 {
+        self.short_term_ms
+    }
+
+    /// Keyed-on-air milliseconds across the whole rolling hour from the last
+    /// [`update`](Self::update): the numerator of
+    /// [`long_term_airtime`](Self::long_term_airtime) over
+    /// `AIRTIME_LONGTERM_MS`.
+    pub fn long_term_airtime_ms(&self) -> u32 {
+        self.long_term_ms
     }
 
     /// Current short-term limit fraction (0.0 = unlimited).
@@ -3429,6 +3451,18 @@ mod tests {
         approx(t.short_term_airtime(), 0.2);
         // long-term = 3000 / 3_600_000
         approx(t.long_term_airtime(), 3000.0 / 3_600_000.0);
+        // The integer accessors carry the same measurement: the fraction the
+        // float accessors reported is exactly ms / window.
+        assert_eq!(t.short_term_airtime_ms(), 3000);
+        assert_eq!(t.long_term_airtime_ms(), 3000);
+        approx(
+            t.short_term_airtime_ms() as f32 / (2.0 * AIRTIME_BINLEN_MS as f32),
+            t.short_term_airtime(),
+        );
+        approx(
+            t.long_term_airtime_ms() as f32 / AIRTIME_LONGTERM_MS as f32,
+            t.long_term_airtime(),
+        );
         assert!(!t.is_locked());
     }
 
