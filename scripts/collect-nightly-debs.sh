@@ -36,6 +36,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# cargo-deb and cargo both write below the cargo target directory, which is
+# only "$ROOT/target" while CARGO_TARGET_DIR is unset — ask instead of assume
+# (scripts/cargo-target-dir.sh). The lnflash bundle is NOT under it: that
+# tarball is the bundle script's own product and stays repo-relative.
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+TARGET="$(cargo_target_dir "$ROOT")"
+
 DIST="dist"
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -49,9 +58,9 @@ collect_deb() {
     # target/debian/. The filename embeds the full nightly version,
     # which changes each run — glob to the unique file.
     local src
-    src=$(ls -1 target/debian/"${pkg}"_*_"${arch_dash}".deb 2>/dev/null | head -n1)
+    src=$(ls -1 "$TARGET"/debian/"${pkg}"_*_"${arch_dash}".deb 2>/dev/null | head -n1)
     if [ -z "${src:-}" ]; then
-        echo "error: no ${pkg} .deb found for ${arch_dash} under target/debian/" >&2
+        echo "error: no ${pkg} .deb found for ${arch_dash} under $TARGET/debian/" >&2
         exit 1
     fi
 
@@ -78,7 +87,7 @@ pack_bin_tarball() {
 
     local name="${pkg}-nightly-${arch_dash}"
     local stage="$DIST/$name"
-    local src="target/${rust_triple}/release"
+    local src="$TARGET/${rust_triple}/release"
 
     mkdir -p "$stage/bin" "$stage/doc"
     for bin in "$@"; do

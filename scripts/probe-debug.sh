@@ -12,7 +12,12 @@ CHIP="nRF52840_xxAA"
 NRF_TARGET="thumbv7em-none-eabihf"
 PROBE_RS="${PROBE_RS:-$HOME/.cargo/bin/probe-rs}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELFDIR="$REPO/leviculum-nrf/target/$NRF_TARGET/release"
+# Asked, not assumed: with CARGO_TARGET_DIR set the ELF this script flashes is
+# nowhere near "$REPO/leviculum-nrf/target" (scripts/cargo-target-dir.sh).
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$REPO/scripts/cargo-target-dir.sh"
+ELFDIR="$(cargo_target_dir "$REPO/leviculum-nrf")/$NRF_TARGET/release"
 
 die() { echo "probe-debug: ERROR: $*" >&2; exit 1; }
 

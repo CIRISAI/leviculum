@@ -186,7 +186,7 @@ nrf-shellcheck:
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
-        scripts/check-prepush-guard.sh
+        scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as

@@ -22,7 +22,13 @@ set -euo pipefail
 LIMIT="${1:-16384}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NRF="$ROOT/leviculum-nrf"
-OUT="$NRF/target/thumbv7em-none-eabihf/release"
+# Not "$NRF/target": cargo puts the ELF wherever CARGO_TARGET_DIR says, and a
+# gate that looks in the wrong place reports "missing ELF" after a build that
+# worked. See scripts/cargo-target-dir.sh.
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+OUT="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 
 # GNU objdump prints the immediate in decimal, llvm-objdump in hex; the
 # parser below accepts both, so either tool is fine.

@@ -5,7 +5,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/x86_64-unknown-linux-musl/debug"
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+BIN="$(cargo_target_dir "$ROOT")/x86_64-unknown-linux-musl/debug"
 WORK="${1:-/tmp/lnprobe-accept}"
 PYRNS="PYTHONPATH=$ROOT/reference/Reticulum"
 

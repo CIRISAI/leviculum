@@ -23,7 +23,18 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 NRF_DIR="$ROOT/leviculum-nrf"
-NRF_TARGET="$NRF_DIR/target/thumbv7em-none-eabihf/release"
+# Both workspaces are asked where cargo writes rather than told: with
+# CARGO_TARGET_DIR set (the nightly wrapper sets it) every artefact below lands
+# outside the tree and every "$ROOT/target" path here would miss it. See
+# scripts/cargo-target-dir.sh.
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+HOST_TARGET="$(cargo_target_dir "$ROOT")"
+NRF_TARGET_DIR="$(cargo_target_dir "$NRF_DIR")"
+NRF_TARGET="$NRF_TARGET_DIR/thumbv7em-none-eabihf/release"
+# OUT_DIR stays repo-relative: the tarball is this script's own product, not a
+# cargo artefact, and the release steps that collect it look here.
 OUT_DIR="${OUT_DIR:-$ROOT/target/lnflash}"
 
 # The boards this bundle carries. One record per board, four fields:
@@ -90,9 +101,12 @@ OBJCOPY="$(find_objcopy)"
 
 # bin2uf2 is leviculum-nrf's, already the producer of every image we flash.
 # Reusing it keeps one UF2 writer on the build side rather than two.
-BIN2UF2="$NRF_DIR/target/bin2uf2"
+BIN2UF2="$NRF_TARGET_DIR/bin2uf2"
 if [ ! -x "$BIN2UF2" ] || [ "$NRF_DIR/tools/bin2uf2.rs" -nt "$BIN2UF2" ]; then
     say "building bin2uf2"
+    # rustc, unlike cargo, does not create the directory it writes into, and an
+    # external target directory is empty before the first build below runs.
+    mkdir -p "$NRF_TARGET_DIR"
     rustc -O -o "$BIN2UF2" "$NRF_DIR/tools/bin2uf2.rs"
 fi
 
@@ -121,7 +135,7 @@ done
 # its own to find.
 say "building lnflash"
 cargo build -p lnflash --release
-LNFLASH="$ROOT/target/x86_64-unknown-linux-musl/release/lnflash"
+LNFLASH="$HOST_TARGET/x86_64-unknown-linux-musl/release/lnflash"
 [ -f "$LNFLASH" ] || { echo "no lnflash binary at $LNFLASH" >&2; exit 1; }
 
 # --- Assemble ----------------------------------------------------------------

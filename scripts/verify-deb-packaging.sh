@@ -26,7 +26,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 ARCH="${1:-amd64}"
-DEB_DIR="target/debian"
+# cargo-deb writes below the cargo target directory, not below "$ROOT/target",
+# whenever CARGO_TARGET_DIR moves it (scripts/cargo-target-dir.sh).
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+DEB_DIR="$(cargo_target_dir "$ROOT")/debian"
 FAILURES=0
 CHECKS=0
 

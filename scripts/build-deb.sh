@@ -37,6 +37,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Where cargo-deb drops the finished packages. "$ROOT/target/debian" only holds
+# while CARGO_TARGET_DIR is unset (scripts/cargo-target-dir.sh). The roff pages
+# below are the other case and deliberately stay repo-relative: the three
+# Cargo.toml manifests declare them as `../target/man/<tool>.1`, resolved
+# against the manifest directory, so that path is pinned wherever cargo builds.
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+TARGET="$(cargo_target_dir "$ROOT")"
+
 ARCH="${1:-}"
 case "$ARCH" in
 amd64) TRIPLE=x86_64-unknown-linux-musl ;;
@@ -127,7 +137,7 @@ for crate in "${CRATES[@]}"; do
     version="$(cat ".deb-version-${crate}")"
     cargo deb -p "$crate" --target "$TRIPLE" --no-build --no-strip \
         --deb-version "$version"
-    debs+=("target/debian/$(pkg_name "$crate")_${version}_${ARCH}.deb")
+    debs+=("$TARGET/debian/$(pkg_name "$crate")_${version}_${ARCH}.deb")
 done
 
 # The three things cargo-deb gets wrong or cannot produce: native

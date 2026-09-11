@@ -132,7 +132,11 @@ echo "Building $BINARY_NAME..."
 cargo build --package leviculum-cli --bin $BINARY_NAME 2>&1
 or fail "cargo build failed"
 
-set -l binary_path "$project_dir/target/debug/$BINARY_NAME"
+# Where cargo wrote it, not where it usually writes: CARGO_TARGET_DIR moves
+# the whole tree (same reason as scripts/cargo-target-dir.sh, in fish).
+set -l target_dir (cd $project_dir; and cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+or fail "cargo metadata failed in $project_dir"
+set -l binary_path "$target_dir/debug/$BINARY_NAME"
 test -f $binary_path
 or fail "binary not found at $binary_path"
 

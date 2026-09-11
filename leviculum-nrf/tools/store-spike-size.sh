@@ -11,6 +11,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+NRF="$PWD"
+# cargo decides where the ELFs land; CARGO_TARGET_DIR moves them out of the
+# workspace entirely (scripts/cargo-target-dir.sh in the repo root).
+# shellcheck source-path=SCRIPTDIR/../..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$NRF/../scripts/cargo-target-dir.sh"
+elfdir="$(cargo_target_dir "$NRF")/thumbv7em-none-eabihf/release"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
@@ -38,7 +45,7 @@ for bin in t114 rak4631; do
         sequential) features="$base_features,store-spike-sequential" ;;
         esac
         cargo build --release --bin "$bin" --features "$features" >/dev/null
-        cp "target/thumbv7em-none-eabihf/release/$bin" "$out/$bin-$variant"
+        cp "$elfdir/$bin" "$out/$bin-$variant"
     done
 
     echo "=== $bin ($base_features)"

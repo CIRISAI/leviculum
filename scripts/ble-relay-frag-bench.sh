@@ -36,7 +36,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/x86_64-unknown-linux-musl/debug"
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+BIN="$(cargo_target_dir "$ROOT")/x86_64-unknown-linux-musl/debug"
 WORK="${WORK:-/tmp/ble-relay-frag-bench}"
 RNODE_PORT="${RNODE_PORT:?set RNODE_PORT to the t-beam serial port}"
 FREQ="${FREQ:-867200000}"
