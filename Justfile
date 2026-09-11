@@ -186,7 +186,8 @@ nrf-shellcheck:
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
-        scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh
+        scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
+        scripts/push-clean.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -368,12 +369,19 @@ check-integ-bin-list:
 check-supervised-spawns:
     @python3 scripts/check-supervised-spawns.py
 
-# The guards in .githooks/pre-push, driven against scratch repositories
-# (~1 s, no build). They are cold code — they fire on the rare wrong push and
-# nothing exercises them in between — and the hook advertised a selftest in a
-# comment for three weeks before one existed. Two of the fifteen cases are
-# negative controls (an untracked file, a non-master ref at another sha): the
-# guard must refuse the wrong push without refusing the normal one.
+# The guards in .githooks/pre-push and the remedy their refusals print
+# (scripts/push-clean.sh), driven against scratch repositories (~0.3 s, no
+# build). They are cold code: they fire on the rare wrong push and nothing
+# exercises them in between. The one selftest that did cover the ref guard
+# lives outside the repository on a single host, so it says nothing about the
+# hook in any other clone.
+#
+# Three of the twenty-two cases are negative controls — an untracked file, a
+# non-master ref at another sha, and a push from a clone with core.hooksPath
+# unset. The last is the load-bearing one: the old printed remedy produced a
+# tree that pushed with no hook at all, and the push still arrived, so only a
+# case where the proof FAILS tells the hook-ran evidence apart from the
+# push-arrived evidence.
 #
 # In `fast`, which is what the hook itself runs, so a guard broken by an edit
 # is caught by the next push rather than by the push it wrongly refuses.

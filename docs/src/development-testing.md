@@ -135,12 +135,22 @@ to be what is being pushed. A tree with uncommitted tracked changes
 anything but `HEAD` (`.githooks/pre-push:139`), is refused before the
 first gate starts: otherwise the verdict describes code that is not
 being pushed, in either direction. Untracked files are exempt; they are
-in no commit. To push a sha the tree is not standing on, clone the
-repository and check that sha out.
+in no commit.
 
-`just fast` runs all three against scratch repositories
-(`just prepush-guard`, ~1 s), so a guard broken by an edit is caught by
-the next push instead of by the push it wrongly refuses.
+To push a sha this tree is not standing on, run
+`scripts/push-clean.sh <sha> [<remote>]`. It keeps a clone outside the
+tree (`$LEV_PUSH_TREE`, default `~/.cache/leviculum/push-tree`), checks
+the sha out there detached, initialises the submodules, points that
+clone's remote at the URL this repository uses for it, and — the part a
+hand-written `git clone` silently omits — sets `core.hooksPath`, so the
+gates actually run on what is being pushed. The clone keeps its build
+cache between runs.
+
+`just fast` runs the guards and that script against scratch repositories
+(`just prepush-guard`, ~0.3 s), so a guard broken by an edit is caught by
+the next push instead of by the push it wrongly refuses. One of its cases
+pushes from a clone with `core.hooksPath` unset and requires the proof to
+fail there: a push that arrives is no evidence a hook ran.
 
 The rest of the hook: it used to also block on Tier 2 staleness, at
 5 commits/8 h (warn) and 10 commits/24 h (block); the block was

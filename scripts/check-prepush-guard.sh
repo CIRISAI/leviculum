@@ -1,23 +1,47 @@
 #!/usr/bin/env bash
-# Positive control for the guards in .githooks/pre-push.
+# Positive control for the guards in .githooks/pre-push, and for the remedy
+# their refusals print.
 #
 # Those guards are cold code: they fire on the rare push that is wrong, and
 # between firings nothing exercises them. A guard nobody runs is a guard that
-# rots — .githooks/pre-push has advertised a selftest in a comment since
-# 2026-08-17 and none existed, which is why a tree-guard defect could sit in it
-# unnoticed until a push was refused for the wrong reason (2026-09-11).
+# rots, and a tree-guard defect could sit in this hook unnoticed until a push
+# was refused for the wrong reason (2026-09-11).
+#
+# A selftest for the ref guard did exist before this file and had run daily for
+# weeks: `~/.local/bin/lev-selftest` on hamster, driven by project-sanity.sh.
+# It lives outside the repository and on one host, so it says nothing about the
+# hook in any other clone, and nothing about the tree guard. This file is the
+# in-repository version — `just fast` runs it, so every host that pushes runs
+# it — and lev-selftest now calls this script instead of its own copy.
 #
 # Every case below drives the real hook, with LEV_PREPUSH_GUARD_ONLY=1 so it
 # stops before the multi-minute gates, against a scratch repository built here.
 # No case inspects the hook's source; each one pushes something and reads the
 # verdict. The whole file runs in about a second.
 #
-# Usage: bash scripts/check-prepush-guard.sh
+# Usage, from any working directory:
+#
+#   bash <path>/scripts/check-prepush-guard.sh                 # this repo's hook
+#   bash <path>/scripts/check-prepush-guard.sh <hook>          # a given hook
+#   LEV_PREPUSH_HOOK=<hook> bash <path>/scripts/check-prepush-guard.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="$ROOT/.githooks/pre-push"
+# Argument first, environment second, this repo's hook last. Callers outside
+# the tree — lev-selftest drives the hook of whichever checkout it is auditing
+# — name the hook; everything here is absolute afterwards, because the cases
+# below run with the working directory inside a scratch repository.
+HOOK="${1:-${LEV_PREPUSH_HOOK:-$ROOT/.githooks/pre-push}}"
+[ -f "$HOOK" ] || { echo "[prepush-guard] no such hook: $HOOK" >&2; exit 1; }
+HOOK="$(cd "$(dirname "$HOOK")" && pwd)/$(basename "$HOOK")"
 [ -x "$HOOK" ] || { echo "[prepush-guard] not executable: $HOOK" >&2; exit 1; }
+
+# The remedy that hook's refusals print, taken from the same checkout as the
+# hook rather than from this script's own tree: the two are a pair, and a run
+# against someone else's hook must test the script that hook names.
+PUSH_CLEAN="$(cd "$(dirname "$HOOK")/.." && pwd)/scripts/push-clean.sh"
+[ -r "$PUSH_CLEAN" ] ||
+    { echo "[prepush-guard] no such script: $PUSH_CLEAN" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -70,7 +94,7 @@ bad() {
 expect_refusal() {
     local what="$1" phrase="$2"
     if [ "$rc" -eq 0 ]; then
-        bad "$what: hook exited 0, expected a refusal"
+        bad "$what: exited 0, expected a refusal"
     elif ! printf '%s' "$out" | grep -qF "$phrase"; then
         bad "$what: refused, but the message never says '$phrase'"
     else
@@ -81,7 +105,7 @@ expect_refusal() {
 expect_pass() {
     local what="$1"
     if [ "$rc" -ne 0 ]; then
-        bad "$what: hook exited $rc, expected it to pass"
+        bad "$what: exited $rc, expected it to pass"
     else
         ok "$what"
     fi
@@ -193,6 +217,127 @@ expect_pass "a non-master ref at another sha passes"
 run_hook "$elsewhere" origin "$PUBLIC_URL" \
     "refs/heads/master $elsewhere_head refs/heads/master $ZERO"
 expect_pass "a clean tree pushing HEAD passes the guard"
+
+# --- the remedy the refusals print -------------------------------------------
+# A refusal is only as good as the recipe it hands you. The one these guards
+# printed until 2026-09-11 — `git clone . /tmp/push-tree && checkout <sha>` —
+# built a tree that pushes with NO hook running at all, because a clone
+# inherits no `core.hooksPath`. The push then arrives, which is exactly what
+# makes the defect invisible: the operator sees success.
+#
+# So these cases must not ask whether the push arrived. The commit the clone
+# pushes carries a CLAUDE.md to a remote named `origin`, i.e. something the
+# hook MUST refuse; the refusal sentence is produced by nothing else and can
+# only have come from inside the clone. The negative control below removes
+# `core.hooksPath` from the same clone and pushes the identical commit, which
+# then goes straight through — the proof fails exactly when the hook is gone.
+
+# A scratch source repository: the real hook, the real script, a policy file
+# the hook must refuse, and a submodule, since initialising them was the second
+# thing the old recipe left undone.
+sub="$WORK/pushclean-sub"
+git init -q --initial-branch=master "$sub"
+git -C "$sub" config user.email "gate@example.invalid"
+git -C "$sub" config user.name "Gate"
+echo vendored >"$sub/file.txt"
+git -C "$sub" add file.txt
+git -C "$sub" commit -qm "vendored"
+
+push_src="$(scratch_repo pushclean-src)"
+mkdir -p "$push_src/.githooks" "$push_src/scripts"
+cp "$HOOK" "$push_src/.githooks/pre-push"
+cp "$PUSH_CLEAN" "$push_src/scripts/push-clean.sh"
+chmod +x "$push_src/.githooks/pre-push" "$push_src/scripts/push-clean.sh"
+echo "policy" >"$push_src/CLAUDE.md"
+git -C "$push_src" -c protocol.file.allow=always \
+    submodule add -q "$sub" vendor/sub
+git -C "$push_src" add -f .githooks/pre-push scripts/push-clean.sh CLAUDE.md
+git -C "$push_src" commit -qm "hook, remedy, policy file and a submodule"
+push_head="$(git -C "$push_src" rev-parse HEAD)"
+
+# An empty bare repository standing in for the forge, reached under the name
+# `origin` so the hook classifies the push as public exactly as it would.
+forge="$WORK/pushclean-forge.git"
+git init -q --bare "$forge"
+git -C "$push_src" remote add origin "$forge"
+
+forge_master() {
+    git -C "$forge" rev-parse --verify --quiet refs/heads/master || true
+}
+
+push_tree="$WORK/pushclean-tree"
+run_push_clean() {
+    set +e
+    out="$(LEV_PREPUSH_GUARD_ONLY=1 LEV_PUSH_TREE="$push_tree" \
+        bash "$push_src/scripts/push-clean.sh" "$@" 2>&1)"
+    rc=$?
+    set -e
+}
+
+run_push_clean "$push_head"
+expect_refusal "push-clean.sh: the hook runs inside the clone" \
+    "carries Claude-specific files"
+
+CHECKS=$((CHECKS + 1))
+if [ -n "$(forge_master)" ]; then
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    the refused push reached the forge anyway" >&2
+else
+    echo "[prepush-guard] ok      the refused push published nothing"
+fi
+
+CHECKS=$((CHECKS + 1))
+if [ -r "$push_tree/vendor/sub/file.txt" ]; then
+    echo "[prepush-guard] ok      push-clean.sh initialises the submodules"
+else
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    push-clean.sh left vendor/sub uninitialised;" >&2
+    echo "[prepush-guard]         check-submodules would stop \`just fast\` here" >&2
+fi
+
+CHECKS=$((CHECKS + 1))
+clone_url="$(git -C "$push_tree" remote get-url origin 2>/dev/null || true)"
+if [ "$clone_url" = "$forge" ]; then
+    echo "[prepush-guard] ok      the clone's origin is the forge, not the source"
+else
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    the clone's origin is '$clone_url'," >&2
+    echo "[prepush-guard]         expected the source's own origin URL $forge" >&2
+fi
+
+# Negative control. Same clone, same commit, same remote — only core.hooksPath
+# is gone, which is precisely what the old recipe never set. If this push were
+# also refused, the refusal above would be evidence of nothing.
+git -C "$push_tree" config --unset core.hooksPath
+set +e
+out="$(git -C "$push_tree" push origin "$push_head:refs/heads/master" 2>&1)"
+rc=$?
+set -e
+expect_pass "without core.hooksPath the identical push is not refused"
+
+CHECKS=$((CHECKS + 1))
+if printf '%s' "$out" | grep -qF "carries Claude-specific files"; then
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    the hookless push was refused too; the proof" >&2
+    echo "[prepush-guard]         above does not distinguish hook from no hook" >&2
+elif [ "$(forge_master)" = "$push_head" ]; then
+    echo "[prepush-guard] ok      ... and the forge took what the hook refused"
+else
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    the hookless push neither refused nor landed;" >&2
+    echo "[prepush-guard]         forge master is '$(forge_master)'" >&2
+fi
+
+# Reusing the push tree must never clobber what is in it. The phrase is
+# push-clean's own wording, not the hook's ("the WORKING tree has ..."): with
+# this check removed the hook still refuses the push a moment later, so the
+# looser phrase would pass while push-clean was free to check out over the
+# edits it was supposed to protect.
+git -C "$push_tree" config core.hooksPath .githooks
+echo "half-finished port" >>"$push_tree/CLAUDE.md"
+run_push_clean "$push_head"
+expect_refusal "push-clean.sh: a dirty push tree is refused" \
+    "the push tree has uncommitted tracked changes"
 
 echo "[prepush-guard] $((CHECKS - FAILURES))/$CHECKS checks passed"
 [ "$FAILURES" -eq 0 ] || exit 1

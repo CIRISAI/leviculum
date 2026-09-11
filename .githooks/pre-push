@@ -123,8 +123,8 @@ if [ -n "$prepush_dirty" ]; then
     echo "pre-push: REFUSED — the working tree has uncommitted tracked changes:" >&2
     printf '%s\n' "$prepush_dirty" | sed 's|^|pre-push:   |' >&2
     echo "pre-push: the gates below would test THIS TREE, not the commit being pushed." >&2
-    echo "pre-push: commit the changes, or push from a clean checkout of that sha:" >&2
-    echo "pre-push:   git clone . /tmp/push-tree && git -C /tmp/push-tree checkout <sha>" >&2
+    echo "pre-push: commit the changes, or push that sha from a clean checkout:" >&2
+    echo "pre-push:   scripts/push-clean.sh <sha>" >&2
     exit 1
 fi
 
@@ -146,8 +146,8 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
     echo "pre-push: REFUSED — '$remote_ref' would get $local_sha," >&2
     echo "pre-push: but HEAD, the tree the gates below test, is $prepush_head." >&2
     echo "pre-push: whatever the gates say would be about a different commit." >&2
-    echo "pre-push: push from a clean checkout of $local_sha instead:" >&2
-    echo "pre-push:   git clone . /tmp/push-tree && git -C /tmp/push-tree checkout $local_sha" >&2
+    echo "pre-push: push $local_sha from a clean checkout instead:" >&2
+    echo "pre-push:   scripts/push-clean.sh $local_sha" >&2
     exit 1
 done <<< "$prepush_refs"
 
