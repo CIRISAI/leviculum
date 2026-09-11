@@ -271,6 +271,24 @@ pub const STORE_STORM_MAX_RECORDS: u16 = 1_000;
 /// silently.
 pub const STORE_STORM_MAX_BYTES: u16 = 1_024;
 
+/// Set the board's propagation-node costs (Codeberg #384):
+/// `lnflash --stamp-cost N` / `--peering-cost N`.
+///
+/// Payload is two bytes, `[stamp_cost, peering_cost]`, each either a
+/// cost or [`PN_COST_KEEP`] to leave that field as persisted. Persisted
+/// on the telemetry flash page like the target (#238), read at boot,
+/// reported as the boot `PN_CONFIG` line; the running role picks the
+/// values up at the next reset, which the ack's caller states. A frame
+/// with both bytes [`PN_COST_KEEP`] sets nothing and is refused with
+/// [`REFUSE_VALUE`].
+pub const TYPE_PN_CONFIG: u8 = 0x12;
+
+/// "Leave this cost as persisted." Doubles as the refusal of 255 as a
+/// value: stamp generation cannot terminate at cost 255
+/// (`leviculum-lxmf/src/stamp.rs`, Codeberg #181), so no board should be
+/// able to announce it.
+pub const PN_COST_KEEP: u8 = 0xFF;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -549,6 +567,32 @@ pub fn decode_store_storm_payload(payload: &[u8]) -> Option<StoreStormWire> {
     Some(StoreStormWire {
         records: u16::from_be_bytes([bytes[0], bytes[1]]),
         size: u16::from_be_bytes([bytes[2], bytes[3]]),
+    })
+}
+
+/// What one [`TYPE_PN_CONFIG`] asks for (Codeberg #384). A field holding
+/// [`PN_COST_KEEP`] leaves the persisted value alone, so one flag can be
+/// set without the host knowing the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PnConfigWire {
+    pub stamp_cost: u8,
+    pub peering_cost: u8,
+}
+
+/// Encode a complete propagation-node config frame (#384).
+pub fn encode_pn_config(config: &PnConfigWire) -> Vec<u8> {
+    encode_frame(TYPE_PN_CONFIG, &[config.stamp_cost, config.peering_cost])
+}
+
+/// Decode a propagation-node config payload: exactly 2 bytes.
+///
+/// Shape only — the both-fields-[`PN_COST_KEEP`] refusal is a value
+/// judgement and belongs to [`classify_control_frame`].
+pub fn decode_pn_config_payload(payload: &[u8]) -> Option<PnConfigWire> {
+    let bytes: [u8; 2] = payload.try_into().ok()?;
+    Some(PnConfigWire {
+        stamp_cost: bytes[0],
+        peering_cost: bytes[1],
     })
 }
 
@@ -1459,6 +1503,12 @@ pub enum ControlAction {
     /// the firmware's to check. Both fields are already inside their
     /// bounds: the classifier refused anything else.
     StoreStorm(StoreStormWire),
+    /// Envelope propagation-node config (Codeberg #384): merge the two
+    /// costs over the persisted record (a [`PN_COST_KEEP`] field keeps),
+    /// persist, and answer `encode_ack(TYPE_PN_CONFIG)` only once the
+    /// record is on the page (#358). The running role reads the record at
+    /// boot, so the ack's meaning is "the next reset comes up with this".
+    PnConfig(PnConfigWire),
     /// Anything envelope-shaped that cannot be executed: answer
     /// `encode_refusal(refused_type, reason)`. Never silence.
     Refuse { refused_type: u8, reason: u8 },
@@ -1617,6 +1667,23 @@ pub fn classify_control_frame(data: &[u8], accepted: &[u8]) -> ControlAction {
             },
             None => malformed,
         },
+        TYPE_PN_CONFIG => match decode_pn_config_payload(frame.payload) {
+            // Both fields "keep" is a set that sets nothing — a typo, not
+            // a config. One live field is enough; 255 as a value is
+            // impossible by construction, since 0xFF *is* the keep
+            // sentinel (and cost 255 is the one no stamp search can
+            // satisfy, `leviculum-lxmf/src/stamp.rs`).
+            Some(config)
+                if config.stamp_cost != PN_COST_KEEP || config.peering_cost != PN_COST_KEEP =>
+            {
+                ControlAction::PnConfig(config)
+            }
+            Some(_) => ControlAction::Refuse {
+                refused_type: TYPE_PN_CONFIG,
+                reason: REFUSE_VALUE,
+            },
+            None => malformed,
+        },
         // In the accepted list but without an executor here: refusing is
         // more honest than a firmware that acks what it cannot do.
         _ => ControlAction::Refuse {
@@ -1650,6 +1717,7 @@ mod tests {
         TYPE_ANNOUNCE,
         TYPE_BLE_TX_GAP,
         TYPE_STORE_STORM,
+        TYPE_PN_CONFIG,
     ];
 
     /// A firmware from before #236 landed its telemetry consumer.
@@ -3380,6 +3448,54 @@ mod tests {
             classify_control_frame(&bytes, ACCEPTED_PRE_236),
             ControlAction::Refuse {
                 refused_type: TYPE_STORE_STORM,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+    #[test]
+    fn pn_config_classifies_and_keep_keep_is_refused() {
+        let both = PnConfigWire {
+            stamp_cost: 13,
+            peering_cost: 1,
+        };
+        assert_eq!(
+            classify_control_frame(&encode_pn_config(&both), ACCEPTED),
+            ControlAction::PnConfig(both)
+        );
+        // One live field is enough: the other rides the keep sentinel.
+        let one = PnConfigWire {
+            stamp_cost: PN_COST_KEEP,
+            peering_cost: 0,
+        };
+        assert_eq!(
+            classify_control_frame(&encode_pn_config(&one), ACCEPTED),
+            ControlAction::PnConfig(one)
+        );
+        // Both keep: a set that sets nothing.
+        let neither = PnConfigWire {
+            stamp_cost: PN_COST_KEEP,
+            peering_cost: PN_COST_KEEP,
+        };
+        assert_eq!(
+            classify_control_frame(&encode_pn_config(&neither), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_PN_CONFIG,
+                reason: REFUSE_VALUE,
+            }
+        );
+        // Wrong payload length is malformed, not a value refusal.
+        assert_eq!(
+            classify_control_frame(&encode_frame(TYPE_PN_CONFIG, &[13]), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_PN_CONFIG,
+                reason: REFUSE_MALFORMED,
+            }
+        );
+        // A firmware that never learned the type refuses it by name.
+        assert_eq!(
+            classify_control_frame(&encode_pn_config(&both), ACCEPTED_PRE_236),
+            ControlAction::Refuse {
+                refused_type: TYPE_PN_CONFIG,
                 reason: REFUSE_UNKNOWN_TYPE,
             }
         );

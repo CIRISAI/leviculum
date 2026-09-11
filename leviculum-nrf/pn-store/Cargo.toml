@@ -1,0 +1,14 @@
+[package]
+name = "leviculum-pn-store"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Propagation-node store adapters over the record log (host-testable)"
+
+[dependencies]
+leviculum-record-log = { path = "../record-log" }
+leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }
+
+[dev-dependencies]
+leviculum-record-log = { path = "../record-log", features = ["sim"] }

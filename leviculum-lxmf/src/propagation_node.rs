@@ -464,6 +464,18 @@ impl<S: PropagationStore> PropagationNode<S> {
         }
     }
 
+    /// Un-remember one transient ID from the duplicate cache.
+    ///
+    /// For a caller whose store defers durability past the
+    /// [`PropagationStore::append`] boundary (the board's flush queue,
+    /// `leviculum-pn-store`): when the deferred write fails, the entry
+    /// this role recorded at accept time would otherwise turn the
+    /// client's retry into a proven-but-unstored duplicate — the exact
+    /// lie "persist before you prove" exists to prevent.
+    pub fn forget_processed(&mut self, transient_id: &TransientId) {
+        self.processed.remove(transient_id);
+    }
+
     /// Answer one `/get` request for the client whose delivery destination
     /// hash is `remote_delivery_hash` (derived by the caller from the
     /// link-identified identity, as the reference derives it,

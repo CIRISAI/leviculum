@@ -547,19 +547,35 @@ impl<F: NorFlash> RecordLog<F> {
         &mut self,
         mut visit: impl FnMut(&Record),
     ) -> Result<(), Error<F::Error>> {
+        self.for_each_seq(|_, record| visit(record)).await
+    }
+
+    /// [`Self::for_each`], additionally handing the visitor the sequence of
+    /// the page each record sits in.
+    ///
+    /// Page sequences are strictly increasing across erases and records
+    /// within a page are appended at increasing offsets, so
+    /// `page_sequence << 16 | offset_in_page` is a total order over the
+    /// store's lifetime — the append-order position the propagation store's
+    /// per-peer sync cursor is defined on (#384,
+    /// `leviculum-lxmf/src/propagation_store.rs`, `StoredMessage::sequence`).
+    pub async fn for_each_seq(
+        &mut self,
+        mut visit: impl FnMut(u32, &Record),
+    ) -> Result<(), Error<F::Error>> {
         for step in 1..=self.sectors {
             let idx = (self.active + step) % self.sectors;
             let sector = self.base + idx * SECTOR_SIZE;
-            if read_sector_header(&mut self.flash, sector).await?.is_none() {
+            let Some(seq) = read_sector_header(&mut self.flash, sector).await? else {
                 continue;
-            }
+            };
             let mut off = SECTOR_HEADER_LEN;
             while SECTOR_SIZE - off >= MIN_STRIDE {
                 match probe_record(&mut self.flash, sector + off, SECTOR_SIZE - off).await? {
                     Some((record, intact)) => {
                         off += record.stride();
                         if intact {
-                            visit(&record);
+                            visit(seq, &record);
                         }
                     }
                     None => break,
@@ -567,6 +583,34 @@ impl<F: NorFlash> RecordLog<F> {
             }
         }
         Ok(())
+    }
+
+    /// Read the record whose header starts at absolute device offset `at`,
+    /// or `None` when no committed record starts there.
+    ///
+    /// For a caller that kept a record's offset from an earlier scan and
+    /// wants to act on it later — the propagation store's purge path — so
+    /// the action re-validates the record instead of trusting a stale
+    /// offset: a page reclaimed in between reads back as no record or as a
+    /// different one, and the caller compares the key before acting.
+    pub async fn record_at(&mut self, at: u32) -> Result<Option<Record>, Error<F::Error>> {
+        if at < self.base || at >= self.base + self.sectors * SECTOR_SIZE {
+            return Ok(None);
+        }
+        let in_page = (at - self.base) % SECTOR_SIZE;
+        if in_page < SECTOR_HEADER_LEN || !in_page.is_multiple_of(PROGRAM_UNIT) {
+            return Ok(None);
+        }
+        let sector = at - in_page;
+        if read_sector_header(&mut self.flash, sector).await?.is_none() {
+            return Ok(None);
+        }
+        if SECTOR_SIZE - in_page < MIN_STRIDE {
+            return Ok(None);
+        }
+        Ok(probe_record(&mut self.flash, at, SECTOR_SIZE - in_page)
+            .await?
+            .and_then(|(record, intact)| intact.then_some(record)))
     }
 
     /// Read a record's body into `out`. Returns the number of bytes read,

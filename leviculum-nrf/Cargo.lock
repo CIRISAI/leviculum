@@ -1037,6 +1037,14 @@ name = "leviculum-persist-ack"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-pn-store"
+version = "0.1.0"
+dependencies = [
+ "leviculum-lxmf",
+ "leviculum-record-log",
+]
+
+[[package]]
 name = "leviculum-qspi-bitbang"
 version = "0.1.0"
 

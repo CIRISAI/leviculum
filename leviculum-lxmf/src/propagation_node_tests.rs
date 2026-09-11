@@ -330,3 +330,22 @@ fn announce_defaults_are_the_concept_papers_numbers() {
     assert_eq!(announce.peering_cost, 0);
     assert!(announce.metadata.is_empty());
 }
+
+/// The board's deferred-durability path: a store flush that failed after
+/// the accept must be able to un-remember the id, so the client's retry is
+/// stored rather than answered as a proven duplicate.
+#[test]
+fn a_forgotten_id_is_accepted_again_as_new() {
+    let mut node = node(64 * 1024);
+    let bytes = envelope(7, 1);
+    let transient_id = accepted_id(&node.handle_upload(&bytes, 100, no_validation));
+
+    // Simulate the failed flush: the body never became durable.
+    assert!(node.store_mut().purge(&transient_id).unwrap());
+    node.forget_processed(&transient_id);
+
+    match node.handle_upload(&bytes, 101, no_validation) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(!duplicate),
+        other => panic!("expected acceptance, got {other:?}"),
+    }
+}

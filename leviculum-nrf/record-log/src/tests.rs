@@ -1436,3 +1436,104 @@ fn a_page_of_plausible_headers_is_sealed_rather_than_believed() {
         assert_eq!(recs[0].key, key(0));
     });
 }
+
+/// `page_sequence << 16 | offset` is what part 3 maps the propagation
+/// store's `StoredMessage::sequence` onto (#384), so the pair
+/// `for_each_seq` hands out must be strictly increasing in append order —
+/// including across a page reclaim, where the offset resets but the page
+/// sequence has moved on.
+#[test]
+fn for_each_seq_orders_appends_across_a_reclaim() {
+    block_on(async {
+        let mut log = fresh(3).await;
+        // Enough field-sized records to lap out of page 0 into page 1.
+        let per_page = (SECTOR_PAYLOAD as usize) / record_stride(FIELD_BODY);
+        let total = per_page + 3;
+        for n in 0..total as u32 {
+            log.append(&key(n), n, 1, &body(n, FIELD_BODY))
+                .await
+                .unwrap();
+        }
+
+        let mut seen: Vec<([u8; KEY_LEN], u64)> = Vec::new();
+        log.for_each_seq(|page_seq, record| {
+            let in_page = (record.offset % SECTOR_SIZE) as u64;
+            seen.push((record.key, (page_seq as u64) << 16 | in_page));
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(seen.len(), total, "nothing reclaimed at 3 pages yet");
+        // Sort by the derived sequence: the result must be append order.
+        seen.sort_by_key(|(_, seq)| *seq);
+        for (n, (k, _)) in seen.iter().enumerate() {
+            assert_eq!(*k, key(n as u32), "sequence order is append order");
+        }
+        // And the derived sequences are strictly increasing — no ties even
+        // where the offset reset at the page boundary.
+        assert!(seen.windows(2).all(|w| w[0].1 < w[1].1));
+    });
+}
+
+/// `record_at` answers exactly the offsets `for_each` reported and nothing
+/// else: a mid-record offset, an unaligned one, a page-header offset and an
+/// out-of-region one are all `None`, never a misparse.
+#[test]
+fn record_at_finds_records_only_at_their_headers() {
+    block_on(async {
+        let mut log = fresh(SECTORS).await;
+        for n in 0..3u32 {
+            log.append(&key(n), n, 1, &body(n, FIELD_BODY))
+                .await
+                .unwrap();
+        }
+        let recs = collect(&mut log).await;
+        for rec in &recs {
+            let found = log.record_at(rec.offset).await.unwrap().expect("is there");
+            assert_eq!(found.key, rec.key);
+            assert_eq!(found.len, rec.len);
+        }
+        // Between two headers: aligned but mid-record.
+        assert!(log
+            .record_at(recs[0].offset + PROGRAM_UNIT)
+            .await
+            .unwrap()
+            .is_none());
+        // Unaligned.
+        assert!(log.record_at(recs[0].offset + 1).await.unwrap().is_none());
+        // The page header itself.
+        assert!(log.record_at(0).await.unwrap().is_none());
+        // Outside the region.
+        assert!(log.record_at(REGION + 64).await.unwrap().is_none());
+    });
+}
+
+/// A purge through a `record_at` round trip behaves exactly like a purge
+/// through the record kept from the scan — the offset is the identity.
+#[test]
+fn record_at_supports_purge_by_offset() {
+    block_on(async {
+        let mut log = fresh(SECTORS).await;
+        log.append(&key(1), 1, 1, &body(1, FIELD_BODY))
+            .await
+            .unwrap();
+        log.append(&key(2), 2, 1, &body(2, FIELD_BODY))
+            .await
+            .unwrap();
+        let recs = collect(&mut log).await;
+        let target = recs.iter().find(|r| r.key == key(1)).unwrap().offset;
+
+        let record = log.record_at(target).await.unwrap().unwrap();
+        log.purge(&record).await.unwrap();
+
+        let (live, purged) = log.count().await.unwrap();
+        assert_eq!((live, purged), (1, 1));
+        let live_keys: Vec<_> = collect(&mut log)
+            .await
+            .into_iter()
+            .filter(Record::is_live)
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(live_keys, vec![key(2)]);
+    });
+}
