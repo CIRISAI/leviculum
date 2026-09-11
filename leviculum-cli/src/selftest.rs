@@ -21,8 +21,42 @@ use leviculum_std::{
 };
 
 // Message Format
-fn build_message(dir: &str, seq: u64, now_ms: u64) -> Vec<u8> {
-    let payload = format!("{dir}:{seq}:{now_ms}");
+
+/// Which exchange a message belongs to.
+///
+/// Carried in the message rather than read off the tool's current phase
+/// when the message arrives. A link message still in flight when the
+/// single-packet phase opens is a link message; counting it as a
+/// single-packet receipt inflates exactly the delivery rate this tool
+/// exists to measure, and can put the single-packet tally above the
+/// number of single packets sent (Codeberg #337).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Sent over the established link.
+    Link,
+    /// Sent as a destination-addressed single packet.
+    SinglePacket,
+}
+
+impl Phase {
+    fn tag(self) -> &'static str {
+        match self {
+            Phase::Link => "l",
+            Phase::SinglePacket => "p",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "l" => Some(Phase::Link),
+            "p" => Some(Phase::SinglePacket),
+            _ => None,
+        }
+    }
+}
+
+fn build_message(phase: Phase, dir: &str, seq: u64, now_ms: u64) -> Vec<u8> {
+    let payload = format!("{}:{dir}:{seq}:{now_ms}", phase.tag());
     let mut hasher = Sha256::new();
     hasher.update(payload.as_bytes());
     let hash = hasher.finalize();
@@ -31,6 +65,7 @@ fn build_message(dir: &str, seq: u64, now_ms: u64) -> Vec<u8> {
 }
 
 struct ParsedMessage {
+    phase: Phase,
     dir: String,
     seq: u64,
     timestamp_ms: u64,
@@ -38,17 +73,18 @@ struct ParsedMessage {
 
 fn parse_message(data: &[u8]) -> Option<ParsedMessage> {
     let s = std::str::from_utf8(data).ok()?;
-    let parts: Vec<&str> = s.splitn(4, ':').collect();
-    if parts.len() != 4 {
+    let parts: Vec<&str> = s.splitn(5, ':').collect();
+    if parts.len() != 5 {
         return None;
     }
-    let dir = parts[0].to_string();
-    let seq: u64 = parts[1].parse().ok()?;
-    let timestamp_ms: u64 = parts[2].parse().ok()?;
-    let checksum = parts[3];
+    let phase = Phase::from_tag(parts[0])?;
+    let dir = parts[1].to_string();
+    let seq: u64 = parts[2].parse().ok()?;
+    let timestamp_ms: u64 = parts[3].parse().ok()?;
+    let checksum = parts[4];
 
     // Verify checksum
-    let payload = format!("{dir}:{seq}:{timestamp_ms}");
+    let payload = format!("{}:{dir}:{seq}:{timestamp_ms}", phase.tag());
     let mut hasher = Sha256::new();
     hasher.update(payload.as_bytes());
     let hash = hasher.finalize();
@@ -58,6 +94,7 @@ fn parse_message(data: &[u8]) -> Option<ParsedMessage> {
     }
 
     Some(ParsedMessage {
+        phase,
         dir,
         seq,
         timestamp_ms,
@@ -187,17 +224,24 @@ impl SharedState {
 // Received message recording
 /// Record a received message into the stats, handling dedup, ordering, and RTT.
 /// `is_a` = true means node A received (expects dir "ba"), false means node B (expects "ab").
+///
+/// The message says which exchange it belongs to, so a link message that
+/// arrives after the single-packet phase has opened is still counted as a
+/// link message (Codeberg #337). `sp_phase_open` is the tool's current
+/// phase and is used for one thing only: a frame that did not parse carries
+/// no phase, so the corrupt count has to be attributed to the phase that is
+/// running.
 fn record_received_message(
     st: &mut SelftestStats,
     data: &[u8],
     now_ms: u64,
     is_a: bool,
-    is_sp: bool,
+    sp_phase_open: bool,
 ) {
     let expected_dir = if is_a { "ba" } else { "ab" };
     match parse_message(data) {
         Some(msg) if msg.dir == expected_dir => {
-            if is_sp {
+            if msg.phase == Phase::SinglePacket {
                 // Single-packet phase counters
                 if st.sp_seen_seqs_a.contains(&msg.seq) && is_a
                     || st.sp_seen_seqs_b.contains(&msg.seq) && !is_a
@@ -259,7 +303,7 @@ fn record_received_message(
         }
         Some(_) => {} // Message from wrong direction
         None => {
-            if is_sp {
+            if sp_phase_open {
                 st.sp_corrupt += 1;
             } else {
                 st.corrupt += 1;
@@ -454,7 +498,7 @@ async fn send_msg(
     is_a: bool,
 ) {
     let now_ms = start_time.elapsed().as_millis() as u64;
-    let msg = build_message(dir, seq, now_ms);
+    let msg = build_message(Phase::Link, dir, seq, now_ms);
     match stream.send(&msg).await {
         Ok(()) => {
             let mut st = state.stats.lock().unwrap();
@@ -484,7 +528,7 @@ async fn send_single_msg(
     is_a: bool,
 ) -> Option<usize> {
     let now_ms = start_time.elapsed().as_millis() as u64;
-    let msg = build_message(dir, seq, now_ms);
+    let msg = build_message(Phase::SinglePacket, dir, seq, now_ms);
     match endpoint.send_measured(&msg).await {
         Ok((_hash, wire_len)) => {
             let mut st = state.stats.lock().unwrap();
@@ -1307,7 +1351,12 @@ pub async fn run_selftest(
             // pacing delays and busy conditions automatically.
             let mut burst_ok = 0u64;
             for seq in 0..10u64 {
-                let msg = build_message("ab", 10000 + seq, start_time.elapsed().as_millis() as u64);
+                let msg = build_message(
+                    Phase::Link,
+                    "ab",
+                    10000 + seq,
+                    start_time.elapsed().as_millis() as u64,
+                );
                 match tokio::time::timeout(std::time::Duration::from_secs(10), stream_a.send(&msg))
                     .await
                 {
@@ -2467,8 +2516,9 @@ mod tests {
 
     #[test]
     fn test_build_parse_roundtrip() {
-        let msg = build_message("ab", 42, 1000);
+        let msg = build_message(Phase::SinglePacket, "ab", 42, 1000);
         let parsed = parse_message(&msg).expect("should parse");
+        assert_eq!(parsed.phase, Phase::SinglePacket);
         assert_eq!(parsed.dir, "ab");
         assert_eq!(parsed.seq, 42);
         assert_eq!(parsed.timestamp_ms, 1000);
@@ -2476,7 +2526,7 @@ mod tests {
 
     #[test]
     fn test_parse_bad_checksum() {
-        let mut msg = build_message("ab", 1, 1000);
+        let mut msg = build_message(Phase::Link, "ab", 1, 1000);
         // Corrupt the last byte
         let len = msg.len();
         msg[len - 1] = b'X';
@@ -2487,7 +2537,9 @@ mod tests {
     fn test_parse_bad_format() {
         assert!(parse_message(b"not:a:valid").is_none());
         assert!(parse_message(b"").is_none());
-        assert!(parse_message(b"ab:notnum:1000:deadbeef").is_none());
+        assert!(parse_message(b"l:ab:notnum:1000:deadbeef").is_none());
+        // A message with no phase tag is not a message this tool wrote.
+        assert!(parse_message(b"ab:0:1000:deadbeef").is_none());
     }
 
     #[test]
@@ -2602,7 +2654,7 @@ mod tests {
     #[test]
     fn test_record_received_link_phase() {
         let mut stats = SelftestStats::new();
-        let msg = build_message("ba", 0, 100);
+        let msg = build_message(Phase::Link, "ba", 0, 100);
         record_received_message(&mut stats, &msg, 200, true, false);
         assert_eq!(stats.recv_a, 1);
         assert_eq!(stats.sp_recv_a, 0);
@@ -2611,16 +2663,47 @@ mod tests {
     #[test]
     fn test_record_received_sp_phase() {
         let mut stats = SelftestStats::new();
-        let msg = build_message("ba", 0, 100);
+        let msg = build_message(Phase::SinglePacket, "ba", 0, 100);
         record_received_message(&mut stats, &msg, 200, true, true);
         assert_eq!(stats.recv_a, 0);
         assert_eq!(stats.sp_recv_a, 1);
     }
 
+    /// Codeberg #337: a link message is still in flight when the
+    /// single-packet phase opens. It used to be counted as a single-packet
+    /// receipt because the tally read the tool's clock instead of the
+    /// message, which inflates the single-packet delivery rate — the number
+    /// every #221-family PDR reading is taken from — and can put it above
+    /// 100%. The message says which exchange it belongs to; that is what
+    /// counts it.
+    #[test]
+    fn a_late_link_message_stays_in_the_link_tally() {
+        let mut stats = SelftestStats::new();
+        stats.sent_a = 1;
+        stats.sp_sent_a = 1;
+
+        let late = build_message(Phase::Link, "ba", 0, 100);
+        record_received_message(&mut stats, &late, 5_000, true, true);
+
+        assert_eq!(stats.recv_a, 1, "the link sent it, the link counts it");
+        assert_eq!(
+            stats.sp_recv_a, 0,
+            "no single packet was received, so none may be reported"
+        );
+
+        // And the converse still holds: a single packet that arrives after
+        // the phase flag was reset is not credited to the link.
+        let mut stats = SelftestStats::new();
+        let single = build_message(Phase::SinglePacket, "ba", 0, 100);
+        record_received_message(&mut stats, &single, 5_000, true, false);
+        assert_eq!(stats.sp_recv_a, 1);
+        assert_eq!(stats.recv_a, 0);
+    }
+
     #[test]
     fn test_record_received_wrong_dir() {
         let mut stats = SelftestStats::new();
-        let msg = build_message("ab", 0, 100);
+        let msg = build_message(Phase::Link, "ab", 0, 100);
         // Node A expects "ba", so "ab" should be ignored
         record_received_message(&mut stats, &msg, 200, true, false);
         assert_eq!(stats.recv_a, 0);
