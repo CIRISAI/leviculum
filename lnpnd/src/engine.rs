@@ -1,4 +1,4 @@
-//! The propagation-node engine: a [`CoreProcessor`] driving
+//! The propagation-node engine: a [`leviculum_std::driver::CoreProcessor`] driving
 //! [`PropagationNode`] from inside the driver's tick.
 //!
 //! # Why a `CoreProcessor` and not the public event receiver
@@ -33,14 +33,16 @@ use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, ProofStrategy,
     RequestError, RequestPolicy,
 };
-use leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PN;
 use leviculum_lxmf::node::APP_NAME;
+use leviculum_lxmf::peering::{PeerStore, PeeringConfig, OFFER_REQUEST_PATH};
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::{
-    CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
-    PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
+    Eviction, EvictionReason, GetOutcome, PropagationNode, PropagationNodeConfig, PropagationStore,
+    TransientId, UploadOutcome, MESSAGE_GET_PATH,
 };
+
+use crate::peering::{validate_stamp_value, PeeringRuntime};
 
 /// The reference announces the propagation destination 20 s after the role
 /// comes up (`NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`,
@@ -71,6 +73,11 @@ pub struct EngineConfig<S> {
     /// Delay before the first announce; [`ANNOUNCE_DELAY_SECS`] is the
     /// reference's behaviour and the production value, tests shorten it.
     pub announce_delay_secs: u64,
+    /// Peering configuration (part 2); reference key names.
+    pub peering: PeeringConfig,
+    /// Where the peer table persists — a file on the host, the record log
+    /// on the board (part 3).
+    pub peer_store: Box<dyn PeerStore + Send>,
 }
 
 enum State<S> {
@@ -84,6 +91,8 @@ struct Ready<S> {
     destination_hash: DestinationHash,
     /// Whether stamp validation is armed, decided once from the config.
     min_cost: u8,
+    /// The peering half: peer table, `/offer`, outbound sync.
+    peering: PeeringRuntime,
 }
 
 /// One observable engine event, mirrored to the structured log; the channel
@@ -110,6 +119,32 @@ pub enum EngineEvent {
     },
     Evicted {
         count: usize,
+    },
+    /// Peer-table change: `action` is add/drop/decline, `reason` names why.
+    Peer {
+        action: &'static str,
+        destination_hash: [u8; 16],
+        reason: &'static str,
+    },
+    /// One `/offer` round observed, either direction.
+    Offer {
+        dir: &'static str,
+        peer: [u8; 16],
+        offered: usize,
+        wanted: usize,
+    },
+    /// One sync round ended, either direction.
+    SyncDone {
+        dir: &'static str,
+        peer: [u8; 16],
+        transferred: usize,
+        bytes: u64,
+        result: &'static str,
+    },
+    /// A peering key was mined (once per peer; it persists).
+    KeyMined {
+        peer: [u8; 16],
+        value: u16,
     },
 }
 
@@ -205,7 +240,10 @@ impl<S: PropagationStore> Engine<S> {
             store,
             announce_interval_secs: _,
             announce_delay_secs: _,
+            peering,
+            peer_store,
         } = config;
+        let identity_copy = identity.clone();
         let mut destination = match Destination::new(
             Some(identity),
             Direction::In,
@@ -226,9 +264,20 @@ impl<S: PropagationStore> Engine<S> {
         let destination_hash = *destination.hash();
         core.register_destination(destination);
         core.register_request_handler(destination_hash, MESSAGE_GET_PATH, RequestPolicy::AllowAll);
+        // The second handler on the reference's destination
+        // (`reference/LXMF/LXMF/LXMRouter.py:669-670`): identity handling
+        // is the handler's own (`offer_request` answers ERROR_NO_IDENTITY).
+        core.register_request_handler(
+            destination_hash,
+            OFFER_REQUEST_PATH,
+            RequestPolicy::AllowAll,
+        );
 
-        let node = PropagationNode::new(store, node_config);
+        let mut node = PropagationNode::new(store, node_config);
         let min_cost = node.min_accepted_cost();
+        let peering = PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
+        // Restored peers may already require true stamp values (§5).
+        node.set_compute_stamp_value(peering.requires_stamp_values());
         self.emit(EngineEvent::Ready {
             destination_hash: *destination_hash.as_bytes(),
         });
@@ -236,7 +285,46 @@ impl<S: PropagationStore> Engine<S> {
             node,
             destination_hash,
             min_cost,
+            peering,
         }));
+    }
+
+    /// Number of table peers, once registered — the periculum helper's
+    /// peer probe.
+    pub fn peer_count(&self) -> Option<usize> {
+        match &self.state {
+            State::Ready(ready) => Some(ready.peering.peer_count()),
+            _ => None,
+        }
+    }
+
+    /// Reset one peer's sync cursor for a bounded full re-offer (§5's
+    /// reboot case, driven by the conformance cells).
+    pub fn reoffer(&mut self, destination_hash: &[u8; 16]) -> bool {
+        match &mut self.state {
+            State::Ready(ready) => ready.peering.reoffer(destination_hash),
+            _ => false,
+        }
+    }
+
+    /// The table's peers, once registered.
+    pub fn peer_hashes(&self) -> Vec<[u8; 16]> {
+        match &self.state {
+            State::Ready(ready) => ready.peering.peers(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Live store entries above one peer's cursor — this node's
+    /// equivalent of the reference's per-peer unhandled count. `None`
+    /// when unregistered or the peer is unknown.
+    pub fn unhandled_toward(&self, destination_hash: &[u8; 16]) -> Option<usize> {
+        match &self.state {
+            State::Ready(ready) => ready
+                .peering
+                .unhandled_toward(&ready.node, destination_hash),
+            _ => None,
+        }
     }
 
     fn take_ready(&mut self, core: &mut StdNodeCoreRef<'_>) -> Option<Box<Ready<S>>> {
@@ -276,24 +364,19 @@ impl<S: PropagationStore> Engine<S> {
         out: &mut TickOutput,
     ) -> bool {
         let min_cost = ready.min_cost;
+        let compute_value = ready.node.compute_stamp_value();
+        // Cost above 0 is opt-in configuration. The 1000-round PN
+        // workblock (WORKBLOCK_EXPAND_ROUNDS_PN,
+        // reference/LXMF/LXMF/LXStamper.py:13) streams through the
+        // constant-space validator; ~41 000 SHA-256 compressions is
+        // ~10 ms of the core lock and trips PROCESSOR_TICK_BUDGET's
+        // report, which is the honest signal until validation moves to
+        // a worker. The same closure also computes the true value at
+        // cost 0 while any peer filters offers by value (§5).
         let outcome = ready
             .node
             .handle_upload(data, unix_secs(), |transient_id, stamp| {
-                // Cost above 0 is opt-in configuration. The 1000-round PN
-                // workblock (WORKBLOCK_EXPAND_ROUNDS_PN,
-                // reference/LXMF/LXMF/LXStamper.py:13) streams through the
-                // constant-space validator; ~41 000 SHA-256 compressions is
-                // ~10 ms of the core lock and trips PROCESSOR_TICK_BUDGET's
-                // report, which is the honest signal until validation moves to
-                // a worker (part 2, where batch offers make it mandatory).
-                let mut stamper = CooperativeStamper::cooperative(rand_core::OsRng);
-                futures::executor::block_on(stamper.validate_stamp(
-                    transient_id,
-                    stamp,
-                    min_cost,
-                    WORKBLOCK_EXPAND_ROUNDS_PN,
-                ))
-                .unwrap_or(None)
+                validate_stamp_value(transient_id, stamp, min_cost, compute_value)
             });
         match outcome {
             UploadOutcome::Accepted {
@@ -496,7 +579,24 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             return out;
         };
         match event {
-            // A client (or future peer) opened a link to us: resources are
+            // A propagation announce: the peer table's input
+            // (`LXMFPropagationAnnounceHandler`,
+            // reference/LXMF/LXMF/Handlers.py:56-99).
+            NodeEvent::AnnounceReceived { announce, .. }
+                if announce.name_hash()
+                    == &Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT])
+                    && announce.destination_hash() != &ready.destination_hash =>
+            {
+                ready.peering.on_announce(
+                    core,
+                    *announce.destination_hash().as_bytes(),
+                    announce.app_data(),
+                );
+                ready
+                    .node
+                    .set_compute_stamp_value(ready.peering.requires_stamp_values());
+            }
+            // A client (or peer) opened a link to us: resources are
             // gated by the application, as the reference gates them
             // (`propagation_link_established` sets ACCEPT_APP,
             // reference/LXMF/LXMF/LXMRouter.py:2188-2193).
@@ -510,6 +610,38 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 {
                     tracing::warn!("lnpnd: resource strategy: {error:?}");
                 }
+            }
+            // Our own sync link to a peer came up.
+            NodeEvent::LinkEstablished {
+                link_id,
+                is_initiator: true,
+                ..
+            } => {
+                ready.peering.on_link_established(core, link_id, &mut out);
+            }
+            // The peer's answer to our /offer.
+            NodeEvent::ResponseReceived {
+                link_id,
+                request_id,
+                response_data,
+                ..
+            } => {
+                ready.peering.on_response(
+                    core,
+                    &ready.node,
+                    link_id,
+                    request_id,
+                    response_data,
+                    &mut out,
+                );
+            }
+            NodeEvent::RequestTimedOut {
+                link_id,
+                request_id,
+            } => {
+                ready
+                    .peering
+                    .on_request_timeout(core, link_id, request_id, &mut out);
             }
             // Emitted before the matching LinkDataReceived (module docs).
             NodeEvent::LinkProofRequested {
@@ -548,7 +680,9 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             NodeEvent::ResourceAdvertised {
                 link_id, data_size, ..
             } if Self::owns_link(core, &ready, link_id) => {
-                let verdict = if ready.node.accepts_resource_of(*data_size) {
+                let accept = ready.node.accepts_resource_of(*data_size);
+                let verdict = if accept {
+                    ready.peering.on_inbound_resource_accepted(link_id);
                     core.accept_resource(link_id)
                 } else {
                     core.reject_resource(link_id)
@@ -564,9 +698,39 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 is_sender: false,
                 ..
             } if Self::owns_link(core, &ready, link_id) => {
-                // The resource protocol has its own acknowledgement; no
+                // The multi-message peer-sync form is the peering half's
+                // (gated on the validated key, LXMRouter.py:2381-2389);
+                // the singleton form is the client upload path below. The
+                // resource protocol has its own acknowledgement; no
                 // packet proof exists to send here.
-                let _ = self.ingest(&mut ready, core, link_id, data, "resource", &mut out);
+                let handled =
+                    ready
+                        .peering
+                        .on_sync_resource(core, &mut ready.node, link_id, data, &mut out);
+                if !handled {
+                    let _ = self.ingest(&mut ready, core, link_id, data, "resource", &mut out);
+                }
+            }
+            // Our outbound sync resource concluded (or failed).
+            NodeEvent::ResourceCompleted {
+                link_id,
+                is_sender: true,
+                segment_index,
+                total_segments,
+                ..
+            } if segment_index == total_segments => {
+                ready
+                    .peering
+                    .on_resource_sent(core, link_id, true, &mut out);
+            }
+            NodeEvent::ResourceFailed {
+                link_id,
+                is_sender: true,
+                ..
+            } => {
+                ready
+                    .peering
+                    .on_resource_sent(core, link_id, false, &mut out);
             }
             NodeEvent::RequestReceived {
                 link_id,
@@ -578,8 +742,22 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             } if destination_hash == &ready.destination_hash && path == MESSAGE_GET_PATH => {
                 self.answer_get(&mut ready, core, link_id, request_id, data, &mut out);
             }
+            NodeEvent::RequestReceived {
+                link_id,
+                destination_hash,
+                request_id,
+                path,
+                data,
+                ..
+            } if destination_hash == &ready.destination_hash && path == OFFER_REQUEST_PATH => {
+                let response = ready
+                    .peering
+                    .answer_offer_request(core, &ready.node, link_id, data);
+                self.respond(core, link_id, request_id, &response, &mut out);
+            }
             NodeEvent::LinkClosed { link_id, .. } => {
                 self.pending_proofs.remove(link_id);
+                ready.peering.on_link_closed(link_id);
             }
             _ => {}
         }
@@ -610,6 +788,10 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             self.log_evictions(&evicted);
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
+
+        ready
+            .peering
+            .on_tick(core, &mut ready.node, now_ms, &mut out);
 
         self.state = State::Ready(ready);
 

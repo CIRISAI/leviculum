@@ -53,8 +53,8 @@ use leviculum_lxmf::router::{
 };
 use leviculum_lxmf::{
     announce, BuiltResource, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
-    PendingResourceBuild, PropagationNodeConfig, PropagationStampRequest, PropagationTransport,
-    Verification,
+    PeeringConfig, PendingResourceBuild, PropagationNodeConfig, PropagationStampRequest,
+    PropagationTransport, Verification,
 };
 use leviculum_std::driver::{CoreProcessor, StdNodeCore};
 use leviculum_std::FilePropagationStore;
@@ -723,11 +723,47 @@ impl LxmfHelperProcessor {
             ),
             Command::PnEnable {
                 announce_delay_secs,
-            } => self.pn_enable(core, announce_delay_secs, out),
+                options,
+            } => self.pn_enable(core, announce_delay_secs, &options, out),
             Command::PnStoreSize => match self.pn.as_ref().and_then(|pn| pn.engine.store_count()) {
                 Some(size) => self
                     .emitter
                     .event("lxmf_pn_store", &[("size", size.to_string())]),
+                None => self.emitter.error("propagation node not enabled"),
+            },
+            Command::PnPeers => match self.pn.as_ref().and_then(|pn| pn.engine.peer_count()) {
+                Some(count) => self
+                    .emitter
+                    .event("lxmf_pn_peers", &[("count", count.to_string())]),
+                None => self.emitter.error("propagation node not enabled"),
+            },
+            Command::PnUnhandled { peer } => {
+                match self
+                    .pn
+                    .as_ref()
+                    .and_then(|pn| pn.engine.unhandled_toward(&peer))
+                {
+                    Some(count) => self.emitter.event(
+                        "lxmf_pn_unhandled",
+                        &[("peer", hex_encode(&peer)), ("count", count.to_string())],
+                    ),
+                    None => self
+                        .emitter
+                        .error(&format!("{} is not a peer", hex_encode(&peer))),
+                }
+            }
+            Command::PnReoffer { peer } => match self.pn.as_mut() {
+                Some(pn) => {
+                    if pn.engine.reoffer(&peer) {
+                        self.emitter.log(format!(
+                            "[lxmf-node] cursor reset for {}, re-offer scheduled",
+                            hex_encode(&peer)
+                        ));
+                    } else {
+                        self.emitter
+                            .error(&format!("{} is not a peer", hex_encode(&peer)));
+                    }
+                }
                 None => self.emitter.error("propagation node not enabled"),
             },
             Command::SetPn { node } => {
@@ -786,33 +822,84 @@ impl LxmfHelperProcessor {
         &mut self,
         core: &mut StdNodeCore,
         announce_delay_secs: Option<u64>,
+        options: &[(String, String)],
         out: &mut TickOutput,
     ) {
         if self.pn.is_some() {
             self.emitter.error("propagation node already enabled");
             return;
         }
-        let store = match FilePropagationStore::open(
-            &self.config.pn_store_dir,
-            // 5 MB, the limit the interop harness gives the Python control
-            // node (`set_message_storage_limit(megabytes=5)`).
-            5_000_000,
-        ) {
+        let mut node_config = PropagationNodeConfig {
+            name: Some(self.config.display_name.clone()),
+            ..PropagationNodeConfig::default()
+        };
+        let mut peering = PeeringConfig::default();
+        // 5 MB, the limit the interop harness gives the Python control
+        // node (`set_message_storage_limit(megabytes=5)`).
+        let mut store_limit: u64 = 5_000_000;
+        for (key, value) in options {
+            let parsed = match key.as_str() {
+                "stamp_cost" => value.parse().map(|v| node_config.stamp_cost = v).is_ok(),
+                "peering_cost" => value
+                    .parse()
+                    .map(|v: u8| {
+                        node_config.peering_cost = v;
+                        peering.peering_cost = v;
+                    })
+                    .is_ok(),
+                "transfer_limit_kb" => value
+                    .parse()
+                    .map(|v| node_config.transfer_limit_kb = v)
+                    .is_ok(),
+                "sync_limit_kb" => value.parse().map(|v| node_config.sync_limit_kb = v).is_ok(),
+                "max_peers" => value.parse().map(|v| peering.max_peers = v).is_ok(),
+                "autopeer" => value.parse().map(|v| peering.autopeer = v).is_ok(),
+                "autopeer_maxdepth" => value.parse().map(|v| peering.autopeer_maxdepth = v).is_ok(),
+                "from_static_only" => value.parse().map(|v| peering.from_static_only = v).is_ok(),
+                "static_peers" => value
+                    .split(',')
+                    .map(|raw| {
+                        protocol::parse_destination_hash(raw)
+                            .map(|hash| peering.static_peers.push(hash))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .is_ok(),
+                "store_limit_kb" => value.parse().map(|v: u64| store_limit = v * 1000).is_ok(),
+                _ => {
+                    self.emitter.error(&format!("unknown pn option: {key}"));
+                    return;
+                }
+            };
+            if !parsed {
+                self.emitter
+                    .error(&format!("invalid pn option value: {key}={value}"));
+                return;
+            }
+        }
+        let store = match FilePropagationStore::open(&self.config.pn_store_dir, store_limit) {
             Ok(store) => store,
             Err(e) => {
                 self.emitter.error(&format!("pn store: {e}"));
                 return;
             }
         };
+        let peer_store = match leviculum_std::FilePeerStore::open(
+            self.config.pn_store_dir.with_extension("peers"),
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                self.emitter.error(&format!("pn peer store: {e}"));
+                return;
+            }
+        };
         let (mut engine, events) = PnEngine::new(PnEngineConfig {
             identity: Identity::generate(&mut rand_core::OsRng),
-            node_config: PropagationNodeConfig {
-                name: Some(self.config.display_name.clone()),
-                ..PropagationNodeConfig::default()
-            },
+            node_config,
             store,
             announce_interval_secs: lnpnd::engine::DEFAULT_ANNOUNCE_INTERVAL_SECS,
             announce_delay_secs: announce_delay_secs.unwrap_or(lnpnd::engine::ANNOUNCE_DELAY_SECS),
+            peering,
+            peer_store: Box::new(peer_store),
         });
         // One tick registers the destination and the `/get` handler; the
         // Ready event is drained right below.
@@ -832,6 +919,52 @@ impl LxmfHelperProcessor {
                     .emitter
                     .event("lxmf_pn_ready", &[("hash", hex_encode(&destination_hash))]),
                 PnEvent::Broken { detail } => self.emitter.error(&format!("pn broken: {detail}")),
+                PnEvent::Peer {
+                    action,
+                    destination_hash,
+                    reason,
+                } => self.emitter.event(
+                    "lxmf_pn_peer",
+                    &[
+                        ("action", action.to_string()),
+                        ("peer", hex_encode(&destination_hash)),
+                        ("reason", reason.to_string()),
+                    ],
+                ),
+                PnEvent::Offer {
+                    dir,
+                    peer,
+                    offered,
+                    wanted,
+                } => self.emitter.event(
+                    "lxmf_pn_offer",
+                    &[
+                        ("dir", dir.to_string()),
+                        ("peer", hex_encode(&peer)),
+                        ("offered", offered.to_string()),
+                        ("wanted", wanted.to_string()),
+                    ],
+                ),
+                PnEvent::SyncDone {
+                    dir,
+                    peer,
+                    transferred,
+                    bytes,
+                    result,
+                } => self.emitter.event(
+                    "lxmf_pn_sync",
+                    &[
+                        ("dir", dir.to_string()),
+                        ("peer", hex_encode(&peer)),
+                        ("transferred", transferred.to_string()),
+                        ("bytes", bytes.to_string()),
+                        ("result", result.to_string()),
+                    ],
+                ),
+                PnEvent::KeyMined { peer, value } => self.emitter.event(
+                    "lxmf_pn_key_mined",
+                    &[("peer", hex_encode(&peer)), ("value", value.to_string())],
+                ),
                 other => self.emitter.log(format!("[lxmf-node] pn event: {other:?}")),
             }
         }

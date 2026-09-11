@@ -1,9 +1,10 @@
-//! lnpnd — the LXMF propagation-node daemon (Codeberg #384, part 1).
+//! lnpnd — the LXMF propagation-node daemon (Codeberg #384, parts 1–2).
 //!
 //! The host-side mailbox role: announce `lxmf.propagation`, accept client
-//! uploads, answer `/get`, on the file-backed store. The protocol logic is
-//! `leviculum_lxmf::propagation_node`; this crate is wiring, a CLI and a
-//! run loop.
+//! uploads, answer `/get`, peer with other propagation nodes over `/offer`
+//! and sync stored messages both ways, on the file-backed store. The
+//! protocol logic is `leviculum_lxmf::propagation_node` and
+//! `leviculum_lxmf::peering`; this crate is wiring, a CLI and a run loop.
 //!
 //! # Why a separate binary and not an `lnmsg` mode
 //!
@@ -20,3 +21,4 @@
 
 pub mod engine;
 pub mod identity;
+pub(crate) mod peering;

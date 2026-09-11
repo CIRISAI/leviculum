@@ -860,15 +860,17 @@ What it still owes is a board. Three of the numbers above are arithmetic
 or datasheet figures — the scan time, the erase storm's cost, the UF2
 survival — and a rig run replaces each of them with a measurement.
 
-## 5. Peering: the design part 2 builds
+## 5. Peering: the design part 2 built
 
 Peering is the core of the role — a node that does not peer is a
-mailbox, not a mesh (Lead decision, 2026-09-11). This section is the
-binding design for part 2 of leviculum#384: first what the reference
-actually keeps and exchanges, measured against the pinned tree
-(795fdaa), then our design inside this page's constraints. Part 1
-implemented the role without peering but with this section already
-written, so part 2 extends the tree instead of reworking it.
+mailbox, not a mesh (Lead decision, 2026-09-11). This section was the
+binding design for part 2 of leviculum#384 and is now updated to what
+part 2 built: first what the reference actually keeps and exchanges,
+measured against the pinned tree (795fdaa), then our design inside this
+page's constraints, with every number re-derived from the code as
+landed. The protocol half is `leviculum-lxmf/src/peering.rs`
+(`no_std + alloc`, behind the `PeerStore` trait the board implements in
+part 3); the host glue is `lnpnd/src/peering.rs`.
 
 ### What the reference keeps, per peer and per message
 
@@ -908,33 +910,48 @@ verb between peers either.
 ### Our peer record, and the cap
 
 Per peer we keep what is wire-visible plus the minimum liveness state,
-and nothing statistical:
+and nothing statistical. As built (`Peer` / `PeerRecord`,
+`leviculum-lxmf/src/peering.rs`), the packed persistable record weighs:
 
 | Field | Bytes |
 |---|---|
 | destination hash | 16 |
+| identity hash (the peering-key material's first half, `LXMPeer.py:258`) | 16 |
 | peering key + value | 34 |
 | announced limits (transfer, sync) | 8 |
 | announced costs (stamp, flexibility, peering) | 3 |
-| cursor into the store sequence | 6 |
-| last heard, next attempt, backoff, state | 9 |
-| **per peer** | **76**, call it 80 aligned |
+| peering timebase, last heard | 12 |
+| cursor into the store sequence | 8 |
+| static flag | 1 |
+| **per peer** | **98**, call it 104 aligned |
 
-During one sync (one at a time on the board) the offer list is 32 B
-per offered id, bounded by the store: 176 ids is 5 632 B, ~6 KiB with
-msgpack overhead. Against §2's worst observed free heap of 39 308 B,
-an 8 KiB budget slice for peering — a fifth of the worst case — gives
-`80·N + 6 144 ≤ 8 192`, N ≤ 25. **Board cap: 16 peers** (margin for
-the offer list of a fuller future store); **host config default: 20**,
-the reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable. The
-board table is RAM-only: persisting it would need flash writes on
-peer-state churn, and §2's endurance table prices any
-frequently-rewritten fixed page at 18.6 days. The cost of forgetting
-peers at reboot is bounded and rare: autopeering re-forms from the
-next announce each side hears, and one full re-offer per re-formed
-peer (≤ 6 KiB, ~20 s of SF8 airtime) is answered with "want none" for
-everything already delivered. The host persists its table in a file,
-as the reference does (`LXMRouter.py:599-631`).
+The design's 80 grew to ~104 in the build: the identity hash joined
+the record (mining material must survive a restart or the key is
+useless), and the cursor widened to the u64 the host store's sequence
+uses (the board packs the same pair into 6 bytes, below). Re-derived
+against the same budget: during one sync (one at a time on the board,
+`lnpnd/src/peering.rs` holds one round in flight) the offer list is
+bounded at **6 144 B** (`OFFER_BYTES_LIMIT`) — 34 B per encoded id, so
+at most 179 ids per round, re-offering the rest next round. Against
+§2's worst observed free heap of 39 308 B, the same 8 KiB peering
+slice gives `104·N + 6 144 ≤ 8 192`, N ≤ 19. **Board cap: 16 peers**
+still holds, now with less margin; **host config default: 20**, the
+reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable as
+`max_peers`. The full-table policy is deterministic and documented on
+`DeclineReason::TableFull`: first heard wins, a full table declines
+new candidates (the reference's own behaviour, `LXMRouter.py:2032`),
+and slots free only by the 14-day unreachability cull
+(`MAX_UNREACHABLE`, `LXMPeer.py:39`), an unpeer, or the peer leaving
+the role.
+
+The host persists its table in one msgpack file
+(`FilePeerStore`, `leviculum-std/src/file_peer_store.rs`), as the
+reference does (`LXMRouter.py:599-631`). The board's `PeerStore`
+implementation is part 3's: the trait demands only upsert-by-key
+(append a new tagged record, purge the old), full-scan load, and
+nothing rewritten in place — no fixed page, which is §2's endurance
+rule. Mined peering keys ride the same record, so the grind happens
+once per peer, not per reboot.
 
 ### The cursor, instead of per-peer sets
 
@@ -943,14 +960,42 @@ written once per erase (`SECTOR_HEADER_LEN` header,
 `leviculum-nrf/record-log/src/lib.rs:220`), records within a page are
 ordered by offset. **A store position is therefore the pair
 `(page_sequence: u32, offset: u16)`, and each peer holds one cursor:
-everything at or below it has been offered and concluded.** A sync
-offers every live id newer than the cursor (one `for_each` scan, §2
-prices it at 8-33 ms); on the concluded transfer — or on a "want
-none" response — the cursor advances to the newest offered position.
-That replaces both per-peer sets with 6 bytes per peer, and it cannot
-lose messages: a message is either at or below a concluded cursor
-(offered once), evicted (absent everywhere, the reference's own
-behaviour at `:348-352`), or ahead of the cursor (offered next round).
+everything at or below it has been offered and concluded.** As built,
+the store trait carries this as `StoredMessage::sequence: u64`
+(`leviculum-lxmf/src/propagation_store.rs`): the board maps
+`page_sequence << 16 | offset` into it, the host store assigns a
+monotone append counter persisted in its file names
+(`leviculum-std/src/file_propagation_store.rs`), so cursors survive a
+host restart too. A sync offers every live id newer than the cursor
+(one `for_each` scan, §2 prices it at 8-33 ms; `build_offer`,
+`leviculum-lxmf/src/peering.rs`); on the concluded transfer — or on a
+"want none" response — the cursor advances to the plan's target
+(`resource_concluded` is the reference's own only-on-conclusion rule,
+`LXMPeer.py:492-517`). That replaces both per-peer sets with one
+integer per peer, and it cannot lose messages: a message is either at
+or below a concluded cursor (offered once), evicted (absent
+everywhere, the reference's own behaviour at `:348-352`), or ahead of
+the cursor (offered next round).
+
+Three cursor semantics the build pinned down, tested in
+`leviculum-lxmf/src/peering_tests.rs`:
+
+- **Permanent skips advance the cursor.** An entry whose stamp value
+  is below the peer's minimum (`LXMPeer.py:340`) or whose size exceeds
+  the peer's per-message limit (`:370-373`) is stepped past for good —
+  exactly the ids the reference marks handled without sending.
+- **Resumable stops do not.** The peer's per-sync limit and the
+  6 144 B offer bound end the round *without* advancing past what they
+  excluded; the walk is in append order, so nothing above the target
+  was withheld for a resumable reason. (The reference offers
+  weight-sorted and keeps scanning past a sync-limit hit; ours stops
+  there — a selection-order deviation with no wire effect, and the
+  property that lets a single integer replace the sets.)
+- **A stale cursor is a bounded full re-offer.** A cursor naming a
+  reclaimed page (board) or a reset store (host) orders below
+  everything live, so the next round re-offers everything — ≤ 6 KiB of
+  ids — and the peer answers "want none" for what it holds. The
+  conformance cells drive this path explicitly (`lxmf_pn_reoffer`).
 
 What a Python peer observes: offers that may include ids it already
 holds — including messages it itself sent us, since a cursor cannot
@@ -965,20 +1010,27 @@ cursor pointing into a reclaimed page simply reads as "older than
 everything live" and the next offer is a full offer — the reboot case
 again, bounded the same way.
 
-**One accept-path consequence, decided now:** part 1 stores stamp
-value 0 for messages accepted at cost 0 (the validator short-circuits,
-`leviculum-lxmf/src/stamp.rs:198`, where the reference computes the
-true value even at cost 0, `LXStamper.py:95`). The offering side drops
-ids whose stored value is below the *peer's* minimum
-(`LXMPeer.py:340`), and a default Python peer's minimum is 13 − 3 =
-10, so a store full of value-0 records would offer that peer nothing.
-Part 2 therefore computes the true stamp value at accept time whenever
-any known peer requires more than 0 — 41 000 SHA-256 compressions per
+**One accept-path consequence, decided in the design and built as
+decided:** part 1 stored stamp value 0 for messages accepted at cost 0
+(the validator short-circuits, where the reference computes the true
+value even at cost 0, `LXStamper.py:95`). The offering side drops ids
+whose stored value is below the *peer's* minimum (`LXMPeer.py:340`),
+and a default Python peer's minimum is 16 − 3 = 13, so a store full of
+value-0 records would offer that peer nothing. Part 2 therefore
+computes the true stamp value at accept time whenever any known peer
+requires more than 0 (`PropagationNode::set_compute_stamp_value`,
+driven from the peer table; the measuring validator is
+`CooperativeStamper::measure_stamp`) — 41 000 SHA-256 compressions per
 message, §2's orientation says 0.8-2.5 s on the board, free on the
 host — and keeps the shortcut otherwise. The record tag is written
 once at append, so the decision is per-message at accept, not
 retrofittable; a store accepted cheap stays cheap until it turns over
-(at most 30 days).
+(at most 30 days). Note the practical consequence the chain cell ran
+into: a true value of a *free* stamp is small (geometric, expected ~1
+bit), so computing it honestly does not make a cost-0 store
+propagatable through a default stock node — a node that wants its
+store to travel through default peers must announce a stamp cost whose
+minimum clears theirs (the cells use 16).
 
 ### Peering *with* a Python node: the price of its key
 
@@ -996,13 +1048,18 @@ per trial, expected 2^cost trials —
 | 18 | ~5.3 × 10^5 | 10 s / 21 s / 32 s |
 | 26 | ~1.3 × 10^8 | **45 min / 89 min / 134 min** |
 
-One-off per peer and persistable — but on the board the table above is
-RAM-only, so a cost-26 Python neighbour costs the better part of an
-hour of the single core *per reboot*. Part 2 therefore persists mined
-peering keys (and only them) in the record log itself as tagged
-records: append-only, no fixed page, at 50 B of body (a 92 B stride
-under §2's record header) a negligible tenant. The SHA-256 throughput figure that pins this table's real
-column is §4's owed measurement, still owed here.
+One-off per peer and persistable — a cost-26 Python neighbour would
+otherwise cost the better part of an hour of the board's single core
+*per reboot*. Part 2 therefore persists the mined key inside the peer
+record itself (the `PeerStore` boundary above): on the host that is
+the peer file, on the board a ~104 B tagged record — append-only, no
+fixed page, a negligible tenant of the region. The host mines on a
+worker thread, as the reference does (`LXMPeer.py:285-286`), never
+under the core lock; costs above `remote_peering_cost_max` (default
+26, `MAX_PEERING_COST`, `LXMRouter.py:51`) are refused at the table,
+so the grind is bounded by configuration. The SHA-256 throughput
+figure that pins this table's real column is §4's owed measurement,
+still owed here.
 
 Our own announced peering cost defaults to 0, the same policy as the
 stamp cost and this time without even a reference counter-argument:
@@ -1012,9 +1069,24 @@ the `PROPAGATION_COST_MIN` clamp applies to the propagation cost only
 trivially (`validate_peering_key` with target 0 accepts any key,
 `LXStamper.py:73-82`).
 
-One client-side quirk of announcing cost 0, observed against the live
-reference (part 1's interop run): `get_outbound_propagation_cost`
-treats 0 as falsy (`LXMRouter.py:429`), re-requests the path, logs
-"stamp cost still unavailable" — and then proceeds correctly, mining a
-free stamp and uploading. Cost 0 is honoured on the wire; the
-reference client just grumbles first.
+Two falsy-zero quirks of announcing cost 0, both observed against the
+reference and both ours to route around:
+
+- **Client side** (part 1's interop run): `get_outbound_propagation_cost`
+  treats 0 as falsy (`LXMRouter.py:429`), re-requests the path, logs
+  "stamp cost still unavailable" — and then proceeds correctly, mining
+  a free stamp and uploading. Cost 0 is honoured on the wire; the
+  reference client just grumbles first.
+- **Peer side, and this one is a dead end**: `LXMPeer.peering_key_ready`
+  short-circuits false on a falsy peering cost (`LXMPeer.py:228`), so a
+  stock node's sync toward a cost-0 peer postpones forever on "peering
+  key has not been generated yet" — the key IS generated, the readiness
+  check just never looks at it. **A stock lxmd can never sync toward a
+  node announcing peering cost 0.** Our own outbound side deviates
+  (any key is ready at cost 0, `Peer::peering_key_ready`,
+  `leviculum-lxmf/src/peering.rs` — wire format untouched, the
+  validator side accepts any key at target 0, `LXStamper.py:79-82`),
+  so rust-to-rust peering at 0 works; a node that wants *stock* peers
+  to sync to it announces at least 1, which is what the conformance
+  chain cells do and why. Upstream is not told (standing policy);
+  the workaround is a one-bit cost.

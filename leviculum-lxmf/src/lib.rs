@@ -20,17 +20,18 @@
 //! boards' record log implements. A host built on these still owns links,
 //! resources and stamp-validation scheduling: this crate performs no I/O.
 //!
-//! What the crate does **not** implement is the *node ↔ node* direction. A
-//! Python propagation node syncs with its peers over a second endpoint,
-//! `/offer`, whose upload payload is the same wire shape carrying more than
-//! one message, admitted only against a validated peering key
-//! (`LXMRouter.propagation_resource_concluded`,
-//! reference/LXMF/LXMF/LXMRouter.py:2336-2345, and the peering-key branch at
-//! :2377-2385). That is why [`PropagationUpload::decode`] accepts the
+//! The *node ↔ node* direction (leviculum#384 part 2) lives in
+//! [`peering`]: the peer table with its cursor-per-peer replacement for the
+//! reference's per-message sets, the `/offer` codec and inbound gate, and
+//! the pure decisions of an outbound sync round. A Python propagation node
+//! syncs with its peers over `/offer`, whose payload is the client upload's
+//! wire shape carrying more than one message, admitted only against a
+//! validated peering key (`LXMRouter.propagation_resource_concluded`,
+//! reference/LXMF/LXMF/LXMRouter.py:2336-2345, and the peering-key branch
+//! at :2381-2389). [`PropagationUpload::decode`] still accepts the
 //! singleton envelope only and answers the multi-message form with
-//! [`PropagationError::MultipleMessages`]: it is a message for an endpoint
-//! this crate does not serve, not a malformed one. Peer sync, peering keys
-//! and the `/offer` path are leviculum#209.
+//! [`PropagationError::MultipleMessages`]; the peer-sync form is decoded by
+//! [`peering::PeerSyncEnvelope`] where the key gate can be applied.
 
 #![no_std]
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub mod message;
 pub mod msgpack;
 pub mod node;
 pub mod paper;
+pub mod peering;
 pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
@@ -65,6 +67,12 @@ pub use node::{
     LxmfNodeOutput, LxmfResourceSendParams, PreparedLxmfSend, SubmissionId,
 };
 pub use paper::{PaperError, PaperMessage};
+pub use peering::{
+    answer_offer, build_offer, peering_key_material, response_action, DeclineReason, DropReason,
+    InboundGate, MemoryPeerStore, OfferPlan, OfferResponse, Peer, PeerChange, PeerOffer,
+    PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig, ResponseAction, SyncPhase,
+    OFFER_REQUEST_PATH,
+};
 pub use propagation::{
     MessageGetRequest, MessageGetResponse, MessageListResponse, MetadataEntry, PeerError,
     PropagatedMessage, PropagationError, PropagationNodeAnnounce, PropagationSignal,

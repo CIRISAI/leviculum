@@ -39,6 +39,9 @@ pub const STAMP_COST_EXPIRY: u64 = 45 * 24 * 60 * 60;
 pub const WORKBLOCK_EXPAND_ROUNDS: usize = 3000;
 /// Workblock expansion rounds for the outer propagation-node stamp.
 pub const WORKBLOCK_EXPAND_ROUNDS_PN: usize = 1000;
+/// Workblock expansion rounds for a node-to-node peering key
+/// (`WORKBLOCK_EXPAND_ROUNDS_PEERING`, `reference/LXMF/LXMF/LXStamper.py:14`).
+pub const WORKBLOCK_EXPAND_ROUNDS_PEERING: usize = 25;
 
 pub const FIELD_EMBEDDED_LXMS: i64 = 0x01;
 pub const FIELD_TELEMETRY: i64 = 0x02;

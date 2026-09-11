@@ -9,13 +9,17 @@
 //! [`PropagationStore`], so the same role runs on a directory of files today
 //! and the boards' record log in part 3.
 //!
-//! What this module deliberately does **not** implement is node↔node peering:
-//! `/offer`, peering keys, and outbound sync are part 2 (the design, with
-//! numbers, is in `docs/src/concepts/propagation-node-on-a-board.md` §5).
-//! The reference admits a multi-message transfer only against a validated
-//! peering key (`reference/LXMF/LXMF/LXMRouter.py:2377-2385`); until part 2,
-//! that form is answered the way the reference answers it without a key —
-//! the link is torn down.
+//! Node↔node peering — `/offer`, peering keys, outbound sync — lives in
+//! [`crate::peering`] (part 2; the design, with numbers, is in
+//! `docs/src/concepts/propagation-node-on-a-board.md` §5). This module
+//! contributes the shared accept path: [`PropagationNode::accept_stamped`]
+//! ingests one stamped message from a peer-sync resource through the same
+//! validation, dedup and eviction as a client upload, and the caller
+//! enforces the reference's peering-key gate on the multi-message form
+//! (`reference/LXMF/LXMF/LXMRouter.py:2381-2389`). The raw-packet upload
+//! keeps part 1's shape: a multi-message *packet* is answered with a torn
+//! link — peers sync with a Resource (`LXMPeer.py:466-468`), never a
+//! packet, so only a nonconforming sender can observe the difference.
 //!
 //! Every wire fact carries its `file:line` into the reference at the point
 //! it is implemented. The reference pin is 795fdaa (LXMF 1.1.0).
@@ -63,7 +67,7 @@ pub struct PropagationNodeConfig {
     /// inbound resources (`propagation_resource_advertised`,
     /// `reference/LXMF/LXMF/LXMRouter.py:2220-2224`).
     pub sync_limit_kb: u64,
-    /// Announce field 5[0]: the propagation stamp cost clients mine to.
+    /// Announce field 5\[0\]: the propagation stamp cost clients mine to.
     /// Default 0: accepted without work, user-settable. The reference clamps
     /// its own to ≥13 (`PROPAGATION_COST_MIN`,
     /// `reference/LXMF/LXMF/LXMRouter.py:52`, applied at `:137`); announcing
@@ -71,11 +75,11 @@ pub struct PropagationNodeConfig {
     /// `max(0, cost − flexibility)` — and is this project's chosen policy
     /// (concept paper §1, "We would be the first to advertise cheap").
     pub stamp_cost: u8,
-    /// Announce field 5[1]: how far below our cost a stamp may fall and
+    /// Announce field 5\[1\]: how far below our cost a stamp may fall and
     /// still be accepted (`PROPAGATION_COST_FLEX`,
     /// `reference/LXMF/LXMF/LXMRouter.py:53`, default 3).
     pub stamp_cost_flexibility: u8,
-    /// Announce field 5[2]: the peering cost another node mines to `/offer`
+    /// Announce field 5\[2\]: the peering cost another node mines to `/offer`
     /// us batches. Default 0 under the same policy as `stamp_cost`; unlike
     /// the propagation cost, the reference applies **no lower clamp** to its
     /// peering cost (`LXMRouter.py:137` clamps `propagation_cost` only), so
@@ -234,6 +238,14 @@ pub struct PropagationNode<S> {
     /// §2 forbids — and the host keeps the same shape so both run one code
     /// path.
     processed: alloc::collections::BTreeMap<TransientId, u64>,
+    /// Compute true stamp values even when our own accepted cost is 0.
+    /// Set by the engine while any known peer requires a stamp value above
+    /// 0 of the messages it takes (`docs/src/concepts/
+    /// propagation-node-on-a-board.md` §5: the offering side drops ids
+    /// whose stored value is below the peer's minimum,
+    /// `reference/LXMF/LXMF/LXMPeer.py:340`, and the record tag is written
+    /// once at accept, so the decision is per-message at accept time).
+    compute_stamp_value: bool,
 }
 
 impl<S: PropagationStore> PropagationNode<S> {
@@ -242,7 +254,19 @@ impl<S: PropagationStore> PropagationNode<S> {
             store,
             config,
             processed: alloc::collections::BTreeMap::new(),
+            compute_stamp_value: false,
         }
+    }
+
+    /// See the field: while set, the accept path asks `validate` for the
+    /// true stamp value even at accepted cost 0 (validation at cost 0
+    /// cannot fail, so this only fills the stored value).
+    pub fn set_compute_stamp_value(&mut self, compute: bool) {
+        self.compute_stamp_value = compute;
+    }
+
+    pub fn compute_stamp_value(&self) -> bool {
+        self.compute_stamp_value
     }
 
     pub fn store(&self) -> &S {
@@ -313,7 +337,8 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// from either the raw-link-packet or the single-message resource path.
     ///
     /// `validate` is called only when [`Self::min_accepted_cost`] is above
-    /// zero, with the transient ID and the 32-byte stamp; it returns the
+    /// zero (or [`Self::set_compute_stamp_value`] demands true values for
+    /// peering), with the transient ID and the 32-byte stamp; it returns the
     /// stamp's value if valid at that cost (`validate_pn_stamp`,
     /// `reference/LXMF/LXMF/LXStamper.py:84-96`, over the
     /// [`crate::constants::WORKBLOCK_EXPAND_ROUNDS_PN`]-round workblock) or
@@ -334,13 +359,56 @@ impl<S: PropagationStore> PropagationNode<S> {
             Err(PropagationError::MultipleMessages) => return UploadOutcome::PeerSyncForm,
             Err(error) => return UploadOutcome::Malformed(error),
         };
-        let transient_id = *upload.transient_id();
+        self.ingest_split(
+            upload.unstamped_lxmf(),
+            upload.propagation_stamp(),
+            *upload.transient_id(),
+            now_secs,
+            validate,
+        )
+    }
 
+    /// Accept one stamped message body (`lxmf_data ‖ stamp`) from a peer
+    /// sync resource. Same acceptance path as a client upload — the
+    /// reference funnels both through `lxmf_propagation`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2430-2436` for the sync side,
+    /// `:2245-2250` for the client side) — with the same length guard as
+    /// `validate_pn_stamp` (`reference/LXMF/LXMF/LXStamper.py:87`).
+    pub fn accept_stamped(
+        &mut self,
+        stamped: &[u8],
+        now_secs: u64,
+        validate: impl FnOnce(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
+    ) -> UploadOutcome {
+        if stamped.len() <= crate::constants::LXMF_OVERHEAD + STAMP_SIZE {
+            return UploadOutcome::Malformed(PropagationError::InvalidLength);
+        }
+        let (unstamped, stamp) = stamped.split_at(stamped.len() - STAMP_SIZE);
+        let mut propagation_stamp = [0u8; STAMP_SIZE];
+        propagation_stamp.copy_from_slice(stamp);
+        let transient_id = leviculum_core::crypto::full_hash(unstamped);
+        self.ingest_split(
+            unstamped,
+            &propagation_stamp,
+            transient_id,
+            now_secs,
+            validate,
+        )
+    }
+
+    fn ingest_split(
+        &mut self,
+        unstamped: &[u8],
+        stamp: &[u8; STAMP_SIZE],
+        transient_id: TransientId,
+        now_secs: u64,
+        validate: impl FnOnce(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
+    ) -> UploadOutcome {
         let min_cost = self.min_accepted_cost();
-        let stamp_value = if min_cost == 0 {
+        let stamp_value = if min_cost == 0 && !self.compute_stamp_value {
             0
         } else {
-            match validate(&transient_id, upload.propagation_stamp()) {
+            match validate(&transient_id, stamp) {
                 Some(value) => value.min(u8::MAX as u16) as u8,
                 None => {
                     return UploadOutcome::InvalidStamp {
@@ -351,12 +419,11 @@ impl<S: PropagationStore> PropagationNode<S> {
         };
 
         let mut destination_hash = [0u8; DESTINATION_LENGTH];
-        destination_hash.copy_from_slice(&upload.unstamped_lxmf()[..DESTINATION_LENGTH]);
+        destination_hash.copy_from_slice(&unstamped[..DESTINATION_LENGTH]);
 
-        let mut body =
-            Vec::with_capacity(upload.unstamped_lxmf().len() + upload.propagation_stamp().len());
-        body.extend_from_slice(upload.unstamped_lxmf());
-        body.extend_from_slice(upload.propagation_stamp());
+        let mut body = Vec::with_capacity(unstamped.len() + stamp.len());
+        body.extend_from_slice(unstamped);
+        body.extend_from_slice(stamp);
         let size = body.len() as u32;
 
         let duplicate = self.processed.contains_key(&transient_id)

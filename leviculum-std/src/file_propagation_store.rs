@@ -2,15 +2,21 @@
 //! (Codeberg #384, part 1).
 //!
 //! The layout is the reference's message store, one directory of files named
-//! `<transient_id_hex>_<received_secs>_<stamp_value>` whose content is
-//! `lxmf_data || stamp` (`lxmf_propagation`,
+//! `<transient_id_hex>_<received_secs>_<stamp_value>_<sequence>` whose
+//! content is `lxmf_data || stamp` (`lxmf_propagation`,
 //! `reference/LXMF/LXMF/LXMRouter.py:2512-2515`; re-indexed at startup by
-//! `enable_propagation`, `:565-592`). Two local differences: the timestamp
-//! is integer seconds rather than a float, and the stamp-value component is
+//! `enable_propagation`, `:565-592`). Three local differences: the timestamp
+//! is integer seconds rather than a float, the stamp-value component is
 //! always present (the reference omits it at value 0 and then *skips such
 //! files entirely* when re-indexing, `:568` requires three components — a
-//! quirk, not a behaviour worth importing). The directory is not a wire
-//! format; nothing reads it but us.
+//! quirk, not a behaviour worth importing), and a fourth component carries
+//! the append-order sequence the per-peer sync cursors index
+//! (`docs/src/concepts/propagation-node-on-a-board.md` §5) so cursors stay
+//! valid across a reopen. A three-component name (a part-1 store, or a
+//! directory copied from a reference node) is still read; such entries are
+//! assigned fresh sequences above every known one, in receive-time order,
+//! which at worst re-offers them once. The directory is not a wire format;
+//! nothing reads it but us.
 //!
 //! # Power-cut safety, and why this store fsyncs
 //!
@@ -22,7 +28,7 @@
 //! write-to-temp, `fsync`, rename-into-place, `fsync` the directory — after
 //! it returns, the message survives the plug being pulled, and a cut at any
 //! earlier point leaves only a `.tmp` file the reopen scan ignores. The
-//! generic [`atomic_write`](crate::storage) helper deliberately skips the
+//! generic `atomic_write` helper in `crate::storage` deliberately skips the
 //! fsyncs (announce caches and ratchet files tolerate losing the last
 //! seconds); this store must not.
 
@@ -42,6 +48,8 @@ pub struct FilePropagationStore {
     capacity: u64,
     used: u64,
     index: BTreeMap<TransientId, IndexEntry>,
+    /// Last assigned append sequence; recovered as the maximum on disk.
+    last_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +80,7 @@ impl FilePropagationStore {
             if name.ends_with(".tmp") {
                 continue;
             }
-            let Some((transient_id, received_at, stamp_value)) = parse_name(&name) else {
+            let Some((transient_id, received_at, stamp_value, sequence)) = parse_name(&name) else {
                 note_unreadable_entry(&dir, &entry.file_name());
                 continue;
             };
@@ -102,16 +110,54 @@ impl FilePropagationStore {
                         size: size as u32,
                         received_at,
                         stamp_value,
+                        // Legacy three-component names get a real sequence
+                        // after the scan, below.
+                        sequence: sequence.unwrap_or(0),
                     },
                     path,
                 },
             );
+        }
+        let mut last_sequence = index
+            .values()
+            .map(|entry| entry.meta.sequence)
+            .max()
+            .unwrap_or(0);
+        // Sequence legacy entries above everything known, oldest first, so
+        // relative order is kept and cursors below them stay sound (a
+        // too-high foreign cursor is the bounded full re-offer case, §5).
+        let mut legacy: Vec<TransientId> = index
+            .values()
+            .filter(|entry| entry.meta.sequence == 0)
+            .map(|entry| entry.meta.transient_id)
+            .collect();
+        legacy.sort_by_key(|id| {
+            let meta = index[id].meta;
+            (meta.received_at, meta.transient_id)
+        });
+        for id in legacy {
+            last_sequence += 1;
+            if let Some(entry) = index.get_mut(&id) {
+                entry.meta.sequence = last_sequence;
+                // Persist the assignment so it is one-time, not
+                // per-reopen: a later open must not renumber.
+                let renamed = dir.join(Self::entry_name(
+                    &entry.meta.transient_id,
+                    entry.meta.received_at,
+                    entry.meta.stamp_value,
+                    last_sequence,
+                ));
+                if std::fs::rename(&entry.path, &renamed).is_ok() {
+                    entry.path = renamed;
+                }
+            }
         }
         Ok(Self {
             dir,
             capacity,
             used,
             index,
+            last_sequence,
         })
     }
 
@@ -129,23 +175,40 @@ impl FilePropagationStore {
         self.index.is_empty()
     }
 
-    fn entry_name(transient_id: &TransientId, received_at: u64, stamp_value: u8) -> String {
+    fn entry_name(
+        transient_id: &TransientId,
+        received_at: u64,
+        stamp_value: u8,
+        sequence: u64,
+    ) -> String {
         format!(
-            "{}_{received_at}_{stamp_value}",
+            "{}_{received_at}_{stamp_value}_{sequence}",
             hex_encode(transient_id.as_slice())
         )
     }
 }
 
-fn parse_name(name: &str) -> Option<(TransientId, u64, u8)> {
+fn parse_name(name: &str) -> Option<(TransientId, u64, u8, Option<u64>)> {
     let mut parts = name.split('_');
     let id: TransientId = hex_decode(parts.next()?)?.try_into().ok()?;
     let received_at: u64 = parts.next()?.parse().ok()?;
     let stamp_value: u8 = parts.next()?.parse().ok()?;
+    let sequence = match parts.next() {
+        // Part-1 layout: no sequence component yet.
+        None => None,
+        Some(raw) => {
+            let sequence: u64 = raw.parse().ok()?;
+            // 0 is reserved for "not yet assigned".
+            if sequence == 0 {
+                return None;
+            }
+            Some(sequence)
+        }
+    };
     if parts.next().is_some() {
         return None;
     }
-    Some((id, received_at, stamp_value))
+    Some((id, received_at, stamp_value, sequence))
 }
 
 fn read_destination(path: &Path) -> Option<[u8; 16]> {
@@ -190,10 +253,15 @@ impl PropagationStore for FilePropagationStore {
         if next > self.capacity {
             return Err(StorageError::Full);
         }
-        let path = self
-            .dir
-            .join(Self::entry_name(transient_id, received_at, stamp_value));
+        let sequence = self.last_sequence + 1;
+        let path = self.dir.join(Self::entry_name(
+            transient_id,
+            received_at,
+            stamp_value,
+            sequence,
+        ));
         durable_write(&self.dir, &path, body)?;
+        self.last_sequence = sequence;
         // Replacing an entry under a different timestamp leaves the old
         // file behind; remove it after the new one is durable.
         if let Some(previous) = self.index.get(transient_id) {
@@ -212,6 +280,7 @@ impl PropagationStore for FilePropagationStore {
                     size: body.len() as u32,
                     received_at,
                     stamp_value,
+                    sequence,
                 },
                 path,
             },
@@ -312,12 +381,12 @@ mod tests {
         // written, and was never renamed.
         let torn = dir
             .path()
-            .join(FilePropagationStore::entry_name(&[2; 32], 999, 0))
+            .join(FilePropagationStore::entry_name(&[2; 32], 999, 0, 2))
             .with_extension("tmp");
         std::fs::write(&torn, body_for(9, 60)).expect("torn temp file");
         let torn_short = dir
             .path()
-            .join(FilePropagationStore::entry_name(&[3; 32], 999, 0))
+            .join(FilePropagationStore::entry_name(&[3; 32], 999, 0, 3))
             .with_extension("tmp");
         std::fs::write(&torn_short, [9u8; 7]).expect("short torn temp file");
 
@@ -346,6 +415,52 @@ mod tests {
         let store = FilePropagationStore::open(dir.path(), 250).expect("reopen");
         assert_eq!(store.len(), 1);
         assert!(store.contains(&[2; 32]).unwrap());
+    }
+
+    /// Sequences are the cursor domain (§5): they must survive a reopen,
+    /// keep growing from where they were, and a part-1 store without them
+    /// is migrated once, oldest first, then never renumbered again.
+    #[test]
+    fn sequences_persist_grow_and_migrate_legacy_names_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 8192).expect("open");
+        store.append(&[1; 32], 100, 0, &body_for(7, 100)).unwrap();
+        store.append(&[2; 32], 200, 0, &body_for(7, 100)).unwrap();
+        let seq_of = |store: &FilePropagationStore, id: &TransientId| {
+            let mut found = 0;
+            store
+                .for_each(&mut |meta| {
+                    if meta.transient_id == *id {
+                        found = meta.sequence;
+                    }
+                })
+                .unwrap();
+            found
+        };
+        assert_eq!(seq_of(&store, &[1; 32]), 1);
+        assert_eq!(seq_of(&store, &[2; 32]), 2);
+        drop(store);
+
+        // A part-1 file: three components, no sequence. Migrated above
+        // everything known and renamed on disk.
+        std::fs::write(
+            dir.path().join(format!("{}_50_0", hex_encode(&[3u8; 32]))),
+            body_for(9, 100),
+        )
+        .unwrap();
+        let mut store = FilePropagationStore::open(dir.path(), 8192).expect("reopen");
+        assert_eq!(seq_of(&store, &[1; 32]), 1);
+        assert_eq!(seq_of(&store, &[2; 32]), 2);
+        assert_eq!(seq_of(&store, &[3; 32]), 3);
+        // New appends continue above.
+        store.append(&[4; 32], 300, 0, &body_for(7, 100)).unwrap();
+        assert_eq!(seq_of(&store, &[4; 32]), 4);
+        drop(store);
+
+        // The migration was persisted: a third open sees the same numbers.
+        let store = FilePropagationStore::open(dir.path(), 8192).expect("reopen 2");
+        assert_eq!(seq_of(&store, &[3; 32]), 3);
+        assert_eq!(store.newest_sequence().unwrap(), 4);
     }
 
     #[test]

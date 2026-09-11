@@ -39,15 +39,35 @@ pub enum Command {
         body: Vec<u8>,
         body_b64: String,
     },
-    /// `pn_enable [announce_delay_secs]` — run the LXMF propagation-node
-    /// role on this helper (leviculum#384): the lxmd path,
-    /// `enable_propagation()`, on the Python side; `lnpnd`'s engine here.
-    /// Emits `lxmf_pn_ready hash=<hex>`. The optional delay overrides the
-    /// reference's 20 s first-announce deferral for fast tests.
-    PnEnable { announce_delay_secs: Option<u64> },
+    /// `pn_enable [announce_delay_secs] [key=value …]` — run the LXMF
+    /// propagation-node role on this helper (leviculum#384): the lxmd
+    /// path, `enable_propagation()`, on the Python side; `lnpnd`'s engine
+    /// here. Emits `lxmf_pn_ready hash=<hex>`. The optional delay
+    /// overrides the reference's 20 s first-announce deferral for fast
+    /// tests; the `key=value` pairs carry the lxmd-named node and peering
+    /// configuration (part 2): `stamp_cost`, `peering_cost`, `max_peers`,
+    /// `autopeer_maxdepth`, `from_static_only`, `static_peers` (hex,
+    /// comma-separated), `store_limit_kb`, `transfer_limit_kb`,
+    /// `sync_limit_kb`. Both helpers accept the same keys, so the driver
+    /// stays identical across stacks.
+    PnEnable {
+        announce_delay_secs: Option<u64>,
+        options: Vec<(String, String)>,
+    },
     /// `pn_store_size` — emit `lxmf_pn_store size=<n>`, the number of
     /// messages the node's store currently holds.
     PnStoreSize,
+    /// `pn_peers` — emit `lxmf_pn_peers count=<n>`, the peer-table size.
+    PnPeers,
+    /// `pn_reoffer <hex>` — reset the sync cursor for one peer and
+    /// trigger a fresh round: the bounded full re-offer of §5. The round's
+    /// outcome arrives as `lxmf_pn_offer dir=out …`.
+    PnReoffer { peer: [u8; 16] },
+    /// `pn_unhandled <hex>` — emit `lxmf_pn_unhandled peer=<hex>
+    /// count=<n>`: how many stored messages this node still considers
+    /// un-offered toward that peer (live entries above its cursor; the
+    /// Python helper answers from the reference's per-peer unhandled set).
+    PnUnhandled { peer: [u8; 16] },
     /// `set_pn <hex>` — select the outbound propagation node. Errors until
     /// the node's identity is known from an announce, so the driver can poll.
     /// Emits `lxmf_pn_selected peer=<hex>`.
@@ -121,18 +141,47 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
             }))
         }
         "pn_enable" => {
-            let announce_delay_secs =
-                match parts.next() {
-                    None => None,
-                    Some(value) => Some(value.parse().map_err(|_| {
-                        CommandError::new(format!("invalid announce delay: {value}"))
-                    })?),
-                };
+            let mut announce_delay_secs = None;
+            let mut options = Vec::new();
+            for (index, token) in parts.enumerate() {
+                if let Some((key, value)) = token.split_once('=') {
+                    if key.is_empty() || value.is_empty() {
+                        return Err(CommandError::new(format!("invalid pn option: {token}")));
+                    }
+                    options.push((key.to_string(), value.to_string()));
+                } else if index == 0 {
+                    announce_delay_secs = Some(token.parse().map_err(|_| {
+                        CommandError::new(format!("invalid announce delay: {token}"))
+                    })?);
+                } else {
+                    return Err(CommandError::new(format!(
+                        "pn_enable options must be key=value: {token}"
+                    )));
+                }
+            }
             Ok(Some(Command::PnEnable {
                 announce_delay_secs,
+                options,
             }))
         }
         "pn_store_size" => Ok(Some(Command::PnStoreSize)),
+        "pn_peers" => Ok(Some(Command::PnPeers)),
+        "pn_reoffer" => {
+            let Some(hash) = parts.next() else {
+                return Err(CommandError::new("usage: pn_reoffer <hex>"));
+            };
+            Ok(Some(Command::PnReoffer {
+                peer: parse_destination_hash(hash)?,
+            }))
+        }
+        "pn_unhandled" => {
+            let Some(hash) = parts.next() else {
+                return Err(CommandError::new("usage: pn_unhandled <hex>"));
+            };
+            Ok(Some(Command::PnUnhandled {
+                peer: parse_destination_hash(hash)?,
+            }))
+        }
         "set_pn" => {
             let Some(hash) = parts.next() else {
                 return Err(CommandError::new("usage: set_pn <hex>"));
@@ -167,7 +216,7 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
 /// The length is checked here because a truncated hash in a scenario file is a
 /// typo, and "not 16 bytes" says that where "identity not known; call
 /// wait_for_peer first" does not.
-fn parse_destination_hash(hex: &str) -> Result<[u8; 16], CommandError> {
+pub fn parse_destination_hash(hex: &str) -> Result<[u8; 16], CommandError> {
     let bytes = hex_decode(hex)
         .ok_or_else(|| CommandError::new(format!("non-hexadecimal destination hash: {hex}")))?;
     bytes.as_slice().try_into().map_err(|_| {
@@ -374,6 +423,56 @@ mod tests {
         };
         assert_eq!(body_b64, "aGVsbG8gYm9i");
         assert_eq!(body, b"hello bob");
+    }
+
+    #[test]
+    fn pn_enable_takes_a_delay_and_lxmd_named_options() {
+        assert_eq!(
+            parse_command("pn_enable"),
+            Ok(Some(Command::PnEnable {
+                announce_delay_secs: None,
+                options: vec![]
+            }))
+        );
+        assert_eq!(
+            parse_command("pn_enable 1 stamp_cost=16 peering_cost=1"),
+            Ok(Some(Command::PnEnable {
+                announce_delay_secs: Some(1),
+                options: vec![
+                    ("stamp_cost".into(), "16".into()),
+                    ("peering_cost".into(), "1".into())
+                ]
+            }))
+        );
+        // Options without a delay.
+        assert_eq!(
+            parse_command("pn_enable max_peers=2"),
+            Ok(Some(Command::PnEnable {
+                announce_delay_secs: None,
+                options: vec![("max_peers".into(), "2".into())]
+            }))
+        );
+        // The failing sides: a bare non-first token, an empty value.
+        assert!(parse_command("pn_enable 1 what").is_err());
+        assert!(parse_command("pn_enable stamp_cost=").is_err());
+    }
+
+    #[test]
+    fn pn_peers_and_pn_reoffer_parse_with_their_failing_sides() {
+        let hash = "0102030405060708090a0b0c0d0e0f10";
+        let peer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        assert_eq!(parse_command("pn_peers"), Ok(Some(Command::PnPeers)));
+        assert_eq!(
+            parse_command(&format!("pn_reoffer {hash}")),
+            Ok(Some(Command::PnReoffer { peer }))
+        );
+        assert!(parse_command("pn_reoffer").is_err());
+        assert!(parse_command("pn_reoffer zz").is_err());
+        assert_eq!(
+            parse_command(&format!("pn_unhandled {hash}")),
+            Ok(Some(Command::PnUnhandled { peer }))
+        );
+        assert!(parse_command("pn_unhandled").is_err());
     }
 
     #[test]

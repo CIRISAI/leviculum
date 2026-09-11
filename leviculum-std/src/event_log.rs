@@ -471,6 +471,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_EVICT",
         required_keys: &["tid", "bytes", "age_s", "reason"],
     },
+    // Peering events (Codeberg #384 part 2): one line per peer-table
+    // change, per `/offer` round (either direction), per concluded or
+    // failed sync round. `peer` is the remote propagation destination
+    // hash.
+    EventSchema {
+        name: "PN_PEER",
+        required_keys: &["peer", "action", "reason"],
+    },
+    EventSchema {
+        name: "PN_OFFER",
+        required_keys: &["peer", "dir", "offered", "wanted"],
+    },
+    EventSchema {
+        name: "PN_SYNC",
+        required_keys: &["peer", "dir", "transferred", "bytes", "result"],
+    },
 ];
 
 /// Where the buffer is dumped on a panicking drop.

@@ -96,6 +96,15 @@ pub struct StoredMessage {
     pub received_at: u64,
     /// Leading-zero-bit value of the validated propagation stamp.
     pub stamp_value: u8,
+    /// Position in the store's append order, strictly monotone over the
+    /// store's lifetime: the domain of the per-peer sync cursor
+    /// (`docs/src/concepts/propagation-node-on-a-board.md` §5). On the
+    /// board this is `page_sequence(u32) << 16 | offset(u16)` — the record
+    /// log's page sequences are monotone, so the mapping is too. A store
+    /// may renumber only in ways that keep relative order; a peer cursor
+    /// that no longer matches any live sequence is answered by
+    /// [`crate::peering::build_offer`] with a bounded full re-offer.
+    pub sequence: u64,
 }
 
 /// The store a propagation node keeps its accepted messages in.
@@ -148,6 +157,15 @@ pub trait PropagationStore {
         self.for_each(&mut |_| total += 1)?;
         Ok(total)
     }
+
+    /// The highest live [`StoredMessage::sequence`], 0 when empty — what
+    /// the sync scheduler compares peer cursors against. One directory
+    /// pass by default.
+    fn newest_sequence(&self) -> Result<u64, StorageError> {
+        let mut newest = 0u64;
+        self.for_each(&mut |meta| newest = newest.max(meta.sequence))?;
+        Ok(newest)
+    }
 }
 
 /// The smallest body [`PropagationStore::append`] accepts: a destination hash
@@ -166,12 +184,14 @@ pub struct MemoryPropagationStore {
     entries: BTreeMap<TransientId, MemoryEntry>,
     capacity: u64,
     used: u64,
+    next_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
 struct MemoryEntry {
     received_at: u64,
     stamp_value: u8,
+    sequence: u64,
     body: Vec<u8>,
 }
 
@@ -181,6 +201,7 @@ impl MemoryPropagationStore {
             entries: BTreeMap::new(),
             capacity,
             used: 0,
+            next_sequence: 0,
         }
     }
 
@@ -214,11 +235,13 @@ impl PropagationStore for MemoryPropagationStore {
         if next > self.capacity {
             return Err(StorageError::Full);
         }
+        self.next_sequence += 1;
         self.entries.insert(
             *transient_id,
             MemoryEntry {
                 received_at,
                 stamp_value,
+                sequence: self.next_sequence,
                 body: body.to_vec(),
             },
         );
@@ -236,6 +259,7 @@ impl PropagationStore for MemoryPropagationStore {
                 size: entry.body.len() as u32,
                 received_at: entry.received_at,
                 stamp_value: entry.stamp_value,
+                sequence: entry.sequence,
             });
         }
         Ok(())

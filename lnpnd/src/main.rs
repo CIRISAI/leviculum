@@ -44,13 +44,13 @@ struct Args {
     #[arg(long)]
     name: Option<String>,
 
-    /// Propagation stamp cost announced to clients (announce field 5[0]).
+    /// Propagation stamp cost announced to clients (announce field 5\[0\]).
     /// 0 accepts uploads without proof-of-work; the Python reference never
     /// announces below 13, announcing lower is wire-legal and honoured.
     #[arg(long, default_value_t = 0)]
     stamp_cost: u8,
 
-    /// Peering cost announced to would-be peer nodes (announce field 5[2]).
+    /// Peering cost announced to would-be peer nodes (announce field 5\[2\]).
     /// Peering itself lands in a later part; the cost is announced now so
     /// the announce is complete.
     #[arg(long, default_value_t = 0)]
@@ -73,6 +73,38 @@ struct Args {
     /// `announce_interval` default of 360 minutes.
     #[arg(long, default_value_t = DEFAULT_ANNOUNCE_INTERVAL_SECS)]
     announce_interval_secs: u64,
+
+    /// Peer-table cap; lxmd's `max_peers` (reference default 20).
+    #[arg(long, default_value_t = 20)]
+    max_peers: usize,
+
+    /// Static peers, comma-separated destination hashes (hex); lxmd's
+    /// `static_peers`. Always peered, never culled, never capped.
+    #[arg(long, value_delimiter = ',')]
+    static_peers: Vec<String>,
+
+    /// Peer automatically on propagation announces; lxmd's `autopeer`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    autopeer: bool,
+
+    /// Hop depth inside which announces create peers; lxmd's
+    /// `autopeer_maxdepth` (reference default 4).
+    #[arg(long, default_value_t = 4)]
+    autopeer_maxdepth: u8,
+
+    /// Highest remote peering cost we mine a key for; lxmd's
+    /// `remote_peering_cost_max` (reference default 26).
+    #[arg(long, default_value_t = 26)]
+    remote_peering_cost_max: u8,
+
+    /// Concurrent inbound sync transfers before /offer answers throttled;
+    /// lxmd's `max_inbound_syncs` (reference default 3).
+    #[arg(long, default_value_t = 3)]
+    max_inbound_syncs: usize,
+
+    /// Accept /offer only from static peers; lxmd's `from_static_only`.
+    #[arg(long, default_value_t = false)]
+    from_static_only: bool,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -139,12 +171,39 @@ async fn main() -> ExitCode {
         name: args.name.map(String::into_bytes),
         ..leviculum_lxmf::PropagationNodeConfig::default()
     };
+    let mut static_peers = Vec::new();
+    for raw in &args.static_peers {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        match parse_hash(raw) {
+            Some(hash) => static_peers.push(hash),
+            None => return failure(format!("static peer '{raw}' is not a 16-byte hex hash")),
+        }
+    }
+    let peering = leviculum_lxmf::PeeringConfig {
+        max_peers: args.max_peers,
+        autopeer: args.autopeer,
+        autopeer_maxdepth: args.autopeer_maxdepth,
+        peering_cost: args.peering_cost,
+        remote_peering_cost_max: args.remote_peering_cost_max,
+        max_inbound_syncs: args.max_inbound_syncs,
+        from_static_only: args.from_static_only,
+        static_peers,
+    };
+    let peer_store = match leviculum_std::FilePeerStore::open(args.data_dir.join("peers")) {
+        Ok(store) => store,
+        Err(error) => return failure(format!("peer store: {error}")),
+    };
     let (engine, events) = Engine::new(EngineConfig {
         identity,
         node_config,
         store,
         announce_interval_secs: args.announce_interval_secs,
         announce_delay_secs: lnpnd::engine::ANNOUNCE_DELAY_SECS,
+        peering,
+        peer_store: Box::new(peer_store),
     });
 
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
@@ -207,6 +266,37 @@ async fn main() -> ExitCode {
                     eprintln!("lnpnd: served /get {form} ({count} message(s))")
                 }
                 EngineEvent::Evicted { count } => eprintln!("lnpnd: evicted {count} message(s)"),
+                EngineEvent::Peer {
+                    action,
+                    destination_hash,
+                    reason,
+                } => eprintln!(
+                    "lnpnd: peer {action} {} ({reason})",
+                    short_hex(&destination_hash)
+                ),
+                EngineEvent::Offer {
+                    dir,
+                    peer,
+                    offered,
+                    wanted,
+                } => eprintln!(
+                    "lnpnd: offer {dir} peer {} offered {offered} wanted {wanted}",
+                    short_hex(&peer)
+                ),
+                EngineEvent::SyncDone {
+                    dir,
+                    peer,
+                    transferred,
+                    bytes,
+                    result,
+                } => eprintln!(
+                    "lnpnd: sync {dir} peer {} transferred {transferred} ({bytes} B): {result}",
+                    short_hex(&peer)
+                ),
+                EngineEvent::KeyMined { peer, value } => eprintln!(
+                    "lnpnd: peering key mined for {} (value {value})",
+                    short_hex(&peer)
+                ),
             }
         }
     });
@@ -225,4 +315,19 @@ async fn main() -> ExitCode {
 fn store_free_kb(store: &FilePropagationStore) -> u64 {
     use leviculum_lxmf::PropagationStore as _;
     store.free_space() / 1000
+}
+
+fn short_hex(bytes: &[u8]) -> String {
+    bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_hash(raw: &str) -> Option<[u8; 16]> {
+    if raw.len() != 32 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut hash = [0u8; 16];
+    for (index, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&raw[2 * index..2 * index + 2], 16).ok()?;
+    }
+    Some(hash)
 }

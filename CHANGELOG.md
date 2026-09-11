@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Propagation-node peering (#384 part 2): lnpnd now peers with other
+  propagation nodes — including stock Python `lxmd` at its default
+  peering cost — and syncs its store both ways. The protocol half lives
+  in `leviculum-lxmf::peering` (`no_std + alloc`, board-ready behind a
+  `PeerStore` trait): a capped peer table fed by propagation announces
+  (autopeer within the configured hop depth, static list, deterministic
+  first-heard-wins policy at the cap, 14-day unreachability cull), the
+  `/offer` wire codec and inbound gate (peering-key validation at our
+  announced cost, throttling, `from_static_only`), and one append-order
+  cursor per peer instead of the reference's per-message peer sets —
+  everything at or below the cursor has been offered and concluded, a
+  stale cursor is a bounded full re-offer. Outbound rounds mine the
+  peer's peering key once on a worker thread, persist it, offer within
+  a 6144-byte bound, and advance the cursor only on the concluded
+  resource. Messages accepted at cost 0 get true stamp values computed
+  whenever any peer filters offers by value. New lnpnd flags use lxmd's
+  key names: `--max-peers`, `--static-peers`, `--autopeer`,
+  `--autopeer-maxdepth`, `--remote-peering-cost-max`,
+  `--max-inbound-syncs`, `--from-static-only`. Structured events:
+  `PN_PEER`, `PN_OFFER`, `PN_SYNC`. Verified end-to-end in an all-Rust
+  two-node loopback (autopeer, key mine, offer, sync, re-offer answered
+  "want none") and by new periculum conformance cells against genuine
+  stock `lxmd` peers, including a mixed-stack relay chain in both
+  directions, key reuse at stock cost 18, the peer cap, and store
+  overflow during an inbound sync.
+
 - lnpnd, an LXMF propagation node daemon (#384): the store-and-forward
   mailbox role on a running Reticulum shared instance. It announces
   `lxmf.propagation`, accepts client uploads (proving each packet only

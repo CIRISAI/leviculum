@@ -209,6 +209,17 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
         let digest = digest_from_base(&base, stamp);
         Ok(digest_valid(&digest, cost).then(|| digest_value(&digest)))
     }
+
+    /// The true value of a stamp regardless of any cost gate — what the
+    /// reference records even at cost 0 (`stamp_value`,
+    /// `reference/LXMF/LXMF/LXStamper.py:62-71`, reached through
+    /// `validate_pn_stamp` `:95`). Used by a peering node that accepts at
+    /// cost 0 but must store values its peers filter offers by
+    /// (`LXMPeer.py:340`).
+    pub async fn measure_stamp(&mut self, material: &[u8], stamp: &[u8; 32], rounds: usize) -> u16 {
+        let base = self.workblock_hasher(material, rounds).await;
+        digest_value(&digest_from_base(&base, stamp))
+    }
 }
 #[cfg(feature = "pow")]
 impl<R: CryptoRngCore> CooperativeStamper<R, CooperativeYield> {

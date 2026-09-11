@@ -24,6 +24,7 @@ pub mod file_identity_store;
 pub(crate) mod file_known_destinations_store;
 pub mod file_lxmf_store;
 pub(crate) mod file_packet_hash_store;
+pub mod file_peer_store;
 pub mod file_propagation_store;
 pub(crate) mod file_ratchet_store;
 /// Fuzzing-only entry points exposing crate-internal parsers to the detached
@@ -71,6 +72,7 @@ pub use driver::{
 };
 pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
+pub use file_peer_store::FilePeerStore;
 pub use file_propagation_store::FilePropagationStore;
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
