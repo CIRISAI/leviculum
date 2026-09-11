@@ -121,8 +121,8 @@ mount first and is lock-protected.
 ## Before pushing
 
 Nothing to type. `git push` triggers `.githooks/pre-push`, which lints
-the Woodpecker pipelines (`.githooks/pre-push:180`) and then runs
-`just fast` (Tier 0, `.githooks/pre-push:183`). A red Tier 0 aborts the
+the Woodpecker pipelines (`.githooks/pre-push:204`) and then runs
+`just fast` (Tier 0, `.githooks/pre-push:207`). A red Tier 0 aborts the
 push — fix, commit, and push again.
 
 Three cheap guards run before those minutes are spent. Two are about
@@ -131,8 +131,8 @@ what reaches a public forge: only `master` and tags go to Codeberg
 `.mcp.json` or `.claude/` goes there at all. The third is about the
 gates themselves — they test the working tree, so the working tree has
 to be what is being pushed. A tree with uncommitted tracked changes
-(`.githooks/pre-push:121`), or a push that would move `master` to
-anything but `HEAD` (`.githooks/pre-push:139`), is refused before the
+(`.githooks/pre-push:144`), or a push that would move `master` to
+anything but `HEAD` (`.githooks/pre-push:162`), is refused before the
 first gate starts: otherwise the verdict describes code that is not
 being pushed, in either direction. Untracked files are exempt; they are
 in no commit.

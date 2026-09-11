@@ -81,8 +81,31 @@ if [ "$prepush_public" = true ]; then
         # — still passes. A file truly named `CLAUDE.md<suffix>` is refused;
         # that spelling is far more often a leaked copy than a wanted source
         # file, and the remedy for the rare exception is a rename.
-        claude_hits="$(git -c core.quotepath=false log --format= --name-only \
-            --no-renames "${claude_range[@]}" -- \
+        # `git log` failing is NOT "no hits". With a remote sha this clone has
+        # never fetched (the forge moved; also: shallow clone, broken object)
+        # the range cannot be listed at all, and until 2026-09-11 that error
+        # vanished into the pipeline: empty output read as a clean range, push
+        # passed (measured — a scratch repo with a committed CLAUDE.md and an
+        # unknown remote sha went through with rc=0). So the listing is its own
+        # step with its status checked, and an unlistable range fails CLOSED:
+        # the guard cannot know the range is clean, so it refuses and says so.
+        # The `|| true` stays only on the grep below, where empty genuinely
+        # means "no matching path" — grep's rc=1 is its no-match verdict, not
+        # a swallowed error.
+        claude_list_rc=0
+        claude_files="$(git -c core.quotepath=false log --format= --name-only \
+            --no-renames "${claude_range[@]}" --)" || claude_list_rc=$?
+        if [ "$claude_list_rc" -ne 0 ]; then
+            echo "pre-push: REFUSED — cannot inspect what this push would publish." >&2
+            echo "pre-push: git could not list the range (${claude_range[*]})," >&2
+            echo "pre-push: so this guard cannot know whether Claude-specific files" >&2
+            echo "pre-push: are in it. Usually the forge has moved and this clone" >&2
+            echo "pre-push: has not fetched, so the base commit is missing locally:" >&2
+            echo "pre-push:   git fetch $ref_guard_remote" >&2
+            echo "pre-push: then push again." >&2
+            exit 1
+        fi
+        claude_hits="$(printf '%s\n' "$claude_files" \
             | grep -Ei '(^|/)CLAUDE\.md|(^|/)\.mcp\.json$|(^|/)\.claude/' \
             | sort -u || true)"
         if [ -n "$claude_hits" ]; then
@@ -155,7 +178,8 @@ done <<< "$prepush_refs"
 # selftest can exercise cheaply — everything below costs minutes. With
 # LEV_PREPUSH_GUARD_ONLY=1 the hook stops here, so scripts/check-prepush-guard.sh
 # can drive every outcome — the six ref-guard ones (refuse / master / tag /
-# delete / other-remote / multi-ref) and the three tree-guard ones (dirty /
+# delete / other-remote / multi-ref), the Claude-guard ones (hit / clean /
+# host-to-host / unlistable range), and the three tree-guard ones (dirty /
 # HEAD mismatch / clean) — against scratch repositories in about a second.
 # `just fast` runs it. It is a test hook, never set in normal use.
 [ "${LEV_PREPUSH_GUARD_ONLY:-0}" = "1" ] && exit 0

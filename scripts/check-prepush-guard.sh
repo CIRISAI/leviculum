@@ -164,6 +164,72 @@ run_hook "$claude_repo" hamster "$HOST_URL" \
     "refs/heads/master $claude_head refs/heads/master $ZERO"
 expect_pass "the same commit passes host-to-host"
 
+# The guard judges a RANGE, and listing the range can itself fail: the remote
+# sha in a pre-push line is what the forge advertises, and when the forge has
+# moved past what this clone has fetched, that object is missing locally and
+# `git log <remote>..<local>` dies. Until 2026-09-11 the pipeline read that
+# death as an empty file list and a `--force` push then published whatever the
+# range held. An unlistable range must refuse — for a clean range too, because
+# the guard cannot know it is clean without listing it.
+UNKNOWN="1111111111111111111111111111111111111111"
+CANNOT_INSPECT="cannot inspect what this push would publish"
+
+run_hook "$claude_repo" origin "$PUBLIC_URL" \
+    "refs/heads/master $claude_head refs/heads/master $UNKNOWN"
+expect_refusal "an unknown remote sha refuses even with CLAUDE.md in the range" \
+    "$CANNOT_INSPECT"
+
+clean_head="$(git -C "$repo" rev-parse HEAD)"
+run_hook "$repo" origin "$PUBLIC_URL" \
+    "refs/heads/master $clean_head refs/heads/master $UNKNOWN"
+expect_refusal "an unknown remote sha refuses a clean range too" \
+    "$CANNOT_INSPECT"
+
+# With the base known the guard inspects the range as before: a range that
+# adds CLAUDE.md is refused for its content, a clean one passes.
+claude_base="$(git -C "$claude_repo" rev-parse HEAD~1)"
+run_hook "$claude_repo" origin "$PUBLIC_URL" \
+    "refs/heads/master $claude_head refs/heads/master $claude_base"
+expect_refusal "a known base with CLAUDE.md in the range is still refused" \
+    "carries Claude-specific files"
+
+clean_base="$(git -C "$repo" rev-parse HEAD~1)"
+run_hook "$repo" origin "$PUBLIC_URL" \
+    "refs/heads/master $clean_head refs/heads/master $clean_base"
+expect_pass "a known base with a clean range passes"
+
+# Positive control: put the swallowing `|| true` back into a copy of the hook
+# and show the unknown-sha case PASS there. This proves the two refusal cases
+# above detect the 2026-09-11 defect instead of passing vacuously; if the
+# hook's shape drifts so far that the sed finds nothing to put back, that is
+# a failure of this control, not a pass.
+swallow_hook="$WORK/swallowing-pre-push"
+sed 's/|| claude_list_rc=\$?/|| true/' "$HOOK" >"$swallow_hook"
+chmod +x "$swallow_hook"
+CHECKS=$((CHECKS + 1))
+if cmp -s "$swallow_hook" "$HOOK"; then
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    positive control: found no guarded listing to" >&2
+    echo "[prepush-guard]         un-guard in the hook; the control is vacuous" >&2
+else
+    echo "[prepush-guard] ok      positive control: restored the swallowing pipeline"
+fi
+
+real_hook="$HOOK"
+HOOK="$swallow_hook"
+run_hook "$claude_repo" origin "$PUBLIC_URL" \
+    "refs/heads/master $claude_head refs/heads/master $UNKNOWN"
+HOOK="$real_hook"
+CHECKS=$((CHECKS + 1))
+if [ "$rc" -eq 0 ]; then
+    echo "[prepush-guard] ok      positive control: the swallowing hook lets the unknown-sha push through"
+else
+    FAILURES=$((FAILURES + 1))
+    echo "[prepush-guard] FAIL    positive control: the swallowing copy refused; the" >&2
+    echo "[prepush-guard]         unknown-sha cases above prove nothing about the fix" >&2
+    printf '%s\n' "${out:-}" | sed 's|^|[prepush-guard]         |' >&2
+fi
+
 # --- tree guard --------------------------------------------------------------
 # The gates below the guards test the WORKING TREE. These three cases are the
 # whole claim: what the gates test and what the push publishes must be the
