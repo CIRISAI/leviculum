@@ -419,3 +419,28 @@ fn frame_key_tracks_ble_peers() {
     };
     assert_ne!(base.key(), no_ble.key());
 }
+
+/// The integer 5dp coordinate renderer replaced `write!(.., "{:.5}", v)`
+/// (the firmware's last f64 Display). The float formatting it replaced is
+/// the expected value: every rendering must match it byte for byte, across
+/// signs, magnitudes, carry-into-the-integer-part rounding, and the
+/// negative-zero a West/South hemisphere conversion produces.
+#[test]
+fn coord_5dp_matches_the_float_formatting_it_replaced() {
+    let mut cases: Vec<f64> = vec![
+        0.0, -0.0, 53.07516, 8.80777, -53.07516, -8.80777, 90.0, -90.0, 180.0, -180.0,
+        // rounding carries all the way through the fraction
+        0.999999, -0.999999, 179.999996, // fraction rounds down to zero
+        0.000004, -0.000004, // smallest step the panel resolves
+        0.00001, -0.00001, 51.1657, // exactly representable nowhere, typical two-sided case
+    ];
+    // A dense sweep across a degree so no rounding bucket goes untested.
+    for i in 0..100_000u32 {
+        cases.push(52.0 + f64::from(i) * 1e-5 + 3.3e-6);
+    }
+    for v in cases {
+        let mut s = heapless::String::<24>::new();
+        leviculum_screen::write_coord_5dp(&mut s, v).unwrap();
+        assert_eq!(s.as_str(), format!("{v:.5}"), "coordinate {v:?}");
+    }
+}

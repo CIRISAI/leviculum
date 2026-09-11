@@ -249,7 +249,9 @@ impl StatusModel<'_> {
                 let _ = write!(line5, "GPS: {} sat {}", sats, label);
                 match coords {
                     Some((lat, lon)) => {
-                        let _ = write!(line6, "{:.5},{:.5}", lat, lon);
+                        let _ = write_coord_5dp(&mut line6, lat);
+                        let _ = line6.push(',');
+                        let _ = write_coord_5dp(&mut line6, lon);
                     }
                     None => {
                         let _ = write!(line6, "(no fix)");
@@ -293,6 +295,31 @@ impl StatusModel<'_> {
         }
         Ok(())
     }
+}
+
+/// Render a finite coordinate as `{:.5}` would — sign, integer degrees,
+/// exactly five decimals — through integer formatting only. This line was
+/// the firmware's last f64 Display, and `{:.5}` on an f64 links core's
+/// flt2dec machinery (dragon, grisu, their power tables) into the image;
+/// a coordinate needs none of it at a fixed 1e-5-degree resolution
+/// (~1.1 m, the panel's established quantum, see [`FrameKey`]).
+///
+/// Rounding is half-up on the binary value where `{:.5}` rounds on the
+/// decimal expansion; the two can only part ways when `|v| * 1e5` lands
+/// exactly between two integers, which a parsed NMEA coordinate does not
+/// hit in practice and which would differ by one 1e-5 step — below the
+/// receiver's own jitter. The sign is taken from the value itself so a
+/// West/South zero keeps its `-0.00000` rendering.
+pub fn write_coord_5dp(w: &mut impl core::fmt::Write, v: f64) -> core::fmt::Result {
+    let neg = v.is_sign_negative();
+    let mag = if neg { -v } else { v };
+    // core has no f64::round; +0.5-then-truncate is round-half-up for the
+    // non-negative finite values a coordinate is.
+    let scaled = (mag * 1e5 + 0.5) as u64;
+    if neg {
+        w.write_char('-')?;
+    }
+    write!(w, "{}.{:05}", scaled / 100_000, scaled % 100_000)
 }
 
 /// Format the identity hash as 10 hex chars (5 bytes).
