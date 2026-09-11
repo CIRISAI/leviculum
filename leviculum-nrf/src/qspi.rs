@@ -83,16 +83,78 @@
 //! | something else | a third thing, and the bytes are the evidence for whatever it is. |
 //!
 //! So before it gives up, that path drops the peripheral, takes the same
-//! pins back as ordinary GPIOs, and asks 0x9F again by hand at 250 kHz
+//! pins back as ordinary GPIOs, and asks again by hand at 250 kHz
 //! (`bitbang_second_opinion` below, shifter in
-//! [`leviculum_qspi_bitbang`]).
-//! One extra `[QSPI] BITBANG` line, then `None` exactly as before. It
-//! reads an identifier and writes nothing — the only opcode the shifter
-//! knows is 0x9F, and there is no path from here to one that erases.
+//! [`leviculum_qspi_bitbang`]). Four extra `[QSPI]` lines, then `None`
+//! exactly as before. Everything it sends is a read or the datasheet reset
+//! pair; nothing it sends writes to the part, and the shifter has no
+//! opcode that could — not even `06h` WREN.
 //!
 //! **Only on that path.** A board whose part answers reaches `state=ok`
 //! without a single GPIO write from any of this, and its boot is not a
 //! cycle slower.
+//!
+//! # What the four lines say
+//!
+//! The first batch asked `9Fh` once and stopped, and `00:00:00` from that
+//! one question turned out to be a reading the part's own datasheet
+//! forbids taking at face value. Two sentences of Macronix MX25R1635F
+//! rev. 1.6 are why this path grew:
+//!
+//! - **§10-3**, "While Program/Erase operation is in progress, it will not
+//!   decode the RDID instruction." A busy part is mute to `9Fh`
+//!   *specifically*. `05h` answers in that state, and it is the question
+//!   we had never asked first.
+//! - **Pin 7 is HOLD# *or* RESET#** depending on the part's configuration.
+//!   If it is acting as RESET# and sits low, nothing answers whatever is
+//!   sent — and before our init that pin is an input with no pull, i.e.
+//!   floating.
+//!
+//! So the path now proves our own side first, then asks the part the
+//! questions it is allowed to answer. All four readings are pre-registered
+//! below, so a capture is read against a table written before the boot
+//! rather than interpreted after it.
+//!
+//! ## `[QSPI] PINS sck=<ok|stuck> cs=.. io0=.. io1=.. io2=.. io3=..`
+//!
+//! Each pin driven to both levels and read back through its own input
+//! buffer. `stuck` means the readback did not follow. This proves the MCU
+//! controls the lines before anything is concluded about what is on them;
+//! a `stuck` here makes every line after it uninterpretable.
+//!
+//! ## `[QSPI] MISO pullup=<0|1> pulldown=<0|1>`
+//!
+//! CS# high, so a part that is present has released IO1 (its SO). The line
+//! is then read once under the nRF's internal pull-up and once under its
+//! pull-down, and what it does under them is the measurement that matters:
+//!
+//! | pullup / pulldown | conclusion |
+//! |---|---|
+//! | 1 / 0 | the line follows our pull: nothing external drives it. Open connection or a dead part. |
+//! | 0 / 0 | something holds it low: a short, the header, or the part itself. |
+//! | 1 / 1 | something holds it high. |
+//!
+//! ## `[QSPI] BITBANG id=<hh:hh:hh> clk_khz=..`
+//!
+//! `9Fh` by hand, before the reset. Unchanged from the first batch, and
+//! the "before" half of the pair the line below completes.
+//!
+//! ## `[QSPI] PROBE rdsr=<hh> rdid=<hh:hh:hh> rems=<hh:hh> after_reset=1 wip=<0|1>`
+//!
+//! The datasheet's own wake-up sequence — `66h`/`99h` with WP# and HOLD#
+//! held high — and then the three read opcodes:
+//!
+//! | observed | conclusion |
+//! |---|---|
+//! | any of them non-zero and non-`ff` | the part is alive; the earlier silence was a state the reset cleared |
+//! | `rdsr` answers, `rdid` does not | the part is busy (WIP set, `wip=1`), §10-3 |
+//! | all `00` | nothing on the bus responds under any command |
+//! | all `ff` | the bus floats high; with `pulldown=0` above that is a contradiction worth its own line |
+//!
+//! One pass, one line each. No retries and no frequency ladder: this runs
+//! on a board that has already failed to answer, the caller returns `None`
+//! whatever comes back, and a ladder would produce more lines and no more
+//! information than the first.
 
 use embassy_nrf::qspi::{self, Config, Frequency, Qspi};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
@@ -400,41 +462,138 @@ impl leviculum_qspi_bitbang::Bus for GpioBus {
     }
 }
 
+/// Core cycles per microsecond at the nRF52840's 64 MHz core.
+const CYCLES_PER_US: u32 = 64;
+
+/// Settle between driving a pin and reading its own pad level back, stage
+/// 1a. 10 us against a GPIO that switches in nanoseconds — the margin is
+/// there so a line loaded by a long trace or a sleeping part's input
+/// capacitance is not read before it has arrived.
+const PIN_READBACK_CYCLES: u32 = 10 * CYCLES_PER_US;
+
+/// Settle after changing IO1's internal pull, stage 1b.
+///
+/// The nRF52840's internal pull is ~13 kOhm (nRF52840 PS v1.8, §6.9.3
+/// "Electrical specification", `R_PU`/`R_PD`), so against even a few
+/// hundred pF of bus capacitance the line is at its new level in a few
+/// microseconds. 100 us is two orders over that, and it runs twice, once
+/// per boot, on a board that has already failed.
+const PULL_SETTLE_CYCLES: u32 = 100 * CYCLES_PER_US;
+
+/// Settle after WP# and HOLD# are driven high, before anything is clocked.
+///
+/// 100 us. If pin 7 has been acting as RESET# and sitting low, this is the
+/// first moment the part has ever been out of reset, and `tREADY1` — the
+/// time from the rising edge to the part accepting an instruction — is
+/// 35 us max (MX25R1635F rev. 1.6, Table 17 "AC Characteristics").
+const HOLD_SETTLE_CYCLES: u32 = 100 * CYCLES_PER_US;
+
+/// Settle after the `66h`/`99h` pair, before the first read.
+///
+/// 50 us against the same 35 us `tREADY1`. Small margin, deliberately:
+/// anything the part does in this window it does on its own, and a long
+/// wait here would blur a reset that worked into one that did not.
+const RESET_RECOVERY_CYCLES: u32 = 50 * CYCLES_PER_US;
+
+/// Drive a pin to both levels and read each one back through the pin's own
+/// input buffer. `true` when the readback followed both times.
+///
+/// `set_as_input_output` rather than `set_as_output` because
+/// `set_as_output` writes `INPUT: Disconnect` into `PIN_CNF`
+/// (`set_as_output`, `embassy-nrf-0.9.0/src/gpio.rs:362`), and a
+/// disconnected input buffer reads zero forever — which would report every
+/// pin as `stuck` and prove nothing.
+///
+/// `OutputDrive::Standard` rather than the high drive the transfer uses:
+/// if a line is shorted, this is the moment it is found out, and the
+/// standard driver is the one that spends the least current finding out.
+///
+/// Leaves the pin disconnected, which is where `Qspi::drop` left five of
+/// the six; CS# is the exception and its caller restores it.
+fn pin_follows(pin: &mut Flex<'static>) -> bool {
+    pin.set_high();
+    pin.set_as_input_output(Pull::None, OutputDrive::Standard);
+    cortex_m::asm::delay(PIN_READBACK_CYCLES);
+    let high = pin.is_high();
+
+    pin.set_low();
+    cortex_m::asm::delay(PIN_READBACK_CYCLES);
+    let low = pin.is_low();
+
+    pin.set_as_disconnected();
+    high && low
+}
+
+/// The two words the `PINS` line is allowed to use.
+fn ok_or_stuck(followed: bool) -> &'static str {
+    if followed {
+        "ok"
+    } else {
+        "stuck"
+    }
+}
+
 /// Ask the pins directly, once, and say what they answered.
 ///
 /// Only reached from the `state=no-answer` branch of [`identify_at_boot`],
-/// and only after the `Qspi` is dropped. One read of opcode 0x9F at
-/// [`BITBANG_CLK_KHZ`], one `[QSPI] BITBANG` line, no retry and no second
-/// opcode: the caller returns `None` either way, so a ladder of attempts
-/// would produce more lines and no more information than the first.
+/// and only after the `Qspi` is dropped. Four `[QSPI]` lines — `PINS`,
+/// `MISO`, `BITBANG`, `PROBE` — and the table each is read by is in the
+/// module docs above, written before the boot rather than after it. One
+/// pass per line, no retry and no frequency ladder: the caller returns
+/// `None` either way, so a ladder of attempts would produce more lines and
+/// no more information than the first.
 ///
-/// # Reading the answer
+/// # The order, and why it is that order
 ///
-/// See the table in the module docs. Two details of the wiring below feed
-/// into it and are worth having in front of you:
+/// Nothing may be concluded about the part until our own side is proven,
+/// so the pins come first (`PINS`) and what is on IO1 when nobody of ours
+/// drives it comes second (`MISO`). Only then is anything clocked.
 ///
-/// - IO1 is read with a **pull-down**. Without one, an undriven wire is a
-///   floating input and the bytes would be noise rather than evidence, so
-///   `00:00:00` has to be made to mean something: it means the wire never
-///   left the level the nRF's own internal pull put it at. A part that is
-///   present drives IO1 push-pull and wins against a pull of that order
-///   easily, so it cannot suppress a real answer — which also
-///   makes `ff:ff:ff` a genuine "something else" here and not the
-///   idle reading it would be under a pull-up.
-/// - IO2 and IO3 are driven high for the whole transfer. They are the
-///   part's WP# and HOLD#, and a part with HOLD# low suspends the transfer
-///   and answers nothing. The QSPI peripheral was doing this implicitly
-///   through `CINSTRCONF.LIO2`/`LIO3`
-///   (`embassy-nrf-0.9.0/src/qspi.rs:290`); by hand it is explicit.
+/// CS# is tested first of the six and put straight back to driven-high, so
+/// the part is deselected for every other pin's test and cannot read a
+/// stray SCK edge as the start of a command. Nothing here ever asserts a
+/// write-enable, so even a fully mis-clocked byte cannot reach a state
+/// where the part would program or erase.
+///
+/// Stage 1a's IO3 test is also the first thing on this board that ever
+/// gives pin 7 a defined low and then a defined high. On a part where that
+/// pin is configured as RESET# rather than HOLD#, that *is* a hardware
+/// reset, and the `PROBE` line below is read after it — which is one more
+/// reason `after_reset=1` is on that line and not on `BITBANG`.
+///
+/// `BITBANG` is the cold `9Fh`, before the reset; `PROBE` is the same
+/// question plus `05h` and `90h` after it, which is what `after_reset=1`
+/// on that line means. The pair is the evidence for whether the reset
+/// changed anything, and neither line alone is.
+///
+/// # Two details of the wiring
+///
+/// - IO1 is read with a **pull-down** during the transfers. Without one,
+///   an undriven wire is a floating input and the bytes would be noise
+///   rather than evidence, so `00:00:00` has to be made to mean something:
+///   it means the wire never left the level the nRF's own internal pull
+///   put it at. A part that is present drives IO1 push-pull and wins
+///   against a pull of that order easily, so it cannot suppress a real
+///   answer — which also makes `ff:ff:ff` a genuine "something else" here
+///   and not the idle reading it would be under a pull-up. (Stage 1b reads
+///   it under both pulls on purpose; that is the one place the pull is the
+///   measurement rather than a floor under it.)
+/// - IO2 and IO3 are driven high from the end of stage 1b onwards. They
+///   are the part's WP# and pin 7, and pin 7 is HOLD# *or* RESET#: a part
+///   with HOLD# low suspends the transfer and answers nothing, and a part
+///   held in RESET# answers nothing at all. The QSPI peripheral was doing
+///   this implicitly through `CINSTRCONF.LIO2`/`LIO3`
+///   (`embassy-nrf-0.9.0/src/qspi.rs:290`); by hand it is explicit, and
+///   [`HOLD_SETTLE_CYCLES`] is the recovery time that follows raising them.
 ///
 /// One ambiguity this does not resolve, and should not be read past: a
-/// part still in Deep Power Down answers nothing here either, because the
-/// only opcode it would honour is 0xAB and this sends 0x9F. That is not
-/// worth a second opcode. `identify_at_boot` already sent 0xAB and pulsed
-/// CS# low three times before reaching this branch, so on any board where
-/// the QSPI reaches the part the part is awake — and on a board where it
-/// does not, the interesting row of the table is the one where the
-/// hand-clocked read *succeeds*, which no amount of sleep can fake.
+/// part still in Deep Power Down answers nothing to `9Fh` here either,
+/// because the only opcode it would honour is `0xAB`. `identify_at_boot`
+/// already sent `0xAB` and pulsed CS# low three times before reaching this
+/// branch, so on any board where the QSPI reaches the part the part is
+/// awake — and on a board where it does not, the interesting rows of the
+/// tables are the ones where something *answers*, which no amount of sleep
+/// can fake.
 ///
 /// # What it leaves behind
 ///
@@ -450,34 +609,107 @@ impl leviculum_qspi_bitbang::Bus for GpioBus {
 fn bitbang_second_opinion(pins: [Peri<'static, AnyPin>; 6]) {
     let [sck, csn, io0, io1, io2, io3] = pins;
 
-    // WP# and HOLD# first, before anything can be selected.
-    let mut wp = Flex::new(io2);
-    wp.set_high();
-    wp.set_as_output(OutputDrive::HighDrive);
-    let mut hold = Flex::new(io3);
-    hold.set_high();
-    hold.set_as_output(OutputDrive::HighDrive);
-
-    // CS# is already an output driven high, so setting the level before
-    // the direction keeps it that way through the handover: no glitch a
-    // sleeping part could read as a select.
+    let mut sck = Flex::new(sck);
     let mut csn = Flex::new(csn);
+    let mut io0 = Flex::new(io0);
+    let mut io1 = Flex::new(io1);
+    let mut wp = Flex::new(io2);
+    let mut hold = Flex::new(io3);
+
+    // Stage 1a: does the MCU control these six lines at all? CS# first,
+    // and back to driven-high immediately, so every test after it runs
+    // with the part deselected.
+    let cs_ok = pin_follows(&mut csn);
     csn.set_high();
     csn.set_as_output(OutputDrive::HighDrive);
 
-    let mut sck = Flex::new(sck);
+    let sck_ok = pin_follows(&mut sck);
+    let io0_ok = pin_follows(&mut io0);
+    let io1_ok = pin_follows(&mut io1);
+    let io2_ok = pin_follows(&mut wp);
+    let io3_ok = pin_follows(&mut hold);
+
+    crate::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!(
+            "PINS sck={} cs={} io0={} io1={} io2={} io3={}",
+            ok_or_stuck(sck_ok),
+            ok_or_stuck(cs_ok),
+            ok_or_stuck(io0_ok),
+            ok_or_stuck(io1_ok),
+            ok_or_stuck(io2_ok),
+            ok_or_stuck(io3_ok),
+        ),
+    );
+
+    // Stage 1b: with CS# high a present part has released IO1, so whatever
+    // the line does under our two pulls, it does without us driving it.
+    // This is the line that separates "open connection" from "held".
+    io1.set_as_input(Pull::Up);
+    cortex_m::asm::delay(PULL_SETTLE_CYCLES);
+    let miso_pullup = io1.is_high();
+    io1.set_as_input(Pull::Down);
+    cortex_m::asm::delay(PULL_SETTLE_CYCLES);
+    let miso_pulldown = io1.is_high();
+
+    crate::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!(
+            "MISO pullup={} pulldown={}",
+            u8::from(miso_pullup),
+            u8::from(miso_pulldown)
+        ),
+    );
+
+    // WP# and pin 7 high for everything below, and held there until the
+    // pins are handed back. If pin 7 has been acting as RESET#, this is
+    // the edge that lets the part answer at all.
+    wp.set_high();
+    wp.set_as_output(OutputDrive::HighDrive);
+    hold.set_high();
+    hold.set_as_output(OutputDrive::HighDrive);
+    cortex_m::asm::delay(HOLD_SETTLE_CYCLES);
+
     sck.set_low();
     sck.set_as_output(OutputDrive::HighDrive);
-
-    let mut io0 = Flex::new(io0);
     io0.set_low();
     io0.set_as_output(OutputDrive::HighDrive);
-
-    let mut io1 = Flex::new(io1);
     io1.set_as_input(Pull::Down);
 
     let mut bus = GpioBus { sck, csn, io0, io1 };
+
+    // Cold, before the reset.
     let id = leviculum_qspi_bitbang::read_jedec_id(&mut bus);
+    crate::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!(
+            "BITBANG id={} clk_khz={}",
+            JedecId(Some(id)),
+            BITBANG_CLK_KHZ
+        ),
+    );
+
+    // Stage 2: the datasheet's wake-up sequence, then the three questions
+    // a part in an unknown state is allowed to answer. `reset` clocks
+    // `66h` and `99h` adjacent with nothing between them, which is what
+    // makes the reset honoured rather than ignored.
+    leviculum_qspi_bitbang::reset(&mut bus);
+    cortex_m::asm::delay(RESET_RECOVERY_CYCLES);
+    let rdsr = leviculum_qspi_bitbang::read_status(&mut bus);
+    let rdid = leviculum_qspi_bitbang::read_jedec_id(&mut bus);
+    let rems = leviculum_qspi_bitbang::read_manufacturer_device_id(&mut bus);
+
+    crate::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!(
+            "PROBE rdsr={:02x} rdid={} rems={:02x}:{:02x} after_reset=1 wip={}",
+            rdsr,
+            JedecId(Some(rdid)),
+            rems[0],
+            rems[1],
+            u8::from(rdsr & leviculum_qspi_bitbang::STATUS_WIP != 0),
+        ),
+    );
 
     let GpioBus { sck, csn, io0, io1 } = bus;
     // Give the pins back. Dropping a `Flex` disconnects it, which is what
@@ -489,15 +721,6 @@ fn bitbang_second_opinion(pins: [Peri<'static, AnyPin>; 6]) {
     drop(wp);
     drop(hold);
     csn.persist();
-
-    crate::log::log_fmt_critical(
-        "[QSPI] ",
-        format_args!(
-            "BITBANG id={} clk_khz={}",
-            JedecId(Some(id)),
-            BITBANG_CLK_KHZ
-        ),
-    );
 }
 
 /// One JEDEC id read (opcode 0x9F). `None` is a transaction the peripheral
