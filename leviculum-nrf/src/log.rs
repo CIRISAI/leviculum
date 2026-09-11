@@ -424,6 +424,18 @@ struct TracingVisitor<'a> {
 }
 
 impl tracing_core::field::Visit for TracingVisitor<'_> {
+    // Not for behaviour — no event in the firmware graph records an f64
+    // field today — but for the vtable: the default record_f64 forwards
+    // the value as &dyn Debug, and that f64-Debug vtable alone kept
+    // core's whole flt2dec apparatus (dragon, grisu, their power tables,
+    // ~13 KiB) linked into both images. Fixed-point at 1e-6 keeps any
+    // future float field readable without inviting the tables back.
+    fn record_f64(&mut self, field: &tracing_core::field::Field, value: f64) {
+        let mut w = leviculum_log_line::Sink::new(self.buf, self.len);
+        let _ = core::fmt::Write::write_fmt(&mut w, format_args!(" {}=", field.name()));
+        let _ = leviculum_log_line::write_f64_micro(&mut w, value);
+    }
+
     fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn core::fmt::Debug) {
         let mut w = leviculum_log_line::Sink::new(self.buf, self.len);
         if field.name() == "message" {

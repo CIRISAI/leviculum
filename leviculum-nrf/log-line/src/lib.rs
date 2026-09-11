@@ -145,6 +145,28 @@ pub fn format_line<'a>(
     &buf[..len]
 }
 
+/// Write a finite f64 as sign, integer part, and exactly six decimals
+/// (1e-6 resolution) through integer formatting only.
+///
+/// This is the firmware log path's float rendering: the tracing
+/// visitor's default `record_f64` forwards a value as `&dyn Debug`, and
+/// that single f64-Debug vtable kept core's flt2dec apparatus (dragon,
+/// grisu, their power tables, ~13 KiB) linked into both images even
+/// though no event records an f64 today. Rounding is half-up on the
+/// binary value; magnitudes above u64::MAX microunits saturate, which
+/// is all a log line owes a float.
+pub fn write_f64_micro(w: &mut impl core::fmt::Write, value: f64) -> core::fmt::Result {
+    let neg = value.is_sign_negative();
+    let mag = if neg { -value } else { value };
+    // core has no f64::round; +0.5-then-truncate rounds half-up for the
+    // non-negative finite values left after the sign split.
+    let micros = (mag * 1e6 + 0.5) as u64;
+    if neg {
+        w.write_char('-')?;
+    }
+    write!(w, "{}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -170,6 +192,55 @@ mod tests {
         let mut buf = [0u8; 1024];
         let bytes = format_line(&mut buf, prefix, args, stamp);
         String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// The integer micro-formatter replaced the default tracing
+    /// `record_f64` path (f64 as `{:?}`). The float formatter's own
+    /// six-decimal rendering is the expected value: every output must
+    /// match `format!("{:.6}")` byte for byte, across signs, magnitudes,
+    /// carry-through rounding, negative zero, and saturation.
+    #[test]
+    fn f64_micro_matches_the_float_formatting_it_replaced() {
+        let mut cases: std::vec::Vec<f64> = std::vec![
+            0.0,
+            -0.0,
+            1.5,
+            -1.5,
+            0.000001,
+            -0.000001,
+            0.9999996,
+            -0.9999996,
+            1234.567891,
+            53.075161,
+            -8.807771,
+        ];
+        for i in 0..100_000u32 {
+            cases.push(f64::from(i) * 1e-6 + 3.3e-7);
+        }
+        for v in cases {
+            let mut buf = [0u8; 64];
+            let mut len = 0usize;
+            let mut w = Sink::new(&mut buf, &mut len);
+            write_f64_micro(&mut w, v).unwrap();
+            let got = core::str::from_utf8(&buf[..len]).unwrap();
+            assert_eq!(got, std::format!("{v:.6}"), "value {v:?}");
+        }
+    }
+
+    /// Out-of-range magnitudes saturate instead of wrapping: the exact
+    /// digits stop mattering above u64::MAX microunits, the sign and
+    /// "very large" must survive.
+    #[test]
+    fn f64_micro_saturates_on_overflow() {
+        let mut buf = [0u8; 64];
+        let mut len = 0usize;
+        let mut w = Sink::new(&mut buf, &mut len);
+        write_f64_micro(&mut w, 1e30).unwrap();
+        let got = core::str::from_utf8(&buf[..len]).unwrap();
+        assert_eq!(
+            got,
+            std::format!("{}.{:06}", u64::MAX / 1_000_000, u64::MAX % 1_000_000)
+        );
     }
 
     #[test]
