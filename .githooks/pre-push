@@ -97,11 +97,67 @@ if [ "$prepush_public" = true ]; then
     done <<< "$prepush_refs"
 fi
 
+# --- tree guard: the gates below judge the tree, so the tree must be the push -
+# Everything under this line — the pipeline lint, `just fast` — runs against
+# the WORKING TREE, and nothing in this hook has ever compared that tree with
+# the commit the push publishes. The verdict is therefore about whatever
+# happened to be checked out, which is only the same thing by habit.
+#
+# Both directions are real. On 2026-09-11 a push of 081522b2 — gated green an
+# hour earlier — was refused because a coder pass had left a half-finished
+# record-log port in the tree. The opposite case costs more and is just as
+# easy to reach: a dirty tree that happens to pass waves through a commit that
+# nothing ever tested.
+#
+# Untracked files deliberately do not count. Every working tree has them
+# (scratch logs, unignored build output, a note beside the code), they are in
+# no commit, and refusing on them would make this hook fire on a state that is
+# normal. A hook that fires on the normal state is a hook people push past
+# with `--no-verify`, which switches off the guards above as well — the exact
+# failure the removed Tier 2 gate documented at the end of this file.
+#
+# Both checks apply to every remote, not only the public one: a gate run that
+# describes the wrong content is worthless wherever the commit is going.
+prepush_dirty="$(git status --porcelain --untracked-files=no --ignore-submodules=untracked)"
+if [ -n "$prepush_dirty" ]; then
+    echo "pre-push: REFUSED — the working tree has uncommitted tracked changes:" >&2
+    printf '%s\n' "$prepush_dirty" | sed 's|^|pre-push:   |' >&2
+    echo "pre-push: the gates below would test THIS TREE, not the commit being pushed." >&2
+    echo "pre-push: commit the changes, or push from a clean checkout of that sha:" >&2
+    echo "pre-push:   git clone . /tmp/push-tree && git -C /tmp/push-tree checkout <sha>" >&2
+    exit 1
+fi
+
+# Same rule, other half: `just fast` can only speak for the commit at HEAD, so
+# a push that would move master to anything else is ungated.
+#
+# refs/heads/master only. A tag, or a feature branch fetched from the other
+# host, is routinely pushed from a tree standing somewhere else entirely, and
+# refusing those would block the host-to-host path that exists so feature
+# branches never reach the forge (see the ref guard at the top). master is
+# where gated commits land, and it is the ref this hook's verdict is about.
+prepush_head="$(git rev-parse HEAD)"
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+    [ -z "$remote_ref" ] && continue
+    # Deletion: nothing is being gated, and the ref guard already let it by.
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    [ "$remote_ref" = "refs/heads/master" ] || continue
+    [ "$local_sha" = "$prepush_head" ] && continue
+    echo "pre-push: REFUSED — '$remote_ref' would get $local_sha," >&2
+    echo "pre-push: but HEAD, the tree the gates below test, is $prepush_head." >&2
+    echo "pre-push: whatever the gates say would be about a different commit." >&2
+    echo "pre-push: push from a clean checkout of $local_sha instead:" >&2
+    echo "pre-push:   git clone . /tmp/push-tree && git -C /tmp/push-tree checkout $local_sha" >&2
+    exit 1
+done <<< "$prepush_refs"
+
 # Testability affordance: the guards above are the only part of this hook a
 # selftest can exercise cheaply — everything below costs minutes. With
-# LEV_PREPUSH_GUARD_ONLY=1 the hook stops here, so `lev-selftest` can assert
-# all six ref-guard outcomes (refuse / master / tag / delete / other-remote /
-# multi-ref) in under a second. It is a test hook, never set in normal use.
+# LEV_PREPUSH_GUARD_ONLY=1 the hook stops here, so scripts/check-prepush-guard.sh
+# can drive every outcome — the six ref-guard ones (refuse / master / tag /
+# delete / other-remote / multi-ref) and the three tree-guard ones (dirty /
+# HEAD mismatch / clean) — against scratch repositories in about a second.
+# `just fast` runs it. It is a test hook, never set in normal use.
 [ "${LEV_PREPUSH_GUARD_ONLY:-0}" = "1" ] && exit 0
 
 # git runs hooks with the login shell's PATH, not an interactive one, so

@@ -121,11 +121,28 @@ mount first and is lock-protected.
 ## Before pushing
 
 Nothing to type. `git push` triggers `.githooks/pre-push`, which lints
-the Woodpecker pipelines (`.githooks/pre-push:21`) and then runs
-`just fast` (Tier 0, `.githooks/pre-push:24`). A red Tier 0 aborts the
-push — fix, stage, and push again.
+the Woodpecker pipelines (`.githooks/pre-push:180`) and then runs
+`just fast` (Tier 0, `.githooks/pre-push:183`). A red Tier 0 aborts the
+push — fix, commit, and push again.
 
-That is the whole hook. It used to also block on Tier 2 staleness, at
+Three cheap guards run before those minutes are spent. Two are about
+what reaches a public forge: only `master` and tags go to Codeberg
+(`.githooks/pre-push:31`), and no commit carrying `CLAUDE.md`,
+`.mcp.json` or `.claude/` goes there at all. The third is about the
+gates themselves — they test the working tree, so the working tree has
+to be what is being pushed. A tree with uncommitted tracked changes
+(`.githooks/pre-push:121`), or a push that would move `master` to
+anything but `HEAD` (`.githooks/pre-push:139`), is refused before the
+first gate starts: otherwise the verdict describes code that is not
+being pushed, in either direction. Untracked files are exempt; they are
+in no commit. To push a sha the tree is not standing on, clone the
+repository and check that sha out.
+
+`just fast` runs all three against scratch repositories
+(`just prepush-guard`, ~1 s), so a guard broken by an edit is caught by
+the next push instead of by the push it wrongly refuses.
+
+The rest of the hook: it used to also block on Tier 2 staleness, at
 5 commits/8 h (warn) and 10 commits/24 h (block); the block was
 unsatisfiable and was removed on 2026-08-07, along with the
 `git push --no-verify` habit it taught. See

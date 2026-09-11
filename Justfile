@@ -185,7 +185,8 @@ nrf-shellcheck:
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
-        scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh
+        scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
+        scripts/check-prepush-guard.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -367,6 +368,18 @@ check-integ-bin-list:
 check-supervised-spawns:
     @python3 scripts/check-supervised-spawns.py
 
+# The guards in .githooks/pre-push, driven against scratch repositories
+# (~1 s, no build). They are cold code — they fire on the rare wrong push and
+# nothing exercises them in between — and the hook advertised a selftest in a
+# comment for three weeks before one existed. Two of the fifteen cases are
+# negative controls (an untracked file, a non-master ref at another sha): the
+# guard must refuse the wrong push without refusing the normal one.
+#
+# In `fast`, which is what the hook itself runs, so a guard broken by an edit
+# is caught by the next push rather than by the push it wrongly refuses.
+prepush-guard:
+    @bash scripts/check-prepush-guard.sh
+
 # Regenerate THIRD-PARTY-NOTICES from the two lockfiles (Codeberg #288).
 # Needs cargo-about; scripts/install-ci.sh installs the pinned version.
 notices:
@@ -436,7 +449,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
