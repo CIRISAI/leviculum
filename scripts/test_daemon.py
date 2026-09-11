@@ -2014,6 +2014,29 @@ class TestDaemon:
             self.lxmf_router.set_outbound_propagation_node(dest_hash_bytes)
             return {"result": "ok"}
 
+        elif method == "lxmf_request_from_propagation_node":
+            # The client-side mailbox drain: list, fetch, then confirm-purge
+            # (LXMRouter.request_messages_from_propagation_node ->
+            # message_list_response -> message_get_response). Used by the
+            # propagation-node interop tests where the node under test is the
+            # RUST side and this daemon is a genuine Python client.
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            self.lxmf_router.request_messages_from_propagation_node(
+                self.lxmf_identity
+            )
+            return {"result": "ok"}
+
+        elif method == "lxmf_propagation_transfer_state":
+            # PR_IDLE..PR_COMPLETE / PR_*failure constants (LXMRouter.py:65-78)
+            # plus the message count of the last completed sync.
+            if self.lxmf_router is None:
+                return {"error": "lxmf not initialized"}
+            return {"result": {
+                "state": self.lxmf_router.propagation_transfer_state,
+                "last_result": self.lxmf_router.propagation_transfer_last_result,
+            }}
+
         elif method == "shutdown":
             self.running = False
             return {"result": "shutting_down"}
@@ -2264,6 +2287,15 @@ class TestDaemon:
         # Signal readiness by printing to stdout
         extra = f" {self.instance_name}" if self.share_instance else ""
         print(f"READY {self.rns_port} {self.cmd_port}{extra}", flush=True)
+
+        # The harness stops reading stdout at the READY line, which closes
+        # the pipe's read end. stdout is a pipe, so it is block-buffered: a
+        # later print sits in the buffer without error, and the next
+        # multiprocessing fork (LXStamper's stamp workers) flushes std
+        # streams and dies with BrokenPipeError inside
+        # process_deferred_stamps. Everything after READY is diagnostics,
+        # so it goes where diagnostics already go.
+        sys.stdout = sys.stderr
 
         try:
             while self.running:
