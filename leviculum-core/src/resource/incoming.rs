@@ -23,6 +23,18 @@ use crate::resource::{
 
 use super::outgoing::ResourcePollResult;
 
+/// Where a hashmap-update segment starts in the local hashmap, or `None`
+/// when the peer's segment number cannot name a position on this side.
+///
+/// The only caller is [`IncomingResource::handle_hashmap_update`], and it is
+/// a named function so the arithmetic is provable on its own: `segment` is a
+/// 64-bit value chosen by the peer, and both the narrowing to `usize` (a
+/// 32-bit target truncates) and the multiplication (a 64-bit target wraps)
+/// silently produce a small, plausible-looking index out of a huge one.
+fn hashmap_base(segment: u64, seg_len: usize) -> Option<usize> {
+    usize::try_from(segment).ok()?.checked_mul(seg_len)
+}
+
 /// Result of receiving a data part.
 #[derive(Debug)]
 pub(crate) enum ResourcePartResult {
@@ -452,7 +464,7 @@ impl IncomingResource {
         }
 
         let segment = msgpack::read_msgpack_uint(msgpack_data, &mut pos)
-            .ok_or(ResourceError::InvalidHashmap)? as usize;
+            .ok_or(ResourceError::InvalidHashmap)?;
         let hashmap_bytes = msgpack::read_msgpack_bin(msgpack_data, &mut pos)
             .ok_or(ResourceError::InvalidHashmap)?;
 
@@ -463,6 +475,23 @@ impl IncomingResource {
         let seg_len = HASHMAP_MAX_LEN;
         let num_entries = hashmap_bytes.len() / RESOURCE_HASHMAP_LEN;
 
+        // `segment` came off the wire, so the product that turns it into an
+        // index is computed in checked arithmetic before anything is indexed
+        // with it. Unchecked, `segment * seg_len` wraps in a release build
+        // (segment = 2^63 with seg_len = 74 wraps to 0) and the bounds check
+        // below then sees the wrapped product: the peer's hashes land on
+        // entries it never addressed, and the transfer fails its final hash
+        // check with nothing saying why. A segment this side cannot place is
+        // a bad frame, not a frame to clamp.
+        let Some(base) = hashmap_base(segment, seg_len) else {
+            crate::tracing::warn!(
+                "HMU rejected: segment={} does not fit the hashmap (seg_len={})",
+                segment,
+                seg_len,
+            );
+            return Err(ResourceError::InvalidHashmap);
+        };
+
         crate::tracing::debug!(
             "HMU received: segment={}, seg_len={}, num_entries={}, hashmap_height_before={}",
             segment,
@@ -472,7 +501,9 @@ impl IncomingResource {
         );
 
         for i in 0..num_entries {
-            let idx = i + segment * seg_len;
+            let Some(idx) = base.checked_add(i) else {
+                break;
+            };
             if idx >= self.hashmap.len() {
                 break;
             }
@@ -873,6 +904,63 @@ mod tests {
         .unwrap();
 
         assert_eq!(incoming.progress(), 0.0);
+    }
+
+    /// Codeberg #333: the segment number is the peer's, and the product that
+    /// turns it into an index must not be allowed to wrap into a plausible
+    /// one. `2^63 * 74` is exactly `37 * 2^64`, so on a 64-bit target the
+    /// unchecked `segment * seg_len` is 0 and the peer writes over the head
+    /// of the hashmap it never addressed.
+    #[test]
+    fn hashmap_base_refuses_a_segment_that_would_wrap() {
+        assert_eq!(hashmap_base(0, HASHMAP_MAX_LEN), Some(0));
+        assert_eq!(hashmap_base(1, HASHMAP_MAX_LEN), Some(HASHMAP_MAX_LEN));
+
+        // The wrapping witness, stated as arithmetic rather than as a
+        // debug-build panic: this is what the old code computed.
+        let wrapping = 1u64 << 63;
+        assert_eq!((wrapping as usize).wrapping_mul(HASHMAP_MAX_LEN), 0);
+        assert_eq!(hashmap_base(wrapping, HASHMAP_MAX_LEN), None);
+        assert_eq!(hashmap_base(u64::MAX, HASHMAP_MAX_LEN), None);
+    }
+
+    /// The same value through the real frame: the HMU is rejected and the
+    /// hashmap entry the advertisement established is still the one there.
+    #[test]
+    fn hmu_with_a_wrapping_segment_is_rejected_and_changes_nothing() {
+        let hashmap_data = vec![0x11, 0x22, 0x33, 0x44];
+        let mut adv = make_test_adv(3, hashmap_data);
+        adv.transfer_size = 1392; // 3 * 464 sdu
+
+        let (mut incoming, _) = IncomingResource::from_advertisement(
+            &adv,
+            431,
+            464,
+            1000,
+            usize::MAX,
+            WindowPolicy::Current,
+        )
+        .unwrap();
+
+        let before = incoming.hashmap.clone();
+        assert_eq!(before[0], Some([0x11, 0x22, 0x33, 0x44]));
+
+        let mut hmu = Vec::new();
+        hmu.extend_from_slice(&[0xAA; 32]); // resource_hash
+        msgpack::write_fixarray_header(&mut hmu, 2);
+        msgpack::write_uint(&mut hmu, 1u64 << 63);
+        msgpack::write_bin(&mut hmu, &[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let result = incoming.handle_hashmap_update(1000, &hmu);
+
+        assert!(
+            matches!(result, Err(ResourceError::InvalidHashmap)),
+            "a segment this side cannot place is a bad frame: {result:?}"
+        );
+        assert_eq!(
+            incoming.hashmap, before,
+            "the rejected frame must not have touched the hashmap"
+        );
     }
 
     #[test]
