@@ -1,13 +1,13 @@
 //! The board's message store: [`leviculum_record_log`] mounted on the region
 //! `memory.x` reserves behind the firmware image (Codeberg #384).
 //!
-//! **Nothing is stored in it yet.** No LXMF, no propagation node, nothing
-//! announced. What this module adds is the region, the mount, and one bench
-//! instrument that writes synthetic records so the erase storm can be measured
-//! under BLE and LoRa load. A board that mounts the store behaves exactly as
-//! before on every other path, which is the whole requirement for shipping it:
-//! the store is a consumer of flash and of the SoftDevice's flash scheduler,
-//! and neither is touched until somebody asks it to append.
+//! Two producers write records today: the propagation role
+//! ([`crate::pn`], part 3 — message and peer records through the
+//! [`PnOp`] channel below) and the `--store-storm` bench instrument
+//! (synthetic records, so the erase storm can be measured under BLE and
+//! LoRa load). This module owns the region, the mount, and the one task
+//! allowed to hold an append; everything else reaches the log by
+//! channel.
 //!
 //! # Where the region comes from
 //!
@@ -103,11 +103,10 @@ const _: () = assert!(
     "the control envelope would accept a storm record larger than a page can hold"
 );
 
-/// What a caller may ask the store task to do.
-///
-/// One variant, because nothing stores messages yet: the bench instrument is
-/// the only producer of records on a board today. A message producer arrives
-/// as another variant, not as another owner of the log.
+/// What the bench instrument may ask the store task to do. The message
+/// producer — the propagation engine — has its own channel ([`PN_OPS`])
+/// because its ops carry heap bodies and demand a per-op reply; neither
+/// is another owner of the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     /// Append `records` synthetic records of `size` body bytes each, tagged
