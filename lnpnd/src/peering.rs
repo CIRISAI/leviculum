@@ -559,6 +559,23 @@ impl PeeringRuntime {
         }
     }
 
+    /// The peer behind an inbound link whose `/offer` peering key
+    /// validated. The engine captures this the moment a sync resource
+    /// concludes — the reference reads `validated_peer_links` inside the
+    /// resource callback itself (`reference/LXMF/LXMF/LXMRouter.py:2381`),
+    /// so a link torn down while the stamps are still on the validation
+    /// worker cannot retroactively orphan the batch.
+    pub(crate) fn validated_peer(&self, link_id: &LinkId) -> Option<[u8; 16]> {
+        self.validated_links.get(link_id).copied()
+    }
+
+    /// Mark a link's peering key as validated, exactly as `/offer` does —
+    /// for tests that need the state without a full offer round.
+    #[cfg(test)]
+    pub(crate) fn validate_link_for_tests(&mut self, link_id: LinkId, peer: [u8; 16]) {
+        self.validated_links.insert(link_id, peer);
+    }
+
     /// Handle a completed inbound resource when it is the multi-message
     /// peer-sync form. Returns `true` when handled here; `false` hands the
     /// single-message form back to the engine's client-upload path.
@@ -568,11 +585,19 @@ impl PeeringRuntime {
     /// messages are ingested even when others in the batch fail, and any
     /// invalid stamp tears down and throttles the sender for
     /// `PN_STAMP_THROTTLE` (`:2440-2450`).
+    ///
+    /// `validated_peer` is [`Self::validated_peer`] as of the moment the
+    /// resource concluded, captured by the caller: with validation on the
+    /// worker, the drain may run after a `LinkClosed` already cleared the
+    /// map (the reference peer tears its link down as soon as the transfer
+    /// concludes), and a late lookup here would drop the whole batch.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_sync_resource<S: PropagationStore>(
         &mut self,
         core: &mut Core,
         node: &mut PropagationNode<S>,
         link_id: &LinkId,
+        validated_peer: Option<[u8; 16]>,
         data: &[u8],
         validate: &mut dyn FnMut(&TransientId, &[u8; 32]) -> Option<u16>,
         out: &mut TickOutput,
@@ -584,9 +609,8 @@ impl PeeringRuntime {
             self.inbound_transfers.remove(link_id);
             return false;
         }
-        let remote_hash = self.validated_links.get(link_id).copied();
         self.inbound_transfers.remove(link_id);
-        let Some(remote_hash) = remote_hash else {
+        let Some(remote_hash) = validated_peer else {
             tracing::debug!(
                 "lnpnd: multi-message transfer without validated peering key; tearing down"
             );

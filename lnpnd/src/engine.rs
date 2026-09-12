@@ -934,6 +934,7 @@ impl<S: PropagationStore> Engine<S> {
             carrier,
             data,
             proof,
+            sync_peer,
             verdicts,
         } = done;
         let mut validate = |transient_id: &TransientId, _stamp: &[u8; STAMP_SIZE]| {
@@ -957,6 +958,7 @@ impl<S: PropagationStore> Engine<S> {
                     core,
                     &mut ready.node,
                     &link_id,
+                    sync_peer,
                     &data,
                     &mut validate,
                     out,
@@ -965,6 +967,56 @@ impl<S: PropagationStore> Engine<S> {
                     let _ =
                         self.ingest(ready, core, &link_id, &data, "resource", &mut validate, out);
                 }
+            }
+        }
+    }
+
+    /// A completed inbound resource on one of the role's links: the
+    /// multi-message peer-sync form is the peering half's (gated on the
+    /// validated key, LXMRouter.py:2381-2389); the singleton form is the
+    /// client upload path. The resource protocol has its own
+    /// acknowledgement; no packet proof exists to send here.
+    ///
+    /// The validated sync peer is captured NOW, not at the drain: the
+    /// reference peer tears its link down as soon as its transfer
+    /// concludes, and the `LinkClosed` that follows clears the peering
+    /// runtime's link state while the stamps may still be on the worker.
+    fn on_inbound_resource_completed(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        link_id: &LinkId,
+        data: &[u8],
+        out: &mut TickOutput,
+    ) {
+        let min_cost = ready.min_cost;
+        let compute_value = ready.node.compute_stamp_value();
+        let sync_peer = ready.peering.validated_peer(link_id);
+        if ValidationWorker::worth_deferring(min_cost, compute_value) {
+            self.validation.enqueue(ValidationJob {
+                link_id: *link_id,
+                carrier: Carrier::Resource,
+                data: data.to_vec(),
+                proof: None,
+                sync_peer,
+                min_cost,
+                compute_value,
+            });
+        } else {
+            let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                validate_stamp_value(transient_id, stamp, min_cost, compute_value)
+            };
+            let handled = ready.peering.on_sync_resource(
+                core,
+                &mut ready.node,
+                link_id,
+                sync_peer,
+                data,
+                &mut validate,
+                out,
+            );
+            if !handled {
+                let _ = self.ingest(ready, core, link_id, data, "resource", &mut validate, out);
             }
         }
     }
@@ -1097,6 +1149,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                         carrier: Carrier::Packet,
                         data: data.clone(),
                         proof,
+                        sync_peer: None,
                         min_cost,
                         compute_value,
                     });
@@ -1151,46 +1204,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 is_sender: false,
                 ..
             } if Self::owns_link(core, &ready, link_id) => {
-                // The multi-message peer-sync form is the peering half's
-                // (gated on the validated key, LXMRouter.py:2381-2389);
-                // the singleton form is the client upload path below. The
-                // resource protocol has its own acknowledgement; no
-                // packet proof exists to send here.
-                let min_cost = ready.min_cost;
-                let compute_value = ready.node.compute_stamp_value();
-                if ValidationWorker::worth_deferring(min_cost, compute_value) {
-                    self.validation.enqueue(ValidationJob {
-                        link_id: *link_id,
-                        carrier: Carrier::Resource,
-                        data: data.clone(),
-                        proof: None,
-                        min_cost,
-                        compute_value,
-                    });
-                } else {
-                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
-                        validate_stamp_value(transient_id, stamp, min_cost, compute_value)
-                    };
-                    let handled = ready.peering.on_sync_resource(
-                        core,
-                        &mut ready.node,
-                        link_id,
-                        data,
-                        &mut validate,
-                        &mut out,
-                    );
-                    if !handled {
-                        let _ = self.ingest(
-                            &mut ready,
-                            core,
-                            link_id,
-                            data,
-                            "resource",
-                            &mut validate,
-                            &mut out,
-                        );
-                    }
-                }
+                self.on_inbound_resource_completed(&mut ready, core, link_id, data, &mut out);
             }
             // Our outbound sync resource concluded (or failed).
             NodeEvent::ResourceCompleted {
@@ -1512,5 +1526,77 @@ mod tests {
             leviculum_lxmf::encode_control_error(leviculum_lxmf::PeerError::NoIdentity)
         );
         engine.state = State::Ready(ready);
+    }
+
+    /// leviculum#384 part 4 regression (conformance red
+    /// `lxmf_pn_store_full_inbound`): the reference peer tears its sync
+    /// link down the moment its transfer concludes, while the stamps are
+    /// still on the validation worker. The peering association must be
+    /// captured when the resource concludes — as the reference reads
+    /// `validated_peer_links` inside the resource callback itself
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2381`) — because by the time the
+    /// verdicts drain, `LinkClosed` has already cleared the link state,
+    /// and a late lookup dropped the entire inbound batch.
+    #[test]
+    fn a_deferred_sync_survives_the_peer_closing_the_link_before_the_drain() {
+        use leviculum_lxmf::constants::LXMF_OVERHEAD;
+        use leviculum_lxmf::PeerSyncEnvelope;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), None);
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        let link_id = LinkId::new([0x42; 16]);
+        let peer = [0x24u8; 16];
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        // Cost 0 with value computation on: the grinding is worth
+        // deferring, and any stamp measures to some value — no mining.
+        ready.node.set_compute_stamp_value(true);
+        ready.peering.validate_link_for_tests(link_id, peer);
+
+        let stamped = |seed: u8| {
+            let mut message = vec![seed; LXMF_OVERHEAD + 40];
+            message.extend_from_slice(&[seed.wrapping_add(1); STAMP_SIZE]);
+            message
+        };
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![stamped(0x01), stamped(0x02)],
+        };
+        let mut out = TickOutput::empty();
+        engine.on_inbound_resource_completed(
+            &mut ready,
+            &mut core,
+            &link_id,
+            &envelope.encode(),
+            &mut out,
+        );
+        // The close lands before any drain could run — the deterministic
+        // stand-in for the LinkClosed event the engine routes here.
+        ready.peering.on_link_closed(&link_id);
+        engine.state = State::Ready(ready);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let now_ms = core.now_ms();
+            let _ = engine.on_tick(&mut core, now_ms);
+            let stored = match &engine.state {
+                State::Ready(ready) => ready.node.store().count().unwrap_or(0),
+                _ => panic!("engine must stay ready"),
+            };
+            if stored == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the closed link orphaned the synced batch: store holds {stored} of 2"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }

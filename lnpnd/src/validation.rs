@@ -88,6 +88,11 @@ pub(crate) struct ValidationJob {
     pub data: Vec<u8>,
     /// The packet's queued proof hash ([`Carrier::Packet`] only).
     pub proof: Option<[u8; 32]>,
+    /// The link's validated sync peer at enqueue ([`Carrier::Resource`]
+    /// only): captured when the resource concluded, because the peer may
+    /// tear the link down — erasing the peering runtime's link state —
+    /// before the verdicts drain.
+    pub sync_peer: Option<[u8; 16]>,
     /// [`leviculum_lxmf::PropagationNode::min_accepted_cost`] at enqueue.
     pub min_cost: u8,
     /// [`leviculum_lxmf::PropagationNode::compute_stamp_value`] at enqueue.
@@ -103,6 +108,8 @@ pub(crate) struct ValidationDone {
     pub carrier: Carrier,
     pub data: Vec<u8>,
     pub proof: Option<[u8; 32]>,
+    /// [`ValidationJob::sync_peer`], carried through unchanged.
+    pub sync_peer: Option<[u8; 16]>,
     pub verdicts: HashMap<TransientId, Option<u16>>,
 }
 
@@ -198,6 +205,7 @@ fn run_worker(jobs: &Receiver<ValidationJob>, results: &Sender<ValidationDone>) 
             carrier: job.carrier,
             data: job.data,
             proof: job.proof,
+            sync_peer: job.sync_peer,
             verdicts,
         };
         if results.send(done).is_err() {

@@ -34,7 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation moved off the core lock onto a single worker thread
   (arrival order preserved — the proof still leaves only after the
   store append), so a cost-13 default no longer spends ~10 ms of the
-  core mutex per accepted message.
+  core mutex per accepted message; the validated sync-peer
+  association is captured when the resource concludes, so a peer
+  that tears its link down before the verdicts drain — stock lxmd
+  does — cannot orphan the inbound batch.
 
 - Propagation-node peering (#384 part 2): lnpnd now peers with other
   propagation nodes — including stock Python `lxmd` at its default
