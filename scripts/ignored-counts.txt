@@ -49,3 +49,9 @@
 # /home/lew/coding/Reticulum in every batch touching the RPC/compat surface,
 # and before releases.
 20   -p leviculum-std --test rnsd_interop
+
+# measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
+# an assertion: its runtime is a coin-flip distribution and only means
+# anything in --release on the host it runs on, by hand. Run manually before
+# a release and whenever the stamp code changes (see the test's header).
+1    -p lnmsg --test stamp_timing
