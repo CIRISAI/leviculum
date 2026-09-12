@@ -108,18 +108,70 @@ fn a_whitespace_only_body_is_an_empty_body() {
     assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
 }
 
-/// The brief's rule: what is not built says so, rather than silently doing
-/// something else. A script that asked for a mailbox and got a direct delivery
-/// would believe an offline recipient had been reached.
+/// `--via propagated` is a real path now; with no daemon it fails exactly the
+/// way a direct send does, an operational failure naming the daemon — never
+/// a silent direct delivery, and never exit 0 or 3 for a message that went
+/// nowhere.
 #[test]
-fn via_propagated_says_it_is_not_built_yet() {
-    let run = run(&["send", NOWHERE, "--via", "propagated"], b"body\n");
-    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+fn via_propagated_without_a_daemon_is_an_operational_failure() {
+    let instance = format!("lnmsg-nothing-here-{}", std::process::id());
+    let run = run(
+        &[
+            "send",
+            NOWHERE,
+            "--via",
+            "propagated",
+            "--instance",
+            &instance,
+        ],
+        b"body\n",
+    );
+    assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
     assert!(run.stdout.is_empty());
     assert!(
-        run.stderr.contains("not built yet"),
-        "the refusal must name itself: {}",
+        run.stderr.contains(&instance),
+        "the failure must name the missing daemon: {}",
         run.stderr
+    );
+}
+
+/// A malformed --pn is caught before the body is read or a daemon dialled,
+/// like every other argument error.
+#[test]
+fn a_malformed_pn_is_a_usage_error() {
+    let run = run(&["send", NOWHERE, "--pn", "zz"], b"body\n");
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("--pn"), "{}", run.stderr);
+}
+
+/// `lnmsg address` needs no daemon: it mints the identity on first use and
+/// prints the same 32-hex address every run after.
+#[test]
+fn address_prints_a_stable_32_hex_address_without_a_daemon() {
+    let home = tempfile::tempdir().expect("state dir");
+    let output = |()| {
+        let mut command = Command::new(LNMSG);
+        command
+            .arg("address")
+            .env("LNMSG_HOME", home.path())
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
+        child.wait_with_output().expect("wait for lnmsg")
+    };
+    let first = output(());
+    assert_eq!(first.status.code(), Some(0));
+    let address = String::from_utf8_lossy(&first.stdout).trim().to_string();
+    assert_eq!(address.len(), 32, "one 32-hex line: {address:?}");
+    assert!(address.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    let second = output(());
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout).trim(),
+        address,
+        "the address is the persistent identity's, not a fresh mint per run"
     );
 }
 

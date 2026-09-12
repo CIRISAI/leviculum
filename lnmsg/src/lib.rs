@@ -1,8 +1,9 @@
 //! `lnmsg` — a terminal LXMF messenger for Reticulum.
 //!
-//! This crate carries the first slice of the program described in
-//! `docs/src/concepts/lnmsg.md`: the non-interactive send path, and nothing
-//! more. No TUI, no mailbox, no reading.
+//! This crate carries the non-interactive slices of the program described in
+//! `docs/src/concepts/lnmsg.md`: the send path — direct, propagated, or
+//! `auto` with the Columba-style fallback to a propagation node — and the
+//! mailbox drain (`lnmsg fetch`). No TUI.
 //!
 //! # The two structural constraints
 //!
@@ -52,9 +53,12 @@
 
 pub mod address;
 pub mod body;
+pub mod config;
 pub mod display_name;
 pub mod engine;
 pub mod events;
+pub mod fetch;
 pub mod identity;
 pub mod outbox;
+pub mod seen;
 pub mod send;

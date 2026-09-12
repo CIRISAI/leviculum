@@ -35,14 +35,21 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::Duration;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
-use leviculum_core::{DestinationHash, Storage as _};
-use leviculum_lxmf::router::{LxmfRouter, MessageState, RouterConfig, RouterEvent, RouterOutput};
+use leviculum_core::{Destination, DestinationHash, Storage as _};
+use leviculum_lxmf::propagation::PropagationNodeAnnounce;
+use leviculum_lxmf::propagation_client::{PropagationTransport, PROPAGATION_ASPECT};
+use leviculum_lxmf::router::{
+    LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
+    PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
+};
 use leviculum_lxmf::{
     announce, CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
+    Verification,
 };
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
 use leviculum_std::ReticulumNode;
@@ -67,15 +74,47 @@ const POLL_INTERVAL_MS: u64 = 200;
 /// loop under the core lock is a node hang rather than a bug report.
 const MAX_ABSORB_ROUNDS: usize = 8;
 
+/// Above this announced cost the mining worker reports its progress on
+/// stderr: a grind the operator cannot see ending is indistinguishable from a
+/// hang, and default propagation nodes announce 13 now.
+const STAMP_PROGRESS_COST: u8 = 10;
+
+/// One proof-of-work job on its way to the mining thread.
+enum StampJob {
+    /// A recipient delivery stamp, at the cost the recipient announced.
+    Delivery(DeliveryStampRequest),
+    /// The independent propagation-node stamp over the transient ID, at the
+    /// cost the selected node announced.
+    Propagation(PropagationStampRequest),
+}
+
+impl StampJob {
+    fn key(&self) -> (StampKind, [u8; 32]) {
+        match self {
+            Self::Delivery(request) => (StampKind::Delivery, request.message_id),
+            Self::Propagation(request) => (StampKind::Propagation, request.message_id),
+        }
+    }
+}
+
+/// Which of a message's two possible stamps a mining job is for. A propagated
+/// message to a cost-announcing recipient legitimately mines both, one after
+/// the other, so the single-flight set is keyed by kind as well as id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum StampKind {
+    Delivery,
+    Propagation,
+}
+
 /// A stamp the mining thread has finished with.
 enum StampAnswer {
-    Ready {
+    Delivery {
         request: DeliveryStampRequest,
-        stamp: [u8; 32],
+        result: Result<[u8; 32], String>,
     },
-    Failed {
-        request: DeliveryStampRequest,
-        detail: String,
+    Propagation {
+        request: PropagationStampRequest,
+        result: Result<[u8; 32], String>,
     },
 }
 
@@ -110,7 +149,7 @@ pub struct Engine {
     display_name: Vec<u8>,
     events: Sender<OutboxEvent>,
     commands: Receiver<Command>,
-    stamps: Sender<DeliveryStampRequest>,
+    stamps: Sender<StampJob>,
     stamp_answers: Receiver<StampAnswer>,
     state: State,
     resolves: Vec<Resolve>,
@@ -118,11 +157,16 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
-    /// Message ids whose stamp is being mined, so a re-offer does not queue a
-    /// second mine for the same message behind the first.
-    mining: HashSet<[u8; 32]>,
+    /// Stamps being mined, so a re-offer does not queue a second mine for the
+    /// same work behind the first. Keyed by kind as well as id: a propagated
+    /// message can need a recipient stamp and a node stamp in one run.
+    mining: HashSet<(StampKind, [u8; 32])>,
     /// Whether our own delivery announce has gone out. See [`Engine::announce`].
     announced: bool,
+    /// The most recently announced propagation node this run has heard —
+    /// what [`Command::SelectPn`] falls back to when neither `--pn` nor the
+    /// config names one.
+    last_pn: Option<[u8; 16]>,
 }
 
 impl Engine {
@@ -221,19 +265,31 @@ impl Engine {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
             }
-            RouterEvent::StampPending(request) => {
-                // Off the lock: mining is unbounded work at a cost the peer
-                // chooses, and the generator is async. Both are things a hook
-                // body may least afford.
-                //
-                // Single-flight: the router re-offers a still-queued message
-                // every retry interval, and a second mine for one id would
-                // queue behind the first for the same answer.
-                let id = request.message_id;
-                if self.mining.insert(id) && self.stamps.send(request).is_err() {
-                    // The worker is gone, so the answer will never come; drop
-                    // the marker so a later re-offer is dispatched normally.
-                    self.mining.remove(&id);
+            RouterEvent::StampPending(request) => self.dispatch_stamp(StampJob::Delivery(request)),
+            RouterEvent::PropagationStampPending(request) => {
+                self.dispatch_stamp(StampJob::Propagation(request));
+            }
+            RouterEvent::MessageReceived(message) => {
+                let message = *message;
+                self.emit(OutboxEvent::Received {
+                    message_id: message.message_id,
+                    source: message.source_hash,
+                    verified: message.verification == Verification::Valid,
+                    title: message.title,
+                    body: message.content,
+                });
+            }
+            RouterEvent::PropagationSyncComplete(result) => {
+                self.emit(OutboxEvent::SyncDone {
+                    received: result.received,
+                    duplicates: result.duplicates,
+                });
+            }
+            RouterEvent::PropagationSyncState(status) => {
+                if let Some(word) = sync_failure(status.state) {
+                    self.emit(OutboxEvent::SyncFailed {
+                        detail: word.to_string(),
+                    });
                 }
             }
             // Everything else is either inbound traffic this slice does not
@@ -241,6 +297,23 @@ impl Engine {
             // forwarded: an event the frontend cannot act on is noise on a
             // seam that a daemon protocol will one day have to carry.
             _ => {}
+        }
+    }
+
+    /// Hand one proof-of-work job to the mining thread.
+    ///
+    /// Off the lock: mining is unbounded work at a cost the peer chooses, and
+    /// the generator is async. Both are things a hook body may least afford.
+    ///
+    /// Single-flight: the router re-offers a still-queued message every retry
+    /// interval, and a second mine for one job would queue behind the first
+    /// for the same answer.
+    fn dispatch_stamp(&mut self, job: StampJob) {
+        let key = job.key();
+        if self.mining.insert(key) && self.stamps.send(job).is_err() {
+            // The worker is gone, so the answer will never come; drop the
+            // marker so a later re-offer is dispatched normally.
+            self.mining.remove(&key);
         }
     }
 
@@ -282,6 +355,9 @@ impl Engine {
                     answered: false,
                 }),
                 Ok(Command::Send(request)) => self.send(ready, core, *request, out),
+                Ok(Command::SelectPn { preferred }) => self.select_pn(ready, core, preferred, out),
+                Ok(Command::Fetch) => self.fetch(ready, core, out),
+                Ok(Command::Cancel { message_id }) => self.cancel(ready, core, &message_id, out),
                 Err(TryRecvError::Empty) => return,
                 // The frontend is gone; the node is being torn down.
                 Err(TryRecvError::Disconnected) => return,
@@ -289,27 +365,128 @@ impl Engine {
         }
     }
 
+    /// Pick the propagation node for this run's uploads and drains.
+    fn select_pn(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        preferred: Option<[u8; 16]>,
+        out: &mut TickOutput,
+    ) {
+        let Some(destination) = preferred.or(self.last_pn) else {
+            self.emit(OutboxEvent::PnUnavailable {
+                detail: "no propagation node is known: none was given with --pn, none is \
+                         configured, and none has announced since this run attached"
+                    .to_string(),
+            });
+            return;
+        };
+        let hash = DestinationHash::new(destination);
+        // The announced cost is read before `absorb` takes `ready` mutably;
+        // `None` means the node has not been heard yet this run, in which
+        // case the router requests its path and learns the cost from the
+        // replayed announce.
+        let stamp_cost = ready
+            .router
+            .known_propagation_node(&hash)
+            .map(|known| known.announce.stamp_cost);
+        match ready
+            .router
+            .select_outbound_propagation_node(core, Some(hash))
+        {
+            Ok(output) => {
+                self.absorb(ready, core, output, out);
+                self.emit(OutboxEvent::PnSelected {
+                    destination,
+                    stamp_cost,
+                });
+            }
+            Err(e) => self.emit(OutboxEvent::PnUnavailable {
+                detail: format!("{e:?}"),
+            }),
+        }
+    }
+
+    /// Start one mailbox drain against the selected node.
+    fn fetch(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
+        match ready
+            .router
+            .request_messages_from_propagation_node(core, None)
+        {
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(e) => self.emit(OutboxEvent::SyncFailed {
+                detail: format!("{e:?}"),
+            }),
+        }
+    }
+
+    /// Drop a queued message. `NotFound` is not an error here: the message
+    /// may have reached a terminal state between the frontend's decision and
+    /// this tick, which is exactly the outcome a cancel wants.
+    fn cancel(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        message_id: &[u8; 32],
+        out: &mut TickOutput,
+    ) {
+        match ready.router.cancel(core, message_id) {
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(RouterError::NotFound) => {}
+            Err(e) => self.emit(OutboxEvent::Refused {
+                detail: format!("cancel: {e:?}"),
+            }),
+        }
+    }
+
     /// Drain finished proof-of-work.
     fn pump_stamps(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
         loop {
             match self.stamp_answers.try_recv() {
-                Ok(StampAnswer::Ready { request, stamp }) => {
-                    self.mining.remove(&request.message_id);
-                    match ready
-                        .router
-                        .set_outbound_stamp_result(core, &request, stamp.to_vec())
-                    {
-                        Ok(output) => self.absorb(ready, core, output, out),
-                        Err(e) => self.emit(OutboxEvent::Refused {
-                            detail: format!("stamp rejected: {e:?}"),
+                Ok(StampAnswer::Delivery { request, result }) => {
+                    self.mining
+                        .remove(&(StampKind::Delivery, request.message_id));
+                    match result {
+                        Ok(stamp) => match ready.router.set_outbound_stamp_result(
+                            core,
+                            &request,
+                            stamp.to_vec(),
+                        ) {
+                            Ok(output) => self.absorb(ready, core, output, out),
+                            // The advertised cost moved while we mined; the
+                            // router re-offers the message and a fresh mine
+                            // runs at the current cost.
+                            Err(RouterError::StaleStampRequest) => {}
+                            Err(e) => self.emit(OutboxEvent::Refused {
+                                detail: format!("stamp rejected: {e:?}"),
+                            }),
+                        },
+                        Err(detail) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {detail}"),
                         }),
                     }
                 }
-                Ok(StampAnswer::Failed { request, detail }) => {
-                    self.mining.remove(&request.message_id);
-                    self.emit(OutboxEvent::Refused {
-                        detail: format!("proof-of-work failed: {detail}"),
-                    });
+                Ok(StampAnswer::Propagation { request, result }) => {
+                    self.mining
+                        .remove(&(StampKind::Propagation, request.message_id));
+                    match result {
+                        Ok(stamp) => {
+                            let now_ms = core.now_ms();
+                            match ready
+                                .router
+                                .set_outbound_propagation_stamp_result(&request, stamp, now_ms)
+                            {
+                                Ok(output) => self.absorb(ready, core, output, out),
+                                Err(RouterError::StaleStampRequest) => {}
+                                Err(e) => self.emit(OutboxEvent::Refused {
+                                    detail: format!("propagation stamp rejected: {e:?}"),
+                                }),
+                            }
+                        }
+                        Err(detail) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {detail}"),
+                        }),
+                    }
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
             }
@@ -325,14 +502,19 @@ impl Engine {
     ) {
         let method = match request.via {
             Via::Direct => delivery_method(request.body.len()),
+            Via::Link => DeliveryMethod::Direct,
             Via::Propagated => {
-                // Guarded in the CLI already; guarded here too, because the
-                // seam is what a daemon-mode frontend would speak and a
-                // refusal must not depend on which frontend asked.
-                self.emit(OutboxEvent::Refused {
-                    detail: "delivery through a propagation node is not built yet".to_string(),
-                });
-                return;
+                // Guarded here rather than only in the CLI ordering, because
+                // the seam is what a daemon-mode frontend would speak and a
+                // send with nowhere to go must not sit silently in the queue.
+                if ready.router.outbound_propagation_node().is_none() {
+                    self.emit(OutboxEvent::Refused {
+                        detail: "no propagation node is selected; SelectPn must succeed first"
+                            .to_string(),
+                    });
+                    return;
+                }
+                DeliveryMethod::Propagated
             }
         };
         let message = match ready.router.create_message(
@@ -467,6 +649,33 @@ fn delivery_method(body_len: usize) -> DeliveryMethod {
     }
 }
 
+/// The delivery address `identity` registers as — what `lnmsg address`
+/// prints, and the same derivation the engine's registration performs, so
+/// the two cannot disagree.
+pub fn delivery_address(identity: &Identity) -> Result<[u8; 16], String> {
+    let bytes = identity
+        .private_key_bytes()
+        .map_err(|e| format!("the identity has no private key: {e:?}"))?;
+    let copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the identity: {e:?}"))?;
+    let destination =
+        LxmfNode::delivery_destination(copy).map_err(|e| format!("delivery destination: {e:?}"))?;
+    Ok(*destination.hash().as_bytes())
+}
+
+/// The mailbox-drain failure states, in the words the frontend reports.
+fn sync_failure(state: PropagationClientState) -> Option<&'static str> {
+    match state {
+        PropagationClientState::NoPath => Some("no path to the propagation node"),
+        PropagationClientState::LinkFailed => Some("the propagation node did not answer"),
+        PropagationClientState::TransferFailed => Some("the transfer failed"),
+        PropagationClientState::NoIdentity => Some("the node does not know our identity"),
+        PropagationClientState::NoAccess => Some("the node refused us access"),
+        PropagationClientState::Failed => Some("the sync failed"),
+        _ => None,
+    }
+}
+
 /// Mint the delivery destination and the router that drives it.
 fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String> {
     let identity_hash = *identity.hash();
@@ -484,15 +693,43 @@ fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String>
     let address = *destination.hash().as_bytes();
     let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
         .map_err(|e| format!("register delivery destination: {e:?}"))?;
-    Ok(Ready {
-        router: LxmfRouter::new(node, identity_hash, RouterConfig::default()),
-        address,
-    })
+    let mut router = LxmfRouter::new(node, identity_hash, RouterConfig::default());
+    // The propagation client is always on, exactly as `leviculum-lxmf-node`
+    // has it (`leviculum-lxmf-node/src/processor.rs`, "The propagation
+    // *client* is always on"): `--via propagated`, the auto fallback and
+    // `lnmsg fetch` all need it, and it registers a second local destination
+    // that accepts no links, so a plain direct send cannot observe it.
+    let client_copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the propagation identity: {e:?}"))?;
+    let transport_destination = PropagationTransport::destination(client_copy)
+        .map_err(|e| format!("propagation destination: {e:?}"))?;
+    let transport = PropagationTransport::register(core, transport_destination)
+        .map_err(|e| format!("register propagation client: {e:?}"))?;
+    router
+        .enable_propagation_client(transport, PropagationClientConfig::default())
+        .map_err(|e| format!("enable propagation client: {e:?}"))?;
+    Ok(Ready { router, address })
 }
 
 impl CoreProcessor for Engine {
     fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
         let mut out = TickOutput::empty();
+        // Recency, not ranking: `Command::SelectPn` without a preference
+        // takes the most recently announced node, so the order of arrival is
+        // tracked here — the router's transport keeps the set but not the
+        // order. A node announcing itself disabled is not a candidate.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if announce.name_hash()
+                == &Destination::compute_name_hash(
+                    leviculum_lxmf::node::APP_NAME,
+                    &[PROPAGATION_ASPECT],
+                )
+                && PropagationNodeAnnounce::decode(announce.app_data())
+                    .is_ok_and(|decoded| decoded.enabled)
+            {
+                self.last_pn = Some(*announce.destination_hash().as_bytes());
+            }
+        }
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
@@ -638,7 +875,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
 
     let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
     let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
-    let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<DeliveryStampRequest>();
+    let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
     let (answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
 
     // Proof-of-work, off the core lock and off the runtime's workers: mining
@@ -660,6 +897,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
         tracked: BTreeMap::new(),
         mining: HashSet::new(),
         announced: false,
+        last_pn: None,
     };
 
     let mut node = ReticulumNodeBuilder::new()
@@ -687,7 +925,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
     })
 }
 
-fn run_stamp_worker(jobs: &Receiver<DeliveryStampRequest>, answers: &Sender<StampAnswer>) {
+fn run_stamp_worker(jobs: &Receiver<StampJob>, answers: &Sender<StampAnswer>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -695,21 +933,80 @@ fn run_stamp_worker(jobs: &Receiver<DeliveryStampRequest>, answers: &Sender<Stam
         Ok(runtime) => runtime,
         Err(_) => return,
     };
-    runtime.block_on(async {
-        while let Ok(request) = jobs.recv() {
-            let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-            let answer = match request.generate_with(&mut executor).await {
-                Ok(stamp) => StampAnswer::Ready { request, stamp },
-                Err(e) => StampAnswer::Failed {
-                    request,
-                    detail: format!("{e:?}"),
-                },
-            };
-            if answers.send(answer).is_err() {
-                return;
+    while let Ok(job) = jobs.recv() {
+        let answer = match job {
+            StampJob::Delivery(request) => {
+                let cost = request.target_cost;
+                let result = mine_with_progress(&runtime, cost, "delivery stamp", async {
+                    let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
+                    request.generate_with(&mut executor).await
+                });
+                StampAnswer::Delivery { request, result }
             }
+            StampJob::Propagation(request) => {
+                let cost = request.target_cost;
+                let result = mine_with_progress(&runtime, cost, "propagation stamp", async {
+                    let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
+                    request.generate_with(&mut executor).await
+                });
+                StampAnswer::Propagation { request, result }
+            }
+        };
+        if answers.send(answer).is_err() {
+            return;
         }
-    });
+    }
+}
+
+/// Run one mining future to completion, narrating it on stderr when the cost
+/// is above [`STAMP_PROGRESS_COST`].
+///
+/// The narration is elapsed time, not a percentage: proof-of-work has no
+/// knowable fraction-done, and inventing one would be the progress-bar lie.
+/// stderr rather than stdout, so a scripted send's "success prints nothing"
+/// contract on stdout is untouched.
+fn mine_with_progress<F>(
+    runtime: &tokio::runtime::Runtime,
+    cost: u8,
+    what: &str,
+    future: F,
+) -> Result<[u8; 32], String>
+where
+    F: std::future::Future<Output = Result<[u8; 32], leviculum_lxmf::StampError>>,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let started = std::time::Instant::now();
+    let ticker = if cost > STAMP_PROGRESS_COST {
+        eprintln!("lnmsg: mining {what} at cost {cost}...");
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        let what = what.to_string();
+        let handle = std::thread::spawn(move || {
+            let mut waited = 0u64;
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(500));
+                waited += 500;
+                if waited.is_multiple_of(5_000) && !flag.load(Ordering::Relaxed) {
+                    eprintln!("lnmsg: still mining {what} ({}s)...", waited / 1_000);
+                }
+            }
+        });
+        Some((done, handle))
+    } else {
+        None
+    };
+    let result = runtime.block_on(future).map_err(|e| format!("{e:?}"));
+    if let Some((done, handle)) = ticker {
+        done.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+        eprintln!(
+            "lnmsg: {what} mined in {:.1}s",
+            started.elapsed().as_secs_f32()
+        );
+    }
+    result
 }
 
 #[cfg(test)]
@@ -726,7 +1023,7 @@ mod tests {
     fn engine_named(display_name: &[u8]) -> (Engine, Receiver<OutboxEvent>, Sender<Command>) {
         let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
         let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
-        let (stamps_tx, _stamps_rx) = std::sync::mpsc::channel::<DeliveryStampRequest>();
+        let (stamps_tx, _stamps_rx) = std::sync::mpsc::channel::<StampJob>();
         let (_answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
         let engine = Engine {
             display_name: display_name.to_vec(),
@@ -739,6 +1036,7 @@ mod tests {
             tracked: BTreeMap::new(),
             mining: HashSet::new(),
             announced: false,
+            last_pn: None,
         };
         (engine, events_rx, commands_tx)
     }
@@ -824,10 +1122,11 @@ mod tests {
         );
     }
 
-    /// `--via propagated` is refused at the seam, not only in the CLI: a
-    /// daemon-mode frontend speaks this seam and must get the same answer.
+    /// A propagated send with no node selected is refused at the seam, not
+    /// only in the CLI ordering: a daemon-mode frontend speaks this seam and
+    /// must get the same answer instead of a message that sits forever.
     #[test]
-    fn propagated_delivery_is_refused_at_the_seam() {
+    fn a_propagated_send_without_a_selected_node_is_refused_at_the_seam() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
         let (mut engine, events, commands) = engine();
@@ -851,9 +1150,71 @@ mod tests {
             .collect();
         assert_eq!(refusals.len(), 1, "exactly one refusal: {refusals:?}");
         assert!(
-            refusals[0].contains("not built yet"),
-            "the refusal must say it is unbuilt, not invent a reason: {}",
+            refusals[0].contains("no propagation node is selected"),
+            "the refusal must name the missing selection: {}",
             refusals[0]
+        );
+    }
+
+    /// `SelectPn` with nothing to select from must say so, and must not
+    /// invent a node.
+    #[test]
+    fn selecting_a_node_with_none_known_reports_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events, commands) = engine();
+
+        commands
+            .send(Command::SelectPn { preferred: None })
+            .expect("queue the command");
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let seen: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+            "no known node and no preference must be reported: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnSelected { .. })),
+            "nothing may be selected out of thin air: {seen:?}"
+        );
+    }
+
+    /// A `--pn`/configured node is selectable before any announce from it has
+    /// been heard — the router requests its path and learns the announced
+    /// cost from the replay, exactly as Python accepts a configured hash
+    /// before a route is known.
+    #[test]
+    fn selecting_a_preferred_node_works_before_its_announce_arrives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events, commands) = engine();
+
+        let node = [0x7e; 16];
+        commands
+            .send(Command::SelectPn {
+                preferred: Some(node),
+            })
+            .expect("queue the command");
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let selected =
+            std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+                OutboxEvent::PnSelected {
+                    destination,
+                    stamp_cost,
+                } => Some((destination, stamp_cost)),
+                _ => None,
+            });
+        assert_eq!(
+            selected,
+            Some((node, None)),
+            "the preferred node is selected as given, with no cost known yet"
         );
     }
 

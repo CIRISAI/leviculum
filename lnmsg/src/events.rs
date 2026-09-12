@@ -92,6 +92,55 @@ pub fn state(message_id: &[u8; 32], state: &str) {
     );
 }
 
+/// The `--via auto` decision, exactly once per send: which method carried
+/// the message in the end, and why. `reason` is `link-delivery` when the
+/// direct leg won, and the fallback reason word from
+/// [`crate::send::fallback_reason`] when the mailbox leg ran.
+pub fn via(method: &str, reason: &str) {
+    tracing::debug!(
+        event = "LNMSG_VIA",
+        method = %scalar(method),
+        reason = %scalar(reason),
+    );
+}
+
+/// The propagation node this run settled on. `source` is where the choice
+/// came from (`flag`, `config` or `announced`); `cost` is the stamp cost the
+/// node announced, `-` while it has not been heard yet.
+pub fn pn(node: &[u8; 16], source: &str, cost: Option<u64>) {
+    tracing::debug!(
+        event = "LNMSG_PN",
+        node = %to_hex(node),
+        source = %scalar(source),
+        cost = %cost.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
+    );
+}
+
+/// One inbound message during a fetch. `dup` says it was suppressed because
+/// an earlier run already delivered it (the cross-run seen store, not the
+/// router's own in-run de-duplication).
+pub fn fetched(message_id: &[u8; 32], source: &[u8; 16], bytes: usize, dup: bool) {
+    tracing::debug!(
+        event = "LNMSG_FETCHED",
+        id = %to_hex(message_id),
+        src = %to_hex(source),
+        bytes = bytes,
+        dup = dup,
+    );
+}
+
+/// A fetch's closing line: what the node handed over, how much of it the
+/// router had already seen this run, and how many messages were new to the
+/// user across runs.
+pub fn sync_done(received: usize, duplicates: usize, new: usize) {
+    tracing::debug!(
+        event = "LNMSG_SYNC_DONE",
+        received = received,
+        duplicates = duplicates,
+        new = new,
+    );
+}
+
 /// The last line of a run: what happened, and the exit code that follows from
 /// it. `id` is `-` when the run ended before a message existed.
 pub fn done(message_id: Option<&[u8; 32]>, outcome: &str, code: u8) {

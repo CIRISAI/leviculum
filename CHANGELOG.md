@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- lnmsg speaks to propagation nodes. `--via auto` (the new default)
+  tries the direct delivery link first and, when none comes up inside
+  the timeout, uploads the message to a propagation node instead — the
+  fallback Columba's `tryPropagationOnFail` and Sideband perform. `--via
+  direct` and `--via propagated` stay as explicit choices; the exit code
+  distinguishes handed on directly (0), held by a node for collection
+  (3), and neither (1), and the decision is logged as one structured
+  `LNMSG_VIA method=… reason=…` line. Node selection: `--pn <hash>`,
+  then the `propagation_node` key in lnmsg's own config
+  (`${LNMSG_HOME}/config`), then the most recently announced node heard
+  while attached; the client mines the propagation stamp at the node's
+  announced cost with elapsed-time progress on stderr above cost 10.
+  `lnmsg fetch` drains the mailbox with the genuine list/fetch/confirm
+  round and prints what is new, de-duplicated across runs against
+  messages already delivered directly (message ids persisted in
+  `${LNMSG_HOME}/seen`); `lnmsg address` prints the persistent LXMF
+  address without needing a daemon.
+
+### Fixed
+
+- Raw Link packet receipts are no longer failed at the literal
+  `max(rtt × 6, 5 ms)` deadline. The reference computes that formula but
+  only checks receipts once per second, so no Python receipt can fail
+  that early; enforcing it exactly meant that on a 1 ms-RTT TCP link an
+  upload to a Python propagation node was declared failed 6 ms after
+  sending — while the node was still validating the PoW stamp before
+  proving — and the LXMF layer then tore down the link the proof was
+  about to arrive on, every retry alike. The enforced deadline is now
+  floored at the reference's own check cadence
+  (`RAW_RECEIPT_TIMEOUT_FLOOR_MS`, 1 s); LoRa-scale RTTs are unaffected.
+
 - lnpnd grows to lxmd's full scope (#384 part 4). Remote management:
   the node registers lxmd's `lxmf.propagation.control` destination with
   the `/pn/get/stats`, `/pn/peer/sync` and `/pn/peer/unpeer` request

@@ -204,22 +204,36 @@ impl Mesh {
         }
     }
 
-    /// Run `lnmsg send` against this mesh, on a blocking thread so the daemon's
-    /// runtime keeps serving the IPC socket while the child talks to it.
+    /// Run `lnmsg send` against this mesh with the mesh's own state dir.
+    async fn send(&self, args: Vec<String>, stdin: Vec<u8>) -> Sent {
+        let home = self.home.path().to_path_buf();
+        self.run("send", home, args, stdin).await
+    }
+
+    /// Run one `lnmsg` subcommand against this mesh, on a blocking thread so
+    /// the daemon's runtime keeps serving the IPC socket while the child
+    /// talks to it. `home` is the client's state directory — the mailbox
+    /// tests run two clients (a sender and a recipient) against one mesh,
+    /// and each needs its own identity and seen store.
     ///
     /// The child writes its structured event log into the state directory and
     /// [`Sent::log`] carries it back, so a failing assertion prints the state
     /// sequence that produced it rather than a bare exit code. That is what the
     /// log is for (`docs/src/concepts/lnmsg-architecture.md` §7).
-    async fn send(&self, args: Vec<String>, stdin: Vec<u8>) -> Sent {
+    async fn run(
+        &self,
+        subcommand: &'static str,
+        home: PathBuf,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+    ) -> Sent {
         let instance = self.instance.clone();
-        let home = self.home.path().to_path_buf();
-        let log = home.join(format!("events-{}.log", args.join("-")));
+        let log = home.join(format!("events-{subcommand}-{}.log", args.join("-")));
         let read_log = log.clone();
         let sent = tokio::task::spawn_blocking(move || {
             let mut command = Command::new(LNMSG);
             command
-                .arg("send")
+                .arg(subcommand)
                 .args(&args)
                 .args(["--instance", &instance])
                 .env("LNMSG_HOME", &home)
@@ -479,6 +493,204 @@ async fn a_destination_that_does_not_exist_is_not_a_success() {
         peer.received().is_empty(),
         "nothing may have reached the Python router"
     );
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// `--via auto`, recipient online: the direct delivery link comes up, the
+/// message arrives at the real Python receiver, and the exit code is 0 —
+/// never 3, because no mailbox was involved. This is the leg that has to
+/// work for auto to be an honest default rather than a propagation tax.
+#[tokio::test(flavor = "multi_thread")]
+async fn via_auto_delivers_direct_when_the_python_receiver_is_online() {
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    let sent = mesh
+        .send(
+            vec![
+                python_address.clone(),
+                "--via".to_string(),
+                "auto".to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            b"direct while online\n".to_vec(),
+        )
+        .await;
+
+    assert_eq!(sent.code, Some(0), "{sent}");
+    assert_eq!(sent.stdout, "", "a successful send says nothing: {sent}");
+    assert!(
+        sent.log.contains("LNMSG_VIA")
+            && sent.log.contains("method=direct")
+            && sent.log.contains("reason=link-delivery"),
+        "the decision line must record the direct leg winning: {sent}"
+    );
+
+    let id = sent.enqueued_id();
+    let message = wait_for_python(&peer, &id, Duration::from_secs(40)).await;
+    assert_eq!(
+        String::from_utf8(hex_bytes(&message, "content")).expect("utf8"),
+        "direct while online"
+    );
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// The whole mailbox round against a real Python propagation node: a sender
+/// client uploads with `--via propagated` (exit 3, "a node holds it"), the
+/// Python node stores it, and the recipient client drains it with the
+/// genuine list/fetch/confirm round — the same flow the periculum control
+/// cell runs with lxmd, here against `LXMRouter.enable_propagation` in
+/// process. A second drain proves the confirm purged the store AND that the
+/// seen store suppresses a reprint.
+#[tokio::test(flavor = "multi_thread")]
+async fn propagated_upload_and_fetch_round_trip_through_a_python_node() {
+    let peer = PythonPeer::start();
+    peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    let pn_hash = peer
+        .rpc("lxmf_enable_propagation", serde_json::json!({}))
+        .get("propagation_hash")
+        .and_then(|v| v.as_str())
+        .expect("the Python node reports its propagation hash")
+        .to_string();
+    peer.rpc("lxmf_announce_propagation_node", serde_json::json!({}));
+
+    let sender_home = tempfile::tempdir().expect("sender home");
+    let recipient_home = tempfile::tempdir().expect("recipient home");
+
+    // The recipient announces itself once (any run announces on attach), so
+    // the sender can encrypt to it; the drain coming back empty is itself
+    // the negative half of the round.
+    let first_drain = mesh
+        .run(
+            "fetch",
+            recipient_home.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                pn_hash.clone(),
+                "--timeout".to_string(),
+                "60".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(first_drain.code, Some(0), "{first_drain}");
+    assert_eq!(
+        first_drain.stdout, "",
+        "an empty mailbox prints nothing: {first_drain}"
+    );
+    let recipient_address = {
+        let line = first_drain
+            .log
+            .lines()
+            .find(|line| line.starts_with("LNMSG_ATTACHED "))
+            .expect("the drain attached");
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix("address="))
+            .expect("the attach line carries our address")
+            .to_string()
+    };
+
+    let sent = mesh
+        .run(
+            "send",
+            sender_home.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--via".to_string(),
+                "propagated".to_string(),
+                "--pn".to_string(),
+                pn_hash.clone(),
+                "--title".to_string(),
+                "mailbox".to_string(),
+                "--timeout".to_string(),
+                "60".to_string(),
+            ],
+            b"held by the python node\n".to_vec(),
+        )
+        .await;
+    assert_eq!(
+        sent.code,
+        Some(3),
+        "a node holding the message is exit 3, not 0: {sent}"
+    );
+    assert_eq!(sent.stdout, "", "{sent}");
+
+    let drained = mesh
+        .run(
+            "fetch",
+            recipient_home.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                pn_hash.clone(),
+                "--timeout".to_string(),
+                "60".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(drained.code, Some(0), "{drained}");
+    assert!(
+        drained.stdout.contains("held by the python node"),
+        "the body must come back out of the Python node's store: {drained}"
+    );
+    assert!(
+        drained.stdout.contains("title mailbox"),
+        "the title travels too: {drained}"
+    );
+
+    let empty_again = mesh
+        .run(
+            "fetch",
+            recipient_home.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                pn_hash,
+                "--timeout".to_string(),
+                "60".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(empty_again.code, Some(0), "{empty_again}");
+    assert_eq!(
+        empty_again.stdout, "",
+        "the confirm purged the store and the seen store suppresses reprints: {empty_again}"
+    );
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// Negative: a propagation node hash that belongs to nobody must fail inside
+/// the timeout with the no-node/no-path story, never hang and never
+/// fabricate an empty success.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_from_a_nonexistent_node_fails_cleanly() {
+    let peer = PythonPeer::start();
+    peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+
+    let nowhere = "0123456789abcdef0123456789abcdef";
+    let fetched = mesh
+        .run(
+            "fetch",
+            mesh.home.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                nowhere.to_string(),
+                "--timeout".to_string(),
+                "25".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(fetched.code, Some(1), "{fetched}");
+    assert_eq!(fetched.stdout, "", "no messages may be invented: {fetched}");
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }

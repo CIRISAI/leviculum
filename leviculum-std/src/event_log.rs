@@ -455,6 +455,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LNMSG_DONE",
         required_keys: &["id", "outcome", "code"],
     },
+    EventSchema {
+        name: "LNMSG_VIA",
+        required_keys: &["method", "reason"],
+    },
+    EventSchema {
+        name: "LNMSG_PN",
+        required_keys: &["node", "source", "cost"],
+    },
+    EventSchema {
+        name: "LNMSG_FETCHED",
+        required_keys: &["id", "src", "bytes", "dup"],
+    },
+    EventSchema {
+        name: "LNMSG_SYNC_DONE",
+        required_keys: &["received", "duplicates", "new"],
+    },
     // lnpnd propagation-node events (Codeberg #384 part 1), one line per
     // accepted upload, per `/get`, per eviction. `tid` is the first 16 hex
     // chars of the transient ID, the same shortening the journey contract

@@ -87,6 +87,23 @@ pub struct Queued {
     pub state: MessageState,
 }
 
+/// Exit codes, and the claims they are allowed to make. `lnmsg send`'s code
+/// distinguishes the three outcomes a script has to tell apart: the message
+/// was handed on towards the recipient directly (0), it is waiting in a
+/// propagation node's mailbox (3), or neither happened (1). 2 stays the
+/// argument-error code, per `lnomad`'s convention (`lnomad/src/main.rs:174`).
+pub const EXIT_DIRECT: u8 = 0;
+/// Neither direct delivery nor a mailbox took the message.
+pub const EXIT_FAILURE: u8 = 1;
+/// The command line was wrong; nothing was attempted.
+pub const EXIT_USAGE: u8 = 2;
+/// A propagation node accepted the message for later collection. Not 0:
+/// "the recipient's path has the bytes" and "a mailbox is holding them until
+/// the recipient asks" are different promises, and a cron job pointing at a
+/// sometimes-offline peer is exactly the caller that needs to know which one
+/// it got.
+pub const EXIT_PROPAGATED: u8 = 3;
+
 /// Why a send did not get as far as being handed on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
@@ -116,6 +133,10 @@ pub enum SendError {
         message_id: [u8; 32],
         last: Option<MessageState>,
     },
+    /// No propagation node could be selected, so a propagated send had
+    /// nowhere to go. The detail names which of the three sources (flag,
+    /// config, announces) came up empty, or what the selection said.
+    NoPropagationNode(String),
 }
 
 impl From<OutboxGone> for SendError {
@@ -165,6 +186,11 @@ impl std::fmt::Display for SendError {
                     Some(state) => format!("last state {state:?}"),
                     None => "no state reported".to_string(),
                 }
+            ),
+            Self::NoPropagationNode(detail) => write!(
+                f,
+                "no propagation node: {detail}.\n  \
+                 Name one with --pn <hash>, or set propagation_node in lnmsg's config."
             ),
         }
     }
@@ -294,6 +320,13 @@ pub async fn run_send<O: Outbox>(
                     };
                 }
                 OutboxEvent::Left { .. } => {}
+                // Mailbox traffic. A direct run has no fetch in flight, and a
+                // node selection is the propagated runner's business.
+                OutboxEvent::PnSelected { .. }
+                | OutboxEvent::PnUnavailable { .. }
+                | OutboxEvent::Received { .. }
+                | OutboxEvent::SyncDone { .. }
+                | OutboxEvent::SyncFailed { .. } => {}
             }
         }
 
@@ -314,6 +347,180 @@ pub async fn run_send<O: Outbox>(
                 // Unreachable: the phase only becomes HandedOn together with
                 // the id being set.
                 (Phase::HandedOn, None) => SendError::NeverReady,
+            });
+        }
+        tokio::time::sleep(options.poll).await;
+    }
+}
+
+/// Whether — and why — a failed direct leg of `--via auto` should fall back
+/// to a propagation node.
+///
+/// The word returned is the `reason=` value of the `LNMSG_VIA` line, so it
+/// stays short and stable. `None` means the failure is not about the
+/// destination at all (the engine never came up, the command line was
+/// refused): uploading to a mailbox would fail the same way, or worse, hide
+/// an operator error behind a queued copy nobody asked for.
+pub fn fallback_reason(error: &SendError) -> Option<&'static str> {
+    match error {
+        // No route and no key: the peer is not reachable from here right
+        // now, which is exactly the case a mailbox exists for.
+        SendError::Unreachable { .. } => Some("no-route"),
+        // A route existed but the message never left: the link did not come
+        // up inside the budget.
+        SendError::Stranded { .. } => Some("stranded"),
+        // The router gave up on the direct attempt.
+        SendError::Rejected { .. } => Some("rejected"),
+        // Engine-level failures. `NoAnswer` is deliberately here too: an
+        // engine that queued a message and then said nothing is wedged, and
+        // handing a second message to the same wedged engine cannot help.
+        SendError::Gone
+        | SendError::Broken(_)
+        | SendError::NeverReady
+        | SendError::Refused(_)
+        | SendError::NoAnswer { .. }
+        | SendError::NoPropagationNode(_) => None,
+    }
+}
+
+/// What the propagated runner is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropagatedPhase {
+    Selecting,
+    Queued,
+    HandedOn,
+}
+
+/// Run one propagated send: select the node, queue the message, and wait for
+/// the node to accept the upload (`MessageState::AwaitingCollection`).
+///
+/// `preferred_pn` is `--pn` or the configured default; `None` lets the
+/// engine take the most recently announced node. `pn_source` is the word the
+/// `LNMSG_PN` log line carries for where the choice came from. `cancel`
+/// removes a stranded direct copy first, so an auto fallback cannot hand the
+/// same message to the peer twice if the peer reappears mid-upload.
+///
+/// Unlike [`run_send`] this does not wait for the engine's `Ready`: it is
+/// also called as the second leg of `--via auto`, where `Ready` was consumed
+/// by the direct leg. Commands queue until the engine is ready either way,
+/// so the sequencing is unchanged; only the events differ.
+pub async fn run_send_propagated<O: Outbox>(
+    outbox: &mut O,
+    request: SendRequest,
+    preferred_pn: Option<[u8; 16]>,
+    pn_source: &str,
+    cancel: Option<[u8; 32]>,
+    options: &SendOptions,
+) -> Result<Queued, SendError> {
+    let start = Instant::now();
+    let destination = request.destination;
+    let via = request.via;
+    let body_len = request.body.len();
+
+    if let Some(message_id) = cancel {
+        outbox.submit(Command::Cancel { message_id })?;
+    }
+    outbox.submit(Command::SelectPn {
+        preferred: preferred_pn,
+    })?;
+
+    let mut phase = PropagatedPhase::Selecting;
+    let mut address = None;
+    let mut message_id = None;
+    let mut last_state = None;
+    let mut request = Some(request);
+
+    loop {
+        while let Some(event) = outbox.try_next_event()? {
+            match event {
+                OutboxEvent::Ready { address: ours } => {
+                    address = Some(ours);
+                    events::attached(&options.instance, &ours);
+                }
+                OutboxEvent::Broken { detail } => return Err(SendError::Broken(detail)),
+                OutboxEvent::PnSelected {
+                    destination: node,
+                    stamp_cost,
+                } => {
+                    if phase == PropagatedPhase::Selecting {
+                        events::pn(&node, pn_source, stamp_cost);
+                        if let Some(request) = request.take() {
+                            outbox.submit(Command::Send(Box::new(request)))?;
+                        }
+                        phase = PropagatedPhase::Queued;
+                    }
+                }
+                OutboxEvent::PnUnavailable { detail } => {
+                    return Err(SendError::NoPropagationNode(detail));
+                }
+                OutboxEvent::Queued { message_id: id } => {
+                    if phase == PropagatedPhase::Queued && message_id.is_none() {
+                        message_id = Some(id);
+                        events::enqueued(&id, &destination, body_len, via.as_str());
+                        phase = PropagatedPhase::HandedOn;
+                    }
+                }
+                OutboxEvent::Refused { detail } => return Err(SendError::Refused(detail)),
+                OutboxEvent::State {
+                    message_id: id,
+                    state,
+                } if Some(id) == message_id => {
+                    events::state(&id, &format!("{state:?}"));
+                    last_state = Some(state);
+                    if handed_on(state) {
+                        return Ok(Queued {
+                            message_id: id,
+                            address: address.unwrap_or_default(),
+                            state,
+                        });
+                    }
+                    if given_up(state) {
+                        return Err(SendError::Rejected {
+                            message_id: id,
+                            state,
+                        });
+                    }
+                }
+                OutboxEvent::Left {
+                    message_id: id,
+                    last,
+                } if Some(id) == message_id => {
+                    let state = last.or(last_state).unwrap_or(MessageState::Failed);
+                    return if given_up(state) {
+                        Err(SendError::Rejected {
+                            message_id: id,
+                            state,
+                        })
+                    } else {
+                        Ok(Queued {
+                            message_id: id,
+                            address: address.unwrap_or_default(),
+                            state,
+                        })
+                    };
+                }
+                // Stale events about the direct leg's message (its id never
+                // matches ours), resolves, and mailbox traffic no send asked
+                // for.
+                _ => {}
+            }
+        }
+
+        if start.elapsed() >= options.budget {
+            return Err(match (phase, message_id) {
+                (PropagatedPhase::Selecting, _) => SendError::NoPropagationNode(
+                    "selecting a node did not finish inside the timeout".to_string(),
+                ),
+                (PropagatedPhase::Queued, _) => SendError::NoAnswer {
+                    message_id: [0u8; 32],
+                },
+                (PropagatedPhase::HandedOn, Some(id)) => SendError::Stranded {
+                    message_id: id,
+                    last: last_state,
+                },
+                // Unreachable: the phase only becomes HandedOn together with
+                // the id being set.
+                (PropagatedPhase::HandedOn, None) => SendError::NeverReady,
             });
         }
         tokio::time::sleep(options.poll).await;
@@ -549,6 +756,7 @@ mod tests {
                 message_id: ID,
                 last: None,
             },
+            SendError::NoPropagationNode("none announced".into()),
         ];
         for error in errors {
             let text = error.to_string().to_lowercase();
@@ -557,5 +765,221 @@ mod tests {
                 "an error may not claim delivery: {text}"
             );
         }
+    }
+
+    /// The auto decision table. Destination-shaped failures fall back;
+    /// engine-shaped ones do not, because a second message into the same
+    /// broken engine cannot fare better.
+    #[test]
+    fn only_destination_shaped_failures_fall_back() {
+        assert_eq!(
+            fallback_reason(&SendError::Unreachable {
+                destination: DST,
+                waited: Duration::from_secs(3),
+            }),
+            Some("no-route")
+        );
+        assert_eq!(
+            fallback_reason(&SendError::Stranded {
+                message_id: ID,
+                last: Some(MessageState::Outbound),
+            }),
+            Some("stranded")
+        );
+        assert_eq!(
+            fallback_reason(&SendError::Rejected {
+                message_id: ID,
+                state: MessageState::Failed,
+            }),
+            Some("rejected")
+        );
+        for stay in [
+            SendError::Gone,
+            SendError::Broken("x".into()),
+            SendError::NeverReady,
+            SendError::Refused("QueueFull".into()),
+            SendError::NoAnswer { message_id: ID },
+            SendError::NoPropagationNode("none".into()),
+        ] {
+            assert_eq!(fallback_reason(&stay), None, "{stay:?} must not fall back");
+        }
+    }
+
+    const PN: [u8; 16] = [0x77; 16];
+
+    fn propagated_request() -> SendRequest {
+        SendRequest {
+            destination: DST,
+            title: b"status".to_vec(),
+            body: b"disk 91%".to_vec(),
+            via: Via::Propagated,
+        }
+    }
+
+    /// The propagated happy path: node selected, message queued, node
+    /// accepted the upload. `AwaitingCollection` — not `Sent` — is what ends
+    /// the run, because that is the state the upload-complete leg reports
+    /// (`leviculum-lxmf/src/router/propagation_runtime.rs`, "Reporting
+    /// `Sent` here would make this indistinguishable").
+    #[tokio::test(start_paused = true)]
+    async fn a_propagated_send_ends_on_awaiting_collection() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::Ready { address: [1; 16] },
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: Some(13),
+            },
+            OutboxEvent::Queued { message_id: ID },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::Sending,
+            },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::AwaitingCollection,
+            },
+        ]);
+
+        let queued = run_send_propagated(
+            &mut outbox,
+            propagated_request(),
+            Some(PN),
+            "flag",
+            None,
+            &options(),
+        )
+        .await
+        .expect("an accepted upload is the success");
+
+        assert_eq!(queued.state, MessageState::AwaitingCollection);
+        let commands = outbox.commands.borrow();
+        assert!(
+            matches!(commands[0], Command::SelectPn { preferred: Some(p) } if p == PN),
+            "selection first: {commands:?}"
+        );
+        assert!(matches!(commands[1], Command::Send(_)));
+    }
+
+    /// No node, no upload: the message must not be queued at all when the
+    /// selection came up empty.
+    #[tokio::test(start_paused = true)]
+    async fn no_selectable_node_fails_before_queueing() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::Ready { address: [1; 16] },
+            OutboxEvent::PnUnavailable {
+                detail: "none announced".to_string(),
+            },
+        ]);
+
+        let error = run_send_propagated(
+            &mut outbox,
+            propagated_request(),
+            None,
+            "announced",
+            None,
+            &options(),
+        )
+        .await
+        .expect_err("no node is a failure");
+
+        assert!(
+            matches!(error, SendError::NoPropagationNode(_)),
+            "{error:?}"
+        );
+        assert!(
+            !outbox
+                .commands
+                .borrow()
+                .iter()
+                .any(|command| matches!(command, Command::Send(_))),
+            "nothing may be queued without a node"
+        );
+    }
+
+    /// The auto fallback's cancel: a stranded direct copy is withdrawn
+    /// before the propagated copy is queued, and stale events about it are
+    /// not mistaken for the new message's.
+    #[tokio::test(start_paused = true)]
+    async fn the_fallback_cancels_the_stranded_direct_copy_first() {
+        const DIRECT_ID: [u8; 32] = [0x0d; 32];
+        let mut outbox = FakeOutbox::new(vec![
+            // Stale traffic from the direct leg, arriving late.
+            OutboxEvent::State {
+                message_id: DIRECT_ID,
+                state: MessageState::Cancelled,
+            },
+            OutboxEvent::Left {
+                message_id: DIRECT_ID,
+                last: Some(MessageState::Cancelled),
+            },
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            OutboxEvent::Queued { message_id: ID },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::AwaitingCollection,
+            },
+        ]);
+
+        let queued = run_send_propagated(
+            &mut outbox,
+            propagated_request(),
+            Some(PN),
+            "flag",
+            Some(DIRECT_ID),
+            &options(),
+        )
+        .await
+        .expect("stale direct events must not derail the fallback");
+
+        assert_eq!(
+            queued.message_id, ID,
+            "the propagated copy's id, not the cancelled one's"
+        );
+        let commands = outbox.commands.borrow();
+        assert!(
+            matches!(commands[0], Command::Cancel { message_id } if message_id == DIRECT_ID),
+            "the cancel goes first: {commands:?}"
+        );
+    }
+
+    /// A node that accepts the link and then never finishes the upload is a
+    /// stranded message, same as the direct path's version of the story.
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_that_never_completes_is_stranded_at_the_timeout() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            OutboxEvent::Queued { message_id: ID },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::Sending,
+            },
+        ]);
+
+        let error = run_send_propagated(
+            &mut outbox,
+            propagated_request(),
+            Some(PN),
+            "flag",
+            None,
+            &options(),
+        )
+        .await
+        .expect_err("an unfinished upload is not a success");
+        assert!(
+            matches!(
+                error,
+                SendError::Stranded {
+                    message_id: id,
+                    last: Some(MessageState::Sending),
+                } if id == ID
+            ),
+            "{error:?}"
+        );
     }
 }

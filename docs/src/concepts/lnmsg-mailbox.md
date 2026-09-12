@@ -90,6 +90,25 @@ different failures happened, because they need different fixes:
 A single "sync failed" for all six is the lie this section exists to
 prevent.
 
+### The non-interactive slice's selection order (decided 2026-09-12)
+
+The shipped `lnmsg send`/`lnmsg fetch` have no picker to offer, so the
+CLI resolves the node in a fixed order: the `--pn` flag, then the
+`propagation_node` key in `${LNMSG_HOME}/config` (the persisted
+default), then the most recently announced node heard while attached.
+Recency rather than the library's route/cost ranking, because for a
+short-lived CLI the node that just announced is the one whose
+reachability is *evidence* rather than cache; the reference
+`LXMRouter` ships no autoselection at all — its clients pick, each
+with their own rule (NomadNet by hops among trusted, columba by hops).
+Nothing is auto-adopted silently in the TUI sense: a cron job's
+operator wrote `--pn` or the config key, and the announced fallback is
+for the interactive shell where the operator reads the `LNMSG_PN`
+line. What is persisted where: the identity at `${LNMSG_HOME}/identity`,
+the node default in `${LNMSG_HOME}/config`, the cross-run seen-message
+ids in `${LNMSG_HOME}/seen`; the selection itself is per-run and never
+written back.
+
 ### Which node, and the trust question
 
 NomadNet auto-selects the fewest-hops node **whose trust level is

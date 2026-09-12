@@ -26,9 +26,17 @@ use leviculum_lxmf::router::MessageState;
 /// How a message should reach its destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
-    /// Straight to the peer over the mesh.
+    /// Straight to the peer over the mesh, the delivery method chosen by
+    /// body size (a small body goes as one opportunistic packet).
     Direct,
-    /// Through a propagation node's mailbox. Not built in this slice.
+    /// Straight to the peer, but always over a delivery link. This is the
+    /// first leg of `--via auto`: a link either comes up — the peer is
+    /// alive — or it does not, which is the crisp failure the fallback
+    /// decision needs. An opportunistic packet cannot fail that way; it is
+    /// `Sent` the moment it leaves, reachable peer or not.
+    Link,
+    /// Through a propagation node's mailbox. Requires a node to have been
+    /// selected with [`Command::SelectPn`] first.
     Propagated,
 }
 
@@ -37,6 +45,7 @@ impl Via {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
+            Self::Link => "link",
             Self::Propagated => "propagated",
         }
     }
@@ -60,6 +69,21 @@ pub enum Command {
     Resolve { destination: [u8; 16] },
     /// Queue one message.
     Send(Box<SendRequest>),
+    /// Select the propagation node every later [`Via::Propagated`] send and
+    /// every [`Command::Fetch`] talks to. `preferred` is the `--pn` flag or
+    /// the configured default; `None` asks for the most recently announced
+    /// node this run has heard — the reference `LXMRouter` keeps no
+    /// autoselection of its own (its clients pick; NomadNet and Sideband
+    /// both do), so recency is lnmsg's own rule, recorded in
+    /// `docs/src/concepts/lnmsg-mailbox.md`.
+    SelectPn { preferred: Option<[u8; 16]> },
+    /// Drain the selected node's mailbox with the genuine list/fetch/confirm
+    /// round (`message_get_request` semantics).
+    Fetch,
+    /// Remove a queued message. The auto fallback cancels the stranded
+    /// direct copy before uploading the propagated one, so a peer that
+    /// reappears mid-fallback cannot be handed the same message twice.
+    Cancel { message_id: [u8; 32] },
 }
 
 /// What the engine reports back.
@@ -90,6 +114,30 @@ pub enum OutboxEvent {
         message_id: [u8; 32],
         last: Option<MessageState>,
     },
+    /// A [`Command::SelectPn`] found its node. `stamp_cost` is what the node
+    /// announced, i.e. what a client will have to mine per upload.
+    PnSelected {
+        destination: [u8; 16],
+        stamp_cost: Option<u64>,
+    },
+    /// A [`Command::SelectPn`] could not name a node at all.
+    PnUnavailable { detail: String },
+    /// One inbound message reached our delivery destination — directly or
+    /// out of a mailbox drain; the router has already de-duplicated within
+    /// this run, and the frontend de-duplicates across runs by `message_id`.
+    Received {
+        message_id: [u8; 32],
+        source: [u8; 16],
+        title: Vec<u8>,
+        body: Vec<u8>,
+        /// Whether the signature verified against a known source identity.
+        verified: bool,
+    },
+    /// A [`Command::Fetch`] finished its round. `received` and `duplicates`
+    /// are the router's own counts for the drain.
+    SyncDone { received: usize, duplicates: usize },
+    /// A [`Command::Fetch`] failed, with the client state that ended it.
+    SyncFailed { detail: String },
 }
 
 /// The engine went away — in this slice, the driver detached a panicking
@@ -174,6 +222,7 @@ mod tests {
     #[test]
     fn via_spells_itself_the_way_the_flag_does() {
         assert_eq!(Via::Direct.as_str(), "direct");
+        assert_eq!(Via::Link.as_str(), "link");
         assert_eq!(Via::Propagated.as_str(), "propagated");
     }
 }
