@@ -434,6 +434,12 @@ impl PeerTable {
         self.peers.len()
     }
 
+    /// Estimated heap bytes the table pins (#388 census): the peer map's
+    /// node structure. A [`Peer`] is inline — no heap behind it.
+    pub fn heap_bytes(&self) -> usize {
+        leviculum_core::heap_census::btree_map_bytes(&self.peers)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
     }

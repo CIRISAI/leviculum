@@ -749,6 +749,15 @@ pub trait Storage {
     fn diagnostic_dump(&self) -> (String, u64) {
         (String::new(), 0)
     }
+
+    /// Estimated heap bytes this storage pins beyond its own inline
+    /// struct (#388 census). Default 0: implementations that never feed
+    /// the firmware census (host storages with their own diagnostics)
+    /// need not account. `EmbeddedStorage` overrides it — its heapless
+    /// maps are inline in the node, only their `Vec` values are heap.
+    fn heap_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Storage error type

@@ -94,6 +94,29 @@ pub(crate) struct IncomingResource {
 }
 
 impl IncomingResource {
+    /// Estimated heap bytes this in-flight reassembly pins (#388
+    /// census): part spines and payloads, the hashmap, and the staged
+    /// assembly/REQ buffers.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use core::mem::size_of;
+        let mut bytes = self.parts.capacity() * size_of::<Option<Vec<u8>>>()
+            + self.hashmap.capacity() * size_of::<Option<[u8; RESOURCE_HASHMAP_LEN]>>();
+        for part in self.parts.iter().flatten() {
+            bytes += part.capacity();
+        }
+        for buf in [
+            &self.request_id,
+            &self.assembled_with_metadata,
+            &self.last_req,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes += buf.capacity();
+        }
+        bytes
+    }
+
     /// Create from a received advertisement.
     ///
     /// Returns `(incoming_resource, first_req_payload)`.

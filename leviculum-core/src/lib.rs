@@ -114,6 +114,8 @@ pub mod framing;
 /// cargo-fuzz harness. Compiled only under `--cfg fuzzing` (set by cargo-fuzz).
 #[cfg(fuzzing)]
 pub mod fuzz;
+/// Heap-census estimators (Codeberg #388): who holds the firmware heap.
+pub mod heap_census;
 mod hex_fmt;
 pub mod identity;
 pub mod identity_store;

@@ -23,6 +23,11 @@ pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
 pub mod flash;
+/// The `[HEAP_CENSUS]` line (Codeberg #388): who holds the heap the
+/// `[HEAP]` line watches. Gated like [`pn`] — the engine is one of the
+/// owners it walks, and every shipped build enables the SoftDevice.
+#[cfg(feature = "softdevice")]
+pub mod heap_census;
 pub mod identity;
 pub mod interface;
 pub mod log;

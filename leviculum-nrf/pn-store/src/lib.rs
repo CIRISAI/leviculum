@@ -204,6 +204,18 @@ pub fn scan(region: &[u8], mut visit: impl FnMut(&RawRecord<'_>)) {
     }
 }
 
+/// Estimated heap bytes a [`FlushOp`] queue pins (#388 census): the
+/// ring's slot spine plus every queued append's body allocation.
+fn queue_heap_bytes(queue: &VecDeque<FlushOp>) -> usize {
+    let mut bytes = queue.capacity() * core::mem::size_of::<FlushOp>();
+    for op in queue {
+        if let FlushOp::Append { body, .. } = op {
+            bytes += body.capacity();
+        }
+    }
+    bytes
+}
+
 /// One write the engine owes the record-store task, in queue order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlushOp {
@@ -249,6 +261,12 @@ impl<R: Region> PnStore<R> {
     /// Writes waiting to be flushed.
     pub fn pending_ops(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Estimated heap bytes the flush queue pins (#388 census): the ring
+    /// spine plus each queued append's body.
+    pub fn queued_heap_bytes(&self) -> usize {
+        queue_heap_bytes(&self.queue)
     }
 
     /// The next op to flush, if any. The op stays queued (and keeps its
@@ -523,6 +541,15 @@ impl<R: Region> PnPeerStore<R> {
 
     pub fn pending_ops(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Estimated heap bytes this adapter pins (#388 census): the flush
+    /// queue with its append bodies, plus the unflushed save/remove
+    /// mirrors.
+    pub fn queued_heap_bytes(&self) -> usize {
+        queue_heap_bytes(&self.queue)
+            + self.pending.capacity() * core::mem::size_of::<PeerRecord>()
+            + self.removed.capacity() * DESTINATION_LENGTH
     }
 
     pub fn peek_op(&self) -> Option<&FlushOp> {

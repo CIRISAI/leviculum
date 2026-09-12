@@ -274,6 +274,20 @@ impl Channel {
         self.tx_ring.len() < self.window
     }
 
+    /// Estimated heap bytes this channel pins: both ring spines plus the
+    /// envelope payloads queued in them (#388 census).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use crate::heap_census::vec_deque_bytes;
+        let mut bytes = vec_deque_bytes(&self.tx_ring) + vec_deque_bytes(&self.rx_ring);
+        for out in &self.tx_ring {
+            bytes += out.envelope.data.capacity();
+        }
+        for (envelope, _) in self.rx_ring.iter().flatten() {
+            bytes += envelope.data.capacity();
+        }
+        bytes
+    }
+
     /// Get the maximum data unit for channel messages
     ///
     /// This is the link MDU minus the envelope header size, capped at the

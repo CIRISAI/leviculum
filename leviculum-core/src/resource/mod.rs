@@ -348,6 +348,11 @@ pub struct ResourceAdvertisement {
 }
 
 impl ResourceAdvertisement {
+    /// Estimated heap bytes a stored advertisement pins (#388 census).
+    pub fn heap_bytes(&self) -> usize {
+        self.hashmap_data.capacity() + self.request_id.as_ref().map_or(0, |id| id.capacity())
+    }
+
     /// Serialize to msgpack.
     ///
     /// Produces a fixmap(11) with single-char string keys in Python-compatible

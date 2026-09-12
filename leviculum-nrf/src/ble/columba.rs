@@ -653,6 +653,10 @@ fn process_logged(
             ),
         );
     }
+    // #388 census: this chokepoint sees every fragment of both roles,
+    // so it is the one place the session-local defragmenter's holding
+    // can be mirrored where the census walker reads it.
+    super::defrag_held_set(slot_index, d.held_bytes());
     result
 }
 
@@ -966,6 +970,7 @@ async fn gatt_events(
     // reconnect in the central task's duplicate check.
     peer_link_down(slot_index);
     conn_link_down(slot_index);
+    super::defrag_held_set(slot_index, 0);
     HVN_DRAIN.release(conn_handle);
 }
 
@@ -1863,6 +1868,7 @@ async fn central_link(
     );
     peer_link_down(slot_index);
     conn_link_down(slot_index);
+    super::defrag_held_set(slot_index, 0);
     HVN_DRAIN.release(conn_handle);
 }
 

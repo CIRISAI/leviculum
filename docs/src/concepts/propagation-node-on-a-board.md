@@ -542,7 +542,7 @@ usable way for two boards to meet rather than a consolation prize.
 
 **BLE.** The negotiated MTU is bounded by measurement rather than
 assumed: the SoftDevice is configured with an ATT MTU ceiling of 256
-(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:640`), but the field log
+(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:671`), but the field log
 shows a 183-byte packet fragmenting into 2 and a 275-byte packet also
 into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default

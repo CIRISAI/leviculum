@@ -564,6 +564,11 @@ async fn main(spawner: Spawner) {
     // a spawned task: the counters live in the node this loop owns.
     let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
 
+    // The `[HEAP_CENSUS]` line (#388): who holds the heap. Rides the
+    // main loop like the `[TRANSPORT]` ticker — the node and the engine
+    // it walks are this loop's own state.
+    let mut heap_census = leviculum_nrf::heap_census::Ticker::new();
+
     log_critical!("[STG] main-loop");
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
 
@@ -599,13 +604,15 @@ async fn main(spawner: Spawner) {
     // 9. Telemetry evaluation tick (only while a target is configured)
     loop {
         transport_stats.poll(&node);
+        heap_census.poll(&node, pn_engine.as_ref());
         // Clamped by the stats deadline so the line is still emitted on a
         // channel quiet enough that the node itself has nothing scheduled.
         let deadline = node
             .next_deadline()
             .map(Instant::from_millis)
             .unwrap_or(Instant::MAX)
-            .min(transport_stats.deadline());
+            .min(transport_stats.deadline())
+            .min(heap_census.deadline());
         // The propagation engine's own schedule (queued work, announce,
         // sync scheduler) rides the same timer arm.
         let deadline = match pn_engine.as_ref() {

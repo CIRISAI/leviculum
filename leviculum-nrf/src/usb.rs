@@ -315,6 +315,10 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
 ///   at each phase boundary of a load run turns the one boot-dominated
 ///   number into a per-phase peak; see
 ///   [`crate::reset_stack_watermark`].
+/// - `c` — heap census on demand (#388). Sets a flag the main loop
+///   reads; the `[HEAP_CENSUS]` line follows within one loop wake-up
+///   (≤ 30 s, the `[TRANSPORT]` clamp), because only that loop owns the
+///   state the census walks.
 ///
 /// All other bytes are ignored, so terminal line endings and stray input
 /// are harmless.
@@ -334,6 +338,10 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
                 // everything below it is dead. See the fn docs for the
                 // interrupt-nesting caveat the margin covers.
                 unsafe { crate::reset_stack_watermark() };
+            }
+            #[cfg(feature = "softdevice")]
+            if buf[..n].contains(&b'c') {
+                crate::heap_census::request();
             }
         }
     }

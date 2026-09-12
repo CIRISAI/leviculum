@@ -144,6 +144,30 @@ const _: () = assert!(MAX_LINKS >= CONN_COUNT as usize);
 /// and its host tests.
 pub static HVN_DRAIN: DrainRouter<MAX_LINKS> = DrainRouter::new();
 
+/// Last-observed heap bytes held by each link's defragmenter (#388
+/// census). Written by [`columba`]'s two inbound paths after every
+/// fragment (the defragmenter itself lives in the session task's local
+/// state, out of the census walker's reach), zeroed when the session's
+/// slot is torn down. Indexed by the drain-slot, the per-link identity
+/// both roles already use.
+static DEFRAG_HELD: [core::sync::atomic::AtomicUsize; MAX_LINKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_LINKS];
+
+/// Sum of the per-link defragmenter holdings, for the heap census.
+pub fn defrag_held_bytes() -> usize {
+    DEFRAG_HELD
+        .iter()
+        .map(|slot| slot.load(core::sync::atomic::Ordering::Relaxed))
+        .sum()
+}
+
+/// Publish one link's current defragmenter holding (0 on teardown).
+pub(crate) fn defrag_held_set(slot_index: usize, bytes: usize) {
+    if let Some(slot) = DEFRAG_HELD.get(slot_index) {
+        slot.store(bytes, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The channel depth every BLE packet queue uses.
 const QUEUE_DEPTH: usize = 4;
 

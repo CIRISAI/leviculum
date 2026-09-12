@@ -429,6 +429,45 @@ pub async fn miner_task() {
 // The engine
 // ---------------------------------------------------------------------------
 
+/// The engine's slice of the heap census (#388): estimated bytes per
+/// part of the role's runtime state, from [`Engine::heap_census`]. The
+/// message store itself is flash; what shows up here is only RAM the
+/// role pins while working.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EngineHeapCensus {
+    /// Live peers in the table.
+    pub peer_count: usize,
+    /// Peer table node structure.
+    pub peers: usize,
+    /// Queued work items (uploads, /get, /offer) with their payloads.
+    pub work: usize,
+    /// The inbound sync batch draining one message per settle pass.
+    pub batch: usize,
+    /// The outbound sync round's offer plan.
+    pub outbound: usize,
+    /// Per-link bookkeeping: pending proofs, validated links, inbound
+    /// transfers, the too-large list.
+    pub link_maps: usize,
+    /// The role's own state ([`PropagationNode::heap_bytes`]): the
+    /// processed-id duplicate cache and the announced name.
+    pub role: usize,
+    /// Unflushed writes queued at both store adapters.
+    pub flush: usize,
+}
+
+impl EngineHeapCensus {
+    /// Sum of every accounted field.
+    pub fn total(&self) -> usize {
+        self.peers
+            + self.work
+            + self.batch
+            + self.outbound
+            + self.link_maps
+            + self.role
+            + self.flush
+    }
+}
+
 pub struct Engine {
     role: PropagationNode<PnStore<FlashRegion>>,
     peers: PeerTable,
@@ -565,6 +604,52 @@ impl Engine {
     /// The propagation destination hash, for boot banners.
     pub fn destination_hash(&self) -> &DestinationHash {
         &self.dest_hash
+    }
+
+    /// One engine-level heap census (#388): estimated bytes per part of
+    /// the role's runtime state, walked at the owners — the model is
+    /// [`leviculum_core::heap_census`]'s.
+    pub fn heap_census(&self) -> EngineHeapCensus {
+        use leviculum_core::heap_census as hc;
+        let mut work = self.work.capacity() * core::mem::size_of::<Work>();
+        for item in &self.work {
+            work += match item {
+                Work::Upload { data, .. } | Work::Get { data, .. } | Work::Offer { data, .. } => {
+                    data.capacity()
+                }
+            };
+        }
+        let batch = self.sync_batch.as_ref().map_or(0, |batch| {
+            hc::vec_deque_bytes(&batch.messages)
+                + batch
+                    .messages
+                    .iter()
+                    .map(|message| message.capacity())
+                    .sum::<usize>()
+        });
+        let outbound = self
+            .outbound
+            .as_ref()
+            .map_or(0, |sync| hc::vec_bytes(&sync.plan.ids));
+        let link_maps = hc::btree_map_bytes(&self.pending_proofs)
+            + self
+                .pending_proofs
+                .values()
+                .map(hc::vec_deque_bytes)
+                .sum::<usize>()
+            + hc::btree_map_bytes(&self.validated_links)
+            + hc::vec_bytes(&self.inbound_transfers)
+            + hc::vec_bytes(&self.too_large);
+        EngineHeapCensus {
+            peer_count: self.peers.len(),
+            peers: self.peers.heap_bytes(),
+            work,
+            batch,
+            outbound,
+            link_maps,
+            role: self.role.heap_bytes(),
+            flush: self.role.store().queued_heap_bytes() + self.peer_store.queued_heap_bytes(),
+        }
     }
 
     /// When the loop should call [`Engine::settle`] again.

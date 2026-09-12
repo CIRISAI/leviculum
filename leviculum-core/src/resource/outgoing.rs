@@ -255,6 +255,25 @@ pub(crate) struct OutgoingResource {
 }
 
 impl OutgoingResource {
+    /// Estimated heap bytes this in-flight transfer pins (#388 census):
+    /// the encrypted staging copy, the part buffers and their spine,
+    /// the hashmap, and the cached advertisement packet.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use core::mem::size_of;
+        let mut bytes = self.encrypted_data.capacity()
+            + self.parts.capacity() * size_of::<Vec<u8>>()
+            + self.hashmap.capacity() * RESOURCE_HASHMAP_LEN
+            + self.sent_mask.capacity()
+            + self.adv_packet.capacity();
+        for part in &self.parts {
+            bytes += part.capacity();
+        }
+        if let Some(id) = &self.request_id {
+            bytes += id.capacity();
+        }
+        bytes
+    }
+
     /// Create a new outgoing resource for transfer over a link.
     ///
     /// # Arguments
@@ -1163,6 +1182,12 @@ pub(crate) struct OutgoingSegmentPlan {
 }
 
 impl OutgoingSegmentPlan {
+    /// Estimated heap bytes the plan pins (#388 census): the full
+    /// application data held for the remaining segments, plus metadata.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.data.capacity() + self.metadata.as_ref().map_or(0, |m| m.capacity())
+    }
+
     /// Create a plan for a transfer whose combined `metadata + data` exceeds
     /// [`RESOURCE_MAX_EFFICIENT_SIZE`]. `next_index` starts at 2 because the
     /// caller advertises segment 1 directly.

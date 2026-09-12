@@ -1030,6 +1030,22 @@ impl Storage for EmbeddedStorage {
     fn load_dest_ratchet_keys(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<Vec<u8>> {
         self.dest_ratchet_keys.get(dest_hash).cloned()
     }
+
+    // Heap census (#388). The heapless maps are inline in the node's
+    // one boxed block and counted by `node_struct` there; what this
+    // storage pins on the HEAP is exactly its variable-size values —
+    // the raw announce bytes and the serialized ratchet keys.
+    fn heap_bytes(&self) -> usize {
+        self.announce_cache
+            .iter()
+            .map(|(_, raw)| raw.capacity())
+            .sum::<usize>()
+            + self
+                .dest_ratchet_keys
+                .iter()
+                .map(|(_, keys)| keys.capacity())
+                .sum::<usize>()
+    }
 }
 
 #[cfg(test)]

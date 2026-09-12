@@ -271,7 +271,7 @@ repeated copy, `add_packet_hash`
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:6475`). Whether the relayed echo
+`leviculum-core/src/transport.rs:6404`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

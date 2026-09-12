@@ -343,6 +343,15 @@ impl BleDefragmenter {
         self.fragments.len()
     }
 
+    /// Estimated heap bytes the reassembly in progress pins: the
+    /// fragment payloads plus the map's node structure (#388 census).
+    /// 0 when idle — completion hands the assembled packet away and
+    /// clears the map.
+    pub fn held_bytes(&self) -> usize {
+        crate::heap_census::btree_map_bytes(&self.fragments)
+            + self.fragments.values().map(|f| f.capacity()).sum::<usize>()
+    }
+
     /// Discard the reassembly in progress and count it when one was
     /// pending: the caller is dropping a partial packet for a reason
     /// the defragmenter could not see (a hard reset after a garbage

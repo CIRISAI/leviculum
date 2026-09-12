@@ -325,6 +325,12 @@ pub struct Destination {
 }
 
 impl Destination {
+    /// Estimated heap bytes this destination pins beyond its inline
+    /// struct (#388 census): the full name and the ratchet store.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.full_name.capacity() + self.ratchets.capacity() * core::mem::size_of::<Ratchet>()
+    }
+
     /// Create a new destination
     ///
     /// # Arguments

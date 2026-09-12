@@ -838,6 +838,42 @@ impl Link {
         self.initiator
     }
 
+    /// Estimated heap bytes this link's non-resource state pins (#388
+    /// census): channel rings, cached proofs, a pending resource
+    /// advertisement. The link struct itself is inline in the node's
+    /// link table and counted there.
+    pub(crate) fn content_heap_bytes(&self) -> usize {
+        let mut bytes = self.channel.as_ref().map_or(0, |ch| ch.heap_bytes());
+        if let Some(proof) = &self.cached_proof {
+            bytes += proof.capacity();
+        }
+        bytes += crate::heap_census::btree_map_bytes(&self.cached_resource_proofs);
+        for proof in self.cached_resource_proofs.values() {
+            bytes += proof.capacity();
+        }
+        if let Some(adv) = &self.pending_resource_adv {
+            bytes += adv.heap_bytes();
+        }
+        bytes
+    }
+
+    /// Estimated heap bytes of resource transfers in flight on this
+    /// link (#388 census): incoming reassembly, outgoing staging, and a
+    /// multi-segment plan's retained data.
+    pub(crate) fn resource_heap_bytes(&self) -> usize {
+        self.incoming_resource
+            .as_ref()
+            .map_or(0, |r| r.heap_bytes())
+            + self
+                .outgoing_resource
+                .as_ref()
+                .map_or(0, |r| r.heap_bytes())
+            + self
+                .outgoing_segments
+                .as_ref()
+                .map_or(0, |p| p.heap_bytes())
+    }
+
     /// Get the proof strategy for received data on this link
     pub fn proof_strategy(&self) -> ProofStrategy {
         self.proof_strategy

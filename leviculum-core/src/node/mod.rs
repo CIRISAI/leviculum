@@ -3123,6 +3123,44 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         out
     }
 
+    /// One heap census of this node (Codeberg #388): estimated bytes
+    /// held per subsystem, computed by walking the collections at their
+    /// owners — see [`crate::heap_census`] for the estimation model.
+    /// Allocation-free and O(state), so the firmware main loop can call
+    /// it at a coarse cadence next to the `[HEAP]` line.
+    pub fn heap_census(&self) -> crate::heap_census::NodeHeapCensus {
+        use crate::heap_census as hc;
+        let mut links = hc::btree_map_bytes(&self.links);
+        let mut resources = 0usize;
+        for link in self.links.values() {
+            links += link.content_heap_bytes();
+            resources += link.resource_heap_bytes();
+        }
+        let requests = hc::btree_map_bytes(&self.request_handlers)
+            + hc::btree_map_bytes(&self.pending_requests)
+            + hc::btree_map_bytes(&self.request_resource_uploads)
+            + hc::btree_map_bytes(&self.response_resource_downloads)
+            + hc::btree_map_bytes(&self.link_retry_state)
+            + hc::btree_map_bytes(&self.link_id_aliases)
+            + hc::btree_map_bytes(&self.link_origin_ids)
+            + self.receipt_tracker.heap_bytes();
+        let mut destinations = hc::btree_map_bytes(&self.destinations);
+        for destination in self.destinations.values() {
+            destinations += destination.heap_bytes();
+        }
+        crate::heap_census::NodeHeapCensus {
+            node_struct: core::mem::size_of::<Self>(),
+            link_count: self.links.len(),
+            links,
+            resources,
+            events: hc::vec_bytes(&self.events) + hc::vec_bytes(&self.mgmt_destinations),
+            requests,
+            destinations,
+            transport: self.transport.heap_bytes(),
+            storage: self.transport.storage().heap_bytes(),
+        }
+    }
+
     /// Get the current time in milliseconds from the transport clock
     pub fn now_ms(&self) -> u64 {
         self.transport.clock().now_ms()

@@ -249,6 +249,14 @@ pub struct PropagationNode<S> {
 }
 
 impl<S: PropagationStore> PropagationNode<S> {
+    /// Estimated heap bytes the role itself pins (#388 census): the
+    /// processed-id duplicate cache and the announced name. The store
+    /// adapter accounts for its own queued writes.
+    pub fn heap_bytes(&self) -> usize {
+        leviculum_core::heap_census::btree_map_bytes(&self.processed)
+            + self.config.name.as_ref().map_or(0, |name| name.capacity())
+    }
+
     pub fn new(store: S, config: PropagationNodeConfig) -> Self {
         Self {
             store,

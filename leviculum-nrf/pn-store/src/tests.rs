@@ -456,3 +456,31 @@ fn load_all_reflects_pending_saves_before_flush() {
         assert_eq!(records[0].cursor, 300);
     });
 }
+
+#[test]
+fn queued_heap_bytes_track_the_flush_queues() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+
+        // Message store: an unflushed append pins at least its body.
+        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        assert_eq!(store.queued_heap_bytes(), 0);
+        let body = msg_body(1, FIELD_BODY);
+        store.append(&key(1), 1000, 0, &body).unwrap();
+        assert!(
+            store.queued_heap_bytes() >= body.len(),
+            "queued append body not accounted"
+        );
+        flush_messages(&mut store, &region, &mut log);
+        // Flushed: the bodies are gone; only ring capacity may linger.
+        assert!(store.queued_heap_bytes() < body.len());
+
+        // Peer store: an unflushed save pins its pending mirror.
+        let mut peers = PnPeerStore::new(region.clone());
+        assert_eq!(peers.queued_heap_bytes(), 0);
+        peers.save(&full_peer(7, 100)).unwrap();
+        assert!(peers.queued_heap_bytes() > 0);
+    });
+}

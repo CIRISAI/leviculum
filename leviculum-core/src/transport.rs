@@ -3490,6 +3490,83 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         (s, total)
     }
 
+    /// Estimated heap bytes the transport's own dynamic state pins
+    /// (#388 census): pending actions and events (spines plus queued
+    /// packet payloads), the per-interface announce queues and held
+    /// announces, and the interface bookkeeping maps. The tables that
+    /// migrated to [`Storage`] are that impl's
+    /// to report via `Storage::heap_bytes`.
+    pub fn heap_bytes(&self) -> usize {
+        use crate::heap_census as hc;
+        let mut bytes = hc::vec_bytes(&self.events) + hc::vec_bytes(&self.pending_actions);
+        for action in &self.pending_actions {
+            bytes += match action {
+                Action::SendPacket { data, .. } => data.capacity(),
+                Action::Broadcast {
+                    data,
+                    exclude_ifaces,
+                    ..
+                } => data.capacity() + hc::vec_bytes(exclude_ifaces),
+            };
+        }
+        bytes += hc::btree_map_bytes(&self.interface_announce_caps);
+        for cap in self.interface_announce_caps.values() {
+            bytes += hc::vec_deque_bytes(&cap.queue);
+            for queued in &cap.queue {
+                bytes += queued.raw.capacity();
+            }
+        }
+        bytes += hc::btree_map_bytes(&self.interface_held_announces);
+        for held in self.interface_held_announces.values() {
+            bytes += hc::btree_map_bytes(held);
+            for announce in held.values() {
+                bytes += announce.raw.capacity();
+            }
+        }
+        bytes += hc::btree_map_bytes(&self.held_announce_entries);
+        for entry in self.held_announce_entries.values() {
+            bytes += entry.raw_packet.capacity();
+        }
+        bytes += hc::btree_set_bytes(&self.local_destinations)
+            + hc::btree_map_bytes(&self.interface_names)
+            + self
+                .interface_names
+                .values()
+                .map(|name| name.capacity())
+                .sum::<usize>()
+            + hc::btree_set_bytes(&self.offline_interfaces)
+            + hc::btree_map_bytes(&self.interface_peer_counts)
+            + hc::btree_set_bytes(&self.peer_link_reoriginations)
+            + hc::btree_map_bytes(&self.interface_modes)
+            + hc::btree_map_bytes(&self.interface_kinds)
+            + hc::btree_map_bytes(&self.interface_ingress_control)
+            + hc::btree_map_bytes(&self.interface_egress_control)
+            + hc::btree_map_bytes(&self.interface_hw_mtus)
+            + hc::btree_map_bytes(&self.interface_link_profiles)
+            + hc::btree_set_bytes(&self.local_client_interfaces)
+            + hc::btree_map_bytes(&self.pending_local_path_requests)
+            + hc::btree_map_bytes(&self.interface_announce_rate_configs)
+            + hc::btree_map_bytes(&self.interface_next_slot_ms)
+            + hc::btree_map_bytes(&self.interface_max_airtime_ms)
+            + hc::btree_map_bytes(&self.ifac_configs)
+            + hc::btree_map_bytes(&self.blackholed_identities)
+            + hc::btree_map_bytes(&self.tunnels)
+            + hc::btree_map_bytes(&self.interface_tunnel_ids)
+            + hc::btree_map_bytes(&self.interface_ingress_burst);
+        for windows in [
+            &self.interface_incoming_announce_times,
+            &self.interface_outgoing_announce_times,
+            &self.interface_incoming_pr_times,
+            &self.interface_outgoing_pr_times,
+        ] {
+            bytes += hc::btree_map_bytes(windows);
+            for window in windows.values() {
+                bytes += hc::vec_deque_bytes(window);
+            }
+        }
+        bytes
+    }
+
     /// Get the transport configuration
     pub fn config(&self) -> &TransportConfig {
         &self.config

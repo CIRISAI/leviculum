@@ -99,6 +99,11 @@ impl ReceiptTracker {
         }
     }
 
+    /// Estimated heap bytes of the tracker's entry spine (#388 census).
+    pub(super) fn heap_bytes(&self) -> usize {
+        crate::heap_census::vec_bytes(&self.entries)
+    }
+
     /// Register a receipt for a channel message, replacing any existing entry
     /// for the same `(link_id, sequence)`.
     pub(super) fn register(
