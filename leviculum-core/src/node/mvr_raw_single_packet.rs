@@ -28,7 +28,6 @@ use crate::memory_storage::MemoryStorage;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::transport::{Action, InterfaceId, PathEntry, TickOutput};
-use crate::DestinationHash;
 
 type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
 

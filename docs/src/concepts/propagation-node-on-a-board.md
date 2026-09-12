@@ -218,7 +218,7 @@ not.
 
 One file decides it. `leviculum-nrf/memory.x` carves `STORE` out of the
 top of the application window and exports `__srecord_store` /
-`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:147`)
+`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:220`)
 reads those two symbols, and nothing else in the tree knows the
 addresses.
 
@@ -405,7 +405,7 @@ says 210 KiB of gap is what remains at 16. Widening the region upward is
 impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
 widening it downward moves every record, so a later resize is a
 reformat. That is the deliberate price of the smaller default, and
-`mount` (`leviculum-nrf/src/record_store.rs:376`) already treats a
+`mount` (`leviculum-nrf/src/record_store.rs:522`) already treats a
 region that is not ours as unformatted rather than as corrupt, so the
 reformat is a boot line and not an incident.
 
@@ -434,7 +434,7 @@ outright when it finds no gap (S140 SDS, Flash API timing), so a refusal
 is a statement about the next few milliseconds of radio traffic and not
 about the part. The store answers it with four attempts and a doubling
 delay — 50, 100, 200 ms (`FLASH_ATTEMPTS`,
-`leviculum-nrf/src/record_store.rs:134`) — and prints every refusal and
+`leviculum-nrf/src/record_store.rs:207`) — and prints every refusal and
 a running count on its debug port.
 
 A refusal part way through an append **seals the page**: the rest of it
@@ -466,7 +466,7 @@ delivery rate across a storm, measured against the same run without one.
 
 **Reads do not go through the SoftDevice's flash scheduler at all.** The
 internal flash is memory-mapped and the read is a `memcpy` that cannot
-fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:263`) —
+fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:336`) —
 unlike a write or an erase, it never waits for a gap between radio
 events. That single fact removes the RAM index the QSPI costing needed:
 a lookup is a scan, and a scan is free of the radio.
@@ -497,7 +497,7 @@ how many peer with us nor, therefore, that number.
 **What a full scan costs.** `for_each`
 (`leviculum-nrf/record-log/src/lib.rs:546`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`
-(`leviculum-nrf/record-log/src/lib.rs:862`) checks the CRC over both. A
+(`leviculum-nrf/record-log/src/lib.rs:906`) checks the CRC over both. A
 full region is therefore one pass over at most 64 KiB.
 
 **This is arithmetic, not a measurement, and the assumption is stated:**

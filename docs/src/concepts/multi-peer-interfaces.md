@@ -92,11 +92,11 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:874`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:901`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:913`; the
+`leviculum-nrf/src/bin/t114.rs:924`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:952`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:964`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:854`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:904`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:3893`). So the identity-shaped
@@ -261,7 +261,7 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 
 | Budget | Measured | Headroom |
 |---|---|---|
-| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:220`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
+| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:232`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
 | SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:88`) | **not the relevant budget, see below** |
 
