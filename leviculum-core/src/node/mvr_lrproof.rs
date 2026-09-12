@@ -327,7 +327,8 @@ fn run_asymmetric_return_path_scenario() -> ScenarioOutcome {
         );
 
         // 1. Initiator connects -> broadcasts the link request.
-        let (init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (init_link, _routed, out) =
+            initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // 2. A receives the request from its local client and forwards it.
@@ -612,7 +613,8 @@ fn lrproof_symmetric_single_hop_relay_establishes() {
         assert_eq!(relay_a.hops_to(&dest_hash), Some(1));
 
         // 1. connect -> request.
-        let (_init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (_init_link, _routed, out) =
+            initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // 2. A forwards (remaining_hops frozen to 1).
@@ -720,7 +722,8 @@ fn lrproof_link_carries_data_despite_hop_asymmetry() {
         let _ = relay_g.handle_packet(InterfaceId(g_from_y), &y_rebroadcasts[0]);
 
         // Establish the link over the asymmetric path (works after the LRPROOF fix).
-        let (init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (init_link, _routed, out) =
+            initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
         let out = relay_a.handle_packet(InterfaceId(a_local), &request);
         let a_forwarded = one_packet(&out);

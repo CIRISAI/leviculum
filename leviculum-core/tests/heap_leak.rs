@@ -277,7 +277,7 @@ fn establish(
     dest_hash: DestinationHash,
     key: &[u8; 32],
 ) -> Option<LinkId> {
-    let (link_id, _routed, out) = a.connect(dest_hash, key);
+    let (link_id, _routed, out) = a.connect(dest_hash, key).expect("connect");
     settle(a, b, out);
     if a.link(&link_id).map(|l| l.is_active()).unwrap_or(false) {
         Some(link_id)

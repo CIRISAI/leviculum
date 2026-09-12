@@ -149,7 +149,8 @@ fn establish_captured(
     signing_key: [u8; 32],
     rtt_advance_ms: u64,
 ) -> (Vec<u8>, Vec<u8>, Vec<u8>, LinkId, LinkId) {
-    let (caller_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
     let lr_wire = action_data(&out)
         .into_iter()
         .next()

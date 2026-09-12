@@ -137,7 +137,8 @@ fn establish() -> (EndpointNode, EndpointNode, usize, usize, LinkId) {
     let r_iface = add_iface(&mut responder, "R_mesh");
     let i_iface = add_iface(&mut initiator, "I_mesh");
 
-    let (caller_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
 
     // Ping-pong the handshake (request -> proof -> rtt -> ack) until quiescent.
     let mut for_responder = action_data(&out);
@@ -430,7 +431,8 @@ fn rekey_retry_emits_no_resource_failed() {
 
     // Connect and DROP the first request so the establishment times out and the
     // #66 retry re-keys the link under a fresh id.
-    let (_caller_link_id, _routed, _out) = initiator.connect(dest_hash, &signing_key);
+    let (_caller_link_id, _routed, _out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
 
     let now = initiator.transport().clock().now_ms();
     initiator

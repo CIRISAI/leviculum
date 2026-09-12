@@ -577,7 +577,12 @@ impl LxmfNode {
             .get_identity(destination.as_bytes())
             .map(|identity| identity.ed25519_verifying().to_bytes())
             .ok_or(LxmfNodeError::UnknownPeer)?;
-        let (link_id, _routed, core) = node.connect(destination, &signing_key);
+        // A link-cap refusal (`max_links`, #388) reads as "no direct link
+        // right now": the caller's existing retry path re-attempts after a
+        // link has closed, exactly like any other unavailable direct link.
+        let (link_id, _routed, core) = node
+            .connect(destination, &signing_key)
+            .map_err(|_| LxmfNodeError::DirectLinkUnavailable)?;
         self.pending_links.insert(destination, link_id);
         self.link_destinations.insert(link_id, destination);
         let output = LxmfNodeOutput {

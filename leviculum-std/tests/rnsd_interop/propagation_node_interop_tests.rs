@@ -52,7 +52,13 @@ struct PnHost {
     deframer: Deframer,
     destination_hash: DestinationHash,
     pending_proofs: HashMap<LinkId, VecDeque<[u8; 32]>>,
-    accepted: usize,
+    /// Distinct transient ids the role accepted. A set, not a counter:
+    /// a client whose upload proof is late (e.g. under full-suite load)
+    /// legally RETRIES the same message, and the role proves the
+    /// duplicate too (`UploadOutcome::Accepted`'s contract) — two accept
+    /// events for one message are correct protocol behaviour, a second
+    /// distinct message is not.
+    accepted: std::collections::BTreeSet<leviculum_lxmf::TransientId>,
 }
 
 impl PnHost {
@@ -88,7 +94,7 @@ impl PnHost {
             deframer: Deframer::new(),
             destination_hash,
             pending_proofs: HashMap::new(),
-            accepted: 0,
+            accepted: std::collections::BTreeSet::new(),
         }
     }
 
@@ -158,8 +164,8 @@ impl PnHost {
                 match self.role.handle_upload(data, unix_secs(), |_, _| {
                     unreachable!("stamp cost 0 must not validate")
                 }) {
-                    UploadOutcome::Accepted { .. } => {
-                        self.accepted += 1;
+                    UploadOutcome::Accepted { transient_id, .. } => {
+                        self.accepted.insert(transient_id);
                         let packet_hash = proof.expect("a proof decision precedes the data");
                         Some(
                             self.node
@@ -189,8 +195,8 @@ impl PnHost {
                 match self.role.handle_upload(data, unix_secs(), |_, _| {
                     unreachable!("stamp cost 0 must not validate")
                 }) {
-                    UploadOutcome::Accepted { .. } => {
-                        self.accepted += 1;
+                    UploadOutcome::Accepted { transient_id, .. } => {
+                        self.accepted.insert(transient_id);
                         None
                     }
                     other => panic!("resource upload refused: {other:?}"),
@@ -405,5 +411,9 @@ async fn python_clients_upload_and_drain_through_our_propagation_node() {
         "the store must be empty after the confirmed fetch, {} left",
         host.role.store().len()
     );
-    assert_eq!(host.accepted, 1, "exactly one upload accepted");
+    assert_eq!(
+        host.accepted.len(),
+        1,
+        "exactly one distinct upload accepted"
+    );
 }

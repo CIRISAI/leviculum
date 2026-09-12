@@ -82,6 +82,8 @@ mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_identify_relay;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_link_cap;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;
 #[cfg(test)]
 mod mvr_link_delivery_telemetry;
@@ -4594,7 +4596,9 @@ mod tests {
         assert!(node.has_path(&dest_hash), "should have path from announce");
 
         // Call connect(), actions are returned immediately in TickOutput
-        let (link_id, _, output) = node.connect(dest_hash, &remote_signing_key);
+        let (link_id, _, output) = node
+            .connect(dest_hash, &remote_signing_key)
+            .expect("connect");
 
         // The link request should have been returned as an Action (SendPacket
         // to the path's interface since we have a path, or Broadcast if no path)
@@ -4631,7 +4635,8 @@ mod tests {
         let dest_hash = *dest.hash();
 
         // Connect without any path, should broadcast
-        let (_link_id, was_routed, output) = node.connect(dest_hash, &signing_key);
+        let (_link_id, was_routed, output) =
+            node.connect(dest_hash, &signing_key).expect("connect");
         assert!(!was_routed, "should not be routed without a path");
 
         // Verify it broadcast instead
@@ -4676,7 +4681,8 @@ mod tests {
         assert!(node.has_path(&dest_hash), "should have path from announce");
 
         // Connect with path, should be routed
-        let (_link_id, was_routed, output) = node.connect(dest_hash, &signing_key);
+        let (_link_id, was_routed, output) =
+            node.connect(dest_hash, &signing_key).expect("connect");
         assert!(was_routed, "should be routed with a known path");
 
         // Verify it sent via SendPacket (not Broadcast)
@@ -4733,7 +4739,9 @@ mod tests {
         assert!(node.has_path(&dest_hash), "should have path from announce");
 
         // Initiate connection, actions returned in output
-        let (link_id, _, _output) = node.connect(dest_hash, &remote_signing_key);
+        let (link_id, _, _output) = node
+            .connect(dest_hash, &remote_signing_key)
+            .expect("connect");
 
         (node, dest_hash, link_id)
     }
@@ -4881,7 +4889,9 @@ mod tests {
         // Initiator A (non-transport): connect broadcasts the request.
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (caller_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (caller_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let first_request = extract_broadcast_data(&output);
 
         // T forwards the first request toward B — and the forward is LOST.
@@ -4974,7 +4984,9 @@ mod tests {
 
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (_caller_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (_caller_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let first_request = extract_broadcast_data(&output);
 
         // First request DOES reach B; B auto-accepts (Stage 1) and its proof is lost
@@ -5164,7 +5176,9 @@ mod tests {
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
 
         // 3. Initiator connects (broadcasts since no path)
-        let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (init_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let link_req_data = extract_broadcast_data(&output);
 
         // 4. Responder receives link request → auto-accepts (Stage 1): the
@@ -5234,7 +5248,9 @@ mod tests {
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
 
         // 3. Initiator connects (broadcasts since no path)
-        let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (init_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let link_req_data = extract_broadcast_data(&output);
 
         // 4. Responder receives link request → auto-accepts (Stage 1): the
@@ -5306,7 +5322,9 @@ mod tests {
         // Initiator connects (broadcasts a link request since no path is known).
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (_init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (_init_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let link_req_data = extract_broadcast_data(&output);
 
         // Responder receives the link request: it is ignored, so there is no
@@ -5376,7 +5394,9 @@ mod tests {
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
 
-        let (_init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (_init_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let link_req_data = extract_broadcast_data(&output);
 
         let _output = responder.handle_packet(InterfaceId(0), &link_req_data);
@@ -5801,7 +5821,7 @@ mod tests {
         // First initiator connects
         let clock = MockClock::new(TEST_TIME_MS);
         let mut init1 = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (link1, _, out1) = init1.connect(hash1, &signing1);
+        let (link1, _, out1) = init1.connect(hash1, &signing1).expect("connect");
         let data1 = extract_broadcast_data(&out1);
         let out = responder.handle_packet(InterfaceId(0), &data1);
         let proof1 = extract_broadcast_data(&out);
@@ -5812,7 +5832,7 @@ mod tests {
         // Second initiator connects
         let clock = MockClock::new(TEST_TIME_MS);
         let mut init2 = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (_link2, _, out2) = init2.connect(hash2, &signing2);
+        let (_link2, _, out2) = init2.connect(hash2, &signing2).expect("connect");
         let data2 = extract_broadcast_data(&out2);
         let out = responder.handle_packet(InterfaceId(0), &data2);
         let proof2 = extract_broadcast_data(&out);
@@ -5884,7 +5904,9 @@ mod tests {
 
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (_, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (_, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let req_data = extract_broadcast_data(&output);
 
         let output = responder.handle_packet(InterfaceId(0), &req_data);
@@ -5925,7 +5947,9 @@ mod tests {
 
         let clock = MockClock::new(TEST_TIME_MS);
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (_, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (_, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let req_data = extract_broadcast_data(&output);
 
         let output = responder.handle_packet(InterfaceId(0), &req_data);
@@ -6177,8 +6201,8 @@ mod tests {
 
         let hash1 = *dest1.hash();
         let hash2 = *dest2.hash();
-        let (_, _, _) = node.connect(hash1, &signing1);
-        let (_, _, _) = node.connect(hash2, &signing2);
+        let (_, _, _) = node.connect(hash1, &signing1).expect("connect");
+        let (_, _, _) = node.connect(hash2, &signing2).expect("connect");
 
         // Exhaust all retries for both links
         let mut output = node.handle_timeout();
@@ -7027,7 +7051,7 @@ mod tests {
 
         let clock = MockClock::new(TEST_TIME_MS);
         let mut init = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
-        let (link_id, _, _) = init.connect(dest_hash, &resp_signing_key);
+        let (link_id, _, _) = init.connect(dest_hash, &resp_signing_key).expect("connect");
         let pending_link = init.link(&link_id).unwrap();
         assert_eq!(
             pending_link.attached_interface(),
@@ -9419,7 +9443,9 @@ mod tests {
         let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
 
         // Initiator connects
-        let (init_link_id, _, output) = initiator.connect(dest_hash, &resp_signing_key);
+        let (init_link_id, _, output) = initiator
+            .connect(dest_hash, &resp_signing_key)
+            .expect("connect");
         let link_req_data = extract_broadcast_data(&output);
 
         // Responder receives link request → auto-accepts (Stage 1): proof in actions

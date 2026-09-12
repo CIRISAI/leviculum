@@ -114,7 +114,8 @@ fn establish(
     dest_hash: crate::DestinationHash,
     signing_key: [u8; 32],
 ) -> (LinkId, LinkId) {
-    let (caller_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
 
     let mut responder_link_id = None;
     let mut for_responder = action_data(&out);

@@ -96,7 +96,12 @@ impl PeerStore for FilePeerStore {
     }
 }
 
-const RECORD_FIELDS: usize = 12;
+const RECORD_FIELDS: usize = 13;
+
+/// Field count before the peer's public keys were persisted (#388 pass
+/// 3); records of this arity still decode, keys absent, so an upgrade
+/// keeps its peer table.
+const RECORD_FIELDS_LEGACY: usize = 12;
 
 fn encode_records(records: &[PeerRecord]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -125,6 +130,10 @@ fn encode_records(records: &[PeerRecord]) -> Vec<u8> {
         msgpack::uint(&mut out, record.last_heard);
         msgpack::uint(&mut out, record.cursor);
         msgpack::bool(&mut out, record.is_static);
+        match &record.public_keys {
+            Some(keys) => msgpack::bin(&mut out, keys),
+            None => msgpack::nil(&mut out),
+        }
     }
     out
 }
@@ -137,7 +146,8 @@ fn decode_records(bytes: &[u8]) -> Option<Vec<PeerRecord>> {
     }
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
-        if msgpack::array_len(bytes, &mut position).ok()? != RECORD_FIELDS {
+        let fields = msgpack::array_len(bytes, &mut position).ok()?;
+        if fields != RECORD_FIELDS && fields != RECORD_FIELDS_LEGACY {
             return None;
         }
         let destination_hash: [u8; 16] = msgpack::read_bin(bytes, &mut position)
@@ -178,9 +188,25 @@ fn decode_records(bytes: &[u8]) -> Option<Vec<PeerRecord>> {
         let last_heard = msgpack::read_uint(bytes, &mut position).ok()?;
         let cursor = msgpack::read_uint(bytes, &mut position).ok()?;
         let is_static = msgpack::read_bool(bytes, &mut position).ok()?;
+        let public_keys = if fields == RECORD_FIELDS_LEGACY
+            || msgpack::peek_kind(bytes, position).ok()? == msgpack::Kind::Nil
+        {
+            if fields != RECORD_FIELDS_LEGACY {
+                msgpack::read_nil(bytes, &mut position).ok()?;
+            }
+            None
+        } else {
+            Some(
+                msgpack::read_bin(bytes, &mut position)
+                    .ok()?
+                    .try_into()
+                    .ok()?,
+            )
+        };
         records.push(PeerRecord {
             destination_hash,
             identity_hash,
+            public_keys,
             peering_key,
             transfer_limit_kb,
             sync_limit_kb,
@@ -204,6 +230,7 @@ mod tests {
         PeerRecord {
             destination_hash: [seed; 16],
             identity_hash: seed.is_multiple_of(2).then(|| [seed + 1; 16]),
+            public_keys: seed.is_multiple_of(2).then(|| [seed + 2; 64]),
             peering_key: Some(([seed; 32], 18)),
             transfer_limit_kb: 4,
             sync_limit_kb: 32,

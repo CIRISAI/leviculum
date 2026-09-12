@@ -194,6 +194,13 @@ pub enum LinkError {
     PacingDelay { ready_at_ms: u64 },
     /// Destination not registered on this node
     DestinationNotRegistered,
+    /// The configured link-table cap ([`crate::transport::TransportConfig::max_links`])
+    /// is reached; no link was created. Retry after an existing link
+    /// closes — callers must back off, not spin.
+    TableFull {
+        /// The configured cap the table is at.
+        max: usize,
+    },
 }
 
 impl core::fmt::Display for LinkError {
@@ -214,6 +221,9 @@ impl core::fmt::Display for LinkError {
             }
             LinkError::DestinationNotRegistered => {
                 write!(f, "destination not registered on this node")
+            }
+            LinkError::TableFull { max } => {
+                write!(f, "link table at its configured cap of {}", max)
             }
         }
     }

@@ -166,7 +166,7 @@ fn identify_relays_across_two_transit_hops() {
     );
 
     // Establish: request I -> A -> G -> R, proof R -> G -> A -> I.
-    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
     let request = one_packet(&out);
     let a_req = one_packet(&relay_a.handle_packet(InterfaceId(a_local), &request));
     let g_req = one_packet(&relay_g.handle_packet(InterfaceId(g_from_a), &a_req));
@@ -246,7 +246,7 @@ fn identify_relays_across_one_transit_hop() {
     let _ = relay_a.handle_packet(InterfaceId(a_mesh), &announce_raw);
     assert_eq!(relay_a.hops_to(&dest_hash), Some(1));
 
-    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
     let request = one_packet(&out);
     let a_req = one_packet(&relay_a.handle_packet(InterfaceId(a_local), &request));
     let proof = one_packet(&responder.handle_packet(InterfaceId(r_iface), &a_req));

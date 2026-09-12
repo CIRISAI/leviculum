@@ -337,6 +337,7 @@ fn full_peer(n: u8, cursor: u64) -> PeerRecord {
     PeerRecord {
         destination_hash: [n; 16],
         identity_hash: Some([n ^ 0xFF; 16]),
+        public_keys: Some([n.wrapping_add(2); 64]),
         peering_key: Some(([n.wrapping_add(1); 32], 18)),
         transfer_limit_kb: 4,
         sync_limit_kb: 32,
@@ -357,6 +358,7 @@ fn peer_record_round_trip() {
 
     let minimal = PeerRecord {
         identity_hash: None,
+        public_keys: None,
         peering_key: None,
         is_static: false,
         ..full_peer(9, 0)
@@ -365,6 +367,15 @@ fn peer_record_round_trip() {
         decode_peer_record(&encode_peer_record(&minimal)),
         Some(minimal)
     );
+
+    // A record written before #388 pass 3 (no trailing key bytes) still
+    // decodes, with the keys absent — an upgrade keeps its peer table.
+    let legacy_source = PeerRecord {
+        public_keys: None,
+        ..full_peer(4, sequence(1, 64))
+    };
+    let legacy_body = &encode_peer_record(&legacy_source)[..PEER_RECORD_LEN_LEGACY];
+    assert_eq!(decode_peer_record(legacy_body), Some(legacy_source));
 
     // Wrong version and wrong length are refused, never misparsed.
     let mut wrong = encode_peer_record(&full_peer(1, 0));

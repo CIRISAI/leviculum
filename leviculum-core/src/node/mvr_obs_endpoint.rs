@@ -133,7 +133,8 @@ fn run_endpoint_round_trip() -> String {
         let i_iface = add_iface(&mut initiator, "I_mesh");
 
         // 1. Initiator connects -> LinkRequest (broadcast, no path known).
-        let (init_link, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (init_link, _routed, out) =
+            initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // 2. Responder accepts the inbound link as the ENDPOINT: LINK_LOCAL +

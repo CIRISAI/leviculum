@@ -622,6 +622,18 @@ pub struct TransportConfig {
     /// deliberate opt-in gated by an interop A/B and a live check, never a
     /// silent field change.
     pub lrproof_rewrite_on_asymmetry: bool,
+    /// Cap on concurrent endpoint links (entries in `NodeCore.links`,
+    /// inbound and outbound alike). `None` (default) is unbounded, the
+    /// host behaviour and Python's (`Transport.py:116`, `link_table = {}`
+    /// — a dict on a host with gigabytes). `Some(n)` refuses the link
+    /// past `n` live entries: an inbound request gets no link and no
+    /// proof (`LINK_REFUSED`), an outbound [`NodeCore::connect`] returns
+    /// [`crate::link::LinkError::TableFull`]. Wire and semantics are
+    /// unchanged — a refused request is a request that got no proof,
+    /// which every peer already handles with its establishment timeout
+    /// and retry. Set by the boards, whose heap budget (#388) sums a
+    /// fixed per-link cost.
+    pub max_links: Option<usize>,
 }
 
 impl Default for TransportConfig {
@@ -637,6 +649,7 @@ impl Default for TransportConfig {
             // Default preserves today's field behaviour exactly (rewrite, not
             // drop); the strict reference check is opt-in only (#38).
             lrproof_rewrite_on_asymmetry: true,
+            max_links: None,
         }
     }
 }

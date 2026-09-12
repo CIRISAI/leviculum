@@ -482,3 +482,162 @@ fn peer_records_round_trip_through_a_store_and_restore() {
     store.remove(&peer.destination_hash).unwrap();
     assert!(store.load_all().unwrap().is_empty());
 }
+
+// ---- identity recall survives the identity-cache roll (#388 pass 3) ----
+
+/// Sixteen peers announced, then nine unrelated identities announced —
+/// the board's 8-slot `known_identities` cache has rolled twice over —
+/// and a sync toward each of the sixteen still finds its keys (from the
+/// copy captured with the peer) and opens its link.
+#[test]
+fn peer_keys_survive_identity_cache_roll() {
+    use leviculum_core::traits::{Clock, NoStorage};
+    use leviculum_core::{DestinationHash, EmbeddedStorage, NodeCoreBuilder};
+    use rand_core::OsRng;
+
+    struct TestClock;
+    impl Clock for TestClock {
+        fn now_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    let mut storage = EmbeddedStorage::new();
+    let mut peers = PeerTable::new(PeeringConfig {
+        max_peers: 16,
+        ..PeeringConfig::default()
+    });
+
+    // Sixteen announces: each puts the identity into the cache (as the
+    // core's announce processing does) and is captured with the peer (as
+    // the role does in its announce handler).
+    let mut identities = alloc::vec::Vec::new();
+    for n in 0..16u8 {
+        let dest = [n; 16];
+        let identity = Identity::generate(&mut OsRng);
+        storage.set_identity(dest, identity.clone());
+        peers.handle_announce(dest, &announce(1), Some(1), 0);
+        let cached = storage.get_identity(&dest).cloned().expect("just cached");
+        peers
+            .get_mut(&dest)
+            .expect("announce peered")
+            .capture_identity(&cached);
+        identities.push((dest, identity));
+    }
+
+    // Nine unrelated identities roll the 8-slot cache; every peer's
+    // cache entry is gone.
+    for n in 100..109u8 {
+        storage.set_identity([n; 16], Identity::generate(&mut OsRng));
+    }
+    for (dest, _) in &identities {
+        assert!(
+            storage.get_identity(dest).is_none(),
+            "cache must have rolled past peer {dest:?}"
+        );
+    }
+
+    // The sync round toward each of the sixteen still finds keys via the
+    // peer-first recall order and opens its link with them.
+    let mut node = NodeCoreBuilder::new().build(OsRng, TestClock, NoStorage);
+    for (dest, original) in &identities {
+        let recalled = peers
+            .get(dest)
+            .expect("still peered")
+            .recall_identity(&storage)
+            .expect("keys kept with the peer");
+        assert_eq!(recalled.hash(), original.hash(), "identity hash matches");
+        assert_eq!(
+            recalled.ed25519_verifying().to_bytes(),
+            original.ed25519_verifying().to_bytes(),
+            "signing key matches — the proof this key verifies is the peer's"
+        );
+        let signing = recalled.ed25519_verifying().to_bytes();
+        let _out = node
+            .connect(DestinationHash::new(*dest), &signing)
+            .expect("link request goes out on the recalled key");
+    }
+}
+
+/// The captured keys ride the persisted record: a restore recalls the
+/// identity without any cache at all.
+#[test]
+fn captured_keys_survive_store_restore() {
+    use leviculum_core::traits::NoStorage;
+    use rand_core::OsRng;
+
+    let identity = Identity::generate(&mut OsRng);
+    let mut peer = peer_at(0);
+    assert!(peer.capture_identity(&identity));
+    assert!(
+        !peer.capture_identity(&identity),
+        "second capture is a no-op"
+    );
+
+    let mut store = MemoryPeerStore::default();
+    store.save(&PeerRecord::of(&peer)).unwrap();
+    let mut restored = table();
+    restored.restore(store.load_all().unwrap());
+    let recalled = restored
+        .get(&peer.destination_hash)
+        .unwrap()
+        .recall_identity(&NoStorage)
+        .expect("recall needs no cache");
+    assert_eq!(recalled.hash(), identity.hash());
+}
+
+// ---- announced sync limit bounds the wire resource (#388 pass 3, item 3) ----
+
+/// Pack the largest legal batches the reference's loop admits and check
+/// the REAL wire encoding (`msgpack([ts, [bin, ...]])`,
+/// `LXMPeer.py:466`) against the announced limit. The loop counts
+/// [`OFFER_BASE_SIZE`] up front plus [`OFFER_PER_MESSAGE_OVERHEAD`] per
+/// message and stops strictly below the limit (`LXMPeer.py:359-360`,
+/// `:376`); the wire framing must be dominated by that accounting for
+/// every message-size mix, including the msgpack bin8/bin16 boundary.
+#[test]
+fn sync_batch_wire_size_never_exceeds_announced_limit() {
+    const LIMIT: u64 = 8 * 1000; // the board's announced sync limit shape
+
+    // The reference's packing rule: admit while
+    // `cumulative + size + overhead < limit` (strict).
+    fn pack_batch(message_size: usize) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+        let mut batch = alloc::vec::Vec::new();
+        let mut cumulative = OFFER_BASE_SIZE;
+        loop {
+            let transfer = message_size as u64 + OFFER_PER_MESSAGE_OVERHEAD;
+            if cumulative + transfer >= LIMIT {
+                return batch;
+            }
+            cumulative += transfer;
+            batch.push(vec![0xAB; message_size]);
+        }
+    }
+
+    fn wire_bytes(batch: &[alloc::vec::Vec<u8>]) -> usize {
+        let mut out = alloc::vec::Vec::new();
+        msgpack::array(&mut out, 2);
+        msgpack::f64(&mut out, 1_726_000_000.5);
+        msgpack::array(&mut out, batch.len());
+        for message in batch {
+            msgpack::bin(&mut out, message);
+        }
+        out.len()
+    }
+
+    // Message sizes chosen to stress the framing: the degenerate empty
+    // message (maximum count, maximum framing share), both sides of the
+    // bin8/bin16 header boundary, a realistic tiny message, and the
+    // largest per-message size a 4 KB transfer limit admits.
+    for message_size in [0usize, 1, 100, 255, 256, 4000] {
+        let batch = pack_batch(message_size);
+        assert!(!batch.is_empty(), "size {message_size}: batch must pack");
+        let wire = wire_bytes(&batch);
+        assert!(
+            (wire as u64) < LIMIT,
+            "size {message_size}: wire {wire} B (n={}) must stay below the \
+             announced limit {LIMIT}",
+            batch.len()
+        );
+    }
+}

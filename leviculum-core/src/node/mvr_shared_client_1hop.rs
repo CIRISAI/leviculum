@@ -128,7 +128,7 @@ fn shared_client_1hop_link_request_is_type2_with_transport_id() {
     let (dest, signing_key) = make_destination();
     install_path(&mut node, &dest, 1, iface);
 
-    let (_link, was_routed, out) = node.connect(dest, &signing_key);
+    let (_link, was_routed, out) = node.connect(dest, &signing_key).expect("connect");
     assert!(was_routed, "the known 1-hop path must route the request");
 
     let (send_iface, pkt) = one_send_packet(&out);
@@ -166,7 +166,7 @@ fn regular_node_1hop_link_request_stays_type1() {
     let (dest, signing_key) = make_destination();
     install_path(&mut node, &dest, 1, iface);
 
-    let (_link, was_routed, out) = node.connect(dest, &signing_key);
+    let (_link, was_routed, out) = node.connect(dest, &signing_key).expect("connect");
     assert!(was_routed, "the known 1-hop path must route the request");
 
     let (send_iface, pkt) = one_send_packet(&out);
@@ -193,7 +193,7 @@ fn multihop_link_request_still_type2() {
     let (dest, signing_key) = make_destination();
     install_path(&mut node, &dest, 2, iface);
 
-    let (_link, was_routed, out) = node.connect(dest, &signing_key);
+    let (_link, was_routed, out) = node.connect(dest, &signing_key).expect("connect");
     assert!(was_routed, "the known 2-hop path must route the request");
 
     let (send_iface, pkt) = one_send_packet(&out);

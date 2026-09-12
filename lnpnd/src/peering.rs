@@ -426,14 +426,15 @@ impl PeeringRuntime {
         let change = self
             .table
             .handle_announce(destination_hash, &announce, hops, now);
-        // The identity arrived with the announce; remember its hash for
-        // the peering-key material (`LXMPeer.py:258`).
+        // The identity arrived with the announce; keep its public keys
+        // (and hash, for the peering-key material, `LXMPeer.py:258`) with
+        // the peer itself (#388 pass 3), so recall does not depend on the
+        // node's identity cache at sync time.
         if let Some(peer) = self.table.get_mut(&destination_hash) {
-            if peer.identity_hash.is_none() {
-                peer.identity_hash = core
-                    .storage()
-                    .get_identity(&destination_hash)
-                    .map(|identity| *identity.hash());
+            if peer.public_keys.is_none() || peer.identity_hash.is_none() {
+                if let Some(identity) = core.storage().get_identity(&destination_hash) {
+                    peer.capture_identity(identity);
+                }
             }
         }
         match change {
@@ -799,15 +800,26 @@ impl PeeringRuntime {
         now_ms: u64,
         out: &mut TickOutput,
     ) {
-        // Fill in what the round needs from storage.
+        // Fill in what the round needs: the keys kept with the peer
+        // first, the node's identity cache second (#388 pass 3).
         self.traffic_mut(&destination).last_sync_attempt = now;
-        let stored_identity = core.storage().get_identity(&destination);
+        let recalled = self
+            .table
+            .get(&destination)
+            .and_then(|peer| peer.recall_identity(core.storage()));
         let Some(peer) = self.table.get_mut(&destination) else {
             return;
         };
-        if peer.identity_hash.is_none() {
-            peer.identity_hash = stored_identity.as_ref().map(|identity| *identity.hash());
+        let captured = match &recalled {
+            Some(identity) => peer.capture_identity(identity),
+            None => false,
+        };
+        if captured {
+            self.persist_peer(&destination);
         }
+        let Some(peer) = self.table.get_mut(&destination) else {
+            return;
+        };
 
         // Key first: mined at the peer's announced cost, on a worker
         // (`generate_peering_key`, `reference/LXMF/LXMF/LXMPeer.py:242-265`),
@@ -873,8 +885,9 @@ impl PeeringRuntime {
 
         // The link. Backoff is booked before establishment and cleared
         // when the link comes up (`LXMPeer.py:321-322`, `:330`, `:541`).
-        let Some(signing_key) =
-            stored_identity.map(|identity| identity.ed25519_verifying().to_bytes())
+        let Some(signing_key) = recalled
+            .as_ref()
+            .map(|identity| identity.ed25519_verifying().to_bytes())
         else {
             out.merge(core.request_path(&DestinationHash::new(destination)));
             return;
@@ -882,7 +895,20 @@ impl PeeringRuntime {
         peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
         peer.next_sync_attempt = now + peer.sync_backoff_secs;
         peer.state = SyncPhase::LinkEstablishing;
-        let (link_id, _, core_out) = core.connect(DestinationHash::new(destination), &signing_key);
+        let (link_id, _, core_out) =
+            match core.connect(DestinationHash::new(destination), &signing_key) {
+                Ok(connected) => connected,
+                Err(error) => {
+                    // Link-cap refusal (`max_links`, #388). The backoff above is
+                    // already booked, so the round simply retries on a later
+                    // pass instead of spinning.
+                    tracing::debug!("lnpnd: sync connect refused: {error}");
+                    if let Some(peer) = self.table.get_mut(&destination) {
+                        peer.state = SyncPhase::Idle;
+                    }
+                    return;
+                }
+            };
         out.merge(core_out);
         self.outbound = Some(OutboundSync {
             peer: destination,

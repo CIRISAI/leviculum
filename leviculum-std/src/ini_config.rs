@@ -291,6 +291,12 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.keepalive_interval = Some(v);
             }
         }
+        // Link-table cap (#388). Leviculum-only key; absent or 0 keeps the
+        // table unbounded (the Python behaviour), so a stock rnsd config is
+        // unaffected. Lets a periculum node run with a board-like cap.
+        "max_links" => {
+            config.max_links = value.trim().parse().ok().filter(|&n: &usize| n > 0);
+        }
         // Codeberg #32 sub-task b: opt-in runtime auto-connect. An integer that
         // both enables the feature and caps concurrent auto-connections (Python
         // `autoconnect_discovered_interfaces`). Only positive values enable it.
@@ -1902,6 +1908,21 @@ mod tests {
         assert!(!config.reticulum.enable_transport);
         assert!(config.reticulum.shared_instance);
         assert!(config.interfaces.is_empty());
+    }
+
+    #[test]
+    fn test_max_links_parsed_and_zero_means_unbounded() {
+        // The leviculum-only link cap (#388): a positive integer caps the
+        // table, 0 and garbage keep it unbounded (the rnsd behaviour a
+        // stock config gets), absent stays None.
+        let capped = parse_ini("[reticulum]\n  max_links = 4\n").unwrap();
+        assert_eq!(capped.reticulum.max_links, Some(4));
+        let zero = parse_ini("[reticulum]\n  max_links = 0\n").unwrap();
+        assert_eq!(zero.reticulum.max_links, None);
+        let garbage = parse_ini("[reticulum]\n  max_links = many\n").unwrap();
+        assert_eq!(garbage.reticulum.max_links, None);
+        let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(absent.reticulum.max_links, None);
     }
 
     #[test]

@@ -327,7 +327,7 @@ fn run_scenario() -> Outcome {
         );
 
         // --- The local client opens a link to R through A -------------------
-        let (init_link, _routed, out) = initiator.connect(dest_r, &signing_key);
+        let (init_link, _routed, out) = initiator.connect(dest_r, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // A forwards the request; freezes remaining_hops = 3, hops = 0.
@@ -638,7 +638,7 @@ fn run_heal_scenario() -> HealOutcome {
         z_hops_to_r = relay_z.hops_to(&dest_r);
 
         // --- First link attempt: proof arrives short, is DROPPED -------------
-        let (link1, _routed, out) = initiator.connect(dest_r, &signing_key);
+        let (link1, _routed, out) = initiator.connect(dest_r, &signing_key).expect("connect");
         let request = one_packet(&out);
         let out = relay_a.handle_packet(InterfaceId(a_local), &request);
         let a_forwarded = one_packet(&out);
@@ -692,7 +692,7 @@ fn run_heal_scenario() -> HealOutcome {
         a_hops_to_r_after_heal = relay_a.hops_to(&dest_r);
 
         // --- Second link attempt: it now agrees and establishes --------------
-        let (link2, _routed2, out) = initiator.connect(dest_r, &signing_key);
+        let (link2, _routed2, out) = initiator.connect(dest_r, &signing_key).expect("connect");
         let request2 = one_packet(&out);
         let out = relay_a.handle_packet(InterfaceId(a_local), &request2);
         let a_forwarded2 = one_packet(&out);

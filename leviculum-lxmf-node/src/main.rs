@@ -98,17 +98,39 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// The instance name decides the abstract socket (`\0rns/{name}`) the daemon
-/// listens on, so it has to come from the daemon's own config file. Same
-/// derivation `lncp` and `lnstatus` use.
-fn instance_name(config_dir: &std::path::Path) -> String {
+/// What this helper takes from the daemon's config file.
+///
+/// The instance name decides the abstract socket (`\0rns/{name}`) the
+/// daemon listens on, so it has to come from the daemon's own config —
+/// same derivation `lncp` and `lnstatus` use. `max_links` and
+/// `keepalive_interval` ride along (#388): the helper is the process
+/// that TERMINATES delivery links on this node (a shared-instance
+/// client runs its own stack), so a config-file link cap that bound
+/// only the daemon would bind nothing a peer can open. Reading them
+/// here makes the one config file govern every leviculum stack on the
+/// node — which is also what the board is, in one process.
+struct DaemonConfigKeys {
+    instance_name: String,
+    max_links: Option<usize>,
+    keepalive_interval: Option<u64>,
+}
+
+fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
     let config_file = config_dir.join("config");
     if config_file.exists() {
         if let Ok(config) = Config::load(&config_file) {
-            return config.reticulum.instance_name;
+            return DaemonConfigKeys {
+                instance_name: config.reticulum.instance_name,
+                max_links: config.reticulum.max_links,
+                keepalive_interval: config.reticulum.keepalive_interval,
+            };
         }
     }
-    "default".to_string()
+    DaemonConfigKeys {
+        instance_name: "default".to_string(),
+        max_links: None,
+        keepalive_interval: None,
+    }
 }
 
 #[tokio::main]
@@ -162,7 +184,8 @@ async fn run(args: Args) -> Result<(), String> {
     let (builds_tx, builds_rx) = mpsc::channel::<BuildJob>();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel::<Shutdown>();
 
-    let instance = instance_name(&args.config_dir);
+    let daemon_keys = daemon_config_keys(&args.config_dir);
+    let instance = daemon_keys.instance_name.clone();
     emitter.log(format!(
         "[lxmf-node] starting display_name={} storage={} instance={instance}",
         args.display_name,
@@ -182,11 +205,16 @@ async fn run(args: Args) -> Result<(), String> {
         shutdown_tx.clone(),
     );
 
-    let mut node = ReticulumNodeBuilder::new()
+    let mut builder = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(&instance)
+        .max_links(daemon_keys.max_links)
         .storage_path(storage_dir)
-        .core_processor(processor)
+        .core_processor(processor);
+    if let Some(secs) = daemon_keys.keepalive_interval {
+        builder = builder.link_keepalive(secs);
+    }
+    let mut node = builder
         .build()
         .await
         .map_err(|e| format!("could not attach to the shared instance '{instance}': {e}"))?;

@@ -35,6 +35,9 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
+use leviculum_core::identity::Identity;
+use leviculum_core::traits::Storage;
+
 use crate::{
     constants::DESTINATION_LENGTH,
     msgpack,
@@ -106,6 +109,33 @@ pub const OFFER_BYTES_LIMIT: usize = 6144;
 pub const OFFER_PER_MESSAGE_OVERHEAD: u64 = 16;
 pub const OFFER_BASE_SIZE: u64 = 24;
 
+/// What one message ACTUALLY costs in the shipped sync resource, at most:
+/// the wire form is `msgpack([timestamp, [lxmf_bytes, ...]])`
+/// (`reference/LXMF/LXMF/LXMPeer.py:466`), so each message adds one
+/// msgpack bin header — 2 B (bin8) below 256 bytes, 3 B (bin16) up to
+/// 64 KiB, and no message can reach bin32 because the per-message
+/// transfer limit drops it first (`LXMPeer.py:370`).
+pub const SYNC_FRAMING_PER_MESSAGE_MAX: u64 = 3;
+
+/// What the batch structure ACTUALLY costs on the wire, at most: the
+/// outer 2-element fixarray (1 B), the float64 timestamp (9 B), and the
+/// message list's array header (≤ 3 B up to 65 535 entries).
+pub const SYNC_FRAMING_BASE_MAX: u64 = 13;
+
+// The receivable-sync-limit proof (#388 pass 3, item 3): the packing
+// loop counts `OFFER_BASE_SIZE` up front and `OFFER_PER_MESSAGE_OVERHEAD`
+// per message and stops strictly below the announced limit
+// (`next_size >= limit` skips, `LXMPeer.py:376`). Because each accounted
+// overhead dominates its actual wire framing (asserted here), the shipped
+// resource is strictly smaller than the accounted sum, hence strictly
+// below the announced limit — a receiver whose resource cap is at least
+// the announced limit can always take the batch. Pinned empirically by
+// `sync_batch_wire_size_never_exceeds_announced_limit`.
+const _: () = {
+    assert!(SYNC_FRAMING_PER_MESSAGE_MAX <= OFFER_PER_MESSAGE_OVERHEAD);
+    assert!(SYNC_FRAMING_BASE_MAX <= OFFER_BASE_SIZE);
+};
+
 /// Peering configuration, reference key names
 /// (`reference/LXMF/LXMF/Utilities/lxmd.py:128-233`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +204,15 @@ pub struct Peer {
     /// peering-key material (`key_material`,
     /// `reference/LXMF/LXMF/LXMPeer.py:258`).
     pub identity_hash: Option<[u8; DESTINATION_LENGTH]>,
+    /// The peer's public keys (X25519 ‖ Ed25519, the announce's key
+    /// field), captured when the peer's announce is processed and kept
+    /// with the peer (#388 pass 3). The general `known_identities`
+    /// cache is a small rolling table on the board (8 slots against up
+    /// to 16 peers), so a peer's keys must not depend on still being in
+    /// it when its sync round comes — recall goes through
+    /// [`Peer::recall_identity`], this field first, the cache second.
+    /// 64 bytes per peer, 1 KiB at a full board table.
+    pub public_keys: Option<[u8; 64]>,
     /// Mined peering key and its value (32 + 2 B). Mined at the peer's
     /// announced cost, reused as long as its value still satisfies that
     /// cost (`peering_key_ready`, `reference/LXMF/LXMF/LXMPeer.py:227-236`).
@@ -213,6 +252,7 @@ impl Peer {
         Self {
             destination_hash,
             identity_hash: None,
+            public_keys: None,
             peering_key: None,
             transfer_limit_kb: announce.transfer_limit_kb,
             sync_limit_kb: announce.sync_limit_kb,
@@ -259,6 +299,36 @@ impl Peer {
             None => false,
         }
     }
+
+    /// Remember the peer's identity with the peer itself (#388 pass 3):
+    /// public keys and identity hash, persisted via [`PeerRecord`]. Called
+    /// when the identity is at hand (announce processing, a cache hit
+    /// during recall). Returns whether anything changed, so the caller
+    /// knows to persist.
+    pub fn capture_identity(&mut self, identity: &Identity) -> bool {
+        let keys = identity.public_key_bytes();
+        let changed =
+            self.public_keys != Some(keys) || self.identity_hash != Some(*identity.hash());
+        self.public_keys = Some(keys);
+        self.identity_hash = Some(*identity.hash());
+        changed
+    }
+
+    /// Recall the peer's identity: the keys kept with the peer first, the
+    /// node's `known_identities` cache second (#388 pass 3). The cache is
+    /// a rolling 8-slot table on the board while the role peers with up
+    /// to 16 nodes — sixteen announces cycle it twice over, so by the
+    /// time a peer's sync round comes its cache entry may be long gone;
+    /// the copy captured at announce time is what keeps the sync able to
+    /// derive the peering-key material and open the link.
+    pub fn recall_identity<S: Storage>(&self, storage: &S) -> Option<Identity> {
+        if let Some(keys) = &self.public_keys {
+            if let Ok(identity) = Identity::from_public_key_bytes(keys) {
+                return Some(identity);
+            }
+        }
+        storage.get_identity(&self.destination_hash).cloned()
+    }
 }
 
 /// The persistable subset of a [`Peer`], what [`PeerStore`] carries.
@@ -273,6 +343,10 @@ impl Peer {
 pub struct PeerRecord {
     pub destination_hash: [u8; DESTINATION_LENGTH],
     pub identity_hash: Option<[u8; DESTINATION_LENGTH]>,
+    /// The peer's public keys (see [`Peer::public_keys`]); persisted so a
+    /// reboot does not have to wait for the peer's next announce (stock
+    /// lxmd announces its propagation destination every six hours).
+    pub public_keys: Option<[u8; 64]>,
     pub peering_key: Option<([u8; 32], u16)>,
     pub transfer_limit_kb: u64,
     pub sync_limit_kb: u64,
@@ -290,6 +364,7 @@ impl PeerRecord {
         Self {
             destination_hash: peer.destination_hash,
             identity_hash: peer.identity_hash,
+            public_keys: peer.public_keys,
             peering_key: peer.peering_key,
             transfer_limit_kb: peer.transfer_limit_kb,
             sync_limit_kb: peer.sync_limit_kb,
@@ -309,6 +384,7 @@ impl PeerRecord {
         Peer {
             destination_hash: self.destination_hash,
             identity_hash: self.identity_hash,
+            public_keys: self.public_keys,
             peering_key: self.peering_key,
             transfer_limit_kb: self.transfer_limit_kb,
             sync_limit_kb: self.sync_limit_kb,

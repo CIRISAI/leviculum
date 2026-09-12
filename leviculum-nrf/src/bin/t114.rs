@@ -162,8 +162,25 @@ async fn main(spawner: Spawner) {
         t114::CONFIG.identity_flash_page,
     );
 
+    // #388 pass 3: the heap budget's `links=` term, derived from the
+    // arithmetic in `heap_census::max_endpoint_links` and ENFORCED as the
+    // core's link cap — the budget and the cap are the same constant.
+    const MAX_ENDPOINT_LINKS: usize =
+        leviculum_nrf::heap_census::max_endpoint_links(core::mem::size_of::<
+            leviculum_core::node::NodeCore<
+                leviculum_nrf::rng::RawHwRng,
+                EmbassyClock,
+                EmbeddedStorage,
+            >,
+        >());
+    const _: () = assert!(
+        MAX_ENDPOINT_LINKS >= leviculum_nrf::ble::MAX_LINKS,
+        "HEAP_BUDGET affords fewer endpoint links than claimable BLE sessions (#388)"
+    );
+
     let mut builder = NodeCoreBuilder::new()
         .enable_transport(true)
+        .max_links(Some(MAX_ENDPOINT_LINKS))
         .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
         .max_queued_announces(32)
         .max_random_blobs(8)

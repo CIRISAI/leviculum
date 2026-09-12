@@ -92,7 +92,8 @@ fn establish() -> (EndpointNode, EndpointNode, usize, usize, LinkId) {
     let r_iface = add_iface(&mut responder, "R_mesh");
     let i_iface = add_iface(&mut initiator, "I_mesh");
 
-    let (caller_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
 
     let mut for_responder = action_data(&out);
     for _ in 0..8 {
@@ -373,7 +374,8 @@ fn make_det_pair(
     let r_iface = add_iface(&mut responder, "R_mesh");
     let i_iface = add_iface(&mut initiator, "I_mesh");
 
-    let (caller_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
     let mut for_responder = action_data(&out);
     for _ in 0..8 {
         if for_responder.is_empty() {

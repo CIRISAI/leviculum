@@ -122,7 +122,7 @@ fn established_link_shows_up_in_the_census() {
     // Teach the initiator the path, then establish.
     let out = initiator.handle_packet(IFACE, &announce_bytes);
     settle(&mut initiator, &mut responder, out);
-    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
     settle(&mut initiator, &mut responder, out);
     assert!(
         initiator

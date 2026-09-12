@@ -128,6 +128,16 @@ pub struct ReticulumConfig {
     /// semantic change. `None` (default) keeps RTT-driven behaviour.
     #[serde(default)]
     pub keepalive_interval: Option<u64>,
+    /// Cap on concurrent endpoint links (#388). Leviculum-only key (rnsd
+    /// has none); absent or 0 means unbounded, the Python behaviour. With
+    /// `Some(n)` the daemon refuses inbound link requests (no link, no
+    /// proof, one `LINK_REFUSED` line) and fails outbound connects once
+    /// `n` links are live; a slot frees the moment a link closes. Wire
+    /// and semantics unchanged — a refused request is a request that got
+    /// no proof, which every initiator's establishment timeout and retry
+    /// already handle.
+    #[serde(default)]
+    pub max_links: Option<usize>,
     /// Auto-connect discovered interfaces (Codeberg #32, sub-task b).
     ///
     /// A single integer that both gates and bounds runtime auto-connect,
@@ -216,6 +226,7 @@ impl Default for ReticulumConfig {
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
+            max_links: None,
             autoconnect_discovered_interfaces: 0,
             network_identity: None,
             discovery_job_interval_secs: DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,

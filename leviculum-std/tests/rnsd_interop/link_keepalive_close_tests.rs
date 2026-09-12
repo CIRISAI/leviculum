@@ -157,7 +157,9 @@ async fn establish_link_as_initiator(
         .map_err(|_| "Invalid hash length")?;
 
     // Initiate link via node
-    let (link_id, _, output) = node.connect(DestinationHash::new(dest_hash), &signing_key);
+    let (link_id, _, output) = node
+        .connect(DestinationHash::new(dest_hash), &signing_key)
+        .expect("connect");
     dispatch_actions(stream, &output).await;
 
     // Wait for proof (raw bytes for handle_packet)
@@ -272,7 +274,9 @@ async fn establish_rust_to_rust_link(daemon: &TestDaemon) -> Result<RustToRustLi
     let _ = node_b.handle_packet(InterfaceId(0), &announce_info.raw_data);
 
     // B initiates link to A via connect()
-    let (link_id_b, _, output) = node_b.connect(dest_hash_a, &signing_key_a);
+    let (link_id_b, _, output) = node_b
+        .connect(dest_hash_a, &signing_key_a)
+        .expect("connect");
 
     // Send link request via B's stream
     dispatch_actions(&mut stream_b, &output).await;
@@ -561,7 +565,9 @@ async fn test_link_stale_detection_no_inbound() {
     responder.register_destination(dest);
 
     // Initiator starts link
-    let (link_id, _, output) = initiator.connect(dest_hash, &dest_signing_key);
+    let (link_id, _, output) = initiator
+        .connect(dest_hash, &dest_signing_key)
+        .expect("connect");
     let link_request_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver link request to responder
@@ -685,7 +691,9 @@ async fn test_stale_link_closes_after_timeout() {
     responder.register_destination(dest);
 
     // Initiator starts link
-    let (link_id, _, output) = initiator.connect(dest_hash, &dest_signing_key);
+    let (link_id, _, output) = initiator
+        .connect(dest_hash, &dest_signing_key)
+        .expect("connect");
     let link_request_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver link request to responder. Auto-accept (Stage 1): handle_packet
@@ -811,7 +819,9 @@ async fn test_keepalive_resets_stale_timer() {
     responder.register_destination(dest);
 
     // Initiator starts link
-    let (link_id, _, output) = initiator.connect(dest_hash, &dest_signing_key);
+    let (link_id, _, output) = initiator
+        .connect(dest_hash, &dest_signing_key)
+        .expect("connect");
     let link_request_data = extract_action_packets(&output).into_iter().next().unwrap();
 
     // Deliver link request to responder. Auto-accept (Stage 1): handle_packet

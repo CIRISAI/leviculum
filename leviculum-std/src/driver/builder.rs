@@ -63,6 +63,8 @@ pub struct ReticulumNodeBuilder {
     data_channel_capacity_explicit: Option<usize>,
     /// Explicit link keepalive override in seconds (takes priority over config)
     link_keepalive_secs_explicit: Option<u64>,
+    /// Explicit link-table cap override (takes priority over config, #388)
+    max_links_explicit: Option<Option<usize>>,
     /// Explicit auto-connect cap override (takes priority over config value).
     /// `0` disables runtime auto-connect; `N > 0` enables it capped at `N`.
     autoconnect_discovered_interfaces_explicit: Option<usize>,
@@ -107,6 +109,7 @@ impl ReticulumNodeBuilder {
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
+            max_links_explicit: None,
             autoconnect_discovered_interfaces_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
@@ -639,6 +642,17 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Cap the number of concurrent endpoint links (#388).
+    ///
+    /// Takes priority over the config `max_links`. `None` is unbounded.
+    /// Shared-instance client programs that want a config-file cap to
+    /// bind them (the LXMF helper does) read the key themselves and pass
+    /// it here, because a client build never loads the daemon's config.
+    pub fn max_links(mut self, n: Option<usize>) -> Self {
+        self.max_links_explicit = Some(n);
+        self
+    }
+
     /// Enable or disable shared instance (local IPC socket).
     ///
     /// When enabled, the daemon listens on an abstract Unix socket for
@@ -899,6 +913,10 @@ impl ReticulumNodeBuilder {
         let core_builder = core_builder
             .enable_transport(enable_transport)
             .link_keepalive(link_keepalive_secs)
+            .max_links(
+                self.max_links_explicit
+                    .unwrap_or(config.reticulum.max_links),
+            )
             .respond_to_probes(config.reticulum.respond_to_probes)
             .remote_management(
                 config.reticulum.remote_management_enabled,

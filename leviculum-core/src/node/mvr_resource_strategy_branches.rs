@@ -84,7 +84,7 @@ fn deliver_adv_with_strategy(
     let mut sender = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
     let s_iface = add_iface(&mut sender, "S_mesh");
 
-    let (sender_link, _routed, out) = sender.connect(dest_hash, &signing_key);
+    let (sender_link, _routed, out) = sender.connect(dest_hash, &signing_key).expect("connect");
     let mut receiver_link = None;
     let mut for_receiver = action_data(&out);
     for _ in 0..8 {

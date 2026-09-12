@@ -2331,10 +2331,11 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<LinkHandle, Error> {
-        // Request link from NodeCore
+        // Request link from NodeCore. A refusal by the configured link cap
+        // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
         let (link_id, _was_routed, output) = {
             let mut inner = self.inner.lock_recover();
-            inner.connect(*dest_hash, dest_signing_key)
+            inner.connect(*dest_hash, dest_signing_key)?
         };
         // Send output to event loop for dispatch (backpressure, waits if full)
         self.action_dispatch_tx
@@ -3332,7 +3333,7 @@ impl ReticulumNode {
     ) -> Result<(LinkHandle, LinkEstablishedFuture), Error> {
         let (link_id, _was_routed, output) = {
             let mut inner = self.inner.lock_recover();
-            inner.connect(*dest_hash, dest_signing_key)
+            inner.connect(*dest_hash, dest_signing_key)?
         };
         let established = self.completions.register_link_established(link_id);
         if self.action_dispatch_tx.send(output).await.is_err() {
@@ -7467,7 +7468,8 @@ mod tests {
             .inner()
             .lock()
             .unwrap()
-            .connect(dest_hash, &signing_key);
+            .connect(dest_hash, &signing_key)
+            .expect("connect");
         assert!(
             node.link_negotiated_mtu(&link_id).is_some(),
             "presence probe must already be true for a pending link"
@@ -8755,7 +8757,8 @@ mod tests {
             .inner()
             .lock()
             .unwrap()
-            .connect(dest_hash, &signing_key);
+            .connect(dest_hash, &signing_key)
+            .expect("connect");
 
         // Registered while Pending: nothing to resolve yet.
         let mut fut = node.await_link_established(&link_id);
@@ -8908,7 +8911,7 @@ mod tests {
         // The mgmt-client role: a bare sans-I/O core initiating the link.
         let mut peer =
             NodeCoreBuilder::new().build(rand_core::OsRng, SystemClock::new(), NoStorage);
-        let (peer_link_id, _routed, out) = peer.connect(dest_hash, &signing_key);
+        let (peer_link_id, _routed, out) = peer.connect(dest_hash, &signing_key).expect("connect");
 
         // Hand-shuttle until both sides go quiet. Observation stays manual:
         // nothing reaches the completion registry until the test dispatches

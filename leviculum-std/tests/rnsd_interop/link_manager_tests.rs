@@ -159,7 +159,9 @@ async fn establish_initiator_link(
         .map_err(|_| HarnessError::ParseError("Invalid hash length".to_string()))?;
 
     // Initiate link via node
-    let (link_id, _, output) = node.connect(DestinationHash::new(dest_hash), &signing_key_bytes);
+    let (link_id, _, output) = node
+        .connect(DestinationHash::new(dest_hash), &signing_key_bytes)
+        .expect("connect");
 
     // Send link request
     dispatch_actions(stream, &output).await;
@@ -419,7 +421,9 @@ async fn test_manager_initiator_concurrent_links() {
             let pub_key_bytes = hex::decode(&dest_info.public_key).unwrap();
             let signing_key: [u8; 32] = pub_key_bytes[32..64].try_into().unwrap();
             let dest_hash: [u8; 16] = hex::decode(&dest_info.hash).unwrap().try_into().unwrap();
-            let (link_id, _, output) = node.connect(DestinationHash::new(dest_hash), &signing_key);
+            let (link_id, _, output) = node
+                .connect(DestinationHash::new(dest_hash), &signing_key)
+                .expect("connect");
             let packets = extract_action_packets(&output);
             (link_id, packets)
         };
@@ -931,7 +935,9 @@ async fn test_rust_to_rust_via_daemon() {
     let _ = node_b.handle_packet(InterfaceId(0), &announce_info.raw_data);
 
     // B initiates link to A - connect() uses the path learned from announce
-    let (link_id_b, _, output) = node_b.connect(dest_hash_a, &signing_key_a);
+    let (link_id_b, _, output) = node_b
+        .connect(dest_hash_a, &signing_key_a)
+        .expect("connect");
 
     // If transport_id is set, we should be using HEADER_2
     let packets = extract_action_packets(&output);
@@ -1138,7 +1144,9 @@ async fn test_rust_to_rust_multiple_messages() {
     let _ = node_b.handle_packet(InterfaceId(0), &announce_info.raw_data);
 
     // Establish link
-    let (link_id_b, _, output) = node_b.connect(dest_hash_a, &signing_key_a);
+    let (link_id_b, _, output) = node_b
+        .connect(dest_hash_a, &signing_key_a)
+        .expect("connect");
     dispatch_actions(&mut stream_b, &output).await;
 
     let (raw_request, link_id_a_bytes) = wait_for_link_request(
@@ -1401,7 +1409,7 @@ async fn test_manager_handshake_timeout() {
     let signing_key = [0x33; 32];
 
     // Initiate link to non-existent destination
-    let (link_id, _, _output) = node.connect(dest_hash, &signing_key);
+    let (link_id, _, _output) = node.connect(dest_hash, &signing_key).expect("connect");
 
     // Verify pending
     assert_eq!(node.pending_link_count(), 1);
@@ -1460,7 +1468,7 @@ async fn test_manager_send_on_inactive_link() {
     let signing_key = [0x33; 32];
 
     // Initiate link (pending, not active)
-    let (link_id, _, _output) = node.connect(dest_hash, &signing_key);
+    let (link_id, _, _output) = node.connect(dest_hash, &signing_key).expect("connect");
 
     // Try to send - should fail
     let result = node.send_on_link(&link_id, b"test data");
@@ -1596,7 +1604,9 @@ async fn test_manager_many_simultaneous_links() {
         let signing_key: [u8; 32] = pub_key_bytes[32..64].try_into().unwrap();
         let dest_hash: [u8; 16] = hex::decode(&dest.hash).unwrap().try_into().unwrap();
 
-        let (link_id, _, output) = node.connect(DestinationHash::new(dest_hash), &signing_key);
+        let (link_id, _, output) = node
+            .connect(DestinationHash::new(dest_hash), &signing_key)
+            .expect("connect");
         link_ids.push(link_id);
         dispatch_actions(&mut stream, &output).await;
     }
@@ -1841,7 +1851,9 @@ async fn test_manager_interleaved_operations() {
         let pub_key_bytes = hex::decode(&dest.public_key).unwrap();
         let signing_key: [u8; 32] = pub_key_bytes[32..64].try_into().unwrap();
         let dest_hash: [u8; 16] = hex::decode(&dest.hash).unwrap().try_into().unwrap();
-        let (link_id, _, output) = node.connect(DestinationHash::new(dest_hash), &signing_key);
+        let (link_id, _, output) = node
+            .connect(DestinationHash::new(dest_hash), &signing_key)
+            .expect("connect");
         let packets = extract_action_packets(&output);
         (link_id, packets)
     };

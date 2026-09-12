@@ -473,7 +473,11 @@ impl PropagationTransport {
             .get_identity(destination.as_bytes())
             .map(|identity| identity.ed25519_verifying().to_bytes())
             .ok_or(PropagationTransportError::UnknownNode)?;
-        let (link_id, _, core) = node.connect(destination, &signing_key);
+        // Link-cap refusal (`max_links`, #388) → LinkUnavailable: the
+        // client retries on its next pass, as with any missing link.
+        let (link_id, _, core) = node
+            .connect(destination, &signing_key)
+            .map_err(|_| PropagationTransportError::LinkUnavailable)?;
         self.pending_links.insert(destination, link_id);
         self.link_destinations.insert(link_id, destination);
         Ok(PropagationTransportOutput {

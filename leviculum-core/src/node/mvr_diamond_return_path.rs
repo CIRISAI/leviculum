@@ -238,7 +238,7 @@ fn run_scenario() -> Outcome {
 
         // --- Phase 2: B opens a link to A via R2 ----------------------------
 
-        let (_link, _routed, out) = b.connect(dest_a, &key_a);
+        let (_link, _routed, out) = b.connect(dest_a, &key_a).expect("connect");
         // The LinkRequest routes toward A via R2.
         let requests = actions_on(&out);
         assert_eq!(requests.len(), 1, "connect emits one link request");

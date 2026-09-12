@@ -327,7 +327,11 @@ impl BidirMedium {
 
     /// Establish a clean (lossless, full establishment) link alpha -> beta.
     fn establish(&mut self, dest_hash: crate::DestinationHash, signing_key: &[u8; 32]) {
-        let (link_id, _routed, out) = self.alpha.node.connect(dest_hash, signing_key);
+        let (link_id, _routed, out) = self
+            .alpha
+            .node
+            .connect(dest_hash, signing_key)
+            .expect("connect");
         self.link_id = link_id;
         let pkts = Self::absorb(Target::Alpha, &mut self.alpha, out);
         self.enqueue_from(Target::Alpha, pkts);

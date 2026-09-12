@@ -246,7 +246,7 @@ fn establishment_baseline_no_loss_establishes() {
         let i_iface = add_iface(&mut initiator, "I_mesh");
 
         // Initiator connects -> LinkRequest (broadcast, no path known).
-        let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // Responder receives the request and auto-accepts (Stage 1): the proof
@@ -304,7 +304,7 @@ fn establishment_proof_dropped_once_recovers_via_retransmit() {
         let r_iface = add_iface(&mut responder, "R_mesh");
         let i_iface = add_iface(&mut initiator, "I_mesh");
 
-        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // Responder auto-accepts (Stage 1) and builds the proof...
@@ -367,7 +367,7 @@ fn establishment_link_request_dropped_once_recovers_via_retransmit() {
         let r_iface = add_iface(&mut responder, "R_mesh");
         let i_iface = add_iface(&mut initiator, "I_mesh");
 
-        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
         let _dropped_request = one_packet(&out); // DROP: never delivered to responder.
 
         // The responder never saw the request, so it has no pending link.
@@ -429,7 +429,7 @@ fn establishment_persistent_proof_loss_dies_after_bounded_retries() {
         let mut initiator = make_initiator();
         let r_iface = add_iface(&mut responder, "R_mesh");
 
-        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // Responder auto-accepts (Stage 1) and proves once; that proof is dropped.
@@ -525,7 +525,7 @@ fn auto_accept_default_proves_rekeyed_retry_and_establishes() {
         let r_iface = add_iface(&mut responder, "R_mesh");
         let i_iface = add_iface(&mut initiator, "I_mesh");
 
-        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+        let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
         let request = one_packet(&out);
 
         // Auto-accept: handle_packet proves the link inline (no accept_link call).
@@ -586,7 +586,7 @@ fn destination_rejecting_links_emits_no_proof_and_no_link() {
     let mut initiator = make_initiator();
     let r_iface = add_iface(&mut responder, "R_mesh");
 
-    let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (_link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
     let request = one_packet(&out);
 
     let out = responder.handle_packet(InterfaceId(r_iface), &request);
@@ -622,7 +622,7 @@ fn drive_persistent_proof_loss_to_death() -> bool {
     let mut initiator = make_initiator();
     let r_iface = add_iface(&mut responder, "R_mesh");
 
-    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key);
+    let (link_id, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
     let request = one_packet(&out);
 
     // Responder auto-accepts (Stage 1) and proves once; that proof (and every

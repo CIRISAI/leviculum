@@ -61,7 +61,7 @@ async fn establish_initiator_link(
     let signing_key = extract_signing_key(&dest_info.public_key);
     let dest_hash = parse_dest_hash(&dest_info.hash);
 
-    let (link_id, _, output) = node.connect(dest_hash, &signing_key);
+    let (link_id, _, output) = node.connect(dest_hash, &signing_key).expect("connect");
     dispatch_actions(stream, &output).await;
 
     let proof_raw = receive_raw_proof_for_link(stream, deframer, &link_id, Duration::from_secs(10))

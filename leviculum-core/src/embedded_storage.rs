@@ -340,6 +340,19 @@ pub struct EmbeddedStorage {
     /// host. A board meshes with a handful of peers; an evicted
     /// identity is re-learned from the peer's next announce, exactly
     /// like an evicted path.
+    ///
+    /// **Who may depend on these slots (#388 pass 3):** NOT the
+    /// propagation role's sync peers — up to 16 of them would cycle
+    /// this table twice over, so each peer keeps its own 64-byte key
+    /// copy in the peer store (`leviculum-lxmf::peering::Peer::
+    /// public_keys`, captured at announce time) and recalls that copy
+    /// first, this cache second. What the 8 slots serve is the
+    /// delivery side: the two phones' delivery identities plus the few
+    /// transport neighbours whose announces are being verified at any
+    /// one time — a working set of well under 8, and every miss heals
+    /// on the sender's next announce (mobile phones announce every
+    /// 300 s; only the role's peers announce as rarely as stock lxmd's
+    /// six hours, and they no longer live here).
     known_identities: OrderedMap<[u8; TRUNCATED_HASHBYTES], Identity, 8>,
 
     /// Cached remote ratchet public keys, used for batch decryption of

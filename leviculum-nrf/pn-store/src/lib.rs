@@ -429,13 +429,20 @@ impl<R: Region> PropagationStore for PnStore<R> {
 }
 
 /// Encoded size of a [`PeerRecord`] body: version, flags, dest, identity,
-/// key + value, limits, costs, timebase, last-heard, cursor.
-pub const PEER_RECORD_LEN: usize = 1 + 1 + 16 + 16 + 34 + 4 + 4 + 3 + 8 + 8 + 8;
+/// key + value, limits, costs, timebase, last-heard, cursor, public keys.
+/// The trailing 64 key bytes joined in #388 pass 3; records of the old
+/// length ([`PEER_RECORD_LEN_LEGACY`]) still decode (keys absent), so an
+/// upgrade keeps its peer table.
+pub const PEER_RECORD_LEN: usize = PEER_RECORD_LEN_LEGACY + 64;
+
+/// Body length written before the peer's public keys were persisted.
+pub const PEER_RECORD_LEN_LEGACY: usize = 1 + 1 + 16 + 16 + 34 + 4 + 4 + 3 + 8 + 8 + 8;
 
 const PEER_VERSION: u8 = 1;
 const PEER_FLAG_IDENTITY: u8 = 0x01;
 const PEER_FLAG_KEY: u8 = 0x02;
 const PEER_FLAG_STATIC: u8 = 0x04;
+const PEER_FLAG_PUBKEYS: u8 = 0x08;
 
 /// Encode a [`PeerRecord`] as one record-log body.
 pub fn encode_peer_record(record: &PeerRecord) -> [u8; PEER_RECORD_LEN] {
@@ -465,13 +472,19 @@ pub fn encode_peer_record(record: &PeerRecord) -> [u8; PEER_RECORD_LEN] {
     out[79..87].copy_from_slice(&record.peering_timebase.to_le_bytes());
     out[87..95].copy_from_slice(&record.last_heard.to_le_bytes());
     out[95..103].copy_from_slice(&record.cursor.to_le_bytes());
+    if let Some(keys) = &record.public_keys {
+        out[1] |= PEER_FLAG_PUBKEYS;
+        out[103..167].copy_from_slice(keys);
+    }
     out
 }
 
 /// Decode a record-log body back into a [`PeerRecord`], or `None` for a
 /// body from a different version or length.
 pub fn decode_peer_record(body: &[u8]) -> Option<PeerRecord> {
-    if body.len() != PEER_RECORD_LEN || body[0] != PEER_VERSION {
+    if (body.len() != PEER_RECORD_LEN && body.len() != PEER_RECORD_LEN_LEGACY)
+        || body[0] != PEER_VERSION
+    {
         return None;
     }
     let flags = body[1];
@@ -489,9 +502,16 @@ pub fn decode_peer_record(body: &[u8]) -> Option<PeerRecord> {
     });
     let le32 = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().ok().unwrap_or_default());
     let le64 = |at: usize| u64::from_le_bytes(body[at..at + 8].try_into().ok().unwrap_or_default());
+    let public_keys =
+        (flags & PEER_FLAG_PUBKEYS != 0 && body.len() == PEER_RECORD_LEN).then(|| {
+            let mut keys = [0u8; 64];
+            keys.copy_from_slice(&body[103..167]);
+            keys
+        });
     Some(PeerRecord {
         destination_hash,
         identity_hash,
+        public_keys,
         peering_key,
         transfer_limit_kb: le32(68) as u64,
         sync_limit_kb: le32(72) as u64,

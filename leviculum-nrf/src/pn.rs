@@ -43,30 +43,51 @@
 //!
 //! # Heap budget (#388)
 //!
-//! The boot line `HEAP_BUDGET links=<max> per_link=<b> role=<b>
-//! reserve=<b> total=<b>` (emitted by
+//! The boot line `HEAP_BUDGET links=<max> ble_links=<m> per_link=<b>
+//! ble_session=<b> role=<b> reserve=<b> total=<b>` (emitted by
 //! [`crate::heap_census::log_budget_and_assert`], asserted against
 //! [`crate::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
 //! heap may reach at once:
 //!
 //! ```text
 //! total = node_box                            (size_of the boxed NodeCore,
-//!                                              ~30.5 KiB: EmbeddedStorage's
+//!                                              30 984 B: EmbeddedStorage's
 //!                                              inline tables + core state)
-//!       + links · per_link                    links    = ble::MAX_LINKS (4)
-//!         per_link = size_of::<Link>()        one boxed Reticulum link (~2.6 KiB)
-//!                  + ble::SESSION_BUDGET_BYTES  queue full + pump + defrag
+//!       + links · per_link                    links = max_endpoint_links
+//!         per_link = size_of::<Link>()        one boxed Reticulum link (2 600 B)
 //!                  + link-table node share      (the map value is a Box)
+//!       + ble_links · ble_session             ble_links = ble::MAX_LINKS (4)
+//!                                             SESSION_BUDGET_BYTES: queue
+//!                                             full + pump + defrag, only a
+//!                                             link on a GATT connection has
+//!                                             one — a LoRa link costs
+//!                                             per_link alone
 //!       + role                                ROLE_BUDGET_BYTES:
 //!           BOARD_SYNC_LIMIT_KB·1000            one inbound sync batch
 //!         + 2 · BOARD_TRANSFER_LIMIT_KB·1000    two phones' queued uploads
-//!         + 4096                                peer table, offer plan, maps,
-//!                                               duplicate cache, flush queues
+//!         + 5120                                peer table incl. 64 B keys
+//!                                               per peer (#388 pass 3),
+//!                                               offer plan, maps, duplicate
+//!                                               cache, flush queues
 //!       + reserve                             fragmentation reserve
 //!                                             + the shared BLE channels
 //!                                             + one incoming resource at
 //!                                               MAX_INCOMING_RESOURCE_BYTES
 //! ```
+//!
+//! `links` is DERIVED, not chosen
+//! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
+//! subtracted from the heap and the remainder divided by `per_link`.
+//! With today's numbers — node box 30 984, role 21 120, reserve 18 848,
+//! sessions 4 · 3 948 = 15 792, per_link 2 664 — the remainder is
+//! 11 560 B and the division yields **4**: the heap affords exactly the
+//! BLE-session count, no extra LoRa-backed links until a fixed term
+//! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
+//! so the budget's `links=` is an enforced cap, not a claim: the fifth
+//! concurrent link — the allocation that used to die at 340 bytes in
+//! the field — is refused (`LINK_REFUSED`, the initiator retries after
+//! its establishment timeout) instead of taking every existing link
+//! down with the heap.
 //!
 //! Every term is a named constant next to the state it bounds; the
 //! census's `pn_batch=`/`pn_work=`/`ble_s<n>=` lines are the running
@@ -292,7 +313,17 @@ const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
 const BOARD_SYNC_LIMIT_KB: u64 = 8;
 
 // The announced sync limit must stay receivable, or it is a lie peers
-// pay for with a dead resource transfer.
+// pay for with a dead resource transfer. The limit bounds the WIRE
+// resource, framing included (#388 pass 3 item 3): the peer's packing
+// loop counts 24 B up front and 16 B per message and stops strictly
+// below the limit (`per_message_overhead`/`cumulative_size`,
+// `reference/LXMF/LXMF/LXMPeer.py:359-360`, strict skip at `:376`),
+// while the shipped `msgpack([ts, [bin, ...]])` (`:466`) costs at most
+// 13 B base + 3 B per message — each accounted term dominates its wire
+// term (asserted at their definitions in `leviculum_lxmf::peering`,
+// pinned by that crate's largest-legal-batch test), so the resource is
+// strictly smaller than the accounted sum, which is strictly below
+// this limit.
 const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING_RESOURCE_BYTES);
 
 /// The role's slice of the boot heap budget (`HEAP_BUDGET role=`, #388):
@@ -303,12 +334,14 @@ const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING
 ///   settle pass, so at most one batch exists);
 /// * `pn_work` — queued upload payloads, one per phone at the announced
 ///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
-/// * 4 KiB — everything structural: the peer table (§5: `104·16 + slack`
-///   at [`BOARD_MAX_PEERS`]), the offer plan (`pn_out`), the per-link
-///   maps, the role's duplicate cache and the store adapters' queued
-///   writes (`pn_flush`).
+/// * 5 KiB — everything structural: the peer table (§5's `104·16` plus
+///   the 64 B of public keys each peer now keeps (#388 pass 3, ~1 KiB
+///   at [`BOARD_MAX_PEERS`] — grown from the previous 4 KiB term
+///   because the keys did not fit its slack), the offer plan
+///   (`pn_out`), the per-link maps, the role's duplicate cache and the
+///   store adapters' queued writes (`pn_flush`).
 pub const ROLE_BUDGET_BYTES: usize =
-    BOARD_SYNC_LIMIT_KB as usize * 1000 + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000 + 4096;
+    BOARD_SYNC_LIMIT_KB as usize * 1000 + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000 + 5 * 1024;
 
 /// Boot-time spine reservations (#388 step 3), allocated once in
 /// [`Engine::new`] and reused: `VecDeque`/`Vec` never shrink, so the
@@ -1094,12 +1127,17 @@ impl Engine {
         let change = self
             .peers
             .handle_announce(destination_hash, &announce, hops, now);
+        // Capture the announcer's keys with the peer (#388 pass 3): the
+        // announce that created or refreshed this peer also put the
+        // identity into `known_identities`, but that cache is a rolling
+        // 8-slot table — by this peer's sync round the entry may be gone.
+        // The copy kept here (and persisted below with the peer record)
+        // is what the sync recalls first.
         if let Some(peer) = self.peers.get_mut(&destination_hash) {
-            if peer.identity_hash.is_none() {
-                peer.identity_hash = node
-                    .storage()
-                    .get_identity(&destination_hash)
-                    .map(|identity| *identity.hash());
+            if peer.public_keys.is_none() || peer.identity_hash.is_none() {
+                if let Some(identity) = node.storage().get_identity(&destination_hash) {
+                    peer.capture_identity(identity);
+                }
             }
         }
         match change {
@@ -1819,14 +1857,28 @@ impl Engine {
         C: Clock,
         S: Storage,
     {
-        let stored_identity = node.storage().get_identity(&destination);
+        // Recall order (#388 pass 3): the keys kept with the peer first,
+        // the node's rolling `known_identities` cache second. A cache hit
+        // for a peer that has no keys yet is captured back into the peer
+        // record, so the next recall no longer depends on the cache.
+        let recalled = self
+            .peers
+            .get(&destination)
+            .and_then(|peer| peer.recall_identity(node.storage()));
         let our_identity_hash = self.identity_hash;
         let Some(peer) = self.peers.get_mut(&destination) else {
             return;
         };
-        if peer.identity_hash.is_none() {
-            peer.identity_hash = stored_identity.as_ref().map(|identity| *identity.hash());
+        let captured = match &recalled {
+            Some(identity) => peer.capture_identity(identity),
+            None => false,
+        };
+        if captured {
+            self.persist_peer(&destination);
         }
+        let Some(peer) = self.peers.get_mut(&destination) else {
+            return;
+        };
         if !peer.peering_key_ready() {
             let Some(peer_identity_hash) = peer.identity_hash else {
                 out.merge(node.request_path(&DestinationHash::new(destination)));
@@ -1874,8 +1926,9 @@ impl Engine {
             return;
         }
 
-        let Some(signing_key) =
-            stored_identity.map(|identity| identity.ed25519_verifying().to_bytes())
+        let Some(signing_key) = recalled
+            .as_ref()
+            .map(|identity| identity.ed25519_verifying().to_bytes())
         else {
             out.merge(node.request_path(&DestinationHash::new(destination)));
             return;
@@ -1883,7 +1936,24 @@ impl Engine {
         peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
         peer.next_sync_attempt = now + peer.sync_backoff_secs;
         peer.state = SyncPhase::LinkEstablishing;
-        let (link_id, _, core_out) = node.connect(DestinationHash::new(destination), &signing_key);
+        let (link_id, _, core_out) =
+            match node.connect(DestinationHash::new(destination), &signing_key) {
+                Ok(connected) => connected,
+                Err(_) => {
+                    // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
+                    // core has logged LINK_REFUSED; the backoff above is
+                    // already booked, so this round retries on a later
+                    // sync pass instead of spinning.
+                    crate::log::log_fmt(
+                        "PN_SYNC ",
+                        format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
+                    );
+                    if let Some(peer) = self.peers.get_mut(&destination) {
+                        peer.state = SyncPhase::Idle;
+                    }
+                    return;
+                }
+            };
         out.merge(core_out);
         self.outbound = Some(OutboundSync {
             peer: destination,

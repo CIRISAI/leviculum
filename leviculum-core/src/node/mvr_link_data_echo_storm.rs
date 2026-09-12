@@ -161,7 +161,9 @@ fn test_two_relay_shared_medium_link_data() {
 
         // 2. I opens a REAL link to R (the lncp handshake). Small advances:
         //    no timers fire, every wire is a reaction to a received packet.
-        let (link_id, _routed, out) = mesh.nodes[5].connect(dest_hash, &signing_key);
+        let (link_id, _routed, out) = mesh.nodes[5]
+            .connect(dest_hash, &signing_key)
+            .expect("connect");
         let mut seed = Vec::new();
         Mesh::collect_actions(
             &out,

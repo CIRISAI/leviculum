@@ -138,6 +138,18 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Cap the number of concurrent endpoint links (#388). `None`
+    /// (default) is unbounded; `Some(n)` refuses inbound link requests
+    /// (no link, no proof, one `LINK_REFUSED` line) and makes
+    /// [`NodeCore::connect`](super::NodeCore::connect) return
+    /// [`LinkError::TableFull`](crate::link::LinkError::TableFull) once
+    /// `n` links are live. See
+    /// [`TransportConfig::max_links`](crate::transport::TransportConfig::max_links).
+    pub fn max_links(mut self, n: Option<usize>) -> Self {
+        self.transport_config.max_links = n;
+        self
+    }
+
     /// Override the link keepalive interval (seconds) for every link this node
     /// creates. `None` (default) keeps the RTT-derived interval. Useful for
     /// slow links and for shrinking the stale-link timeout in tests.

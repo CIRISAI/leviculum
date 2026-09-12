@@ -237,11 +237,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// A tuple of `(LinkId, was_routed, TickOutput)`:
     /// - `was_routed`: `true` if the link request was sent via a known path,
     ///   `false` if it was broadcast (no path existed).
+    ///
+    /// # Errors
+    /// [`LinkError::TableFull`] when the configured link cap
+    /// ([`crate::transport::TransportConfig::max_links`]) is reached; no
+    /// link was created and nothing was sent. Retry after a link closes.
     pub fn connect(
         &mut self,
         dest_hash: DestinationHash,
         dest_signing_key: &[u8; 32],
-    ) -> (LinkId, bool, crate::transport::TickOutput) {
+    ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
+        if let Some(max) = self.transport_config().max_links {
+            if self.links.len() >= max {
+                self.log_link_refused(&dest_hash, max);
+                return Err(LinkError::TableFull { max });
+            }
+        }
         // Check if we have path info for this destination
         let (next_hop, hops) = if let Some(path) = self.transport.path(dest_hash.as_bytes()) {
             if path.needs_relay() {
@@ -331,7 +342,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         );
 
         let output = self.process_events_and_actions();
-        (link_id, was_routed, output)
+        Ok((link_id, was_routed, output))
+    }
+
+    /// One structured refusal line for the link-table cap (#388), shared by
+    /// the inbound ([`Self::handle_link_request`]) and outbound
+    /// ([`Self::connect`]) paths so both sides of a capped node grep alike.
+    fn log_link_refused(&self, dest_hash: &DestinationHash, max: usize) {
+        crate::tracing::debug!(
+            target: "leviculum_core::link",
+            "LINK_REFUSED reason=budget links={} max={} dest={}",
+            self.links.len(),
+            max,
+            HexShort(dest_hash.as_bytes()),
+        );
     }
 
     /// Build and route the link establishment proof for an incoming link.
@@ -526,6 +550,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub fn link_mut(&mut self, link_id: &LinkId) -> Option<&mut crate::link::Link> {
         let resolved = self.resolve_link_id(link_id);
         self.links.get_mut(&resolved).map(Box::as_mut)
+    }
+
+    /// Total live entries in the link table, pending and active alike —
+    /// the count the `max_links` cap (#388) is enforced against.
+    pub fn link_count(&self) -> usize {
+        self.links.len()
     }
 
     /// Get the number of active links
@@ -841,6 +871,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 );
             }
             return;
+        }
+
+        // Link-table cap (#388): past the cap the request gets no link and
+        // no proof. Wire and semantics are unchanged — a request without a
+        // proof is what every initiator's establishment timeout and retry
+        // already handle. Checked after the duplicate branch above, which
+        // re-serves an existing entry and adds none.
+        if let Some(max) = self.transport_config().max_links {
+            if self.links.len() >= max {
+                self.log_link_refused(&dest_hash, max);
+                return;
+            }
         }
 
         // Extract request data from packet payload

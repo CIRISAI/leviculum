@@ -488,7 +488,9 @@ fn test_rig_cell_local_client_link_handshake() {
         );
 
         // 2. I opens a REAL link to R's destination (the lncp handshake).
-        let (_link_id, _routed, out) = mesh.nodes[4].connect(dest_hash, &signing_key);
+        let (_link_id, _routed, out) = mesh.nodes[4]
+            .connect(dest_hash, &signing_key)
+            .expect("connect");
         let mut seed = Vec::new();
         Mesh::collect_actions(
             &out,
@@ -572,7 +574,7 @@ fn test_shared_medium_multihop_link_handshake() {
         // 2. C opens a REAL link to A. Seed the air with C's LinkRequest and
         //    pump with a small advance: no timers fire, so every subsequent
         //    wire is a direct reaction to a received packet.
-        let (_link_id, routed, out) = nodes[2].connect(dest_hash, &signing_key);
+        let (_link_id, routed, out) = nodes[2].connect(dest_hash, &signing_key).expect("connect");
         assert!(
             routed,
             "C must route the LinkRequest via its path through B"

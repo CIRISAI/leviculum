@@ -112,7 +112,9 @@ async fn establish_rust_to_rust_link(
     let _ = node_b.handle_packet(InterfaceId(0), &announce_info.raw_data);
 
     // B initiates link to A
-    let (link_id_b, _, output) = node_b.connect(dest_hash_a, &signing_key_a);
+    let (link_id_b, _, output) = node_b
+        .connect(dest_hash_a, &signing_key_a)
+        .expect("connect");
     dispatch_actions(stream_b, &output).await;
 
     // A receives link request
@@ -344,7 +346,7 @@ async fn test_mtu_a2_rust_to_python_tcp_mtu() {
     let dest_hash = DestinationHash::new(dest_hash_bytes);
 
     // Initiate link, now has path from announce, so signaling bytes will be included
-    let (link_id, _, output) = node.connect(dest_hash, &signing_key);
+    let (link_id, _, output) = node.connect(dest_hash, &signing_key).expect("connect");
     dispatch_actions(&mut stream, &output).await;
 
     // Wait for proof

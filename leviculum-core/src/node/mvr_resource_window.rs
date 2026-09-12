@@ -402,7 +402,10 @@ impl PacedDelivery {
     /// (the receiver's part-timeout is RTT-capped; an instant handshake would
     /// give it an unrealistic 1 ms cap).
     fn establish(&mut self, dest_hash: crate::DestinationHash, signing_key: &[u8; 32]) {
-        let (link_id, _routed, out) = self.receiver.connect(dest_hash, signing_key);
+        let (link_id, _routed, out) = self
+            .receiver
+            .connect(dest_hash, signing_key)
+            .expect("connect");
         self.link_id = link_id;
         self.to_sender.extend(action_data(&out));
 

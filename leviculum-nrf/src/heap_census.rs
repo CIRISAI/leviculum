@@ -133,12 +133,16 @@ const FRAG_RESERVE_BYTES: usize = 6 * 1024;
 /// #388; the `Link` blocks are counted separately).
 const LINK_MAP_BYTES_PER_LINK: usize = 64;
 
-/// The budget's `per_link=` term. `const fn`: the binaries also assert
-/// the whole sum at compile time against their concrete `NodeCore`.
+/// The budget's `per_link=` term: what EVERY endpoint link costs
+/// regardless of carrier — one boxed `Link` plus its link-table node
+/// share. A link's BLE session (queue, pump, defragmenter) exists only
+/// for links riding a GATT connection and is budgeted separately, once
+/// per claimable session ([`crate::ble::MAX_LINKS`] ×
+/// [`crate::ble::SESSION_BUDGET_BYTES`]) — a LoRa-backed link has no BLE
+/// session. `const fn`: the binaries also assert the whole sum at
+/// compile time against their concrete `NodeCore`.
 pub const fn budget_per_link() -> usize {
-    core::mem::size_of::<leviculum_core::link::Link>()
-        + crate::ble::SESSION_BUDGET_BYTES
-        + LINK_MAP_BYTES_PER_LINK
+    core::mem::size_of::<leviculum_core::link::Link>() + LINK_MAP_BYTES_PER_LINK
 }
 
 /// The budget's `reserve=` term (fragmentation + shared BLE channels +
@@ -147,12 +151,45 @@ pub const fn budget_reserve() -> usize {
     FRAG_RESERVE_BYTES + crate::ble::CHANNEL_BUDGET_BYTES + crate::MAX_INCOMING_RESOURCE_BYTES
 }
 
+/// How many endpoint links a node box of `node_box` bytes affords — the
+/// `links=` term of the boot line, the value the binaries hand to
+/// `NodeCoreBuilder::max_links`, and the count [`budget_total`] sums, so
+/// the enforced cap and the budget cannot drift (#388 pass 3).
+///
+/// Derivation: everything that is not a per-link cost is fixed —
+/// `node_box`, the role, the reserve, and the
+/// [`crate::ble::MAX_LINKS`] BLE sessions (budgeted whether or not a
+/// link currently rides them, because a claimable GATT connection can
+/// fill its queues). What remains of [`crate::HEAP_SIZE`] is divided by
+/// [`budget_per_link`], the carrier-independent cost of one more link.
+/// With today's numbers (T114: node box 30 984 B, role 21 120 B,
+/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 664 B) the
+/// division yields 4 — the heap affords exactly the BLE-session count,
+/// and no extra LoRa-backed links until a fixed term shrinks. The
+/// binaries assert `>=` [`crate::ble::MAX_LINKS`]: a node box grown past
+/// that line is a budget violation at compile time, not a dead session
+/// in the field.
+pub const fn max_endpoint_links(node_box: usize) -> usize {
+    let fixed = node_box
+        + crate::pn::ROLE_BUDGET_BYTES
+        + budget_reserve()
+        + crate::ble::MAX_LINKS * crate::ble::SESSION_BUDGET_BYTES;
+    if fixed >= crate::HEAP_SIZE {
+        0
+    } else {
+        (crate::HEAP_SIZE - fixed) / budget_per_link()
+    }
+}
+
 /// The budget's `total=` for a node box of `node_box` bytes — the one
 /// sum both the boot line and the binaries' compile-time assertions
-/// use, so they cannot drift.
+/// use, so they cannot drift. `<=` [`crate::HEAP_SIZE`] holds by
+/// construction of [`max_endpoint_links`]; the assertions keep it as a
+/// belt against a future edit decoupling the two.
 pub const fn budget_total(node_box: usize) -> usize {
     node_box
-        + crate::ble::MAX_LINKS * budget_per_link()
+        + max_endpoint_links(node_box) * budget_per_link()
+        + crate::ble::MAX_LINKS * crate::ble::SESSION_BUDGET_BYTES
         + crate::pn::ROLE_BUDGET_BYTES
         + budget_reserve()
 }
@@ -161,13 +198,18 @@ pub const fn budget_total(node_box: usize) -> usize {
 /// whose worst case does not fit the heap (#388 step 4).
 ///
 /// ```text
-/// HEAP_BUDGET links=<max> per_link=<b> role=<b> reserve=<b> total=<b>
+/// HEAP_BUDGET links=<max> ble_links=<m> per_link=<b> ble_session=<b>
+///   role=<b> reserve=<b> total=<b>
 /// ```
 ///
-/// * `links` — [`crate::ble::MAX_LINKS`], every claimable BLE session;
-/// * `per_link` — one boxed `Link` (`size_of`, the census's `links=`
-///   unit) + [`crate::ble::SESSION_BUDGET_BYTES`] (queue, pump,
-///   defragmenter at worst case) + the link table's node share;
+/// (one line on the wire; wrapped here for the page).
+///
+/// * `links` — [`max_endpoint_links`], the ENFORCED cap on the
+///   Reticulum link table (`NodeCoreBuilder::max_links`, #388 pass 3);
+/// * `ble_links` — [`crate::ble::MAX_LINKS`], every claimable BLE
+///   session, budgeted at [`crate::ble::SESSION_BUDGET_BYTES`]
+///   (`ble_session=`) each on top of the carrier-independent
+///   `per_link=` (one boxed `Link` + the link table's node share);
 /// * `role` — [`crate::pn::ROLE_BUDGET_BYTES`], the `pn_*` worst case
 ///   (arithmetic at its definition and in [`crate::pn`]'s module doc);
 ///   budgeted whether or not the role is enabled this boot, because a
@@ -177,22 +219,23 @@ pub const fn budget_total(node_box: usize) -> usize {
 ///   channels + one incoming resource at the binaries' cap.
 ///
 /// `node_box` is passed by the binary (`size_of_val` of its concrete
-/// boxed `NodeCore`) and is inside `total=` — the line has exactly the
-/// five keys the #388 instruction names, and `total ≤` [`crate::HEAP_SIZE`]
-/// is asserted: a violation panics at boot, lands in the post-mortem,
-/// and names the arithmetic instead of failing as a 340-byte
-/// allocation three days into a field run.
+/// boxed `NodeCore`) and is inside `total=`. Asserted: `total ≤`
+/// [`crate::HEAP_SIZE`] and `links ≥ ble_links` — a violation panics at
+/// boot, lands in the post-mortem, and names the arithmetic instead of
+/// failing as a 340-byte allocation three days into a field run.
 pub fn log_budget_and_assert(node_box: usize) {
-    let links = crate::ble::MAX_LINKS;
+    let links = max_endpoint_links(node_box);
+    let ble_links = crate::ble::MAX_LINKS;
     let per_link = budget_per_link();
+    let ble_session = crate::ble::SESSION_BUDGET_BYTES;
     let role = crate::pn::ROLE_BUDGET_BYTES;
     let reserve = budget_reserve();
     let total = budget_total(node_box);
     crate::log::log_fmt_critical(
         "[HEAP] ",
         format_args!(
-            "HEAP_BUDGET links={} per_link={} role={} reserve={} total={}",
-            links, per_link, role, reserve, total
+            "HEAP_BUDGET links={} ble_links={} per_link={} ble_session={} role={} reserve={} total={}",
+            links, ble_links, per_link, ble_session, role, reserve, total
         ),
     );
     assert!(
@@ -200,6 +243,11 @@ pub fn log_budget_and_assert(node_box: usize) {
         "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
          (node box, per-link, role, reserve) before shipping this configuration",
         crate::HEAP_SIZE
+    );
+    assert!(
+        links >= ble_links,
+        "HEAP_BUDGET affords only {links} endpoint links, below the {ble_links} \
+         claimable BLE sessions: shrink a fixed term before shipping this configuration",
     );
 }
 

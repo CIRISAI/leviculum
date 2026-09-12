@@ -114,7 +114,8 @@ fn establish_link_via_rekey() -> (
 
     // 1. Connect: broadcasts the first link request. DROP it (never delivered),
     //    so the establishment times out and the #66 retry re-keys the link.
-    let (caller_link_id, _routed, _out) = initiator.connect(dest_hash, &signing_key);
+    let (caller_link_id, _routed, _out) =
+        initiator.connect(dest_hash, &signing_key).expect("connect");
 
     // 2. Force the establishment timeout -> retry with fresh keys (re-key).
     let now = initiator.transport().clock().now_ms();
