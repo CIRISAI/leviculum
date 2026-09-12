@@ -920,6 +920,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "embassy-sync 0.7.2",
+ "heapless 0.8.0",
  "leviculum-core",
 ]
 
@@ -1000,7 +1001,6 @@ dependencies = [
  "embedded-hal-async",
  "embedded-storage",
  "embedded-storage-async",
- "heapless 0.8.0",
  "heapless 0.9.3",
  "leviculum-announce-policy",
  "leviculum-battery-scale",

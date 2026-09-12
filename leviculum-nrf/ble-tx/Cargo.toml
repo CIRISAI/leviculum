@@ -27,3 +27,9 @@ leviculum-core = { path = "../../leviculum-core", default-features = false }
 # reach the firmware build, where nrf-softdevice registers the real one
 # and two implementations are a link error.
 critical-section = { version = "1", features = ["std"] }
+# The #387 minimal reproducer: nrf-softdevice's vendored `GattValue`
+# impl unwraps `heapless::Vec::from_slice` on heapless 0.8, and the
+# `gatt_bytes` test pins that panic with the same call on the same
+# version. Already in the tree — leviculum-nrf's `heapless_v8` is the
+# same 0.8 line.
+heapless = { version = "0.8", default-features = false }

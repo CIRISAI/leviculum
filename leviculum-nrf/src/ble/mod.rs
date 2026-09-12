@@ -629,15 +629,24 @@ const CONN_GAP: raw::ble_gap_conn_cfg_t = raw::ble_gap_conn_cfg_t {
 /// conn_cfg under APP_CONN_CFG_TAG = 1 (softdevice.rs:68) and starts
 /// advertising with the same tag (peripheral.rs:277).
 ///
-/// What this does NOT do is keep events inside the
-/// `nrf-softdevice/evt-max-size-512` buffer selected in Cargo.toml.
-/// That bound is the 251-byte width of rx/tx (see
-/// [`columba::ReticulumService`]): both values live in the SoftDevice's
-/// attribute table with max_len 251 and no write authorization, so a
-/// longer write is rejected by the SoftDevice with an ATT error and
-/// never becomes an event. Widening 251 is what forces a recheck of
-/// `evt-max-size-*`; moving this number does not.
-const CONN_GATT: raw::ble_gatt_conn_cfg_t = raw::ble_gatt_conn_cfg_t { att_mtu: 256 };
+/// What this does NOT do is bound what reaches the GATT value
+/// conversions. The 2026-09-12 field panic (#387) disproved the
+/// earlier claim here that the SoftDevice rejects every write past the
+/// attribute's `max_len` before an event exists: a value longer than
+/// the rx/tx width reached `from_gatt` on a live board. The width
+/// itself is `GATT_VALUE_MAX` = this MTU − 3, the largest single ATT
+/// write the grant permits (see [`columba::GattData`] and
+/// `leviculum-ble-tx`'s `gatt_bytes`, where the arithmetic lives), the
+/// conversion tolerates ANY event length, and the event buffer
+/// (`nrf-softdevice/evt-max-size-512` in Cargo.toml) is the one bound
+/// that still panics when exceeded (#354) — rechecking it is what
+/// widening `GATT_VALUE_MAX` forces.
+///
+/// The value is the shared `ATT_MTU` constant so the MTU grant and the
+/// characteristic width cannot drift apart.
+const CONN_GATT: raw::ble_gatt_conn_cfg_t = raw::ble_gatt_conn_cfg_t {
+    att_mtu: leviculum_ble_tx::ATT_MTU as u16,
+};
 
 const ATTR_TAB_SIZE: raw::ble_gatts_cfg_attr_tab_size_t = raw::ble_gatts_cfg_attr_tab_size_t {
     attr_tab_size: raw::BLE_GATTS_ATTR_TAB_SIZE_DEFAULT,
@@ -969,7 +978,7 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// and an absence needs a heartbeat to be quotable from a log:
 ///
 /// ```text
-/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n>
+/// BLE_COUNTERS packets=<n> dropped=<n> waits=<n> unrouted=<n> links=<n> displaced=<n> refused=<n> route_miss=<n> oversize=<n>
 /// ```
 ///
 /// `links=` is the number of claimed drain slots — live BLE links.
@@ -984,6 +993,10 @@ const COUNTERS_PERIOD_SECS: u64 = 30;
 /// packets dropped because the peer the core addressed held no live
 /// link here (#376); a rising value on a healthy board means the path
 /// table outlived a link and the #365 cull should have fired.
+/// `oversize=` counts inbound GATT values dropped for exceeding
+/// `GATT_VALUE_MAX` (#387), writes and notifications together; each is
+/// also named as its own `BLE_GATT_*_OVERSIZE` line, and every count
+/// here was a board panic before #387.
 /// The two-link acceptance for #255 phase B reads `links=2 unrouted=0`
 /// off this line: both slots claimed, and every HVN drain edge still
 /// found the link that produced it.
@@ -995,7 +1008,7 @@ async fn counters_task() -> ! {
         crate::log::log_fmt(
             "[BLE ] ",
             format_args!(
-                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={}",
+                "BLE_COUNTERS packets={} dropped={} waits={} unrouted={} links={} displaced={} refused={} route_miss={} oversize={}",
                 BLE_TX_PACKETS.load(Ordering::Relaxed),
                 BLE_TX_DROPPED.load(Ordering::Relaxed),
                 BLE_TX_DRAIN_WAITS.load(Ordering::Relaxed),
@@ -1004,6 +1017,7 @@ async fn counters_task() -> ! {
                 columba::BLE_LINKS_DISPLACED.load(Ordering::Relaxed),
                 columba::BLE_LINKS_REFUSED.load(Ordering::Relaxed),
                 BLE_TX_ROUTE_MISSES.load(Ordering::Relaxed),
+                columba::BLE_GATT_OVERSIZE.load(Ordering::Relaxed),
             ),
         );
     }

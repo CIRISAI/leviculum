@@ -32,10 +32,11 @@ use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     addr_value, judge_supervision_timeout, manufacturer_data, parse_peer_advertisement,
     should_initiate, with_free_slots, CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine,
-    ConnParamsReq, ConnParamsReqLine, ConnectDecision, LinkPhase, LinkRole, LinkUp, Origin,
-    PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, LEGACY_AD_CAPACITY,
-    LINK_TIMEOUT_MS, MANUFACTURER_DATA_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    ConnParamsReq, ConnParamsReqLine, ConnectDecision, GattBytes, LinkPhase, LinkRole, LinkUp,
+    Origin, OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED,
+    CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
+    MANUFACTURER_DATA_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -46,19 +47,75 @@ use nrf_softdevice::ble::advertisement_builder::{
     ServiceList,
 };
 use nrf_softdevice::ble::gatt_server::{Server, WriteOp};
-use nrf_softdevice::ble::{central, gatt_client, gatt_server, peripheral, Address, Connection};
+use nrf_softdevice::ble::{
+    central, gatt_client, gatt_server, peripheral, Address, Connection, GattValue,
+};
 use nrf_softdevice::Softdevice;
 use static_cell::StaticCell;
 
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
 use super::{CarrierWaiter, BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
 
-/// The two data characteristics are 251 bytes wide, which is also the
-/// largest GATTS write event the SoftDevice can hand us (251 bytes of data
-/// behind an 18-byte event header). The buffer that event is read into is
-/// sized by the `nrf-softdevice/evt-max-size-*` feature in `Cargo.toml`, and
-/// nrf-softdevice panics rather than truncating when the event does not fit
-/// (Codeberg #354). Widening 251 means rechecking that feature.
+/// The value type of every characteristic a peer can write or notify:
+/// [`GattBytes`] under the `GattValue` trait, with a `from_gatt` that
+/// **cannot panic** (Codeberg #387).
+///
+/// The vendored impl this replaces — `GattValue for heapless::Vec<u8,
+/// N>` — is `unwrap!(Self::from_slice(data))` (nrf-softdevice
+/// gatt_traits.rs:97), and the field T114 panicked on exactly that
+/// line twice on 2026-09-12 with two phones connected: the macro's
+/// generated `on_write`/`on_hvx` feed `from_gatt` whatever the event
+/// buffer delivered, with no length gate between the air and the
+/// unwrap. Here an over-bound value is truncated and *marked* instead;
+/// the event handlers check [`GattBytes::oversize`] and drop the whole
+/// value with a `BLE_GATT_*_OVERSIZE` line, because a truncated
+/// Columba fragment completing a reassembly is worse than a lost one.
+///
+/// The width is [`GATT_VALUE_MAX`] (253): the exact size of a Columba
+/// fragment filling our granted ATT MTU of 256 (`leviculum-ble-tx`'s
+/// `gatt_bytes`, where the constants live and the arithmetic is
+/// const-asserted). The previous 251 — the link-layer DLE payload, a
+/// bound from the wrong layer — was 2 bytes short of a legitimate
+/// full-MTU fragment. The event buffer that feeds this type is sized
+/// by `nrf-softdevice/evt-max-size-*` in `Cargo.toml`, and
+/// nrf-softdevice still panics when an EVENT does not fit (#354):
+/// widening [`GATT_VALUE_MAX`] means rechecking that feature
+/// (253 + 18 bytes of event header = 271, inside 512).
+pub struct GattData(GattBytes<GATT_VALUE_MAX>);
+
+impl GattValue for GattData {
+    const MIN_SIZE: usize = 0;
+    const MAX_SIZE: usize = GATT_VALUE_MAX;
+
+    fn from_gatt(data: &[u8]) -> Self {
+        GattData(GattBytes::from_wire(data))
+    }
+
+    fn to_gatt(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl GattData {
+    /// Outbound construction: `None` if the value would not fit, so
+    /// nothing we hand the stack can ever be oversize on a peer.
+    fn new(data: &[u8]) -> Option<Self> {
+        GattBytes::new(data).map(GattData)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    fn wire_len(&self) -> usize {
+        self.0.wire_len()
+    }
+
+    fn oversize(&self) -> bool {
+        self.0.oversize()
+    }
+}
+
 #[nrf_softdevice::gatt_service(uuid = "37145b00-442d-4a94-917f-8f42c5da28e3")]
 pub struct ReticulumService {
     #[characteristic(
@@ -66,10 +123,10 @@ pub struct ReticulumService {
         write,
         write_without_response
     )]
-    rx: heapless_v8::Vec<u8, 251>,
+    rx: GattData,
 
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e4", read, notify)]
-    tx: heapless_v8::Vec<u8, 251>,
+    tx: GattData,
 
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e6", read)]
     identity: [u8; 16],
@@ -697,6 +754,28 @@ async fn gatt_events(
         let ReticulumServerEvent::ReticulumService(service_evt) = evt;
         match service_evt {
             ReticulumServiceEvent::RxWrite(data) => {
+                // A write past the characteristic bound (#387): dropped
+                // whole, never truncated into the defragmenter — a cut
+                // fragment completing a reassembly is worse than a lost
+                // one. Before #387 this input was a panic in the
+                // vendored `from_gatt` (gatt_traits.rs:97).
+                if data.oversize() {
+                    BLE_GATT_OVERSIZE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    crate::log::log_fmt(
+                        "[BLE ] ",
+                        format_args!(
+                            "{}",
+                            OversizeLine {
+                                from: OversizeFrom::Write,
+                                conn: conn_handle,
+                                len: data.wire_len(),
+                                max: GATT_VALUE_MAX,
+                            }
+                        ),
+                    );
+                    return;
+                }
+                let data = data.as_slice();
                 if !handshake_done.get() && data.len() == 16 {
                     // Identity handshake — peer's first write is its 16-byte identity.
                     crate::log::log_fmt(
@@ -707,7 +786,7 @@ async fn gatt_events(
                         ),
                     );
                     let mut peer_id = [0u8; 16];
-                    peer_id.copy_from_slice(&data);
+                    peer_id.copy_from_slice(data);
                     if !peer_link_up(
                         slot_index,
                         conn_handle,
@@ -747,7 +826,7 @@ async fn gatt_events(
                     note_heard(slot_index);
                     let now = Instant::now().as_millis();
                     let mut d = defrag.replace(BleDefragmenter::new());
-                    let result = process_logged(&mut d, &data, now, slot_index);
+                    let result = process_logged(&mut d, data, now, slot_index);
                     let frags = d.last_completed_fragments();
                     defrag.set(d);
                     match result {
@@ -935,6 +1014,16 @@ pub(crate) static BLE_LINKS_DISPLACED: core::sync::atomic::AtomicU32 =
 /// On a board sitting beside a Columba phone this is the counter that
 /// should climb while `displaced=` stays put.
 pub(crate) static BLE_LINKS_REFUSED: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Inbound GATT values dropped for exceeding [`GATT_VALUE_MAX`] (#387)
+/// — writes and notifications together — for the `BLE_COUNTERS` line's
+/// `oversize=` field. Each drop also names itself as a
+/// `BLE_GATT_WRITE_OVERSIZE` / `BLE_GATT_NOTIFY_OVERSIZE` line; this is
+/// the running total that makes the drops quotable from a capture.
+/// Before #387 this exact input was not a counter but a panic
+/// (nrf-softdevice gatt_traits.rs:97), twice on the field T114.
+pub(crate) static BLE_GATT_OVERSIZE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
 /// Per-slot displacement latches (#376): [`peer_link_up`] signals the
@@ -1242,10 +1331,10 @@ pub(crate) fn plan_fanout(peer: Option<&[u8; 16]>) -> leviculum_ble_tx::TxFanout
 #[nrf_softdevice::gatt_client(uuid = "37145b00-442d-4a94-917f-8f42c5da28e3")]
 pub struct ReticulumClient {
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e5", write)]
-    rx: heapless_v8::Vec<u8, 251>,
+    rx: GattData,
 
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e4", read, notify)]
-    tx: heapless_v8::Vec<u8, 251>,
+    tx: GattData,
 
     #[characteristic(uuid = "37145b00-442d-4a94-917f-8f42c5da28e6", read)]
     identity: [u8; 16],
@@ -1785,12 +1874,11 @@ async fn run_central_session(
     // connected (v2.2 §Identity Handshake Protocol). Written WITH
     // response: the confirmation is the one signal the session may
     // start.
-    let handshake = heapless_v8::Vec::from_slice(own_identity).unwrap_or_default();
-    if handshake.len() != own_identity.len() {
-        // Unreachable (16 <= 251), but a truncated handshake must not
-        // go on the air as a valid-looking write.
+    let Some(handshake) = GattData::new(own_identity) else {
+        // Unreachable (16 <= GATT_VALUE_MAX), but a truncated handshake
+        // must not go on the air as a valid-looking write.
         return;
-    }
+    };
     if let Err(err) = client.rx_write(&handshake).await {
         crate::log::log_fmt(
             "[BLE ] ",
@@ -1828,6 +1916,27 @@ async fn run_central_session(
     // everything that is not a keepalive is fragment traffic.
     let inbound = gatt_client::run(conn, client, |event| {
         let ReticulumClientEvent::TxNotification(data) = event;
+        // Same defect class as the server side's oversize write
+        // (#387): the generated `on_hvx` feeds `from_gatt` whatever
+        // the peer notified, and the vendored conversion panicked on
+        // anything past the bound. Dropped whole, logged, counted.
+        if data.oversize() {
+            BLE_GATT_OVERSIZE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::log::log_fmt(
+                "[BLE ] ",
+                format_args!(
+                    "{}",
+                    OversizeLine {
+                        from: OversizeFrom::Notify,
+                        conn: conn_handle,
+                        len: data.wire_len(),
+                        max: GATT_VALUE_MAX,
+                    }
+                ),
+            );
+            return;
+        }
+        let data = data.as_slice();
         note_heard(slot_index);
         if data.len() < FRAGMENT_HEADER_SIZE {
             // The peer's 1-byte keepalive: nothing to defragment, but
@@ -1837,7 +1946,7 @@ async fn run_central_session(
         }
         let now = Instant::now().as_millis();
         let mut d = defrag.replace(BleDefragmenter::new());
-        let result = process_logged(&mut d, &data, now, slot_index);
+        let result = process_logged(&mut d, data, now, slot_index);
         let frags = d.last_completed_fragments();
         defrag.set(d);
         match result {
@@ -1877,9 +1986,10 @@ async fn run_central_session(
                     let mut sent = 0usize;
                     let mut torn = false;
                     for (index, fragment) in fragments.iter().enumerate() {
-                        let Ok(value) = heapless_v8::Vec::from_slice(fragment.as_slice()) else {
+                        let Some(value) = GattData::new(fragment.as_slice()) else {
                             // Unreachable: DEFAULT_MTU fragments are
-                            // narrower than the 251-byte characteristic.
+                            // narrower than the characteristic's
+                            // GATT_VALUE_MAX.
                             // Reported all the same — this used to be a
                             // bare `return`, i.e. exactly the silent
                             // mid-packet loss #373 hunts.
@@ -1952,7 +2062,11 @@ async fn run_central_session(
                     BLE_TX_PACKETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 Either::Second(()) => {
-                    let kv = heapless_v8::Vec::from_slice(&[KEEPALIVE_BYTE]).unwrap_or_default();
+                    // Unreachable `else` (1 <= GATT_VALUE_MAX); ending
+                    // the session is the harmless reading of it.
+                    let Some(kv) = GattData::new(&[KEEPALIVE_BYTE]) else {
+                        return;
+                    };
                     if client.rx_write_without_response(&kv).await.is_err() {
                         return;
                     }
