@@ -207,49 +207,64 @@ Two consequences of dialling against the sort are deliberate:
   duplicate, not a loop; announce rebroadcast is suppressed the same
   way. Connectivity is what the graph owes the mesh, minimal edge count
   is not.
-- **A second link to an already linked identity is decided by who
-  opened it.** It adds no reachability, burns one of three incoming
+- **A second link to an already linked identity is decided by the rule
+  the PEER runs.** It adds no reachability, burns one of three incoming
   slots and the airtime of a connect, so both roles resolve the
   identity at connect — read from the Identity characteristic as
   central, presented in the handshake as peripheral — and then apply
   one rule, `judge_duplicate` in
-  `leviculum-nrf/ble-tx/src/registry.rs`, which lnsd calls too:
+  `leviculum-nrf/ble-tx/src/registry.rs`, which lnsd calls too. Three
+  branches, and the `rule=` token on every duplicate line says which
+  one fired:
 
-  **The newer connection wins** (`BLE_LINK_REPLACED`), **unless the old
-  link carried real payload within one keepalive interval**
-  (`LINK_ACTIVE_DATA_MS`, 15 s), which refuses the newcomer instead
-  (`BLE_LINK_DUP … action=refuse`). The same rule in both roles — who
-  opened the connection is not an input, and the function's signature
-  is where that is enforced (#360). Replacement is what the peers
-  themselves run: Columba's BLE driver accepts the newer connection of
-  an identity it already holds once the old one is stale or a "zombie"
-  (reference `ble-reticulum` `BLEInterface.py`,
-  `_check_duplicate_identity`, checks 1-3 with
-  `_zombie_timeout = 30.0`).
+  1. `rule=abandoned` — the old link has delivered NOTHING, payload and
+     keepalives alike, for `LINK_ABANDONED_MS` (30 s, two keepalive
+     intervals). Its peer has walked away from it; the newcomer wins
+     (`BLE_LINK_REPLACED`). This is the one case the peer's own
+     arbitration never sees, so nothing it decides can contradict us.
+  2. `rule=same_role` — both connections carry the same role, which a
+     rotated address makes possible in either direction (the pre-dial
+     exclusion is address-keyed, this rule identity-keyed). The peer
+     then holds both in one role and has no central-vs-peripheral
+     choice to make, so we decide alone: our own second dial is refused
+     (it reaches nothing the live link does not), the peer's second
+     dial wins (a node that dials again is done with the connection it
+     has).
+  3. `rule=columba_mtu` / `rule=columba_identity` — the general case:
+     `preferred_ble_role`, a port of Columba's own
+     `preferredBleRole(centralMtu, peripheralMtu, localIdentity,
+     peerIdentity)`, evaluated from the PEER's perspective. It keeps
+     the role with the larger usable MTU and breaks a tie on identity
+     order (`localIdentity < peerIdentity` keeps central), and we keep
+     whichever connection it keeps.
 
-  Why payload and not silence, in either direction: a phone that
-  rotates its address abandons the old connection mid-interval, so the
-  abandoned link's last KEEPALIVE can be arbitrarily recent — at the
-  moment the same identity handshakes on the new connection, a
-  rotated-away link and a healthy idle one are indistinguishable on the
-  any-frame clock. The 2026-09-12 field T114 (#360) is what the
-  direction-only rule before this one cost there: the board dialled the
-  phone's rotated address, learned the same identity, refused its own
-  dial (`origin=outgoing old_silence_ms=9674`), and kept the dead link
-  until the 45 s expiry — the phone was linkless ~45 s of every ~90 s
-  rotation cycle, which is why direct deliveries through that board
-  broke. Payload does discriminate: a rotated-away link never delivers
-  payload again, while payload within one keepalive interval proves the
-  old link is carrying a transfer RIGHT NOW — the one state whose
-  displacement costs something the expiry would not also cost, and
-  exactly the working-link kill the 13bea3e5 field failure showed
-  (~every 95 s, a fully negotiated link swapped for one Columba lists
-  as `Unknown` at MTU 20). One interval and not the reference's 30 s,
-  because every second of the window extends the peer's linkless outage
-  when a rotation follows payload closely, and the interval is the
-  protocol's own liveness quantum — `LINK_TIMEOUT_MS` is already three
-  of it, and a free second parameter would be one more number the
-  stacks could drift on.
+  Whichever branch fires, the LOSING link is disconnected by us at the
+  decision, in either role — never left to the expiry.
+
+  Why the peer's function and not a rule of our own (#360 round 2): the
+  only duplicate rule that never leaves the pair linkless is one both
+  sides compute identically from the same inputs. On 2026-09-12 at
+  21:41 the field T114 and a Pixel running Columba 2.2.4-beta each
+  deduplicated in the OPPOSITE direction within one second. The board
+  kept the newer connection because the old one's last payload was
+  15 185 ms old; the phone kept its own central because its ledger
+  still read the new connection's MTU at the floor
+  (`centralPeerMtus[address] ?: BleConstants.MIN_USABLE_MTU`, so
+  `MTU=20` although the ATT exchange had long settled at 517). Each
+  side then closed the link the other had kept, and the phone's cancel
+  did not even drop the ACL: our outgoing link stayed up for 45 s
+  collecting `Rejecting pre-identity write` refusals until our own
+  expiry. 45 s of dead air per rotation cycle — the same hole round 1
+  closed from the other direction.
+
+  Why the liveness test is any-frame and not payload: Columba sends a
+  1-byte keepalive every 15 s on every connection it holds, so "any
+  traffic within two intervals" is what distinguishes a link its peer
+  still holds from one it has abandoned. Payload silence is what an
+  IDLE phone looks like — it is not evidence of anything, and round 1
+  reading it is precisely what displaced a link the phone was actively
+  keepaliving. `old_data_silence_ms` is still measured and logged, so a
+  round-1-vs-round-2 capture stays greppable, and consulted by nothing.
 
   A link that has really stopped answering is removed by the
   **expiry**, not by a replacement: `last_heard_ms` counts every
@@ -264,10 +279,12 @@ Two consequences of dialling against the sort are deliberate:
   for its TTL so the scanner does not immediately re-offer it; a
   replaced link's queued packets move to the new link first.
 
-  Every duplicate line carries `origin=` (reported, no longer
-  consulted), `old_silence_ms=` (the any-frame measurement), and
-  `old_data_silence_ms=` — the payload recency the decision turned on,
-  `never` for a link that carried none.
+  Every duplicate line carries `rule=`, `origin=` (the role map the
+  arbitration is computed over), `old_mtu=`/`new_mtu=` (the usable MTUs
+  as compared, in the peer's ledger), `old_silence_ms=` (the any-frame
+  measurement the abandonment test reads) and `old_data_silence_ms=` —
+  round 1's input, reported for comparison, `never` for a link that
+  carried none.
 
   What the expiry bound itself replaced is a measurement (#382). Over
   14.1 h beside a Columba phone (`ble-accept-rns/lnsd.log`,
@@ -275,19 +292,20 @@ Two consequences of dialling against the sort are deliberate:
   peer that was demonstrably present throughout ran to a median of
   51 s, a 90th percentile of 182 s and a maximum of 5590 s; 502 links
   outlived 45 s with no payload at all. Payload silence is what an
-  idle phone looks like, so it can never be a reason to KEEP a link
-  out of a duplicate decision's reach — which is exactly how the
-  replacement rule uses it: recent payload protects a link, absent
-  payload merely declines to. The decisions are pinned by
-  `a_rotated_phones_new_connection_replaces_its_silent_old_link`,
-  `stale_payload_does_not_save_a_rotated_away_link`,
-  `a_duplicate_of_an_actively_used_link_is_refused`,
-  `the_duplicate_rule_reads_payload_recency_and_nothing_else`,
-  `keepalives_hold_off_the_expiry_but_never_refuse_a_replacement`
-  and `a_fresh_handshake_alone_does_not_refuse_the_next_one` in the
-  registry, and by `an_idle_links_next_handshake_replaces_it_in_either_role`,
-  `an_actively_used_link_refuses_its_duplicate_in_either_role` and
-  `the_peers_own_dial_still_displaces_a_fresh_handshake_only_link`
+  idle phone looks like, which is why round 2 removed it from the rule
+  entirely. The decisions are pinned by
+  `a_live_old_links_own_dial_is_refused_before_the_handshake`,
+  `an_abandoned_rotated_link_is_displaced_by_our_dial`,
+  `payload_recency_no_longer_flips_the_verdict`,
+  `keepalives_keep_a_link_out_of_the_abandoned_branch`,
+  `a_same_role_pair_is_decided_without_the_peers_arbitration` and
+  `preferred_ble_role_is_kotlinblebridge_44` in the registry, by the
+  two-sided `registry::duel` scenarios that assert the pair is never
+  linkless for longer than 2 s, and by
+  `an_idle_link_is_alive_and_our_redundant_dial_is_refused`,
+  `payload_recency_no_longer_flips_admission_in_either_role`,
+  `our_dial_against_the_peers_live_central_link_is_refused` and
+  `the_peers_second_dial_displaces_its_own_first_link`
   in `leviculum-std/src/interfaces/ble/links.rs`.
 
 The simulation that motivated the fallback is a host test:

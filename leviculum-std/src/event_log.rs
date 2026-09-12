@@ -363,19 +363,27 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_LINK_DOWN",
         required_keys: &["iface", "peer", "role", "reason"],
     },
+    // The duplicate rule's refusal branch (#360 round 2): the identity's
+    // existing link kept the peer and this connection is dropped.
+    // `rule` names the branch that decided — `abandoned`, `same_role`,
+    // `columba_mtu` or `columba_identity` — without which a capture
+    // shows the outcome and not the reasoning.
     EventSchema {
         name: "BLE_LINK_DUP",
-        required_keys: &["peer", "addr", "action"],
+        required_keys: &["peer", "addr", "action", "rule"],
     },
-    // The duplicate rule's replacement branch (#360): a newer connection
-    // of an identity we already hold took the peer over, in either role.
-    // `old_data_silence_ms` is the consulted input — payload recency of
-    // the old link, `never` for a link that carried none.
+    // The duplicate rule's replacement branch (#360 round 2): a newer
+    // connection of an identity we already hold took the peer over, in
+    // either role, and the old link was disconnected at the decision.
+    // `old_silence_ms` is the abandonment test's input (any frame,
+    // keepalives included); `old_data_silence_ms` was round 1's input
+    // and is reported only, `never` for a link that carried no payload.
     EventSchema {
         name: "BLE_LINK_REPLACED",
         required_keys: &[
             "peer",
             "addr",
+            "rule",
             "origin",
             "old_silence_ms",
             "old_data_silence_ms",

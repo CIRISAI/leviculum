@@ -64,8 +64,9 @@ pub use peer::{
     ScanMode,
 };
 pub use registry::{
-    judge_duplicate, plan_fanout, DataSilence, Duplicate, LinkUp, Origin, PeerRegistry, TxFanout,
-    LINK_ACTIVE_DATA_MS, LINK_TIMEOUT_MS,
+    judge_duplicate, plan_fanout, preferred_ble_role, usable_mtu, BleRole, DataSilence, DupRule,
+    DupVerdict, LinkUp, Origin, PeerRegistry, TxFanout, LINK_ABANDONED_MS, LINK_TIMEOUT_MS,
+    MIN_USABLE_MTU,
 };
 pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{

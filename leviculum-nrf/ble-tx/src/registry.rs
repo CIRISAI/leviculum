@@ -12,17 +12,27 @@
 //! report neither.
 //!
 //! Which of the two links that peer keeps is [`PeerRegistry::link_up`]'s
-//! second job, and the rule is [`judge_duplicate`]: the NEWER connection
-//! wins, unless the old link is demonstrably in active use — real
-//! payload within [`LINK_ACTIVE_DATA_MS`] — in which case the newcomer
-//! is refused (#360). The registry carries two clocks per slot: the
-//! liveness clock ([`PeerRegistry::note_heard`]), fed by the caller's
-//! inbound path for EVERY frame, keepalives included, exactly as lnsd's
-//! `LinkTable` feeds `last_heard_ms` — the expiry sweeps read it through
-//! [`PeerRegistry::silence_ms`] to tear a link down that has stopped
-//! answering altogether — and the payload clock
+//! second job, and the rule is [`judge_duplicate`] (#360 round 2): an
+//! old link its peer has abandoned — silent on EVERY frame, keepalives
+//! included, for [`LINK_ABANDONED_MS`] — loses to the newcomer; a pair
+//! whose two connections carry the SAME role (a rotated address dialled
+//! twice in one direction) is decided by us alone, because the peer's
+//! role preference cannot name one of two connections it holds in one
+//! role; and otherwise the arbitration is [`preferred_ble_role`],
+//! Columba's own function, computed from the PEER's perspective so both
+//! ends of the pair keep the same connection. The losing link is torn
+//! down by the caller immediately, never left to the expiry. The
+//! registry carries two clocks per slot: the liveness clock
+//! ([`PeerRegistry::note_heard`]), fed by the caller's inbound path for
+//! EVERY frame, keepalives included, exactly as lnsd's `LinkTable`
+//! feeds `last_heard_ms` — the duplicate rule's abandonment test and
+//! the expiry sweeps both read it, the latter through
+//! [`PeerRegistry::silence_ms`] — and the payload clock
 //! ([`PeerRegistry::note_data`]), fed for non-keepalive frames only,
-//! which is the one input the duplicate rule consults.
+//! which since round 2 is reported on every duplicate decision and
+//! consulted by none (the 2026-09-12 field T114 showed payload recency
+//! deciding AGAINST the phone's own arbitration, see
+//! [`judge_duplicate`]).
 //!
 //! The rules are pure and their failure modes are sequences (a flap, a
 //! displacement, the runtime carrier-off teardown that drops every live
@@ -51,22 +61,39 @@ use leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS;
 /// be excluded BEFORE it spends five seconds timing out on the air.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRegistry<const N: usize> {
+    /// This node's own 16-byte identity hash — the tie-break input of
+    /// [`preferred_ble_role`], set once at interface bring-up
+    /// ([`set_local_identity`](Self::set_local_identity)). Zeroed until
+    /// then, which only ever loses an identity tie-break, never a link.
+    local_identity: [u8; 16],
     slots: [Option<[u8; 16]>; N],
     addrs: [Option<u64>; N],
     last_heard_ms: [u64; N],
     /// When the slot's link last delivered real payload — a fragment
     /// frame, never a keepalive and never the handshake — `None` until
-    /// it first does. The duplicate rule's one input (#360).
+    /// it first does. Reported with every duplicate decision, consulted
+    /// by none since #360 round 2.
     last_data_ms: [Option<u64>; N],
+    /// The slot's connection's ATT MTU as registered at
+    /// [`link_up`](Self::link_up) — the OLD-link MTU input of the
+    /// duplicate rule when the identity presents a second connection.
+    att_mtus: [u16; N],
+    /// Who opened the slot's connection, as registered at
+    /// [`link_up`](Self::link_up) — the OLD-link half of
+    /// [`judge_duplicate`]'s role map. A slot holding no identity holds
+    /// a meaningless value here, which nothing reads: the rule asks for
+    /// it only about a slot it just found this identity on, and that
+    /// slot went through `link_up`.
+    origins: [Origin; N],
 }
 
 /// A link that has delivered NOTHING — no packet fragment, no
 /// keepalive — for this long is dead, and is torn down: it is the
 /// EXPIRY bound, on both stacks (lnsd's `LinkTable::expire`, the
 /// firmware session's `link_silent` arm), and since #382 it decides
-/// nothing else. [`judge_duplicate`] does not read it — a duplicate is
-/// decided by the old link's payload recency against
-/// [`LINK_ACTIVE_DATA_MS`], never by this bound — and a link that stops
+/// nothing else. [`judge_duplicate`] does not read it — its abandonment
+/// bound is the shorter [`LINK_ABANDONED_MS`], and it fires only when
+/// the identity presents a new connection — while a link that stops
 /// answering is removed by the sweep, whether or not anybody dials it.
 ///
 /// Three missed keepalives at the protocol's 15 s cadence
@@ -88,11 +115,23 @@ pub const LINK_TIMEOUT_MS: u64 = 3 * KEEPALIVE_INTERVAL_MS;
 
 /// Who opened the connection whose duplicate identity is being judged.
 ///
-/// Since #360 it is NOT an input to [`judge_duplicate`] — the rule is
-/// the same in both roles, and the function's signature is where that
-/// is enforced. It survives as the `origin=` token every duplicate log
-/// line still carries, so a capture shows which direction a decision
-/// fired in even though the direction no longer decides.
+/// Round 1 of #360 removed it from the rule's inputs; round 2 restores
+/// it — not as a preference (the 2026-09-09 field failures stand:
+/// "incoming wins" and "outgoing wins" were each wrong in one
+/// direction) but as the ROLE MAP [`judge_duplicate`] needs to compute
+/// the peer's own arbitration: the peer's CENTRAL connection of a
+/// duplicate pair is the one we did NOT dial, so this value, inverted,
+/// is which side of `preferredBleRole` each connection sits on. It is
+/// needed for BOTH connections, which is why the registry keeps it per
+/// slot — the two are not always opposite. Core Spec Vol 6 Part B §4.5
+/// forbids a second connection to the same ADDRESS, and identities
+/// outlive addresses: a peer that rotates its RPA can be dialled again
+/// by us while our first dial is live (two `Outgoing`), and can dial us
+/// again from a fresh RPA while its first dial is live (two
+/// `Incoming`). Then the peer holds both connections in one role, its
+/// role preference cannot name one of them, and [`judge_duplicate`]
+/// answers on its own ([`DupRule::SameRole`]). Every duplicate log line
+/// carries the NEWCOMER's value as `origin=`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// The PEER connected to us (we are the peripheral; on lnsd,
@@ -103,105 +142,248 @@ pub enum Origin {
     Outgoing,
 }
 
+/// The role a node keeps when it holds both connections of a duplicate
+/// pair — [`preferred_ble_role`]'s answer, in the deciding node's own
+/// perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BleRole {
+    /// The connection that node dialled.
+    Central,
+    /// The connection its peer dialled.
+    Peripheral,
+}
+
+/// Columba's `BleConstants.MIN_USABLE_MTU`: the usable bytes of the
+/// un-negotiated default ATT MTU (23 minus the 3-byte ATT header), and
+/// the value Columba substitutes for a connection whose MTU its
+/// bookkeeping has not recorded yet
+/// (`centralPeerMtus[address] ?: BleConstants.MIN_USABLE_MTU`,
+/// Columba `KotlinBLEBridge.kt`). The 2026-09-12 field decision turned
+/// on exactly this substitution: the phone arbitrated with the fresh
+/// connection still at `MTU=20` although our ATT exchange had long
+/// settled at 517, so a fresh connection's MTU in the PEER's ledger is
+/// this floor, not the wire's truth.
+pub const MIN_USABLE_MTU: u16 = 20;
+
+/// A raw ATT MTU as the usable per-write payload Columba compares
+/// (`att_mtu - 3`), floored at [`MIN_USABLE_MTU`] — an un-negotiated
+/// connection (ATT MTU still 23) and Columba's not-yet-bookkept
+/// substitute are then the same number, which is the point.
+pub const fn usable_mtu(att_mtu: u16) -> u16 {
+    let usable = att_mtu.saturating_sub(3);
+    if usable < MIN_USABLE_MTU {
+        MIN_USABLE_MTU
+    } else {
+        usable
+    }
+}
+
+/// An old link that has delivered NOTHING — no payload, no keepalive —
+/// for this long when its identity presents a new connection has been
+/// abandoned by its peer, and the newcomer wins outright
+/// ([`judge_duplicate`], #360 round 2).
+///
+/// Two keepalive intervals: Columba sends a 1-byte keepalive every
+/// 15 s on every connection it holds, so one whole missed interval
+/// plus the interval in progress is the earliest instant "it stopped
+/// keepaliving this link" is a fact rather than phase noise. This is
+/// the honest liveness test round 1's payload window was not — the
+/// 2026-09-12 field T114 displaced a link the phone was actively
+/// keepaliving because its last PAYLOAD was 15 185 ms old (a quiet
+/// link is what an idle phone looks like), while the phone's own
+/// arbitration kept it, and each side then tore down the link the
+/// other had kept: 45 s of dead air every cycle. Any-frame silence
+/// past this bound cannot be an idle phone — an idle phone still
+/// keepalives — so the abandoned case is the one case the peer's own
+/// arbitration never sees and never contradicts.
+pub const LINK_ABANDONED_MS: u64 = 2 * KEEPALIVE_INTERVAL_MS;
+
+/// Columba's arbitration of a duplicate pair, ported verbatim:
+/// `preferredBleRole(centralMtu, peripheralMtu, localIdentity,
+/// peerIdentity)` (Columba `KotlinBLEBridge.kt:44`, applied at
+/// `:1725-1760`, the 2026-09-12 decision at `:1749`) — the node keeps
+/// the role with the larger usable MTU and breaks the tie by identity
+/// order: `localIdentity < peerIdentity` keeps central.
+///
+/// `central_mtu`/`peripheral_mtu` are the deciding node's USABLE MTUs
+/// of its central- and peripheral-role connection of the pair, with
+/// [`MIN_USABLE_MTU`] substituted for one it has not bookkept
+/// ([`usable_mtu`] performs both conversions). Columba compares the
+/// identities as lowercase-hex strings; fixed-width hex of a byte
+/// array orders exactly as the byte array, so the `[u8; 16]`
+/// comparison below is the same comparison.
+///
+/// Ported because the only duplicate rule that never leaves the pair
+/// linkless is one both sides compute identically from the same
+/// inputs: whatever this function answers, it must be OUR answer too,
+/// or each side tears down the link the other kept (the 2026-09-12
+/// field failure, #360 round 2).
+pub fn preferred_ble_role(
+    central_mtu: u16,
+    peripheral_mtu: u16,
+    local_identity: &[u8; 16],
+    peer_identity: &[u8; 16],
+) -> BleRole {
+    if central_mtu > peripheral_mtu {
+        BleRole::Central
+    } else if peripheral_mtu > central_mtu {
+        BleRole::Peripheral
+    } else if local_identity < peer_identity {
+        BleRole::Central
+    } else {
+        BleRole::Peripheral
+    }
+}
+
+/// Which branch of [`judge_duplicate`] fired — the `rule=` token every
+/// duplicate log line carries since #360 round 2, so a capture states
+/// not just the outcome but the reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DupRule {
+    /// The old link was silent past [`LINK_ABANDONED_MS`]: abandoned,
+    /// newcomer wins.
+    Abandoned,
+    /// [`preferred_ble_role`] decided on the MTU comparison.
+    ColumbaMtu,
+    /// The MTUs tied; [`preferred_ble_role`] decided on identity order.
+    ColumbaIdentity,
+    /// Both connections carry the SAME role, so the peer holds both in
+    /// one role and [`preferred_ble_role`] — which chooses between a
+    /// central and a peripheral — has no opinion to copy. We decide
+    /// alone, and the decision is the one the peer cannot contradict:
+    /// see [`judge_duplicate`].
+    SameRole,
+    /// The old link's MTU was not known, so the peer's arbitration
+    /// could not be computed — the caller keeps both links and sends
+    /// on the old one until it is ([`DupVerdict::Wait`]).
+    WaitingMtu,
+}
+
+impl DupRule {
+    /// The stable `rule=` log token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DupRule::Abandoned => "abandoned",
+            DupRule::ColumbaMtu => "columba_mtu",
+            DupRule::ColumbaIdentity => "columba_identity",
+            DupRule::SameRole => "same_role",
+            DupRule::WaitingMtu => "waiting_mtu",
+        }
+    }
+}
+
 /// What to do with a second connection carrying an identity we already
 /// hold a live link to (see [`judge_duplicate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Duplicate {
-    /// Keep the old link, drop the newcomer.
-    Refuse,
-    /// Tear the old link down; the newcomer takes the peer over.
-    Displace,
+pub enum DupVerdict {
+    /// Tear the old link down NOW — by us, whichever role, never left
+    /// to the expiry — and let the newcomer take the peer over.
+    KeepNew(DupRule),
+    /// The old link keeps the peer; the newcomer is refused and
+    /// disconnected NOW.
+    KeepOld(DupRule),
+    /// The old link's MTU is unknown, so the peer's arbitration cannot
+    /// be computed yet: keep both links, send on the old one, and
+    /// re-judge when the MTU is known (`rule=waiting_mtu`). Never
+    /// produced when `old_usable_mtu` is supplied, which both current
+    /// callers always do.
+    Wait,
 }
 
-/// A duplicate handshake is refused only when the old link carried real
-/// payload within this window; otherwise the newer connection wins
-/// ([`judge_duplicate`], #360).
+/// Decide a duplicate identity so that BOTH sides of the pair keep the
+/// same connection (#360 round 2).
 ///
-/// One keepalive interval, `leviculum_core::framing::ble`'s
-/// `KEEPALIVE_INTERVAL_MS` (15 s), and the choice is argued on both
-/// bounds:
+/// The 2026-09-12 field failure was two arbitrations pulling in
+/// opposite directions: the board kept the newer connection because
+/// the old one's last payload was 15 185 ms old, the phone kept its
+/// central because its ledger still had the newer connection's MTU at
+/// the floor, and each side then closed the link the other had kept —
+/// the pair was linkless for 45 s of every cycle. The only rule with
+/// no such hole is the PEER's own rule, so this function computes it:
 ///
-/// - **Why payload and not any frame.** A phone that rotates its
-///   address abandons the old connection mid-interval, so the abandoned
-///   link's last KEEPALIVE can be arbitrarily recent — the 2026-09-12
-///   field T114 refused the rotated phone's replacement at
-///   `old_silence_ms=8562` and `9674`, both inside one keepalive
-///   interval, and the phone then had no link at all until the 45 s
-///   expiry, ~45 s of every ~90 s rotation cycle (#360). A healthy idle
-///   link and a rotated-away one are indistinguishable on the any-frame
-///   clock at decision time; on the payload clock the rotated-away link
-///   fails immediately, because it never delivers payload again.
-/// - **Why one interval and not the reference's 30 s.** Every second of
-///   this window extends the peer's linkless outage when a rotation
-///   happens to follow payload closely — the abandoned link then blocks
-///   its own replacement for the window's remainder. One interval is
-///   the protocol's own liveness quantum, the unit `LINK_TIMEOUT_MS`
-///   is already three of; a second free parameter (the reference's
-///   `_zombie_timeout = 30.0`, `ble-reticulum` `BLEInterface.py`, has
-///   no stated derivation) would be one more number the stacks could
-///   drift on.
-/// - **Why not zero.** Payload within the window is proof the old link
-///   is delivering RIGHT NOW — the one state whose displacement costs
-///   something the expiry would not also cost, a transfer in flight cut
-///   for a connection that adds no reachability. Fragments of an active
-///   transfer arrive well inside one interval, so the window covers
-///   exactly that state.
-pub const LINK_ACTIVE_DATA_MS: u64 = KEEPALIVE_INTERVAL_MS;
-
-/// Decide a duplicate identity from how recently the OLD link carried
-/// real payload, and from nothing else — the same rule in both roles
-/// and on both stacks (#360): `old_data_silence_ms` is the time since
-/// the old link's last non-keepalive frame, `None` when it never
-/// carried one.
-///
-/// **The newer connection wins by default.** That is what the peers
-/// run: Columba's BLE driver accepts the newer connection of an
-/// identity it already holds once the old one is no longer active
-/// (reference `ble-reticulum` `BLEInterface.py`,
-/// `_check_duplicate_identity` — a stale or "zombie" old connection
-/// never blocks the new one). The board-side field failure this fixes
-/// (#360, 2026-09-12) was the opposite choice: the phone rotated its
-/// address, its old connection to us went silent, our own dial of the
-/// new address learned the same identity and was refused
-/// (`origin=outgoing old_silence_ms=9674`), and the phone was linkless
-/// until the old link's 45 s expiry — every ~90 s rotation cycle. A
-/// peer's rotated-away link never speaks again, so keeping it AT ALL
-/// is 45 s of dead air bought for nothing.
-///
-/// **The one refusal left** is an old link in demonstrable active use:
-/// real payload within [`LINK_ACTIVE_DATA_MS`] (see there for the
-/// bound's argument). Displacing a link mid-transfer for a connection
-/// that adds no reachability is the 13bea3e5 field cost — the phone's
-/// working link killed every ~95 s by our own blind fallback dial —
-/// and a genuine duplicate dial is exactly a dial that lands while the
-/// old link works. Keepalives do not count: an abandoned link's last
-/// keepalive can be arbitrarily recent, so any keepalive-based refusal
-/// re-creates the 45 s outage above.
-///
-/// **A dead link is still cleared — by expiry, not here.** The liveness
-/// clock ([`PeerRegistry::note_heard`], fed per inbound FRAME including
-/// the 1-byte keepalive since 381fa5a0) is read by two sweeps that tear
-/// a link down once it has delivered neither payload nor keepalive for
-/// [`LINK_TIMEOUT_MS`]: lnsd's `LinkTable::expire`
-/// (`leviculum-std/src/interfaces/ble/links.rs`), driven from the
-/// interface tick in the same module's `mod.rs`, which disconnects the
-/// device and reports the peer lost; and the firmware's per-session
-/// silence arm `link_silent` (`leviculum-nrf/src/ble/columba.rs`),
-/// which disconnects and reports through the same `peer_link_down`
-/// range loss takes. The duplicate rule handles only the case the
-/// expiry is too slow for: the peer is HERE, on a new connection,
-/// asking to be reachable now.
-///
-/// Who opened the connection ([`Origin`]) is deliberately absent from
-/// the signature: the 2026-09-09 pair of field failures showed each
-/// direction-based answer wrong in one direction, and #360 showed the
-/// direction-only rule wrong again. Every duplicate log line still
-/// carries `origin=` — the capture shows the direction, the rule does
-/// not read it.
-pub const fn judge_duplicate(old_data_silence_ms: Option<u64>) -> Duplicate {
-    match old_data_silence_ms {
-        Some(ms) if ms < LINK_ACTIVE_DATA_MS => Duplicate::Refuse,
-        _ => Duplicate::Displace,
+/// 1. **Abandoned old link** (`old_silence_ms` — ANY frame, keepalives
+///    included — at or past [`LINK_ABANDONED_MS`]): the newcomer wins.
+///    This is the one case the peer's arbitration never sees — it has
+///    already walked away from the old connection, stopped keepaliving
+///    it, and a node that keeps it anyway strands the peer until the
+///    45 s expiry (the morning failure of 5e7168a7).
+/// 2. **Same-role pair** (`old_origin == new_origin`): the peer holds
+///    BOTH connections in one role, so `preferredBleRole` — which
+///    chooses between a central and a peripheral — has nothing to
+///    arbitrate and we decide alone. Reachable because the pre-dial
+///    exclusion is address-keyed while this rule is identity-keyed: a
+///    peer that rotates its RPA can be dialled again by us, or dial us
+///    again, while the first connection is live. Both sub-cases are
+///    decided the way the peer cannot contradict:
+///    - two `Outgoing` — both are OUR dials, and a second one adds no
+///      reachability the live first one does not already have. Keep the
+///      old; the newcomer is refused pre-handshake, so the peer never
+///      learns a duplicate existed.
+///    - two `Incoming` — both are the PEER's dials, and it dialled
+///      again, which is what a node does with a connection it no longer
+///      intends to use. Keep the new, and tear the old down ourselves
+///      at once.
+/// 3. **Alive opposite-role old link**: [`preferred_ble_role`] decides,
+///    evaluated from the PEER's perspective — its central connection of
+///    the pair is the one WE did not dial, its local identity is
+///    `peer_identity` — and we keep whichever connection it keeps. Its
+///    view of the two MTUs is the caller's job, and differs by
+///    direction (see [`PeerRegistry::link_up`] for the argument): our
+///    own dial (`Origin::Outgoing`) is judged BEFORE we handshake,
+///    against the peer's ledger in which a fresh connection still reads
+///    [`MIN_USABLE_MTU`]; an incoming handshake is a decision the peer
+///    has ALREADY taken, with the MTU it negotiated itself — the
+///    connection's ATT MTU as we observe it.
+/// 4. **Unknown old MTU** (`old_usable_mtu = None`): [`DupVerdict::Wait`]
+///    — the peer's arbitration cannot be computed, so nothing may be
+///    torn down yet. Neither shipped caller produces it: both always
+///    know both connections' ATT MTUs at the decision (see the report
+///    for #360 round 2).
+pub fn judge_duplicate(
+    old_silence_ms: u64,
+    old_origin: Origin,
+    new_origin: Origin,
+    old_usable_mtu: Option<u16>,
+    new_usable_mtu: u16,
+    local_identity: &[u8; 16],
+    peer_identity: &[u8; 16],
+) -> DupVerdict {
+    if old_silence_ms >= LINK_ABANDONED_MS {
+        return DupVerdict::KeepNew(DupRule::Abandoned);
+    }
+    if old_origin == new_origin {
+        return match new_origin {
+            Origin::Incoming => DupVerdict::KeepNew(DupRule::SameRole),
+            Origin::Outgoing => DupVerdict::KeepOld(DupRule::SameRole),
+        };
+    }
+    let Some(old_usable_mtu) = old_usable_mtu else {
+        return DupVerdict::Wait;
+    };
+    // The peer's central connection is the one we did NOT dial.
+    let (peer_central_mtu, peer_peripheral_mtu) = match new_origin {
+        Origin::Outgoing => (old_usable_mtu, new_usable_mtu),
+        Origin::Incoming => (new_usable_mtu, old_usable_mtu),
+    };
+    let keeps = preferred_ble_role(
+        peer_central_mtu,
+        peer_peripheral_mtu,
+        peer_identity,
+        local_identity,
+    );
+    let keeps_new = match (keeps, new_origin) {
+        (BleRole::Central, Origin::Incoming) | (BleRole::Peripheral, Origin::Outgoing) => true,
+        (BleRole::Central, Origin::Outgoing) | (BleRole::Peripheral, Origin::Incoming) => false,
+    };
+    let rule = if peer_central_mtu != peer_peripheral_mtu {
+        DupRule::ColumbaMtu
+    } else {
+        DupRule::ColumbaIdentity
+    };
+    if keeps_new {
+        DupVerdict::KeepNew(rule)
+    } else {
+        DupVerdict::KeepOld(rule)
     }
 }
 
@@ -228,25 +410,31 @@ pub enum LinkUp {
     /// the caller reports a peer arrival exactly then.
     Accepted { first: bool },
     /// Registered, and the identity's OLD link on `old_slot` must be
-    /// torn down by the caller. Never an arrival — the peer was never
-    /// gone. `old_silence_ms` is how long that link had delivered
-    /// nothing at all (reported, not consulted);
-    /// `old_data_silence_ms` how long since it carried real payload —
-    /// the input [`judge_duplicate`] decided on, `None` for never.
+    /// torn down by the caller NOW. Never an arrival — the peer was
+    /// never gone. `rule` names the [`judge_duplicate`] branch;
+    /// `old_silence_ms` (the abandonment test's input) and the usable
+    /// MTUs the arbitration compared are carried for the log line;
+    /// `old_data_silence_ms` — how long since the old link carried real
+    /// payload, `None` for never — is reported, not consulted.
     Displaced {
         old_slot: usize,
+        rule: DupRule,
         old_silence_ms: u64,
         old_data_silence_ms: Option<u64>,
+        old_usable_mtu: u16,
+        new_usable_mtu: u16,
     },
-    /// NOT registered: the identity's existing link on `old_slot`
-    /// carried real payload within [`LINK_ACTIVE_DATA_MS`]
-    /// (`old_data_silence_ms`, the consulted input) and keeps the peer;
-    /// `old_silence_ms` is reported beside it. The caller drops THIS
-    /// connection.
+    /// NOT registered: the identity's existing link on `old_slot` keeps
+    /// the peer — it is alive (within [`LINK_ABANDONED_MS`]) and the
+    /// peer's own arbitration keeps it. The caller drops THIS
+    /// connection. Fields as on [`Displaced`](Self::Displaced).
     Refused {
         old_slot: usize,
+        rule: DupRule,
         old_silence_ms: u64,
         old_data_silence_ms: Option<u64>,
+        old_usable_mtu: u16,
+        new_usable_mtu: u16,
     },
 }
 
@@ -260,11 +448,21 @@ impl<const N: usize> PeerRegistry<N> {
     /// No links.
     pub const fn new() -> Self {
         Self {
+            local_identity: [0; 16],
             slots: [None; N],
             addrs: [None; N],
             last_heard_ms: [0; N],
             last_data_ms: [None; N],
+            att_mtus: [0; N],
+            origins: [Origin::Incoming; N],
         }
+    }
+
+    /// Set this node's own identity hash — the tie-break input of
+    /// [`preferred_ble_role`]. Called once at interface bring-up,
+    /// before any link can exist.
+    pub fn set_local_identity(&mut self, identity: [u8; 16]) {
+        self.local_identity = identity;
     }
 
     /// Register a slot's connection address — at the connection event,
@@ -292,23 +490,49 @@ impl<const N: usize> PeerRegistry<N> {
         self.addrs.iter().flatten().any(|a| *a == addr_value)
     }
 
-    /// Register a slot's peer, at `now_ms`.
+    /// Register a slot's peer, at `now_ms`. `origin` is who opened this
+    /// connection, `att_mtu` its ATT MTU as currently negotiated
+    /// (`Connection::att_mtu()` — still 23 if no exchange has landed).
     ///
     /// With no other link from that identity this is a plain
     /// [`LinkUp::Accepted`], `first` iff it is the identity's FIRST live
     /// link — the caller reports a peer arrival exactly then.
     ///
     /// A second connection from an identity we already hold is decided
-    /// by [`judge_duplicate`] from the old link's payload recency: the
-    /// newer connection displaces the old link unless that link carried
-    /// real payload within [`LINK_ACTIVE_DATA_MS`], which refuses the
-    /// newcomer instead ([`LinkUp::Refused`]). The rule is the same in
-    /// both roles — who opened the connection is not a parameter here,
-    /// which is what enforces that (#360). The old link's any-frame
-    /// silence is still MEASURED and carried on both variants — it is
-    /// the number a capture checks the decision against — but only the
-    /// payload clock is consulted. Neither edge of a displacement is a
-    /// peer transition — the peer was never gone — which is why
+    /// by [`judge_duplicate`] (#360 round 2): abandoned old link (any
+    /// frame silence at or past [`LINK_ABANDONED_MS`]) → the newcomer
+    /// wins; both connections in the same role → we decide alone (the
+    /// peer has no central-vs-peripheral choice to make); otherwise →
+    /// the PEER's own arbitration ([`preferred_ble_role`]) decides, and
+    /// we keep the connection the peer keeps. The old link's origin
+    /// comes from the registry, which recorded it at that link's own
+    /// `link_up`. The peer's view of the new connection's MTU differs
+    /// by direction:
+    ///
+    /// - `Origin::Outgoing` — OUR dial, judged at the identity read,
+    ///   BEFORE our handshake. The peer has not seen the duplicate yet
+    ///   and will arbitrate only when our handshake lands, against a
+    ///   ledger in which a fresh connection still reads
+    ///   [`MIN_USABLE_MTU`] (field 2026-09-12: the phone arbitrated
+    ///   with `MTU=20` 5.5 s after connect, our ATT long settled at
+    ///   517). So the new connection enters the comparison at the
+    ///   floor, which an alive old link at any negotiated MTU beats —
+    ///   and the refusal happens pre-handshake, so the peer never sees
+    ///   a duplicate at all and its ledger's timing never matters.
+    /// - `Origin::Incoming` — the peer's dial, judged at its handshake.
+    ///   The peer has ALREADY arbitrated (a Columba central dedups when
+    ///   it learns our identity, before writing its handshake; a board
+    ///   central pre-refuses exactly as above, so its handshake means
+    ///   its judge said the newcomer wins) with the MTU it negotiated
+    ///   itself — which we observe as this connection's ATT MTU. The
+    ///   residual race — its exchange completing between its decision
+    ///   and its handshake reaching us — is one connection event wide.
+    ///
+    /// The old link's payload silence is still MEASURED and carried on
+    /// both variants — round 1 consulted it, and the capture line keeps
+    /// the number so a round-1-vs-round-2 comparison stays greppable —
+    /// but the rule no longer reads it. Neither edge of a displacement
+    /// is a peer transition — the peer was never gone — which is why
     /// `Displaced` carries no `first` flag.
     ///
     /// Re-registering the SAME slot is neither: the link the caller
@@ -317,49 +541,84 @@ impl<const N: usize> PeerRegistry<N> {
     /// An accepted link starts its liveness clock here, and its payload
     /// clock at `never`: the handshake (peripheral) or the identity
     /// read (central) that got us this far proves the peer is present,
-    /// not that this link carries traffic — a link that has only
-    /// handshaked must not outrank the next handshake of the same
-    /// identity.
-    pub fn link_up(&mut self, slot: usize, peer: [u8; 16], now_ms: u64) -> LinkUp {
+    /// not that this link carries traffic.
+    pub fn link_up(
+        &mut self,
+        slot: usize,
+        peer: [u8; 16],
+        origin: Origin,
+        att_mtu: u16,
+        now_ms: u64,
+    ) -> LinkUp {
         let old = self
             .slots
             .iter()
             .position(|id| *id == Some(peer))
             .filter(|old| *old != slot);
         if let Some(old_slot) = old {
-            // The any-frame silence is measured for the log line on
-            // both branches and consulted on neither; the payload
-            // silence is the rule's input (#360).
             let old_silence_ms = now_ms.saturating_sub(self.last_heard_ms[old_slot]);
             let old_data_silence_ms =
                 self.last_data_ms[old_slot].map(|last| now_ms.saturating_sub(last));
-            if judge_duplicate(old_data_silence_ms) == Duplicate::Refuse {
+            let old_usable_mtu = usable_mtu(self.att_mtus[old_slot]);
+            let new_usable_mtu = match origin {
+                // The peer's ledger reads a fresh connection at the
+                // floor (see the method docs).
+                Origin::Outgoing => MIN_USABLE_MTU,
+                Origin::Incoming => usable_mtu(att_mtu),
+            };
+            let verdict = judge_duplicate(
+                old_silence_ms,
+                self.origins[old_slot],
+                origin,
+                Some(old_usable_mtu),
+                new_usable_mtu,
+                &self.local_identity,
+                &peer,
+            );
+            let rule = match verdict {
+                DupVerdict::KeepNew(rule) | DupVerdict::KeepOld(rule) => rule,
+                // Unreachable — the old MTU above is always supplied —
+                // and mapped to the conservative half of "keep both":
+                // the newcomer waits, the working link keeps the peer.
+                DupVerdict::Wait => DupRule::WaitingMtu,
+            };
+            if !matches!(verdict, DupVerdict::KeepNew(_)) {
                 return LinkUp::Refused {
                     old_slot,
+                    rule,
                     old_silence_ms,
                     old_data_silence_ms,
+                    old_usable_mtu,
+                    new_usable_mtu,
                 };
             }
             self.slots[slot] = Some(peer);
             self.last_heard_ms[slot] = now_ms;
             self.last_data_ms[slot] = None;
+            self.att_mtus[slot] = att_mtu;
+            self.origins[slot] = origin;
             return LinkUp::Displaced {
                 old_slot,
+                rule,
                 old_silence_ms,
                 old_data_silence_ms,
+                old_usable_mtu,
+                new_usable_mtu,
             };
         }
         let first = self.slots.iter().flatten().all(|id| *id != peer);
         self.slots[slot] = Some(peer);
         self.last_heard_ms[slot] = now_ms;
         self.last_data_ms[slot] = None;
+        self.att_mtus[slot] = att_mtu;
+        self.origins[slot] = origin;
         LinkUp::Accepted { first }
     }
 
     /// A slot's peer delivered a frame at `now_ms` — the liveness clock
     /// the expiry reads through [`silence_ms`](Self::silence_ms), and
-    /// the one [`link_up`](Self::link_up) reports (never consults) with
-    /// each duplicate decision.
+    /// the abandonment test's input on each of
+    /// [`link_up`](Self::link_up)'s duplicate decisions (#360 round 2).
     ///
     /// EVERY inbound frame, keepalives included (Codeberg #382). A
     /// keepalive is the one thing a peer with nothing to say still
@@ -378,9 +637,9 @@ impl<const N: usize> PeerRegistry<N> {
 
     /// A slot's peer delivered a real PAYLOAD frame at `now_ms` — a
     /// fragment, never the 1-byte keepalive — which feeds BOTH clocks:
-    /// payload is also liveness, and it is additionally the active-use
-    /// evidence [`judge_duplicate`] consults (#360). The caller's
-    /// inbound path calls this instead of
+    /// payload is also liveness. Since #360 round 2 the payload clock
+    /// is reported with every duplicate decision and consulted by
+    /// none. The caller's inbound path calls this instead of
     /// [`note_heard`](Self::note_heard) for every frame at or above the
     /// fragment-header size, per frame and before reassembly, like the
     /// liveness clock and for the same reason.
@@ -412,6 +671,7 @@ impl<const N: usize> PeerRegistry<N> {
     pub fn link_down(&mut self, slot: usize) -> Option<[u8; 16]> {
         let identity = self.slots[slot].take()?;
         self.last_data_ms[slot] = None;
+        self.att_mtus[slot] = 0;
         self.slots
             .iter()
             .flatten()
@@ -513,152 +773,394 @@ mod tests {
     const A: [u8; 16] = [0xaa; 16];
     const B: [u8; 16] = [0xbb; 16];
 
+    /// The 2026-09-12 field pair, first four bytes as logged: the board
+    /// `b2a8bea1…` sorts below the phone `b99af2ec…` in Columba's
+    /// hex-string order and therefore in ours.
+    const BOARD: [u8; 16] = [0xb2, 0xa8, 0xbe, 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const PHONE: [u8; 16] = [0xb9, 0x9a, 0xf2, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
     /// The number itself, pinned. It is the link timeout both
-    /// interfaces expire on — three missed keepalives — not a second
-    /// constant beside it, and since #382 it is an expiry bound only:
-    /// [`judge_duplicate`] cannot reach it.
+    /// interfaces expire on — three missed keepalives — and since #382
+    /// it is an expiry bound only.
     #[test]
     fn the_dead_link_bound_is_the_link_timeout_itself() {
         assert_eq!(LINK_TIMEOUT_MS, 45_000);
         assert_eq!(LINK_TIMEOUT_MS, 3 * KEEPALIVE_INTERVAL_MS);
     }
 
-    /// The refusal window, pinned: one keepalive interval on the
-    /// PAYLOAD clock (#360) — the same protocol quantum the expiry
-    /// bound is three of, not a second free parameter.
+    /// The abandonment bound, pinned: two keepalive intervals on the
+    /// ANY-FRAME clock (#360 round 2) — one whole missed interval plus
+    /// the interval in progress, the honest "it stopped keepaliving
+    /// this link".
     #[test]
-    fn the_active_data_window_is_one_keepalive_interval() {
-        assert_eq!(LINK_ACTIVE_DATA_MS, 15_000);
-        assert_eq!(LINK_ACTIVE_DATA_MS, KEEPALIVE_INTERVAL_MS);
+    fn the_abandonment_bound_is_two_keepalive_intervals() {
+        assert_eq!(LINK_ABANDONED_MS, 30_000);
+        assert_eq!(LINK_ABANDONED_MS, 2 * KEEPALIVE_INTERVAL_MS);
+    }
+
+    /// Columba's floor and the ATT conversion: `MIN_USABLE_MTU` is the
+    /// usable payload of the un-negotiated default ATT MTU, so "never
+    /// exchanged" and "not yet bookkept" are the same number.
+    #[test]
+    fn the_mtu_floor_is_the_unnegotiated_usable_payload() {
+        assert_eq!(MIN_USABLE_MTU, 20);
+        assert_eq!(usable_mtu(23), MIN_USABLE_MTU);
+        assert_eq!(usable_mtu(0), MIN_USABLE_MTU);
+        assert_eq!(usable_mtu(517), 514);
+        assert_eq!(usable_mtu(185), 182);
+    }
+
+    /// The verbatim port of `preferredBleRole` (Columba
+    /// KotlinBLEBridge.kt:44): the larger usable MTU's role wins, the
+    /// tie goes to central iff `localIdentity < peerIdentity`.
+    #[test]
+    fn preferred_ble_role_is_kotlinblebridge_44() {
+        assert_eq!(preferred_ble_role(514, 20, &A, &B), BleRole::Central);
+        assert_eq!(preferred_ble_role(20, 514, &A, &B), BleRole::Peripheral);
+        assert_eq!(preferred_ble_role(182, 182, &A, &B), BleRole::Central);
+        assert_eq!(preferred_ble_role(182, 182, &B, &A), BleRole::Peripheral);
+        // Equal identities cannot occur between two nodes (that is the
+        // BLE_LINK_SELF check's job); the port still answers, and
+        // answers peripheral, exactly as the Kotlin `<` does.
+        assert_eq!(preferred_ble_role(182, 182, &A, &A), BleRole::Peripheral);
+    }
+
+    /// Columba compares its identities as lowercase-hex STRINGS; the
+    /// byte-array comparison is the same order (fixed-width hex is
+    /// order-preserving), checked here on the 2026-09-12 field pair.
+    #[test]
+    fn preferred_ble_role_identity_order_matches_columbas_hex_strings() {
+        // "b2a8bea1…" < "b99af2ec…" because '2' < '9' at index 1.
+        assert!(BOARD < PHONE);
+        assert_eq!(
+            preferred_ble_role(514, 514, &BOARD, &PHONE),
+            BleRole::Central
+        );
+        assert_eq!(
+            preferred_ble_role(514, 514, &PHONE, &BOARD),
+            BleRole::Peripheral
+        );
+    }
+
+    /// The judge's first branch: an old link silent past the bound has
+    /// been abandoned and the newcomer wins, in both directions, with
+    /// `>=` at the bound.
+    #[test]
+    fn an_abandoned_old_link_loses_to_the_newcomer() {
+        for (old_origin, new_origin) in [
+            (Origin::Incoming, Origin::Outgoing),
+            (Origin::Outgoing, Origin::Incoming),
+            // Same-role pairs too: abandonment is tested BEFORE the
+            // role map, because an abandoned link is the one case no
+            // arbitration of either side ever sees.
+            (Origin::Incoming, Origin::Incoming),
+            (Origin::Outgoing, Origin::Outgoing),
+        ] {
+            assert_eq!(
+                judge_duplicate(
+                    LINK_ABANDONED_MS,
+                    old_origin,
+                    new_origin,
+                    Some(514),
+                    514,
+                    &BOARD,
+                    &PHONE
+                ),
+                DupVerdict::KeepNew(DupRule::Abandoned)
+            );
+            assert_ne!(
+                judge_duplicate(
+                    LINK_ABANDONED_MS - 1,
+                    old_origin,
+                    new_origin,
+                    Some(514),
+                    514,
+                    &BOARD,
+                    &PHONE
+                ),
+                DupVerdict::KeepNew(DupRule::Abandoned)
+            );
+        }
+    }
+
+    /// The same-role branch, both sub-cases: a rotated RPA lets the
+    /// same identity appear twice in ONE role (the pre-dial exclusion
+    /// is address-keyed, this rule identity-keyed), and then the peer
+    /// holds both connections in one role and `preferredBleRole` has
+    /// nothing to arbitrate. Our own second dial adds no reachability
+    /// and is refused; the peer's second dial is what a node does with
+    /// a connection it has stopped using, so it wins.
+    #[test]
+    fn a_same_role_pair_is_decided_without_the_peers_arbitration() {
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Outgoing,
+                Some(514),
+                MIN_USABLE_MTU,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepOld(DupRule::SameRole),
+            "our own redundant dial reaches nothing the live link does not"
+        );
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Incoming,
+                Origin::Incoming,
+                Some(514),
+                514,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepNew(DupRule::SameRole),
+            "the peer dialled again: it is done with the old connection"
+        );
+    }
+
+    /// The same-role branch answers before the MTUs are consulted at
+    /// all — it must not depend on a comparison the peer never makes.
+    /// The identity tie-break is likewise not reached: both directions
+    /// of the pair give the same answer.
+    #[test]
+    fn the_same_role_branch_reads_neither_mtu_nor_identity_order() {
+        for old_mtu in [None, Some(MIN_USABLE_MTU), Some(514)] {
+            for new_mtu in [MIN_USABLE_MTU, 182, 514] {
+                for (local, peer) in [(&BOARD, &PHONE), (&PHONE, &BOARD)] {
+                    assert_eq!(
+                        judge_duplicate(
+                            1_000,
+                            Origin::Outgoing,
+                            Origin::Outgoing,
+                            old_mtu,
+                            new_mtu,
+                            local,
+                            peer
+                        ),
+                        DupVerdict::KeepOld(DupRule::SameRole)
+                    );
+                    assert_eq!(
+                        judge_duplicate(
+                            1_000,
+                            Origin::Incoming,
+                            Origin::Incoming,
+                            old_mtu,
+                            new_mtu,
+                            local,
+                            peer
+                        ),
+                        DupVerdict::KeepNew(DupRule::SameRole)
+                    );
+                }
+            }
+        }
+    }
+
+    /// An unknown old MTU cannot be arbitrated: Wait, both links kept,
+    /// nothing torn down.
+    #[test]
+    fn an_unknown_old_mtu_waits() {
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Incoming,
+                None,
+                514,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::Wait
+        );
+    }
+
+    /// Tonight's decision as the judge sees it (#360, 2026-09-12): our
+    /// own dial of an identity whose old link is alive enters the
+    /// peer's arbitration at the floor and loses to any negotiated old
+    /// MTU — `rule=columba_mtu`, keep old.
+    #[test]
+    fn our_dial_against_a_live_negotiated_link_loses_at_the_floor() {
+        assert_eq!(
+            judge_duplicate(
+                7_341,
+                Origin::Incoming,
+                Origin::Outgoing,
+                Some(514),
+                MIN_USABLE_MTU,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepOld(DupRule::ColumbaMtu)
+        );
+    }
+
+    /// The identity tie-break in both directions, on an incoming
+    /// handshake with both MTUs negotiated equal: the peer keeps its
+    /// central (the new connection) iff its identity sorts below ours.
+    #[test]
+    fn an_incoming_tie_is_broken_by_columbas_identity_order() {
+        // Peer PHONE (local BOARD): PHONE > BOARD, peer keeps
+        // peripheral = old.
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Incoming,
+                Some(514),
+                514,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepOld(DupRule::ColumbaIdentity)
+        );
+        // Peer BOARD (local PHONE): BOARD < PHONE, peer keeps central
+        // = new.
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Incoming,
+                Some(514),
+                514,
+                &PHONE,
+                &BOARD
+            ),
+            DupVerdict::KeepNew(DupRule::ColumbaIdentity)
+        );
+    }
+
+    /// An incoming connection whose negotiated MTU beats the old
+    /// link's: the peer keeps its central on the MTU comparison alone.
+    #[test]
+    fn an_incoming_bigger_mtu_wins_on_the_mtu_comparison() {
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Incoming,
+                Some(155),
+                514,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepNew(DupRule::ColumbaMtu)
+        );
     }
 
     #[test]
     fn the_first_link_of_an_identity_is_an_arrival_and_displaces_nothing() {
         let mut reg = PeerRegistry::<4>::new();
-        assert_eq!(reg.link_up(0, A, 0), LinkUp::Accepted { first: true });
         assert_eq!(
-            reg.link_up(1, B, 0),
+            reg.link_up(0, A, Origin::Incoming, 517, 0),
+            LinkUp::Accepted { first: true }
+        );
+        assert_eq!(
+            reg.link_up(1, B, Origin::Outgoing, 517, 0),
             LinkUp::Accepted { first: true },
             "a different identity is its own arrival"
         );
     }
 
-    /// The #360 minimal reproducer, the 2026-09-12 field T114 as a
-    /// unit: the phone rotated its address and abandoned its old
-    /// connection, which by then had been silent for ~8 s; the same
-    /// identity handshakes on a new connection. The old rule refused
-    /// (`origin=outgoing old_silence_ms=8562`) and the phone was
-    /// linkless until the 45 s expiry — ~45 s of every ~90 s rotation
-    /// cycle. Required: the NEW connection wins, the old link is torn
-    /// down as replaced, and the caller's counters follow.
+    /// The #360 round 2 minimal reproducer, the 2026-09-12 21:41 field
+    /// T114 as a unit: the phone held a live central link (keepalive
+    /// 7.3 s ago, last payload 15 185 ms ago), rotated its RPA, and our
+    /// scanner dialled the new address and learned the same identity.
+    /// Round 1 displaced the old link on its payload silence while the
+    /// phone's own arbitration (fresh connection at the floor,
+    /// KotlinBLEBridge.kt:1749) kept it — each side closed the link the
+    /// other kept, 45 s of dead air. Required now: OUR dial is refused,
+    /// pre-handshake, `rule=columba_mtu`, and the phone never even
+    /// sees a duplicate.
     #[test]
-    fn a_rotated_phones_new_connection_replaces_its_silent_old_link() {
+    fn a_live_old_links_own_dial_is_refused_before_the_handshake() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 1_000);
-        // The phone's last sign of life on the old link, then rotation.
-        reg.note_heard(0, 2_000);
+        reg.set_local_identity(BOARD);
+        reg.link_up(0, PHONE, Origin::Incoming, 517, 0);
+        reg.note_data(0, 80_115);
+        reg.note_heard(0, 87_959);
         assert_eq!(
-            reg.link_up(1, A, 10_000),
+            reg.link_up(1, PHONE, Origin::Outgoing, 517, 95_300),
+            LinkUp::Refused {
+                old_slot: 0,
+                rule: DupRule::ColumbaMtu,
+                old_silence_ms: 7_341,
+                old_data_silence_ms: Some(15_185),
+                old_usable_mtu: 514,
+                new_usable_mtu: MIN_USABLE_MTU,
+            },
+            "the phone's ledger reads our fresh dial at the floor: old wins"
+        );
+        assert_eq!(reg.slot_for(&PHONE), Some(0), "the old link still holds it");
+        assert_eq!(
+            reg.link_down(1),
+            None,
+            "the refused slot was never registered"
+        );
+    }
+
+    /// The 26 ms race, on the rule directly: round 1 flipped between
+    /// refuse and displace on whether the old link's last payload
+    /// landed just inside or just outside a 15 s window (the field
+    /// decision sat at 15 185 ms, the refreshing write 26 ms short of
+    /// flipping it). Round 2 does not read the payload clock, so both
+    /// sides of the race produce the same verdict — the phone's.
+    #[test]
+    fn payload_recency_no_longer_flips_the_verdict() {
+        let mut verdicts = [None, None];
+        for (i, last_payload) in [95_274_u64, 80_115_u64].into_iter().enumerate() {
+            let mut reg = PeerRegistry::<4>::new();
+            reg.set_local_identity(BOARD);
+            reg.link_up(0, PHONE, Origin::Incoming, 517, 0);
+            reg.note_data(0, last_payload);
+            reg.note_heard(0, 87_959);
+            match reg.link_up(1, PHONE, Origin::Outgoing, 517, 95_300) {
+                LinkUp::Refused { rule, .. } => verdicts[i] = Some(rule),
+                other => panic!("payload at {last_payload} changed the verdict: {other:?}"),
+            }
+        }
+        assert_eq!(verdicts[0], verdicts[1]);
+        assert_eq!(verdicts[0], Some(DupRule::ColumbaMtu));
+    }
+
+    /// The morning case of 5e7168a7's doc comment, round 2 shape: the
+    /// phone rotated and ABANDONED its old connection — no keepalives
+    /// since — and our dial of the new address lands past the
+    /// abandonment bound. The newcomer wins, `rule=abandoned`, and the
+    /// old link is torn down by us now rather than at the 45 s expiry.
+    #[test]
+    fn an_abandoned_rotated_link_is_displaced_by_our_dial() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.set_local_identity(BOARD);
+        reg.link_up(0, PHONE, Origin::Incoming, 517, 0);
+        reg.note_heard(0, 60_000);
+        assert_eq!(
+            reg.link_up(1, PHONE, Origin::Outgoing, 517, 91_000),
             LinkUp::Displaced {
                 old_slot: 0,
-                old_silence_ms: 8_000,
+                rule: DupRule::Abandoned,
+                old_silence_ms: 31_000,
                 old_data_silence_ms: None,
-            },
-            "8 s of silence and no payload in flight: the newcomer wins"
+                old_usable_mtu: 514,
+                new_usable_mtu: MIN_USABLE_MTU,
+            }
         );
         assert_eq!(reg.peer_count(), 1, "one peer throughout the hand-over");
         assert_eq!(reg.link_down(0), None, "the old link's death is churn");
-        assert_eq!(reg.slot_for(&A), Some(1), "the new link holds the peer");
+        assert_eq!(reg.slot_for(&PHONE), Some(1), "the new link holds the peer");
     }
 
-    /// The same rotation with payload in the link's history: payload
-    /// OLDER than the window does not save the old link either — only
-    /// payload within [`LINK_ACTIVE_DATA_MS`] does.
+    /// A keepalive-fed link is ALIVE, and alive means the peer's
+    /// arbitration decides — the round 1 rule displaced such a link
+    /// (its payload clock was stale) and stranded the phone. The
+    /// keepalive that used to be dismissed as "not active use" is
+    /// exactly the evidence the peer still holds the connection.
     #[test]
-    fn stale_payload_does_not_save_a_rotated_away_link() {
+    fn keepalives_keep_a_link_out_of_the_abandoned_branch() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.note_data(0, 60_000);
-        // Keepalives kept it out of the expiry's reach, then rotation.
-        reg.note_heard(0, 100_000);
-        assert_eq!(
-            reg.link_up(1, A, 108_000),
-            LinkUp::Displaced {
-                old_slot: 0,
-                old_silence_ms: 8_000,
-                old_data_silence_ms: Some(48_000),
-            },
-            "payload 48 s ago is history, not active use"
-        );
-    }
-
-    /// The one refusal left (#360): the old link carried real payload
-    /// within one keepalive interval — a transfer demonstrably in
-    /// flight — so the second connection is a genuine duplicate dial
-    /// (our blind fallback dial finding the peer's rotated
-    /// advertisement, the 13bea3e5 field failure) and is sent away.
-    #[test]
-    fn a_duplicate_of_an_actively_used_link_is_refused() {
-        let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 1_000);
-        reg.note_data(0, 20_000);
-        assert_eq!(
-            reg.link_up(1, A, 25_000),
-            LinkUp::Refused {
-                old_slot: 0,
-                old_silence_ms: 5_000,
-                old_data_silence_ms: Some(5_000),
-            },
-            "payload 5 s ago: the old link is in use and keeps the peer"
-        );
-        assert_eq!(reg.slot_for(&A), Some(0), "the old link still holds it");
-        assert!(
-            reg.link_down(1).is_none(),
-            "the refused slot was never registered"
-        );
-        assert_eq!(reg.link_down(0), Some(A), "and the old link is the peer");
-    }
-
-    /// The window's edges, on the rule directly and through the
-    /// registry: payload at the bound is already history (`<`, not
-    /// `<=`), one millisecond inside it still refuses, and `never`
-    /// always displaces.
-    #[test]
-    fn the_duplicate_rule_reads_payload_recency_and_nothing_else() {
-        assert_eq!(judge_duplicate(None), Duplicate::Displace);
-        assert_eq!(judge_duplicate(Some(0)), Duplicate::Refuse);
-        assert_eq!(
-            judge_duplicate(Some(LINK_ACTIVE_DATA_MS - 1)),
-            Duplicate::Refuse
-        );
-        assert_eq!(
-            judge_duplicate(Some(LINK_ACTIVE_DATA_MS)),
-            Duplicate::Displace
-        );
-        assert_eq!(judge_duplicate(Some(u64::MAX)), Duplicate::Displace);
-
-        let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.note_data(0, 1_000);
-        assert!(matches!(
-            reg.link_up(1, A, 1_000 + LINK_ACTIVE_DATA_MS - 1),
-            LinkUp::Refused { .. }
-        ));
-        assert!(matches!(
-            reg.link_up(1, A, 1_000 + LINK_ACTIVE_DATA_MS),
-            LinkUp::Displaced { .. }
-        ));
-    }
-
-    /// Keepalives are liveness, not active use (#360): they keep a link
-    /// out of the EXPIRY's reach forever, and they never refuse the
-    /// identity's next handshake — an abandoned link's last keepalive
-    /// can be arbitrarily recent (the phone rotates mid-interval), so a
-    /// keepalive-based refusal would re-create the 45 s field outage.
-    #[test]
-    fn keepalives_hold_off_the_expiry_but_never_refuse_a_replacement() {
-        let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
+        reg.set_local_identity(BOARD);
+        reg.link_up(0, PHONE, Origin::Incoming, 517, 0);
         let mut t = 0;
         for _ in 0..100 {
             t += KEEPALIVE_INTERVAL_MS;
@@ -668,37 +1170,20 @@ mod tests {
                 "the expiry never comes for a link that keeps answering"
             );
         }
-        assert_eq!(
-            reg.link_up(1, A, t + 1),
-            LinkUp::Displaced {
-                old_slot: 0,
-                old_silence_ms: 1,
-                old_data_silence_ms: None,
-            },
-            "a keepalive one millisecond ago is no reason to refuse"
+        assert!(
+            matches!(
+                reg.link_up(1, PHONE, Origin::Outgoing, 517, t + 1),
+                LinkUp::Refused {
+                    rule: DupRule::ColumbaMtu,
+                    old_silence_ms: 1,
+                    ..
+                }
+            ),
+            "a keepalive one millisecond ago proves the peer holds the old link"
         );
     }
 
-    /// The handshake itself is not payload: a link that has only just
-    /// handshaked must not outrank the same identity's NEXT handshake,
-    /// or a phone whose first connection came up half-broken could
-    /// never replace it inside the window.
-    #[test]
-    fn a_fresh_handshake_alone_does_not_refuse_the_next_one() {
-        let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 1_000);
-        assert!(matches!(
-            reg.link_up(1, A, 1_001),
-            LinkUp::Displaced {
-                old_slot: 0,
-                old_data_silence_ms: None,
-                ..
-            }
-        ));
-    }
-
-    /// The expiry's own input, which is the mechanism item 2 of #382
-    /// hands the dead-link job to: no identity, no clock; a registered
+    /// The expiry's own input: no identity, no clock; a registered
     /// link starts at zero and ages from what it last delivered.
     #[test]
     fn silence_is_reported_only_for_a_slot_that_holds_a_link() {
@@ -708,7 +1193,7 @@ mod tests {
             None,
             "an un-handshaked connection has no liveness clock to read"
         );
-        reg.link_up(0, A, 10_000);
+        reg.link_up(0, A, Origin::Incoming, 517, 10_000);
         assert_eq!(reg.silence_ms(0, 10_000), Some(0));
         assert_eq!(
             reg.silence_ms(0, 10_000 + LINK_TIMEOUT_MS),
@@ -730,49 +1215,57 @@ mod tests {
     #[test]
     fn re_registering_the_same_slot_neither_refuses_nor_displaces() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        assert_eq!(reg.link_up(0, A, 1), LinkUp::Accepted { first: false });
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
         assert_eq!(
-            reg.link_up(0, A, 10 * LINK_TIMEOUT_MS),
+            reg.link_up(0, A, Origin::Incoming, 517, 1),
+            LinkUp::Accepted { first: false }
+        );
+        assert_eq!(
+            reg.link_up(0, A, Origin::Outgoing, 517, 10 * LINK_TIMEOUT_MS),
             LinkUp::Accepted { first: false }
         );
     }
 
     /// A slot's clocks belong to the link that holds it now: a fresh
-    /// registration resets both, so a link inheriting a slot whose
-    /// previous tenant carried payload moments ago is not protected by
-    /// that tenant's activity — nor aged by its silence.
+    /// registration resets them, so a link inheriting a slot whose
+    /// previous tenant was recently alive is not judged by that
+    /// tenant's clocks — nor protected by them.
     #[test]
     fn a_new_link_starts_its_own_clocks() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, B, 0);
+        reg.link_up(0, B, Origin::Incoming, 517, 0);
         reg.note_data(0, 1_000);
         reg.link_down(0);
-        // B's payload was 1 ms ago; A claims the slot now.
-        reg.link_up(0, A, 1_001);
-        assert_eq!(
-            reg.link_up(1, A, 1_002),
-            LinkUp::Displaced {
-                old_slot: 0,
-                old_silence_ms: 1,
-                old_data_silence_ms: None,
-            },
-            "the previous tenant's payload clock is nobody's evidence"
+        // B was heard 1 ms ago; A claims the slot now. A's clock starts
+        // here, so a dial of A's other address 31 s later finds an
+        // ABANDONED link, not B's liveness.
+        reg.link_up(0, A, Origin::Incoming, 517, 1_001);
+        assert!(
+            matches!(
+                reg.link_up(1, A, Origin::Outgoing, 517, 1_001 + LINK_ABANDONED_MS),
+                LinkUp::Displaced {
+                    old_slot: 0,
+                    rule: DupRule::Abandoned,
+                    old_silence_ms: LINK_ABANDONED_MS,
+                    ..
+                }
+            ),
+            "the previous tenant's clock is nobody's evidence"
         );
     }
 
     #[test]
     fn the_last_link_of_an_identity_is_a_loss() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
         assert_eq!(reg.link_down(0), Some(A));
     }
 
     #[test]
     fn a_non_last_link_down_is_churn_not_a_loss() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(1, A, LINK_TIMEOUT_MS);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(1, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         assert_eq!(reg.link_down(0), None);
         assert!(reg.is_linked(&A));
         assert_eq!(reg.link_down(1), Some(A));
@@ -788,7 +1281,7 @@ mod tests {
     fn the_duplicate_check_tracks_liveness() {
         let mut reg = PeerRegistry::<4>::new();
         assert!(!reg.is_linked(&A));
-        reg.link_up(0, A, 0);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
         assert!(reg.is_linked(&A));
         reg.link_down(0);
         assert!(!reg.is_linked(&A));
@@ -797,13 +1290,12 @@ mod tests {
     /// The runtime carrier-off teardown: `--set-media ble=off` makes
     /// every connection task drop its own link, in whatever order the
     /// executor reaches them. Every linked identity must yield exactly
-    /// one loss — that is what feeds one `PeerEvent::Lost` per peer to
-    /// the core's path cull, the same report range loss produces.
+    /// one loss.
     #[test]
     fn dropping_every_claimed_slot_yields_one_loss_per_identity() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(2, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(2, B, Origin::Incoming, 517, 0);
         let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
         assert_eq!(losses, vec![A, B]);
         assert!(!reg.is_linked(&A));
@@ -815,8 +1307,8 @@ mod tests {
     #[test]
     fn a_displaced_identity_is_lost_once_when_all_slots_drop() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(1, A, LINK_TIMEOUT_MS);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(1, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
         assert_eq!(losses, vec![A]);
     }
@@ -831,7 +1323,7 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         for (slot, id) in [A, B, C, D].into_iter().enumerate() {
             assert_eq!(
-                reg.link_up(slot, id, 0),
+                reg.link_up(slot, id, Origin::Incoming, 517, 0),
                 LinkUp::Accepted { first: true },
                 "each identity's first link"
             );
@@ -860,7 +1352,10 @@ mod tests {
         assert!(!reg.addr_linked(0xBEEF));
 
         // Identity arrives; the address side is unaffected.
-        assert_eq!(reg.link_up(1, A, 0), LinkUp::Accepted { first: true });
+        assert_eq!(
+            reg.link_up(1, A, Origin::Incoming, 517, 0),
+            LinkUp::Accepted { first: true }
+        );
         assert!(reg.addr_linked(0xC0DE));
 
         // Teardown clears both facts independently.
@@ -892,12 +1387,12 @@ mod tests {
     fn peer_count_is_distinct_identities_across_slot_gaps() {
         let mut reg = PeerRegistry::<4>::new();
         assert_eq!(reg.peer_count(), 0);
-        reg.link_up(1, A, 0);
+        reg.link_up(1, A, Origin::Incoming, 517, 0);
         assert_eq!(reg.peer_count(), 1);
         // The displacement hand-over: same identity on a second slot.
-        reg.link_up(3, A, LINK_TIMEOUT_MS);
+        reg.link_up(3, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         assert_eq!(reg.peer_count(), 1, "two links, one peer");
-        reg.link_up(0, B, LINK_TIMEOUT_MS);
+        reg.link_up(0, B, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         assert_eq!(reg.peer_count(), 2);
         reg.link_down(1);
         assert_eq!(reg.peer_count(), 2, "A still holds slot 3");
@@ -911,8 +1406,8 @@ mod tests {
     fn a_packet_without_a_hint_floods_every_live_link() {
         let mut reg = PeerRegistry::<4>::new();
         assert_eq!(plan_fanout(&reg, None), TxFanout::Flood, "no links");
-        reg.link_up(0, A, 0);
-        reg.link_up(1, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(1, B, Origin::Incoming, 517, 0);
         assert_eq!(plan_fanout(&reg, None), TxFanout::Flood);
     }
 
@@ -921,8 +1416,8 @@ mod tests {
     #[test]
     fn a_hinted_packet_takes_only_that_peers_link() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, A, 0);
-        reg.link_up(2, B, 0);
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(2, B, Origin::Incoming, 517, 0);
         assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(0));
         assert_eq!(plan_fanout(&reg, Some(&B)), TxFanout::Route(2));
     }
@@ -933,8 +1428,8 @@ mod tests {
     #[test]
     fn a_peer_with_two_links_gets_the_packet_once() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(1, A, 0);
-        reg.link_up(3, A, LINK_TIMEOUT_MS);
+        reg.link_up(1, A, Origin::Incoming, 517, 0);
+        reg.link_up(3, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(1));
     }
 
@@ -943,7 +1438,7 @@ mod tests {
     #[test]
     fn a_hint_for_a_peer_with_no_link_drops_instead_of_flooding() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(0, B, 0);
+        reg.link_up(0, B, Origin::Incoming, 517, 0);
         assert_eq!(
             plan_fanout(&reg, Some(&A)),
             TxFanout::NoLink,
@@ -959,9 +1454,630 @@ mod tests {
     #[test]
     fn slot_for_forgets_a_slot_at_teardown() {
         let mut reg = PeerRegistry::<4>::new();
-        reg.link_up(2, A, 0);
+        reg.link_up(2, A, Origin::Incoming, 517, 0);
         assert_eq!(reg.slot_for(&A), Some(2));
         reg.link_down(2);
         assert_eq!(reg.slot_for(&A), None);
+    }
+}
+
+/// The two-sided model (#360 round 2, item 3 of the batch): a board
+/// running the shipped rule against a Columba stub running
+/// `preferredBleRole` verbatim — including the `?: MIN_USABLE_MTU`
+/// ledger lookup whose timing decided the 2026-09-12 field failure —
+/// with the invariant under test spelled out per scenario: from the
+/// moment the pair can be linked, no interval longer than 2 s in which
+/// it holds zero usable links, and both sides keep the SAME connection.
+#[cfg(test)]
+mod duel {
+    use super::*;
+
+    const BOARD: [u8; 16] = [0xb2, 0xa8, 0xbe, 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const PHONE: [u8; 16] = [0xb9, 0x9a, 0xf2, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    /// An identity that sorts BELOW the board's, for the tie-break's
+    /// other direction.
+    const PHONE_LO: [u8; 16] = [0xa0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    /// The bound every scenario asserts: the rule may not leave the
+    /// pair linkless longer than this.
+    const MAX_GAP_MS: u64 = 2_000;
+
+    /// The pair's two possible connections. Conn `i` uses registry
+    /// slot `i` on the board.
+    #[derive(Clone, Copy)]
+    struct Conn {
+        /// Who dialled it, in the board's terms.
+        board_origin: Origin,
+        /// Usable MTU after the ATT exchange (both ends of a
+        /// connection always observe the same exchanged value).
+        negotiated_usable: u16,
+        /// When the PHONE's ledger records that value — `None` = not
+        /// yet / never, which reads as the floor. This lag, not the
+        /// wire, is what arbitrated on 2026-09-12 (`MTU=20` at the
+        /// dedup, ATT long since at 517).
+        phone_bookkept_at: Option<u64>,
+    }
+
+    struct Duel {
+        board: PeerRegistry<4>,
+        conns: [Conn; 2],
+        board_holds: [bool; 2],
+        phone_holds: [bool; 2],
+        handshaked: [bool; 2],
+        phone_identity: [u8; 16],
+        /// (time, pair-usable) transitions, for the gap assertion.
+        transitions: Vec<(u64, bool)>,
+    }
+
+    impl Duel {
+        fn new(phone_identity: [u8; 16], conns: [Conn; 2]) -> Self {
+            let mut board = PeerRegistry::new();
+            board.set_local_identity(BOARD);
+            Self {
+                board,
+                conns,
+                board_holds: [false; 2],
+                phone_holds: [false; 2],
+                handshaked: [false; 2],
+                phone_identity,
+                transitions: Vec::new(),
+            }
+        }
+
+        /// A connection delivers only when both sides still hold it and
+        /// the identity handshake completed.
+        fn usable(&self) -> bool {
+            (0..2).any(|i| self.board_holds[i] && self.phone_holds[i] && self.handshaked[i])
+        }
+
+        fn note(&mut self, t: u64) {
+            let usable = self.usable();
+            if self.transitions.last().map(|&(_, u)| u) != Some(usable) {
+                self.transitions.push((t, usable));
+            }
+        }
+
+        /// The phone's ledger view of one connection's usable MTU at
+        /// `t` — the verbatim `?: MIN_USABLE_MTU` lookup.
+        fn phone_view(&self, conn: usize, t: u64) -> u16 {
+            match self.conns[conn].phone_bookkept_at {
+                Some(at) if at <= t => self.conns[conn].negotiated_usable,
+                _ => MIN_USABLE_MTU,
+            }
+        }
+
+        /// Columba's dedup, verbatim (KotlinBLEBridge.kt:1725-1760):
+        /// on learning a duplicate identity the phone keeps
+        /// `preferredBleRole`'s role and cancels the other connection
+        /// WITHOUT dropping the ACL (field 2026-09-12 21:41:48.146 —
+        /// "Connection cancelled" left our link up receiving
+        /// refusals). Returns the kept connection.
+        fn phone_dedup(&mut self, t: u64) -> usize {
+            let phone_central = match self.conns[0].board_origin {
+                // The board dialled conn 0, so the phone's central is
+                // conn 1 — and vice versa.
+                Origin::Outgoing => 1,
+                Origin::Incoming => 0,
+            };
+            let phone_peripheral = 1 - phone_central;
+            let kept = match preferred_ble_role(
+                self.phone_view(phone_central, t),
+                self.phone_view(phone_peripheral, t),
+                &self.phone_identity,
+                &BOARD,
+            ) {
+                BleRole::Central => phone_central,
+                BleRole::Peripheral => phone_peripheral,
+            };
+            self.phone_holds[1 - kept] = false;
+            self.note(t);
+            kept
+        }
+
+        /// The board learns the peer's identity on `conn` and runs the
+        /// shipped rule; the loser (if any) is closed on the board's
+        /// side immediately, as the firmware does.
+        fn board_link_up(&mut self, conn: usize, t: u64) -> LinkUp {
+            let up = self.board.link_up(
+                conn,
+                self.phone_identity,
+                self.conns[conn].board_origin,
+                self.conns[conn].negotiated_usable + 3,
+                t,
+            );
+            match up {
+                LinkUp::Refused { .. } => {
+                    self.board_holds[conn] = false;
+                }
+                LinkUp::Displaced { old_slot, .. } => {
+                    self.board_holds[old_slot] = false;
+                    self.board.link_down(old_slot);
+                }
+                LinkUp::Accepted { .. } => {}
+            }
+            self.note(t);
+            up
+        }
+
+        /// The longest linkless interval from `watch_from` to `end`.
+        fn max_gap(&self, watch_from: u64, end: u64) -> u64 {
+            let mut gap_start = Some(watch_from);
+            let mut max = 0;
+            for &(t, usable) in &self.transitions {
+                if t < watch_from {
+                    gap_start = if usable { None } else { Some(watch_from) };
+                    continue;
+                }
+                match (usable, gap_start) {
+                    (true, Some(start)) => {
+                        max = max.max(t.saturating_sub(start));
+                        gap_start = None;
+                    }
+                    (false, None) => gap_start = Some(t),
+                    _ => {}
+                }
+            }
+            if let Some(start) = gap_start {
+                max = max.max(end.saturating_sub(start));
+            }
+            max
+        }
+    }
+
+    /// Scenario (a), tonight's 21:41 failure: the phone holds a live
+    /// central link, rotates its RPA, the board dials the new address,
+    /// both would learn the identity within a second — and the new
+    /// connection's MTU is still at the floor in the phone's ledger.
+    /// Round 1: board displaced the old link, phone kept it, 45 s dead
+    /// air. Round 2: the board's dial is refused BEFORE it handshakes,
+    /// the phone never sees a duplicate, and the old link carries the
+    /// pair throughout — zero gap.
+    #[test]
+    fn scenario_a_rotation_with_the_floor_race_keeps_the_old_link() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    // The race: ATT settled on the wire, the phone's
+                    // ledger has not recorded it (and will not before
+                    // any dedup could run).
+                    phone_bookkept_at: None,
+                },
+            ],
+        );
+        // t=0: the phone's central link, up and handshaked.
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        assert!(matches!(
+            d.board_link_up(0, 0),
+            LinkUp::Accepted { first: true }
+        ));
+        // Keepalives every 15 s; last one 7.3 s before the decision.
+        for t in [15_000, 30_000, 45_000, 60_000, 75_000, 87_959] {
+            d.board.note_heard(0, t);
+        }
+        d.board.note_data(0, 80_115);
+        // t=89 s: the phone rotates its RPA (the old connection is
+        // untouched); the board's scanner dials the new address.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        // t=95.3 s: the board reads the identity — the shipped rule.
+        assert!(matches!(
+            d.board_link_up(1, 95_300),
+            LinkUp::Refused {
+                old_slot: 0,
+                rule: DupRule::ColumbaMtu,
+                ..
+            }
+        ));
+        // The board never handshakes the refused dial, so the phone
+        // never learns a duplicate — but had it deduped, the verbatim
+        // stub with the floor race picks the SAME connection:
+        assert_eq!(
+            d.phone_dedup(95_400),
+            0,
+            "phone (floor for the fresh conn) keeps its central = old"
+        );
+        assert_eq!(d.board.slot_for(&PHONE), Some(0), "board keeps old too");
+        assert_eq!(
+            d.max_gap(0, 120_000),
+            0,
+            "the old link carries the pair throughout"
+        );
+    }
+
+    /// Scenario (a)'s 26 ms race, two-sided: the old link's last
+    /// payload lands just before the decision in one run and 15 185 ms
+    /// before it in the other (the field value — round 1's flip point,
+    /// missed by 26 ms). Both runs must produce the same board verdict,
+    /// and it must be the stub's.
+    #[test]
+    fn scenario_a_regression_the_26ms_payload_race_cannot_flip_the_pair() {
+        for last_payload in [95_274_u64, 80_115_u64] {
+            let mut d = Duel::new(
+                PHONE,
+                [
+                    Conn {
+                        board_origin: Origin::Incoming,
+                        negotiated_usable: 514,
+                        phone_bookkept_at: Some(0),
+                    },
+                    Conn {
+                        board_origin: Origin::Outgoing,
+                        negotiated_usable: 514,
+                        phone_bookkept_at: None,
+                    },
+                ],
+            );
+            d.board_holds[0] = true;
+            d.phone_holds[0] = true;
+            d.handshaked[0] = true;
+            d.board_link_up(0, 0);
+            d.board.note_heard(0, 87_959);
+            d.board.note_data(0, last_payload);
+            d.board_holds[1] = true;
+            d.phone_holds[1] = true;
+            assert!(
+                matches!(d.board_link_up(1, 95_300), LinkUp::Refused { .. }),
+                "payload at {last_payload} must not flip the verdict"
+            );
+            assert_eq!(d.phone_dedup(95_400), 0, "and the stub agrees: old");
+            assert_eq!(d.max_gap(0, 120_000), 0);
+        }
+    }
+
+    /// Scenario (b), the morning case from 5e7168a7's doc comment: the
+    /// phone rotates and ABANDONS the old connection (no keepalives
+    /// since), the board dials the new address. The abandonment branch
+    /// promotes the dial immediately and the old link is torn down by
+    /// us at the decision — not at the 45 s expiry. The watch window
+    /// opens at the dial's identity read: the [60 s, 91 s] hole before
+    /// it is discovery physics (the phone abandoned its only link; no
+    /// rule can act before its new address is found and read), and the
+    /// assertion pins that the RULE adds nothing on top.
+    #[test]
+    fn scenario_b_abandoned_rotation_promotes_the_dial_at_once() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: None,
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        // Keepalives until t=60 s, then the phone rotates and walks
+        // away from the old connection.
+        d.board.note_heard(0, 60_000);
+        d.phone_holds[0] = false;
+        d.note(60_000);
+        // t=91 s: the board's dial of the new address reads the
+        // identity; the old link has been silent 31 s.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        let up = d.board_link_up(1, 91_000);
+        assert!(
+            matches!(
+                up,
+                LinkUp::Displaced {
+                    old_slot: 0,
+                    rule: DupRule::Abandoned,
+                    old_silence_ms: 31_000,
+                    ..
+                }
+            ),
+            "31 s of any-frame silence is an abandoned link: {up:?}"
+        );
+        assert!(
+            !d.board_holds[0],
+            "the old link is closed by us at the decision, not at the \
+             45 s expiry (t=105 s)"
+        );
+        // The board handshakes the accepted dial; the phone holds no
+        // link of this identity, so there is nothing to dedup and the
+        // link is simply up.
+        d.handshaked[1] = true;
+        d.note(91_100);
+        assert_eq!(d.board.slot_for(&PHONE), Some(1));
+        assert!(
+            d.max_gap(91_000, 150_000) <= MAX_GAP_MS,
+            "from the identity read the rule adds no linkless time"
+        );
+    }
+
+    /// Scenario (c), the mirror: the phone dials the board while the
+    /// board holds a live central link to it. A Columba central
+    /// negotiates its MTU before it reads our identity, so its dedup
+    /// runs on negotiated-vs-negotiated — a tie, broken by identity
+    /// order. Sub-case 1: the phone's identity sorts below ours — it
+    /// keeps its central (the new connection) and handshakes it; our
+    /// incoming judge computes the same tie the same way and displaces
+    /// the old link at once.
+    #[test]
+    fn scenario_c_phone_dial_wins_the_tie_and_both_sides_switch() {
+        let mut d = Duel::new(
+            PHONE_LO,
+            [
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    // Its own MTU request, completed before its
+                    // identity read at t=50.5 s.
+                    phone_bookkept_at: Some(50_200),
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        d.board.note_heard(0, 49_000);
+        // t=50 s: the phone dials us.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        // t=50.5 s: the phone reads our identity and dedups: tie,
+        // PHONE_LO < BOARD keeps central = the new connection.
+        assert_eq!(d.phone_dedup(50_500), 1);
+        // t=50.6 s: its handshake lands; our judge computes the same
+        // arbitration and displaces the old link NOW.
+        let up = d.board_link_up(1, 50_600);
+        assert!(
+            matches!(
+                up,
+                LinkUp::Displaced {
+                    old_slot: 0,
+                    rule: DupRule::ColumbaIdentity,
+                    ..
+                }
+            ),
+            "same tie, same identity order, same survivor: {up:?}"
+        );
+        d.handshaked[1] = true;
+        d.note(50_600);
+        assert_eq!(d.board.slot_for(&PHONE_LO), Some(1));
+        assert!(
+            d.max_gap(0, 90_000) <= MAX_GAP_MS,
+            "the hand-over leaves no linkless interval beyond the bound"
+        );
+    }
+
+    /// Scenario (c), sub-case 2: the phone's identity sorts above ours
+    /// — its dedup keeps its peripheral (the OLD connection) and it
+    /// never handshakes the dial, so our judge never runs, the old
+    /// link is never touched, and the pair stays linked throughout.
+    /// (The phone-side cancel leaves its dial's ACL up — the field
+    /// behaviour — which ages out as an unhandshaked connection;
+    /// nothing of ours is torn down for it.)
+    #[test]
+    fn scenario_c_phone_dial_loses_the_tie_and_the_old_link_stands() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(50_200),
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        d.board.note_heard(0, 49_000);
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        // Tie, PHONE > BOARD: the phone keeps its peripheral = old,
+        // cancels its own dial, never handshakes it.
+        assert_eq!(d.phone_dedup(50_500), 0);
+        assert_eq!(d.board.slot_for(&PHONE), Some(0), "registry untouched");
+        assert_eq!(d.board.peer_count(), 1);
+        assert_eq!(d.max_gap(0, 90_000), 0, "the old link never blinked");
+    }
+
+    /// Scenario (e), beyond the batch's four: the SAME-role rotation,
+    /// the case Columba's function cannot arbitrate. The pre-dial
+    /// exclusion is address-keyed and this rule identity-keyed, so a
+    /// rotated RPA puts one identity on two connections of one role;
+    /// the phone then holds both in the other single role and its
+    /// `preferredBleRole` — a choice between a central and a
+    /// peripheral — never fires. The stub is therefore PASSIVE here,
+    /// which is the faithful model: it cancels nothing, so the board's
+    /// answer alone has to leave the pair linked.
+    ///
+    /// Sub-case 1, two of OUR dials: the second adds no reachability
+    /// the live first has, and is refused pre-handshake — the old link
+    /// carries the pair, zero gap.
+    #[test]
+    fn scenario_e_our_second_dial_of_a_rotated_address_is_refused() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: None,
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        d.board.note_heard(0, 60_000);
+        // t=61 s: the phone's rotated address is dialled — a second
+        // OUTGOING connection to an identity we already hold.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        let up = d.board_link_up(1, 61_000);
+        assert!(
+            matches!(
+                up,
+                LinkUp::Refused {
+                    old_slot: 0,
+                    rule: DupRule::SameRole,
+                    old_silence_ms: 1_000,
+                    ..
+                }
+            ),
+            "no arbitration to copy, and nothing to gain: {up:?}"
+        );
+        assert_eq!(d.board.slot_for(&PHONE), Some(0));
+        assert_eq!(d.max_gap(0, 120_000), 0, "the old link never blinked");
+    }
+
+    /// Scenario (e), sub-case 2: the PHONE dials us twice from two
+    /// RPAs. It dialled again, which is what a node does with a
+    /// connection it has stopped using, so the newcomer wins and the
+    /// old link is torn down by us at the decision. The hand-over is
+    /// instant — the new connection is already handshaked when the
+    /// verdict lands, because the handshake IS the decision point on
+    /// this path — so the pair is never linkless.
+    #[test]
+    fn scenario_e_the_peers_second_dial_of_a_rotated_address_wins() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Incoming,
+                    negotiated_usable: 514,
+                    phone_bookkept_at: Some(60_500),
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        d.board.note_heard(0, 60_000);
+        // t=61 s: the phone's second dial handshakes.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        let up = d.board_link_up(1, 61_000);
+        assert!(
+            matches!(
+                up,
+                LinkUp::Displaced {
+                    old_slot: 0,
+                    rule: DupRule::SameRole,
+                    old_silence_ms: 1_000,
+                    ..
+                }
+            ),
+            "the peer dialled again; the old connection is history: {up:?}"
+        );
+        assert!(!d.board_holds[0], "and we close it ourselves, at once");
+        d.handshaked[1] = true;
+        d.note(61_000);
+        assert_eq!(d.board.slot_for(&PHONE), Some(1));
+        assert_eq!(
+            d.max_gap(0, 120_000),
+            0,
+            "the new link was usable the instant the old one closed"
+        );
+    }
+
+    /// Scenario (d): two boards, both running the shipped rule, no
+    /// Columba — the cross-dial race. A (lower address AND lower
+    /// identity — the initiator convention and the tie-break point the
+    /// same way for boards, whose addresses are static) and B dial
+    /// each other simultaneously; each accepts its own dial (no
+    /// duplicate visible yet), then receives the other's handshake.
+    /// Both incoming judges compute the same tie from opposite ends
+    /// and converge on the SAME connection — the lower identity's dial
+    /// — leaving exactly one link and no linkless interval.
+    #[test]
+    fn scenario_d_two_boards_cross_dial_converges_on_one_link() {
+        const A_ID: [u8; 16] = [0x11; 16];
+        const B_ID: [u8; 16] = [0x99; 16];
+        let mut rega = PeerRegistry::<4>::new();
+        rega.set_local_identity(A_ID);
+        let mut regb = PeerRegistry::<4>::new();
+        regb.set_local_identity(B_ID);
+
+        // Conn 0 = A dials B (slot 0 on both); conn 1 = B dials A
+        // (slot 1 on both). Both ATT exchanges settle at connect.
+        // t=1.00 s: A reads B's identity on its dial — no duplicate
+        // visible (B has not handshaked conn 1 to A yet) — accepted,
+        // A handshakes.
+        assert!(matches!(
+            rega.link_up(0, B_ID, Origin::Outgoing, 517, 1_000),
+            LinkUp::Accepted { first: true }
+        ));
+        // t=1.05 s: B reads A's identity on ITS dial — same picture,
+        // accepted, B handshakes.
+        assert!(matches!(
+            regb.link_up(1, A_ID, Origin::Outgoing, 517, 1_050),
+            LinkUp::Accepted { first: true }
+        ));
+        // t=1.10 s: A's handshake lands at B on conn 0: a duplicate
+        // against B's own live dial. The tie says A (lower identity)
+        // keeps central — A is central on conn 0 — so conn 0 wins and
+        // B tears down its own dial now.
+        assert!(matches!(
+            regb.link_up(0, A_ID, Origin::Incoming, 517, 1_100),
+            LinkUp::Displaced {
+                old_slot: 1,
+                rule: DupRule::ColumbaIdentity,
+                ..
+            }
+        ));
+        regb.link_down(1);
+        // t=1.15 s: B's handshake (sent before its teardown) lands at
+        // A on conn 1: A's judge computes the same tie — B keeps
+        // peripheral = conn 0 — and refuses conn 1.
+        assert!(matches!(
+            rega.link_up(1, B_ID, Origin::Incoming, 517, 1_150),
+            LinkUp::Refused {
+                old_slot: 0,
+                rule: DupRule::ColumbaIdentity,
+                ..
+            }
+        ));
+        // Exactly one link survives, the same one on both ends, and
+        // the pair was never linkless: conn 0 was usable from t=1.10 s
+        // and never went down.
+        assert_eq!(rega.slot_for(&B_ID), Some(0));
+        assert_eq!(regb.slot_for(&A_ID), Some(0));
+        assert_eq!(rega.peer_count(), 1);
+        assert_eq!(regb.peer_count(), 1);
     }
 }
