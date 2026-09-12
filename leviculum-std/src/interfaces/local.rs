@@ -526,11 +526,16 @@ async fn local_interface_task(
                 match msg {
                     Some(pkt) => {
                         frame(&pkt.data, &mut frame_buf);
+                        // Counted before the write: the moment the peer can
+                        // observe any byte of this frame, the counter must
+                        // already cover it (Codeberg #389, same ordering as
+                        // TCP). On a write error the dying stream charges one
+                        // frame whose tail never left — bounded by that frame.
+                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = writer.write_all(&frame_buf).await {
                             tracing::debug!("Local interface {} write error: {}", name, e);
                             return;
                         }
-                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                     }
                     None => {
                         tracing::debug!("Local interface {} outgoing channel closed", name);
@@ -906,6 +911,61 @@ mod tests {
         assert!(
             result.is_err(),
             "connecting to nonexistent socket should fail"
+        );
+    }
+
+    /// Codeberg #389 mvr (tx counter siblings): once the peer can observe
+    /// bytes of a frame, the interface's tx counter already covers that
+    /// frame — same ordering the TCP interface pins. A minimal send buffer
+    /// parks `write_all` mid-frame, the peer reads the frame's head, and
+    /// the counter is inspected inside that window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        use std::io::Read as _;
+
+        let (iface_side, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        // Minimal send buffer (the kernel clamps to its floor, still far
+        // below the frame) so the write parks mid-frame.
+        socket2::SockRef::from(&iface_side)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        iface_side.set_nonblocking(true).unwrap();
+        let stream = tokio::net::UnixStream::from_std(iface_side).unwrap();
+
+        let (incoming_tx, _incoming_rx) = mpsc::channel(4);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(4);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task_counters = Arc::clone(&counters);
+        tokio::spawn(local_interface_task(
+            "mvr_389".to_string(),
+            stream,
+            incoming_tx,
+            outgoing_rx,
+            task_counters,
+        ));
+
+        // One frame far larger than the send buffer: the write cannot
+        // complete until the peer drains, so the task stays parked in
+        // write_all while the frame's head is already at the peer.
+        outgoing_tx
+            .send(OutgoingPacket {
+                data: vec![0x42u8; 1 << 20],
+                high_priority: false,
+                peer: None,
+            })
+            .await
+            .unwrap();
+
+        // Blocking read on a dedicated worker thread: returns as soon as
+        // the peer has observable bytes of the frame.
+        let mut head = [0u8; 1024];
+        let n = peer.read(&mut head).unwrap();
+        assert!(n > 0, "peer must observe bytes of the frame");
+
+        let tx = counters.tx_bytes.load(Ordering::Relaxed);
+        assert!(
+            tx > 0,
+            "peer observed {n} bytes but the tx counter reads {tx}"
         );
     }
 }

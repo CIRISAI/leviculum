@@ -629,6 +629,12 @@ where
                     Some(pkt) => {
                         tracing::debug!("Serial interface {} TX {} bytes", name, pkt.data.len());
                         frame(&pkt.data, &mut frame_buf);
+                        // Counted before the write: the moment the peer can
+                        // observe any byte of this frame, the counter must
+                        // already cover it (Codeberg #389, same ordering as
+                        // TCP). On a write error the dying port charges one
+                        // frame whose tail never left — bounded by that frame.
+                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = port.write_all(&frame_buf).await {
                             tracing::debug!("Serial interface {} write error: {}", name, e);
                             return outgoing_rx;
@@ -637,7 +643,6 @@ where
                             tracing::debug!("Serial interface {} flush error: {}", name, e);
                             return outgoing_rx;
                         }
-                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                     }
                     None => {
                         tracing::debug!("Serial interface {} outgoing channel closed", name);
@@ -1394,5 +1399,52 @@ mod tests {
     #[test]
     fn a_request_with_no_attached_interface_reaches_nothing() {
         assert_eq!(request_firmware_reset(), 0);
+    }
+
+    /// Codeberg #389 mvr (tx counter siblings): once the peer can observe
+    /// bytes of a frame, the interface's tx counter already covers that
+    /// frame — same ordering the TCP interface pins. A 4 KiB duplex parks
+    /// `write_all` mid-frame, the peer reads the frame's head, and the
+    /// counter is inspected inside that window.
+    #[tokio::test]
+    async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        let (near, mut far) = tokio::io::duplex(4096);
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task_counters = Arc::clone(&counters);
+        tokio::spawn(serial_io_task(
+            "mvr_389".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            task_counters,
+            false,
+        ));
+
+        // One frame far larger than the duplex buffer: the write cannot
+        // complete, so the task stays parked in write_all while the frame's
+        // head is already at the peer.
+        outgoing_tx
+            .send(OutgoingPacket {
+                data: vec![0x42u8; 64 * 1024],
+                high_priority: false,
+                peer: None,
+            })
+            .await
+            .expect("send into task");
+
+        let mut head = [0u8; 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), far.read(&mut head))
+            .await
+            .expect("the frame head is written promptly")
+            .expect("peer read");
+        assert!(n > 0, "peer must observe bytes of the frame");
+
+        let tx = counters.tx_bytes.load(Ordering::Relaxed);
+        assert!(
+            tx > 0,
+            "peer observed {n} bytes but the tx counter reads {tx}"
+        );
     }
 }

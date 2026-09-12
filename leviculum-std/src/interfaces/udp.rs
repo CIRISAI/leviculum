@@ -556,10 +556,20 @@ async fn udp_io_task(
                                     }
                                 }
                             };
+                            // Counted before the send: the moment the peer
+                            // can observe the datagram, the counter must
+                            // already cover it (Codeberg #389, same ordering
+                            // as TCP). A datagram is all-or-nothing — there
+                            // is no parkable mid-datagram window a test could
+                            // pin, so the ordering here is covered by
+                            // inspection. On a send error the counter charges
+                            // one datagram that never left; UDP send errors
+                            // are transient and logged right below.
+                            counters
+                                .tx_bytes
+                                .fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
                             match socket.send_to(&pkt.data, addr).await {
-                                Ok(n) => {
-                                    counters.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                                }
+                                Ok(_) => {}
                                 Err(e) => {
                                     tracing::warn!("UDP {} send error to {}: {}", name, addr, e);
                                     // Don't break, send errors are transient for

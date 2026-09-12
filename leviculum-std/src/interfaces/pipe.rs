@@ -382,6 +382,12 @@ async fn pipe_io_task(
                     Some(pkt) => {
                         tracing::debug!("Pipe interface {} TX {} bytes", name, pkt.data.len());
                         frame(&pkt.data, &mut frame_buf);
+                        // Counted before the write: the moment the child can
+                        // observe any byte of this frame, the counter must
+                        // already cover it (Codeberg #389, same ordering as
+                        // TCP). On a write error the dying pipe charges one
+                        // frame whose tail never left — bounded by that frame.
+                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = stdin.write_all(&frame_buf).await {
                             tracing::debug!("Pipe interface {}: stdin write error: {}", name, e);
                             return outgoing_rx;
@@ -390,7 +396,6 @@ async fn pipe_io_task(
                             tracing::debug!("Pipe interface {}: stdin flush error: {}", name, e);
                             return outgoing_rx;
                         }
-                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                     }
                     None => {
                         tracing::debug!("Pipe interface {}: outgoing channel closed", name);
@@ -703,5 +708,53 @@ mod tests {
             !handle.is_online(),
             "supervisor must exit after the shutdown signal, not sit out the backoff"
         );
+    }
+
+    /// Codeberg #389 mvr (tx counter siblings): once the peer can observe
+    /// bytes of a frame, the interface's tx counter already covers that
+    /// frame — same ordering the TCP interface pins.
+    ///
+    /// The self-spawn bridge copies exactly 100 bytes then exits: the peer
+    /// has provably observed the frame's head while `write_all` still holds
+    /// far more than the pipe can carry, and the write then dies with EPIPE
+    /// before ever completing — so the only way the counter can cover the
+    /// frame is by being charged before the write.
+    #[tokio::test]
+    async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        let mut handle = spawn_pipe_interface(PipeInterfaceConfig {
+            id: InterfaceId(3),
+            name: "pipe-389".to_string(),
+            // Peer consumes 100 bytes then exits — see pipe_bridge_echo_helper.
+            command: bridge_command(Some(100)),
+            // Keep the supervisor quiet after the child exits.
+            respawn_delay: Duration::from_secs(30),
+            buffer_size: PIPE_DEFAULT_BUFFER_SIZE,
+            reconnect_notify: None,
+            shutdown: None,
+        });
+        handle
+            .ready
+            .wait(Duration::from_secs(5))
+            .await
+            .expect("pipe interface should become ready");
+
+        // One frame far larger than any pipe capacity: write_all can never
+        // complete against a child that stops reading after 100 bytes.
+        handle
+            .try_send(&vec![0x42u8; 1 << 20])
+            .expect("send into pipe should succeed");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let tx = handle.counters.tx_bytes.load(Ordering::Relaxed);
+            if tx > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer consumed the frame's head but the tx counter never covered it (tx={tx})"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

@@ -174,13 +174,16 @@ where
         }
         None => kiss::frame(kiss::CMD_DATA, payload, frame_buf),
     }
-    port.write_all(frame_buf).await?;
-    port.flush().await?;
-    // Count the packet bytes, not the AX.25/KISS overhead, matching Python's
-    // `self.txb += datalen`.
+    // Counted before the write: the moment the peer can observe any byte of
+    // this frame, the counter must already cover it (Codeberg #389, same
+    // ordering as TCP). On a write error the dying port charges one frame
+    // whose tail never left — bounded by that frame. Count the packet bytes,
+    // not the AX.25/KISS overhead, matching Python's `self.txb += datalen`.
     counters
         .tx_bytes
         .fetch_add(payload.len() as u64, Ordering::Relaxed);
+    port.write_all(frame_buf).await?;
+    port.flush().await?;
     Ok(())
 }
 
@@ -904,6 +907,50 @@ mod tests {
         assert_eq!(
             got.data, payload,
             "escaped payload must survive the AX.25/KISS round-trip"
+        );
+    }
+
+    /// Codeberg #389 mvr (tx counter siblings): once the peer can observe
+    /// bytes of a frame, the interface's tx counter already covers that
+    /// frame — same ordering the TCP interface pins. A 4 KiB duplex parks
+    /// `write_all` mid-frame, the peer reads the frame's head, and the
+    /// counter is inspected inside that window.
+    #[tokio::test]
+    async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (a, mut peer) = tokio::io::duplex(4096);
+        let (in_tx, _in_rx) = mpsc::channel(8);
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task_counters = Arc::clone(&counters);
+        tokio::spawn(async move {
+            kiss_io_task("mvr_389", a, in_tx, out_rx, task_counters, false, None).await;
+        });
+
+        // One payload far larger than the duplex buffer: the write cannot
+        // complete, so the task stays parked in write_all while the frame's
+        // head is already at the peer.
+        out_tx
+            .send(OutgoingPacket {
+                peer: None,
+                data: vec![0x42u8; 64 * 1024],
+                high_priority: false,
+            })
+            .await
+            .expect("send into task");
+
+        let mut head = [0u8; 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), peer.read(&mut head))
+            .await
+            .expect("the frame head is written promptly")
+            .expect("peer read");
+        assert!(n > 0, "peer must observe bytes of the frame");
+
+        let tx = counters.tx_bytes.load(Ordering::Relaxed);
+        assert!(
+            tx > 0,
+            "peer observed {n} bytes but the tx counter reads {tx}"
         );
     }
 }
