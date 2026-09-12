@@ -300,7 +300,10 @@ const _: () = assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY);
 
 /// Register the GATT service and spawn the Columba tasks: one
 /// peripheral task per incoming link slot (#372) and the central half.
-/// Called by [`super::init`] once the SoftDevice is enabled.
+/// Called by [`super::init`] once the SoftDevice is enabled. When the
+/// SoftDevice refuses the GATT registration, logs one
+/// `BLE_INIT_FAIL code=<n>` line and spawns nothing: the board comes up
+/// without BLE instead of panicking into a post-mortem.
 ///
 /// Takes the SoftDevice by unique reference and hands back a shared one:
 /// registering a service is the only step that needs exclusive access
@@ -326,10 +329,24 @@ pub fn spawn(
     sd: &'static mut Softdevice,
     identity_hash: [u8; 16],
 ) -> &'static Softdevice {
+    // A GATT table the SoftDevice refuses to register is a boot-time
+    // condition, not a crash: log the SoftDevice's error code and come up
+    // without BLE — no Columba task spawns, exactly like the profile's
+    // `ble=off` path in [`super::init`] — rather than panic a board whose
+    // LoRa carrier and PN role still work. Critical sink: this fires
+    // before the host's DTR-assert has opened the runtime drain, like the
+    // ADV line below.
     static SERVER: StaticCell<NotifyAwareServer> = StaticCell::new();
-    let server = SERVER.init(NotifyAwareServer {
-        inner: ReticulumServer::new(sd).expect("GATT server"),
-    });
+    let server = match ReticulumServer::new(sd) {
+        Ok(inner) => SERVER.init(NotifyAwareServer { inner }),
+        Err(gatt_server::RegisterError::Raw(code)) => {
+            crate::log::log_fmt_critical(
+                "[BLE ] ",
+                format_args!("BLE_INIT_FAIL code={}", u32::from(code)),
+            );
+            return sd;
+        }
+    };
     let sd: &'static Softdevice = sd;
 
     // Publish the identity characteristic value so a connecting peer can
