@@ -800,6 +800,7 @@ fn interface_stats_snapshot_lists_the_tcp_interface() {
 
     let mut any_named = false;
     let mut any_traffic = false;
+    let mut rows = Vec::new();
     for i in 0..count as usize {
         let name = read2(|b, c, l| unsafe { lev_interface_stats_name(table, i, b, c, l) })
             .expect("interface name");
@@ -820,9 +821,16 @@ fn interface_stats_snapshot_lists_the_tcp_interface() {
         if rx > 0 || tx > 0 {
             any_traffic = true;
         }
+        rows.push(format!(
+            "{}: online={online} rx={rx} tx={tx}",
+            String::from_utf8_lossy(&name)
+        ));
     }
-    assert!(any_named, "an interface should have a name");
-    assert!(any_traffic, "the TCP link carried bytes");
+    assert!(
+        any_named,
+        "an interface should have a name; table: {rows:?}"
+    );
+    assert!(any_traffic, "the TCP link carried bytes; table: {rows:?}");
 
     unsafe { lev_interface_stats_free(table) };
 }

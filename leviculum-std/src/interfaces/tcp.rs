@@ -1042,11 +1042,19 @@ async fn tcp_interface_task(
                                 }
                             }
                         }
+                        // Counted before the write: the moment the peer can
+                        // observe any byte of this frame, the counter must
+                        // already cover it, or a stats snapshot synchronized
+                        // through peer-side state reads 0 for traffic that
+                        // provably moved (Codeberg #389). On a write error the
+                        // frame is charged although its tail never left — the
+                        // connection is torn down right here, so the
+                        // overcount is bounded by one frame.
+                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = writer.write_all(&frame_buf).await {
                             tracing::debug!("TCP interface {} write error: {}", name, e);
                             return outgoing_rx;
                         }
-                        counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                     }
                     None => {
                         // Event loop dropped its sender, shut down
@@ -1696,5 +1704,77 @@ mod tests {
         drop(shutdown_tx); // resolves the receiver -> loop stops -> incoming closes
         let closed = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv()).await;
         assert!(matches!(closed, Ok(None)), "incoming closes after detach");
+    }
+
+    /// Codeberg #389 mvr: once the peer can observe bytes of a frame, the
+    /// interface's tx counter already covers that frame. A snapshot whose
+    /// only synchronization is peer-side state (the ffi test waits on B's
+    /// path table) otherwise reads 0 for traffic that provably moved.
+    ///
+    /// Tiny socket buffers force `write_all` to park mid-frame, holding the
+    /// task exactly in the window between making bytes observable and the
+    /// counter update; the peer then reads proof-of-observability bytes and
+    /// the counter is inspected inside that window — deterministically, no
+    /// load or timing needed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        use std::io::Read as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Peer with a minimal receive window, set before connect so the
+        // window is honored from the handshake on.
+        let peer =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        peer.set_recv_buffer_size(4096).unwrap();
+        peer.connect(&addr.into()).unwrap();
+        let mut peer: std::net::TcpStream = peer.into();
+
+        let (iface_stream, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&iface_stream)
+            .set_send_buffer_size(4096)
+            .unwrap();
+
+        let (incoming_tx, _incoming_rx) = mpsc::channel(4);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(4);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task_counters = Arc::clone(&counters);
+        tokio::spawn(async move {
+            tcp_interface_task(
+                "mvr_389".to_string(),
+                iface_stream,
+                incoming_tx,
+                outgoing_rx,
+                None,
+                task_counters,
+            )
+            .await
+        });
+
+        // One frame far larger than both socket buffers combined: the write
+        // cannot complete until the peer drains, so the task stays parked in
+        // write_all while the frame's head is already at the peer.
+        let payload = vec![0x42u8; 1 << 20];
+        outgoing_tx
+            .send(OutgoingPacket {
+                data: payload,
+                high_priority: false,
+                peer: None,
+            })
+            .await
+            .unwrap();
+
+        // Blocking read on a dedicated worker thread: returns as soon as the
+        // peer has observable bytes of the frame.
+        let mut head = [0u8; 1024];
+        let n = peer.read(&mut head).unwrap();
+        assert!(n > 0, "peer must observe bytes of the frame");
+
+        let tx = counters.tx_bytes.load(Ordering::Relaxed);
+        assert!(
+            tx > 0,
+            "peer observed {n} bytes but the tx counter reads {tx}"
+        );
     }
 }
