@@ -683,11 +683,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
         // Python PacketReceipt derives Link packet timeouts from the measured
         // RTT (Packet.py:430-431). Raw packets have no Channel retransmission
-        // state, so this is their actual proof-acceptance deadline.
+        // state, so this is their actual proof-acceptance deadline — floored
+        // at the reference's own enforcement granularity, because Python only
+        // checks receipts once per second and a literal 6 ms deadline on a
+        // fast link fails proofs that are already on the way (see
+        // [`crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS`]).
         let receipt_timeout_ms = link
             .rtt_ms()
             .saturating_mul(TRAFFIC_TIMEOUT_FACTOR)
-            .max(TRAFFIC_TIMEOUT_MIN_MS);
+            .max(TRAFFIC_TIMEOUT_MIN_MS)
+            .max(crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS);
         let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
         let packet_hash = self
             .receipt_tracker

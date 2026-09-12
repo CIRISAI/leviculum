@@ -296,6 +296,26 @@ pub const TRAFFIC_TIMEOUT_FACTOR: u64 = 6;
 /// Minimum timeout for Link packet receipts (Python Link.TRAFFIC_TIMEOUT_MIN_MS = 5).
 pub const TRAFFIC_TIMEOUT_MIN_MS: u64 = 5;
 
+/// Floor on the ENFORCED raw Link receipt deadline (milliseconds).
+///
+/// The reference computes `max(rtt * 6, 5 ms)` for a Link packet receipt
+/// (`reference/Reticulum/RNS/Packet.py:431`) — but it only *checks* receipts
+/// once per second (`Transport.receipts_check_interval = 1.0`,
+/// `reference/Reticulum/RNS/Transport.py:180`), so no Python receipt is
+/// reliably failed before roughly a second has passed, whatever the formula
+/// said. Enforcing the literal formula precisely is implementation parity
+/// where semantic compatibility is needed: on a 1 ms-RTT TCP link the
+/// formula yields 6 ms, and a Python LXMF propagation node that validates a
+/// PoW stamp *before* proving the upload packet needs 10-15 ms — our exact
+/// deadline failed the receipt, the LXMF layer tore the link down (as
+/// Python does on this callback), and the node's proof hit a closed link,
+/// every retry alike. Deviation under the CLAUDE.md rule: wire-invisible,
+/// semantically *closer* to the reference's observable behaviour than the
+/// literal constant, and it removes a systematic delivery failure against
+/// conforming peers on fast links (Priority 1). Slow links (LoRa RTTs in
+/// the seconds) are unaffected: their `rtt * 6` exceeds this floor.
+pub const RAW_RECEIPT_TIMEOUT_FLOOR_MS: u64 = 1_000;
+
 /// Max grace time for response in ms (Python Resource.RESPONSE_MAX_GRACE_TIME = 10s)
 pub const RESPONSE_MAX_GRACE_TIME_MS: u64 = 10_000;
 

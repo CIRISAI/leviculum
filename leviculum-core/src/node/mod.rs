@@ -5477,6 +5477,61 @@ mod tests {
         )));
     }
 
+    /// Regression (lnmsg propagated-upload interop, 2026-09-12): on a 1 ms-RTT
+    /// link the literal Python formula gives a 6 ms receipt deadline, and a
+    /// Python LXMF propagation node validates the upload's PoW stamp *before*
+    /// proving — 10-15 ms. Exact enforcement failed the receipt, the LXMF
+    /// layer tore the link down, and the node's proof hit a closed link on
+    /// every retry. The reference itself cannot fail a receipt that early
+    /// (its check cadence is 1 s, Transport.py:180), so the enforced deadline
+    /// is floored there and a proof slower than six RTTs still confirms.
+    #[test]
+    fn a_fast_link_proof_slower_than_six_rtts_still_confirms() {
+        use crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS;
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .set_rtt_ms(1);
+
+        let (packet_hash, sent) = pair
+            .initiator
+            .send_packet_on_link(&pair.initiator_link_id, b"slow prover, fast link")
+            .unwrap();
+        assert_eq!(
+            pair.initiator.receipt_tracker.earliest_expiry(),
+            Some(TEST_TIME_MS + RAW_RECEIPT_TIMEOUT_FLOOR_MS),
+            "the enforced deadline is floored at the reference's check cadence"
+        );
+
+        let data = extract_broadcast_data(&sent);
+        let proved = pair.responder.handle_packet(InterfaceId(0), &data);
+        let proof = extract_broadcast_data(&proved);
+
+        // 20 ms of stamp validation at the peer: more than six RTTs, far
+        // less than the floor. The receipt must still be waiting.
+        pair.initiator.transport().clock().set(TEST_TIME_MS + 20);
+        let waiting = pair.initiator.handle_timeout();
+        assert!(
+            !waiting.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::LinkDeliveryFailed { packet_hash: hash, .. } if *hash == packet_hash
+            )),
+            "a 6-RTT deadline on a fast link fails proofs that are on the way"
+        );
+
+        let confirmed = pair.initiator.handle_packet(InterfaceId(0), &proof);
+        assert!(confirmed.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkDeliveryConfirmed {
+                link_id,
+                packet_hash: hash,
+            } if *link_id == pair.initiator_link_id && *hash == packet_hash
+        )));
+    }
+
     #[test]
     fn raw_link_receipt_can_outlive_the_old_fixed_timeout() {
         use crate::constants::{DATA_RECEIPT_TIMEOUT_MS, TRAFFIC_TIMEOUT_FACTOR};

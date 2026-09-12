@@ -236,8 +236,8 @@ rule; skipping it re-introduces two regressions by accident.
 
 **Implementation status.** Today the window is two fixed-date
 constants: the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
-(`constants.rs:539`, 2020) and the upper bound
-`EMISSION_LEARN_CEILING_SECS` (`constants.rs:521`, 2200-01-01),
+(`constants.rs:559`, 2020) and the upper bound
+`EMISSION_LEARN_CEILING_SECS` (`constants.rs:541`, 2200-01-01),
 enforced on learning and host injection. They approximate the binding
 bounds with constants that need no build plumbing; deriving the floor
 from the build timestamp was already named as the tightening in #161
@@ -566,7 +566,7 @@ The announce timestamp field holds
 silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
-(`leviculum-core/src/constants.rs:512`) caps it, enforced at the
+(`leviculum-core/src/constants.rs:532`) caps it, enforced at the
 point of resolution (`transport.rs:3278`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
@@ -578,10 +578,10 @@ regardless of which source produced the value. Incident: Codeberg
 Within arm 4, an older emission never regresses the anchor
 (`emitted_secs <= current`, `transport.rs:3414`), and adoption is
 bounded by the sanity window: values above
-`EMISSION_LEARN_CEILING_SECS` (`constants.rs:521`, 2200-01-01) cannot
+`EMISSION_LEARN_CEILING_SECS` (`constants.rs:541`, 2200-01-01) cannot
 come from a real clock and are refused outright
 (`transport.rs:3410`); the lower bound `EMISSION_PLAUSIBLE_MIN_SECS`
-(`constants.rs:539`, 2020) separates real wall clocks from
+(`constants.rs:559`, 2020) separates real wall clocks from
 uptime-derived values, which sit orders of magnitude apart.
 Incidents: #160, #161. Pinned at
 `test_clockless_node_learns_emission_timebase_from_announce`
@@ -624,7 +624,7 @@ abused downwards. Pinned at
 
 Once the calendar is no longer birth-anchored (today: once the value
 clears the plausibility floor), one announce may advance it by at
-most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:539`, one
+most `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:573`, one
 day), so a peer whose clock is decades wrong cannot capture the
 calendar in one announce. State the protection level honestly:
 learning runs before the per-destination announce rate limit and the
@@ -822,11 +822,11 @@ reasoned commit, never load-bearing for the model itself.
 
 - **The upper sanity margin** above the best known anchor — order of
   decades; today the fixed date in `EMISSION_LEARN_CEILING_SECS`
-  (`constants.rs:521`).
+  (`constants.rs:541`).
 - **The lower bound stand-in** `EMISSION_PLAUSIBLE_MIN_SECS`
-  (`constants.rs:539`) until build-timestamp plumbing retires it.
+  (`constants.rs:559`) until build-timestamp plumbing retires it.
 - **The per-announce advance cap**
-  `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:539`).
+  `EMISSION_LEARN_MAX_ADVANCE_SECS` (`constants.rs:573`).
 - **The healing cohort**: how many distinct senders form a median,
   and how large a deviation counts as gross.
 - **The local plausible-now tolerance**: the bounded forward skew
