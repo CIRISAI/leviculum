@@ -234,7 +234,18 @@ static HEAP: Heap = Heap::empty();
 /// Stage 1B's commit message) was WRONG — the artifact was real
 /// for the OLD stack_free implementation (commit 42f05e2 fixes that),
 /// but stack overflow at HEAP=96K is also real. Both bugs coexist.
-const HEAP_SIZE: usize = 96 * 1024;
+///
+/// Public since #388: the boot `HEAP_BUDGET` assertion
+/// ([`heap_census::log_budget_and_assert`]) judges its total against
+/// this pool.
+pub const HEAP_SIZE: usize = 96 * 1024;
+
+/// The largest incoming resource transfer the binaries accept
+/// (`NodeCoreBuilder::max_incoming_resource_size`), stated once so the
+/// builder call, the propagation role's announced sync limit
+/// ([`pn`]'s `BOARD_SYNC_LIMIT_KB`) and the boot `HEAP_BUDGET`'s
+/// reserve term cannot drift apart (#388).
+pub const MAX_INCOMING_RESOURCE_BYTES: usize = 8 * 1024;
 
 /// Return (used, free) heap bytes at this instant.
 pub fn heap_stats() -> (usize, usize) {

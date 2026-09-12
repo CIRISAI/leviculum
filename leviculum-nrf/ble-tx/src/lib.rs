@@ -42,6 +42,7 @@ pub mod gatt_bytes;
 pub mod hold;
 pub mod peer;
 pub mod registry;
+pub mod session_census;
 pub mod window;
 
 pub use adv::{
@@ -66,6 +67,7 @@ pub use registry::{
     judge_duplicate, plan_fanout, DataSilence, Duplicate, LinkUp, Origin, PeerRegistry, TxFanout,
     LINK_ACTIVE_DATA_MS, LINK_TIMEOUT_MS,
 };
+pub use session_census::{HeldBytes, SessionHeld};
 pub use window::{
     CandidateTable, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };

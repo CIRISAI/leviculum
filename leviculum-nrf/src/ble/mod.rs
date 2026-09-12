@@ -168,8 +168,90 @@ pub(crate) fn defrag_held_set(slot_index: usize, bytes: usize) {
     }
 }
 
+/// Heap bytes each link's session currently holds (#388 census): the
+/// packets queued on its private [`LINK_OUT`] queue plus the packet its
+/// pump is fragmenting right now. Written by [`queue_on_link`] (add)
+/// and the two pumps (subtract, when a packet has left or died); reset
+/// at claim (after the stale-tenancy drain) and at teardown, so a
+/// decrement lost to a cancelled pump future cannot linger. The
+/// mechanics and their host tests live in
+/// [`leviculum_ble_tx::session_census`].
+static SESSION_HELD: leviculum_ble_tx::SessionHeld<MAX_LINKS> =
+    leviculum_ble_tx::SessionHeld::new();
+
+/// Heap bytes of packets sitting in [`BLE_OUTGOING`] — handed over by
+/// the core, not yet picked up by the fan-out (#388 census).
+static OUTGOING_HELD: leviculum_ble_tx::HeldBytes = leviculum_ble_tx::HeldBytes::new();
+
+/// Heap bytes of packets sitting in [`BLE_INCOMING`] — reassembled by a
+/// session, not yet consumed by the main loop, which subtracts on
+/// receive via [`incoming_held_sub`] (#388 census).
+static INCOMING_HELD: leviculum_ble_tx::HeldBytes = leviculum_ble_tx::HeldBytes::new();
+
+/// The BLE sessions' census slice (#388): per-drain-slot held bytes and
+/// the two node-facing channels' holdings. The census line prints the
+/// per-slot values as `ble_s0..ble_s3` and their sum plus the channels
+/// as `ble_sessions=`.
+pub fn session_census() -> ([usize; MAX_LINKS], usize) {
+    let mut slots = [0usize; MAX_LINKS];
+    for (index, value) in slots.iter_mut().enumerate() {
+        *value = SESSION_HELD.get(index);
+    }
+    (slots, OUTGOING_HELD.get() + INCOMING_HELD.get())
+}
+
+/// A session pump finished with (or abandoned) a packet of `bytes`.
+pub(crate) fn session_held_sub(slot_index: usize, bytes: usize) {
+    SESSION_HELD.sub(slot_index, bytes);
+}
+
+/// The slot's queue custody is known empty: claim (post-drain) and
+/// teardown.
+pub(crate) fn session_held_reset(slot_index: usize) {
+    SESSION_HELD.reset(slot_index);
+}
+
+/// A displacement moved one queued packet from `old_slot` to `new_slot`
+/// (#376): move its bytes with it.
+pub(crate) fn session_held_moved(old_slot: usize, new_slot: usize, bytes: usize) {
+    SESSION_HELD.sub(old_slot, bytes);
+    SESSION_HELD.add(new_slot, bytes);
+}
+
+/// A session queued one reassembled packet of `bytes` on
+/// [`BLE_INCOMING`].
+pub(crate) fn incoming_held_add(bytes: usize) {
+    INCOMING_HELD.add(bytes);
+}
+
+/// The main loop consumed one inbound packet of `bytes` — the receive
+/// side of [`incoming_held_add`], called by the binaries.
+pub fn incoming_held_sub(bytes: usize) {
+    INCOMING_HELD.sub(bytes);
+}
+
 /// The channel depth every BLE packet queue uses.
 const QUEUE_DEPTH: usize = 4;
+
+/// The MTU this interface reports to the core — the largest packet the
+/// core hands it, and therefore the unit of every queue-depth × packet
+/// bound below.
+pub const INTERFACE_MTU: usize = 564;
+
+/// Worst-case heap bytes ONE BLE session pins (#388, the `per_link=`
+/// slice of the boot `HEAP_BUDGET`): its private [`LINK_OUT`] queue
+/// full, the packet its pump currently holds plus that packet's
+/// fragment copies, and one full reassembly in its defragmenter. The
+/// running actuals are the census's `ble_s<slot>=` and `ble_defrag=`
+/// terms; this constant is what they must stay under.
+pub const SESSION_BUDGET_BYTES: usize = QUEUE_DEPTH * INTERFACE_MTU // LINK_OUT full
+    + 2 * INTERFACE_MTU // pump: the packet + its fragment copies
+    + INTERFACE_MTU; // defragmenter: one in-progress reassembly
+
+/// Worst case of the two node-facing channels ([`BLE_INCOMING`] /
+/// [`BLE_OUTGOING`]) — shared across links, so the budget counts it
+/// once, in its reserve term.
+pub const CHANNEL_BUDGET_BYTES: usize = 2 * QUEUE_DEPTH * INTERFACE_MTU;
 
 /// One packet queue, as both the node-facing channels and the per-link
 /// queues use it.
@@ -428,6 +510,7 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
 async fn tx_fanout_task() -> ! {
     loop {
         let (peer, packet) = BLE_OUTGOING.receive().await;
+        OUTGOING_HELD.sub(packet.capacity());
         match columba::plan_fanout(peer.as_ref()) {
             // `Route` and `NoLink` are only reachable with a hint, so
             // the peer is Some in both arms.
@@ -479,6 +562,7 @@ async fn tx_fanout_task() -> ! {
 /// Put one packet in a link's outbound queue, reporting a full queue.
 fn queue_on_link(slot: usize, packet: Vec<u8>) {
     let len = packet.len();
+    let bytes = packet.capacity();
     if LINK_OUT[slot].try_send(packet).is_err() {
         crate::log::log_fmt(
             "[BLE ] ",
@@ -487,6 +571,10 @@ fn queue_on_link(slot: usize, packet: Vec<u8>) {
                 slot, len, QUEUE_DEPTH
             ),
         );
+    } else {
+        // #388 census: the packet is now in this link's custody, until
+        // its pump subtracts it after the last fragment (or its death).
+        SESSION_HELD.add(slot, bytes);
     }
 }
 
@@ -566,7 +654,7 @@ impl Interface for BleInterface {
         "ble"
     }
     fn mtu(&self) -> usize {
-        564
+        INTERFACE_MTU
     }
     fn is_online(&self) -> bool {
         // Online means "a frame handed to this interface can reach a
@@ -601,8 +689,13 @@ impl Interface for BleInterface {
         if let Some(run) = self.drops.resumed() {
             crate::media::log_tx_resumed(self.name(), run);
         }
+        // #388 census: the copied packet enters BLE_OUTGOING custody on
+        // success (the fan-out subtracts on receive); a refused send
+        // frees the copy right here and is not counted.
+        let bytes = data.len();
         self.sender
             .try_send((peer.copied(), data.to_vec()))
+            .map(|()| OUTGOING_HELD.add(bytes))
             .map_err(|_| {
                 // Codeberg #344: same silence as the other two. A phone that
                 // stops draining the notify path fills this queue, and the board

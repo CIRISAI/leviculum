@@ -343,8 +343,15 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     rng: R,
     /// Transport layer (routing, paths, packets) - owns the node's identity
     transport: Transport<C, S>,
-    /// Active links by ID
-    links: BTreeMap<LinkId, Link>,
+    /// Active links by ID.
+    ///
+    /// The value is boxed (#388): a `Link` is ~3 KB inline (dalek keys,
+    /// channel ring), and alloc's B-tree allocates 11-slot nodes — with
+    /// the value inline, the FIRST link pinned an ~33 KB node on the
+    /// firmware's 96 KiB heap. Boxed, a node costs 11 pointers and each
+    /// live link pays exactly one `size_of::<Link>()` block; the census
+    /// (`links=` / `n_links=`) counts both.
+    links: BTreeMap<LinkId, Box<Link>>,
     /// Tracks channel message receipts awaiting delivery proofs
     receipt_tracker: link_management::ReceiptTracker,
     /// Count of rx_ring full drops since last log
@@ -3130,7 +3137,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// it at a coarse cadence next to the `[HEAP]` line.
     pub fn heap_census(&self) -> crate::heap_census::NodeHeapCensus {
         use crate::heap_census as hc;
-        let mut links = hc::btree_map_bytes(&self.links);
+        // Map nodes (the value slot is a Box pointer since #388) plus one
+        // `size_of::<Link>()` block per live link — the Box target — plus
+        // what each link's content hangs on the heap.
+        let mut links =
+            hc::btree_map_bytes(&self.links) + self.links.len() * core::mem::size_of::<Link>();
         let mut resources = 0usize;
         for link in self.links.values() {
             links += link.content_heap_bytes();

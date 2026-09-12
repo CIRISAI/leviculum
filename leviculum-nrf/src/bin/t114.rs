@@ -164,7 +164,7 @@ async fn main(spawner: Spawner) {
 
     let mut builder = NodeCoreBuilder::new()
         .enable_transport(true)
-        .max_incoming_resource_size(8 * 1024)
+        .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
         .max_queued_announces(32)
         .max_random_blobs(8)
         .respond_to_probes(true);
@@ -182,6 +182,21 @@ async fn main(spawner: Spawner) {
     };
 
     let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
+    // #388: state the heap budget and refuse a configuration that
+    // cannot fit — at boot, where the panic names the arithmetic. The
+    // compile-time twin below fails the build before it can fail a
+    // board.
+    leviculum_nrf::heap_census::log_budget_and_assert(core::mem::size_of_val(&*node));
+    const _: () = assert!(
+        leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
+            leviculum_core::node::NodeCore<
+                leviculum_nrf::rng::RawHwRng,
+                EmbassyClock,
+                EmbeddedStorage,
+            >,
+        >()) <= leviculum_nrf::HEAP_SIZE,
+        "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
+    );
 
     let initial_path_len = node.path_count();
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
@@ -915,6 +930,9 @@ async fn main(spawner: Spawner) {
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::First((peer, data)))) => {
+                // #388 census: this packet just left BLE_INCOMING
+                // custody (counted by the session that queued it).
+                leviculum_nrf::ble::incoming_held_sub(data.capacity());
                 // The reception itself is already on the log: columba's
                 // `BLE: RX <n>B conn=<h> frags=<k>` line names the link
                 // and the peer's fragmentation (#376), so a second

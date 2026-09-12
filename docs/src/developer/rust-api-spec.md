@@ -265,7 +265,7 @@ The three abstractions you implement to run the core on a platform. Defined in
 Provided `Storage` implementations: `NoStorage` (`traits.rs:792`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
-`EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`, `heapless`-backed
+`EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`, `heapless`-backed
 for flash-constrained targets; `fn new() -> Self` at `embedded_storage.rs:344`).
 `leviculum-std` adds a file-backed `Storage` with Python-compatible on-disk
 formats.

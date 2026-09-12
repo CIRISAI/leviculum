@@ -41,6 +41,39 @@
 //! throttles during sequential validation
 //! (`reference/LXMF/LXMF/LXMRouter.py:2273`).
 //!
+//! # Heap budget (#388)
+//!
+//! The boot line `HEAP_BUDGET links=<max> per_link=<b> role=<b>
+//! reserve=<b> total=<b>` (emitted by
+//! [`crate::heap_census::log_budget_and_assert`], asserted against
+//! [`crate::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
+//! heap may reach at once:
+//!
+//! ```text
+//! total = node_box                            (size_of the boxed NodeCore,
+//!                                              ~30.5 KiB: EmbeddedStorage's
+//!                                              inline tables + core state)
+//!       + links · per_link                    links    = ble::MAX_LINKS (4)
+//!         per_link = size_of::<Link>()        one boxed Reticulum link (~2.6 KiB)
+//!                  + ble::SESSION_BUDGET_BYTES  queue full + pump + defrag
+//!                  + link-table node share      (the map value is a Box)
+//!       + role                                ROLE_BUDGET_BYTES:
+//!           BOARD_SYNC_LIMIT_KB·1000            one inbound sync batch
+//!         + 2 · BOARD_TRANSFER_LIMIT_KB·1000    two phones' queued uploads
+//!         + 4096                                peer table, offer plan, maps,
+//!                                               duplicate cache, flush queues
+//!       + reserve                             fragmentation reserve
+//!                                             + the shared BLE channels
+//!                                             + one incoming resource at
+//!                                               MAX_INCOMING_RESOURCE_BYTES
+//! ```
+//!
+//! Every term is a named constant next to the state it bounds; the
+//! census's `pn_batch=`/`pn_work=`/`ble_s<n>=` lines are the running
+//! actuals these terms must dominate. Growing any capacity means
+//! re-running this sum — the boot assertion makes forgetting that a
+//! panic at the desk instead of an allocation failure in the field.
+//!
 //! # The clock (instruction item 6)
 //!
 //! The role needs a calendar three times over: the announce timebase
@@ -241,6 +274,54 @@ const BOARD_MAX_PEERS: usize = 16;
 /// peer is local policy the reference itself exercises at its own bound;
 /// no wire byte differs.
 const BOARD_REMOTE_PEERING_COST_MAX: u8 = 18;
+
+/// Per-transfer (upload) limit announced in field 3, kilobytes of 1000
+/// (`propagation_transfer_limit`, `reference/LXMF/LXMF/LXMPeer.py:370`).
+/// The crate default, stated here because the heap budget below sums it.
+const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
+
+/// Per-sync limit announced in field 4, kilobytes of 1000 (#388).
+///
+/// Was the crate default of 32 — an appetite this board cannot even
+/// receive: the binaries cap incoming resources at
+/// [`crate::MAX_INCOMING_RESOURCE_BYTES`] (8 KiB), so a peer taking the
+/// 32 KB advertisement at its word watched its sync resource refused at
+/// the resource layer anyway. 8 keeps the announced limit truthful AND
+/// bounds the sync batch (`pn_batch=`) at a size the boot `HEAP_BUDGET`
+/// can carry; a peer with more queued simply syncs in more rounds.
+const BOARD_SYNC_LIMIT_KB: u64 = 8;
+
+// The announced sync limit must stay receivable, or it is a lie peers
+// pay for with a dead resource transfer.
+const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING_RESOURCE_BYTES);
+
+/// The role's slice of the boot heap budget (`HEAP_BUDGET role=`, #388):
+/// the worst case of the census's `pn_*` terms. Arithmetic:
+///
+/// * `pn_batch` — one inbound sync's parsed messages, bounded by the
+///   announced [`BOARD_SYNC_LIMIT_KB`] (the batch drains one message per
+///   settle pass, so at most one batch exists);
+/// * `pn_work` — queued upload payloads, one per phone at the announced
+///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
+/// * 4 KiB — everything structural: the peer table (§5: `104·16 + slack`
+///   at [`BOARD_MAX_PEERS`]), the offer plan (`pn_out`), the per-link
+///   maps, the role's duplicate cache and the store adapters' queued
+///   writes (`pn_flush`).
+pub const ROLE_BUDGET_BYTES: usize =
+    BOARD_SYNC_LIMIT_KB as usize * 1000 + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000 + 4096;
+
+/// Boot-time spine reservations (#388 step 3), allocated once in
+/// [`Engine::new`] and reused: `VecDeque`/`Vec` never shrink, so the
+/// event path re-enters these blocks instead of growing fresh ones into
+/// an already-fragmented heap. Payload bytes ride IN the items and are
+/// bounded by the announced limits above. Eight work slots: two phones'
+/// uploads plus `/get` and `/offer` rounds in flight never reached five
+/// on the field captures; growth past the reserve still works, it just
+/// pays one reallocation.
+const WORK_SLOTS: usize = 8;
+
+/// Reserve for [`Engine::too_large`], same allocate-once reasoning.
+const TOO_LARGE_SLOTS: usize = 8;
 
 /// Active-delivery retry budget per stored message (instruction item 4).
 const ACTIVE_ATTEMPTS: u8 = 3;
@@ -547,6 +628,10 @@ impl Engine {
             stamp_cost: config.stamp_cost,
             peering_cost: config.peering_cost,
             name: Some(name.as_bytes().to_vec()),
+            transfer_limit_kb: BOARD_TRANSFER_LIMIT_KB,
+            // The announced sync appetite must fit both the resource cap
+            // and the heap budget (#388) — see BOARD_SYNC_LIMIT_KB.
+            sync_limit_kb: BOARD_SYNC_LIMIT_KB,
             ..PropagationNodeConfig::default()
         };
         let mut role = PropagationNode::new(store, role_config);
@@ -583,11 +668,13 @@ impl Engine {
             identity,
             identity_hash,
             pending_proofs: BTreeMap::new(),
-            work: VecDeque::new(),
+            // #388 step 3: spines at their working size from boot,
+            // reused for the engine's lifetime (see WORK_SLOTS).
+            work: VecDeque::with_capacity(WORK_SLOTS),
             sync_batch: None,
             outbound: None,
             validated_links: BTreeMap::new(),
-            inbound_transfers: Vec::new(),
+            inbound_transfers: Vec::with_capacity(crate::ble::MAX_LINKS),
             mining_peer: None,
             last_synced: None,
             next_sync_at_ms: 0,
@@ -597,7 +684,7 @@ impl Engine {
             announce_withheld_logged: false,
             active: None,
             next_active_at_ms: 0,
-            too_large: Vec::new(),
+            too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
         })
     }
 

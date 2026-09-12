@@ -236,7 +236,7 @@ is a large trait; you do not write it from scratch:
 
 - `NoStorage` (`leviculum-core/src/traits.rs:792`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
-- `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:37`,
+- `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the
   production choice for flash-constrained devices. This is what the nRF52
   firmware uses.

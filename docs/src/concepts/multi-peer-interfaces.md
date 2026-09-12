@@ -81,22 +81,22 @@ what a broadcast domain owes its peers.
 
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
-`leviculum-nrf/src/bin/t114.rs:200`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:537`), with the
+`leviculum-nrf/src/bin/t114.rs:215`) and hardcoded in the interface
+itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:618`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:58`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
-`leviculum-nrf/src/ble/mod.rs:380`; `LINK_OUT`,
-`leviculum-nrf/src/ble/mod.rs:392`).
+`leviculum-nrf/src/ble/mod.rs:510`; `LINK_OUT`,
+`leviculum-nrf/src/ble/mod.rs:474`).
 
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:924`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:952`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:964`; the
+`leviculum-nrf/src/bin/t114.rs:949`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:977`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:989`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:904`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:929`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:3970`). So the identity-shaped
@@ -118,7 +118,7 @@ restarts the strict scan phase on that event (`CentralGone`,
 its strict phase only at a real connection event or teardown
 (`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1416`); a dial
 that timed out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1550`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1573`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.
@@ -261,7 +261,7 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 
 | Budget | Measured | Headroom |
 |---|---|---|
-| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:232`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
+| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:241`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
 | SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:88`) | **not the relevant budget, see below** |
 

@@ -751,6 +751,9 @@ async fn gatt_events(
     // previous tenancy before serving this connection.
     let outgoing_rx = super::link_out(slot_index).receiver();
     while outgoing_rx.try_receive().is_ok() {}
+    // #388 census: the queue is empty, whatever the previous tenancy
+    // left uncounted or over-counted.
+    super::session_held_reset(slot_index);
 
     let tx_handle = server.inner.reticulum_service.tx_value_handle;
 
@@ -852,7 +855,12 @@ async fn gatt_events(
                             // try_send: if the consumer is slow and the 4-deep
                             // channel is full, drop the packet rather than block
                             // here (we're in a sync closure, can't await).
-                            let _ = incoming_tx.try_send((link_peer.get(), packet));
+                            let bytes = packet.capacity();
+                            if incoming_tx.try_send((link_peer.get(), packet)).is_ok() {
+                                // #388 census: BLE_INCOMING custody; the
+                                // main loop subtracts on receive.
+                                super::incoming_held_add(bytes);
+                            }
                         }
                         DefragResult::NeedMore | DefragResult::Error => {}
                     }
@@ -888,6 +896,10 @@ async fn gatt_events(
 
             match select3(outgoing_rx.receive(), keepalive_deadline, tx_ready.wait()).await {
                 Either3::First(packet) => {
+                    // #388 census: this packet stays in the slot's
+                    // custody until its last fragment is out (or the
+                    // teardown reset catches a death mid-pump).
+                    let held_bytes = packet.capacity();
                     if !tx_hold.get().ready() {
                         // Held, not dropped (#376): the packet waits here
                         // until the subscription (or the handshake, if
@@ -920,6 +932,7 @@ async fn gatt_events(
                     )
                     .await;
                     tx_gap.packet_done(Instant::now().as_millis());
+                    super::session_held_sub(slot_index, held_bytes);
                 }
                 Either3::Second(()) => {
                     let kv = [KEEPALIVE_BYTE];
@@ -971,6 +984,7 @@ async fn gatt_events(
     peer_link_down(slot_index);
     conn_link_down(slot_index);
     super::defrag_held_set(slot_index, 0);
+    super::session_held_reset(slot_index);
     HVN_DRAIN.release(conn_handle);
 }
 
@@ -1271,9 +1285,13 @@ fn displace_old_link(
     let mut moved = 0usize;
     let mut dropped = 0usize;
     while let Ok(packet) = old_queue.try_receive() {
+        let bytes = packet.capacity();
         if new_queue.try_send(packet).is_ok() {
+            // #388 census: custody follows the packet to the new slot.
+            super::session_held_moved(old_slot, new_slot, bytes);
             moved += 1;
         } else {
+            super::session_held_sub(old_slot, bytes);
             dropped += 1;
         }
     }
@@ -1829,6 +1847,8 @@ async fn central_link(
     // thrown away with the leftovers.
     let outgoing_rx = super::link_out(slot_index).receiver();
     while outgoing_rx.try_receive().is_ok() {}
+    // #388 census: queue drained, custody starts at zero.
+    super::session_held_reset(slot_index);
     conn_link_up(slot_index, peer_value);
     if !peer_link_up(
         slot_index,
@@ -1869,6 +1889,7 @@ async fn central_link(
     peer_link_down(slot_index);
     conn_link_down(slot_index);
     super::defrag_held_set(slot_index, 0);
+    super::session_held_reset(slot_index);
     HVN_DRAIN.release(conn_handle);
 }
 
@@ -1992,7 +2013,11 @@ async fn run_central_session(
                     conn_handle,
                     frags
                 );
-                let _ = incoming_tx.try_send((Some(peer_id), packet));
+                let bytes = packet.capacity();
+                if incoming_tx.try_send((Some(peer_id), packet)).is_ok() {
+                    // #388 census, as on the peripheral side.
+                    super::incoming_held_add(bytes);
+                }
             }
             DefragResult::NeedMore | DefragResult::Error => {}
         }
@@ -2012,6 +2037,8 @@ async fn run_central_session(
                 Timer::at(last_keepalive.get() + Duration::from_millis(KEEPALIVE_INTERVAL_MS));
             match select(outgoing_rx.receive(), keepalive_deadline).await {
                 Either::First(packet) => {
+                    // #388 census, as on the peripheral pump.
+                    let held_bytes = packet.capacity();
                     serve_tx_gap(&tx_gap, conn.handle().unwrap_or(u16::MAX)).await;
                     let fragments = ble_framing::fragment_packet(&packet, ble_framing::DEFAULT_MTU);
                     let mut sent = 0usize;
@@ -2064,6 +2091,7 @@ async fn run_central_session(
                         sent += 1;
                     }
                     tx_gap.packet_done(Instant::now().as_millis());
+                    super::session_held_sub(slot_index, held_bytes);
                     // One BLE_TX_PKT per multi-fragment packet, success
                     // and failure alike (#373) — same line, same host
                     // test as the notify path's.

@@ -24,10 +24,19 @@
 //! ```text
 //! [HEAP_CENSUS] used=… free=… largest=… node_box=… links=… n_links=…
 //!   res=… events=… req=… dest=… transport=… storage=… ble_defrag=…
+//!   ble_sessions=… ble_s0=… ble_s1=… ble_s2=… ble_s3=…
 //!   pn_peers=… n_peers=… pn_work=… pn_batch=… pn_out=… pn_links=…
 //!   pn_role=… pn_flush=… other=…
 //! ```
-//! (one line on the wire; wrapped here for the page). `other` is the
+//!
+//! (one line on the wire; wrapped here for the page).
+//!
+//! `links=`/`n_links=` walk the RETICULUM link table; a BLE peer that
+//! holds only a GATT connection appears in `ble_sessions=` (total, with
+//! `ble_s<slot>=` per drain slot) — the per-connection owner the field
+//! boards' #388 panics grew in while `n_links=` stayed 0.
+//!
+//! `other` is the
 //! honesty term: `used` minus everything the census attributes — the
 //! log ring's boxes, packets in the static channels, anything not yet
 //! walked. A growing `other` means the census is missing an owner, not
@@ -107,6 +116,93 @@ impl Default for Ticker {
     }
 }
 
+/// Fragmentation reserve in the boot heap budget (#388): heap the
+/// budget leaves unclaimed so the allocator can still serve mid-sized
+/// blocks when the free list is cut up. The number to reason from is
+/// the census's `largest=`: at the rig baseline (56 K used) the loss
+/// was 41 B (`free=41632 largest=41591`), while the field failure
+/// refused 340 B with 4 760 free — fragmentation loss grows with fill,
+/// so the reserve is sized at roughly the largest single event-path
+/// allocation (an MTU packet plus its copies) times a churn factor,
+/// not at the idle loss. Re-derive from `largest=` under two-phone
+/// load when the field census arrives.
+const FRAG_RESERVE_BYTES: usize = 6 * 1024;
+
+/// One 11-slot B-tree node of the boxed link table, amortised per link
+/// in the budget's `per_link=` term (the value is a `Box` pointer since
+/// #388; the `Link` blocks are counted separately).
+const LINK_MAP_BYTES_PER_LINK: usize = 64;
+
+/// The budget's `per_link=` term. `const fn`: the binaries also assert
+/// the whole sum at compile time against their concrete `NodeCore`.
+pub const fn budget_per_link() -> usize {
+    core::mem::size_of::<leviculum_core::link::Link>()
+        + crate::ble::SESSION_BUDGET_BYTES
+        + LINK_MAP_BYTES_PER_LINK
+}
+
+/// The budget's `reserve=` term (fragmentation + shared BLE channels +
+/// one incoming resource at the binaries' cap).
+pub const fn budget_reserve() -> usize {
+    FRAG_RESERVE_BYTES + crate::ble::CHANNEL_BUDGET_BYTES + crate::MAX_INCOMING_RESOURCE_BYTES
+}
+
+/// The budget's `total=` for a node box of `node_box` bytes — the one
+/// sum both the boot line and the binaries' compile-time assertions
+/// use, so they cannot drift.
+pub const fn budget_total(node_box: usize) -> usize {
+    node_box
+        + crate::ble::MAX_LINKS * budget_per_link()
+        + crate::pn::ROLE_BUDGET_BYTES
+        + budget_reserve()
+}
+
+/// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
+/// whose worst case does not fit the heap (#388 step 4).
+///
+/// ```text
+/// HEAP_BUDGET links=<max> per_link=<b> role=<b> reserve=<b> total=<b>
+/// ```
+///
+/// * `links` — [`crate::ble::MAX_LINKS`], every claimable BLE session;
+/// * `per_link` — one boxed `Link` (`size_of`, the census's `links=`
+///   unit) + [`crate::ble::SESSION_BUDGET_BYTES`] (queue, pump,
+///   defragmenter at worst case) + the link table's node share;
+/// * `role` — [`crate::pn::ROLE_BUDGET_BYTES`], the `pn_*` worst case
+///   (arithmetic at its definition and in [`crate::pn`]'s module doc);
+///   budgeted whether or not the role is enabled this boot, because a
+///   budget that only fits with the role off is a config refusal
+///   deferred to `--set-pn on`;
+/// * `reserve` — [`FRAG_RESERVE_BYTES`] + the shared node-facing BLE
+///   channels + one incoming resource at the binaries' cap.
+///
+/// `node_box` is passed by the binary (`size_of_val` of its concrete
+/// boxed `NodeCore`) and is inside `total=` — the line has exactly the
+/// five keys the #388 instruction names, and `total ≤` [`crate::HEAP_SIZE`]
+/// is asserted: a violation panics at boot, lands in the post-mortem,
+/// and names the arithmetic instead of failing as a 340-byte
+/// allocation three days into a field run.
+pub fn log_budget_and_assert(node_box: usize) {
+    let links = crate::ble::MAX_LINKS;
+    let per_link = budget_per_link();
+    let role = crate::pn::ROLE_BUDGET_BYTES;
+    let reserve = budget_reserve();
+    let total = budget_total(node_box);
+    crate::log::log_fmt_critical(
+        "[HEAP] ",
+        format_args!(
+            "HEAP_BUDGET links={} per_link={} role={} reserve={} total={}",
+            links, per_link, role, reserve, total
+        ),
+    );
+    assert!(
+        total <= crate::HEAP_SIZE,
+        "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
+         (node box, per-link, role, reserve) before shipping this configuration",
+        crate::HEAP_SIZE
+    );
+}
+
 /// Largest single allocation the heap can currently serve, by binary
 /// search with real probe allocations. 64-byte resolution: ~12 probes
 /// against a 96 KiB pool, each an O(free-list) walk. Runs without an
@@ -151,15 +247,25 @@ where
     let (used_now, free_now) = crate::heap_stats();
     let census = node.heap_census();
     let ble = crate::ble::defrag_held_bytes();
+    // The BLE sessions' own holdings (#388 pass 2): the packets queued
+    // on the per-link queues plus what sits in the two node-facing
+    // channels. `links=`/`n_links=` above walk the RETICULUM link
+    // table, which is empty while a BLE peer merely holds a GATT
+    // connection — this owner is the one that grows with a second
+    // phone, and before it that growth hid in `other=`.
+    let (ble_slots, ble_chan) = crate::ble::session_census();
+    let ble_sessions = ble_slots.iter().sum::<usize>() + ble_chan;
+    // The per-slot keys below spell out exactly MAX_LINKS values.
+    const _: () = assert!(crate::ble::MAX_LINKS == 4);
     let pn = engine
         .map(crate::pn::Engine::heap_census)
         .unwrap_or_default();
-    let attributed = census.total() + ble + pn.total();
+    let attributed = census.total() + ble + ble_sessions + pn.total();
     let other = used_now.max(used).saturating_sub(attributed);
     crate::log::log_fmt(
         "[HEAP_CENSUS] ",
         format_args!(
-            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} other={}",
+            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} other={}",
             used_now,
             free_now,
             largest,
@@ -173,6 +279,11 @@ where
             census.transport,
             census.storage,
             ble,
+            ble_sessions,
+            ble_slots[0],
+            ble_slots[1],
+            ble_slots[2],
+            ble_slots[3],
             pn.peers,
             pn.peer_count,
             pn.work,

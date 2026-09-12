@@ -179,6 +179,75 @@ mod tests {
         assert!(est <= 50 * (2 * size_of::<usize>() + 11 * 16));
     }
 
+    /// #388 step 2: the link table's B-tree node must not scale with
+    /// `Link`. `NodeCore.links` boxes its values, so a node holds 11
+    /// pointers; with the value inline, the FIRST link pinned an
+    /// 11-slot node of ~3 KB links (~33 KB) on the 96 KiB firmware heap.
+    #[test]
+    fn boxed_link_map_node_is_pointer_sized() {
+        use crate::link::{Link, LinkId};
+        assert_eq!(
+            size_of::<alloc::boxed::Box<Link>>(),
+            size_of::<usize>(),
+            "Box<Link> must be a bare pointer"
+        );
+        let node_cost = btree_bytes_model(
+            1,
+            size_of::<LinkId>() + size_of::<alloc::boxed::Box<Link>>(),
+        );
+        assert!(
+            node_cost <= 400,
+            "one boxed-value map node costs {node_cost} B"
+        );
+        // The regression this guards against, stated as arithmetic.
+        let inline = btree_bytes_model(1, size_of::<LinkId>() + size_of::<Link>());
+        assert!(
+            inline > 8 * 1024,
+            "sanity: the inline node cost the Box removed was {inline} B"
+        );
+    }
+
+    /// #388 step 2, census side: one new link adds one `size_of::<Link>()`
+    /// block plus bounded map overhead to `links=` — never a fat node.
+    #[test]
+    fn census_counts_one_boxed_link_per_link() {
+        use crate::destination::{Destination, DestinationType, Direction};
+        use crate::identity::Identity;
+        use crate::link::Link;
+        use crate::memory_storage::MemoryStorage;
+        use crate::node::NodeCoreBuilder;
+        use crate::test_utils::{MockClock, TEST_TIME_MS};
+        use rand_core::OsRng;
+
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults());
+        let identity = Identity::generate(&mut OsRng);
+        let signing = identity.ed25519_verifying().to_bytes();
+        let dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "census",
+            &["link"],
+        )
+        .unwrap();
+        let before = node.heap_census();
+        let _ = node.connect(*dest.hash(), &signing);
+        let after = node.heap_census();
+        assert_eq!(after.link_count, before.link_count + 1);
+        let delta = after.links - before.links;
+        assert!(
+            delta >= size_of::<Link>(),
+            "census must count the boxed Link block ({delta} B reported)"
+        );
+        assert!(
+            delta <= size_of::<Link>() + 1024,
+            "one pending link must cost one Link block plus bounded \
+             overhead, got {delta} B (Link is {} B)",
+            size_of::<Link>()
+        );
+    }
+
     #[test]
     fn model_matches_hand_arithmetic() {
         // 14 entries of 24 bytes: ceil(14/7)=2 nodes, each 2 words + 11*24.

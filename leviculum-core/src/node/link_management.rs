@@ -4,6 +4,7 @@
 //! connection establishment, acceptance, data transfer, packet routing,
 //! and internal link packet processing (handshake, data, timeouts).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::constants::{
@@ -290,7 +291,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.set_phase(LinkPhase::PendingOutgoing {
             created_at_ms: now_ms,
         });
-        self.links.insert(link_id, link);
+        self.links.insert(link_id, Box::new(link));
 
         // Register retry state so check_timeouts() can re-attempt on failure.
         // Retry count is hop-aware: multi-hop paths need more attempts because
@@ -516,13 +517,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Get a link by ID
     pub fn link(&self, link_id: &LinkId) -> Option<&crate::link::Link> {
-        self.links.get(&self.resolve_link_id(link_id))
+        self.links
+            .get(&self.resolve_link_id(link_id))
+            .map(Box::as_ref)
     }
 
     /// Get a mutable reference to a link by ID
     pub fn link_mut(&mut self, link_id: &LinkId) -> Option<&mut crate::link::Link> {
         let resolved = self.resolve_link_id(link_id);
-        self.links.get_mut(&resolved)
+        self.links.get_mut(&resolved).map(Box::as_mut)
     }
 
     /// Get the number of active links
@@ -867,7 +870,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link.set_hops(packet.hops);
 
         // Store the link
-        self.links.insert(link_id, link);
+        self.links.insert(link_id, Box::new(link));
 
         // Register link_id as a local destination so that data packets
         // addressed to this link are delivered to us.

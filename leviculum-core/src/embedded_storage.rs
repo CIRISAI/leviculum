@@ -17,6 +17,22 @@ use heapless::FnvIndexMap;
 use heapless::FnvIndexSet;
 
 use crate::constants::{RATCHET_SIZE, RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES};
+
+/// Bytes of a 32-byte dedup hash actually stored (#388): the packet
+/// dedup rings key on the first 16 bytes. Dedup is a pure membership
+/// question over uniformly distributed SHA-256 packet hashes, 2^128
+/// distinctness is beyond any collision this mesh can produce, and
+/// halving the key width returns 8 KiB of the firmware node box.
+/// Applies ONLY to keys that are hashes end to end — a structured key
+/// (see `path_request_tag_set`) is not truncatable.
+const DEDUP_KEY_BYTES: usize = 16;
+
+/// The stored dedup key of a full 32-byte hash.
+fn dedup_key(hash: &[u8; 32]) -> [u8; DEDUP_KEY_BYTES] {
+    let mut key = [0u8; DEDUP_KEY_BYTES];
+    key.copy_from_slice(&hash[..DEDUP_KEY_BYTES]);
+    key
+}
 use crate::identity::Identity;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathEntry, PathState,
@@ -32,11 +48,49 @@ use crate::traits::Storage;
 /// When a collection is full, insert operations evict the oldest entry
 /// rather than panicking. This matches the MemoryStorage overflow behavior./// the protocol handles missing entries gracefully via timeouts and retransmits.
 ///
-/// **Size note**: This struct is ~20-30 KB (heapless collections are inline).
-/// On Cortex-M4, it must be placed in a `static` or `Box`, not on the stack.
+/// **Size note**: heapless collections are inline, so this struct IS the
+/// bulk of the firmware's boxed `NodeCore` (the `node_box=` figure in the
+/// `[HEAP_CENSUS]` line, Codeberg #388). On Cortex-M4 it must be placed in
+/// a `static` or `Box`, not on the stack.
+///
+/// # Byte budget (#388), per field
+///
+/// Approximate inline bytes per map, measured on the 64-bit host (the
+/// heapless maps carry no pointers in their entries, so the 32-bit target
+/// differs only in the few `usize`/`Vec` fields inside entry values —
+/// the target total is a little smaller). Per-slot cost of an
+/// `OrderedMap<K, V, N>` is roughly `K + 4 (seq) + V + 2 (hash) + 4
+/// (index)` plus padding, times N, allocated whether the slots are used
+/// or not:
+///
+/// | field                     | slots | ~bytes |
+/// |---------------------------|-------|--------|
+/// | packet_cache (x2)         | 2x256 | 11 300 |
+/// | known_identities          |     8 |  4 400 |
+/// | path_table                |    32 |  3 400 |
+/// | announce_table            |    16 |  1 800 |
+/// | announce_rate_table       |    32 |  1 500 |
+/// | path_request_tag_set      |    32 |  1 300 |
+/// | link_table                |     8 |    900 |
+/// | receipts                  |     8 |    900 |
+/// | announce_cache            |    16 |    800 |
+/// | reverse_table             |    16 |    800 |
+/// | known_ratchets            |     8 |    600 |
+/// | rest (small maps)         |       |  1 000 |
+///
+/// The guard below (`embedded_storage_base_size_guard`, plus the 32-bit
+/// compile-time assertion) holds the total; grow a capacity only with
+/// the heap budget (`HEAP_BUDGET`, leviculum-nrf) re-run.
 pub struct EmbeddedStorage {
     // Packet dedup (two-generation ring)
-    /// SHA-256 hashes of packets seen recently, current generation.
+    /// Truncated SHA-256 hashes of packets seen recently, current
+    /// generation. The stored key is the FIRST [`DEDUP_KEY_BYTES`] bytes
+    /// of the full packet hash (#388): dedup only ever asks "seen this
+    /// exact hash before?", and a 16-byte truncation keeps 2^128
+    /// distinctness — an accidental collision (a fresh packet wrongly
+    /// dropped as a duplicate) is orders of magnitude less likely than a
+    /// bit error the protocol already survives. Full 32-byte keys cost
+    /// 8 KiB more of the 96 KiB firmware heap across both generations.
     ///
     /// **Re-insert semantics:** insert is idempotent (set membership);
     /// position never changes for an already-present hash.
@@ -49,8 +103,12 @@ pub struct EmbeddedStorage {
     /// **Typical access pattern:** every received packet inserts;
     /// every received packet reads (dedup check across both generations).
     ///
-    /// **Capacity:** 256.
-    packet_cache: FnvIndexSet<[u8; 32], 256>,
+    /// **Capacity:** 256 — deliberately NOT shrunk in #388: the window
+    /// (128-256 packets across the rotation) is what stops a relayed
+    /// duplicate from re-entering the mesh, and halving it changes
+    /// semantics under burst load; the byte cost was taken out of the
+    /// key width instead.
+    packet_cache: FnvIndexSet<[u8; DEDUP_KEY_BYTES], 256>,
 
     /// Previous-generation packet dedup ring (see `packet_cache`).
     ///
@@ -59,7 +117,7 @@ pub struct EmbeddedStorage {
     /// rotation and is cleared when the next rotation promotes it again.
     ///
     /// **Capacity:** 256.
-    packet_cache_prev: FnvIndexSet<[u8; 32], 256>,
+    packet_cache_prev: FnvIndexSet<[u8; DEDUP_KEY_BYTES], 256>,
 
     // Path table
     /// Routing entries for known destinations: hops, expiry, next-hop,
@@ -249,7 +307,15 @@ pub struct EmbeddedStorage {
     /// **Typical access pattern:** inserter / reader is the path-
     /// request dedup check (very frequent under flooding).
     ///
-    /// **Capacity:** 32.
+    /// **Capacity:** 32. Deliberately NOT truncated like the packet
+    /// rings (#388): this key is STRUCTURED, not a hash — the caller
+    /// builds it as `dest_hash(16) ‖ request_tag(16)`
+    /// (`transport.rs`, grep `dedup_key`), so keeping only the first
+    /// [`DEDUP_KEY_BYTES`] bytes collapses every request for one
+    /// destination into a single key and the second request is wrongly
+    /// deduplicated (caught by
+    /// `mvr_relay_pr_from_next_hop::peer_up_pull_recovers_…`, which
+    /// re-requests the same destination on its cadence).
     path_request_tag_set: OrderedSet<[u8; 32], 32>,
 
     // Identity / security
@@ -268,8 +334,13 @@ pub struct EmbeddedStorage {
     /// (rare); reader is signature verification on receive (frequent
     /// for the active set, but goes through other code paths).
     ///
-    /// **Capacity:** 16.
-    known_identities: OrderedMap<[u8; TRUNCATED_HASHBYTES], Identity, 16>,
+    /// **Capacity:** 8, down from 16 in #388: an `Identity` is ~512
+    /// inline bytes (dalek verifying keys precompute their Edwards
+    /// point), so this table was the second-largest field, sized for a
+    /// host. A board meshes with a handful of peers; an evicted
+    /// identity is re-learned from the peer's next announce, exactly
+    /// like an evicted path.
+    known_identities: OrderedMap<[u8; TRUNCATED_HASHBYTES], Identity, 8>,
 
     /// Cached remote ratchet public keys, used for batch decryption of
     /// packets sent under the sender's current ratchet.
@@ -338,6 +409,17 @@ pub struct EmbeddedStorage {
     /// **Capacity:** 8.
     receipts: OrderedMap<[u8; TRUNCATED_HASHBYTES], PacketReceipt, 8>,
 }
+
+// #388 instruction step 1: the bound on the node box's dominant part,
+// enforced where the type lives. On the 32-bit target this struct is the
+// bulk of the one `Box<NodeCore>` block the `[HEAP_CENSUS]` line reports
+// as `node_box=`; the same bound is host-tested (with a 64-bit figure) in
+// `embedded_storage_base_size_guard` below.
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(
+    core::mem::size_of::<EmbeddedStorage>() <= 31_000,
+    "EmbeddedStorage outgrew its #388 heap budget on the 32-bit target"
+);
 
 impl EmbeddedStorage {
     /// Create a new EmbeddedStorage with all collections empty.
@@ -575,11 +657,12 @@ where
 impl Storage for EmbeddedStorage {
     // Packet Dedup
     fn has_packet_hash(&self, hash: &[u8; 32]) -> bool {
-        self.packet_cache.contains(hash) || self.packet_cache_prev.contains(hash)
+        let key = dedup_key(hash);
+        self.packet_cache.contains(&key) || self.packet_cache_prev.contains(&key)
     }
 
     fn add_packet_hash(&mut self, hash: [u8; 32]) {
-        let _ = self.packet_cache.insert(hash);
+        let _ = self.packet_cache.insert(dedup_key(&hash));
         // Two-generation rotation: when current exceeds half capacity, rotate
         if self.packet_cache.len() > 128 {
             self.rotate_packet_cache();
@@ -1068,11 +1151,19 @@ mod tests {
         // 768 B over the 32-slot path table — so the peer-loss cull can
         // attribute an entry whose announce identity differs from its
         // link identity (Columba). 43_500 -> 44_300; measured 43_696 B.
+        //
+        // Deliberate tightening 2026-09-12 (Codeberg #388): packet-ring
+        // dedup keys truncated to 16 B (−8 192; the tag set stays at 32 B,
+        // its key is structured — see the field) and known_identities
+        // halved to 8 slots (−4 352). 44_300 -> 31_500; measured 31_120 B
+        // on the 64-bit host. The 32-bit target has its own compile-time
+        // assertion beside the struct.
         let size = core::mem::size_of::<EmbeddedStorage>();
         assert!(
-            size <= 44_300,
-            "EmbeddedStorage grew to {size} B; the eviction order tracking must \
-             not duplicate full keys (Batch 12 regression was 45616 B)"
+            size <= 31_500,
+            "EmbeddedStorage grew to {size} B; every slot here is boxed-NodeCore \
+             heap on the board (#388) — grow a capacity only with the HEAP_BUDGET \
+             arithmetic re-run"
         );
     }
 
@@ -1664,7 +1755,7 @@ mod tests {
     #[test]
     fn level1_known_identities_overflow_correctness() {
         let mut s = EmbeddedStorage::new();
-        let cap = 16;
+        let cap = 8;
         for i in 0..(cap * 3) {
             s.set_identity(key_th(i), Identity::generate(&mut OsRng));
         }
@@ -1680,7 +1771,7 @@ mod tests {
     #[test]
     fn level2_known_identities_refresh_on_reinsert() {
         let mut s = EmbeddedStorage::new();
-        let cap = 16;
+        let cap = 8;
         for i in 0..cap {
             s.set_identity(key_th(i), Identity::generate(&mut OsRng));
         }
