@@ -627,7 +627,7 @@ pub struct TransportConfig {
     /// host behaviour and Python's (`Transport.py:116`, `link_table = {}`
     /// — a dict on a host with gigabytes). `Some(n)` refuses the link
     /// past `n` live entries: an inbound request gets no link and no
-    /// proof (`LINK_REFUSED`), an outbound [`NodeCore::connect`] returns
+    /// proof (`LINK_REFUSED`), an outbound [`crate::node::NodeCore::connect`] returns
     /// [`crate::link::LinkError::TableFull`]. Wire and semantics are
     /// unchanged — a refused request is a request that got no proof,
     /// which every peer already handles with its establishment timeout
