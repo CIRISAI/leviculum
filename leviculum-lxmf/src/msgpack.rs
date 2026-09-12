@@ -39,6 +39,8 @@ pub enum Kind {
     True,
     Array,
     Float,
+    Map,
+    Str,
     Other,
 }
 
@@ -127,6 +129,8 @@ pub fn peek_kind(d: &[u8], p: usize) -> Result<Kind, Error> {
         Marker::True => Kind::True,
         Marker::FixArray(_) | Marker::Array16 | Marker::Array32 => Kind::Array,
         Marker::F32 | Marker::F64 => Kind::Float,
+        Marker::FixMap(_) | Marker::Map16 | Marker::Map32 => Kind::Map,
+        Marker::FixStr(_) | Marker::Str8 | Marker::Str16 | Marker::Str32 => Kind::Str,
         _ => Kind::Other,
     })
 }

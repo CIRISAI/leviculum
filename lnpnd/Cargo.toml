@@ -14,6 +14,65 @@ description = "LXMF propagation node daemon for Reticulum — the host-side mail
 [lints.rust]
 unsafe_code = "forbid"
 
+[package.metadata.deb]
+name = "lnpnd"
+maintainer = "Lew Palm <lp@lew-palm.de>"
+copyright = "2026, Lew Palm"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+lnpnd runs an LXMF propagation node -- a store-and-forward mailbox on a
+Reticulum mesh. Clients (Sideband, MeshChat, lxmd-based tools) configure
+its destination hash as their propagation node; messages for offline
+recipients wait in its store, and the node peers with other propagation
+nodes and syncs stored messages both ways.
+
+lnpnd is a drop-in counterpart to Python's lxmd: it reads lxmd's config
+file format and keys, keeps lxmd's config-directory layout, answers the
+same remote-management queries (lxmd --status --remote works against it
+and vice versa), and carries its own LXMF mailbox with an on_inbound
+hook.
+
+The package installs lnpnd as a systemd service under a dedicated
+'lnpnd' user. It attaches to a running Reticulum shared instance --
+lnsd from the 'leviculum' package, or the Python rnsd.
+"""
+section = "net"
+priority = "optional"
+# Both entries are real: adduser because postinst creates the service
+# user; the binary itself is musl-static with no library dependencies.
+# leviculum is a Recommends rather than a Depends for the same reason as
+# in lblogd: the daemon needs *a* Reticulum shared instance, and the
+# Python rnsd is equally valid.
+depends = "adduser"
+recommends = "leviculum"
+assets = [
+    # cargo-deb only recognises "target/release/..." exactly as a Cargo
+    # target path and auto-substitutes the --target triple into it. Any
+    # prefix disables the rewrite and silently picks up stale non-musl
+    # builds -- see leviculum-cli/Cargo.toml.
+    ["target/release/lnpnd", "usr/bin/", "755"],
+    # Rendered from docs/src/man/ by scripts/md2man.py, which the
+    # build-deb recipes run before this; cargo-deb gzips it itself.
+    ["../target/man/lnpnd.1", "usr/share/man/man1/lnpnd.1", "644"],
+    # Documented overrides for the two lintian tags a musl-static binary
+    # always trips.
+    ["../packaging/lintian/lnpnd", "usr/share/lintian/overrides/lnpnd", "644"],
+    # Codeberg #288; see leviculum-cli/Cargo.toml for what this file is
+    # and why a musl-static package needs it.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/lnpnd/THIRD-PARTY-NOTICES", "644"],
+]
+# Generated per build by scripts/deb-stamp.sh, because Debian wants the
+# top entry to carry this build's version and the version is stamped.
+changelog = "../target/deb-changelog/lnpnd"
+maintainer-scripts = "../packaging/lnpnd/"
+
+[package.metadata.deb.systemd-units]
+unit-name = "lnpnd"
+unit-scripts = "../packaging/lnpnd/"
+enable = true
+start = true
+restart-after-upgrade = true
+
 [dependencies]
 # The propagation-node role, the store trait, and the wire codecs.
 leviculum-lxmf = { path = "../leviculum-lxmf" }

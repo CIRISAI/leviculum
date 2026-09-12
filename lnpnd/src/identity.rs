@@ -54,6 +54,14 @@ pub fn load_or_create(path: &Path) -> Result<Identity, IdentityError> {
             .private_key_bytes()
             .map_err(|_| IdentityError::NotStorable)?;
         std::fs::write(path, private).map_err(io_err)?;
+        // Private key material: owner-only, tighter than the reference's
+        // umask-default (the config directory's 0750 is the other layer).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(io_err)?;
+        }
         Ok(identity)
     }
 }

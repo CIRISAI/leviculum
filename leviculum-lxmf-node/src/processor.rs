@@ -766,6 +766,41 @@ impl LxmfHelperProcessor {
                 }
                 None => self.emitter.error("propagation node not enabled"),
             },
+            Command::PnAllowControl { identity } => match self.pn.as_mut() {
+                Some(pn) => {
+                    if pn.engine.allow_control(core, identity, out) {
+                        self.emitter.event(
+                            "lxmf_pn_control_allowed",
+                            &[("identity", hex_encode(&identity))],
+                        );
+                    } else {
+                        self.emitter.error("propagation node not ready");
+                    }
+                }
+                None => self.emitter.error("propagation node not enabled"),
+            },
+            Command::ControlIdentity { path } => {
+                // A fresh identity, written in the RNS identity-file
+                // format (64 bytes of private key material) so `lxmd
+                // --identity` and `lnpnd --identity` load it alike.
+                let identity = Identity::generate(&mut rand_core::OsRng);
+                match identity
+                    .private_key_bytes()
+                    .map_err(|e| format!("{e:?}"))
+                    .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => self.emitter.event(
+                        "lxmf_control_identity",
+                        &[
+                            ("hash", hex_encode(identity.hash())),
+                            ("path", path.clone()),
+                        ],
+                    ),
+                    Err(detail) => self
+                        .emitter
+                        .error(&format!("control identity write failed: {detail}")),
+                }
+            }
             Command::SetPn { node } => {
                 // Same precondition and polling contract as Python's
                 // lxmf_set_propagation_node: the announce must have been
@@ -900,6 +935,15 @@ impl LxmfHelperProcessor {
             announce_delay_secs: announce_delay_secs.unwrap_or(lnpnd::engine::ANNOUNCE_DELAY_SECS),
             peering,
             peer_store: Box::new(peer_store),
+            // Remote management is enabled per scenario via
+            // `pn_allow_control`; the daemon's own mailbox and `/get`
+            // auth are lnpnd-binary features the helper does not carry
+            // (the helper's delivery router is its own).
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: store_limit,
+            delivery_limit_kb: leviculum_lxmf::constants::DELIVERY_LIMIT_KB,
         });
         // One tick registers the destination and the `/get` handler; the
         // Ready event is drained right below.

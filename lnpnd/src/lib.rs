@@ -19,6 +19,10 @@
 //! instance exactly like `lnmsg` and `lblogd` do; it does not start a stack
 //! of its own.
 
+pub mod client;
+pub mod config;
 pub mod engine;
 pub mod identity;
+pub mod mailbox;
 pub(crate) mod peering;
+pub(crate) mod validation;

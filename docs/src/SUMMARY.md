@@ -49,6 +49,7 @@
 - [Manual page: lnprobe(1)](man/lnprobe.1.md)
 - [Manual page: lnomad(1)](man/lnomad.1.md)
 - [Manual page: lblogd(1)](man/lblogd.1.md)
+- [Manual page: lnpnd(1)](man/lnpnd.1.md)
 - [Manual page: lnflash(1)](man/lnflash.1.md)
 
 # Firmware (LNode)

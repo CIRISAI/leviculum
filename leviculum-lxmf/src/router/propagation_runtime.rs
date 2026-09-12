@@ -1320,6 +1320,40 @@ impl LxmfRouter {
         }
     }
 
+    /// Deliver one unstamped propagated message (`destination_hash ‖
+    /// ciphertext`) addressed to our own delivery destination, locally.
+    ///
+    /// The reference's propagation node short-circuits exactly this case:
+    /// a propagated message whose destination is one of the router's own
+    /// delivery destinations is decrypted and delivered instead of stored
+    /// (`lxmf_propagation`, `reference/LXMF/LXMF/LXMRouter.py:2501-2509`).
+    /// A propagation-node host (lnpnd) calls this after its store accept
+    /// path identified the destination as its own mailbox; a message for
+    /// anyone else is `RouterError::NotFound` and stays the store's.
+    pub fn deliver_propagated_local<R, C, S>(
+        &mut self,
+        node: &NodeCore<R, C, S>,
+        unstamped: &[u8],
+    ) -> Result<RouterOutput, RouterError>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let mut output = RouterOutput::default();
+        let delivered = {
+            let propagated = PropagatedMessage::from_unstamped_bytes(unstamped)?;
+            propagated.destination_hash() == self.node.delivery_destination_hash().as_bytes()
+        };
+        if !delivered {
+            return Err(RouterError::NotFound);
+        }
+        // Wall clock from the one producer, never the caller (#182).
+        let now_unix = super::emission_secs(node);
+        deliver_unstamped(self, node, unstamped, now_unix, &mut output)?;
+        Ok(self.finish_output(output))
+    }
+
     pub fn request_messages_from_propagation_node<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,

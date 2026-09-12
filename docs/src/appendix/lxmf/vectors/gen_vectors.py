@@ -913,6 +913,115 @@ def gen_propagation_node_vectors():
 
 
 # --------------------------------------------------------------------------
+# Remote-management control protocol (leviculum#384 part 4).
+# --------------------------------------------------------------------------
+
+def gen_control_vectors():
+    """Pin the control-destination payload encodings.
+
+    The stats response is the msgpack packing of the dict compile_stats
+    builds (LXMRouter.py:769-836); the dict here mirrors its insertion
+    order and value types key for key, with fixed values, so the hex is
+    exactly what a stock node would put on the wire for that state. The
+    trigger acknowledgement is packb(True) (LXMRouter.py:853) and every
+    refusal is packb(<LXMPeer error int>) (LXMRouter.py:839-865).
+    """
+    peer_static = {
+        "type": "static",
+        "state": 0x00,
+        "alive": True,
+        "name": "pn-b",
+        "last_heard": 1000,
+        "next_sync_attempt": 0,
+        "last_sync_attempt": 900,
+        "sync_backoff": 0,
+        "peering_timebase": 800,
+        "ler": 1200,
+        "str": 40000,
+        "transfer_limit": 256,
+        "sync_limit": 10240,
+        "target_stamp_cost": 16,
+        "stamp_cost_flexibility": 3,
+        "peering_cost": 18,
+        "peering_key": 19,
+        "network_distance": 1,
+        "rx_bytes": 100,
+        "tx_bytes": 200,
+        "acceptance_rate": 1.0,
+        "messages": {"offered": 4, "outgoing": 4, "incoming": 2, "unhandled": 0},
+    }
+    peer_fresh = {
+        "type": "discovered",
+        "state": 0x00,
+        "alive": False,
+        "name": None,
+        "last_heard": 0,
+        "next_sync_attempt": 0,
+        "last_sync_attempt": 0,
+        "sync_backoff": 0,
+        "peering_timebase": 0,
+        "ler": 0,
+        "str": 0,
+        "transfer_limit": None,
+        "sync_limit": None,
+        "target_stamp_cost": None,
+        "stamp_cost_flexibility": None,
+        "peering_cost": None,
+        "peering_key": None,
+        "network_distance": RNS.Transport.PATHFINDER_M,
+        "rx_bytes": 0,
+        "tx_bytes": 0,
+        "acceptance_rate": 0.0,
+        "messages": {"offered": 0, "outgoing": 0, "incoming": 0, "unhandled": 0},
+    }
+    node_stats = {
+        "identity_hash": bytes([0x11] * 16),
+        "destination_hash": bytes([0x22] * 16),
+        "uptime": 42.5,
+        "delivery_limit": 1000,
+        "propagation_limit": 256,
+        "sync_limit": 10240,
+        "target_stamp_cost": 16,
+        "stamp_cost_flexibility": 3,
+        "peering_cost": 18,
+        "max_peering_cost": 26,
+        "autopeer_maxdepth": 4,
+        "from_static_only": False,
+        "messagestore": {"count": 2, "bytes": 4096, "limit": 500000000},
+        "clients": {
+            "client_propagation_messages_received": 5,
+            "client_propagation_messages_served": 3,
+        },
+        "unpeered_propagation_incoming": 1,
+        "unpeered_propagation_rx_bytes": 2048,
+        "static_peers": 1,
+        "discovered_peers": 1,
+        "total_peers": 2,
+        "max_peers": 20,
+        "peers": {bytes([0x33] * 16): peer_static, bytes([0x44] * 16): peer_fresh},
+    }
+    add({
+        "id": "VEC-PN-CONTROL",
+        "title": "Control destination payloads: stats map, trigger ack, errors",
+        "kind": "frozen",
+        "citation": "LXMRouter.py:89-91 (paths); :672-676 (control "
+                    "destination and allow list); :769-836 (compile_stats); "
+                    ":838-865 (handlers); LXMPeer.py:24-31 (error codes)",
+        "structure": "request/response payloads are msgpack.packb(value)",
+        "stats_get_path": LXMRouter.STATS_GET_PATH,
+        "sync_request_path": LXMRouter.SYNC_REQUEST_PATH,
+        "unpeer_request_path": LXMRouter.UNPEER_REQUEST_PATH,
+        "hops_unknown": RNS.Transport.PATHFINDER_M,
+        "stats_response_hex": msgpack.packb(node_stats).hex(),
+        "ack_response_hex": msgpack.packb(True).hex(),
+        "error_no_identity_hex": msgpack.packb(LXMPeer.ERROR_NO_IDENTITY).hex(),
+        "error_no_access_hex": msgpack.packb(LXMPeer.ERROR_NO_ACCESS).hex(),
+        "error_invalid_data_hex": msgpack.packb(LXMPeer.ERROR_INVALID_DATA).hex(),
+        "error_not_found_hex": msgpack.packb(LXMPeer.ERROR_NOT_FOUND).hex(),
+    })
+
+
+# --------------------------------------------------------------------------
 # Determinism self-check for frozen vectors.
 # --------------------------------------------------------------------------
 
@@ -926,6 +1035,7 @@ def assert_determinism():
     gen_propagation_client_vectors()
     gen_announce_vectors()
     gen_propagation_node_vectors()
+    gen_control_vectors()
     for v in VECTORS:
         again = json.dumps(v, sort_keys=True)
         if snapshot[v["id"]] != again:
@@ -944,6 +1054,7 @@ def main():
     gen_propagation_client_vectors()
     gen_announce_vectors()
     gen_propagation_node_vectors()
+    gen_control_vectors()
     assert_determinism()
 
     doc = {

@@ -68,6 +68,20 @@ pub enum Command {
     /// un-offered toward that peer (live entries above its cursor; the
     /// Python helper answers from the reference's per-peer unhandled set).
     PnUnhandled { peer: [u8; 16] },
+    /// `pn_allow_control <identity_hex>` — allow one identity on the
+    /// node's remote-management control destination and re-announce so
+    /// the remote can resolve it (leviculum#384 part 4; the Python side
+    /// runs `allow_control` + `announce_propagation_node`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:478-481`, `:342`). Emits
+    /// `lxmf_pn_control_allowed identity=<hex>`.
+    PnAllowControl { identity: [u8; 16] },
+    /// `control_identity <path>` — write a fresh RNS-format identity
+    /// file to `path` (inside the helper's own filesystem view) and emit
+    /// `lxmf_control_identity hash=<identity_hash_hex> path=<path>`. The
+    /// driver hands the hash to a node's `pn_allow_control` and the path
+    /// to the `lxmd`/`lnpnd` CLI's `--identity`, which is how one
+    /// scenario proves the remote-management round both ways.
+    ControlIdentity { path: String },
     /// `set_pn <hex>` — select the outbound propagation node. Errors until
     /// the node's identity is known from an announce, so the driver can poll.
     /// Emits `lxmf_pn_selected peer=<hex>`.
@@ -180,6 +194,22 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
             };
             Ok(Some(Command::PnUnhandled {
                 peer: parse_destination_hash(hash)?,
+            }))
+        }
+        "pn_allow_control" => {
+            let Some(hash) = parts.next() else {
+                return Err(CommandError::new("usage: pn_allow_control <identity_hex>"));
+            };
+            Ok(Some(Command::PnAllowControl {
+                identity: parse_destination_hash(hash)?,
+            }))
+        }
+        "control_identity" => {
+            let Some(path) = parts.next() else {
+                return Err(CommandError::new("usage: control_identity <path>"));
+            };
+            Ok(Some(Command::ControlIdentity {
+                path: path.to_string(),
             }))
         }
         "set_pn" => {

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- lnpnd grows to lxmd's full scope (#384 part 4). Remote management:
+  the node registers lxmd's `lxmf.propagation.control` destination with
+  the `/pn/get/stats`, `/pn/peer/sync` and `/pn/peer/unpeer` request
+  paths behind the same identity allow list (`control_allowed`), and
+  answers with the reference's stats map — `lxmd --status --peers
+  --sync --break --remote` drives an lnpnd node, and lnpnd carries the
+  same client verbs with output in lxmd's shape, driving stock lxmd
+  nodes in return (both directions in the conformance corpus, the
+  payload encodings pinned byte-exact against `umsgpack` in
+  `VEC-PN-CONTROL`). The daemon's own mailbox: an LXMF delivery
+  destination on the node identity, announced with `display_name` and
+  `stamp_cost`, each received message written in the reference's
+  packed-container file format and handed to the `on_inbound` hook;
+  propagated uploads addressed to the node's own mailbox deliver
+  locally instead of rotting in the store, the reference's own
+  short-circuit. Configuration: an lxmd-format config directory
+  (`config`, `identity`, `allowed`, `ignored`, `storage/`) with lxmd's
+  sections and key names, flags as overrides, `--exampleconfig`, and
+  `auth_required` gating `/get`; the keys lnpnd accepts but does not
+  act on are named in lnpnd(1) with reasons. Packaging: lnpnd joins
+  the `.deb` builds with a hardened systemd unit, a dedicated service
+  user, `--service` file logging and a manual page. Propagation-stamp
+  validation moved off the core lock onto a single worker thread
+  (arrival order preserved — the proof still leaves only after the
+  store append), so a cost-13 default no longer spends ~10 ms of the
+  core mutex per accepted message.
+
 - Propagation-node peering (#384 part 2): lnpnd now peers with other
   propagation nodes — including stock Python `lxmd` at its default
   peering cost — and syncs its store both ways. The protocol half lives

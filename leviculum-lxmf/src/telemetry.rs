@@ -577,7 +577,7 @@ fn parse_power_producer(entry: &[u8]) -> Option<PowerProducer> {
     }
     let power = msgpack::read_number(entry, &mut vp).ok()?;
     let custom_icon = match msgpack::peek_kind(entry, vp) {
-        Ok(Kind::Other) => msgpack::read_str(entry, &mut vp).ok().map(String::from),
+        Ok(Kind::Str) | Ok(Kind::Other) => msgpack::read_str(entry, &mut vp).ok().map(String::from),
         _ => None,
     };
     Some(PowerProducer {

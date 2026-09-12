@@ -1,0 +1,30 @@
+#!/bin/sh
+# postrm for lnpnd — on purge, remove the data and config directories and
+# the system user/group.
+
+set -e
+
+case "$1" in
+    purge)
+        # This destroys the node identity along with the message store,
+        # so the node's mesh address — the hash every client configured —
+        # does not survive a purge. That is what purge means; `apt
+        # remove` without --purge leaves it all intact.
+        rm -rf /var/lib/lnpnd
+        rm -rf /etc/lnpnd
+
+        if getent passwd lnpnd >/dev/null; then
+            deluser --quiet --system lnpnd >/dev/null 2>&1 || true
+        fi
+        if getent group lnpnd >/dev/null; then
+            delgroup --quiet --system lnpnd >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

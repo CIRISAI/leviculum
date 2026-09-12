@@ -42,6 +42,7 @@ extern crate alloc;
 pub mod announce;
 pub mod attachments;
 pub mod constants;
+pub mod control;
 pub mod message;
 pub mod msgpack;
 pub mod node;
@@ -59,6 +60,10 @@ pub mod ticket;
 
 pub use attachments::{
     AttachmentError, AudioAttachment, FileAttachment, ImageAttachment, MessageAttachments,
+};
+pub use control::{
+    encode_control_ack, encode_control_error, ControlNodeStats, ControlPeerStats, ControlResponse,
+    CONTROL_ASPECTS, HOPS_UNKNOWN, STATS_GET_PATH, SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
 };
 pub use message::{DeliveryMethod, Field, Message, MessageError, Verification};
 pub use node::{

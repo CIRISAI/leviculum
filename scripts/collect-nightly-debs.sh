@@ -6,11 +6,12 @@
 # runs.
 #
 # Expects, for both musl triples under target/<triple>/release/:
-#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnomad, lblogd
+#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnomad, lblogd, lnpnd
 # and one .deb per package and arch under target/debian/:
 #   leviculum_*_{amd64,arm64}.deb
 #   lnomad_*_{amd64,arm64}.deb
 #   lblogd_*_{amd64,arm64}.deb
+#   lnpnd_*_{amd64,arm64}.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
 #   target/lnflash/lnflash-<version>.tar.gz
 # plus:
@@ -18,7 +19,7 @@
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
 #   .deb-version-<crate> files from scripts/deb-stamp.sh (ditto)
 #
-# Produces, for each of leviculum, lnomad and lblogd, and each of amd64
+# Produces, for each of leviculum, lnomad, lblogd and lnpnd, and each of amd64
 # and arm64:
 #   dist/<pkg>-nightly-<arch>.deb          + .sha256
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
@@ -74,12 +75,14 @@ collect_deb lnomad amd64
 collect_deb lnomad arm64
 collect_deb lblogd amd64
 collect_deb lblogd arm64
+collect_deb lnpnd amd64
+collect_deb lnpnd arm64
 
 # Per-arch userspace binary tarball: the package's binaries plus
 # README/LICENSE and a VERSION pointer. Drop-in for users who want the
 # tools without root, system service, or .deb tooling.
 pack_bin_tarball() {
-    local pkg="$1"          # leviculum | lnomad | lblogd
+    local pkg="$1"          # leviculum | lnomad | lblogd | lnpnd
     local arch_dash="$2"    # amd64 | arm64
     local rust_triple="$3"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
     local readme_src="$4"   # per-package README, path relative to repo root
@@ -136,6 +139,8 @@ pack_bin_tarball lnomad amd64 x86_64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lnomad arm64 aarch64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lblogd arm64 aarch64-unknown-linux-musl lblogd/README.md lblogd
+pack_bin_tarball lnpnd amd64 x86_64-unknown-linux-musl README.md lnpnd
+pack_bin_tarball lnpnd arm64 aarch64-unknown-linux-musl README.md lnpnd
 
 # The lnflash bundle is already a finished tarball — binary, firmware
 # UF2, SoftDevice, licences and a manifest of checksums over all of it —

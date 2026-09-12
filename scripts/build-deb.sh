@@ -60,8 +60,8 @@ esac
 # Every crate that ships a Debian package, and every binary the three of
 # them install between them. Kept in the same order as deb-stamp.sh's
 # CRATES, which writes the version files read below.
-CRATES=(leviculum-cli lnomad lblogd)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnomad lblogd)
+CRATES=(leviculum-cli lnomad lblogd lnpnd)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnomad lblogd lnpnd)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled

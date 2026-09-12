@@ -13,8 +13,11 @@ use std::{
 
 const LXMF_VERSION: &str = "1.1.0";
 const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
+// Updated 2026-09-12 for VEC-PN-CONTROL (leviculum#384 part 4): the
+// regeneration added one vector and left every existing record
+// byte-identical (diffed id-by-id before this hash moved).
 const VECTOR_FIXTURE_SHA256: &str =
-    "7941bf33ffd60db750fc33faf8cd47e0c08593d8a636cd9fa6da1177a3abff9c";
+    "196fb0692f23d5d98fb7d258101cfd5dfa596f9b68aaa8f61366bc1de055736a";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (

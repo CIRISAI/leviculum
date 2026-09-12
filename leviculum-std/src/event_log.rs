@@ -695,6 +695,44 @@ pub fn install_global_subscriber(default_filter: &str) {
     }
 }
 
+/// [`install_global_subscriber`], but appending the fmt output to a file
+/// instead of the terminal — service mode for a daemon whose reference
+/// counterpart logs to `<configdir>/logfile` when run with `-s`
+/// (`lxmd --service`, `reference/LXMF/LXMF/Utilities/lxmd.py:319-321`).
+/// Falls back to the terminal when the file cannot be opened, because a
+/// daemon that silences itself over a log-file permission error is
+/// undiagnosable.
+pub fn install_global_subscriber_to_file(default_filter: &str, path: &std::path::Path) {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "event_log: could not open log file {} ({error}); logging to stderr",
+                path.display()
+            );
+            install_global_subscriber(default_filter);
+            return;
+        }
+    };
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let writer = Mutex::new(file);
+    let fmt_layer = fmt::layer()
+        .compact()
+        .with_ansi(false)
+        .with_writer(writer)
+        .with_filter(env_filter);
+    if std::env::var(LOG_FILE_ENV_VAR).is_ok() {
+        let _ = Registry::default().with(fmt_layer).with(layer()).try_init();
+    } else {
+        let _ = Registry::default().with(fmt_layer).try_init();
+    }
+}
+
 /// The layer registered into the global subscriber chain.  Driven by
 /// the active-handles list above.
 pub struct EventLogLayer {

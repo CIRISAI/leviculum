@@ -21,7 +21,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use leviculum_core::transport::TickOutput;
 use leviculum_core::{Destination, DestinationHash, Identity, LinkId, Storage as _};
-use leviculum_lxmf::constants::{WORKBLOCK_EXPAND_ROUNDS_PEERING, WORKBLOCK_EXPAND_ROUNDS_PN};
+use leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PEERING;
+use leviculum_lxmf::control::{ControlPeerStats, HOPS_UNKNOWN};
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     answer_offer, build_offer, peering_key_material, response_action, DeclineReason, DropReason,
@@ -88,6 +89,24 @@ struct MiningJob {
 /// The concrete core type, same alias the engine uses.
 type Core = leviculum_std::driver::StdNodeCore;
 
+/// Per-peer traffic counters for the control stats — runtime state, not
+/// persisted, exactly like the reference's own counters, which reset with
+/// the sync state on restore (`LXMPeer.from_bytes` rebuilds them from the
+/// persisted dict; ours restart at zero and the stats say so honestly).
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerTraffic {
+    offered: u64,
+    outgoing: u64,
+    incoming: u64,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    last_sync_attempt: u64,
+    /// The last round's outcome: the reference's `alive` flips true when
+    /// a sync link comes up and false when an attempt outlives the last
+    /// answer (`reference/LXMF/LXMF/LXMPeer.py:280`, `:328`, `:514`).
+    alive: bool,
+}
+
 pub(crate) struct PeeringRuntime {
     table: PeerTable,
     gate: InboundGate,
@@ -107,6 +126,18 @@ pub(crate) struct PeeringRuntime {
     mining: Option<MiningJob>,
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
+    /// Runtime traffic counters per peer, for the control stats.
+    traffic: HashMap<[u8; 16], PeerTraffic>,
+    /// Peer display names from announce metadata (`PN_META_NAME`), for
+    /// the control stats; runtime-only, like the counters.
+    names: HashMap<[u8; 16], String>,
+    /// Sync-form messages accepted from nodes not in the peer table.
+    unpeered_incoming: u64,
+    unpeered_rx_bytes: u64,
+    /// A `--sync <peer>` trigger: sync this peer on the next scheduler
+    /// pass, ahead of the round-robin (`peer_sync_request` calls the
+    /// peer's own `sync()`, `reference/LXMF/LXMF/LXMRouter.py:852`).
+    forced_next: Option<[u8; 16]>,
     events: std::sync::mpsc::Sender<EngineEvent>,
 }
 
@@ -135,6 +166,11 @@ impl PeeringRuntime {
             mining: None,
             last_synced: None,
             next_sync_at_ms: 0,
+            traffic: HashMap::new(),
+            names: HashMap::new(),
+            unpeered_incoming: 0,
+            unpeered_rx_bytes: 0,
+            forced_next: None,
             events,
         }
     }
@@ -192,6 +228,125 @@ impl PeeringRuntime {
         // Make the next tick schedule immediately.
         self.next_sync_at_ms = 0;
         true
+    }
+
+    /// Sync one peer now, ahead of the round-robin — the
+    /// [`leviculum_lxmf::control::SYNC_REQUEST_PATH`] trigger
+    /// (`peer_sync_request` calls the peer's own `sync()`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:852`). `false` when the peer is
+    /// unknown, which the handler answers `ERROR_NOT_FOUND`.
+    pub(crate) fn trigger_sync(&mut self, destination_hash: &[u8; 16]) -> bool {
+        let Some(peer) = self.table.get_mut(destination_hash) else {
+            return false;
+        };
+        peer.next_sync_attempt = 0;
+        peer.sync_backoff_secs = 0;
+        self.forced_next = Some(*destination_hash);
+        self.next_sync_at_ms = 0;
+        true
+    }
+
+    /// Break one peering — the
+    /// [`leviculum_lxmf::control::UNPEER_REQUEST_PATH`] trigger
+    /// (`peer_unpeer_request` calls `unpeer`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:864`). `false` when unknown.
+    pub(crate) fn unpeer(&mut self, destination_hash: &[u8; 16]) -> bool {
+        if !self.table.remove(destination_hash) {
+            return false;
+        }
+        self.forget(destination_hash);
+        self.traffic.remove(destination_hash);
+        if self.forced_next == Some(*destination_hash) {
+            self.forced_next = None;
+        }
+        self.log_peer("drop", destination_hash, "control");
+        true
+    }
+
+    /// Messages accepted over sync links from nodes not in the peer table
+    /// (`unpeered_propagation_incoming` / `…_rx_bytes` in the stats,
+    /// `reference/LXMF/LXMF/LXMRouter.py:827-828`).
+    pub(crate) fn unpeered_incoming(&self) -> (u64, u64) {
+        (self.unpeered_incoming, self.unpeered_rx_bytes)
+    }
+
+    fn traffic_mut(&mut self, destination_hash: &[u8; 16]) -> &mut PeerTraffic {
+        self.traffic.entry(*destination_hash).or_default()
+    }
+
+    /// Per-peer stats for the control destination — the fields of
+    /// `compile_stats`'s peer entries (`reference/LXMF/LXMF/LXMRouter.py:775-803`)
+    /// that this engine tracks; byte and message counters are runtime
+    /// counters since start, rates are not measured and reported as 0.
+    pub(crate) fn control_peer_stats(&self, core: &Core) -> Vec<ControlPeerStats> {
+        self.table
+            .iter()
+            .map(|peer| {
+                let traffic = self
+                    .traffic
+                    .get(&peer.destination_hash)
+                    .copied()
+                    .unwrap_or_default();
+                let acceptance_rate = if traffic.offered > 0 {
+                    traffic.outgoing as f64 / traffic.offered as f64
+                } else {
+                    0.0
+                };
+                ControlPeerStats {
+                    peer_id: peer.destination_hash,
+                    is_static: peer.is_static,
+                    state: match peer.state {
+                        // The reference's ladder (`LXMPeer.py:17-22`); key
+                        // mining has no reference state and reports IDLE.
+                        SyncPhase::Idle | SyncPhase::KeyMining => 0x00,
+                        SyncPhase::LinkEstablishing => 0x01,
+                        SyncPhase::RequestSent => 0x03,
+                        SyncPhase::ResourceTransferring => 0x05,
+                    },
+                    alive: traffic.alive,
+                    name: self.names.get(&peer.destination_hash).cloned(),
+                    last_heard: peer.last_heard,
+                    next_sync_attempt: peer.next_sync_attempt,
+                    last_sync_attempt: traffic.last_sync_attempt,
+                    sync_backoff: peer.sync_backoff_secs,
+                    peering_timebase: peer.peering_timebase,
+                    ler: 0,
+                    str_rate: 0,
+                    transfer_limit_kb: Some(peer.transfer_limit_kb),
+                    sync_limit_kb: Some(peer.sync_limit_kb),
+                    target_stamp_cost: Some(peer.stamp_cost as u64),
+                    stamp_cost_flexibility: Some(peer.stamp_cost_flexibility as u64),
+                    peering_cost: Some(peer.peering_cost as u64),
+                    peering_key_value: peer.peering_key.map(|(_, value)| value as u64),
+                    network_distance: core
+                        .hops_to(&DestinationHash::new(peer.destination_hash))
+                        .map(|hops| hops as u64)
+                        .unwrap_or(HOPS_UNKNOWN),
+                    rx_bytes: traffic.rx_bytes,
+                    tx_bytes: traffic.tx_bytes,
+                    acceptance_rate,
+                    offered: traffic.offered,
+                    outgoing: traffic.outgoing,
+                    incoming: traffic.incoming,
+                    unhandled: 0,
+                }
+            })
+            .collect()
+    }
+
+    /// The peering configuration, for the node-level stats fields.
+    pub(crate) fn config(&self) -> &PeeringConfig {
+        self.table.config()
+    }
+
+    /// Our identity hash, the stats' `identity_hash` field.
+    pub(crate) fn our_identity_hash(&self) -> [u8; 16] {
+        self.our_identity_hash
+    }
+
+    /// Static-list length, for the stats' static/discovered split.
+    pub(crate) fn static_peer_count(&self) -> usize {
+        self.table.iter().filter(|peer| peer.is_static).count()
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -254,6 +409,18 @@ impl PeeringRuntime {
         let Ok(announce) = PropagationNodeAnnounce::decode(app_data) else {
             return;
         };
+        // The announced display name (`PN_META_NAME` in the metadata map),
+        // kept for the control stats' per-peer `name` field.
+        for (key, raw) in &announce.metadata {
+            if *key == leviculum_lxmf::PN_META_NAME {
+                let mut position = 0;
+                if let Ok(bytes) = leviculum_lxmf::msgpack::read_bin(raw, &mut position) {
+                    if let Ok(name) = String::from_utf8(bytes.to_vec()) {
+                        self.names.insert(destination_hash, name);
+                    }
+                }
+            }
+        }
         let hops = core.hops_to(&DestinationHash::new(destination_hash));
         let now = unix_secs();
         let change = self
@@ -407,6 +574,7 @@ impl PeeringRuntime {
         node: &mut PropagationNode<S>,
         link_id: &LinkId,
         data: &[u8],
+        validate: &mut dyn FnMut(&TransientId, &[u8; 32]) -> Option<u16>,
         out: &mut TickOutput,
     ) -> bool {
         let Ok(envelope) = PeerSyncEnvelope::decode(data) else {
@@ -427,16 +595,12 @@ impl PeeringRuntime {
         };
 
         let now = unix_secs();
-        let min_cost = node.min_accepted_cost();
-        let compute_value = node.compute_stamp_value();
         let mut accepted = 0usize;
         let mut duplicates = 0usize;
         let mut bytes = 0u64;
         let mut invalid = 0usize;
         for message in &envelope.messages {
-            let outcome = node.accept_stamped(message, now, |transient_id, stamp| {
-                validate_stamp_value(transient_id, stamp, min_cost, compute_value)
-            });
+            let outcome = node.accept_stamped(message, now, &mut *validate);
             match outcome {
                 UploadOutcome::Accepted {
                     transient_id,
@@ -482,6 +646,16 @@ impl PeeringRuntime {
                     tracing::debug!("lnpnd: sync message dropped, store: {error}");
                 }
             }
+        }
+        if self.table.get(&remote_hash).is_some() {
+            let traffic = self.traffic_mut(&remote_hash);
+            traffic.incoming += accepted as u64;
+            traffic.rx_bytes += bytes;
+        } else {
+            // A key-validated sender we do not peer back with — the
+            // reference's unpeered bucket (`LXMRouter.py:2496-2506`).
+            self.unpeered_incoming += accepted as u64;
+            self.unpeered_rx_bytes += bytes;
         }
         tracing::debug!(
             event = "PN_SYNC",
@@ -536,12 +710,23 @@ impl PeeringRuntime {
         let now = unix_secs();
         for dropped in self.table.cull(now) {
             self.forget(&dropped);
+            self.traffic.remove(&dropped);
+            self.names.remove(&dropped);
             self.log_peer("drop", &dropped, "unreachable");
         }
         node.set_compute_stamp_value(self.requires_stamp_values());
 
         let newest = node.store().newest_sequence().unwrap_or(0);
-        let Some(destination) = self.table.next_due(now, newest, self.last_synced) else {
+        // A control-triggered sync outranks the round-robin, like the
+        // reference's `peer.sync()` call from `peer_sync_request`
+        // (`reference/LXMF/LXMF/LXMRouter.py:852`).
+        let forced = self
+            .forced_next
+            .take()
+            .filter(|hash| self.table.get(hash).is_some());
+        let Some(destination) =
+            forced.or_else(|| self.table.next_due(now, newest, self.last_synced))
+        else {
             return;
         };
         self.last_synced = Some(destination);
@@ -591,6 +776,7 @@ impl PeeringRuntime {
         out: &mut TickOutput,
     ) {
         // Fill in what the round needs from storage.
+        self.traffic_mut(&destination).last_sync_attempt = now;
         let stored_identity = core.storage().get_identity(&destination);
         let Some(peer) = self.table.get_mut(&destination) else {
             return;
@@ -710,6 +896,7 @@ impl PeeringRuntime {
                 return;
             }
         }
+        self.traffic_mut(&peer_hash).alive = true;
         let Some(peer) = self.table.get_mut(&peer_hash) else {
             return;
         };
@@ -780,6 +967,11 @@ impl PeeringRuntime {
             _ => 0,
         };
         if !matches!(response, OfferResponse::Error(_)) {
+            // Counted when the peer answered, the reference's own moment
+            // (`self.offered += len(self.last_offer)`,
+            // `reference/LXMF/LXMF/LXMPeer.py:475`, `:516` on the
+            // concluded-resource arm).
+            self.traffic_mut(&peer_hash).offered += plan.ids.len() as u64;
             tracing::debug!(
                 event = "PN_OFFER",
                 peer = full_hex(&peer_hash),
@@ -964,6 +1156,14 @@ impl PeeringRuntime {
             peer.next_sync_attempt = 0;
             peer.last_heard = unix_secs();
         }
+        // The reference's concluded-transfer accounting
+        // (`resource_concluded`, `reference/LXMF/LXMF/LXMPeer.py:514-518`).
+        {
+            let traffic = self.traffic_mut(peer_hash);
+            traffic.alive = true;
+            traffic.outgoing += transferred as u64;
+            traffic.tx_bytes += bytes;
+        }
         self.persist_peer(peer_hash);
         if let Some(sync) = self.outbound.as_mut() {
             sync.concluded = true;
@@ -999,6 +1199,9 @@ impl PeeringRuntime {
         transferred: usize,
         bytes: u64,
     ) {
+        // The attempt outlived the answer: the reference's liveness rule
+        // (`reference/LXMF/LXMF/LXMPeer.py:280`).
+        self.traffic_mut(peer_hash).alive = false;
         if let Some(sync) = self.outbound.as_mut() {
             sync.concluded = true;
         }
@@ -1021,39 +1224,5 @@ impl PeeringRuntime {
         if let Some(peer) = self.table.get_mut(peer_hash) {
             peer.state = SyncPhase::Idle;
         }
-    }
-}
-
-/// Validate (or measure) one inbound message's propagation stamp.
-///
-/// At a minimum cost above 0 this is the reference's `validate_pn_stamp`
-/// (`reference/LXMF/LXMF/LXStamper.py:84-96`); at cost 0 with peers that
-/// filter by value, the true value is computed the way the reference
-/// always does (§5's accept-path consequence).
-pub(crate) fn validate_stamp_value(
-    transient_id: &TransientId,
-    stamp: &[u8; 32],
-    min_cost: u8,
-    compute_value: bool,
-) -> Option<u16> {
-    let mut stamper = CooperativeStamper::cooperative(rand_core::OsRng);
-    if min_cost == 0 {
-        if compute_value {
-            Some(futures::executor::block_on(stamper.measure_stamp(
-                transient_id,
-                stamp,
-                WORKBLOCK_EXPAND_ROUNDS_PN,
-            )))
-        } else {
-            Some(0)
-        }
-    } else {
-        futures::executor::block_on(stamper.validate_stamp(
-            transient_id,
-            stamp,
-            min_cost,
-            WORKBLOCK_EXPAND_ROUNDS_PN,
-        ))
-        .unwrap_or(None)
     }
 }

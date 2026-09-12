@@ -577,8 +577,8 @@ standard: fast test-ffi verify-packaging
 # it for the hardware nightly. Deleting the binary does NOT work: cargo
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 build-integ-bins:
-    find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy --bin lxmf-node
+    find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src lnpnd/src -name '*.rs' -exec touch {} +
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy --bin lxmf-node --bin lnpnd
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.

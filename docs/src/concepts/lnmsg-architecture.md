@@ -322,7 +322,7 @@ selected one loses its route
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1323`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1357`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
   (`leviculum-lxmf/src/router/propagation_runtime.rs:35-45`), and

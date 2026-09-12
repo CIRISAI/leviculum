@@ -33,16 +33,25 @@ use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, ProofStrategy,
     RequestError, RequestPolicy,
 };
+use leviculum_lxmf::constants::STAMP_SIZE;
+use leviculum_lxmf::control::{
+    encode_control_ack, encode_control_error, ControlNodeStats, CONTROL_ASPECTS, STATS_GET_PATH,
+    SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH,
+};
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{PeerStore, PeeringConfig, OFFER_REQUEST_PATH};
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::{
-    Eviction, EvictionReason, GetOutcome, PropagationNode, PropagationNodeConfig, PropagationStore,
-    TransientId, UploadOutcome, MESSAGE_GET_PATH,
+    Eviction, EvictionReason, GetOutcome, Message, PropagationNode, PropagationNodeConfig,
+    PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
 };
 
-use crate::peering::{validate_stamp_value, PeeringRuntime};
+use crate::mailbox::{MailboxConfig, MailboxRuntime};
+use crate::peering::PeeringRuntime;
+use crate::validation::{
+    validate_stamp_value, Carrier, ValidationDone, ValidationJob, ValidationWorker,
+};
 
 /// The reference announces the propagation destination 20 s after the role
 /// comes up (`NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`,
@@ -78,6 +87,25 @@ pub struct EngineConfig<S> {
     /// Where the peer table persists — a file on the host, the record log
     /// on the board (part 3).
     pub peer_store: Box<dyn PeerStore + Send>,
+    /// Extra identities allowed on the control destination, from the
+    /// config's `control_allowed` (`reference/LXMF/LXMF/Utilities/lxmd.py:219-222`);
+    /// the node's own identity is always allowed
+    /// (`reference/LXMF/LXMF/LXMRouter.py:672`).
+    pub control_allowed: Vec<[u8; 16]>,
+    /// `auth_required` with the `allowed` file's identity hashes: when
+    /// `Some`, only these identities may drain mailboxes over `/get`
+    /// (`identity_allowed`, `reference/LXMF/LXMF/LXMRouter.py:1472-1480`).
+    pub auth_allowed: Option<Vec<[u8; 16]>>,
+    /// The daemon's own mailbox (deliverable 2); `None` runs the
+    /// propagation role alone (the helper's embedding, which has its own
+    /// delivery router).
+    pub mailbox: Option<MailboxConfig>,
+    /// The message store's capacity in bytes, for the stats response
+    /// (`messagestore.limit`); the store itself enforces it.
+    pub store_limit_bytes: u64,
+    /// `delivery_transfer_max_accepted_size` in kilobytes, reported in the
+    /// stats' `delivery_limit`.
+    pub delivery_limit_kb: u64,
 }
 
 enum State<S> {
@@ -93,6 +121,20 @@ struct Ready<S> {
     min_cost: u8,
     /// The peering half: peer table, `/offer`, outbound sync.
     peering: PeeringRuntime,
+    /// The control destination (`lxmf.propagation.control`) and its allow
+    /// list (part 4, deliverable 1).
+    control_hash: DestinationHash,
+    control_allowed: Vec<[u8; 16]>,
+    /// `/get` authentication: `Some` = only these identity hashes.
+    auth_allowed: Option<Vec<[u8; 16]>>,
+    /// The daemon's own mailbox (part 4, deliverable 2).
+    mailbox: Option<MailboxRuntime>,
+    /// Node-level counters for the stats response.
+    started_unix: u64,
+    client_received: u64,
+    client_served: u64,
+    store_limit_bytes: u64,
+    delivery_limit_kb: u64,
 }
 
 /// One observable engine event, mirrored to the structured log; the channel
@@ -146,6 +188,23 @@ pub enum EngineEvent {
         peer: [u8; 16],
         value: u16,
     },
+    /// The daemon's own mailbox registered (deliverable 2).
+    MailboxReady {
+        delivery_hash: [u8; 16],
+    },
+    /// The delivery destination's announce went out.
+    MailboxAnnounced,
+    /// A message arrived in the daemon's own mailbox. `main` writes it
+    /// to the messages directory and runs the `on_inbound` hook — off
+    /// the core lock, which is why this crosses the channel.
+    Inbound {
+        message: Box<Message>,
+    },
+    /// A remote-management request was answered (deliverable 1).
+    ControlServed {
+        path: &'static str,
+        ok: bool,
+    },
 }
 
 pub struct Engine<S> {
@@ -157,6 +216,9 @@ pub struct Engine<S> {
     announce_interval_secs: u64,
     announce_delay_secs: u64,
     next_maintenance_at: u64,
+    /// Stamp validation off the core lock (deliverable 5): the hook
+    /// queues, the worker grinds, the drain applies.
+    validation: ValidationWorker,
 }
 
 /// Unix seconds, the timestamp domain of the store and the announce.
@@ -189,6 +251,7 @@ impl<S: PropagationStore> Engine<S> {
                 announce_interval_secs,
                 announce_delay_secs,
                 next_maintenance_at: 0,
+                validation: ValidationWorker::spawn(),
             },
             receiver,
         )
@@ -242,8 +305,14 @@ impl<S: PropagationStore> Engine<S> {
             announce_delay_secs: _,
             peering,
             peer_store,
+            control_allowed,
+            auth_allowed,
+            mailbox,
+            store_limit_bytes,
+            delivery_limit_kb,
         } = config;
         let identity_copy = identity.clone();
+        let control_identity = identity.clone();
         let mut destination = match Destination::new(
             Some(identity),
             Direction::In,
@@ -273,6 +342,55 @@ impl<S: PropagationStore> Engine<S> {
             RequestPolicy::AllowAll,
         );
 
+        // The control destination, on the same identity, with its three
+        // request handlers behind the allow list — the reference's exact
+        // registration (`reference/LXMF/LXMF/LXMRouter.py:672-676`). The
+        // node's own identity hash is always first in the list (`:672`).
+        let mut allowed = Vec::with_capacity(control_allowed.len() + 1);
+        allowed.push(*control_identity.hash());
+        for hash in control_allowed {
+            if !allowed.contains(&hash) {
+                allowed.push(hash);
+            }
+        }
+        let control_hash = match Destination::new(
+            Some(control_identity),
+            Direction::In,
+            DestinationType::Single,
+            APP_NAME,
+            &CONTROL_ASPECTS,
+        ) {
+            Ok(mut control) => {
+                control.set_accepts_links(true);
+                let control_hash = *control.hash();
+                core.register_destination(control);
+                control_hash
+            }
+            Err(error) => {
+                self.emit(EngineEvent::Broken {
+                    detail: format!("control destination: {error:?}"),
+                });
+                return;
+            }
+        };
+        Self::register_control_handlers(core, &control_hash, &allowed);
+
+        // The daemon's own mailbox (deliverable 2), on the same identity.
+        let mailbox = match mailbox {
+            Some(config) => {
+                match MailboxRuntime::register(core, &identity_copy, config, self.events.clone()) {
+                    Ok(runtime) => Some(runtime),
+                    Err(detail) => {
+                        self.emit(EngineEvent::Broken {
+                            detail: format!("mailbox: {detail}"),
+                        });
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+
         let mut node = PropagationNode::new(store, node_config);
         let min_cost = node.min_accepted_cost();
         let peering = PeeringRuntime::new(peering, peer_store, identity_copy, self.events.clone());
@@ -286,7 +404,37 @@ impl<S: PropagationStore> Engine<S> {
             destination_hash,
             min_cost,
             peering,
+            control_hash,
+            control_allowed: allowed,
+            auth_allowed,
+            mailbox,
+            started_unix: unix_secs(),
+            client_received: 0,
+            client_served: 0,
+            store_limit_bytes,
+            delivery_limit_kb,
         }));
+    }
+
+    /// (Re-)register the three control request handlers behind the allow
+    /// list (`reference/LXMF/LXMF/LXMRouter.py:674-676`). Re-run whenever
+    /// the list changes: the policy is checked by the core before the
+    /// request reaches us, so a disallowed identity times out — exactly
+    /// what `RNS.Destination.ALLOW_LIST` does to it in the reference
+    /// (`reference/Reticulum/RNS/Link.py:867-874`: not allowed, no
+    /// response).
+    fn register_control_handlers(
+        core: &mut StdNodeCoreRef<'_>,
+        control_hash: &DestinationHash,
+        allowed: &[[u8; 16]],
+    ) {
+        for path in [STATS_GET_PATH, SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH] {
+            core.register_request_handler(
+                *control_hash,
+                path,
+                RequestPolicy::AllowList(allowed.to_vec()),
+            );
+        }
     }
 
     /// Number of table peers, once registered — the periculum helper's
@@ -354,6 +502,13 @@ impl<S: PropagationStore> Engine<S> {
 
     /// One upload envelope, from either carrier. Returns whether it was
     /// accepted (so the packet path can prove it).
+    ///
+    /// `validate` is the caller's verdict source: the drain path passes a
+    /// lookup into the worker's finished verdicts, the inline path (cost
+    /// 0, no value computation — no work to speak of) the direct
+    /// validator. See `crate::validation` for why the grinding never
+    /// happens here.
+    #[allow(clippy::too_many_arguments)]
     fn ingest(
         &mut self,
         ready: &mut Ready<S>,
@@ -361,23 +516,10 @@ impl<S: PropagationStore> Engine<S> {
         link_id: &LinkId,
         data: &[u8],
         via: &'static str,
+        validate: &mut dyn FnMut(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
         out: &mut TickOutput,
     ) -> bool {
-        let min_cost = ready.min_cost;
-        let compute_value = ready.node.compute_stamp_value();
-        // Cost above 0 is opt-in configuration. The 1000-round PN
-        // workblock (WORKBLOCK_EXPAND_ROUNDS_PN,
-        // reference/LXMF/LXMF/LXStamper.py:13) streams through the
-        // constant-space validator; ~41 000 SHA-256 compressions is
-        // ~10 ms of the core lock and trips PROCESSOR_TICK_BUDGET's
-        // report, which is the honest signal until validation moves to
-        // a worker. The same closure also computes the true value at
-        // cost 0 while any peer filters offers by value (§5).
-        let outcome = ready
-            .node
-            .handle_upload(data, unix_secs(), |transient_id, stamp| {
-                validate_stamp_value(transient_id, stamp, min_cost, compute_value)
-            });
+        let outcome = ready.node.handle_upload(data, unix_secs(), &mut *validate);
         match outcome {
             UploadOutcome::Accepted {
                 transient_id,
@@ -401,6 +543,13 @@ impl<S: PropagationStore> Engine<S> {
                     transient_id,
                     duplicate,
                 });
+                if !duplicate {
+                    // Directly from a client, the stats' clients bucket
+                    // (`client_propagation_messages_received`,
+                    // `reference/LXMF/LXMF/LXMRouter.py:2250`).
+                    ready.client_received += 1;
+                    self.deliver_own_mailbox(ready, core, &transient_id, &destination_hash, out);
+                }
                 true
             }
             UploadOutcome::InvalidStamp { reject } => {
@@ -481,6 +630,18 @@ impl<S: PropagationStore> Engine<S> {
             self.respond(core, link_id, request_id, &response, out);
             return;
         };
+        // `auth_required`: only listed identities may drain
+        // (`identity_allowed`, `reference/LXMF/LXMF/LXMRouter.py:1472-1480`,
+        // applied at `:1484`).
+        if let Some(allowed) = &ready.auth_allowed {
+            if !allowed.contains(identity.hash()) {
+                let response = MessageListResponse::Error(PeerError::NoAccess)
+                    .encode()
+                    .unwrap_or_default();
+                self.respond(core, link_id, request_id, &response, out);
+                return;
+            }
+        }
         let mailbox = Self::delivery_hash_of(&identity);
         match ready.node.handle_get(data, &mailbox, unix_secs()) {
             Ok(GetOutcome::List { response, count }) => {
@@ -516,6 +677,10 @@ impl<S: PropagationStore> Engine<S> {
                     form: "fetch",
                     count: served.len(),
                 });
+                // The stats' clients bucket
+                // (`client_propagation_messages_served`,
+                // `reference/LXMF/LXMF/LXMRouter.py:1555`).
+                ready.client_served += served.len() as u64;
                 self.respond(core, link_id, request_id, &response, out);
             }
             Err(error) => {
@@ -562,6 +727,259 @@ impl<S: PropagationStore> Engine<S> {
             }
             Err(error) => tracing::warn!("lnpnd: announce failed: {error:?}"),
         }
+        // The control destination announces alongside the node. The
+        // reference announces it only when remotes are allowed
+        // (`announce_propagation_node`, `reference/LXMF/LXMF/LXMRouter.py:342`)
+        // because its local `--status` runs inside the router process and
+        // needs no path; ours is always a separate shared-instance client,
+        // so without this announce even the local operator's `lnpnd
+        // --status` has nothing to resolve a path from. One extra announce
+        // per cadence, wire-legal, and measured to be the difference
+        // between the query answering and timing out (deviation rule).
+        match core.announce_destination(&ready.control_hash, None) {
+            Ok(send) => out.merge(send),
+            Err(error) => tracing::warn!("lnpnd: control announce failed: {error:?}"),
+        }
+    }
+
+    /// Allow one more identity on the control destination at runtime (the
+    /// conformance helper's verb; the config file's `control_allowed` is
+    /// applied at construction). Re-registers the handlers — the allow
+    /// list is checked by the core — and announces so the remote can
+    /// resolve the control destination.
+    pub fn allow_control(
+        &mut self,
+        core: &mut StdNodeCoreRef<'_>,
+        identity_hash: [u8; 16],
+        out: &mut TickOutput,
+    ) -> bool {
+        let Some(mut ready) = self.take_ready(core) else {
+            return false;
+        };
+        if !ready.control_allowed.contains(&identity_hash) {
+            ready.control_allowed.push(identity_hash);
+        }
+        Self::register_control_handlers(core, &ready.control_hash, &ready.control_allowed);
+        self.announce(&mut ready, core, out);
+        self.state = State::Ready(ready);
+        true
+    }
+
+    /// A stored message addressed to our own mailbox is delivered locally
+    /// instead of waiting for a client that will never come — the
+    /// reference's own short-circuit (`lxmf_propagation`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2501-2509`, which delivers and
+    /// never stores). Ours stores first (the accept path is shared with
+    /// every other destination), then purges the entry it just proved:
+    /// the proof said "stored", and delivered-to-the-operator is that
+    /// promise kept, not broken.
+    fn deliver_own_mailbox(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        transient_id: &TransientId,
+        destination_hash: &[u8; 16],
+        out: &mut TickOutput,
+    ) {
+        let Some(mailbox) = ready.mailbox.as_mut() else {
+            return;
+        };
+        if destination_hash != &mailbox.delivery_hash {
+            return;
+        }
+        let stamped = match ready.node.store().read_body(transient_id) {
+            Ok(Some(body)) => body,
+            _ => return,
+        };
+        if stamped.len() <= STAMP_SIZE {
+            return;
+        }
+        let unstamped = &stamped[..stamped.len() - STAMP_SIZE];
+        mailbox.deliver_propagated(core, unstamped, out);
+        if let Err(error) = ready.node.store_mut().purge(transient_id) {
+            tracing::warn!("lnpnd: own-mailbox purge failed: {error}");
+        }
+    }
+
+    /// Answer one control request (`stats_get_request` /
+    /// `peer_sync_request` / `peer_unpeer_request`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:838-865`). The core has already
+    /// enforced the allow list; the identity checks here are the
+    /// reference's own belt and braces.
+    fn answer_control(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        link_id: &LinkId,
+        path: &str,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let identity_hash = core.get_remote_identity(link_id).map(|id| *id.hash());
+        let allowed = match identity_hash {
+            None => {
+                return encode_control_error(PeerError::NoIdentity);
+            }
+            Some(hash) => ready.control_allowed.contains(&hash),
+        };
+        if !allowed {
+            return encode_control_error(PeerError::NoAccess);
+        }
+        match path {
+            STATS_GET_PATH => {
+                self.emit(EngineEvent::ControlServed {
+                    path: STATS_GET_PATH,
+                    ok: true,
+                });
+                self.compile_stats(ready, core).encode()
+            }
+            SYNC_REQUEST_PATH | UNPEER_REQUEST_PATH => {
+                // The request data is one msgpack value: the reference
+                // packs the raw destination hash, which umsgpack encodes
+                // as a 16-byte bin (`peer_sync_request` checks the
+                // unpacked bytes, `LXMRouter.py:847-848`).
+                let peer_hash = {
+                    let mut position = 0;
+                    leviculum_lxmf::msgpack::read_bin(data, &mut position)
+                        .ok()
+                        .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                };
+                let Some(peer_hash) = peer_hash else {
+                    return encode_control_error(PeerError::InvalidData);
+                };
+                let found = if path == SYNC_REQUEST_PATH {
+                    ready.peering.trigger_sync(&peer_hash)
+                } else {
+                    ready.peering.unpeer(&peer_hash)
+                };
+                let served = if path == SYNC_REQUEST_PATH {
+                    SYNC_REQUEST_PATH
+                } else {
+                    UNPEER_REQUEST_PATH
+                };
+                self.emit(EngineEvent::ControlServed {
+                    path: served,
+                    ok: found,
+                });
+                if found {
+                    encode_control_ack()
+                } else {
+                    encode_control_error(PeerError::NotFound)
+                }
+            }
+            _ => encode_control_error(PeerError::InvalidData),
+        }
+    }
+
+    /// The stats response — `compile_stats`
+    /// (`reference/LXMF/LXMF/LXMRouter.py:769-836`) over this engine's
+    /// state. Byte and message counters count since process start; the
+    /// reference persists some of them across restarts (`node_stats`,
+    /// `:646-662`), a difference the numbers wear honestly rather than
+    /// approximating.
+    fn compile_stats(&self, ready: &Ready<S>, core: &mut StdNodeCoreRef<'_>) -> ControlNodeStats {
+        let config = ready.node.config();
+        let peering_config = ready.peering.config();
+        let mut peers = ready.peering.control_peer_stats(core);
+        for peer in &mut peers {
+            peer.unhandled = ready
+                .peering
+                .unhandled_toward(&ready.node, &peer.peer_id)
+                .unwrap_or(0) as u64;
+        }
+        let static_peers = ready.peering.static_peer_count() as u64;
+        let total_peers = peers.len() as u64;
+        let store_bytes = ready
+            .store_limit_bytes
+            .saturating_sub(ready.node.store().free_space());
+        let (unpeered_incoming, unpeered_rx_bytes) = ready.peering.unpeered_incoming();
+        ControlNodeStats {
+            identity_hash: ready.peering.our_identity_hash(),
+            destination_hash: *ready.destination_hash.as_bytes(),
+            uptime_secs: unix_secs().saturating_sub(ready.started_unix) as f64,
+            delivery_limit_kb: Some(ready.delivery_limit_kb),
+            propagation_limit_kb: Some(config.transfer_limit_kb),
+            sync_limit_kb: Some(config.sync_limit_kb),
+            target_stamp_cost: config.stamp_cost as u64,
+            stamp_cost_flexibility: config.stamp_cost_flexibility as u64,
+            peering_cost: config.peering_cost as u64,
+            max_peering_cost: peering_config.remote_peering_cost_max as u64,
+            autopeer_maxdepth: Some(peering_config.autopeer_maxdepth as u64),
+            from_static_only: peering_config.from_static_only,
+            messagestore_count: ready.node.store().count().unwrap_or(0) as u64,
+            messagestore_bytes: store_bytes,
+            messagestore_limit_bytes: Some(ready.store_limit_bytes),
+            client_propagation_messages_received: ready.client_received,
+            client_propagation_messages_served: ready.client_served,
+            unpeered_propagation_incoming: unpeered_incoming,
+            unpeered_propagation_rx_bytes: unpeered_rx_bytes,
+            static_peers,
+            discovered_peers: total_peers.saturating_sub(static_peers),
+            total_peers,
+            max_peers: Some(peering_config.max_peers as u64),
+            peers,
+        }
+    }
+
+    /// Apply one finished validation: re-enter the path the event would
+    /// have taken, with the worker's verdicts as the validator.
+    fn apply_validation(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        done: ValidationDone,
+        out: &mut TickOutput,
+    ) {
+        let ValidationDone {
+            link_id,
+            carrier,
+            data,
+            proof,
+            verdicts,
+        } = done;
+        let mut validate = |transient_id: &TransientId, _stamp: &[u8; STAMP_SIZE]| {
+            verdicts.get(transient_id).copied().flatten()
+        };
+        match carrier {
+            Carrier::Packet => {
+                let accepted =
+                    self.ingest(ready, core, &link_id, &data, "packet", &mut validate, out);
+                if accepted {
+                    if let Some(packet_hash) = proof {
+                        match core.send_data_proof(&link_id, &packet_hash) {
+                            Ok(send) => out.merge(send),
+                            Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
+                        }
+                    }
+                }
+            }
+            Carrier::Resource => {
+                let handled = ready.peering.on_sync_resource(
+                    core,
+                    &mut ready.node,
+                    &link_id,
+                    &data,
+                    &mut validate,
+                    out,
+                );
+                if !handled {
+                    let _ =
+                        self.ingest(ready, core, &link_id, &data, "resource", &mut validate, out);
+                }
+            }
+        }
+    }
+
+    /// Drain the worker's finished validations, in completion order (which
+    /// is submission order — one worker).
+    fn drain_validation(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        out: &mut TickOutput,
+    ) {
+        while let Some(done) = self.validation.try_recv() {
+            self.apply_validation(ready, core, done, out);
+        }
     }
 }
 
@@ -578,6 +996,15 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
+        // Finished validations first: they are older traffic than this
+        // event, and applying them here keeps the per-link order.
+        self.drain_validation(&mut ready, core, &mut out);
+        // The mailbox router sees every event and filters for its own
+        // links, exactly as lnmsg's engine feeds it.
+        if let Some(mut mailbox) = ready.mailbox.take() {
+            mailbox.on_event(core, event, &mut out);
+            ready.mailbox = Some(mailbox);
+        }
         match event {
             // A propagation announce: the peer table's input
             // (`LXMFPropagationAnnounceHandler`,
@@ -660,16 +1087,42 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                     .pending_proofs
                     .get_mut(link_id)
                     .and_then(VecDeque::pop_front);
-                let accepted = self.ingest(&mut ready, core, link_id, data, "packet", &mut out);
-                if accepted {
-                    if let Some(packet_hash) = proof {
-                        // Prove only now that the append returned: the proof
-                        // is the "stored" statement (persist before you
-                        // prove; packet.prove after storing,
-                        // reference/LXMF/LXMF/LXMRouter.py:2255).
-                        match core.send_data_proof(link_id, &packet_hash) {
-                            Ok(send) => out.merge(send),
-                            Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
+                let min_cost = ready.min_cost;
+                let compute_value = ready.node.compute_stamp_value();
+                if ValidationWorker::worth_deferring(min_cost, compute_value) {
+                    // The grinding goes to the worker (deliverable 5); the
+                    // append and the proof follow at the drain, in order.
+                    self.validation.enqueue(ValidationJob {
+                        link_id: *link_id,
+                        carrier: Carrier::Packet,
+                        data: data.clone(),
+                        proof,
+                        min_cost,
+                        compute_value,
+                    });
+                } else {
+                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                        validate_stamp_value(transient_id, stamp, min_cost, compute_value)
+                    };
+                    let accepted = self.ingest(
+                        &mut ready,
+                        core,
+                        link_id,
+                        data,
+                        "packet",
+                        &mut validate,
+                        &mut out,
+                    );
+                    if accepted {
+                        if let Some(packet_hash) = proof {
+                            // Prove only now that the append returned: the proof
+                            // is the "stored" statement (persist before you
+                            // prove; packet.prove after storing,
+                            // reference/LXMF/LXMF/LXMRouter.py:2255).
+                            match core.send_data_proof(link_id, &packet_hash) {
+                                Ok(send) => out.merge(send),
+                                Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
+                            }
                         }
                     }
                 }
@@ -703,12 +1156,40 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 // the singleton form is the client upload path below. The
                 // resource protocol has its own acknowledgement; no
                 // packet proof exists to send here.
-                let handled =
-                    ready
-                        .peering
-                        .on_sync_resource(core, &mut ready.node, link_id, data, &mut out);
-                if !handled {
-                    let _ = self.ingest(&mut ready, core, link_id, data, "resource", &mut out);
+                let min_cost = ready.min_cost;
+                let compute_value = ready.node.compute_stamp_value();
+                if ValidationWorker::worth_deferring(min_cost, compute_value) {
+                    self.validation.enqueue(ValidationJob {
+                        link_id: *link_id,
+                        carrier: Carrier::Resource,
+                        data: data.clone(),
+                        proof: None,
+                        min_cost,
+                        compute_value,
+                    });
+                } else {
+                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                        validate_stamp_value(transient_id, stamp, min_cost, compute_value)
+                    };
+                    let handled = ready.peering.on_sync_resource(
+                        core,
+                        &mut ready.node,
+                        link_id,
+                        data,
+                        &mut validate,
+                        &mut out,
+                    );
+                    if !handled {
+                        let _ = self.ingest(
+                            &mut ready,
+                            core,
+                            link_id,
+                            data,
+                            "resource",
+                            &mut validate,
+                            &mut out,
+                        );
+                    }
                 }
             }
             // Our outbound sync resource concluded (or failed).
@@ -741,6 +1222,19 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 ..
             } if destination_hash == &ready.destination_hash && path == MESSAGE_GET_PATH => {
                 self.answer_get(&mut ready, core, link_id, request_id, data, &mut out);
+            }
+            // Remote management on the control destination (part 4,
+            // deliverable 1; `reference/LXMF/LXMF/LXMRouter.py:838-865`).
+            NodeEvent::RequestReceived {
+                link_id,
+                destination_hash,
+                request_id,
+                path,
+                data,
+                ..
+            } if destination_hash == &ready.control_hash => {
+                let response = self.answer_control(&mut ready, core, link_id, path, data);
+                self.respond(core, link_id, request_id, &response, &mut out);
             }
             NodeEvent::RequestReceived {
                 link_id,
@@ -789,16 +1283,30 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
 
+        self.drain_validation(&mut ready, core, &mut out);
+
+        if let Some(mut mailbox) = ready.mailbox.take() {
+            mailbox.on_tick(core, now_ms, &mut out);
+            ready.mailbox = Some(mailbox);
+        }
+
         ready
             .peering
             .on_tick(core, &mut ready.node, now_ms, &mut out);
 
         self.state = State::Ready(ready);
 
+        let validation_poll = if self.validation.busy() {
+            // Grinding in flight: come back quickly so the append and the
+            // proof follow the worker with minimal added latency.
+            now_ms + 20
+        } else {
+            now_ms + POLL_INTERVAL_MS
+        };
         let due = [
             self.next_announce_at.unwrap_or(now_ms + POLL_INTERVAL_MS),
             self.next_maintenance_at,
-            now_ms + POLL_INTERVAL_MS,
+            validation_poll,
         ]
         .into_iter()
         .filter(|deadline| *deadline > now_ms)
@@ -809,5 +1317,200 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             None => due,
         });
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_core::packet::{Packet, PacketType};
+    use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore};
+    use leviculum_std::driver::{CoreProcessor as _, StdClock, StdStorage};
+
+    fn core(dir: &std::path::Path) -> leviculum_std::driver::StdNodeCore {
+        NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir).expect("storage under a fresh temp dir"),
+        )
+    }
+
+    fn engine_with(
+        control_allowed: Vec<[u8; 16]>,
+        mailbox: Option<MailboxConfig>,
+    ) -> (
+        Engine<MemoryPropagationStore>,
+        std::sync::mpsc::Receiver<EngineEvent>,
+    ) {
+        Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: leviculum_lxmf::PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed,
+            auth_allowed: None,
+            mailbox,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        })
+    }
+
+    fn mailbox_config() -> MailboxConfig {
+        MailboxConfig {
+            display_name: b"an-operator".to_vec(),
+            stamp_cost: 7,
+            announce_at_start: true,
+            announce_interval_secs: None,
+            delivery_limit_kb: 1000,
+            ignored: Vec::new(),
+        }
+    }
+
+    fn announces_in(out: &TickOutput) -> Vec<Packet> {
+        out.actions
+            .iter()
+            .filter_map(|action| match action {
+                leviculum_core::transport::Action::Broadcast { data, .. } => {
+                    Packet::unpack(data).ok()
+                }
+                _ => None,
+            })
+            .filter(|packet| packet.flags.packet_type == PacketType::Announce)
+            .collect()
+    }
+
+    /// The first tick registers the propagation destination, the control
+    /// destination and the mailbox, and reports all of them.
+    #[test]
+    fn the_first_tick_registers_role_control_and_mailbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events) = engine_with(Vec::new(), Some(mailbox_config()));
+
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let seen: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, EngineEvent::Ready { .. })),
+            "the propagation role must report ready: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, EngineEvent::MailboxReady { .. })),
+            "the mailbox must report ready: {seen:?}"
+        );
+    }
+
+    /// The delivery announce carries the configured display name and stamp
+    /// cost — the wire fact `lxmd`'s `register_delivery_identity` produces
+    /// (`reference/LXMF/LXMF/Utilities/lxmd.py:422-423`). Sent after the
+    /// reference's 10 s deferred start; the test crosses that boundary by
+    /// ticking past it.
+    #[test]
+    fn the_mailbox_announce_carries_name_and_stamp_cost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), Some(mailbox_config()));
+
+        let start = core.now_ms();
+        let _ = engine.on_tick(&mut core, start);
+        // The mailbox books its deferred start announce on the first pass
+        // and sends when the clock passes it.
+        let out = engine.on_tick(
+            &mut core,
+            start + (crate::mailbox::MAILBOX_ANNOUNCE_DELAY_SECS + 1) * 1000,
+        );
+        let announces = announces_in(&out);
+        let expected = leviculum_lxmf::announce::delivery(Some(b"an-operator"), Some(7));
+        assert!(
+            announces
+                .iter()
+                .any(|packet| packet.data.as_slice().ends_with(&expected)),
+            "one announce must carry the delivery app data (name + stamp cost); \
+             saw {} announce(s)",
+            announces.len()
+        );
+    }
+
+    /// The control destination announces alongside the node — always,
+    /// because our query CLI is a separate shared-instance client with
+    /// no other way to resolve a path to it (see `Engine::announce`) —
+    /// and `allow_control` re-announces both immediately.
+    #[test]
+    fn the_control_destination_announces_with_the_node() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), None);
+
+        let start = core.now_ms();
+        let out = engine.on_tick(&mut core, start + 1);
+        assert_eq!(
+            announces_in(&out).len(),
+            2,
+            "the node AND its control destination announce at start"
+        );
+
+        let mut out = TickOutput::empty();
+        assert!(engine.allow_control(&mut core, [0x5a; 16], &mut out));
+        assert_eq!(
+            announces_in(&out).len(),
+            2,
+            "allowing a remote re-announces both immediately"
+        );
+    }
+
+    /// A control request on an unknown (never-identified) link answers the
+    /// reference's ERROR_NO_IDENTITY (`stats_get_request`,
+    /// `LXMRouter.py:838-839`) — the handler wiring end to end, minus the
+    /// link the loopback test provides.
+    #[test]
+    fn an_unidentified_control_request_is_answered_no_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(vec![[0x5a; 16]], None);
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let control_hash = match &engine.state {
+            State::Ready(ready) => ready.control_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        let event = NodeEvent::RequestReceived {
+            link_id: LinkId::new([0x77; 16]),
+            destination_hash: control_hash,
+            request_id: [0x11; 16],
+            path: STATS_GET_PATH.to_string(),
+            path_hash: leviculum_core::crypto::truncated_hash(STATS_GET_PATH.as_bytes()),
+            data: Vec::new(),
+            requested_at: 0.0,
+        };
+        let _ = engine.on_event(&mut core, &event);
+        // The response rides send_response on a link that does not exist,
+        // which the core refuses — but the handler's decision is visible
+        // in the encoded payload it tried to send. Assert the decision
+        // directly instead:
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must still be ready"),
+        };
+        let response = engine.answer_control(
+            &mut ready,
+            &mut core,
+            &LinkId::new([0x77; 16]),
+            STATS_GET_PATH,
+            &[],
+        );
+        assert_eq!(
+            response,
+            leviculum_lxmf::encode_control_error(leviculum_lxmf::PeerError::NoIdentity)
+        );
+        engine.state = State::Ready(ready);
     }
 }

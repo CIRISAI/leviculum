@@ -1,0 +1,50 @@
+[Unit]
+Description=LXMF Propagation Node Daemon (store-and-forward mailbox on Reticulum)
+Documentation=https://codeberg.org/Lew_Palm/leviculum
+After=network.target lnsd.service
+Wants=network.target
+
+# Deliberately After= without Requires=: lnpnd needs *a* Reticulum shared
+# instance, and lnsd is only one way to have one — the Python rnsd serves
+# just as well, and the leviculum package is a Recommends, not a Depends.
+# Ordering when lnsd is present, no hard coupling when it is not. If the
+# daemon is not up yet, lnpnd exits and Restart= below brings it back.
+
+# Give up after ten failed starts in five minutes instead of retrying
+# forever; see lnsd.service for why a `failed` unit beats a silent flap.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=lnpnd
+Group=lnpnd
+# No -s/--service: under systemd the journal is the log file, so the
+# daemon logs to stderr and journald captures it. --service (file
+# logging into the config directory) is for setups without a supervisor.
+ExecStart=/usr/bin/lnpnd --config /etc/lnpnd --data-dir /var/lib/lnpnd
+Restart=on-failure
+RestartSec=10
+
+# Hardening, mirroring lnsd.service / lblogd.service. Two writable paths:
+# the data directory (message store, peer table, client state), and the
+# config directory — lnpnd keeps its lxmd-format layout there, which
+# includes the node identity and a first-start default config, both
+# written by the daemon itself (the same files lxmd keeps in its config
+# dir). postinst provisions /etc/lnpnd owned by the service user.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/lnpnd /etc/lnpnd
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

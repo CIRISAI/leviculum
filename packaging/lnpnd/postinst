@@ -1,0 +1,59 @@
+#!/bin/sh
+# postinst for lnpnd — provisions the service user, the config directory
+# and the data directory. Idempotent; safe to re-run on upgrade
+# (case=configure with a $2 previous version).
+
+set -e
+
+DATA_DIR=/var/lib/lnpnd
+CONF_DIR=/etc/lnpnd
+
+case "$1" in
+    configure)
+        if ! getent group lnpnd >/dev/null; then
+            addgroup --quiet --system lnpnd
+        fi
+
+        if ! getent passwd lnpnd >/dev/null; then
+            adduser --quiet --system \
+                --ingroup lnpnd \
+                --home "$DATA_DIR" --no-create-home \
+                --gecos "LXMF propagation node daemon" \
+                --shell /usr/sbin/nologin \
+                lnpnd
+        fi
+
+        # The config directory keeps lxmd's layout: `config` (written by
+        # the daemon on first start, from `lnpnd --exampleconfig`), the
+        # node `identity`, and the optional `allowed` / `ignored` hash
+        # lists. 0750 keeps the identity — the node's address — off
+        # other accounts. The daemon owns the directory because it
+        # writes the identity and the first-start config itself, exactly
+        # as lxmd does in its config directory.
+        mkdir -p "$CONF_DIR"
+        mkdir -p "$DATA_DIR"
+        chown -R lnpnd:lnpnd "$CONF_DIR" "$DATA_DIR"
+        chmod 0750 "$CONF_DIR" "$DATA_DIR"
+
+        if [ -z "$2" ]; then
+            echo ""
+            echo "lnpnd: the propagation node needs a running Reticulum daemon"
+            echo "(lnsd from the 'leviculum' package, or the Python rnsd) using"
+            echo "instance_name 'default'. Once both run, print the node's"
+            echo "destination hash and status with:"
+            echo "    sudo -u lnpnd lnpnd --status --config /etc/lnpnd"
+            echo ""
+            echo "Configuration lives in /etc/lnpnd/config (created on first"
+            echo "start; lxmd's format and keys — see lnpnd(1) and"
+            echo "'lnpnd --exampleconfig')."
+            echo ""
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
