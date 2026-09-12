@@ -1,5 +1,5 @@
-# The binary is musl-static by design, which trips two lintian checks
-# that both assume a normal dynamically-linked Debian binary.
+# The binary is musl-static by design, which trips three lintian checks
+# that all assume a normal dynamically-linked Debian binary.
 #
 # unstripped-binary-or-object: the build passes --no-strip on purpose.
 # cargo-deb's default `strip --strip-all` corrupts musl-static binaries
@@ -12,3 +12,7 @@ lnpnd: unstripped-binary-or-object [usr/bin/lnpnd]
 # prerequisites is the entire point — these packages install on any
 # Debian >= 9 regardless of host glibc.
 lnpnd: shared-library-lacks-prerequisites [usr/bin/lnpnd]
+
+# statically-linked-binary: the tag names the design decision itself;
+# see packaging/lintian/lblogd for the reasoning.
+lnpnd: statically-linked-binary [usr/bin/lnpnd]

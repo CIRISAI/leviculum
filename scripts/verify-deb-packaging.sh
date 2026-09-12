@@ -315,6 +315,19 @@ contains "$CONTENTS" "lblogd.service" "ships the lblogd systemd unit"
 rm -rf "$CTRL_DIR"
 echo
 
+check_package lnpnd lnpnd lnpnd
+contains "$CONTENTS" "lnpnd.service" "ships the lnpnd systemd unit"
+# No conffile on purpose: the package ships no /etc/lnpnd/config — the
+# daemon writes it on first start, exactly as lxmd does in its config
+# directory, and postinst only provisions the (daemon-owned) directory.
+if printf '%s\n' "$CONTENTS" | grep -q ' \./etc/'; then
+    fail "lnpnd ships files under /etc, which its first-start design says it must not"
+else
+    pass "ships nothing under /etc (first-start config, like lxmd)"
+fi
+rm -rf "$CTRL_DIR"
+echo
+
 # ---------------------------------------------------------------------
 # Unit files, checked at the source rather than per package: the same
 # file goes into every architecture's .deb.
@@ -322,7 +335,8 @@ echo
 
 echo "== systemd units"
 if command -v systemd-analyze >/dev/null 2>&1; then
-    for unit in packaging/debian/lnsd.service packaging/lblogd/lblogd.service; do
+    for unit in packaging/debian/lnsd.service packaging/lblogd/lblogd.service \
+        packaging/lnpnd/lnpnd.service; do
         # `verify` resolves the unit against the *build host*, which has
         # neither the units these order themselves after nor (necessarily)
         # the binary they start. Both are properties of the host, not of
@@ -347,7 +361,8 @@ fi
 # The unit's ExecStart must name a path the package actually installs. A
 # typo here would leave a service that installs cleanly, starts, and
 # immediately fails with status=203/EXEC.
-for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.service:lblogd"; do
+for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.service:lblogd" \
+    "packaging/lnpnd/lnpnd.service:lnpnd"; do
     unit="${pair%%:*}"
     pkg="${pair##*:}"
     deb="$(find_deb "$pkg")"
@@ -382,6 +397,41 @@ for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.s
     else
         fail "$(basename "$unit") starts ${exec_path}, which ${pkg} does not ship"
     fi
+done
+echo
+
+# ---------------------------------------------------------------------
+# Cross-architecture identity of the shipped units. One source file goes
+# into every architecture's .deb; this asserts it on the artefacts, so a
+# build that somehow rendered or mangled a unit per architecture cannot
+# hide behind the source check above. Runs whenever both architectures'
+# packages are present, whatever ARCH this invocation verifies.
+# ---------------------------------------------------------------------
+
+echo "== unit identity across architectures"
+for pair in "leviculum:lnsd" "lblogd:lblogd" "lnpnd:lnpnd"; do
+    pkg="${pair%%:*}"
+    unit_name="${pair##*:}"
+    amd="$(ls -1t "$DEB_DIR/${pkg}"_*_amd64.deb 2>/dev/null | head -n1)"
+    arm="$(ls -1t "$DEB_DIR/${pkg}"_*_arm64.deb 2>/dev/null | head -n1)"
+    if [ -z "$amd" ] || [ -z "$arm" ]; then
+        skip "need both architectures' ${pkg} .debs to compare ${unit_name}.service"
+        continue
+    fi
+    amd_dir="$(mktemp -d)"
+    arm_dir="$(mktemp -d)"
+    dpkg-deb -x "$amd" "$amd_dir"
+    dpkg-deb -x "$arm" "$arm_dir"
+    amd_unit="$(find "$amd_dir" -name "${unit_name}.service" | head -n1)"
+    arm_unit="$(find "$arm_dir" -name "${unit_name}.service" | head -n1)"
+    if [ -z "$amd_unit" ] || [ -z "$arm_unit" ]; then
+        fail "${pkg}: ${unit_name}.service missing from an extracted .deb"
+    elif cmp -s "$amd_unit" "$arm_unit"; then
+        pass "${unit_name}.service is byte-identical in the amd64 and arm64 ${pkg} .debs"
+    else
+        fail "${unit_name}.service differs between the amd64 and arm64 ${pkg} .debs"
+    fi
+    rm -rf "$amd_dir" "$arm_dir"
 done
 echo
 

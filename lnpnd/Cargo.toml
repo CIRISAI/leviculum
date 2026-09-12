@@ -54,6 +54,7 @@ assets = [
     # Rendered from docs/src/man/ by scripts/md2man.py, which the
     # build-deb recipes run before this; cargo-deb gzips it itself.
     ["../target/man/lnpnd.1", "usr/share/man/man1/lnpnd.1", "644"],
+    ["README.md", "usr/share/doc/lnpnd/README.md", "644"],
     # Documented overrides for the two lintian tags a musl-static binary
     # always trips.
     ["../packaging/lintian/lnpnd", "usr/share/lintian/overrides/lnpnd", "644"],

@@ -53,6 +53,17 @@ for cmd in i2pd; do
     fi
 done
 
+# Optional test dependency: lintian is the Debian-policy authority
+# scripts/verify-deb-packaging.sh defers to. `just verify-deb` presupposes a
+# build-deb run and is not part of any tier, so warn rather than fail — but a
+# verify run without it skips the policy checks entirely.
+for cmd in lintian; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: optional test dependency '$cmd' not found"
+        echo "[install-ci] Hint: sudo apt install $cmd (needed for the just verify-deb policy checks)"
+    fi
+done
+
 # Optional test dependency: nomadnet drives the on-demand lnomad acceptance
 # (scripts/lnomad_nomadnet_acceptance.sh). Not part of any tier, so warn rather
 # than fail when it is absent.
