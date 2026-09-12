@@ -67,11 +67,10 @@ pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 /// peripheral-role links, so this timer is the only down-detector that
 /// covers both roles.
 ///
-/// Taken from the firmware's registry since #382, which made the same
-/// number the bound on when a duplicate may displace a link: a link the
-/// duplicate rule calls dead is exactly a link [`LinkTable::expire`] is
-/// about to remove anyway, and two copies of that number in one
-/// repository would not stay equal.
+/// Taken from the firmware's registry since #382 — two copies of that
+/// number in one repository would not stay equal. Since #360 it is an
+/// expiry bound only; the duplicate rule reads the payload clock
+/// against `LINK_ACTIVE_DATA_MS` instead (see [`judge_duplicate`]).
 pub(crate) use leviculum_ble_tx::LINK_TIMEOUT_MS;
 
 /// A central that connects but never writes its 16-byte identity is
@@ -96,8 +95,9 @@ impl Role {
         }
     }
 
-    /// Who opened this connection, the input the duplicate rule turns
-    /// on (#382). Our role IS the direction: we are the peripheral only
+    /// Who opened this connection. Since #360 the duplicate rule no
+    /// longer reads it — it survives for the `origin=` log token. Our
+    /// role IS the direction: we are the peripheral only
     /// when the peer dialled us, the central only when we dialled it.
     pub(crate) fn origin(self) -> Origin {
         match self {
@@ -116,15 +116,17 @@ impl Role {
 }
 
 /// A link torn down because a newer connection of the same identity
-/// took it over (#376), and the silence that justified it (#382) — what
-/// the driver needs to disconnect the stale device and log the
-/// decision.
+/// took it over (#376, #360) — what the driver needs to disconnect the
+/// stale device and log the decision. `silence_ms` is the any-frame
+/// silence (reported), `data_silence_ms` the payload silence the rule
+/// consulted, `None` for a link that never carried payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Displaced {
     pub(crate) identity: IdentityHash,
     pub(crate) addr: Addr,
     pub(crate) role: Role,
     pub(crate) silence_ms: u64,
+    pub(crate) data_silence_ms: Option<u64>,
 }
 
 /// One live, handshaked link.
@@ -137,9 +139,12 @@ pub(crate) struct Link {
     pub(crate) mtu: usize,
     defrag: BleDefragmenter,
     /// When this link last delivered ANY frame, keepalives included —
-    /// the liveness clock both [`LinkTable::expire`] and the duplicate
-    /// rule read (#382).
+    /// the liveness clock [`LinkTable::expire`] reads (#382).
     last_heard_ms: u64,
+    /// When this link last delivered real PAYLOAD — a fragment frame,
+    /// never a keepalive and never the handshake — `None` until it
+    /// first does. The duplicate rule's one input (#360).
+    last_data_ms: Option<u64>,
     last_keepalive_tx_ms: u64,
 }
 
@@ -150,13 +155,15 @@ pub(crate) enum Admission {
     /// The peer presented our own identity — we connected to ourselves
     /// through some reflective path. Firmware: `BLE_LINK_SELF`.
     RejectSelf,
-    /// A dial of OURS reached an identity that already holds a live
-    /// link, which keeps the peer. Firmware:
-    /// `BLE_LINK_DUP … action=refuse`. `old_silence_ms` is how long the
-    /// old link had delivered nothing at all: reported so a capture can
-    /// check the decision, never consulted in making it (#382).
+    /// The identity's existing link carried real payload within
+    /// `LINK_ACTIVE_DATA_MS` and keeps the peer (#360). Firmware:
+    /// `BLE_LINK_DUP … action=refuse`. `old_silence_ms` is the old
+    /// link's any-frame silence (reported); `old_data_silence_ms` its
+    /// payload silence — the consulted input, `Some(< window)` by
+    /// construction here.
     RejectDuplicate {
         old_silence_ms: u64,
+        old_data_silence_ms: Option<u64>,
     },
     /// `max_links` reached.
     RejectFull,
@@ -338,16 +345,17 @@ impl LinkTable {
     /// Duplicate handling is identity-keyed, never address-keyed, because
     /// addresses rotate (v2.2 §"Why Not Use MAC Addresses as Keys?").
     /// Which of the two links the peer keeps is decided by
-    /// [`judge_duplicate`] from `role` and from nothing else —
-    /// `Peripheral` means the peer dialled US and displaces, `Central`
-    /// means we dialled it and are refused, and the firmware registry
-    /// applies the identical function to the identical input (#382).
-    /// The old link's silence is measured for the log line on both
-    /// paths and consulted on neither; a link that has really stopped
-    /// answering is [`LinkTable::expire`]'s business, and it removes it
-    /// whether or not anybody dials the identity. A displaced link is
-    /// returned as [`Displaced`] so the driver can disconnect the stale
-    /// device and log the decision.
+    /// [`judge_duplicate`] from the OLD link's payload recency and from
+    /// nothing else — the newer connection wins unless the old link
+    /// carried real payload within `LINK_ACTIVE_DATA_MS`, the same rule
+    /// in both roles, and the firmware registry applies the identical
+    /// function to the identical input (#360). The old link's any-frame
+    /// silence is measured for the log line on both paths and consulted
+    /// on neither; a link that has really stopped answering entirely is
+    /// [`LinkTable::expire`]'s business, and it removes it whether or
+    /// not anybody dials the identity. A displaced link is returned as
+    /// [`Displaced`] so the driver can disconnect the stale device and
+    /// log the decision.
     pub(crate) fn admit(
         &mut self,
         identity: IdentityHash,
@@ -362,10 +370,14 @@ impl LinkTable {
         let mut displaced = None;
         if let Some(pos) = self.links.iter().position(|l| l.identity == identity) {
             let silence_ms = now_ms.saturating_sub(self.links[pos].last_heard_ms);
-            if judge_duplicate(role.origin()) == Duplicate::Refuse {
+            let data_silence_ms = self.links[pos]
+                .last_data_ms
+                .map(|last| now_ms.saturating_sub(last));
+            if judge_duplicate(data_silence_ms) == Duplicate::Refuse {
                 return (
                     Admission::RejectDuplicate {
                         old_silence_ms: silence_ms,
+                        old_data_silence_ms: data_silence_ms,
                     },
                     None,
                 );
@@ -376,6 +388,7 @@ impl LinkTable {
                 addr: old.addr,
                 role: old.role,
                 silence_ms,
+                data_silence_ms,
             });
         }
         if self.links.len() >= self.max_links {
@@ -388,6 +401,7 @@ impl LinkTable {
             mtu: mtu.max(MIN_MTU),
             defrag: BleDefragmenter::new(),
             last_heard_ms: now_ms,
+            last_data_ms: None,
             last_keepalive_tx_ms: now_ms,
         });
         (Admission::Accept, displaced)
@@ -477,6 +491,10 @@ impl LinkTable {
         if data.len() < FRAGMENT_HEADER_SIZE {
             return Inbound::Keepalive;
         }
+        // Real payload: the active-use evidence the duplicate rule
+        // consults (#360). Per frame and before reassembly, like the
+        // liveness clock and for the same reason.
+        link.last_data_ms = Some(now_ms);
         let before = link.defrag.abandoned_count();
         let result = link.defrag.process(data, now_ms);
         if matches!(result, DefragResult::Error) {
@@ -1524,15 +1542,18 @@ mod tests {
         assert_eq!(t.link_count(), 0);
     }
 
-    /// The #382 rule through `admit`, both directions on one table:
-    /// our own dial loses to a link that still answers, the PEER's dial
-    /// wins against the same link.
+    /// The #360 rule through `admit`, both directions on one table: a
+    /// keepalive-fed idle link is REPLACED by the identity's next
+    /// handshake in either role — an abandoned link's last keepalive
+    /// can be arbitrarily recent, so keepalives must not refuse — and
+    /// the rule is the same whoever dialled.
     #[test]
-    fn our_dial_is_refused_where_the_peers_own_dial_displaces() {
+    fn an_idle_links_next_handshake_replaces_it_in_either_role() {
         let mut t = table();
         t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
         // Nothing but keepalives for ten minutes — a phone with nothing
-        // to report, which is what a healthy idle link looks like.
+        // to report, which is what a healthy idle link looks like, and
+        // ALSO what a rotated-away link looks like at decision time.
         let mut now = 0;
         while now < 600_000 {
             now += KEEPALIVE_INTERVAL_MS;
@@ -1540,20 +1561,8 @@ mod tests {
         }
 
         // Our own dial reaching the same identity under its rotated
-        // address: refused, because our dial is evidence of nothing.
+        // address: the newer connection wins.
         let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 185, now + 1);
-        assert_eq!(
-            adm,
-            Admission::RejectDuplicate { old_silence_ms: 1 },
-            "a keepalive one millisecond ago is a live link"
-        );
-        assert!(displaced.is_none());
-        assert_eq!(t.link_count(), 1);
-
-        // The PEER dialling in with the same identity: displaced, at the
-        // same instant and on the same evidence. It has given up on the
-        // old link by its own one-link rule.
-        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 185, now + 1);
         assert_eq!(adm, Admission::Accept);
         assert_eq!(
             displaced,
@@ -1562,57 +1571,54 @@ mod tests {
                 addr: ADDR_1,
                 role: Role::Central,
                 silence_ms: 1,
-            })
+                data_silence_ms: None,
+            }),
+            "a keepalive one millisecond ago is liveness, not active use"
         );
         assert_eq!(t.link_count(), 1);
-        assert_eq!(
-            t.link_by_addr(&ADDR_2).map(|l| l.role),
-            Some(Role::Peripheral)
-        );
+        assert_eq!(t.link_by_addr(&ADDR_2).map(|l| l.role), Some(Role::Central));
     }
 
-    /// A link that has stopped answering ENTIRELY — no payload, no
-    /// keepalive — does not hand itself to our dial either: the dial is
-    /// refused at every age, and `expire` is what takes the link away
-    /// (#382).
-    ///
-    /// Staleness is not a reason to displace. The age is measured on
-    /// OUR receive path, so it says nothing about the peer's intent —
-    /// a quiet link is equally a departed peer, a peer whose keepalives
-    /// we are dropping, and a healthy phone — while the peer's own
-    /// second connection does say something, which is why only that
-    /// direction displaces. And it is not needed: the sweep below
-    /// removes exactly the links this clause used to claim, on its own
-    /// schedule, without replacing a peer's negotiated link with one we
-    /// dialled.
+    /// The one refusal left (#360), in BOTH roles: an old link that
+    /// carried real payload within one keepalive interval keeps the
+    /// peer, and the newcomer is sent away whoever dialled it. Beyond
+    /// the window the same dial replaces, and a link nobody dials is
+    /// still the expiry's job.
     #[test]
-    fn our_dial_is_refused_even_when_the_old_link_stopped_answering() {
+    fn an_actively_used_link_refuses_its_duplicate_in_either_role() {
         let mut t = table();
         t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
         let frags = fragment_packet(b"data", 185);
         t.central_frame(ADDR_1, &frags[0], 1_000);
 
-        for age in [
-            1,
-            LINK_TIMEOUT_MS - 1,
-            LINK_TIMEOUT_MS,
-            10 * LINK_TIMEOUT_MS,
-        ] {
-            let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 185, 1_000 + age);
+        for role in [Role::Central, Role::Peripheral] {
+            let (adm, displaced) = t.admit(ID_A, ADDR_2, role, 185, 1_500);
             assert_eq!(
                 adm,
                 Admission::RejectDuplicate {
-                    old_silence_ms: age
+                    old_silence_ms: 500,
+                    old_data_silence_ms: Some(500),
                 },
-                "our own dial is refused at silence {age}, and the age is reported"
+                "payload 500 ms ago refuses the duplicate as {role:?}"
             );
-            assert!(displaced.is_none(), "nothing displaced at silence {age}");
+            assert!(displaced.is_none());
             assert_eq!(t.link_count(), 1);
         }
 
-        // What does clear it: the expiry sweep, at the same bound, with
-        // no dial involved at all.
-        let expired = t.expire(1_000 + LINK_TIMEOUT_MS);
+        // Past the window the same dial replaces the link.
+        let age = leviculum_ble_tx::LINK_ACTIVE_DATA_MS;
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 185, 1_000 + age);
+        assert_eq!(adm, Admission::Accept);
+        assert_eq!(
+            displaced.map(|d| (d.silence_ms, d.data_silence_ms)),
+            Some((age, Some(age))),
+            "payload one full interval ago is history"
+        );
+
+        // And a dead link nobody dials is cleared by the sweep alone.
+        let mut t = table();
+        t.admit(ID_A, ADDR_1, Role::Central, 185, 0);
+        let expired = t.expire(LINK_TIMEOUT_MS);
         assert_eq!(
             expired.links,
             vec![(ID_A, ADDR_1, Role::Central)],
@@ -1621,19 +1627,19 @@ mod tests {
         assert_eq!(t.link_count(), 0);
     }
 
-    /// The peer's own reconnect still displaces, at any age — the half
-    /// of the rule 381fa5a0 got right, pinned against a change to the
-    /// other half.
+    /// The peer's own reconnect displaces a link that has only
+    /// handshaked, however fresh — the handshake is presence, not
+    /// active use, so it cannot outrank the peer's next handshake.
     #[test]
-    fn the_peers_own_dial_still_displaces_however_fresh_the_old_link_is() {
+    fn the_peers_own_dial_still_displaces_a_fresh_handshake_only_link() {
         let mut t = table();
         t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
         let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 185, 1);
         assert_eq!(adm, Admission::Accept);
         assert_eq!(
-            displaced.map(|d| (d.identity, d.addr, d.silence_ms)),
-            Some((ID_A, ADDR_1, 1)),
-            "one millisecond of silence, and the peer's own action decides"
+            displaced.map(|d| (d.identity, d.addr, d.silence_ms, d.data_silence_ms)),
+            Some((ID_A, ADDR_1, 1, None)),
+            "one millisecond old and payload-free: the newcomer wins"
         );
         assert_eq!(t.link_count(), 1);
     }
@@ -1910,20 +1916,26 @@ mod tests {
     fn a_peer_that_reconnects_still_gets_the_packet_once() {
         let mut t = table();
         t.admit(ID_A, ADDR_1, Role::Central, 517, 0);
+        // A busy old link refuses the duplicate; the table keeps one row.
+        let frags = fragment_packet(b"data", 517);
+        t.central_frame(ADDR_1, &frags[0], 0);
         assert_eq!(
             t.admit(ID_A, ADDR_2, Role::Central, 517, 0).0,
-            Admission::RejectDuplicate { old_silence_ms: 0 },
-            "a live link of the same identity refuses our own dial"
+            Admission::RejectDuplicate {
+                old_silence_ms: 0,
+                old_data_silence_ms: Some(0),
+            },
+            "an actively used link of the same identity refuses our dial"
         );
-        // The old row leaves the way a dead link leaves: the expiry
-        // sweep. Only then is our dial a first link again.
-        assert_eq!(
-            t.expire(LINK_TIMEOUT_MS + 1).links,
-            vec![(ID_A, ADDR_1, Role::Central)]
-        );
-        let (admission, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 517, LINK_TIMEOUT_MS + 1);
+        // Once the payload is history, the reconnect replaces the row
+        // in place — still one row, never two.
+        let later = leviculum_ble_tx::LINK_ACTIVE_DATA_MS;
+        let (admission, displaced) = t.admit(ID_A, ADDR_2, Role::Central, 517, later);
         assert_eq!(admission, Admission::Accept);
-        assert!(displaced.is_none(), "nothing left to displace");
+        assert!(
+            displaced.is_some(),
+            "the old row is handed out for teardown"
+        );
         assert_eq!(t.live_links(), 1, "one identity, one row, always");
 
         let packet: Vec<u8> = vec![0x55; 100];

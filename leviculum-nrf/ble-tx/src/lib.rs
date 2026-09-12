@@ -63,8 +63,8 @@ pub use peer::{
     ScanMode,
 };
 pub use registry::{
-    judge_duplicate, plan_fanout, Duplicate, LinkUp, Origin, PeerRegistry, TxFanout,
-    LINK_TIMEOUT_MS,
+    judge_duplicate, plan_fanout, DataSilence, Duplicate, LinkUp, Origin, PeerRegistry, TxFanout,
+    LINK_ACTIVE_DATA_MS, LINK_TIMEOUT_MS,
 };
 pub use window::{
     CandidateTable, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,

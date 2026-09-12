@@ -367,6 +367,20 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_LINK_DUP",
         required_keys: &["peer", "addr", "action"],
     },
+    // The duplicate rule's replacement branch (#360): a newer connection
+    // of an identity we already hold took the peer over, in either role.
+    // `old_data_silence_ms` is the consulted input — payload recency of
+    // the old link, `never` for a link that carried none.
+    EventSchema {
+        name: "BLE_LINK_REPLACED",
+        required_keys: &[
+            "peer",
+            "addr",
+            "origin",
+            "old_silence_ms",
+            "old_data_silence_ms",
+        ],
+    },
     EventSchema {
         name: "BLE_LINK_SELF",
         required_keys: &["addr", "action"],

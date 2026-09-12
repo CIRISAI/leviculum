@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A phone's rotated BLE address no longer strands it behind its own
+  dead link (#360, board side). When an identity we already hold a
+  link to handshakes on a new connection, the newer connection now
+  wins in both roles — the old link is torn down as
+  `BLE_LINK_REPLACED` and its queued packets move over — unless the
+  old link carried real payload within one keepalive interval
+  (`LINK_ACTIVE_DATA_MS`, 15 s), which still refuses the newcomer to
+  protect a transfer in flight. Before, an outgoing-origin duplicate
+  was refused unconditionally: the board dialled the rotated address,
+  learned the same identity, refused its own dial and kept the
+  abandoned link until the 45 s expiry, leaving the phone linkless
+  ~45 s of every ~90 s rotation cycle. The rule (`judge_duplicate`)
+  is shared by the firmware and lnsd, matches the reference driver's
+  accept-newer behaviour (`ble-reticulum` `BLEInterface.py`,
+  `_check_duplicate_identity`), and logs the consulted payload
+  recency as `old_data_silence_ms=` on every duplicate line.
+
 - Raw Link packet receipts are no longer failed at the literal
   `max(rtt × 6, 5 ms)` deadline. The reference computes that formula but
   only checks receipts once per second, so no Python receipt can fail

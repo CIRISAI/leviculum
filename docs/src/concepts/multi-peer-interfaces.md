@@ -70,7 +70,7 @@ The fifth is different. One configured `BLEInterface` section is one
 Reticulum interface and one broadcast domain (`BLEInterface`,
 `leviculum-std/src/interfaces/ble/mod.rs:5`). Every outbound packet
 goes through one planner that decides which links get a copy
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:547`, driven
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:565`, driven
 from `send_packet`,
 `leviculum-std/src/interfaces/ble/mod.rs:788`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
@@ -114,11 +114,11 @@ including when the dial never connected at all (`CentralGone`,
 `leviculum-std/src/interfaces/ble/bluez.rs:283`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:618`, into `note_reset`,
-`leviculum-std/src/interfaces/ble/links.rs:798`). The firmware restarts
+`leviculum-std/src/interfaces/ble/links.rs:835`). The firmware restarts
 its strict phase only at a real connection event or teardown
-(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1288`); a dial
+(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1416`); a dial
 that timed out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1722`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1550`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.
@@ -183,7 +183,7 @@ That is not a criticism of it — the Columba wire spec has one notify
 characteristic, and no software layer can conjure a second one. It is
 the reason "the reference spawns children, so we should" is not an
 argument here. Our own planner is explicit about the same limit
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:547`).
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:565`).
 
 The firmware is the exception, and it cuts the other way: the
 SoftDevice's notification takes a connection handle, so a board *can*
@@ -303,9 +303,9 @@ parent to lean on. Measured against the tree, not assumed:
 | Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:158`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:1761`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:1942`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:1950`) | **medium** | parent |
-| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:734`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:773`) | **medium** — one adapter | parent |
+| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:734`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:791`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:880`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:301`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:898`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:301`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |
@@ -359,13 +359,46 @@ cleanest behaviour of the four, and it is a real scenario: a rotated-
 address reconnect holds two links to one identity for a moment. Under
 C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:547`), and a
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:565`), and a
 peer loss is reported only when the *last* link for that identity dies
 (`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:332`).
 The observable difference is which of two equally good links carries
 the next packet — the transport cannot express a preference it has no
 information to form. Under B, whichever of the two the stack in
 question runs.
+
+**What an address rotation looks like, from each side.** The observed
+trigger is a Columba phone rotating its resolvable private address
+about every ~90 s (review notes `columba-befunde.md` §5; the
+2026-09-12 field capture on #360 shows the same ~90 s cycle). The
+phone abandons its old connection when it rotates — from our side that
+link simply goes silent mid-keepalive-interval — and reappears under
+an address no table can associate with it, because an advertisement
+carries no identity. The two sides of the same event:
+
+- **Seen from the board or lnsd:** the old link's inbound frames stop;
+  seconds later the same 16-byte identity handshakes on a NEW
+  connection — either because the phone dialled us, or because our own
+  scanner dialled the unrecognizable new address. Which link survives
+  is `judge_duplicate` (`leviculum-nrf/ble-tx/src/registry.rs`, shared
+  by lnsd): **the new link keeps the peer** and the old one is torn
+  down as `BLE_LINK_REPLACED`, unless the old link carried real
+  payload within `LINK_ACTIVE_DATA_MS` (15 s) — then it is mid-transfer,
+  the newcomer is refused (`BLE_LINK_DUP … action=refuse`), and the
+  rotation is served by the next dial after the transfer's payload
+  ages out. Identical in both roles; who dialled is logged, not
+  consulted.
+- **Seen from the phone:** its own driver does the same — the
+  reference accepts the newer connection once the old one is stale or
+  a zombie (`ble-reticulum` `BLEInterface.py`,
+  `_check_duplicate_identity`) — so after a rotation BOTH ends
+  converge on the newest connection, and the brief two-links-one-peer
+  window above is exactly the hand-over moment.
+
+Before #360 the board refused every outgoing-origin duplicate, which
+kept the abandoned link and left the rotating phone linkless for the
+45 s expiry of every ~90 s cycle — the failure that broke the Lead's
+propagation-node upload on 2026-09-12.
 
 ## The recommendation
 

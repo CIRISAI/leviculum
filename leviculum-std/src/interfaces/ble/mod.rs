@@ -467,7 +467,7 @@ impl BleTask {
                         scheduler.note_reset(now);
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
-                            self.log_link_dup_displace(&identity, &addr.0, Role::Peripheral, &old);
+                            self.log_link_replaced(&identity, &addr.0, Role::Peripheral, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
                             disconnect_quietly(adapter, old.addr).await;
@@ -582,7 +582,7 @@ impl BleTask {
                         dial_queue.release(&addr.0, now);
                         let first_link = displaced.is_none();
                         if let Some(old) = displaced {
-                            self.log_link_dup_displace(&identity, &addr.0, Role::Central, &old);
+                            self.log_link_replaced(&identity, &addr.0, Role::Central, &old);
                             self.log_link_down(&old.identity, old.role, "displaced");
                             central_pipes.remove(&old.addr);
                             disconnect_quietly(adapter, old.addr).await;
@@ -977,27 +977,24 @@ impl BleTask {
         );
     }
 
-    /// A duplicate identity we resolved by displacing the old link
-    /// (#376/#382). The firmware's `BLE_LINK_DUP … action=displace`,
+    /// A duplicate identity we resolved by replacing the old link
+    /// (#376/#360). The firmware's `BLE_LINK_REPLACED`,
     /// key for key, so one grep reads a mixed capture: `origin=` names
-    /// who opened the connection that won, `old_silence_ms=` how long
-    /// the loser had delivered nothing at all.
-    fn log_link_dup_displace(
-        &self,
-        identity: &IdentityHash,
-        addr: &Addr,
-        role: Role,
-        old: &Displaced,
-    ) {
+    /// who opened the connection that won (reported, not consulted),
+    /// `old_silence_ms=` how long the loser had delivered nothing at
+    /// all, `old_data_silence_ms=` how long since it carried real
+    /// payload — the number the decision turned on, `never` for a link
+    /// that carried none.
+    fn log_link_replaced(&self, identity: &IdentityHash, addr: &Addr, role: Role, old: &Displaced) {
         tracing::info!(
-            event = "BLE_LINK_DUP",
+            event = "BLE_LINK_REPLACED",
             iface = %self.name,
             peer = %hex8(identity),
             addr = %hex12(addr),
-            action = "displace",
             origin = role.origin_as_str(),
             old_role = old.role.as_str(),
             old_silence_ms = old.silence_ms,
+            old_data_silence_ms = %leviculum_ble_tx::DataSilence(old.data_silence_ms),
         );
     }
 
@@ -1008,7 +1005,10 @@ impl BleTask {
                 addr = %hex12(addr),
                 action = "disconnect",
             ),
-            Admission::RejectDuplicate { old_silence_ms } => tracing::info!(
+            Admission::RejectDuplicate {
+                old_silence_ms,
+                old_data_silence_ms,
+            } => tracing::info!(
                 event = "BLE_LINK_DUP",
                 iface = %self.name,
                 peer = %hex8(identity),
@@ -1016,6 +1016,7 @@ impl BleTask {
                 action = "refuse",
                 origin = role.origin_as_str(),
                 old_silence_ms = old_silence_ms,
+                old_data_silence_ms = %leviculum_ble_tx::DataSilence(old_data_silence_ms),
             ),
             Admission::RejectFull => tracing::info!(
                 "BLE {}: link limit reached, rejecting {}",

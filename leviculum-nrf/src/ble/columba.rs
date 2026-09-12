@@ -794,8 +794,9 @@ async fn gatt_events(
                         peer_id,
                         Origin::Incoming,
                     ) {
-                        // Refused (#376): this identity's existing link
-                        // keeps the peer. Nothing was
+                        // Refused (#360): this identity's existing link
+                        // is actively carrying payload and keeps the
+                        // peer. Nothing was
                         // registered, so the teardown below reports
                         // nothing; dropping the connection here ends
                         // `gatt_server::run` and takes this session
@@ -818,12 +819,16 @@ async fn gatt_events(
                 } else if data.len() < FRAGMENT_HEADER_SIZE {
                     // Single-byte keepalive (0x00): nothing to
                     // defragment, but the peer is demonstrably there,
-                    // and that is exactly what the duplicate rule's
-                    // liveness clock measures (#382). A quiet phone
-                    // sends nothing else for minutes.
+                    // which is what the expiry's liveness clock
+                    // measures (#382). A quiet phone sends nothing
+                    // else for minutes. Liveness only — the duplicate
+                    // rule reads the payload clock (#360), which a
+                    // keepalive must not feed.
                     note_heard(slot_index);
                 } else {
-                    note_heard(slot_index);
+                    // Real payload: liveness AND the active-use
+                    // evidence the duplicate rule consults (#360).
+                    note_data(slot_index);
                     let now = Instant::now().as_millis();
                     let mut d = defrag.replace(BleDefragmenter::new());
                     let result = process_logged(&mut d, data, now, slot_index);
@@ -980,23 +985,26 @@ async fn gatt_events(
 /// OPENED that connection decides
 /// ([`leviculum_ble_tx::judge_duplicate`], #382).
 ///
-/// The two 2026-09-09 field T114s were the two directions. In the
-/// morning the PHONE dialled the board, the board refused, and the
-/// phone stopped reading the link it had abandoned — every announce
-/// went into a dead socket (6d3e5d4). In the evening our own fallback
-/// dial reached the phone we were already linked to, because an
-/// advertisement carries no identity and the phone rotates its address,
-/// and displacing there killed the phone's working link every ~95 s
-/// (13bea3e5). So an INCOMING duplicate displaces the old link — the
-/// peer's own one-link rule makes its second connection better evidence
-/// than any timer of ours — and an OUTGOING one is refused
-/// (`BLE_LINK_DUP … action=refuse`), always: no clock enters either
-/// branch. A dead link is cleared by the expiry instead
-/// ([`link_silent`] at [`leviculum_ble_tx::LINK_TIMEOUT_MS`], the sweep
-/// lnsd runs over its rows), which removes it whether or not anything
-/// dials it. Every line still carries `origin=` and the old link's
-/// `old_silence_ms`: the decision, and the measurement that would show
-/// the decision wrong.
+/// Since #360 the decision reads the OLD link's payload recency and
+/// nothing else, the same in both roles: the newer connection wins
+/// (`BLE_LINK_REPLACED`) unless the old link carried real payload
+/// within [`leviculum_ble_tx::LINK_ACTIVE_DATA_MS`], which refuses the
+/// newcomer (`BLE_LINK_DUP … action=refuse`). The 2026-09-12 field
+/// T114 is why the direction-only rule before it had to go: the phone
+/// rotated its address and abandoned its old connection, the board
+/// dialled the new address, learned the same identity and refused its
+/// own dial (`origin=outgoing old_silence_ms=9674`), and the phone was
+/// linkless until the old link's 45 s expiry — ~45 s of every ~90 s
+/// rotation cycle, which is what broke the Lead's propagation-node
+/// upload that morning. The refusal carve-out keeps the 13bea3e5
+/// lesson: a link actively carrying payload is never cut for a
+/// connection that adds no reachability. A dead link is still cleared
+/// by the expiry ([`link_silent`] at
+/// [`leviculum_ble_tx::LINK_TIMEOUT_MS`], the sweep lnsd runs over its
+/// rows), which removes it whether or not anything dials it. Every
+/// line carries `origin=` (reported, not consulted), the old link's
+/// `old_silence_ms`, and `old_data_silence_ms` — the one number the
+/// decision turned on.
 ///
 /// The first/last-link rules live host-tested in
 /// [`leviculum_ble_tx::registry`]; this is the one firmware instance,
@@ -1056,11 +1064,10 @@ async fn displaced(slot_index: usize, conn_handle: u16) {
 /// The board has no sweep task, so the expiry is an arm of the session
 /// it ends, reading the same liveness clock [`note_heard`] feeds and
 /// making the same comparison lnsd's `LinkTable::expire` makes over its
-/// rows. It has to exist for its own sake: until #382 the only thing on
-/// the board that ever removed a link which had stopped answering was
-/// the duplicate rule's displacement clause — a link was cleared only
-/// if we happened to dial its identity again — and that clause is gone,
-/// because our own dial was never evidence about the peer. A SoftDevice
+/// rows. It has to exist for its own sake: a replacement (#360) clears
+/// a dead link only when its identity happens to connect or be dialled
+/// again, and until #382 that was the ONLY thing that ever removed a
+/// link which had stopped answering. A SoftDevice
 /// supervision timeout does not cover this: it ends a link whose
 /// CONTROLLER has stopped acknowledging (4 s in the central role,
 /// `ConnectConfig::default`; the peer's choice in the peripheral one),
@@ -1099,10 +1106,10 @@ enum LinkEnd {
 }
 
 /// One line for an expiry, none for a displacement — that one is
-/// already on the wire as `BLE_LINK_DUP … action=displace`, logged by
+/// already on the wire as `BLE_LINK_REPLACED`, logged by
 /// the displacer with the evidence it decided on. `silence_ms=` is the
-/// expiry's evidence, in the same spelling
-/// `BLE_LINK_DUP … old_silence_ms=` uses, so one grep reads both.
+/// expiry's evidence, in the same spelling the duplicate lines'
+/// `old_silence_ms=` uses, so one grep reads both.
 fn log_link_end(role: &str, slot_index: usize, conn_handle: u16, end: LinkEnd) {
     if let LinkEnd::Expired(silence_ms) = end {
         crate::log::log_fmt(
@@ -1129,16 +1136,17 @@ async fn link_over(slot_index: usize, conn_handle: u16) -> LinkEnd {
 /// the peer behind the new link (Codeberg #365) — the mirror
 /// of [`peer_link_down`]'s last-link rule.
 ///
-/// A second link from an identity we already hold is decided by
-/// `origin` alone (#382, see [`LIVE_PEERS`]): `false` means REFUSED —
-/// a dial of ours reached an identity that already holds a link, that
-/// link keeps the peer however quiet it has been, and the caller must
-/// drop the connection it just made, address included
+/// A second link from an identity we already hold is decided by the
+/// old link's payload recency (#360, see [`LIVE_PEERS`]): `false`
+/// means REFUSED — the existing link carried real payload within
+/// [`leviculum_ble_tx::LINK_ACTIVE_DATA_MS`] and keeps the peer, and
+/// the caller must drop the connection it just made, address included
 /// ([`note_dead_end`]). `true` means the link is registered, either
-/// plainly or after displacing the old one.
-/// Either way the decision is logged as one `BLE_LINK_DUP` line
-/// carrying `origin=` and the old link's `old_silence_ms`, so a capture
-/// shows which branch fired and on what evidence.
+/// plainly or after replacing the old one.
+/// Either way the decision is logged — `BLE_LINK_DUP … action=refuse`
+/// or `BLE_LINK_REPLACED` — carrying `origin=`, the old link's
+/// `old_silence_ms` and the consulted `old_data_silence_ms`, so a
+/// capture shows which branch fired and on what evidence.
 ///
 /// A displacement registers the new link BEFORE the old one is
 /// signalled, which is what makes the old teardown's `link_down` a
@@ -1152,15 +1160,12 @@ fn peer_link_up(
     origin: Origin,
 ) -> bool {
     let now_ms = Instant::now().as_millis();
-    let up = LIVE_PEERS.lock(|peers| {
-        peers
-            .borrow_mut()
-            .link_up(slot_index, peer_id, origin, now_ms)
-    });
+    let up = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_up(slot_index, peer_id, now_ms));
     match up {
         LinkUp::Refused {
             old_slot,
             old_silence_ms,
+            old_data_silence_ms,
         } => {
             BLE_LINKS_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             let old_conn = HVN_DRAIN
@@ -1169,9 +1174,10 @@ fn peer_link_up(
             crate::log::log_fmt(
                 "[BLE ] ",
                 format_args!(
-                    "BLE_LINK_DUP peer={:02x}{:02x}{:02x}{:02x} addr={:012x} action=refuse origin={} old_conn={} new_conn={} old_silence_ms={}",
+                    "BLE_LINK_DUP peer={:02x}{:02x}{:02x}{:02x} addr={:012x} action=refuse origin={} old_conn={} new_conn={} old_silence_ms={} old_data_silence_ms={}",
                     peer_id[0], peer_id[1], peer_id[2], peer_id[3],
                     peer_value, origin_str(origin), old_conn, conn_handle, old_silence_ms,
+                    leviculum_ble_tx::DataSilence(old_data_silence_ms),
                 ),
             );
             return false;
@@ -1179,6 +1185,7 @@ fn peer_link_up(
         LinkUp::Displaced {
             old_slot,
             old_silence_ms,
+            old_data_silence_ms,
         } => displace_old_link(
             old_slot,
             slot_index,
@@ -1187,6 +1194,7 @@ fn peer_link_up(
             peer_id,
             origin,
             old_silence_ms,
+            old_data_silence_ms,
         ),
         LinkUp::Accepted { first } => {
             if first {
@@ -1201,17 +1209,24 @@ fn peer_link_up(
     true
 }
 
-/// A slot's peer delivered a frame — the liveness clock the duplicate
-/// rule reads (#382). Called per inbound FRAME on both session loops,
-/// before reassembly and for EVERY frame including the 1-byte
-/// keepalive, exactly where lnsd's `link_frame` sets `last_heard_ms`: a
-/// packet that never finishes reassembling still proves the link
-/// delivers, and a keepalive proves the peer is there at all, which is
-/// what a quiet phone has to be judged on. Costs one critical section
-/// and one `u64` store per frame.
+/// A slot's peer delivered a KEEPALIVE — the liveness clock the expiry
+/// reads (#382). Called on both session loops exactly where lnsd's
+/// `link_frame` sets `last_heard_ms`: a keepalive proves the peer is
+/// there at all, which is what a quiet phone has to be judged on.
+/// Costs one critical section and one `u64` store per frame.
 fn note_heard(slot_index: usize) {
     let now_ms = Instant::now().as_millis();
     LIVE_PEERS.lock(|peers| peers.borrow_mut().note_heard(slot_index, now_ms));
+}
+
+/// A slot's peer delivered real PAYLOAD — a fragment frame — which
+/// feeds the expiry's liveness clock AND the payload clock the
+/// duplicate rule consults (#360). Called per inbound FRAME, before
+/// reassembly: a packet that never finishes reassembling still proves
+/// the link delivers.
+fn note_data(slot_index: usize) {
+    let now_ms = Instant::now().as_millis();
+    LIVE_PEERS.lock(|peers| peers.borrow_mut().note_data(slot_index, now_ms));
 }
 
 /// The stable token `BLE_LINK_DUP origin=` carries, matching lnsd's.
@@ -1223,14 +1238,16 @@ fn origin_str(origin: Origin) -> &'static str {
 }
 
 /// Tear down the OLD link of an identity whose newer connection just
-/// registered (#376). The old slot's queued packets move to the new
-/// link's queue first — the displacement says the peer no longer reads
+/// registered (#376, replacement rule #360). The old slot's queued
+/// packets move to the new
+/// link's queue first — the replacement says the peer no longer reads
 /// the old connection, so anything left there would die with it; a
 /// packet the old pump already pulled out of the queue is the one loss
 /// this cannot prevent. Runs synchronously between the registry check
 /// and the wake (no await point), so the old session — which clears its
 /// registry entry before releasing its drain slot — cannot vanish in
 /// between: the latched wake always reaches the tenancy it names.
+#[allow(clippy::too_many_arguments)]
 fn displace_old_link(
     old_slot: usize,
     new_slot: usize,
@@ -1239,6 +1256,7 @@ fn displace_old_link(
     peer_id: [u8; 16],
     origin: Origin,
     old_silence_ms: u64,
+    old_data_silence_ms: Option<u64>,
 ) {
     let old_conn = HVN_DRAIN
         .handle_at(old_slot)
@@ -1258,9 +1276,10 @@ fn displace_old_link(
     crate::log::log_fmt(
         "[BLE ] ",
         format_args!(
-            "BLE_LINK_DUP peer={:02x}{:02x}{:02x}{:02x} addr={:012x} action=displace origin={} old_conn={} new_conn={} old_silence_ms={} moved={} dropped={}",
+            "BLE_LINK_REPLACED peer={:02x}{:02x}{:02x}{:02x} addr={:012x} origin={} old_conn={} new_conn={} old_silence_ms={} old_data_silence_ms={} moved={} dropped={}",
             peer_id[0], peer_id[1], peer_id[2], peer_id[3],
-            peer_value, origin_str(origin), old_conn, new_conn, old_silence_ms, moved, dropped,
+            peer_value, origin_str(origin), old_conn, new_conn, old_silence_ms,
+            leviculum_ble_tx::DataSilence(old_data_silence_ms), moved, dropped,
         ),
     );
     DISPLACE_WAKES[old_slot].signal(old_conn);
@@ -1447,9 +1466,10 @@ fn scan_mode_now() -> ScanMode {
 }
 
 /// How long a dead-end address is skipped: one that carried our own
-/// identity, or that a fallback dial could not connect to (an
-/// already-linked identity is no longer a dead end — since #376 that
-/// dial displaces the old link and stays connected). Sized to the RPA
+/// identity, one whose duplicate handshake was refused for an actively
+/// used old link (#360 — a dial that REPLACES the old link stays
+/// connected and never lands here), or one a fallback dial could not
+/// connect to. Sized to the RPA
 /// rotation timescale (minutes): the
 /// address dies on its own at the peer's next rotation, this just
 /// stops us re-dialling it every scan pass until then — the rig's
@@ -1770,10 +1790,11 @@ async fn central_link(
         return;
     }
     // An identity we already hold is decided by [`peer_link_up`] below,
-    // once the slot exists: the existing link keeps the peer and this
-    // dial is refused, whatever the age of that link (#382). This dial
-    // of ours is evidence of nothing; a link that has really stopped
-    // answering is the expiry's business ([`link_silent`]).
+    // once the slot exists: this dial replaces the old link unless
+    // that link is actively carrying payload, in which case it keeps
+    // the peer and the dial is refused (#360). A link that has really
+    // stopped answering entirely is still the expiry's business
+    // ([`link_silent`]).
 
     // From here the link is real: register it exactly as the peripheral
     // side does — a drain-table claim (whose index is the link identity
@@ -1937,13 +1958,17 @@ async fn run_central_session(
             return;
         }
         let data = data.as_slice();
-        note_heard(slot_index);
         if data.len() < FRAGMENT_HEADER_SIZE {
             // The peer's 1-byte keepalive: nothing to defragment, but
             // it is evidence the peer is still there, which is what the
-            // duplicate rule reads (#382).
+            // expiry reads (#382). Liveness only — the duplicate rule
+            // reads the payload clock (#360).
+            note_heard(slot_index);
             return;
         }
+        // Real payload: liveness AND the active-use evidence the
+        // duplicate rule consults (#360).
+        note_data(slot_index);
         let now = Instant::now().as_millis();
         let mut d = defrag.replace(BleDefragmenter::new());
         let result = process_logged(&mut d, data, now, slot_index);
