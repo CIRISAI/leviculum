@@ -624,6 +624,9 @@ async fn main(spawner: Spawner) {
     // rule, `leviculum_nrf::record_store` module docs).
     macro_rules! pn_step {
         ($events:expr) => {
+            // Board-visible core-event lines (LINK_REFUSED, #388) render
+            // regardless of whether a propagation role runs.
+            leviculum_nrf::events::log_events($events);
             if let Some(pn) = pn_engine.as_mut() {
                 let mut pn_out = pn.on_events(&mut node, $events);
                 pn_out.merge(pn.settle(&mut node).await);

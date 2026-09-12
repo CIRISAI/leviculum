@@ -167,6 +167,39 @@ pub fn write_f64_micro(w: &mut impl core::fmt::Write, value: f64) -> core::fmt::
     write!(w, "{}.{:06}", micros / 1_000_000, micros % 1_000_000)
 }
 
+/// The body of the firmware's `LINK_REFUSED` line: the link-table cap
+/// refusal (#388), rendered from the core's `NodeEvent::LinkRefused`
+/// because the boards build leviculum-core without `tracing` and the
+/// core's own refusal line is compiled out there.
+///
+/// Key set matches that line (`reason=budget links= max= dest=`), so a
+/// capped node's refusals grep alike on a board's CDC capture and in an
+/// lnsd log. `dest` is shortened to its first 4 bytes (8 hex chars) —
+/// enough to correlate against the initiator's own logs without spending
+/// the line budget on a full hash.
+pub struct LinkRefusedBody {
+    /// Live link-table entries at refusal time.
+    pub links: usize,
+    /// The configured cap that was hit.
+    pub max: usize,
+    /// The destination the refused link was for.
+    pub dest: [u8; 16],
+}
+
+impl core::fmt::Display for LinkRefusedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "reason=budget links={} max={} dest=",
+            self.links, self.max
+        )?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -252,6 +285,25 @@ mod tests {
                 1234
             ),
             "[INFO] RX 41 bytes rssi=-97 t=1234\r\n"
+        );
+    }
+
+    /// The whole refusal line, byte for byte, as the #388 board proof
+    /// greps it: prefix, the numbers, the 8-hex-char destination, the
+    /// stamp. The firmware crate runs no host tests, so this is where the
+    /// rendering is held to the shape the capture consumer expects.
+    #[test]
+    fn the_link_refused_line_has_the_shape_the_capture_greps() {
+        let mut dest = [0u8; 16];
+        dest[..4].copy_from_slice(&[0xab, 0x01, 0xcd, 0x23]);
+        let body = LinkRefusedBody {
+            links: 5,
+            max: 5,
+            dest,
+        };
+        assert_eq!(
+            line("LINK_REFUSED ", format_args!("{body}"), 42),
+            "LINK_REFUSED reason=budget links=5 max=5 dest=ab01cd23 t=42\r\n"
         );
     }
 

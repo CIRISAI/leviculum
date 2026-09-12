@@ -1941,9 +1941,10 @@ impl Engine {
                 Ok(connected) => connected,
                 Err(_) => {
                     // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
-                    // core has logged LINK_REFUSED; the backoff above is
-                    // already booked, so this round retries on a later
-                    // sync pass instead of spinning.
+                    // core has emitted LinkRefused, which the bins render
+                    // as a LINK_REFUSED line (`crate::events`); the
+                    // backoff above is already booked, so this round
+                    // retries on a later sync pass instead of spinning.
                     crate::log::log_fmt(
                         "PN_SYNC ",
                         format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),

@@ -22,6 +22,7 @@ pub mod boards;
 pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
+pub mod events;
 pub mod flash;
 /// The `[HEAP_CENSUS]` line (Codeberg #388): who holds the heap the
 /// `[HEAP]` line watches. Gated like [`pn`] — the engine is one of the

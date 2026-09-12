@@ -348,7 +348,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// One structured refusal line for the link-table cap (#388), shared by
     /// the inbound ([`Self::handle_link_request`]) and outbound
     /// ([`Self::connect`]) paths so both sides of a capped node grep alike.
-    fn log_link_refused(&self, dest_hash: &DestinationHash, max: usize) {
+    ///
+    /// Also emits [`NodeEvent::LinkRefused`] with the same numbers: the
+    /// tracing line is compiled out on the boards, and the event is what
+    /// their firmware renders on the debug CDC. One line per refusal on
+    /// each side — lnsd logs the tracing line, the boards render the event.
+    fn log_link_refused(&mut self, dest_hash: &DestinationHash, max: usize) {
         crate::tracing::debug!(
             target: "leviculum_core::link",
             "LINK_REFUSED reason=budget links={} max={} dest={}",
@@ -356,6 +361,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             max,
             HexShort(dest_hash.as_bytes()),
         );
+        self.events.push(NodeEvent::LinkRefused {
+            destination_hash: *dest_hash,
+            links: self.links.len(),
+            max,
+        });
     }
 
     /// Build and route the link establishment proof for an incoming link.

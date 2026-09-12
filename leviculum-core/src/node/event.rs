@@ -187,6 +187,30 @@ pub enum NodeEvent {
         destination_hash: DestinationHash,
     },
 
+    /// A link was refused because the link table is at its configured cap
+    /// (`TransportConfig::max_links`, #388).
+    ///
+    /// Emitted on both refusal paths: an inbound LINK_REQUEST past the cap
+    /// (which gets no link and no proof, so the initiator's establishment
+    /// timeout and retry own recovery) and an outbound
+    /// [`connect`](crate::node::NodeCore::connect) returning
+    /// `LinkError::TableFull`. There is no `link_id`: the refusal is
+    /// precisely that no link was created.
+    ///
+    /// The event exists so the refusal is observable on builds whose
+    /// `tracing` is compiled out — the boards render it as one
+    /// `LINK_REFUSED` line on the debug CDC, where until then a refused
+    /// peer left no line at all.
+    LinkRefused {
+        /// The destination the refused link was for.
+        destination_hash: DestinationHash,
+        /// Live link-table entries at refusal time (pending and active
+        /// alike — the count the cap is enforced against).
+        links: usize,
+        /// The configured cap that was hit.
+        max: usize,
+    },
+
     // Proof Events
     /// Application should decide whether to prove this packet
     ///
@@ -482,6 +506,8 @@ impl NodeEvent {
             | NodeEvent::PacketDeliveryConfirmed { .. }
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::PacketProofRequested { .. }
+            // A refusal is the absence of a link; there is no id to rewrite.
+            | NodeEvent::LinkRefused { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::InterfaceDown(_)
@@ -530,12 +556,15 @@ impl NodeEvent {
             | NodeEvent::ResourceProgress { .. } => EventClass::Data,
 
             // Link lifecycle and identity — at most one per link, must not be
-            // lost or links wedge.
+            // lost or links wedge. A refusal is the lifecycle event of a link
+            // that never came to exist: at most one per refused request, and
+            // it is the only trace the request leaves.
             NodeEvent::LinkEstablished { .. }
             | NodeEvent::LinkStale { .. }
             | NodeEvent::LinkRecovered { .. }
             | NodeEvent::LinkIdentified { .. }
-            | NodeEvent::LinkClosed { .. } => EventClass::Control,
+            | NodeEvent::LinkClosed { .. }
+            | NodeEvent::LinkRefused { .. } => EventClass::Control,
 
             // Proof decisions — require an application call to make progress.
             NodeEvent::PacketProofRequested { .. } | NodeEvent::LinkProofRequested { .. } => {
@@ -594,6 +623,7 @@ impl NodeEvent {
             NodeEvent::ChannelRetransmit { .. } => "ChannelRetransmit",
             NodeEvent::LinkIdentified { .. } => "LinkIdentified",
             NodeEvent::LinkClosed { .. } => "LinkClosed",
+            NodeEvent::LinkRefused { .. } => "LinkRefused",
             NodeEvent::PacketProofRequested { .. } => "PacketProofRequested",
             NodeEvent::LinkProofRequested { .. } => "LinkProofRequested",
             NodeEvent::LinkDeliveryConfirmed { .. } => "LinkDeliveryConfirmed",

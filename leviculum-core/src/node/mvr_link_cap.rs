@@ -25,7 +25,7 @@ use rand_core::OsRng;
 use crate::destination::{Destination, DestinationType, Direction, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::LinkError;
-use crate::node::{NodeCore, NodeCoreBuilder};
+use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::test_log_capture::with_captured_logs;
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::NoStorage;
@@ -115,6 +115,27 @@ fn inbound_cap_refuses_third_link_and_frees_on_close() {
             "no proof may leave for the refused request"
         );
         assert_eq!(responder.link_count(), 2, "no third link entry");
+
+        // The refusal is also an event carrying the line's numbers: the
+        // boards compile tracing out, so the event is their only evidence
+        // that a peer's request was refused.
+        let refusals: Vec<_> = out
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::LinkRefused {
+                    destination_hash,
+                    links,
+                    max,
+                } => Some((*destination_hash, *links, *max)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refusals,
+            std::vec![(dest_hash, 2, 2)],
+            "exactly one LinkRefused event, with the cap's numbers"
+        );
     });
     assert_eq!(
         logs.matches("LINK_REFUSED reason=budget links=2 max=2")
@@ -176,6 +197,27 @@ fn outbound_connect_at_cap_returns_table_full() {
         "connect at the cap must refuse"
     );
     assert_eq!(node.link_count(), 1, "the refusal created nothing");
+
+    // The refused connect returned Err, so there was no TickOutput to carry
+    // the LinkRefused event; it surfaces with the next tick.
+    let out = node.handle_timeout();
+    let refusals: Vec<_> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::LinkRefused {
+                destination_hash,
+                links,
+                max,
+            } => Some((*destination_hash, *links, *max)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refusals,
+        std::vec![(dest_hash, 1, 1)],
+        "the outbound refusal emits one LinkRefused event with the cap's numbers"
+    );
 }
 
 #[test]

@@ -29,6 +29,12 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // Rust builder; the C ABI has no way to install one, so this event cannot
     // fire for an FFI consumer and a typed code for it would be dead ABI.
     "CoreProcessorPanicked",
+    // The link-table cap refusal (#388): cap observability, like
+    // ChannelRetransmit. A C app's own refused connect already fails its
+    // `lev_connect` call synchronously, and an inbound refusal asks nothing
+    // of the application — no link exists to accept, and the initiator's
+    // establishment retry owns recovery.
+    "LinkRefused",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into
