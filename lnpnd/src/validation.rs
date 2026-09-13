@@ -77,7 +77,7 @@ pub(crate) enum Carrier {
     /// A raw link packet (`LinkDataReceived`), owing a proof.
     Packet,
     /// A completed inbound resource (`ResourceCompleted`), which may be a
-    /// single client upload or a multi-message peer sync.
+    /// client upload or a peer sync of any message count.
     Resource,
 }
 

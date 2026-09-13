@@ -444,8 +444,9 @@ enum Work {
     },
 }
 
-/// An inbound multi-message sync resource being drained one message per
-/// settle pass (module docs, §stamp validation).
+/// An inbound sync resource from a validated peer — any message count —
+/// being drained one message per settle pass (module docs, §stamp
+/// validation).
 struct SyncBatch {
     link_id: LinkId,
     remote: [u8; 16],
@@ -1470,29 +1471,40 @@ impl Engine {
         S: Storage,
     {
         self.inbound_transfers.retain(|held| held != link_id);
-        let multi = PeerSyncEnvelope::decode(data)
-            .map(|envelope| envelope.messages.len() > 1)
-            .unwrap_or(false);
-        if !multi {
-            // The singleton form is a client upload riding a resource;
-            // the resource protocol has its own acknowledgement, so no
-            // packet proof exists to send.
+        // Route by the SENDER, not by the message count. The reference
+        // ingests a peer's transfer through the peer branch at any
+        // cardinality and lets the count decide only whether a peering key
+        // was required: `reference/LXMF/LXMF/LXMRouter.py:2381-2389` gates
+        // on `len(messages) > 1`, while `:2430-2447` picks the peer
+        // accounting on `remote_hash in self.peers`. Splitting on the
+        // count instead sent a peer's single-message sync — the common
+        // case, one message per round — down the client path, where it
+        // logged `via=resource` and produced no `PN_SYNC dir=in`: the log
+        // could not tell a forwarded message from a fresh one. The
+        // resource admission above already gates on `validated_links`
+        // (`ResourceAdvertised`), so the two now agree.
+        let envelope = PeerSyncEnvelope::decode(data).ok();
+        let multi = envelope
+            .as_ref()
+            .is_some_and(|envelope| envelope.messages.len() > 1);
+        let peer = self.validated_links.get(link_id).copied();
+        let (Some(remote), Some(envelope)) = (peer, envelope) else {
+            if multi {
+                // Multi-message without a validated peering key: torn down
+                // (`reference/LXMF/LXMF/LXMRouter.py:2381-2389`).
+                self.drop_link_state(link_id);
+                out.merge(node.close_link(link_id));
+                return;
+            }
+            // A client's upload riding a resource; the resource protocol
+            // has its own acknowledgement, so no packet proof exists to
+            // send.
             self.work.push_back(Work::Upload {
                 link_id: *link_id,
                 data: data.to_vec(),
                 proof: None,
                 via: "resource",
             });
-            return;
-        }
-        let Some(remote) = self.validated_links.get(link_id).copied() else {
-            // Multi-message without a validated peering key: torn down
-            // (`reference/LXMF/LXMF/LXMRouter.py:2381-2389`).
-            self.drop_link_state(link_id);
-            out.merge(node.close_link(link_id));
-            return;
-        };
-        let Ok(envelope) = PeerSyncEnvelope::decode(data) else {
             return;
         };
         self.seed_clock(node, envelope.timestamp as u64, "peer-sync");

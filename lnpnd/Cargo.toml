@@ -94,6 +94,9 @@ futures = "0.3"
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
+# The provenance test asserts the PN_ACCEPT line itself, because the line is
+# what the hardware cells wait for; capturing it needs a subscriber.
+tracing-subscriber.workspace = true
 
 [lib]
 name = "lnpnd"

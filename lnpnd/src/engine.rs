@@ -954,7 +954,7 @@ impl<S: PropagationStore> Engine<S> {
                 }
             }
             Carrier::Resource => {
-                let handled = ready.peering.on_sync_resource(
+                let synced = ready.peering.on_sync_resource(
                     core,
                     &mut ready.node,
                     &link_id,
@@ -963,18 +963,40 @@ impl<S: PropagationStore> Engine<S> {
                     &mut validate,
                     out,
                 );
-                if !handled {
-                    let _ =
-                        self.ingest(ready, core, &link_id, &data, "resource", &mut validate, out);
+                match synced {
+                    Some(accepted) => {
+                        for (transient_id, destination_hash) in accepted {
+                            self.deliver_own_mailbox(
+                                ready,
+                                core,
+                                &transient_id,
+                                &destination_hash,
+                                out,
+                            );
+                        }
+                    }
+                    None => {
+                        let _ = self.ingest(
+                            ready,
+                            core,
+                            &link_id,
+                            &data,
+                            "resource",
+                            &mut validate,
+                            out,
+                        );
+                    }
                 }
             }
         }
     }
 
-    /// A completed inbound resource on one of the role's links: the
-    /// multi-message peer-sync form is the peering half's (gated on the
-    /// validated key, LXMRouter.py:2381-2389); the singleton form is the
-    /// client upload path. The resource protocol has its own
+    /// A completed inbound resource on one of the role's links: a
+    /// validated sync peer's transfer is the peering half's at any
+    /// message count (`Peering::on_sync_resource`), everything else is the
+    /// client upload path — and the multi-message form from a sender
+    /// without a validated key is torn down there
+    /// (LXMRouter.py:2381-2389). The resource protocol has its own
     /// acknowledgement; no packet proof exists to send here.
     ///
     /// The validated sync peer is captured NOW, not at the drain: the
@@ -1006,7 +1028,7 @@ impl<S: PropagationStore> Engine<S> {
             let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
                 validate_stamp_value(transient_id, stamp, min_cost, compute_value)
             };
-            let handled = ready.peering.on_sync_resource(
+            let synced = ready.peering.on_sync_resource(
                 core,
                 &mut ready.node,
                 link_id,
@@ -1015,8 +1037,21 @@ impl<S: PropagationStore> Engine<S> {
                 &mut validate,
                 out,
             );
-            if !handled {
-                let _ = self.ingest(ready, core, link_id, data, "resource", &mut validate, out);
+            match synced {
+                Some(accepted) => {
+                    for (transient_id, destination_hash) in accepted {
+                        self.deliver_own_mailbox(
+                            ready,
+                            core,
+                            &transient_id,
+                            &destination_hash,
+                            out,
+                        );
+                    }
+                }
+                None => {
+                    let _ = self.ingest(ready, core, link_id, data, "resource", &mut validate, out);
+                }
             }
         }
     }
@@ -1385,6 +1420,40 @@ mod tests {
         }
     }
 
+    /// A `tracing` writer that keeps what was written, so a test can
+    /// assert on the log line itself rather than on a proxy for it.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        /// The captured log, quotes stripped: `tracing`'s formatter quotes
+        /// string fields (`via="sync"`), the firmware's `log_fmt` does not
+        /// (`via=sync`), and the assertions want one spelling.
+        fn unquoted(&self) -> String {
+            let bytes = self.0.lock().expect("capture lock").clone();
+            String::from_utf8_lossy(&bytes).replace('"', "")
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     fn announces_in(out: &TickOutput) -> Vec<Packet> {
         out.actions
             .iter()
@@ -1598,5 +1667,89 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+    /// The same message, ingested once from a client and once from a
+    /// validated sync peer, must be distinguishable in the log: a
+    /// forwarded message says `via=sync`, a fresh one keeps the carrier it
+    /// rode in on.
+    ///
+    /// Before this, the ingest was routed by message count, so the common
+    /// sync — one message per round — took the client path and logged
+    /// `via=resource`, with client accounting and no `PN_SYNC dir=in`.
+    /// Both board cells (`hardware/ble_pn_board_upload.toml`,
+    /// `hardware/lora_pn_board_sync.toml`) wait 600 s on the receiving
+    /// board for `via=sync durable=1` and timed out on correct behaviour.
+    #[test]
+    fn a_peer_sync_and_a_client_upload_log_different_provenance() {
+        use leviculum_lxmf::constants::LXMF_OVERHEAD;
+        use leviculum_lxmf::PeerSyncEnvelope;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = engine_with(Vec::new(), None);
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let client_link = LinkId::new([0x11; 16]);
+        let peer_link = LinkId::new([0x22; 16]);
+        ready.peering.validate_link_for_tests(peer_link, [0x24; 16]);
+
+        // One message, one envelope — the shape a client uploads and the
+        // shape a peer syncs when it holds exactly one wanted message.
+        let mut message = vec![0x5au8; LXMF_OVERHEAD + 40];
+        message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![message],
+        }
+        .encode();
+
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut out = TickOutput::empty();
+            engine.on_inbound_resource_completed(
+                &mut ready,
+                &mut core,
+                &client_link,
+                &envelope,
+                &mut out,
+            );
+            engine.on_inbound_resource_completed(
+                &mut ready, &mut core, &peer_link, &envelope, &mut out,
+            );
+        });
+        engine.state = State::Ready(ready);
+
+        let log = capture.unquoted();
+        let accepts: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("PN_ACCEPT"))
+            .collect();
+        assert_eq!(accepts.len(), 2, "both ingests must log an accept:\n{log}");
+        assert!(
+            accepts[0].contains("via=resource"),
+            "a client's upload keeps its carrier: {}",
+            accepts[0]
+        );
+        assert!(
+            accepts[1].contains("via=sync"),
+            "a validated peer's message is a forwarded one, whatever the \
+             envelope's message count: {}",
+            accepts[1]
+        );
+        assert!(
+            log.lines()
+                .any(|line| line.contains("PN_SYNC") && line.contains("dir=in")),
+            "a one-message transfer from a peer is still a sync round:\n{log}"
+        );
     }
 }

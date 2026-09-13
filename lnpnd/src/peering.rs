@@ -577,9 +577,24 @@ impl PeeringRuntime {
         self.validated_links.insert(link_id, peer);
     }
 
-    /// Handle a completed inbound resource when it is the multi-message
-    /// peer-sync form. Returns `true` when handled here; `false` hands the
-    /// single-message form back to the engine's client-upload path.
+    /// Handle a completed inbound resource when it came from a validated
+    /// sync peer. Returns `Some(accepted)` when handled here — the
+    /// non-duplicate `(transient_id, destination_hash)` pairs, so the
+    /// caller can deliver the ones addressed to its own mailbox, which the
+    /// reference does for a peer's messages exactly as for a client's
+    /// (`lxmf_propagation` checks `delivery_destinations` before the store,
+    /// whatever `from_peer` says, `LXMRouter.py:2501-2509`). `None` hands
+    /// the transfer back to the engine's client-upload path.
+    ///
+    /// Routing follows the SENDER, not the message count: the reference
+    /// ingests a peer's transfer through this branch at any cardinality
+    /// and lets the count decide only whether a peering key was required
+    /// (`LXMRouter.py:2381-2389` gates on `len(messages) > 1`, while
+    /// `:2430-2447` picks the peer accounting on `remote_hash in
+    /// self.peers`). Splitting on the count instead made a peer's
+    /// single-message sync — the common case, one message per round —
+    /// indistinguishable from a fresh client upload: same `via=resource`
+    /// log line, client accounting, no `PN_SYNC dir=in`.
     ///
     /// The multi-message form without a validated peering key tears the
     /// link down (`reference/LXMF/LXMF/LXMRouter.py:2381-2389`); validated
@@ -602,21 +617,23 @@ impl PeeringRuntime {
         data: &[u8],
         validate: &mut dyn FnMut(&TransientId, &[u8; 32]) -> Option<u16>,
         out: &mut TickOutput,
-    ) -> bool {
+    ) -> Option<Vec<(TransientId, [u8; 16])>> {
         let Ok(envelope) = PeerSyncEnvelope::decode(data) else {
-            return false;
+            return None;
         };
-        if envelope.messages.len() <= 1 {
-            self.inbound_transfers.remove(link_id);
-            return false;
-        }
         self.inbound_transfers.remove(link_id);
         let Some(remote_hash) = validated_peer else {
-            tracing::debug!(
-                "lnpnd: multi-message transfer without validated peering key; tearing down"
-            );
-            out.merge(core.close_link(link_id));
-            return true;
+            if envelope.messages.len() > 1 {
+                tracing::debug!(
+                    "lnpnd: multi-message transfer without validated peering key; tearing down"
+                );
+                out.merge(core.close_link(link_id));
+                // Handled: the link is gone, nothing reaches the store.
+                return Some(Vec::new());
+            }
+            // One message from someone who never presented a peering key:
+            // a client upload, the engine's path.
+            return None;
         };
 
         let now = unix_secs();
@@ -624,6 +641,7 @@ impl PeeringRuntime {
         let mut duplicates = 0usize;
         let mut bytes = 0u64;
         let mut invalid = 0usize;
+        let mut local: Vec<(TransientId, [u8; 16])> = Vec::new();
         for message in &envelope.messages {
             let outcome = node.accept_stamped(message, now, &mut *validate);
             match outcome {
@@ -658,6 +676,7 @@ impl PeeringRuntime {
                     } else {
                         accepted += 1;
                         bytes += size as u64;
+                        local.push((transient_id, destination_hash));
                     }
                 }
                 UploadOutcome::InvalidStamp { .. } => invalid += 1,
@@ -702,7 +721,7 @@ impl PeeringRuntime {
             self.gate.throttle(remote_hash, now);
             out.merge(core.close_link(link_id));
         }
-        true
+        Some(local)
     }
 
     // ------------------------------------------------------------------
