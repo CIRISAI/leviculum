@@ -655,7 +655,7 @@ impl Engine {
 
         let region = FlashRegion::store_region();
         let pages = region.len / SECTOR_SIZE;
-        let store = PnStore::new(region, pages, crate::record_store::free_bytes_hint());
+        let store = PnStore::new(region, pages);
         let name = crate::name::mesh_name(&identity_hash);
         let role_config = PropagationNodeConfig {
             stamp_cost: config.stamp_cost,
@@ -2369,9 +2369,6 @@ impl Engine {
         let mut all_ok = true;
         while let Some(op) = self.role.store().peek_op().cloned() {
             let ok = execute(&op).await;
-            if let Some(free) = ok {
-                self.role.store_mut().set_free_bytes(free);
-            }
             let done = self.role.store_mut().op_done(ok.is_some());
             if ok.is_none() {
                 all_ok = false;

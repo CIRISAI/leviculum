@@ -140,7 +140,14 @@ pub enum PnOp {
 /// What a completed [`PnOp`] reports back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PnDone {
-    /// The log's `free_bytes` after the op — the engine's fill mirror.
+    /// The log's `free_bytes` after the op: bytes appendable before
+    /// reclaim has to erase a page that still holds records. Reported,
+    /// and consulted by nobody since 2026-09-13 — the engine's
+    /// `PropagationStore::free_space` answers the trait's question
+    /// (bytes a body could still use across the region) from its own
+    /// scan, because this number is the active page's room after the
+    /// first lap and reads 0 on a full page beside an almost empty
+    /// store (`leviculum-nrf/pn-store/src/lib.rs`, `free_space`).
     pub free_bytes: u32,
 }
 
@@ -149,11 +156,6 @@ pub struct PnDone {
 /// reply unambiguous without a ticket.
 static PN_OPS: Channel<CriticalSectionRawMutex, PnOp, 1> = Channel::new();
 static PN_DONE: Signal<CriticalSectionRawMutex, Result<PnDone, ()>> = Signal::new();
-
-/// The log's `free_bytes` as of the mount / the last completed operation,
-/// for callers that need the number without a round trip (the boot line,
-/// the display).
-static FREE_BYTES: AtomicU32 = AtomicU32::new(0);
 
 /// Execute one propagation-store write on the log task.
 ///
@@ -175,11 +177,6 @@ pub async fn pn_execute(op: PnOp) -> Result<PnDone, ()> {
     PN_DONE.reset();
     PN_OPS.send(op).await;
     PN_DONE.wait().await
-}
-
-/// The log's `free_bytes` as of the last operation (see [`FREE_BYTES`]).
-pub fn free_bytes_hint() -> u32 {
-    FREE_BYTES.load(Ordering::Relaxed)
 }
 
 /// Set once the log is mounted. Until then there is nothing to append to and
@@ -398,7 +395,6 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
         // being dropped into a channel nothing reads.
         None => return,
     };
-    FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
     MOUNTED.store(true, Ordering::Relaxed);
 
     let mut ticker = embassy_time::Ticker::every(embassy_time::Duration::from_secs(STATS_PERIOD_S));
@@ -414,11 +410,9 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash) {
                 STORM_RUNNING.store(true, Ordering::Relaxed);
                 storm(&mut log, records, size).await;
                 STORM_RUNNING.store(false, Ordering::Relaxed);
-                FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
             }
             Either3::Second(op) => {
                 let outcome = pn_perform(&mut log, base, op).await;
-                FREE_BYTES.store(log.free_bytes(), Ordering::Relaxed);
                 PN_DONE.signal(outcome);
             }
             Either3::Third(()) => {}

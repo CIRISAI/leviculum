@@ -106,7 +106,6 @@ fn flush_messages(
         while let Some(op) = store.peek_op().cloned() {
             apply(log, &op).await;
             store.op_done(true);
-            store.set_free_bytes(log.free_bytes());
             sync(region, log);
         }
     });
@@ -197,7 +196,7 @@ fn sequence_mapping_is_append_order_across_reclaim() {
                 .unwrap();
         }
         sync(&region, &mut log);
-        let store = PnStore::new(region.clone(), 3, log.free_bytes());
+        let store = PnStore::new(region.clone(), 3);
         let dir = directory(&store);
         // Page 0 was reclaimed on the lap; what survives is a suffix of
         // the append order and the sequences are strictly increasing.
@@ -228,7 +227,7 @@ fn bench_and_peer_records_are_invisible_to_the_message_store() {
             .unwrap();
         sync(&region, &mut log);
 
-        let store = PnStore::new(region, SECTORS, log.free_bytes());
+        let store = PnStore::new(region, SECTORS);
         let dir = directory(&store);
         assert_eq!(dir.len(), 1);
         assert_eq!(dir[0].transient_id, key(1));
@@ -244,7 +243,7 @@ fn a_queued_append_is_deduplicated_but_not_offered() {
         let region = SharedRegion::new(SECTORS);
         let mut log = fresh(SECTORS).await;
         sync(&region, &mut log);
-        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        let mut store = PnStore::new(region.clone(), SECTORS);
 
         store
             .append(&key(1), 1000, 12, &msg_body(1, FIELD_BODY))
@@ -274,7 +273,7 @@ fn purge_of_a_queued_append_never_reaches_flash() {
         let region = SharedRegion::new(SECTORS);
         let mut log = fresh(SECTORS).await;
         sync(&region, &mut log);
-        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        let mut store = PnStore::new(region.clone(), SECTORS);
 
         store
             .append(&key(1), 1, 0, &msg_body(1, FIELD_BODY))
@@ -293,7 +292,7 @@ fn purge_masks_and_a_failed_flush_unmasks() {
         let region = SharedRegion::new(SECTORS);
         let mut log = fresh(SECTORS).await;
         sync(&region, &mut log);
-        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        let mut store = PnStore::new(region.clone(), SECTORS);
         store
             .append(&key(1), 1, 0, &msg_body(1, FIELD_BODY))
             .unwrap();
@@ -323,7 +322,7 @@ fn stamp_value_above_the_clamp_is_stored_clamped() {
         let region = SharedRegion::new(SECTORS);
         let mut log = fresh(SECTORS).await;
         sync(&region, &mut log);
-        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        let mut store = PnStore::new(region.clone(), SECTORS);
         store
             .append(&key(1), 1, 200, &msg_body(1, FIELD_BODY))
             .unwrap();
@@ -476,7 +475,7 @@ fn queued_heap_bytes_track_the_flush_queues() {
         sync(&region, &mut log);
 
         // Message store: an unflushed append pins at least its body.
-        let mut store = PnStore::new(region.clone(), SECTORS, log.free_bytes());
+        let mut store = PnStore::new(region.clone(), SECTORS);
         assert_eq!(store.queued_heap_bytes(), 0);
         let body = msg_body(1, FIELD_BODY);
         store.append(&key(1), 1000, 0, &body).unwrap();
@@ -493,5 +492,115 @@ fn queued_heap_bytes_track_the_flush_queues() {
         assert_eq!(peers.queued_heap_bytes(), 0);
         peers.save(&full_peer(7, 100)).unwrap();
         assert!(peers.queued_heap_bytes() > 0);
+    });
+}
+
+/// The board's own region: 16 pages of 4 KiB (leviculum `memory.x`,
+/// `STORE : ORIGIN = 0x000DA000, LENGTH = 0x10000`).
+const BOARD_SECTORS: u32 = 16;
+
+/// `free_space` answers the trait's question — bytes a message body could
+/// still use ACROSS the region — and not the log's `free_bytes`, which is
+/// the active page's room once the region has lapped.
+///
+/// The reproducer is the 2026-09-13 field reading: both T114 and pocket
+/// printed `PN_STATS store=0 free_bytes=0 capacity=65344` for hours while
+/// their mount line said `live=2 free_bytes=2600` and `STORE stats
+/// appends=38 fails=0` showed the log appending happily. The third phase
+/// below is that state exactly — a lapped region whose active page is
+/// full, holding two live records — and there the two numbers differ by
+/// the whole store.
+#[test]
+fn free_space_measures_the_region_and_not_the_active_page() {
+    block_on(async {
+        let region = SharedRegion::new(BOARD_SECTORS);
+        let mut log = fresh(BOARD_SECTORS).await;
+        sync(&region, &mut log);
+        let mut store = PnStore::new(region.clone(), BOARD_SECTORS);
+        let stride = leviculum_record_log::record_stride(FIELD_BODY) as u64;
+        let per_page = SECTOR_PAYLOAD as u64 / stride;
+
+        // Phase 1: two live records in a 16-page region. Close to
+        // capacity, and exactly capacity minus what they occupy.
+        store
+            .append(&key(1), 1, 5, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        store
+            .append(&key(2), 2, 5, &msg_body(2, FIELD_BODY))
+            .unwrap();
+        // A queued append already costs its bytes: the trait's number is
+        // what a NEXT body could use.
+        assert_eq!(store.free_space(), store.capacity() - 2 * stride);
+        flush_messages(&mut store, &region, &mut log);
+        assert_eq!(store.free_space(), store.capacity() - 2 * stride);
+        assert!(
+            store.free_space() > store.capacity() * 9 / 10,
+            "two records do not fill a 64 KiB region: {}",
+            store.free_space()
+        );
+
+        // Phase 2: fill every page. What is left is the per-page tails no
+        // record fits into — page granularity, which the doc comment
+        // states this number does not model.
+        let total = (BOARD_SECTORS as u64 * per_page) as u32;
+        for n in 3..=total {
+            store
+                .append(&key(n), n as u64, 5, &msg_body(n as u8, FIELD_BODY))
+                .unwrap();
+        }
+        flush_messages(&mut store, &region, &mut log);
+        let live = store.count().unwrap() as u64;
+        assert_eq!(store.free_space(), store.capacity() - live * stride);
+        assert!(
+            store.free_space() < SECTOR_PAYLOAD as u64 * 2,
+            "a full region has at most the page tails left: {}",
+            store.free_space()
+        );
+
+        // One more append does NOT fail: the log reclaims its oldest page
+        // round-robin, which is the board's eviction (see `append`'s own
+        // doc comment). The number rises by the page that went.
+        let before = store.free_space();
+        store
+            .append(
+                &key(total + 1),
+                total as u64 + 1,
+                5,
+                &msg_body(0xEE, FIELD_BODY),
+            )
+            .expect("the round-robin log never reports Full for a body that fits a page");
+        flush_messages(&mut store, &region, &mut log);
+        assert!(
+            store.free_space() > before + (per_page - 2) * stride,
+            "the reclaimed page's bytes came back: {before} -> {}",
+            store.free_space()
+        );
+
+        // Phase 3: the field state. Purge everything but two records on a
+        // region that has lapped. The log's own number still reads the
+        // active page's room — near nothing, and on the boards it read
+        // exactly 0 — while the store is all but empty.
+        let keys: Vec<[u8; KEY_LEN]> = directory(&store)
+            .iter()
+            .map(|meta| meta.transient_id)
+            .collect();
+        for id in keys.iter().take(keys.len() - 2) {
+            assert!(store.purge(id).unwrap());
+        }
+        flush_messages(&mut store, &region, &mut log);
+        assert_eq!(store.count().unwrap(), 2);
+        assert!(
+            log.free_bytes() < SECTOR_PAYLOAD,
+            "phase 3 wants the lapped-and-nearly-full active page the \
+             boards had: {}",
+            log.free_bytes()
+        );
+        assert!(
+            store.free_space() > store.capacity() * 9 / 10,
+            "two live records, so the store is nearly empty whatever the \
+             active page says: {} of {}",
+            store.free_space(),
+            store.capacity()
+        );
     });
 }

@@ -237,25 +237,17 @@ pub struct PnStore<R> {
     region: R,
     /// Pages in the region, for [`PropagationStore::capacity`].
     pages: u32,
-    /// Mirror of the log's `free_bytes`, updated from flush replies.
-    free_bytes: u32,
     queue: VecDeque<FlushOp>,
 }
 
 impl<R: Region> PnStore<R> {
-    /// `pages` and `free_bytes` come from the mount line's own numbers.
-    pub fn new(region: R, pages: u32, free_bytes: u32) -> Self {
+    /// `pages` is the region's page count, as the mount line reports it.
+    pub fn new(region: R, pages: u32) -> Self {
         Self {
             region,
             pages,
-            free_bytes,
             queue: VecDeque::new(),
         }
-    }
-
-    /// Update the free-bytes mirror from a flush reply.
-    pub fn set_free_bytes(&mut self, free_bytes: u32) {
-        self.free_bytes = free_bytes;
     }
 
     /// Writes waiting to be flushed.
@@ -402,7 +394,53 @@ impl<R: Region> PropagationStore for PnStore<R> {
         }
     }
 
+    /// The trait's number: bytes a message body could still use across
+    /// the REGION — [`PropagationStore::capacity`] minus what live
+    /// records occupy, minus the appends this store has queued.
+    ///
+    /// Not the log's own `free_bytes`, which this used to mirror. That
+    /// one answers a different question — "bytes appendable before
+    /// reclaim has to erase a page that still holds records" — and after
+    /// the first lap it is only the active page's room, so it reads 0
+    /// whenever the active page happens to be full and 0 again on the
+    /// next boot of a lapped region. Both boards showed exactly that on
+    /// 2026-09-12/13: `PN_STATS store=0 free_bytes=0 capacity=65344`
+    /// beside a mount line of `live=2 free_bytes=2600` and 38 successful
+    /// appends. A store with two live records in a 16-page region is not
+    /// full, and a wrong "full" is worse than none — it is the number a
+    /// future store-full bug would hide behind.
+    ///
+    /// PURGED records do not count as occupied, a queued purge included
+    /// (the module's visibility rule: a queued purge masks its record
+    /// from every read, and this is a read). Their bytes come back when
+    /// the round-robin reclaim reaches their page, and the role's
+    /// `make_room` loop purges until `free_space` reaches what it needs —
+    /// a purge that did not move this number would spin that loop
+    /// through the whole store. PEER and bench records DO count: they
+    /// are live records in the same region, and bytes they hold are
+    /// bytes a message body cannot have.
+    ///
+    /// Cost: one [`scan`] of the region — the same pass `for_each` makes,
+    /// which the concept page prices at 8 to 33 ms of CPU for a full
+    /// 64 KiB (`docs/src/concepts/propagation-node-on-a-board.md`, §Scan)
+    /// and no flash-scheduler time at all. The caller that pays it every
+    /// 300 s is the `PN_STATS` line, which already pays the same for its
+    /// `count()`.
+    ///
+    /// Page granularity is not modelled: a record never straddles a page,
+    /// so a body needing more than the active page's remaining room costs
+    /// the next page whole. The number is therefore an upper bound on
+    /// what one more body can use, by less than a page.
     fn free_space(&self) -> u64 {
+        let live: u64 = self.region.with_bytes(|bytes| {
+            let mut used = 0u64;
+            scan(bytes, |record| {
+                if record.live && !self.is_purge_masked(record.offset) {
+                    used += record_stride(record.body.len()) as u64;
+                }
+            });
+            used
+        });
         let queued: u64 = self
             .queue
             .iter()
@@ -411,7 +449,7 @@ impl<R: Region> PropagationStore for PnStore<R> {
                 FlushOp::Purge { .. } => 0,
             })
             .sum();
-        (self.free_bytes as u64).saturating_sub(queued)
+        self.capacity().saturating_sub(live).saturating_sub(queued)
     }
 
     fn capacity(&self) -> u64 {
