@@ -236,7 +236,16 @@ Two consequences of dialling against the sort are deliberate:
      peerIdentity)`, evaluated from the PEER's perspective. It keeps
      the role with the larger usable MTU and breaks a tie on identity
      order (`localIdentity < peerIdentity` keeps central), and we keep
-     whichever connection it keeps.
+     whichever connection it keeps. "Usable MTU" is the peer's own
+     conversion, bounds included: `usableValueLength(rawAttMtu) =
+     (rawAttMtu - 3).coerceIn(20, 512)`
+     (`columba/rns-host/src/main/kotlin/network/columba/app/rns/host/ble/model/BleConstants.kt:87-88`).
+     The
+     ceiling is not cosmetic — at the top of the range ATT 517 and ATT
+     515 both read 512, so a pair holding those two connections is a
+     TIE the identity order decides; reading the 517 as 514 would
+     decide it by MTU instead, and the two sides would keep different
+     links.
 
   Whichever branch fires, the LOSING link is disconnected by us at the
   decision, in either role — never left to the expiry.

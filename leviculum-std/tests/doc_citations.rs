@@ -105,7 +105,14 @@ const WINDOW: usize = 8;
 /// Path prefixes that refer to sibling repositories. These citations are
 /// counted and reported but cannot be existence-checked from this
 /// workspace.
-const EXTERNAL_PREFIXES: &[&str] = &["periculum/", "ble-reticulum/"];
+///
+/// `columba/` is the phone app whose BLE behaviour we interoperate with,
+/// checked out read-only beside this one (`schneckenschreck:/home/lew/
+/// coding/columba`, branch `main`). It joined the list when the duplicate
+/// rule started porting Columba functions line by line: a citation that
+/// names the Kotlin file and line is what lets the next reader check the
+/// port against the real thing instead of against a transcription.
+const EXTERNAL_PREFIXES: &[&str] = &["periculum/", "ble-reticulum/", "columba/"];
 
 /// The vendored references. A citation into one of these that is not
 /// checked out fails differently from a citation that has drifted.

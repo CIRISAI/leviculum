@@ -1787,7 +1787,8 @@ mod tests {
                 rule: DupRule::ColumbaMtu,
                 old_silence_ms: 7_341,
                 old_data_silence_ms: Some(15_185),
-                old_usable_mtu: 514,
+                // ATT 517 clamped by Columba's own ceiling.
+                old_usable_mtu: 512,
                 new_usable_mtu: MIN_USABLE_MTU,
             },
             "the peer's ledger reads our fresh dial at the floor: old wins"
@@ -1797,6 +1798,43 @@ mod tests {
         assert_eq!(
             t.link_by_addr(&ADDR_1).map(|l| l.role),
             Some(Role::Peripheral),
+            "the link the peer kept is the link we kept"
+        );
+    }
+
+    /// The clamp boundary on lnsd, where it actually fires: BlueZ
+    /// reports ATT MTUs up to Columba's `MAX_MTU = 517`, and
+    /// `usableValueLength` caps what the peer compares at
+    /// `MAX_ATTRIBUTE_VALUE_LENGTH = 512`
+    /// (`columba/rns-host/src/main/kotlin/network/columba/app/rns/host/ble/model/BleConstants.kt:87-88`). Our dial
+    /// exchanged ATT 515 and the peer's dial ATT 517 — 512 == 512 to
+    /// the peer, so it breaks the tie by identity (peer > ours: it
+    /// keeps its peripheral, our dial) and so must we. Unclamped we
+    /// would read 514 > 512, accept the newcomer and displace the link
+    /// the peer kept: the 45 s hole again, from the boundary.
+    #[test]
+    fn the_512_clamp_decides_the_att_517_against_515_boundary() {
+        let mut t = table();
+        // Our dial, one ATT byte below the clamp.
+        t.admit(ID_A, ADDR_1, Role::Central, 515, 0);
+        // The peer dials us from a rotated address at the full 517.
+        let (adm, displaced) = t.admit(ID_A, ADDR_2, Role::Peripheral, 517, 1_000);
+        assert_eq!(
+            adm,
+            Admission::RejectDuplicate {
+                rule: DupRule::ColumbaIdentity,
+                old_silence_ms: 1_000,
+                old_data_silence_ms: None,
+                old_usable_mtu: 512,
+                new_usable_mtu: 512,
+            },
+            "both connections clamp to 512: a tie, and the identity order decides"
+        );
+        assert!(displaced.is_none());
+        assert_eq!(t.link_count(), 1);
+        assert_eq!(
+            t.link_by_addr(&ADDR_1).map(|l| l.role),
+            Some(Role::Central),
             "the link the peer kept is the link we kept"
         );
     }
@@ -2101,7 +2139,7 @@ mod tests {
                 rule: DupRule::SameRole,
                 old_silence_ms: 0,
                 old_data_silence_ms: Some(0),
-                old_usable_mtu: 514,
+                old_usable_mtu: 512,
                 new_usable_mtu: MIN_USABLE_MTU,
             },
             "a live link of the same identity refuses our own second dial"

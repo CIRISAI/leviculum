@@ -165,14 +165,34 @@ pub enum BleRole {
 /// this floor, not the wire's truth.
 pub const MIN_USABLE_MTU: u16 = 20;
 
-/// A raw ATT MTU as the usable per-write payload Columba compares
-/// (`att_mtu - 3`), floored at [`MIN_USABLE_MTU`] — an un-negotiated
-/// connection (ATT MTU still 23) and Columba's not-yet-bookkept
-/// substitute are then the same number, which is the point.
+/// Columba's `BleConstants.MAX_ATTRIBUTE_VALUE_LENGTH`: the longest
+/// attribute value the Bluetooth specification defines, and the CEILING
+/// of the usable length Columba compares
+/// (`BleConstants.kt:68`, applied in `usableValueLength` at `:87-88`).
+/// It bites at the top of Columba's own `MAX_MTU = 517`
+/// (`BleConstants.kt:65`): the phone reads that exchange as 512, not
+/// 514.
+pub const MAX_ATTRIBUTE_VALUE_LENGTH: u16 = 512;
+
+/// A raw ATT MTU as the usable per-write payload Columba compares —
+/// `usableValueLength(rawAttMtu) = (rawAttMtu - ATT_HEADER_SIZE)
+/// .coerceIn(MIN_USABLE_MTU, MAX_ATTRIBUTE_VALUE_LENGTH)` (Columba
+/// `BleConstants.kt:87-88`), ported with both bounds.
+///
+/// The floor makes an un-negotiated connection (ATT MTU still 23) and
+/// Columba's not-yet-bookkept substitute the same number, which is the
+/// point of [`MIN_USABLE_MTU`]. The ceiling matters at exactly one
+/// place, and there it decides: two connections of one identity at ATT
+/// 517 and ATT 515 are 512 == 512 to the phone — a tie, broken by
+/// identity — while an unclamped 514 > 512 would have us break it by
+/// MTU, and the pair then keeps different links. Copying the peer's
+/// rule is only true if the clamp is copied too.
 pub const fn usable_mtu(att_mtu: u16) -> u16 {
     let usable = att_mtu.saturating_sub(3);
     if usable < MIN_USABLE_MTU {
         MIN_USABLE_MTU
+    } else if usable > MAX_ATTRIBUTE_VALUE_LENGTH {
+        MAX_ATTRIBUTE_VALUE_LENGTH
     } else {
         usable
     }
@@ -806,8 +826,25 @@ mod tests {
         assert_eq!(MIN_USABLE_MTU, 20);
         assert_eq!(usable_mtu(23), MIN_USABLE_MTU);
         assert_eq!(usable_mtu(0), MIN_USABLE_MTU);
-        assert_eq!(usable_mtu(517), 514);
         assert_eq!(usable_mtu(185), 182);
+    }
+
+    /// The ceiling, against Columba's own unit test of
+    /// `usableValueLength` (`BleConstantsTest.kt:15-18`) — the same
+    /// four inputs, the same four answers, 517 included.
+    #[test]
+    fn the_mtu_ceiling_is_the_spec_attribute_length() {
+        assert_eq!(MAX_ATTRIBUTE_VALUE_LENGTH, 512);
+        assert_eq!(usable_mtu(23), 20);
+        assert_eq!(usable_mtu(185), 182);
+        assert_eq!(usable_mtu(247), 244);
+        assert_eq!(usable_mtu(517), 512);
+        // The boundary the duplicate rule turns on: the last ATT MTU
+        // below the clamp, and the two above it that collapse onto it.
+        assert_eq!(usable_mtu(514), 511);
+        assert_eq!(usable_mtu(515), 512);
+        assert_eq!(usable_mtu(516), 512);
+        assert_eq!(usable_mtu(u16::MAX), MAX_ATTRIBUTE_VALUE_LENGTH);
     }
 
     /// The verbatim port of `preferredBleRole` (Columba
@@ -1087,7 +1124,8 @@ mod tests {
                 rule: DupRule::ColumbaMtu,
                 old_silence_ms: 7_341,
                 old_data_silence_ms: Some(15_185),
-                old_usable_mtu: 514,
+                // ATT 517 clamped by Columba's own ceiling.
+                old_usable_mtu: 512,
                 new_usable_mtu: MIN_USABLE_MTU,
             },
             "the phone's ledger reads our fresh dial at the floor: old wins"
@@ -1142,7 +1180,7 @@ mod tests {
                 rule: DupRule::Abandoned,
                 old_silence_ms: 31_000,
                 old_data_silence_ms: None,
-                old_usable_mtu: 514,
+                old_usable_mtu: 512,
                 new_usable_mtu: MIN_USABLE_MTU,
             }
         );
@@ -1488,9 +1526,11 @@ mod duel {
     struct Conn {
         /// Who dialled it, in the board's terms.
         board_origin: Origin,
-        /// Usable MTU after the ATT exchange (both ends of a
-        /// connection always observe the same exchanged value).
-        negotiated_usable: u16,
+        /// Raw ATT MTU after the exchange (both ends of a connection
+        /// always observe the same exchanged value). Raw rather than
+        /// usable, because the clamp that turns 517 into 512 is part
+        /// of what is under test.
+        negotiated_att: u16,
         /// When the PHONE's ledger records that value — `None` = not
         /// yet / never, which reads as the floor. This lag, not the
         /// wire, is what arbitrated on 2026-09-12 (`MTU=20` at the
@@ -1538,10 +1578,13 @@ mod duel {
         }
 
         /// The phone's ledger view of one connection's usable MTU at
-        /// `t` — the verbatim `?: MIN_USABLE_MTU` lookup.
+        /// `t` — the verbatim `?: MIN_USABLE_MTU` lookup over what
+        /// `usableValueLength` put in the ledger (`BleGattServer.kt:922`
+        /// writes `centralMtus[address] = usableMtu`, so the clamp has
+        /// already been applied to the stored number).
         fn phone_view(&self, conn: usize, t: u64) -> u16 {
             match self.conns[conn].phone_bookkept_at {
-                Some(at) if at <= t => self.conns[conn].negotiated_usable,
+                Some(at) if at <= t => usable_mtu(self.conns[conn].negotiated_att),
                 _ => MIN_USABLE_MTU,
             }
         }
@@ -1582,7 +1625,7 @@ mod duel {
                 conn,
                 self.phone_identity,
                 self.conns[conn].board_origin,
-                self.conns[conn].negotiated_usable + 3,
+                self.conns[conn].negotiated_att,
                 t,
             );
             match up {
@@ -1639,12 +1682,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     // The race: ATT settled on the wire, the phone's
                     // ledger has not recorded it (and will not before
                     // any dedup could run).
@@ -1707,12 +1750,12 @@ mod duel {
                 [
                     Conn {
                         board_origin: Origin::Incoming,
-                        negotiated_usable: 514,
+                        negotiated_att: 517,
                         phone_bookkept_at: Some(0),
                     },
                     Conn {
                         board_origin: Origin::Outgoing,
-                        negotiated_usable: 514,
+                        negotiated_att: 517,
                         phone_bookkept_at: None,
                     },
                 ],
@@ -1750,12 +1793,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: None,
                 },
             ],
@@ -1818,12 +1861,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     // Its own MTU request, completed before its
                     // identity read at t=50.5 s.
                     phone_bookkept_at: Some(50_200),
@@ -1878,12 +1921,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(50_200),
                 },
             ],
@@ -1900,6 +1943,84 @@ mod duel {
         assert_eq!(d.phone_dedup(50_500), 0);
         assert_eq!(d.board.slot_for(&PHONE), Some(0), "registry untouched");
         assert_eq!(d.board.peer_count(), 1);
+        assert_eq!(d.max_gap(0, 90_000), 0, "the old link never blinked");
+    }
+
+    /// Scenario (f): the clamp boundary, the one place where copying
+    /// `preferredBleRole` without copying `usableValueLength`'s ceiling
+    /// still splits the pair. Our dial exchanged ATT 515, the phone's
+    /// dial ATT 517 — one byte apart on the wire, and both 512 to
+    /// `coerceIn(_, MAX_ATTRIBUTE_VALUE_LENGTH)`. The phone therefore
+    /// sees a TIE and breaks it by identity (PHONE > BOARD: it keeps
+    /// its peripheral, our dial); with an unclamped 514 we would see
+    /// the phone's dial as the larger MTU and displace our own. Each
+    /// side would then hold what the other closed — the 45 s hole of
+    /// 2026-09-12, reached from a third direction.
+    #[test]
+    fn scenario_f_the_512_clamp_boundary_keeps_both_sides_on_one_link() {
+        let mut d = Duel::new(
+            PHONE,
+            [
+                Conn {
+                    board_origin: Origin::Outgoing,
+                    negotiated_att: 515,
+                    phone_bookkept_at: Some(0),
+                },
+                Conn {
+                    board_origin: Origin::Incoming,
+                    // The phone negotiated this one itself, so its
+                    // ledger holds it from the connect.
+                    negotiated_att: 517,
+                    phone_bookkept_at: Some(50_000),
+                },
+            ],
+        );
+        d.board_holds[0] = true;
+        d.phone_holds[0] = true;
+        d.handshaked[0] = true;
+        d.board_link_up(0, 0);
+        d.board.note_heard(0, 49_000);
+        // t=50 s: the phone dials us from a rotated RPA and writes its
+        // identity; our judge runs first, as it does in the field.
+        d.board_holds[1] = true;
+        d.phone_holds[1] = true;
+        let up = d.board_link_up(1, 50_300);
+        assert!(
+            matches!(
+                up,
+                LinkUp::Refused {
+                    old_slot: 0,
+                    rule: DupRule::ColumbaIdentity,
+                    ..
+                }
+            ),
+            "clamped, 512 == 512 is a tie the identity order decides: {up:?}"
+        );
+        // The same two connections with the ceiling left off — ATT 515
+        // as 512, ATT 517 as 514, the state before this change —
+        // answer the other way, which is what makes the clamp
+        // load-bearing rather than cosmetic.
+        assert_eq!(
+            judge_duplicate(
+                1_300,
+                Origin::Outgoing,
+                Origin::Incoming,
+                Some(515 - 3),
+                517 - 3,
+                &BOARD,
+                &PHONE,
+            ),
+            DupVerdict::KeepNew(DupRule::ColumbaMtu),
+            "unclamped, ATT 517 would outrank ATT 515 and split the pair"
+        );
+        // And the phone, arbitrating on its own numbers, keeps the
+        // connection we kept.
+        assert_eq!(
+            d.phone_dedup(50_400),
+            0,
+            "phone: tie at 512, PHONE > BOARD, so it keeps its peripheral"
+        );
+        assert_eq!(d.board.slot_for(&PHONE), Some(0), "board keeps it too");
         assert_eq!(d.max_gap(0, 90_000), 0, "the old link never blinked");
     }
 
@@ -1923,12 +2044,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Outgoing,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: None,
                 },
             ],
@@ -1973,12 +2094,12 @@ mod duel {
             [
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(0),
                 },
                 Conn {
                     board_origin: Origin::Incoming,
-                    negotiated_usable: 514,
+                    negotiated_att: 517,
                     phone_bookkept_at: Some(60_500),
                 },
             ],
