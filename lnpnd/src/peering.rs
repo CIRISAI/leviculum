@@ -442,7 +442,12 @@ impl PeeringRuntime {
                 self.log_peer("add", &destination_hash, "announce");
                 self.persist_peer(&destination_hash);
             }
-            PeerChange::Updated => self.persist_peer(&destination_hash),
+            PeerChange::Updated => {
+                // Same line, same field order as the firmware's
+                // (`leviculum-nrf/src/pn.rs`): one grep reads both stacks.
+                self.log_peer("refresh", &destination_hash, "announce");
+                self.persist_peer(&destination_hash);
+            }
             PeerChange::Dropped(reason) => {
                 self.forget(&destination_hash);
                 self.log_peer(

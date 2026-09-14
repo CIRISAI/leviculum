@@ -1151,6 +1151,14 @@ impl Engine {
                 self.next_sync_at_ms = 0;
             }
             PeerChange::Updated => {
+                // The line a REPEATABLE run can assert. `add` is printed
+                // once in a board's life per peer: the table is persisted
+                // as TAG_PEER records and restored at boot, and a restore
+                // prints nothing, so on boards that have met before no
+                // `action=add` can ever come again. A refresh happens on
+                // every announce heard, which is what the two production
+                // cells are actually about — autopeering as upkeep.
+                self.log_peer("refresh", &destination_hash, "announce");
                 self.persist_peer(&destination_hash);
                 self.next_sync_at_ms = 0;
             }

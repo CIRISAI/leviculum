@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `${LNMSG_HOME}/seen`); `lnmsg address` prints the persistent LXMF
   address without needing a daemon.
 
+- Peering logs a refresh, not only an addition. Every announce that
+  refreshes a peer already in the table emits `PN_PEER action=refresh
+  reason=announce`, on the boards and in `lnpnd` alike and with the
+  same field order in both. `action=add` is a once-per-peer-lifetime
+  line — the table is persisted and restored across reboots and
+  flashes — so until now nothing in the log said that a running node
+  still hears its peers.
+
 ### Fixed
 
 - A phone's rotated BLE address no longer strands it behind its own
