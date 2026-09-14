@@ -188,14 +188,28 @@ pub const TYPE_NODE_NAME_QUERY: u8 = 0x0D;
 /// says "no probe responder" is an answer a derivation cannot give.
 /// Read-only, safe mid-measurement like [`TYPE_MEDIA_QUERY`].
 pub const TYPE_IDENTITY_QUERY: u8 = 0x0E;
-/// Announce-now command (Codeberg #376); empty payload. The board
-/// announces its LXMF delivery destination immediately, on all
-/// interfaces, exactly as the telemetry path does before a report —
-/// same app data, same clock gate. Without a calendar clock the
-/// announce is withheld ([`REFUSE_NO_CLOCK`]) rather than sent: the
-/// emission timestamp inside the announce is what peers rank paths by,
-/// and an uptime-stamped announce would poison the very path the bench
-/// is trying to observe.
+/// Announce-now command (Codeberg #376); empty payload. The board makes
+/// every announce it makes on its own cadence, immediately and on all
+/// interfaces: the LXMF delivery destination exactly as the telemetry
+/// path does before a report (same app data, same clock gate), and — on
+/// a board running the propagation role — the `lxmf.propagation`
+/// destination exactly as the role does on its interval (Codeberg #384,
+/// no clock gate). Both, because `Identity.recall` is keyed by
+/// destination hash: a client that learned the delivery destination
+/// still cannot address the mailbox.
+///
+/// Without a calendar clock the DELIVERY announce is withheld
+/// ([`REFUSE_NO_CLOCK`]) rather than sent — the emission timestamp
+/// inside the announce is what peers rank paths by, and an
+/// uptime-stamped announce would poison the very path the bench is
+/// trying to observe. The role's announce carries an uptime timebase by
+/// design and is not withheld.
+///
+/// The answer therefore grades the COMMAND: [`encode_ack`] once at
+/// least one announce left the board, [`REFUSE_NO_CLOCK`] when the only
+/// announce this board has was withheld by the clock gate, and
+/// [`REFUSE_UNSUPPORTED`] when it has none to make. Which announces went
+/// out is on the board's own `[ANNOUNCE] sent ... reason=` lines.
 ///
 /// A bench instrument: it separates "the announce never left the
 /// board" from "it left and the receiver did not take it" without

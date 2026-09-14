@@ -1751,6 +1751,54 @@ impl Engine {
         self.next_announce_at_ms = Some(now_ms + PN_ANNOUNCE_INTERVAL_SECS * 1000);
     }
 
+    /// Announce the role NOW, on every interface, because a host asked
+    /// (`TYPE_ANNOUNCE`). Same announce [`Self::tick_announce`] sends on
+    /// the cadence — same destination, same app data, same store gate —
+    /// so what a listener hears is what it would have heard at the next
+    /// interval, only sooner.
+    ///
+    /// NOT clock-gated, for the reason the periodic announce is not
+    /// (item 6): a clockless board still announces with its uptime
+    /// timebase, and the contact that announce invites is exactly what
+    /// delivers the seed. The delivery-destination announce beside it in
+    /// the binaries IS clock-gated, and stays that way — the two answer
+    /// to different rules and this one follows its own.
+    ///
+    /// The cadence is deliberately NOT re-armed: `lnflash --announce`
+    /// does not re-arm the delivery announce's periodic gate either, and
+    /// a commanded announce that silently pushed the next scheduled one
+    /// out would make the interval a function of how often the harness
+    /// asked. Returns no actions when the store did not mount — a role
+    /// that cannot prove an upload must not invite one.
+    pub fn announce_now<R, C, S>(&mut self, node: &mut NodeCore<R, C, S>) -> TickOutput
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let mut out = TickOutput::default();
+        if !crate::record_store::mounted() {
+            crate::log::log_fmt_critical(
+                "PN ",
+                format_args!("announce withheld reason=store-unmounted"),
+            );
+            return out;
+        }
+        let app_data = self.role.announce_app_data(node.emission_secs());
+        if let Ok(send) = node.announce_destination(&self.dest_hash, Some(&app_data)) {
+            out.merge(send);
+            let d = self.dest_hash.as_bytes();
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason=pn-host",
+                    d[0], d[1], d[2], d[3]
+                ),
+            );
+        }
+        out
+    }
+
     /// A BLE peer finished its identity handshake: announce the role to
     /// it, on its link alone, so a phone that just connected learns this
     /// board is a propagation node without waiting out the cadence.

@@ -31,7 +31,10 @@ pub use rnode::{
     RNodeChannelOpenFuture,
 };
 pub(crate) mod serial;
-pub use serial::request_firmware_reset;
+pub use serial::{
+    request_firmware, request_firmware_announce, request_firmware_reset, FirmwareRequest,
+    FIRMWARE_ANNOUNCE_SIGNAL,
+};
 pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;

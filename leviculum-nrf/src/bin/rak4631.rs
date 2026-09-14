@@ -814,12 +814,53 @@ async fn main(spawner: Spawner) {
             }
             Either4::Third(Either4::Fourth(())) => {
                 // A host asked for an announce now (#376 `TYPE_ANNOUNCE`,
-                // `lnflash --announce`). Exactly the announce the
-                // telemetry path sends before a report — same
-                // destination, same app data, same clock gate — so the
-                // desk measures the announce the board sends on its own
-                // cadence, only sooner.
+                // `lnflash --announce`, periculum's `announce_board`):
+                // every announce this board makes on its own cadence,
+                // made now.
+                //
+                // TWO announces, not one, because a board running the
+                // propagation role has two destinations a peer can look
+                // up: the `lxmf.delivery` one the telemetry path
+                // announces, and the `lxmf.propagation` one the role
+                // announces (`leviculum_nrf::pn::Engine::announce_now`).
+                // A client that wants to upload needs the SECOND —
+                // `Identity.recall` is keyed by destination hash, so
+                // knowing the delivery destination tells it nothing
+                // about the mailbox — and until this arm sent it, the
+                // only way to learn it was to wait out the role's own
+                // 300 s interval.
+                //
+                // Each half keeps its own rule: the delivery announce
+                // stays clock-gated (an uptime-stamped announce poisons
+                // the path ranking a desk measures), the role's is not
+                // (#384 item 6 — a clockless board still announces, and
+                // the contact it invites is what delivers the seed). So
+                // the answer grades the COMMAND and not either half:
+                // ack when at least one announce left the board, the
+                // named refusal only when none did. Which one went out
+                // is on the board's own `[ANNOUNCE] sent ... reason=`
+                // lines — `pn-host` for the role, `host` for delivery.
                 use leviculum_core::envelope;
+                let pn_announced = match pn_engine.as_mut() {
+                    Some(pn) => {
+                        let out = pn.announce_now(&mut node);
+                        if out.actions.is_empty() {
+                            false
+                        } else {
+                            let mut ifaces: [&mut dyn Interface; 3] =
+                                [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                            let dispatched =
+                                dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                            leviculum_nrf::dispatch::settle(
+                                "pn-announce-host",
+                                &mut node,
+                                &dispatched,
+                            );
+                            true
+                        }
+                    }
+                    None => false,
+                };
                 let answer = match delivery_hash.as_ref() {
                     None => {
                         // No delivery destination was registered this
@@ -867,6 +908,15 @@ async fn main(spawner: Spawner) {
                             ),
                         }
                     }
+                };
+                // The role's announce is on the air even where the
+                // delivery half was withheld or does not exist, and a
+                // refusal would report the command as having done
+                // nothing.
+                let answer = if pn_announced {
+                    envelope::encode_ack(envelope::TYPE_ANNOUNCE)
+                } else {
+                    answer
                 };
                 // Best effort, like the wall-time answer: a full outgoing
                 // channel means a busy link; the host's retry covers it.

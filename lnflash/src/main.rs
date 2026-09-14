@@ -80,14 +80,28 @@ struct Cli {
     #[arg(long, value_name = "MS", conflicts_with_all = ["set_time", "set_telemetry"])]
     set_tx_spacing: Option<u16>,
 
-    /// Make every running LNode announce its LXMF delivery destination
-    /// immediately, on all interfaces, then exit. No flashing, nothing
-    /// persisted. Exactly the announce the board's telemetry path sends
-    /// before a report, under the same rule: a board without a calendar
-    /// clock withholds it and says so ([ANNOUNCE] withheld
-    /// reason=no-clock on its debug port) — run --set-time first. A bench
-    /// instrument for #376: it separates "the announce never left the
-    /// board" from "it left and was not taken" without waiting out the
+    /// Make every running LNode announce NOW — every announce it makes on
+    /// its own cadence, immediately and on all interfaces — then exit. No
+    /// flashing, nothing persisted.
+    ///
+    /// That is the LXMF delivery destination, exactly as the board's
+    /// telemetry path announces it before a report, and on a board running
+    /// the propagation role its lxmf.propagation destination too, exactly
+    /// as the role announces it on its 300 s interval (#384). Both,
+    /// because Reticulum's identity cache is keyed by destination hash: a
+    /// client that heard the delivery announce still cannot address the
+    /// board's mailbox.
+    ///
+    /// Each keeps its own rule. The delivery announce is withheld on a
+    /// board without a calendar clock, which says so ([ANNOUNCE] withheld
+    /// reason=no-clock on its debug port) — run --set-time first; the
+    /// role's carries an uptime timebase by design and is not withheld.
+    /// The board answers OK once at least one announce left it, and the
+    /// [ANNOUNCE] sent ... reason= lines say which (reason=host for
+    /// delivery, reason=pn-host for the role).
+    ///
+    /// A bench instrument for #376: it separates "the announce never left
+    /// the board" from "it left and was not taken" without waiting out the
     /// board's own announce cadence.
     #[arg(
         long,

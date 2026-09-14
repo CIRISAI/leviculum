@@ -41,10 +41,56 @@ const FRAME_TIMEOUT: Duration = Duration::from_millis(100);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
-// Commanded firmware reset, on request
+// Commanded firmware requests, out of band
 // ---------------------------------------------------------------------------
 
-/// Broadcast of "send the commanded-reset frame on every attached board".
+/// What a caller can ask this daemon to put on its boards' data ports.
+///
+/// One frame per variant, and nothing else: this is the escape hatch for
+/// the ports the daemon holds exclusively, not a general control channel.
+/// A variant earns its place by being impossible to do any other way
+/// while the daemon is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareRequest {
+    /// Reboot the board ([`leviculum_core::rnode::RADIO_RESET_FRAME`]).
+    Reset,
+    /// Announce now ([`leviculum_core::envelope::TYPE_ANNOUNCE`]): the
+    /// board makes every announce it would make on its own cadence,
+    /// immediately. Reaches the daemon as
+    /// [`FIRMWARE_ANNOUNCE_SIGNAL`].
+    ///
+    /// Same standing as the reset, and for the same reason. A harness
+    /// that has to observe a client learning a board's destination
+    /// cannot wait out the board's announce interval and call the result
+    /// a measurement — a 300 s interval against a 300 s step budget is a
+    /// race the run loses roughly half the time (periculum's
+    /// `ble_pn_board_upload`, 2026-09-14). The daemon is the only
+    /// process that can ask, because it holds the port.
+    Announce,
+}
+
+/// The signal a caller sends lnsd to ask for [`FirmwareRequest::Announce`].
+///
+/// A NUMBER and not a name, which is the whole point. The named spares are
+/// gone — SIGUSR1 is the diagnostics dump, SIGUSR2 the firmware reset, and
+/// SIGHUP has to keep terminating a daemon run from a terminal — so this
+/// lives in the real-time range Linux reserves for signals with no prior
+/// meaning. But `SIGRTMIN` is a libc opinion, not a constant: measured on
+/// this host, glibc answers 34 and musl 35 (musl keeps 32-34 for its own
+/// `__synccall`), and lnsd ships in both flavours — the workspace builds
+/// x86_64-unknown-linux-musl by default (`.cargo/config.toml`) while
+/// `docker kill --signal=SIGRTMIN` and `/usr/bin/kill -RTMIN` both resolve
+/// against the SENDER's glibc. Naming the signal would have sent 34 to a
+/// daemon listening on 35, and 34 in a musl process is a signal musl
+/// reserves.
+///
+/// 40 instead: inside the real-time range of both (glibc 34-64, musl
+/// 35-64) and clear of the low end, so a libc that reserves another one or
+/// two still leaves it free. Senders write the number too — periculum's
+/// `announce_board` step is the other end of this contract.
+pub const FIRMWARE_ANNOUNCE_SIGNAL: i32 = 40;
+
+/// Broadcast of a [`FirmwareRequest`] to every attached board.
 ///
 /// The daemon holds each firmware board's data port for its whole run, and
 /// the serial crate opens it `TIOCEXCL`, so nothing else on the host can
@@ -66,19 +112,29 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 /// exactly as an outgoing packet is), so a board rebooted through here
 /// comes back from the same defined state — which is what makes the two
 /// resets comparable at all.
-static FIRMWARE_RESET_REQUESTS: std::sync::OnceLock<tokio::sync::broadcast::Sender<()>> =
+static FIRMWARE_REQUESTS: std::sync::OnceLock<tokio::sync::broadcast::Sender<FirmwareRequest>> =
     std::sync::OnceLock::new();
 
-fn firmware_reset_channel() -> &'static tokio::sync::broadcast::Sender<()> {
-    FIRMWARE_RESET_REQUESTS.get_or_init(|| tokio::sync::broadcast::channel(4).0)
+fn firmware_request_channel() -> &'static tokio::sync::broadcast::Sender<FirmwareRequest> {
+    FIRMWARE_REQUESTS.get_or_init(|| tokio::sync::broadcast::channel(4).0)
 }
 
-/// Ask every serial interface in this process to send the commanded-reset
-/// frame to the board behind it. Returns the number of interfaces that were
+/// Ask every serial interface in this process to put `request` on the wire
+/// to the board behind it. Returns the number of interfaces that were
 /// listening — 0 means this daemon holds no firmware board, which is a
 /// finding for the caller rather than an error here.
+pub fn request_firmware(request: FirmwareRequest) -> usize {
+    firmware_request_channel().send(request).unwrap_or(0)
+}
+
+/// [`FirmwareRequest::Reset`], by its own name.
 pub fn request_firmware_reset() -> usize {
-    firmware_reset_channel().send(()).unwrap_or(0)
+    request_firmware(FirmwareRequest::Reset)
+}
+
+/// [`FirmwareRequest::Announce`], by its own name.
+pub fn request_firmware_announce() -> usize {
+    request_firmware(FirmwareRequest::Announce)
 }
 
 /// Radio configuration to send to LNode firmware over serial (test infrastructure).
@@ -560,10 +616,11 @@ where
     let mut read_buf = vec![0u8; READ_BUF_SIZE];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
     let mut last_read_at = Instant::now();
-    // Subscribed here rather than at spawn: a reset requested while the
-    // port was down is not a reset of the board that just came back, and
-    // acting on it would reboot a board nobody asked about.
-    let mut reset_requests = firmware_reset_channel().subscribe();
+    // Subscribed here rather than at spawn: a request made while the
+    // port was down was not made about the board that just came back,
+    // and acting on it would reboot (or announce from) a board nobody
+    // asked about.
+    let mut firmware_requests = firmware_request_channel().subscribe();
 
     loop {
         // Compute timeout: if mid-frame, use FRAME_TIMEOUT; otherwise wait indefinitely
@@ -651,7 +708,7 @@ where
                 }
             }
 
-            // Commanded firmware reset, requested out of band.
+            // Commanded firmware request, made out of band.
             //
             // Written on the same port, from the same task, as every
             // outgoing packet: nothing else may hold this port, so nothing
@@ -659,37 +716,72 @@ where
             // signal handler's task is what keeps it from interleaving
             // with a frame already half-written.
             //
-            // The board answers RADIO_RESET_ACK and then reboots, taking
-            // its USB device with it; the ACK arrives on the read path
-            // above as a 3-byte frame the transport will not recognise and
-            // discards, and the read then errors, which is the port loss
-            // the reconnect task already knows how to handle. So there is
-            // no wait for the ACK here — the reboot IS the outcome, and
-            // the caller watches for it on the bus.
-            recv = reset_requests.recv() => {
-                match recv {
-                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::info!(
-                            "Serial {}: commanded firmware reset requested, sending reset frame",
-                            name
+            // Neither frame is waited on here. A reset is answered with
+            // RADIO_RESET_ACK and then the board reboots, taking its USB
+            // device with it; an announce is answered with the envelope
+            // ack or a named refusal. Both answers arrive on the read
+            // path above as a short frame the transport will not
+            // recognise and discards. For the reset the reboot IS the
+            // outcome and the caller watches for it on the bus; for the
+            // announce it is the announce reaching a peer, which this
+            // port cannot see either way. A wait here would only add a
+            // way for the port's own task to stall.
+            recv = firmware_requests.recv() => {
+                // A lagged receiver has missed requests it cannot name,
+                // and with more than one kind in the channel it must not
+                // guess: serving a `Reset` for what was an `Announce`
+                // reboots a board mid-measurement and every assertion
+                // after it silently measures a mesh that was taken down
+                // by the harness. Doing nothing is the detectable
+                // failure instead — both callers observe the OUTCOME
+                // (a reboot on the USB bus, a peer learning a
+                // destination) and fail by name when it does not come.
+                // While the channel carried one kind this arm did serve
+                // a lagged reset; that reading died with the second
+                // variant.
+                let request = match recv {
+                    Ok(request) => Some(request),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            "Serial {}: {} out-of-band firmware request(s) missed while \
+                             this port was busy; not guessing which",
+                            name, n
                         );
-                        frame(&leviculum_core::rnode::RADIO_RESET_FRAME, &mut frame_buf);
-                        if let Err(e) = port.write_all(&frame_buf).await {
-                            tracing::warn!("Serial {}: reset frame write failed: {}", name, e);
-                            return outgoing_rx;
-                        }
-                        if let Err(e) = port.flush().await {
-                            tracing::warn!("Serial {}: reset frame flush failed: {}", name, e);
-                            return outgoing_rx;
-                        }
-                        tracing::info!("Serial {}: reset frame sent", name);
+                        None
                     }
                     // The sender is a `OnceLock` static that is never
                     // dropped, so this is unreachable; stopping the select
                     // arm rather than spinning on it is the safe reading.
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::debug!("Serial {}: reset request channel closed", name);
+                        tracing::debug!("Serial {}: firmware request channel closed", name);
+                        None
                     }
+                };
+                if let Some(request) = request {
+                    let (what, payload) = match request {
+                        FirmwareRequest::Reset => (
+                            "reset",
+                            leviculum_core::rnode::RADIO_RESET_FRAME.to_vec(),
+                        ),
+                        FirmwareRequest::Announce => (
+                            "announce",
+                            leviculum_core::envelope::encode_announce(),
+                        ),
+                    };
+                    tracing::info!(
+                        "Serial {}: commanded firmware {} requested, sending frame",
+                        name, what
+                    );
+                    frame(&payload, &mut frame_buf);
+                    if let Err(e) = port.write_all(&frame_buf).await {
+                        tracing::warn!("Serial {}: {} frame write failed: {}", name, what, e);
+                        return outgoing_rx;
+                    }
+                    if let Err(e) = port.flush().await {
+                        tracing::warn!("Serial {}: {} frame flush failed: {}", name, what, e);
+                        return outgoing_rx;
+                    }
+                    tracing::info!("Serial {}: {} frame sent", name, what);
                 }
             }
 
@@ -1101,13 +1193,48 @@ mod tests {
         }
     }
 
+    /// Serialises every test in this module that keeps a live
+    /// [`serial_io_task`].
+    ///
+    /// Not fussiness: the out-of-band firmware-request channel is a
+    /// process-global broadcast to every serial interface IN THIS PROCESS
+    /// — the property the daemon wants, because a signal is addressed to
+    /// a process and not to one port — and `cargo test` runs a crate's
+    /// tests as threads of ONE process. So two live io tasks means one
+    /// test's request is served by the other test's port: it writes a
+    /// frame nobody asked it for, and logs a line the other test's
+    /// tracing capture then reads as its own. Measured before this lock
+    /// existed: `test_drop_direct_ingress_announces_arming_at_the_serial_boundary`
+    /// failed 8 times in 30 runs of `cargo test -p leviculum-std --lib
+    /// interfaces::serial`, some of those with the announce request's own
+    /// log line sitting in its capture buffer.
+    ///
+    /// Every test that spawns the task therefore takes this, and every
+    /// one of them ends its task before releasing it — a leaked task is a
+    /// subscriber for the rest of the binary and the lock cannot help
+    /// against that.
+    ///
+    /// Held across awaits deliberately: a `tokio::sync::Mutex` would make
+    /// the plain `#[test]` sibling enter a runtime just to take it.
+    static SERIAL_IO_TASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The lock, poisoning ignored: a panicking test has already failed,
+    /// and refusing to run the others adds nothing to the report.
+    fn serial_io_task_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL_IO_TASK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The TEST-ONLY `test_drop_direct_ingress` knob at the interface level
     /// (HDLC deframe → filter, no daemon): a frame whose wire hops byte
     /// (`raw[1]`) is 0 is dropped before the transport channel, a relayed
     /// copy (hops >= 1) passes, and with the knob off (the default) the
     /// hops-0 frame passes too.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_drop_direct_ingress_filters_hops0_at_the_serial_boundary() {
+        let _guard = serial_io_task_test_guard();
         async fn rx_through_io_task(
             drop_direct: bool,
             frames: &[Vec<u8>],
@@ -1175,8 +1302,10 @@ mod tests {
     /// holds the flag the drop filter reads, so the line proves the
     /// production drop path is live and not merely that a config key
     /// parsed. Off (the default), the line must be absent.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_drop_direct_ingress_announces_arming_at_the_serial_boundary() {
+        let _guard = serial_io_task_test_guard();
         /// Capture tracing output for the duration of the returned guard.
         /// Thread-local default subscriber + current-thread tokio runtime,
         /// same pattern as the rnode airtime-lock tests.
@@ -1348,8 +1477,13 @@ mod tests {
     /// state" stops being true of one of them and the two measurements
     /// stop being comparable — which is exactly the kind of drift a
     /// re-formation cell would report as a mesh finding.
+    // The guard is a std mutex held across awaits on purpose (see its
+    // doc): a tokio mutex would need the plain `#[test]` sibling below to
+    // enter a runtime just to take it.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_reset_request_puts_the_unattached_reset_bytes_on_the_port() {
+        let _guard = serial_io_task_test_guard();
         let (near, mut far) = tokio::io::duplex(1024);
         let (incoming_tx, _incoming_rx) = mpsc::channel(8);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
@@ -1373,7 +1507,14 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
-        assert_eq!(reached, 1, "one attached interface, one request delivered");
+        // At least this port. NOT exactly one: the channel is
+        // process-global (see `FIRMWARE_REQUEST_TEST_LOCK`) and other
+        // tests in this file keep their own `serial_io_task` alive in
+        // parallel, so the count is a property of the whole test process
+        // and not of this test. What this test is actually about is the
+        // BYTES on this port, asserted below; the count only has to show
+        // the request was delivered somewhere.
+        assert!(reached >= 1, "the request reached no interface at all");
 
         let mut expected = Vec::new();
         frame(&leviculum_core::rnode::RADIO_RESET_FRAME, &mut expected);
@@ -1398,7 +1539,78 @@ mod tests {
     /// a silent 0 would read as a board that rebooted.
     #[test]
     fn a_request_with_no_attached_interface_reaches_nothing() {
+        let _guard = serial_io_task_test_guard();
         assert_eq!(request_firmware_reset(), 0);
+    }
+
+    /// The commanded ANNOUNCE puts `TYPE_ANNOUNCE` on the port, HDLC-framed
+    /// exactly as an outgoing packet is — the same claim the reset test
+    /// above makes about its frame, and for the same reason: a board only
+    /// acts on the bytes, so what is asserted has to be the bytes.
+    ///
+    /// The two requests share one broadcast channel, so this also pins
+    /// that they do not share a FRAME: an announce that wrote
+    /// `RADIO_RESET_FRAME` would reboot every board a harness asked to
+    /// announce, and the cell after it would measure a mesh the harness
+    /// took down.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn the_announce_request_writes_the_announce_frame() {
+        let _guard = serial_io_task_test_guard();
+        let (near, mut far) = tokio::io::duplex(256);
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(serial_io_task(
+            "test-announce".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            counters,
+            false,
+        ));
+
+        // The subscribe happens inside the task; give it a turn to run
+        // before the request, or the broadcast has no receiver yet.
+        let reached = loop {
+            tokio::task::yield_now().await;
+            let reached = request_firmware_announce();
+            if reached > 0 {
+                break reached;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        // At least this port. NOT exactly one: the channel is
+        // process-global (see `FIRMWARE_REQUEST_TEST_LOCK`) and other
+        // tests in this file keep their own `serial_io_task` alive in
+        // parallel, so the count is a property of the whole test process
+        // and not of this test. What this test is actually about is the
+        // BYTES on this port, asserted below; the count only has to show
+        // the request was delivered somewhere.
+        assert!(reached >= 1, "the request reached no interface at all");
+
+        let mut expected = Vec::new();
+        frame(&leviculum_core::envelope::encode_announce(), &mut expected);
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), far.read_exact(&mut got))
+            .await
+            .expect("the announce frame is written promptly")
+            .expect("the port receives it");
+        assert_eq!(
+            got, expected,
+            "the daemon-routed announce must be the TYPE_ANNOUNCE envelope"
+        );
+
+        let mut reset_frame = Vec::new();
+        frame(&leviculum_core::rnode::RADIO_RESET_FRAME, &mut reset_frame);
+        assert_ne!(
+            got, reset_frame,
+            "an announce request must never write the reset frame"
+        );
+
+        drop(outgoing_tx);
+        drop(far);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 
     /// Codeberg #389 mvr (tx counter siblings): once the peer can observe
@@ -1406,14 +1618,21 @@ mod tests {
     /// frame — same ordering the TCP interface pins. A 4 KiB duplex parks
     /// `write_all` mid-frame, the peer reads the frame's head, and the
     /// counter is inspected inside that window.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn tx_counter_covers_bytes_the_peer_can_already_observe() {
+        let _guard = serial_io_task_test_guard();
         let (near, mut far) = tokio::io::duplex(4096);
         let (incoming_tx, _incoming_rx) = mpsc::channel(8);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
         let counters = Arc::new(InterfaceCounters::new());
         let task_counters = Arc::clone(&counters);
-        tokio::spawn(serial_io_task(
+        // Held rather than discarded: this task parks in `write_all` for
+        // good (the frame is larger than the duplex), so without the
+        // abort below it outlives the test and stays subscribed to the
+        // firmware-request channel for the rest of the binary — the leak
+        // that made a sibling test read this one's frames.
+        let task = tokio::spawn(serial_io_task(
             "mvr_389".to_string(),
             near,
             incoming_tx,
@@ -1446,5 +1665,11 @@ mod tests {
             tx > 0,
             "peer observed {n} bytes but the tx counter reads {tx}"
         );
+
+        // The task is parked mid-`write_all` by construction and will
+        // never return on its own; abort it so it stops being a
+        // subscriber the moment this test is done with it.
+        task.abort();
+        let _ = task.await;
     }
 }

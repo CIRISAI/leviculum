@@ -123,7 +123,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("Reticulum daemon running");
 
     // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on
-    // SIGUSR1, command a firmware reset on SIGUSR2.
+    // SIGUSR1, command a firmware reset on SIGUSR2, command an announce
+    // on SIGRTMIN.
     //
     // SIGUSR2 joins an existing surface rather than inventing one: SIGUSR1
     // is already how this daemon is asked to do something out of band, and
@@ -135,15 +136,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // it mirrors Python-RNS, and which would gain a verb Python-RNS has
     // no idea about.
     //
-    // What it does: every firmware board this daemon holds gets the
-    // commanded-reset frame on its data port. The daemon is the only
-    // process that CAN send it, because it holds the port exclusively for
-    // its whole run (periculum #255).
+    // What they do: every firmware board this daemon holds gets the
+    // commanded-reset frame, or the announce-now control frame
+    // (`TYPE_ANNOUNCE`), on its data port. The daemon is the only process
+    // that CAN send either, because it holds the port exclusively for its
+    // whole run (periculum #255).
+    //
+    // Why the announce is a REAL-TIME signal and not a third named one:
+    // the named spares are gone. SIGUSR1 and SIGUSR2 are taken, and SIGHUP
+    // is the one signal this daemon must keep dying from — lnsd is
+    // routinely run in a terminal, and a HUP that announced instead of
+    // terminating would leave an orphan holding the boards' ports. The
+    // real-time range is the one Linux reserves for exactly this: signals
+    // with no prior meaning.
+    //
+    // It is a fixed NUMBER and not `SIGRTMIN`, for the reason
+    // [`leviculum_std::interfaces::FIRMWARE_ANNOUNCE_SIGNAL`] states in
+    // full: `SIGRTMIN` is a libc opinion (glibc 34, musl 35, both measured
+    // on this host) and lnsd ships in both flavours, so a sender naming
+    // the signal would resolve it against ITS libc and miss. The startup
+    // line states the number so nothing has to be inferred from a source
+    // file.
     {
         use tokio::signal::unix::{signal, SignalKind};
+        let announce_signal = leviculum_std::interfaces::FIRMWARE_ANNOUNCE_SIGNAL;
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
+        let mut announce = signal(SignalKind::from_raw(announce_signal))?;
+        info!(
+            "Out-of-band control: SIGUSR1 diagnostics, SIGUSR2 firmware reset, \
+             signal {announce_signal} commanded announce"
+        );
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { info!("Received SIGINT"); break; }
@@ -158,6 +182,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // no board is a caller that signalled the wrong node,
                     // and silence would read as a reset that happened.
                     info!("Received SIGUSR2: commanded firmware reset on {reached} serial interface(s)");
+                }
+                _ = announce.recv() => {
+                    let reached = leviculum_std::interfaces::request_firmware_announce();
+                    // Same rule as the reset's count, and the same reason:
+                    // a caller waiting for a client to learn this board's
+                    // destination has to be able to tell "no board here"
+                    // from "the announce went out and nobody heard it".
+                    info!(
+                        "Received signal {announce_signal}: commanded announce on \
+                         {reached} serial interface(s)"
+                    );
                 }
             }
         }

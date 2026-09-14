@@ -453,9 +453,9 @@ silent.
 **What the erase storm does to BLE and LoRa is to be measured on the
 rig, and this page will not predict it.** The instrument is already in
 the firmware: `STORE_STORM` (`TYPE_STORE_STORM`,
-`leviculum-core/src/envelope.rs:250`) appends N synthetic records of a
+`leviculum-core/src/envelope.rs:264`) appends N synthetic records of a
 given size, bounded at 1 000 records of 1 024 B
-(`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:272`) and
+(`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
 `leviculum-nrf/src/record_store.rs:81`); `lnflash --store-storm
 COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:327`).

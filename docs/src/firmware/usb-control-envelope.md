@@ -47,7 +47,7 @@ Commands (host → board):
 | 0x0C | NODE_NAME        | see below — set or clear the operator-chosen name |
 | 0x0D | NODE_NAME_QUERY  | empty (a query) — answered with NODE_NAME_REPORT |
 | 0x0E | IDENTITY_QUERY   | empty (a query) — answered with IDENTITY_REPORT |
-| 0x0F | ANNOUNCE         | empty — announce the LXMF delivery destination now (#376) |
+| 0x0F | ANNOUNCE         | empty — announce now: the LXMF delivery destination, and the propagation destination where that role runs (#376, #384) |
 | 0x10 | BLE_TX_GAP       | BLE inter-packet gap in ms, u16 BE (2 B), 0..=5000 (#376) |
 | 0x11 | STORE_STORM      | record count and body size, two u16 BE (4 B), 1..=1000 and 0..=1024 (#384) |
 
@@ -75,18 +75,44 @@ new frame types extend the accepted list without bumping it.
 
 ### ANNOUNCE (0x0F) and BLE_TX_GAP (0x10) — the #376 bench instruments
 
-`ANNOUNCE` makes the board announce its LXMF delivery destination
-immediately, on all interfaces, exactly as the telemetry path does before
-a report — same destination, same app data, and the same clock gate:
-without a calendar clock the board withholds the announce, logs
-`[ANNOUNCE] withheld reason=no-clock` on the debug port and refuses with
-reason `0x07`. (The gate is not cosmetic: the emission timestamp inside
-the announce is what peers rank paths by — see
-`docs/src/protocol-notes/announce-dedup-and-path-replacement.md` — so an
-uptime-stamped announce would poison the path under measurement.) On
-success the board logs `[ANNOUNCE] sent dst=<hex8> reason=host` and the
-usual `BLE_TX_PKT` lines, and acks. One-shot; nothing is persisted.
-Host side: `lnflash --announce`.
+`ANNOUNCE` makes the board make every announce it makes on its own
+cadence, immediately and on all interfaces. That is TWO announces on a
+board running the propagation role, and one on a board without it:
+
+* the **LXMF delivery** destination, exactly as the telemetry path
+  announces it before a report — same destination, same app data, and the
+  same clock gate: without a calendar clock the board withholds it, logs
+  `[ANNOUNCE] withheld reason=no-clock` on the debug port and, if it has
+  nothing else to announce, refuses with reason `0x07`. (The gate is not
+  cosmetic: the emission timestamp inside the announce is what peers rank
+  paths by — see
+  `docs/src/protocol-notes/announce-dedup-and-path-replacement.md` — so an
+  uptime-stamped announce would poison the path under measurement.) On
+  success: `[ANNOUNCE] sent dst=<hex8> reason=host`.
+* the **lxmf.propagation** destination, where the role runs (#384),
+  exactly as the role announces it on its 300 s interval — and NOT
+  clock-gated, because a clockless board still announces the role with its
+  uptime timebase (#384 item 6) and the contact that invites is what
+  delivers a clock seed. On success:
+  `[ANNOUNCE] sent dst=<hex8> reason=pn-host`. Withheld only when the
+  record store did not mount (`PN announce withheld
+  reason=store-unmounted`): a role that cannot prove an upload must not
+  invite one.
+
+Both, and not just the first, because Reticulum's identity cache is keyed
+by destination hash: a client that heard the delivery announce still
+cannot address the board's mailbox, so `set_outbound_propagation_node`
+fails with `identity for <hash> not known` until the role's announce
+arrives too.
+
+The ack therefore grades the COMMAND: OK once at least one announce left
+the board, reason `0x07` (no clock) when the only announce this board has
+was withheld by the clock gate, and reason `0x03` (unsupported) when it
+has none to make. Which ones went out is on the `[ANNOUNCE] sent ...
+reason=` lines, beside the usual `BLE_TX_PKT` lines. One-shot; nothing is
+persisted. Host side: `lnflash --announce`, and periculum's
+`announce_board` step, which relays the same frame through the board's
+owning daemon (the daemon holds the data port `TIOCEXCL`).
 
 `BLE_TX_GAP` sets the gap the BLE drain leaves between the last fragment
 of one packet and the first fragment of the next packet **on the same
