@@ -230,7 +230,7 @@ entirely the client's job**, from raw `NodeEvent::AnnounceReceived`.
 
 There is also no event for `Sending`, for `Outbound`, or for progress: the
 router folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress`
-without emitting anything (`leviculum-lxmf/src/router.rs:1306-1318`), so
+without emitting anything (`leviculum-lxmf/src/router.rs:1374-1386`), so
 progress must be polled through `outbound()`
 (`leviculum-lxmf/src/router.rs:672`).
 
