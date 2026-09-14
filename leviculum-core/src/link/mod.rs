@@ -1825,10 +1825,23 @@ impl Link {
         // Validate mode and store confirmed MTU from responder's signaling bytes
         let (confirmed_mtu, mode) = decode_signaling_bytes(&signalling_bytes);
         validate_mode(mode).map_err(|_| LinkError::InvalidProof)?;
-        self.negotiated_mtu = if confirmed_mtu >= MTU as u32 {
-            confirmed_mtu
-        } else {
+        // Codeberg #390: adopt the responder's confirmed value VERBATIM, the
+        // way the reference does -- `self.mtu = confirmed_mtu or
+        // RNS.Reticulum.MTU` (`reference/Reticulum/RNS/Link.py`,
+        // `validate_proof`). Python's `or` falls back to the base MTU only for
+        // a missing/zero value, never for a small one; a responder that clamps
+        // to a slow carrier is TELLING us the path cannot carry more.
+        //
+        // The old `max(confirmed, MTU)` floor made the two ends of one link
+        // disagree whenever the responder's next hop clamped below 500: the
+        // responder ran at the clamp, we ran at 500, and every size derived
+        // from the MTU (link MDU, resource SDU, hence the part count and the
+        // hashmap width) forked. See `mvr_link_mtu_asymmetry.rs` for the
+        // resource livelock that came out of it on hardware.
+        self.negotiated_mtu = if confirmed_mtu == 0 {
             MTU as u32
+        } else {
+            confirmed_mtu
         };
 
         // Update state
