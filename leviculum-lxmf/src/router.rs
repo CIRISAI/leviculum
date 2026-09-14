@@ -298,6 +298,15 @@ pub enum RouterEvent {
         is_initiator: bool,
     },
     Duplicate([u8; 32]),
+    /// An opportunistic message did not fit one packet, so it went out over a
+    /// link instead: [`LxmfNodeEvent::DeliveryMethodFallback`] forwarded to
+    /// the application, which is the only place the switch is visible.
+    DeliveryMethodFallback {
+        message_id: [u8; 32],
+        requested: DeliveryMethod,
+        chosen: DeliveryMethod,
+        packed_len: usize,
+    },
     /// A peer announced its `lxmf.delivery` destination, with the announce the
     /// router decoded for its own outbound stamp-cost cache.
     ///
@@ -1393,6 +1402,19 @@ impl LxmfRouter {
             }
             LxmfNodeEvent::InboundRejected { method, reason } => {
                 out.push(RouterEvent::InboundRejected { method, reason });
+            }
+            LxmfNodeEvent::DeliveryMethodFallback {
+                message_id,
+                requested,
+                chosen,
+                packed_len,
+            } => {
+                out.push(RouterEvent::DeliveryMethodFallback {
+                    message_id,
+                    requested,
+                    chosen,
+                    packed_len,
+                });
             }
             _ => {}
         }

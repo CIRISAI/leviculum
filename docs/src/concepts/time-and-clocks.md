@@ -174,7 +174,7 @@ keeps a ticket only while `time.time() < expires` on its own machine
 does not. A backwards-biased expiry from an unhealed calendar is
 therefore already expired on arrival — issuing it is emitting a field
 the peer silently discards. `LxmfRouter::issue_ticket_field`
-(`leviculum-lxmf/src/router.rs:640`) returns
+(`leviculum-lxmf/src/router.rs:649`) returns
 `RouterError::NoWallClock` while the calendar is not a plausible wall
 clock, rather than issue one: a named error is a diagnosis; a
 discarded ticket is a mystery that surfaces months later as "replies

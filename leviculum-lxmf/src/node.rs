@@ -173,6 +173,30 @@ pub enum LxmfNodeEvent {
         representation: DeliveryRepresentation,
         submission: SubmissionId,
     },
+    /// The requested delivery method did not survive the size check, so the
+    /// message goes out on a carrier its sender did not ask for.
+    ///
+    /// Only the opportunistic request can lose this way: one byte over the
+    /// single-packet limit and delivery switches to a link, which costs a
+    /// handshake per message instead of one packet. Python performs the same
+    /// switch, reports it on `LOG_DEBUG` and nowhere else, and overwrites
+    /// `desired_method` while doing it, so afterwards the caller's wish is not
+    /// recoverable (`LXMessage.pack`,
+    /// `reference/LXMF/LXMF/LXMessage.py:399-401`).
+    ///
+    /// No peer can observe the switch — wire format and semantics are
+    /// identical on either carrier — so this is sender-side diagnostics for a
+    /// node that has just been moved off its own energy plan without being
+    /// told. `packed_len` is the size that decided it: the fully packed
+    /// message, which [`LxmfNode::representation`] measures against
+    /// [`OPPORTUNISTIC_PACKET_MDU`] after subtracting the destination hash an
+    /// opportunistic packet infers from its header instead of carrying.
+    DeliveryMethodFallback {
+        message_id: [u8; 32],
+        requested: DeliveryMethod,
+        chosen: DeliveryMethod,
+        packed_len: usize,
+    },
     Progress {
         message_id: [u8; 32],
         progress: f32,
@@ -515,6 +539,32 @@ impl LxmfNode {
         }
     }
 
+    /// The notice that a requested method did not survive the size check.
+    ///
+    /// `None` when the message gets the carrier its sender asked for, which
+    /// is every case but the oversized opportunistic one: `Direct` never
+    /// falls back (both its representations are direct), and the methods this
+    /// adapter refuses outright never reach here.
+    fn fallback_event(
+        requested: DeliveryMethod,
+        representation: DeliveryRepresentation,
+        message_id: [u8; 32],
+        packed_len: usize,
+    ) -> Option<LxmfNodeEvent> {
+        let chosen = match representation {
+            DeliveryRepresentation::OpportunisticPacket => DeliveryMethod::Opportunistic,
+            DeliveryRepresentation::DirectPacket | DeliveryRepresentation::DirectResource => {
+                DeliveryMethod::Direct
+            }
+        };
+        (chosen != requested).then_some(LxmfNodeEvent::DeliveryMethodFallback {
+            message_id,
+            requested,
+            chosen,
+            packed_len,
+        })
+    }
+
     /// Ensure that a direct link exists, requesting a path first when needed.
     pub fn ensure_direct_link<R, C, S>(
         &mut self,
@@ -610,6 +660,14 @@ impl LxmfNode {
         let packed = message.pack();
         check_outgoing_delivery_size(self.config.max_outgoing_delivery_size, packed.len())?;
         let representation = Self::representation_of(message.method, packed.len())?;
+        // Reported before the submission it changed, so a reader of the event
+        // stream sees the decision and then its consequence.
+        let fallback = Self::fallback_event(
+            message.method,
+            representation,
+            message.message_id,
+            packed.len(),
+        );
         let destination = DestinationHash::new(message.destination_hash);
 
         match representation {
@@ -640,12 +698,15 @@ impl LxmfNode {
                 );
                 let output = LxmfNodeOutput {
                     core,
-                    events: vec![LxmfNodeEvent::Submitted {
-                        message_id: message.message_id,
-                        method: DeliveryMethod::Direct,
-                        representation,
-                        submission: SubmissionId::LinkPacket(packet_hash),
-                    }],
+                    events: fallback
+                        .into_iter()
+                        .chain([LxmfNodeEvent::Submitted {
+                            message_id: message.message_id,
+                            method: DeliveryMethod::Direct,
+                            representation,
+                            submission: SubmissionId::LinkPacket(packet_hash),
+                        }])
+                        .collect(),
                 };
                 Ok(output)
             }
@@ -657,13 +718,17 @@ impl LxmfNode {
                     None,
                     self.config.auto_compress_resources,
                 )?;
-                Ok(self.record_resource_submission(
+                let mut output = self.record_resource_submission(
                     link_id,
                     message.message_id,
                     resource_hash,
                     packed.len(),
                     core,
-                ))
+                );
+                if let Some(fallback) = fallback {
+                    output.events.insert(0, fallback);
+                }
+                Ok(output)
             }
         }
     }

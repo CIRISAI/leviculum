@@ -168,9 +168,9 @@ handoff, and wiring the two together is an explicit goal.
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
 Three layers, all sans-IO: `NodeCore` (Reticulum transport, owned by the
-app), `LxmfNode` (`leviculum-lxmf/src/node.rs:351`, the `lxmf.delivery`
+app), `LxmfNode` (`leviculum-lxmf/src/node.rs:375`, the `lxmf.delivery`
 destination adapter), and `LxmfRouter`
-(`leviculum-lxmf/src/router.rs:442`, the queue, retry scheduler, stamp and
+(`leviculum-lxmf/src/router.rs:451`, the queue, retry scheduler, stamp and
 ticket policy, dedup caches and propagation client). The application builds
 on `LxmfRouter` and owns both it and the core; the router never owns the
 core, every method takes it as a parameter.
@@ -246,7 +246,7 @@ There is still no event for `Outbound` and none for progress: the router
 folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress` without
 emitting anything (`leviculum-lxmf/src/router.rs:1381-1393`), so progress
 must be polled through `outbound()`
-(`leviculum-lxmf/src/router.rs:672`).
+(`leviculum-lxmf/src/router.rs:681`).
 
 ### `MessageState` and what it honestly means
 
@@ -270,10 +270,10 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    Direct delivery goes `Outbound -> Sending -> Delivered | Rejected |
    Failed` and never passes through `Sent`, because the `Submitted` handler
    matches only `DeliveryMethod::Opportunistic`
-   (`leviculum-lxmf/src/router.rs:1366-1370`).
+   (`leviculum-lxmf/src/router.rs:1375-1379`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
-   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1115-1137`) or from
+   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1180-1202`) or from
    `ResourceCompleted { is_sender: true }`
    (`leviculum-lxmf/src/node.rs:1009-1020`). It proves the bytes arrived at
    the destination identity. It does not prove an LXMF client parsed them
@@ -292,7 +292,7 @@ entry is removed, and from then on it is indistinguishable from a message
 that vanished.
 
 Terminal states remove the entry from the outbound map
-(`remove_outbound`, `leviculum-lxmf/src/router.rs:844-847`; call sites at
+(`remove_outbound`, `leviculum-lxmf/src/router.rs:853-856`; call sites at
 `:859`, `:1298`, `:1322` and
 `leviculum-lxmf/src/router/propagation_runtime.rs:895`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
@@ -305,9 +305,9 @@ Setup requires the client to mint a second `lxmf.propagation` destination
 via `PropagationTransport::destination`
 (`leviculum-lxmf/src/propagation_client.rs:282-292`),
 register it, and hand it to `enable_propagation_client`
-(`leviculum-lxmf/src/router.rs:577`); the transport identity must equal the
+(`leviculum-lxmf/src/router.rs:586`); the transport identity must equal the
 router's or you get `RouterError::IdentityMismatch`
-(`leviculum-lxmf/src/router.rs:582-584`).
+(`leviculum-lxmf/src/router.rs:591-593`).
 
 Node discovery is automatic from announces (`remember_announce`,
 `leviculum-lxmf/src/propagation_client.rs:384-400`, driven from the
@@ -345,7 +345,7 @@ What the router will not do:
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:1919-1936`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:1941-1958`).
   The client must persist and replay them via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1317`). The selected
@@ -416,7 +416,7 @@ restarts, and must not pretend to.
   to a contact so their future messages skip proof-of-work. Mostly
   invisible and automatic: received tickets are remembered from any
   signature-valid inbound message — `remember_verified_ticket`
-  (`leviculum-lxmf/src/router.rs:1462`) — and applied when a message is
+  (`leviculum-lxmf/src/router.rs:1484`) — and applied when a message is
   enqueued (`leviculum-lxmf/src/router.rs:791`). Expiry 21 days, renew at 14,
   minimum one day between issuances to the same peer
   (`leviculum-lxmf/src/constants.rs:34-37`). `issue_ticket_field` refuses
@@ -428,7 +428,7 @@ restarts, and must not pretend to.
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is
   2^cost hashes plus a workblock expansion of 3000 rounds
-  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:39`). Costs
+  (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:45`). Costs
   above about 40 bits are described in-tree as "already unreachable in
   practice" (`leviculum-lxmf/src/router.rs:1116-1117`). No wall-clock
   benchmark exists in the crate and none was run for this document, so any
@@ -617,7 +617,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:6157`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:1850`).
+   (`leviculum-lxmf/src/router.rs:1872`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:5305-5346`), the tick-counted
@@ -773,8 +773,8 @@ not a list of open work.
    support (`leviculum-lxmf/src/node.rs:429-430`). A user receiving a large
    attachment they do not want can only watch.
 8. **Most error types are `Debug` only.** `RouterError`
-   (`leviculum-lxmf/src/router.rs:340`), `LxmfNodeError`
-   (`leviculum-lxmf/src/node.rs:233`), `PropagationTransportError`
+   (`leviculum-lxmf/src/router.rs:349`), `LxmfNodeError`
+   (`leviculum-lxmf/src/node.rs:257`), `PropagationTransportError`
    (`leviculum-lxmf/src/propagation_client.rs:144`), `MessageError`
    (`leviculum-lxmf/src/message.rs:40`) and `StorageError` have no
    `Display`. Every user-facing string is the client's to write, and two
