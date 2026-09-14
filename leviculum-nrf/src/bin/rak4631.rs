@@ -217,7 +217,19 @@ async fn main(spawner: Spawner) {
         .enable_transport(true)
         .max_links(Some(MAX_ENDPOINT_LINKS))
         .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
-        .max_queued_announces(32)
+        // #402: announces held back by the LoRa announce cap wait here, and
+        // on a board the queue is a heap term, not a formality. One entry is
+        // its raw announce (~183 B) plus its Vec header, destination, hops
+        // and timestamp, about 220 B, so eight entries are ~1.8 KiB of the
+        // 45-50 KiB idle heap — against 16384 entries (the host default, and
+        // Python's `MAX_QUEUED_ANNOUNCES`), which is no bound at all here.
+        // Eight is also a time bound: at SF10 the 2 % share holds an announce
+        // ~92 s, so a full queue is ~12 minutes deep, and past that an
+        // announce is better re-learned from its source's next one than
+        // replayed stale. A full queue drops the ARRIVING announce, the
+        // newest one; the queue keeps what it has and drains fewest-hops-
+        // first (`Transport::drain_announce_queues`).
+        .max_queued_announces(8)
         .max_random_blobs(8)
         .respond_to_probes(true);
 
@@ -622,6 +634,15 @@ async fn main(spawner: Spawner) {
     // it walks are this loop's own state.
     let mut heap_census = leviculum_nrf::heap_census::Ticker::new();
 
+    // The announce bandwidth cap's price list (#402). The core has always had
+    // the cap — queue, fewest-hops-first drain, 2 % share — but it only binds
+    // an interface somebody registered a bitrate for, and the firmware
+    // registered none, so the medium where an announce is DEAREST was the one
+    // medium that never held one back. Synced after every wake because the
+    // PHY changes under it (the test cells reconfigure the radio per profile);
+    // the tracker registers only on a real change.
+    let mut announce_cap = leviculum_nrf::lora::AnnounceCap::new();
+
     // Event-driven main loop, eight event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
@@ -755,6 +776,11 @@ async fn main(spawner: Spawner) {
         // re-originate an unanswerable path request on. Serial and LoRa
         // mirror nothing — no "peers" at this layer — and stay at zero.
         node.set_interface_peer_count(2, ble_iface.peer_count());
+        // The LoRa PHY's price, mirrored into the announce cap in the same
+        // place and for the same reason as the online mirror above: a
+        // reconfigure lands in another task while this one sleeps, and the
+        // arms below must throttle against the PHY as it is NOW.
+        announce_cap.sync(&mut node);
         match wake {
             Either4::Third(Either4::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The

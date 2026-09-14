@@ -24,10 +24,10 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 *enforcement* never leaves the device.
 
 Our LNode firmware enforces the same way: `AirtimeTracker`
-(`leviculum-core/src/rnode.rs:1407`) mirrors the RNode ledger, and
+(`leviculum-core/src/rnode.rs:1501`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:1161-1186`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:1245-1270`), continuing to listen so RX is
 not starved.
 
 The host-side airtime credit bucket

@@ -1375,6 +1375,100 @@ pub fn frame_airtime_cost_ms(
     airtime_ms_with_preamble(frame_len, bandwidth_hz, sf, cr, preamble_symbols)
 }
 
+/// Packet length the LoRa announce-cap bitrate is derived at, in bytes.
+///
+/// The cap's holdoff is `len * 8 / bitrate` (Python
+/// `Interface.process_announce_queue`, `RNS/Interfaces/Interface.py:340`),
+/// linear in length, while real airtime is affine: a fixed preamble plus a
+/// per-byte cost. One length can therefore be exact and only its
+/// neighbourhood matters — and announces are the only packets this formula
+/// ever sees, a narrow population. 167 B is a bare announce (2 header + 16
+/// destination + 1 context + 64 public key + 10 name hash + 10 random hash +
+/// 64 signature), and the widest one a board put on the air in the #402
+/// capture was 210 B with app data and a ratchet (`bench_dual_pair_slow`,
+/// 2026-09-14, 32 announce-sized frames in 167..210). 183 sits in that band.
+pub const ANNOUNCE_CAP_REFERENCE_BYTES: usize = 183;
+
+/// The bitrate to register with `Transport::register_interface_bitrate` for a
+/// LoRa interface running this PHY, in bits per second.
+///
+/// This is the EFFECTIVE rate — [`ANNOUNCE_CAP_REFERENCE_BYTES`] of packet
+/// divided by the airtime those bytes actually cost — and not the nominal
+/// symbol rate ([`compute_bitrate`]) Python registers for an RNode. It comes
+/// out of [`packet_airtime_ms`], the same arithmetic the interface charges to
+/// its regulatory duty ledger, so the two cannot disagree about what a frame
+/// costs: at SF10/BW125/CR4:5 the nominal rate calls a 183 B announce 1.5 s
+/// and the air calls it 2.05 s, and a cap built on the first buys a third
+/// less silence than it believes.
+///
+/// Deviation from Python-RNS implementation, permitted under the project's
+/// deviation rule: nothing here reaches the wire (the holdoff is local
+/// transmit scheduling), the semantics a peer expects are unchanged, and it
+/// measurably improves Priority 1 on the medium where an announce is most
+/// expensive.
+///
+/// Returns 0 — "no cap", the value that REMOVES the cap entry — for a PHY
+/// whose airtime is not computable (bandwidth 0, sf 0, sf > 63), the same
+/// inputs [`airtime_ms_with_preamble`] refuses. An unconfigured radio is not
+/// transmitting anything to cap.
+pub fn announce_cap_bitrate_bps(bandwidth_hz: u32, sf: u8, cr: u8, preamble_symbols: u16) -> u32 {
+    let airtime_ms = packet_airtime_ms(
+        ANNOUNCE_CAP_REFERENCE_BYTES,
+        bandwidth_hz,
+        sf,
+        cr,
+        preamble_symbols,
+    );
+    if airtime_ms == 0 {
+        return 0;
+    }
+    (ANNOUNCE_CAP_REFERENCE_BYTES as u64 * 8 * 1000 / airtime_ms) as u32
+}
+
+/// The announce-cap bitrate a LoRa interface has registered, so the
+/// registration is edge-triggered on a PHY change and happens at no other
+/// time.
+///
+/// The edge matters: `Transport::register_interface_bitrate` REPLACES the cap
+/// entry, and a fresh entry has `allowed_at_ms = 0` and an empty queue. A
+/// caller that re-registered on every loop iteration would hand the throttler
+/// a permanent "allowed now" and cap nothing at all, while looking from the
+/// outside exactly like a working cap.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AnnounceCapBitrate {
+    registered_bps: u32,
+}
+
+impl AnnounceCapBitrate {
+    /// Nothing registered yet — the state the transport starts in, with no
+    /// cap entry for the interface.
+    pub const fn new() -> Self {
+        Self { registered_bps: 0 }
+    }
+
+    /// What the caller last registered, 0 before the first [`Self::sync`].
+    pub fn registered_bps(&self) -> u32 {
+        self.registered_bps
+    }
+
+    /// The bitrate to register for this PHY, or `None` when it is the one
+    /// already registered and the caller must leave the throttler alone.
+    pub fn sync(
+        &mut self,
+        bandwidth_hz: u32,
+        sf: u8,
+        cr: u8,
+        preamble_symbols: u16,
+    ) -> Option<u32> {
+        let bps = announce_cap_bitrate_bps(bandwidth_hz, sf, cr, preamble_symbols);
+        if bps == self.registered_bps {
+            return None;
+        }
+        self.registered_bps = bps;
+        Some(bps)
+    }
+}
+
 /// Whether a bursting LoRa transmitter must yield the channel (open its
 /// post-TX ack window) instead of draining the next queued frame.
 ///
@@ -3548,5 +3642,74 @@ mod tests {
         let expected = airtime_ms_with_preamble(255, 125_000, 7, 5, 24)
             + airtime_ms_with_preamble(1 + 300 - 254, 125_000, 7, 5, 24);
         assert_eq!(split, expected);
+    }
+
+    /// The announce-cap bitrate is the airtime arithmetic and nothing else,
+    /// at both ends of the spreading-factor range (#402). Stated as the
+    /// arithmetic rather than as two frozen numbers: a change to the airtime
+    /// formula must move the registered bitrate with it, which is the whole
+    /// point of deriving one from the other.
+    #[test]
+    fn announce_cap_bitrate_is_the_airtime_arithmetic() {
+        for (sf, preamble) in [(7u8, 24u16), (12u8, 18u16)] {
+            let air = packet_airtime_ms(ANNOUNCE_CAP_REFERENCE_BYTES, 125_000, sf, 5, preamble);
+            assert!(air > 0, "premise: SF{sf} airtime is computable");
+            assert_eq!(
+                announce_cap_bitrate_bps(125_000, sf, 5, preamble),
+                (ANNOUNCE_CAP_REFERENCE_BYTES as u64 * 8 * 1000 / air) as u32,
+                "SF{sf} bitrate must be the airtime of the reference packet"
+            );
+        }
+    }
+
+    /// The spread across the SF range is the reason the value cannot be a
+    /// constant: SF12 is more than an order of magnitude dearer than SF7, so
+    /// a cap computed once at boot for the wrong PHY is not a cap.
+    #[test]
+    fn announce_cap_bitrate_falls_with_spreading_factor() {
+        let sf7 = announce_cap_bitrate_bps(125_000, 7, 5, 24);
+        let sf10 = announce_cap_bitrate_bps(125_000, 10, 5, 18);
+        let sf12 = announce_cap_bitrate_bps(125_000, 12, 5, 18);
+        assert!(
+            sf7 > sf10 && sf10 > sf12,
+            "sf7={sf7} sf10={sf10} sf12={sf12}"
+        );
+        assert!(
+            sf7 > sf12 * 10,
+            "SF7 should outrun SF12 by more than 10x: sf7={sf7} sf12={sf12}"
+        );
+    }
+
+    /// A PHY with no computable airtime registers 0, which is the value that
+    /// REMOVES the cap entry: an unconfigured radio has no traffic to cap.
+    #[test]
+    fn announce_cap_bitrate_is_zero_for_an_uncomputable_phy() {
+        assert_eq!(announce_cap_bitrate_bps(0, 10, 5, 18), 0);
+        assert_eq!(announce_cap_bitrate_bps(125_000, 0, 5, 18), 0);
+        assert_eq!(announce_cap_bitrate_bps(125_000, 64, 5, 18), 0);
+    }
+
+    /// The tracker answers on the PHY edge and stays silent in between —
+    /// re-registering replaces the holdoff and the queue, so an unchanged
+    /// PHY must produce no registration at all.
+    #[test]
+    fn announce_cap_bitrate_tracker_is_edge_triggered() {
+        let mut tracker = AnnounceCapBitrate::new();
+        assert_eq!(tracker.registered_bps(), 0);
+
+        let first = tracker.sync(125_000, 10, 5, 18);
+        assert_eq!(first, Some(announce_cap_bitrate_bps(125_000, 10, 5, 18)));
+        assert_eq!(tracker.registered_bps(), first.unwrap());
+
+        assert_eq!(
+            tracker.sync(125_000, 10, 5, 18),
+            None,
+            "an unchanged PHY must not re-register"
+        );
+
+        let changed = tracker.sync(125_000, 12, 5, 18);
+        assert_eq!(changed, Some(announce_cap_bitrate_bps(125_000, 12, 5, 18)));
+        assert_eq!(tracker.registered_bps(), changed.unwrap());
+        assert_eq!(tracker.sync(125_000, 12, 5, 18), None);
     }
 }

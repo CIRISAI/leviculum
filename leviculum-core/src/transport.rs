@@ -15436,6 +15436,82 @@ mod tests {
             );
         }
 
+        /// Codeberg #402: a board whose radio settings change re-registers the
+        /// announce-cap bitrate, and the cap in force afterwards is the new
+        /// PHY's. The second half is the one that bites: an UNCHANGED PHY must
+        /// leave the throttler alone, because `register_interface_bitrate`
+        /// replaces the cap entry and a replaced entry is allowed to transmit
+        /// now — a caller that re-registered on every poll would look capped
+        /// and cap nothing.
+        #[test]
+        fn lora_phy_change_re_registers_the_announce_cap() {
+            use crate::rnode::{announce_cap_bitrate_bps, AnnounceCapBitrate};
+
+            fn configured(transport: &Transport<impl Clock, impl Storage>) -> Option<u32> {
+                transport
+                    .interface_bitrate_entries()
+                    .into_iter()
+                    .find(|e| e.id == 0)
+                    .and_then(|e| e.configured_bitrate)
+            }
+
+            let mut transport = make_transport_enabled();
+            let _idx = transport.register_interface(Box::new(MockInterface::new("lora", 0)));
+            transport.set_interface_name(0, "lora_sx1262".into());
+            assert_eq!(
+                configured(&transport),
+                None,
+                "premise: an interface nobody registered a bitrate for has no cap"
+            );
+
+            let mut tracker = AnnounceCapBitrate::new();
+
+            // Boot on the rig profile, SF10/BW125/CR4:5, preamble 18.
+            let sf10 = tracker
+                .sync(125_000, 10, 5, 18)
+                .expect("the first sync registers");
+            transport.register_interface_bitrate(0, sf10);
+            assert_eq!(configured(&transport), Some(sf10));
+            assert_eq!(
+                transport.interface_announce_cap(0),
+                Some(DEFAULT_ANNOUNCE_CAP_PERCENT),
+                "the registration puts the default share in force"
+            );
+
+            // A holdoff is running. An unchanged PHY must not clear it.
+            transport
+                .interface_announce_caps
+                .get_mut(&0)
+                .expect("registered above")
+                .allowed_at_ms = 10_000;
+            assert_eq!(
+                tracker.sync(125_000, 10, 5, 18),
+                None,
+                "an unchanged PHY must not ask for a re-registration"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&0].allowed_at_ms, 10_000,
+                "the running holdoff survives a PHY that did not change"
+            );
+
+            // The cells reconfigure the radio: same medium, twenty times the price.
+            let sf12 = tracker
+                .sync(125_000, 12, 5, 18)
+                .expect("a PHY change asks for a re-registration");
+            transport.register_interface_bitrate(0, sf12);
+            assert_eq!(
+                sf12,
+                announce_cap_bitrate_bps(125_000, 12, 5, 18),
+                "the registered bitrate is the new settings' airtime arithmetic"
+            );
+            assert!(sf12 < sf10, "SF12 is dearer than SF10: {sf12} vs {sf10}");
+            assert_eq!(
+                configured(&transport),
+                Some(sf12),
+                "the cap in force is the new PHY's, not the boot PHY's"
+            );
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;

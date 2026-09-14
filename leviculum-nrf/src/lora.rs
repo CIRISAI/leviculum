@@ -124,6 +124,12 @@ pub fn config_sender() -> Sender<'static, CriticalSectionRawMutex, RadioConfig, 
     LORA_CONFIG.sender()
 }
 
+/// Index of the LoRa carrier in the node's interface table — the one the
+/// binaries name `lora_sx1262`, and the one [`LoRaInterface::id`] answers
+/// with. Spelled once so a caller that has to address this interface without
+/// holding it (the announce cap, #402) cannot address a different one.
+pub const IFACE_INDEX: usize = 1;
+
 // LoRaInterface for NodeCore dispatch
 pub struct LoRaInterface {
     sender: Sender<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
@@ -146,7 +152,7 @@ impl LoRaInterface {
 
 impl Interface for LoRaInterface {
     fn id(&self) -> InterfaceId {
-        InterfaceId(1)
+        InterfaceId(IFACE_INDEX)
     }
     fn name(&self) -> &str {
         "lora_sx1262"
@@ -429,6 +435,84 @@ fn publish_running_config(config: &RadioConfig) {
 /// configured yet (#349, `TYPE_RADIO_QUERY`).
 pub fn running_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
     RUNNING_CONFIG.lock(|slot| slot.get())
+}
+
+/// Keeps the core's announce bandwidth cap told what a frame costs on this
+/// board's LoRa carrier (Codeberg #402).
+///
+/// The cap mechanism has always been there — the queue, the fewest-hops-first
+/// drain, the 2 % share — but it only exists for an interface somebody
+/// registered a bitrate for, and the firmware registered none. On a host a
+/// `bitrate` config key does it; a board has no config file, it has a radio,
+/// so the number is derived from the PHY the radio is actually running
+/// ([`leviculum_core::rnode::announce_cap_bitrate_bps`], the same airtime
+/// arithmetic the duty ledger charges).
+///
+/// [`sync`](Self::sync) is called from the main loop after every wake, and
+/// registers only on a real PHY change: re-registering replaces the cap entry,
+/// clearing the holdoff and the queue with it, so a board that re-registered
+/// every wake would carry a cap that never caps.
+pub struct AnnounceCap {
+    tracker: leviculum_core::rnode::AnnounceCapBitrate,
+}
+
+impl Default for AnnounceCap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnnounceCap {
+    pub const fn new() -> Self {
+        Self {
+            tracker: leviculum_core::rnode::AnnounceCapBitrate::new(),
+        }
+    }
+
+    /// Register the live PHY's announce-cap bitrate if it changed, and say so
+    /// on the debug port. Does nothing until the LoRa task has configured the
+    /// chip once — [`running_config`] describes live hardware or nothing, and
+    /// a cap for a radio that never came up would be a number about a fiction.
+    pub fn sync<R, C, S>(&mut self, node: &mut leviculum_core::node::NodeCore<R, C, S>)
+    where
+        R: rand_core::CryptoRngCore,
+        C: leviculum_core::traits::Clock,
+        S: leviculum_core::traits::Storage,
+    {
+        let Some(phy) = running_config() else {
+            return;
+        };
+        let Some(bitrate_bps) =
+            self.tracker
+                .sync(phy.bandwidth_hz, phy.sf, phy.cr, phy.preamble_len)
+        else {
+            return;
+        };
+        node.register_interface_bitrate(IFACE_INDEX, bitrate_bps);
+        // What an operator hunting a quiet board needs: the price this board
+        // thinks its medium charges, and the silence one announce buys at
+        // that price. `holdoff_ms` is the core's own formula
+        // (`len * 8 * 1000 / (bitrate * cap%/100)`) at the reference length,
+        // so the line and the throttler quote the same arithmetic.
+        let cap_pct = leviculum_core::constants::DEFAULT_ANNOUNCE_CAP_PERCENT;
+        let holdoff_ms = (leviculum_core::rnode::ANNOUNCE_CAP_REFERENCE_BYTES as u64 * 8 * 1000)
+            .checked_div(bitrate_bps as u64 * cap_pct as u64 / 100)
+            .unwrap_or(0);
+        crate::log::log_fmt_critical(
+            "[ANNOUNCE_CAP] ",
+            format_args!(
+                "iface=lora_sx1262 bitrate_bps={} cap_pct={} holdoff_ms={} ref_bytes={} sf={} bw={} cr={} preamble={}",
+                bitrate_bps,
+                cap_pct,
+                holdoff_ms,
+                leviculum_core::rnode::ANNOUNCE_CAP_REFERENCE_BYTES,
+                phy.sf,
+                phy.bandwidth_hz,
+                phy.cr,
+                phy.preamble_len
+            ),
+        );
+    }
 }
 
 // CSMA/CA constants. The retry gate itself (attempt budget, contention
