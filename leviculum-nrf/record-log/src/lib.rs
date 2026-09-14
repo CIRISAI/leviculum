@@ -248,7 +248,6 @@ const COMMIT_FLAGS_IX: usize = 3;
 const AFTER_COMMIT: u32 = COMMIT_OFF + PROGRAM_UNIT;
 
 const CRC_INIT: u16 = 0xFFFF;
-const CRC_POLY: u16 = 0x1021;
 
 /// Round up to the program unit.
 pub const fn align_up(n: usize) -> usize {
@@ -265,19 +264,15 @@ pub const fn record_stride(body_len: usize) -> usize {
 /// Same polynomial, seed and bit order as `leviculum_core::framing::crc16`;
 /// the standard check value (`"123456789"` → `0x29B1`) is asserted in this
 /// crate's tests, which is what keeps the two from drifting. Duplicated
-/// rather than shared because these sixteen lines are the only thing this
-/// crate would take from `leviculum-core`, and the firmware's pure crates
-/// carry no dependencies for a reason.
+/// rather than shared because this function is the only thing this crate
+/// would take from `leviculum-core`, and the firmware's pure crates carry no
+/// dependencies for a reason.
 pub fn crc16_update(mut crc: u16, data: &[u8]) -> u16 {
     for byte in data {
-        crc ^= (*byte as u16) << 8;
-        for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ CRC_POLY;
-            } else {
-                crc <<= 1;
-            }
-        }
+        // Fold one byte for polynomial 0x1021 without a table or bit loop.
+        let mut byte = (crc >> 8) ^ u16::from(*byte);
+        byte ^= byte >> 4;
+        crc = (crc << 8) ^ (byte << 12) ^ (byte << 5) ^ byte;
     }
     crc
 }
