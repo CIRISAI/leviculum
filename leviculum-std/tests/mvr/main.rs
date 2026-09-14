@@ -25,6 +25,7 @@ mod core_processor_seam;
 mod iface_online_after_task_death;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
+mod local_client_announce_burst_half_duplex;
 mod ratchet_rotation_single_packet;
 mod resource_consecutive_push_window_policy;
 mod responder_close_delivery;

@@ -93,6 +93,8 @@ mod mvr_link_mtu_asymmetry;
 mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
+#[cfg(test)]
+mod mvr_local_client_announce_immediate;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]

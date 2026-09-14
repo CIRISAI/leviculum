@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flashes — so until now nothing in the log said that a running node
   still hears its peers.
 
+### Changed
+
+- A shared-instance client's announce goes out at once, as the reference
+  does. The core held the first announce of every local-client destination
+  for 250 ms to batch a start-up burst; wire format and semantics were
+  untouched by it, but the deviation rule's third condition — a measurable
+  improvement of priority 1 — never had a measurement, and collision
+  avoidance belongs to the interface, which already spaces its own
+  transmissions. Measured against `rnsd` with the same client on both
+  stacks, 12 registrations each: median client-announce-to-on-air 1 ms for
+  `lnsd` against 699 ms for the reference, whose job loop is what it waits
+  on. A five-client simultaneous burst onto a half-duplex LoRa interface
+  still reaches the radio complete and 51 ms apart, which is the
+  interface's own spacing.
+
 ### Fixed
 
 - A board whose telemetry target is unreachable no longer announces at

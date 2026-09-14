@@ -48,7 +48,14 @@
 # vendored, so a fresh clone cannot run them. They run by hand against
 # /home/lew/coding/Reticulum in every batch touching the RPC/compat surface,
 # and before releases.
-20   -p leviculum-std --test rnsd_interop
+#
+# 20 -> 21 (2026-09-14): local_client_announce_latency_ab, the A/B the
+# removal of LOCAL_CLIENT_ANNOUNCE_DELAY_MS owed. Each arm spawns a Python
+# rnsd and the pair costs about 30 s, and what it pins is one stack against
+# the other rather than a behaviour of ours alone. Run by hand with
+# `--ignored --nocapture` whenever local-client announce scheduling is
+# touched on either side; nothing in the release path re-measures it.
+21   -p leviculum-std --test rnsd_interop
 
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means

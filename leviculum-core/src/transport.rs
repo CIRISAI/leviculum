@@ -45,13 +45,12 @@ use crate::constants::{
     ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
     DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
     EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
-    JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_ANNOUNCE_DELAY_MS,
-    LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX, MAX_QUEUED_ANNOUNCES_PER_INTERFACE,
-    MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU, PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS,
-    PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS,
-    PATH_REQUEST_MIN_INTERVAL_MS, PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE,
-    RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS, TRUNCATED_HASHBYTES,
-    UNKNOWN_BITRATE_ASSUMPTION_BPS,
+    JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
+    MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
+    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
+    PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS,
+    PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS,
+    TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
 
 use crate::announce::{emission_from_random_hash, max_emission_from_blobs, ReceivedAnnounce};
@@ -4056,7 +4055,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2795. A destination with no cached
+    /// link-request path uses at transport.rs:2794. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -4775,7 +4774,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1103 ran in the
+        // Gate on the already-incremented hops (transport.rs:1102 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -5053,12 +5052,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // local_client_known_dests timestamp is refreshed unconditionally
             // above (before should_update check) so clients stay alive even when
             // path table doesn't change.
-            let is_new_local_client_dest = if from_local {
+            if from_local {
                 self.storage
-                    .add_local_client_dest(interface_index, dest_hash)
-            } else {
-                false
-            };
+                    .add_local_client_dest(interface_index, dest_hash);
+            }
 
             // Determine if we should rebroadcast. Two independent cases qualify:
             //   * `enable_transport`: this node forwards announces from other
@@ -5089,24 +5086,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 "announce rebroadcast decision"
             );
 
-            // Local client first-registration: delay rebroadcast by 250ms to
-            // batch multiple registrations during startup (Python Transport.py:2232).
-            // Skip immediate broadcast; the deferred AnnounceEntry handles it.
-            let delay_for_local_registration = should_rebroadcast && is_new_local_client_dest;
-
             // Python-RNS parity: received announces are not re-emitted
             // directly from handle_announce. They are inserted into
             // announce_table below and the retry scheduler performs every
             // on-air rebroadcast. Python does the same at Transport.py:1754
             // (inserts entry) + Transport.py:519-540 (scheduler fires).
-
-            if delay_for_local_registration {
-                crate::tracing::debug!(
-                    "Delaying rebroadcast of local client announce for <{}> by {}ms",
-                    HexShort(&dest_hash),
-                    LOCAL_CLIENT_ANNOUNCE_DELAY_MS
-                );
-            }
 
             // A PATH_RESPONSE from a local client that satisfies a pending
             // external path request is scheduled for ONE immediate
@@ -5171,9 +5155,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // same destination, so the requester gets the
                             // fresh data instead of the cache.
                             Some(now)
-                        } else if delay_for_local_registration {
-                            // Deferred first broadcast for local client registration
-                            Some(now + LOCAL_CLIENT_ANNOUNCE_DELAY_MS)
+                        } else if should_rebroadcast && from_local {
+                            // "If the announce is from a local client, it is
+                            // announced immediately, but only one time"
+                            // (Transport.py:1890-1894): no window at all. We
+                            // held a first registration for 250 ms until
+                            // 2026-09-14; see
+                            // `node/mvr_local_client_announce_immediate.rs`
+                            // for why that went.
+                            Some(now)
                         } else if should_rebroadcast {
                             // Python-RNS parity (Transport.py:1728): the first
                             // rebroadcast for a received non-local-client
@@ -8700,7 +8690,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1666`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1665`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -13588,7 +13578,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // transport.rs:3961-3947, a deliberate anti-replay extension — so
+            // transport.rs:3960-3946, a deliberate anti-replay extension — so
             // the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -15617,11 +15607,10 @@ mod tests {
             // Process local announce (hops == 0) from local client if0
             let (raw, _dh) = make_announce_raw(0, PacketContext::None);
             transport.process_incoming(0, &raw).unwrap();
-            let _ = transport.drain_actions(); // No immediate broadcast (250ms delay)
+            let _ = transport.drain_actions(); // the receiving pass never transmits
             let _ = transport.drain_events();
 
-            // Advance past the 250ms local client announce delay and poll
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // The entry is due at `now`; one scheduler pass fires it.
             transport.poll();
             let actions = transport.drain_actions();
 
@@ -18468,7 +18457,7 @@ mod tests {
 
             transport
                 .clock
-                .advance(transport.announce_jitter_max_ms() + LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+                .advance(transport.announce_jitter_max_ms() + 1);
             transport.poll();
             let actions = transport.drain_actions();
             assert!(
@@ -18519,11 +18508,10 @@ mod tests {
             transport.process_incoming(0, &raw).unwrap();
             let _ = transport.drain_events();
 
-            // First registration defers by LOCAL_CLIENT_ANNOUNCE_DELAY_MS;
-            // let it fire.
+            // Past any rebroadcast window, so the entry is due either way.
             transport
                 .clock
-                .advance(transport.announce_jitter_max_ms() + LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+                .advance(transport.announce_jitter_max_ms() + 1);
             transport.poll();
             let actions = transport.drain_actions();
             assert!(
@@ -18643,7 +18631,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1103) before
+        // The inbound path increments hops once (transport.rs:1102) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -23898,8 +23886,9 @@ mod tests {
         #[test]
         fn test_shared_instance_registration_triggers_announce() {
             // When a local client sends an announce for a NEW destination,
-            // the daemon should delay the network rebroadcast by 250ms
-            // (Python Transport.py:2232) instead of broadcasting immediately.
+            // the daemon queues it for the scheduler rather than emitting it
+            // from the receiving pass; the scheduler fires it at `now`
+            // (Python Transport.py:1890-1894).
             let mut transport = make_transport_with_local_client();
 
             // Process an announce from the local client (hops=0 on wire, +1/-1 = net 0)
@@ -23907,8 +23896,8 @@ mod tests {
             let result = transport.process_incoming(LOCAL_CLIENT_IFACE, &raw);
             assert!(result.is_ok());
 
-            // Drain actions, there should be NO immediate Broadcast for this announce
-            // (because it's a new local client destination, 250ms delay applies)
+            // Drain actions: the receiving pass never transmits — the retry
+            // scheduler performs every on-air rebroadcast, as the reference does.
             let actions = transport.drain_actions();
             let _ = transport.drain_events();
 
@@ -23922,7 +23911,7 @@ mod tests {
                 .count();
             assert_eq!(
                 network_broadcasts, 0,
-                "First announce from local client should NOT broadcast immediately"
+                "the receiving pass queues the announce; the scheduler transmits it"
             );
 
             // Verify the destination is tracked in Storage
@@ -23937,10 +23926,10 @@ mod tests {
                 "Dest hash should be tracked in local_client_known_dests"
             );
 
-            // Verify an AnnounceEntry was created with deferred retransmit at 250ms.
-            // Python parity (Transport.py:1748-1752): local-client source
-            // starts at retries=PATHFINDER_R so the scheduler fires exactly
-            // once before `retries > PATHFINDER_R` removes the entry.
+            // Verify an AnnounceEntry was created, due now. Python parity
+            // (Transport.py:1890-1894): a local-client announce is scheduled
+            // for `now` and starts at retries=PATHFINDER_R, so the scheduler
+            // fires it exactly once before `retries > PATHFINDER_R` removes it.
             let entry = transport.storage.get_announce(&dest_hash);
             assert!(entry.is_some(), "AnnounceEntry should exist");
             let entry = entry.unwrap();
@@ -23950,19 +23939,17 @@ mod tests {
             );
             assert_eq!(
                 entry.retransmit_at_ms,
-                Some(TEST_TIME_MS + LOCAL_CLIENT_ANNOUNCE_DELAY_MS),
-                "retransmit should be scheduled at now + 250ms"
+                Some(TEST_TIME_MS),
+                "a local client's announce is due now, with no core-side hold"
             );
 
-            // Advance clock past the 250ms delay and poll
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Poll without moving the clock: it is already due.
             transport.poll();
             let actions = transport.drain_actions();
 
-            // Now we should see the rebroadcast action
             assert!(
                 !actions.is_empty(),
-                "After 250ms delay, the announce should be rebroadcast"
+                "the registration goes on the air in the first scheduler pass"
             );
         }
 
@@ -23980,8 +23967,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Advance clock so the deferred rebroadcast fires
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the queued rebroadcast (due now).
             transport.poll();
             let _ = transport.drain_actions();
 
@@ -24022,8 +24008,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Flush deferred announce
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the queued rebroadcast (due now).
             transport.poll();
             let _ = transport.drain_actions();
 
@@ -24073,7 +24058,7 @@ mod tests {
             let actions_immediate = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Should NOT have immediate broadcast (250ms delay for new registration)
+            // The receiving pass queues; it does not transmit.
             let immediate_network = actions_immediate
                 .iter()
                 .filter(|a| match a {
@@ -24084,16 +24069,16 @@ mod tests {
                 .count();
             assert_eq!(
                 immediate_network, 0,
-                "Reconnected client's announce should be delayed 250ms"
+                "the receiving pass queues the announce; the scheduler transmits it"
             );
 
-            // 5. After 250ms, announce is rebroadcast
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // 5. Due at `now`: the next scheduler pass fires it, no clock move.
             transport.poll();
             let actions = transport.drain_actions();
             assert!(
                 !actions.is_empty(),
-                "After 250ms, reconnected client's announce should be rebroadcast"
+                "a reconnected client's announce goes out in the first \
+                 scheduler pass after it was received"
             );
 
             // 6. Verify tracking
@@ -24120,8 +24105,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Flush deferred announce
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the queued rebroadcast (due now).
             transport.poll();
             let _ = transport.drain_actions();
 
@@ -24207,8 +24191,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Flush 250ms delay
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the queued rebroadcast (due now).
             transport.poll();
             let _ = transport.drain_actions();
 
@@ -24267,8 +24250,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Flush 250ms delay
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the queued rebroadcast (due now).
             transport.poll();
             let _ = transport.drain_actions();
 
@@ -24287,8 +24269,7 @@ mod tests {
             let _ = transport.drain_actions();
             let _ = transport.drain_events();
 
-            // Flush 250ms delay for second announce
-            transport.clock.advance(LOCAL_CLIENT_ANNOUNCE_DELAY_MS + 1);
+            // Let the scheduler fire the second queued rebroadcast.
             transport.poll();
             let _ = transport.drain_actions();
 

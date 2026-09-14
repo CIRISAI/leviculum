@@ -59,6 +59,7 @@ mod link_packet_interop_tests;
 mod link_tests;
 mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
+mod local_client_announce_latency_ab;
 mod lrproof_hop_undercount_interop_tests;
 mod lxmf_interop_tests;
 mod mtu_tests;
