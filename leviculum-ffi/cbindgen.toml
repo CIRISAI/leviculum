@@ -36,9 +36,10 @@ header = """
  *
  * Blocking and the event fd (deadlock warning):
  *   - Calls that take a `timeout_ms` parameter (lev_announce, lev_connect,
- *     lev_link_send, lev_send_request, lev_send_response, lev_send_datagram,
- *     lev_close_link, lev_start, lev_stop, ...) block the calling thread until
- *     they complete or the timeout elapses. A negative timeout blocks forever.
+ *     lev_link_send, lev_send_request, lev_send_response,
+ *     lev_send_response_resource, lev_send_datagram, lev_close_link,
+ *     lev_start, lev_stop, ...) block the calling thread until they complete
+ *     or the timeout elapses. A negative timeout blocks forever.
  *   - These blocking calls are driven on the calling thread but depend on the
  *     node's event loop making progress. Do NOT issue a blocking `lev_*` call
  *     from the SAME thread that drains the event fd while it is mid-drain; run

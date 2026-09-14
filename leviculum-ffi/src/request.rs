@@ -198,6 +198,55 @@ pub unsafe extern "C" fn lev_send_response(
     })
 }
 
+/// Answer a received request with a response Resource, for responses larger
+/// than the link MDU (link id and request id, each 16 bytes). Use it when
+/// `lev_send_response` returns `LEV_ERR_REQUEST` for an over-MDU payload.
+///
+/// `data`/`data_len` must be one valid msgpack-encoded value — the same
+/// contract as `lev_send_response`, and it matters here: the library prepends
+/// the request id itself, so a caller who packs `[request_id, response]`
+/// leaves the requester with an answer it cannot parse. Blocks up to
+/// `timeout_ms` for the initial dispatch; the transfer itself completes in the
+/// background and the requester sees one response event.
+#[no_mangle]
+pub unsafe extern "C" fn lev_send_response_resource(
+    node: *const leviculum_t,
+    link_id: *const u8,
+    request_id: *const u8,
+    data: *const u8,
+    data_len: usize,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if link_id.is_null() || request_id.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if data.is_null() && data_len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        let lid = LinkId::new(read_array::<LEV_ADDR_LEN>(link_id));
+        let rid = read_array::<LEV_ADDR_LEN>(request_id);
+        let payload: &[u8] = if data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(data, data_len)
+        };
+        match block_on_timeout(
+            h.runtime(),
+            h.node().send_response_resource(&lid, &rid, payload),
+            timeout_ms,
+        ) {
+            Ok(Ok(())) => LEV_OK,
+            Ok(Err(e)) => map_error(&e),
+            Err(()) => LEV_ERR_TIMEOUT,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

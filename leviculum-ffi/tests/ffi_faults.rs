@@ -193,6 +193,36 @@ fn resource_on_unknown_link_reports_resource_error() {
     );
 }
 
+/// Codeberg #391. The over-MDU response path must fail the same way the
+/// resource path does — an error the caller can branch on, never a panic and
+/// never a silent success that leaves the requester waiting.
+#[test]
+fn response_resource_on_unknown_link_reports_resource_error() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_node(dir.path(), |_| {});
+    let fake_link = [0x33u8; 16];
+    let request_id = [0x44u8; 16];
+    // One valid msgpack value, as the call's contract demands.
+    let data = b"\xa7payload";
+    let rc = unsafe {
+        lev_send_response_resource(
+            node.0,
+            fake_link.as_ptr(),
+            request_id.as_ptr(),
+            data.as_ptr(),
+            data.len(),
+            2000,
+        )
+    };
+    assert_eq!(
+        rc,
+        LEV_ERR_RESOURCE,
+        "unknown-link response resource: {}",
+        last_error()
+    );
+}
+
 #[test]
 fn request_on_unknown_link_reports_request_error() {
     let _serial = serial();

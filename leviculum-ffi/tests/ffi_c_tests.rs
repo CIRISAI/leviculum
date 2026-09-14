@@ -170,6 +170,17 @@ fn c_phase_e_acceptance() {
     compile_and_run_on_free_addr("examples/c/phase_e.c", "phase_e_c");
 }
 
+/// Codeberg #391: a request answered with more than one packet.
+///
+/// The bug's failure mode is a requester that waits forever, so the assertion
+/// that matters is not an error code but that the program terminates at all
+/// having received the whole payload. It runs longer than the phase examples
+/// because it moves a 300 KB resource over a real link.
+#[test]
+fn c_over_mdu_response_acceptance() {
+    compile_and_run_on_free_addr("examples/c/response_resource.c", "response_resource_c");
+}
+
 #[test]
 fn c_daemon_acceptance() {
     // Port 0: the kernel assigns the config-file node's listen port at bind;
@@ -196,6 +207,10 @@ fn the_two_node_examples_refuse_to_run_without_an_address() {
         ("examples/c/phase_c.c", "phase_c_c_noargs"),
         ("examples/c/phase_d.c", "phase_d_c_noargs"),
         ("examples/c/phase_e.c", "phase_e_c_noargs"),
+        (
+            "examples/c/response_resource.c",
+            "response_resource_c_noargs",
+        ),
         ("examples/c/daemon.c", "daemon_c_noargs"),
     ] {
         let Some(out_bin) = compile(source, bin) else {

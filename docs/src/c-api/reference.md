@@ -358,6 +358,9 @@ int lev_send_request(const struct leviculum_t *node, const uint8_t *link_id, con
                      int response_timeout_ms, uint8_t *out_request_id);
 int lev_send_response(const struct leviculum_t *node, const uint8_t *link_id,
                       const uint8_t *request_id, const uint8_t *data, uintptr_t data_len, int timeout_ms);
+int lev_send_response_resource(const struct leviculum_t *node, const uint8_t *link_id,
+                               const uint8_t *request_id, const uint8_t *data, uintptr_t data_len,
+                               int timeout_ms);
 ```
 
 - `lev_register_request_handler` registers a handler for `path` on a local
@@ -373,6 +376,14 @@ int lev_send_response(const struct leviculum_t *node, const uint8_t *link_id,
 - `lev_send_response` replies to a received request (link id and request id from
   the `LEV_EVENT_REQUEST_RECEIVED` event); `data` must be one valid
   msgpack-encoded value.
+- `lev_send_response_resource` replies to the same request when the answer does
+  not fit in one packet: `lev_send_response` is bounded by the link MDU and
+  returns `LEV_ERR_REQUEST` above it, and this call sends the answer as a
+  resource instead. Same arguments, same `data` contract — one valid
+  msgpack-encoded value, with no `[request_id, response]` wrapper of your own,
+  because the library prepends the request id itself. Use this and not
+  `lev_send_resource` for an over-MDU answer: a plain resource carries no
+  request id, so the requester never correlates it and waits out its deadline.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
