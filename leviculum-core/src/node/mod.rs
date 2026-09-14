@@ -88,6 +88,8 @@ mod mvr_link_data_echo_storm;
 #[cfg(test)]
 mod mvr_link_delivery_telemetry;
 #[cfg(test)]
+mod mvr_link_mtu_asymmetry;
+#[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
@@ -113,6 +115,8 @@ mod mvr_peer_link_reorigination;
 mod mvr_peer_up_pull;
 #[cfg(test)]
 mod mvr_pending_local_path_requests;
+#[cfg(test)]
+mod mvr_pn_sync_resource_census;
 #[cfg(test)]
 mod mvr_probe_announce_phase;
 #[cfg(test)]

@@ -114,6 +114,11 @@ struct Params {
     payload_bytes: usize,
     /// Simulated-time budget before the run gives up.
     budget_ms: u64,
+    /// HW MTU both endpoints declare for the shared medium, or `None` to
+    /// leave the interfaces unconstrained. Codeberg #390: a clamp below the
+    /// base MTU is what the boards' LoRa interface used to declare, and it
+    /// is the axis `bidir_wedge_vs_hw_mtu` sweeps.
+    hw_mtu: Option<u32>,
 }
 
 /// The committed anchor's parameters, at the DEVICE regime the field failure
@@ -127,6 +132,7 @@ const DEFAULT_PARAMS: Params = Params {
     drop_phase: 2,
     payload_bytes: 4096,
     budget_ms: TIME_BUDGET_MS,
+    hw_mtu: None,
 };
 
 /// Hard step cap: a safety backstop far above any legitimate run so a harness
@@ -429,6 +435,10 @@ fn run_bidir_with(params: Params) -> BidirResult {
     };
     alpha.iface = add_iface(&mut alpha.node, "A_mesh");
     beta.iface = add_iface(&mut beta.node, "B_mesh");
+    if let Some(hw_mtu) = params.hw_mtu {
+        alpha.node.set_interface_hw_mtu(alpha.iface, hw_mtu);
+        beta.node.set_interface_hw_mtu(beta.iface, hw_mtu);
+    }
 
     let mut h = BidirMedium {
         alpha,
@@ -580,6 +590,59 @@ fn bidir_transfer_completes_under_loss_halfduplex() {
     );
 }
 
+/// Codeberg #390's prediction, answered host-side: does the `hw_mtu` the
+/// boards' LoRa interface declares decide whether `lora_lnode_lncp_bidir_slow`
+/// wedges?
+///
+/// The field cell runs two LNodes pushing a resource to each other over one
+/// SF10 carrier and hangs 900 s in the TRANSFER phase. Until #390 the boards
+/// declared `hw_mtu = 255` for that carrier, which forked the two ends of the
+/// link onto different MTUs (initiator 500, responder 255) and therefore onto
+/// different resource part counts. This runs the same half-duplex + loss
+/// harness at both HW MTUs and prints whether each completes.
+///
+/// Read this together with the two `mvr_link_mtu_asymmetry` tests: those pin
+/// the MTU fork itself, this one says what the fork does to the cell's own
+/// traffic shape. Note that the harness models loss and half-duplex but not
+/// the device's radio timing; the hardware cell remains the arbiter.
+#[test]
+fn bidir_wedge_vs_hw_mtu() {
+    for hw_mtu in [255u32, 508] {
+        let p = Params {
+            hw_mtu: Some(hw_mtu),
+            ..DEFAULT_PARAMS
+        };
+        let r = run_bidir_with(p);
+        std::eprintln!(
+            "BIDIR-HWMTU hw_mtu={hw_mtu} a_in={} b_in={} a_fail={} b_fail={} dropped={} \
+             sim_ms={} status=({:?},{:?},{:?},{:?})",
+            r.alpha_received.is_some(),
+            r.beta_received.is_some(),
+            r.alpha_failed,
+            r.beta_failed,
+            r.dropped,
+            r.sim_ms,
+            r.end_status.0,
+            r.end_status.1,
+            r.end_status.2,
+            r.end_status.3,
+        );
+        assert!(
+            r.alpha_received.is_some() && r.beta_received.is_some(),
+            "with both ends on one MTU a clamping carrier must still complete \
+             both ways (hw_mtu={hw_mtu}, sim_ms={}, dropped={}, statuses \
+             a_out={:?} a_in={:?} b_out={:?} b_in={:?}). A RED here at 255 \
+             means the MTU fork is back.",
+            r.sim_ms,
+            r.dropped,
+            r.end_status.0,
+            r.end_status.1,
+            r.end_status.2,
+            r.end_status.3,
+        );
+    }
+}
+
 /// Decisive livelock-vs-slow probe: for the non-completing cells the 120 s
 /// budget is suspiciously close to the raw airtime (16 KB at 342 B/s is ~48 s
 /// one-way, ~96 s for both directions on half-duplex even losslessly), so a
@@ -609,6 +672,7 @@ fn bidir_livelock_vs_slow() {
             drop_phase: dp,
             payload_bytes: size,
             budget_ms: huge_budget,
+            hw_mtu: None,
         };
         let r = run_bidir_with(p);
         let both = r.alpha_received.is_some() && r.beta_received.is_some();
@@ -656,6 +720,7 @@ fn bidir_sweep() {
                     drop_phase: dp,
                     payload_bytes: size,
                     budget_ms: TIME_BUDGET_MS,
+                    hw_mtu: None,
                 };
                 let r = run_bidir_with(p);
                 let loss_pct = 100usize.checked_div(dm).unwrap_or(0);

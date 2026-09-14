@@ -235,7 +235,25 @@ async fn main(spawner: Spawner) {
     // node discovers unknown paths on behalf of the host.
     node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
     node.set_interface_name(1, alloc::string::String::from("lora_sx1262"));
-    node.set_interface_hw_mtu(1, 255);
+    // Codeberg #390: 508, not 255. Three places already agree on 508 for a
+    // LoRa carrier -- the reference (`RNS/Interfaces/RNodeInterface.py`,
+    // `HW_MTU = 508`), our own RNode constant (`leviculum-core/src/rnode.rs`,
+    // `HW_MTU: usize = 508`), and the splitter that actually puts the bytes on
+    // the air (`build_lora_frames`, two frames of at most
+    // `MAX_SINGLE_PAYLOAD = 254`). The radio was never the limit; 255 was.
+    //
+    // What the old 255 cost: an incoming link over this interface clamped to
+    // 255 on the responder (`Link::new_incoming`, `path_mtu.min(hw_mtu)`)
+    // while the initiator floored the confirmed value back at 500
+    // (`Link::process_proof`). The two ends then derived different resource
+    // SDUs (464 vs 219), the receiver computed more parts than the
+    // advertisement had hashmap entries, and every request it built came back
+    // flagged exhausted -- an unbounded 115-byte REQ/HMU loop that burned a PN
+    // sync round for 177 s until the outbound watchdog reaped it
+    // (`lora_pn_board_sync`, hardware, 2026-09-14). Pinned in
+    // `leviculum-core/src/node/mvr_link_mtu_asymmetry.rs`. Read that price
+    // before tidying this number back down.
+    node.set_interface_hw_mtu(1, 508);
     node.set_interface_name(2, alloc::string::String::from("ble"));
     node.set_interface_hw_mtu(2, 564);
 
