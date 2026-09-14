@@ -1396,6 +1396,16 @@ impl Reporter {
             return actions;
         };
 
+        // Ask the attempt floor before spending, not only before deciding:
+        // `poll` above asks the same question, but everything below this
+        // line is airtime and the announce is spent before a report even
+        // exists. The gate belongs where the spend is, so that no future
+        // path into this block can reach the announce without having
+        // cleared the floor (#236 regression, Sep 2026).
+        if !self.policy.may_spend_airtime(now_ms) {
+            return actions;
+        }
+
         // Announce our delivery destination first: a receiver verifies the
         // LXMF signature against our public key, which it can only have
         // from an announce. Sending the report to a peer that has never
@@ -1416,11 +1426,21 @@ impl Reporter {
         ) {
             Ok(message) => message,
             Err(_) => {
+                // The announce above is already on the air. Book it, or
+                // the next tick finds the floor clear and spends another.
+                self.policy.note_airtime_spent(now_ms);
                 self.withhold("no-readings");
                 return actions;
             }
         };
         let Ok(on_air) = message.on_air() else {
+            // Unreachable while `build_report` asks for an opportunistic
+            // message (only the propagated and paper methods refuse), but
+            // a branch that returns in silence is how nineteen hours of
+            // announces left one line in a capture. Same treatment as its
+            // two neighbours: book the announce, say why nothing follows.
+            self.policy.note_airtime_spent(now_ms);
+            self.withhold("no-on-air");
             return actions;
         };
 
@@ -1435,6 +1455,11 @@ impl Reporter {
                 "no-path"
             };
             actions.extend(node.request_path(&hash).actions);
+            // The announce went out before the route was known; the path
+            // request goes out now. Both are airtime this attempt spent,
+            // and this is the branch a node whose target has walked away
+            // takes on every tick — the whole of #236's flood.
+            self.policy.note_airtime_spent(now_ms);
             self.withhold(reason);
             return actions;
         }
@@ -1511,10 +1536,13 @@ impl Reporter {
                 self.pending_payload = Some(on_air);
             }
             Err(_) => {
-                // The core could not build or route it at all. This path
-                // already leaves the cadence unconsumed — `note_emitted`
-                // is never reached — so it needs no settlement, and it
-                // keeps the reason string `note_dispatch` reuses.
+                // The core could not build or route it at all. Nothing is
+                // in flight, so this path needs no settlement — but the
+                // announce before it was airtime, so the floor is raised
+                // here exactly as on the three branches above. The cadence
+                // stays unconsumed (`note_emitted` is never reached) and
+                // the reason string is the one `note_dispatch` reuses.
+                self.policy.note_airtime_spent(now_ms);
                 self.withhold("send-failed");
             }
         }

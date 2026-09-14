@@ -783,6 +783,16 @@ impl SendPolicy {
     /// pair every 6.5 s against a 60 s policy, ~20 % channel occupancy
     /// from one node.
     ///
+    /// The floor only holds if every spend raises it, and an attempt that
+    /// dies before a packet exists still spent the announce that precedes
+    /// it. Those paths call
+    /// [`note_airtime_spent`](Self::note_airtime_spent); the ones that get
+    /// as far as handing a report over call
+    /// [`note_emitted`](Self::note_emitted), which raises the same clock.
+    /// A caller about to spend asks
+    /// [`may_spend_airtime`](Self::may_spend_airtime) — the same question
+    /// this gate asks — at the site of the spend.
+    ///
     /// A node that has emitted nothing yet has no floor to clear, which is
     /// what keeps the immediate report of a newly usable target immediate.
     pub fn poll(&mut self, now_ms: u64, fix: Option<Fix>) -> Option<ReportReason> {
@@ -797,10 +807,8 @@ impl SendPolicy {
         if usable.is_some() && self.first_fix_ms.is_none() {
             self.first_fix_ms = Some(now_ms);
         }
-        if let Some(attempt) = self.last_attempt_ms {
-            if now_ms.saturating_sub(attempt) < self.params.min_interval_ms {
-                return None;
-            }
+        if !self.may_spend_airtime(now_ms) {
+            return None;
         }
         if self.immediate_pending {
             return Some(ReportReason::Immediate);
@@ -839,6 +847,44 @@ impl SendPolicy {
         }
     }
 
+    /// Whether the attempt floor lets this node put anything on the air
+    /// for telemetry right now.
+    ///
+    /// The same question [`poll`](Self::poll)'s attempt-floor gate asks,
+    /// named so a caller can ask it at the moment it is about to spend.
+    /// A telemetry report is not one packet: the pre-report announce goes
+    /// out before the report has even been built, and it is airtime
+    /// whether or not a report follows it. Asking here is what makes the
+    /// invariant hold over the announce too, rather than only over the
+    /// report the policy gets told about.
+    ///
+    /// A node that has spent nothing yet may spend — the floor is a
+    /// distance from the last attempt, and there is none.
+    pub const fn may_spend_airtime(&self, now_ms: u64) -> bool {
+        match self.last_attempt_ms {
+            Some(attempt) => now_ms.saturating_sub(attempt) >= self.params.min_interval_ms,
+            None => true,
+        }
+    }
+
+    /// Book airtime that went out with no report behind it.
+    ///
+    /// The pre-report announce is spent before the report is built, so
+    /// every way the attempt can die afterwards — no readings, a message
+    /// that will not encode, no path to the target, a send the core
+    /// refuses — has already cost the channel one announce.
+    /// [`note_emitted`](Self::note_emitted) is not reachable on those
+    /// paths and must not be faked there: nothing is in flight, so
+    /// nothing may later settle as sent. This raises the attempt floor
+    /// and touches nothing else.
+    ///
+    /// It consumes no cadence and no reading: the report is still owed,
+    /// and it goes out on the first tick past the floor exactly as a
+    /// report lost by the dispatch does.
+    pub const fn note_airtime_spent(&mut self, now_ms: u64) {
+        self.last_attempt_ms = Some(now_ms);
+    }
+
     /// Confirm that a report actually went out, with the position it
     /// carried (`None` when it carried none). Only this consumes the
     /// cadence and the armed immediate report.
@@ -862,17 +908,23 @@ impl SendPolicy {
     ///
     /// It does, however, start the attempt floor: this is the moment
     /// airtime was spent, and [`poll`](Self::poll) refuses to emit again
-    /// for `min_interval_ms` from here whatever the dispatch decides. That
-    /// is the whole of the rate limit — the failure path adds nothing,
-    /// because a floor that only the failure path raised would be a floor
-    /// a caller could forget to raise.
+    /// for `min_interval_ms` from here whatever the dispatch decides.
+    ///
+    /// It is not the only way that floor is raised, because it is not the
+    /// only way airtime is spent: an attempt that dies before a packet
+    /// exists has still put the pre-report announce on the air, and those
+    /// paths book it with
+    /// [`note_airtime_spent`](Self::note_airtime_spent). What stays true
+    /// is that a floor raised only by the failure paths would be one a
+    /// caller could forget to raise — so this raises it on the success
+    /// path, unconditionally, before anything can go wrong.
     ///
     /// Pair it with [`note_dispatch`](Self::note_dispatch). Two
     /// `note_emitted` calls without a settle in between keep only the
     /// later one: the earlier report is gone either way, and the cadence
     /// belongs to the report that is actually in flight.
     pub fn note_emitted(&mut self, now_ms: u64, reported: Option<Fix>) {
-        self.last_attempt_ms = Some(now_ms);
+        self.note_airtime_spent(now_ms);
         self.pending = Some(PendingReport {
             now_ms,
             fix: reported,

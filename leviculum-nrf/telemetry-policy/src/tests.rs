@@ -1646,3 +1646,149 @@ fn clear_forgets_the_tracked_report() {
     assert_eq!(t.awaiting_retry(), None);
     assert_eq!(t.note_proof(&pkt(1), 23_000), None);
 }
+
+// ---------------------------------------------------------------------------
+// The tick that spends an announce it never books (#236 regression, Sep 2026)
+// ---------------------------------------------------------------------------
+
+/// The firmware's telemetry tick reduced to its airtime decisions.
+///
+/// It mirrors `leviculum-nrf/src/telemetry.rs::tick` in the one ordering
+/// this is about: `poll` decides, then the delivery announce goes on the
+/// air *before* the report exists, and the steps after it — building the
+/// report, encoding it, finding a path, handing it to the core — can each
+/// fail once that announce is already spent. `report_path_works == false`
+/// stands for every one of those failures; on the board the common one is
+/// "the target walked away", the no-path branch.
+///
+/// The model is the test's subject, not scaffolding: the bug was never in
+/// the policy's arithmetic, it was in a caller that spent airtime on a
+/// path where it told the policy nothing.
+struct TickModel {
+    policy: SendPolicy,
+    /// When a delivery announce went on the air.
+    announces: Vec<u64>,
+    /// When a report was handed to the core and dispatched cleanly.
+    reports: Vec<u64>,
+}
+
+impl TickModel {
+    fn new(profile: Profile) -> Self {
+        let mut policy = reporting_node();
+        policy.set_target(profile, true);
+        Self {
+            policy,
+            announces: Vec::new(),
+            reports: Vec::new(),
+        }
+    }
+
+    fn tick(&mut self, now_ms: u64, report_path_works: bool) {
+        if self.policy.poll(now_ms, Some(good_fix())).is_none() {
+            return;
+        }
+        if !self.policy.may_spend_airtime(now_ms) {
+            return;
+        }
+        // Airtime, whatever happens below: the announce precedes the
+        // report and does not depend on it.
+        self.announces.push(now_ms);
+        if !report_path_works {
+            self.policy.note_airtime_spent(now_ms);
+            return;
+        }
+        self.reports.push(now_ms);
+        self.policy.note_emitted(now_ms, Some(good_fix()));
+        assert!(self.policy.note_dispatch(true));
+    }
+
+    /// The shortest gap between two consecutive spends.
+    fn tightest_announce_gap(&self) -> Option<u64> {
+        self.announces.windows(2).map(|w| w[1] - w[0]).min()
+    }
+}
+
+/// A target that cannot be reached costs the channel one announce per
+/// `min_interval_ms`, not one per tick.
+///
+/// This is #236 as it was measured in the field: a board whose telemetry
+/// target has gone away took the no-path branch on every 5 s tick, and
+/// because that branch booked nothing, the floor it was supposed to clear
+/// was still the one from the last successful report. The worst measured
+/// hour was an announce every 6.7 s from a single node.
+#[test]
+fn an_unreachable_target_is_announced_at_the_policy_rate() {
+    let floor = Profile::Tracker.params().min_interval_ms;
+    let mut m = TickModel::new(Profile::Tracker);
+
+    let run_ms = 30 * 60_000;
+    let mut now = 0;
+    while now <= run_ms {
+        m.tick(now, false);
+        now += TICK_MS;
+    }
+
+    assert!(
+        !m.announces.is_empty(),
+        "a node that reaches nobody must still try"
+    );
+    assert!(
+        m.reports.is_empty(),
+        "no report can have gone out on a failing path"
+    );
+    assert!(
+        m.tightest_announce_gap().unwrap_or(u64::MAX) >= floor,
+        "two announces {} ms apart against a {} ms floor: {:?}",
+        m.tightest_announce_gap().unwrap_or_default(),
+        floor,
+        m.announces
+    );
+    // The bound the airtime budget is written against, stated as a count
+    // and not only as a gap: one attempt per floor over the run, plus the
+    // first one.
+    let allowed = (run_ms / floor + 1) as usize;
+    assert!(
+        m.announces.len() <= allowed,
+        "{} announces in {} ms, at most {} allowed",
+        m.announces.len(),
+        run_ms,
+        allowed
+    );
+}
+
+/// Control: a reachable target keeps the cadence it had.
+///
+/// Without it, a "fix" that simply refuses to ever spend airtime passes
+/// the test above and silences the node.
+#[test]
+fn control_a_reachable_target_keeps_its_cadence() {
+    let params = Profile::Tracker.params();
+    let mut m = TickModel::new(Profile::Tracker);
+
+    let run_ms = 60 * 60_000;
+    let mut now = 0;
+    while now <= run_ms {
+        m.tick(now, true);
+        now += TICK_MS;
+    }
+
+    // The immediate report at the first tick, then a heartbeat every
+    // `max_interval_ms` — a standing node with a good fix has no movement
+    // to report, so the heartbeat is the whole cadence.
+    let expected: Vec<u64> = core::iter::once(0)
+        .chain(
+            (1..)
+                .map(|n| n * params.max_interval_ms)
+                .take_while(|t| *t <= run_ms),
+        )
+        .collect();
+    assert_eq!(
+        m.reports, expected,
+        "the success path's cadence changed: announces {:?}",
+        m.announces
+    );
+    assert_eq!(
+        m.announces, m.reports,
+        "every announce on the success path belongs to a report"
+    );
+}

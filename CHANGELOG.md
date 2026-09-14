@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A board whose telemetry target is unreachable no longer announces at
+  the tick rate. The telemetry tick puts the delivery announce on the
+  air before the report exists, and the paths that give up after it —
+  no readings, no path, an interface that is offline, a send the core
+  refuses — booked nothing, so the attempt floor stayed where the last
+  successful report left it and the next 5 s tick spent another
+  announce. Measured at its worst as one announce every 6.7 s from a
+  single node against a 60 s policy, roughly 20 % channel occupancy.
+  Every one of those paths now books the airtime it spent
+  (`SendPolicy::note_airtime_spent`), and the tick asks
+  `SendPolicy::may_spend_airtime` at the spend itself. The report is
+  still owed and still goes out on the first tick past the floor; only
+  the retry rate changes. The `on_air()` branch that used to return in
+  silence now says `report withheld reason=no-on-air`.
+
 - A phone's rotated BLE address no longer strands it behind its own
   dead link (#360, board side). When an identity we already hold a
   link to handshakes on a new connection, the newer connection now
