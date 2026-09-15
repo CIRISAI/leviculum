@@ -205,6 +205,37 @@ needs the identifier before it can.
 > build compiles 1.8 V in. Supporting it needs that value to become a
 > board fact rather than a family fact.
 
+### Family C: XIAO nRF52840 + Wio-SX1262
+
+`solarnode` binary. NSS `P0.04`, SCK `P1.13`, MOSI `P1.15`, MISO `P1.14`,
+BUSY `P0.29`, DIO1 `P0.03`, NRESET `P0.28`, TCXO at 1.8 V via DIO3, DIO2
+as antenna switch **and an external RX enable on `P0.05`**. That last pin
+is what this family adds to the shared code: DIO2 steers only the
+transmit side of the Wio-SX1262's switch, so the receive side is a host
+GPIO the driver asserts for a listening window and releases before every
+key-up (`rx_frontend`, `leviculum-nrf/src/sx1262.rs:326`;
+`LoRaRxEnable`, `leviculum-nrf/src/boards/solarnode.rs:63`).
+
+| Product | Level | Note |
+|---|---|---|
+| Seeed SenseCAP Solar Node P1-Pro | **Bring-up** | On the rig since 2026-09-15; radio not yet confirmed on air |
+| Seeed XIAO nRF52840 + Wio-SX1262 kit | Expected | Same two modules, same seven pins plus RXEN |
+| Wio Tracker L1 / L1 e-ink | Not covered | Different carrier, LEDs and battery sense not checked |
+
+The image drives, besides the radio, one LED on `P0.19` and nothing else:
+no display, and neither the L76K GNSS nor the battery sampler is compiled
+into `bsp-solarnode` yet, so the pins a carrier board might reuse for
+them stay unconfigured. That is the whole reason the kit above can be
+*Expected* at all — the modules decide the radio, and the carrier decides
+everything this build does not touch.
+
+The bootloader cannot tell these apart. `nRF52840-SeeedXiao-v1` names the
+MCU module, and a DIY XIAO with an entirely different radio wired to the
+same pads reports exactly the same string, so `lnflash` has no manifest
+entry for this board and must not be given one on that evidence
+(Codeberg #233). For the bring-up the image goes onto the mass-storage
+volume by hand.
+
 ### Not covered today
 
 Each of these is a separate pinout family, reachable by adding one board
@@ -212,15 +243,15 @@ file rather than by changing shared code:
 
 | Family | Products |
 |---|---|
-| XIAO nRF52840 + Wio-SX1262 | Seeed SenseCAP Solar Node, Wio Tracker L1, XIAO kits |
 | ThinkNode M6 | Elecrow ThinkNode M6, muzi BASE |
 | ProMicro + E22 | nRF52 ProMicro DIY, DLS Minimesh Lite |
 | Individual wirings | Heltec Mesh Pocket, B&Q Nano G2 Ultra, LILYGO T-Echo Lite, Canary One, MS24SF1, MeshLink, TWC Mesh v4 |
 
-The XIAO family is the one case where the bootloader cannot answer which
-board it is: the MCU module is a XIAO and the radio is a separate part,
-so a SenseCAP Solar Node and a DIY XIAO with different radio wiring both
-report `nRF52840-SeeedXiao-v1`. Boards like that need a second
+The XIAO family, now family C above, is the one case where the
+bootloader cannot answer which board it is: the MCU module is a XIAO and
+the radio is a separate part, so a SenseCAP Solar Node and a DIY XIAO
+with different radio wiring both report `nRF52840-SeeedXiao-v1`. Having
+a build for it does not change that. Boards like that need a second
 discriminator before anything may be written.
 
 ### Known open question

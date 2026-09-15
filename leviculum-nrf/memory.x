@@ -53,7 +53,7 @@ MEMORY
     /* page at or above 0xDA000 and no erase reaches one. The ASSERT below */
     /* is what keeps that true as the image grows: it fails the LINK if    */
     /* FLASH would reach into STORE, and scripts/check-nrf-store-gap.sh    */
-    /* reports the remaining gap for both bins on every `just fast`.       */
+    /* reports the remaining gap for every bin on every `just fast`.       */
     /*                                                                    */
     /* Size: ONE number, 0x10000 = 16 pages = 64 KiB, and it is here       */
     /* rather than in Rust. `__srecord_store`/`__erecord_store` below are  */

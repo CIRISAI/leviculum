@@ -1,11 +1,24 @@
-//! Firmware entry point for Heltec Mesh Node T114
+//! Firmware entry point for the SenseCAP Solar Node P1-Pro (Codeberg #233)
 //!
 //! Runs a Reticulum transport node with three interfaces:
 //! - Interface 0: USB CDC-ACM serial (HDLC framing) to host
-//! - Interface 1: SX1262 LoRa radio
+//! - Interface 1: SX1262 LoRa radio, on the Wio-SX1262 module
 //! - Interface 2: BLE peripheral (Columba v2.2 protocol)
 //!
 //! The transport engine routes packets between all interfaces.
+//!
+//! Three Seeed modules on a carrier board, all of them nRF52840-family
+//! parts we already drive, so this file is the T114's binary with the
+//! solar node's pin map and without its panel. What is genuinely new is
+//! in two shared places and not here: the radio's external RX-enable
+//! line (`sx1262.rs`) and the divider-enable polarity the battery
+//! sampler now takes from the board (`battery.rs`).
+//!
+//! The bring-up milestone is deliberately small: boot, identity over
+//! USB, radio up, one packet received from a board we already trust.
+//! GNSS and battery are wired below under their own feature gates but
+//! are NOT in `bsp-solarnode` yet — each is its own step with its own
+//! evidence (Lead, 2026-09-15).
 
 #![no_std]
 #![no_main]
@@ -27,7 +40,7 @@ use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
 use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
-use leviculum_nrf::boards::t114;
+use leviculum_nrf::boards::solarnode;
 use leviculum_nrf::clock::EmbassyClock;
 use leviculum_nrf::interface::EmbeddedInterface;
 use leviculum_nrf::lora::LoRaInterface;
@@ -66,10 +79,15 @@ async fn main(spawner: Spawner) {
     }
 
     leviculum_nrf::set_panic_led(
-        t114::PANIC_LED_PORT,
-        t114::PANIC_LED_PIN,
-        t114::PANIC_LED_ACTIVE_LOW,
+        solarnode::PANIC_LED_PORT,
+        solarnode::PANIC_LED_PIN,
+        solarnode::PANIC_LED_ACTIVE_LOW,
     );
+    // A distinct LED for HardFault — the blue one on P0.15, active high
+    // like the green — so a bring-up can tell a fault from a panic across
+    // the room, before the first serial line exists. Same reasoning as
+    // the Pocket V2's (`bin/rak4631.rs`).
+    leviculum_nrf::set_hardfault_led(0, 15, false);
     leviculum_nrf::set_irq_priorities();
     // This binary wires a telemetry Reporter into its main loop; declared
     // before USB comes up so the serial task can never answer a telemetry
@@ -85,7 +103,7 @@ async fn main(spawner: Spawner) {
     // to disagree.
     leviculum_nrf::telemetry::declare_position_sources(
         /* gnss_available */ cfg!(feature = "gnss"),
-        t114::CONFIG.telemetry_flash_page,
+        solarnode::CONFIG.telemetry_flash_page,
     );
     // The media profile decides which carriers come up at all, so it is
     // read before USB and before either carrier: before USB so a host
@@ -93,18 +111,19 @@ async fn main(spawner: Spawner) {
     // record is still unread, and before the carriers because the answer
     // is their spawn decision. A memory-mapped flash read, legal this
     // early and before `Softdevice::enable`.
-    let (media, media_src) = leviculum_nrf::media::load_at_boot(t114::CONFIG.telemetry_flash_page);
+    let (media, media_src) =
+        leviculum_nrf::media::load_at_boot(solarnode::CONFIG.telemetry_flash_page);
     // The node's name, read on the same page and for the same reason the
     // profile is: before USB, so a host frame is never answered against
     // the derived default while the record is still unread, and before
     // the first announce and `ble::init`, which both display it.
-    leviculum_nrf::name::load_at_boot(t114::CONFIG.telemetry_flash_page);
+    leviculum_nrf::name::load_at_boot(solarnode::CONFIG.telemetry_flash_page);
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
-    let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t114::CONFIG);
+    let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &solarnode::CONFIG);
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
 
-    log_critical!("leviculum T114 booting");
+    log_critical!("leviculum SolarNode booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     leviculum_nrf::log_stack("boot");
@@ -145,21 +164,18 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // VEXT (P0.21) carries BOTH the TFT chain and the L76K receiver, so
-    // it belongs to neither task; the binary raises it here, as the
-    // references do at board level (Meshtastic main.cpp:420-422 "turn on
-    // the display power"; RNode setup()). Raised as early as the
-    // peripherals exist so its 1 s warmup overlaps the rest of init
-    // instead of delaying a consumer.
-    leviculum_nrf::vext::raise(p.P0_21);
-    let mut led = t114::led(p.P1_03);
+    // No VEXT rail here: the carrier board has no switched peripheral
+    // supply of the T114's kind. What it does have is a GNSS enable
+    // (P1.05), and that one belongs to the receiver, so it is raised in
+    // the GNSS block below rather than at board level.
+    let mut led = solarnode::led(p.P0_19);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
 
     // Load or generate persistent identity from internal flash
     let mut id_store = leviculum_nrf::flash::NvmcIdentityStore::new(
         embassy_nrf::nvmc::Nvmc::new(p.NVMC),
-        t114::CONFIG.identity_flash_page,
+        solarnode::CONFIG.identity_flash_page,
     );
 
     // #388 pass 3: the heap budget's `links=` term, derived from the
@@ -276,70 +292,79 @@ async fn main(spawner: Spawner) {
     );
     // Full identity hash for benchmark trace correlation
     leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-        "t114_node={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        "solar_node={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
         hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]
     ));
     if let Some(probe_hash) = node.probe_dest_hash() {
         let ph = probe_hash.as_bytes();
         leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "t114_probe={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            "solar_probe={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
             ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
         ));
     }
 
-    // No QSPI on this board: `CONFIG.qspi_part` is `None`, the six pins
-    // are never configured, and there is no `[STG] qspi-init` stage to
-    // hang in. Said out loud because a capture with no store line at all
-    // would leave the reader guessing which of the two it is looking at —
-    // a part that did not answer, or a board that has none. The evidence
-    // is in `boards/t114.rs` (Codeberg #384).
+    // A P25Q16H IS fitted here, on the XIAO module — unlike the T114 and
+    // the RAK4631, whose headers name a part their boards do not carry
+    // (Codeberg #384). It is nevertheless not mounted: `CONFIG.qspi_part`
+    // is `None`, the six pins are never configured, and there is no
+    // `[STG] qspi-init` stage to hang in. Said out loud on its own line
+    // because "no store line at all" reads the same for a part that did
+    // not answer, a board that has none, and this — a part nothing has
+    // asked for yet. The pins are in `boards/solarnode.rs`.
     leviculum_nrf::log::log_fmt_critical(
         "[QSPI] ",
-        format_args!("NONE board=t114 reason=not-fitted-see-boards-t114-rs"),
+        format_args!("NONE board=solarnode reason=fitted-but-unmounted-see-boards-solarnode-rs"),
     );
 
-    // LoRa (SPIM2. SPIM3 has a MISO read bug on T114)
+    // LoRa on SPIM2, the instance the shared `lora::init` signature
+    // dictates. Pin map from `boards/solarnode.rs`; note that SCK/MISO/MOSI
+    // are the XIAO's P1.13/P1.14/P1.15 pads while CS and the three control
+    // lines are on port 0.
     log_critical!("[STG] lora-init");
     let lora = leviculum_nrf::lora::init(
         p.SPI2,
-        p.P0_19.into(),
-        p.P0_22.into(),
-        p.P0_23.into(),
-        p.P0_24.into(),
-        p.P0_25.into(),
-        p.P0_17.into(),
-        p.P0_20.into(),
-        // No host-driven RX enable: DIO2 owns the whole antenna switch on
-        // this board (`boards/t114.rs`).
-        None,
+        p.P1_13.into(), // SCK
+        p.P1_15.into(), // MOSI
+        p.P1_14.into(), // MISO
+        p.P0_04.into(), // NSS / CS
+        p.P0_28.into(), // RESET
+        p.P0_29.into(), // BUSY
+        p.P0_03.into(), // DIO1
+        // The line the other two boards do not have: DIO2 steers the
+        // transmit side of the Wio-SX1262's switch, the host steers the
+        // receive side. The driver asserts it for a listening window and
+        // releases it before every key-up (`sx1262.rs`); nothing above the
+        // interface knows it exists.
+        Some(p.P0_05.into()), // RXEN
         spim::Frequency::M4,
-        t114::CONFIG.lora_tcxo_voltage_reg,
+        solarnode::CONFIG.lora_tcxo_voltage_reg,
     )
     .await;
     info!("SX1262 ready");
 
     // Radio profile: whatever a host last set and we persisted, else the
     // compiled default. A blank or corrupt page decodes to None.
-    let radio_cfg = match leviculum_nrf::radio_store::load(t114::CONFIG.radio_config_flash_page)
-        .and_then(leviculum_nrf::lora::RadioConfig::from_wire_config)
-    {
-        Some(cfg) => {
-            leviculum_nrf::log::log_fmt(
-                "[RADIO] ",
-                format_args!(
-                    "persisted freq={} bw={} sf={} cr={} pwr={}",
-                    cfg.frequency_hz, cfg.bw_hz, cfg.sf, cfg.cr_denom, cfg.tx_power_dbm
-                ),
-            );
-            cfg
-        }
-        None => {
-            leviculum_nrf::log::log_fmt("[RADIO] ", format_args!("default eu_medium"));
-            leviculum_nrf::lora::RadioConfig::eu_medium()
-        }
-    };
+    let radio_cfg =
+        match leviculum_nrf::radio_store::load(solarnode::CONFIG.radio_config_flash_page)
+            .and_then(leviculum_nrf::lora::RadioConfig::from_wire_config)
+        {
+            Some(cfg) => {
+                leviculum_nrf::log::log_fmt(
+                    "[RADIO] ",
+                    format_args!(
+                        "persisted freq={} bw={} sf={} cr={} pwr={}",
+                        cfg.frequency_hz, cfg.bw_hz, cfg.sf, cfg.cr_denom, cfg.tx_power_dbm
+                    ),
+                );
+                cfg
+            }
+            None => {
+                leviculum_nrf::log::log_fmt("[RADIO] ", format_args!("default eu_medium"));
+                leviculum_nrf::lora::RadioConfig::eu_medium()
+            }
+        };
     let lora_channels = leviculum_nrf::lora::channels();
     // `lora=off` means the radio stays down: the task that resets,
     // configures and keys the SX1262 is never spawned, so the chip is
@@ -419,7 +444,7 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::radio_store::spawn_store_task(
         &spawner,
         shared_flash,
-        t114::CONFIG.radio_config_flash_page,
+        solarnode::CONFIG.radio_config_flash_page,
     );
     // Telemetry-target persistence (#236): its own page (0xEA000, reserved
     // in memory.x beside identity and radio config, above the linker's
@@ -428,7 +453,7 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::telemetry::spawn_store_task(
         &spawner,
         shared_flash,
-        t114::CONFIG.telemetry_flash_page,
+        solarnode::CONFIG.telemetry_flash_page,
     );
 
     // The message store (#384): mounts the record log on the region
@@ -446,42 +471,30 @@ async fn main(spawner: Spawner) {
     #[cfg(any(feature = "store-spike-record-log", feature = "store-spike-sequential"))]
     leviculum_nrf::store_spike::exercise(shared_flash).await;
 
-    // ST7789 status display — blind-driven (the panel is write-only, no
-    // probe possible; see leviculum_nrf::st7789 module docs). Safe and
-    // default-on for panel-less boards, so this single UF2 serves both
-    // populations. The task owns the VEXT/VTFT power rails. The cfg only
-    // exists because the workspace-wide clippy run also checks this bin
-    // under the rak4631 feature set; the real t114 build always has it.
-    #[cfg(feature = "bsp-t114")]
-    {
-        log_critical!("[STG] display-spawn");
-        leviculum_nrf::st7789::init(
-            &spawner,
-            leviculum_nrf::st7789::TftWiring {
-                spi: p.SPI3,
-                sck: p.P1_08,
-                mosi: p.P1_09,
-                cs: p.P0_11,
-                dc: p.P0_12,
-                rst: p.P0_02,
-                vtft: p.P0_03,
-                leda: p.P0_15,
-            },
-            identity_hash,
-        );
-        info!("display task spawned (ST7789 blind-drive)");
-    }
+    // No display on this board: no ST7789, no `leviculum-screen` path,
+    // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233).
 
-    // Quectel L76K on UARTE0 (#69). Pin naming is from the MCU's side:
-    // the MCU receives on P1.05 and transmits on P1.07. Beware the
-    // Meshtastic reference (variants/nrf52840/heltec_mesh_node_t114/
-    // variant.h): the comments on GPS_TX_PIN/GPS_RX_PIN (lines 177/178)
-    // describe the opposite of what the code does — effective are lines
-    // 182/183, `PIN_SERIAL1_RX = GPS_RX_PIN` (P1.05) as the CPU's RX and
-    // `PIN_SERIAL1_TX = GPS_TX_PIN` (P1.07) as the CPU's TX. Follow the
-    // code, not the comments. P1.02 is the standby control the driver
-    // holds high, P1.04 the unused PPS. Power comes from the VEXT rail
-    // raised above.
+    // XIAO L76K on UARTE0, at 9600 baud. Pin naming is from the MCU's
+    // side, as everywhere else in this tree: the MCU transmits on P1.11
+    // and receives on P1.12.
+    //
+    // That direction is the one number in the map worth doubting, and
+    // `boards/solarnode.rs` says why: Meshtastic's GPS_TX_PIN/GPS_RX_PIN
+    // naming is inconsistent across variants, and a swapped pair produces
+    // silence rather than an error — the receiver would settle on
+    // `no-hardware` with perfectly good wiring. FIRST BRING-UP CONFIRMS
+    // IT. If the presence machine reports `no-hardware` on a board whose
+    // L76K is powered, swap this pair before suspecting the module.
+    //
+    // P0.02 is the standby/wakeup control the driver holds high. There is
+    // no PPS line broken out on this carrier, hence `pps: None`: the
+    // pulse output is not merely unused here, it is not on a pad, and
+    // P0.31 (which would carry it on a XIAO) is the battery ADC. So this
+    // board is an NMEA-only time source (#166).
+    //
+    // P1.05 is the receiver's own power enable. It goes into the wiring
+    // rather than being raised here: nothing else on this carrier is on
+    // that switch, so the task that needs it is the task that owns it.
     #[cfg(feature = "gnss")]
     {
         leviculum_nrf::gnss::init(
@@ -491,35 +504,36 @@ async fn main(spawner: Spawner) {
                 timer: p.TIMER1,
                 ppi_a: p.PPI_CH0,
                 ppi_b: p.PPI_CH1,
-                rx: p.P1_05.into(),
-                tx: p.P1_07.into(),
-                pps: Some(p.P1_04.into()),
-                standby: Some(p.P1_02.into()),
-                // The L76K's supply is the VEXT rail this binary raised,
-                // not a switch of the receiver's own.
-                power_enable: None,
+                rx: p.P1_12.into(),
+                tx: p.P1_11.into(),
+                pps: None,
+                standby: Some(p.P0_02.into()),
+                // Unlike both other boards, the receiver here has a supply
+                // switch of its own and nothing else is on it.
+                power_enable: Some(p.P1_05.into()),
                 module: leviculum_nrf::gnss::ModuleKind::QuectelL76k,
             },
         );
         info!("gnss task spawned (L76K)");
     }
 
-    // Battery sense on AIN2 (P0.04) through the 100/490 divider the
-    // T114's `ADC_MULTIPLIER` of 4.916 encodes, with P0.06 as the
-    // divider's enable — the pin the RAK does not have, held high only
-    // for the duration of a sample so 490 kΩ does not sit across the
-    // pack between them (`boards/t114.rs`).
+    // Battery sense on P0.31 (AIN7) through the XIAO module's own
+    // 1 M/510 k divider, which `ADC_MULTIPLIER` = 2.9608 encodes, with
+    // P0.14 as its enable — **active low** here, unlike the T114's, which
+    // is why the polarity travels with the pin (`boards/solarnode.rs`,
+    // `battery::DividerEnable`). Asserted only for the duration of a
+    // sample so 1.51 MΩ does not sit across the pack for a winter.
     #[cfg(feature = "battery")]
     {
         leviculum_nrf::battery::init(
             &spawner,
             p.SAADC,
-            p.P0_04,
+            p.P0_31,
             Some(leviculum_nrf::battery::DividerEnable {
-                pin: p.P0_06.into(),
-                active: t114::ADC_CTRL_ACTIVE,
+                pin: p.P0_14.into(),
+                active: solarnode::ADC_CTRL_ACTIVE,
             }),
-            t114::ADC_MULTIPLIER,
+            solarnode::ADC_MULTIPLIER,
         );
         info!("battery task spawned");
     }
@@ -535,12 +549,14 @@ async fn main(spawner: Spawner) {
     let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
     let ifac_configs: BTreeMap<usize, IfacConfig> = BTreeMap::new();
 
-    // Boot blink
-    led.set_level(Level::Low);
+    // Boot blink. Inverted against the T114's: this board's green LED is
+    // **active high** (`boards/solarnode.rs`), so High is the lit level
+    // and the pin ends where `solarnode::led` left it, dark.
+    led.set_level(Level::High);
     for _ in 0..12_000_000u32 {
         cortex_m::asm::nop();
     }
-    led.set_level(Level::High);
+    led.set_level(Level::Low);
 
     // Telemetry (Codeberg #236). The delivery destination is registered
     // unconditionally, target or not: it is what a receiver verifies our
@@ -550,7 +566,7 @@ async fn main(spawner: Spawner) {
     if let Some(hash) = delivery_hash.as_ref() {
         let dh = hash.as_bytes();
         leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "t114_lxmf_delivery={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            "solar_lxmf_delivery={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             dh[0], dh[1], dh[2], dh[3], dh[4], dh[5], dh[6], dh[7],
             dh[8], dh[9], dh[10], dh[11], dh[12], dh[13], dh[14], dh[15]
         ));
@@ -568,12 +584,12 @@ async fn main(spawner: Spawner) {
     // page (PN_CONFIG line above states which source answered). The
     // miner task is the peering-key grinder — cooperative, off the main
     // loop, results harvested by the engine.
-    let pn_config = leviculum_nrf::pn::load_config_at_boot(t114::CONFIG.telemetry_flash_page);
+    let pn_config = leviculum_nrf::pn::load_config_at_boot(solarnode::CONFIG.telemetry_flash_page);
     let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
         let ph = pn.destination_hash().as_bytes();
         leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "t114_lxmf_propagation={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            "solar_lxmf_propagation={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
             ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
         ));
@@ -599,14 +615,15 @@ async fn main(spawner: Spawner) {
         // hash-only record with the key once it is resolved (#370), so
         // after one successful resolution a reboot restores ready and
         // owes the immediate report.
-        if let Some(stored) = leviculum_nrf::telemetry::load(t114::CONFIG.telemetry_flash_page) {
+        if let Some(stored) = leviculum_nrf::telemetry::load(solarnode::CONFIG.telemetry_flash_page)
+        {
             reporter.apply_target(&mut node, stored);
         }
         // A persisted fixed position replaces the sensor from the first
         // report of this boot on — the pin must not depend on which
         // record the host set last.
         if let Some(stored) =
-            leviculum_nrf::telemetry::load_fixed_position(t114::CONFIG.telemetry_flash_page)
+            leviculum_nrf::telemetry::load_fixed_position(solarnode::CONFIG.telemetry_flash_page)
         {
             reporter.apply_fixed_position(Some(stored));
         }
@@ -1177,18 +1194,22 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// separately rather than having to infer it from the numbers.
 ///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. The T114 has the L76K (#69), so a fix contributes
-/// position, speed, bearing and the HDOP the accuracy gate reads.
+/// peripherals exist. This board has an L76K like the T114's and a
+/// battery sampler like both, so the two `cfg` arms below read the same
+/// way they do there — and, while `bsp-solarnode` switches neither
+/// feature on, both arms compile under the T114's feature set and the
+/// numbers arrive the day the features do (#233).
 ///
-/// The battery field is filled from the same ADC task the panel and the
-/// `BATTERY` log line read (#380). A pack voltage on the air is the one
-/// reading that reaches an operator who is still in the field, which is
-/// the situation #380 exists for. Same source and same shape as the V2
-/// at `bin/rak4631.rs`, so the two boards report the field alike.
+/// The battery field is filled from the same ADC task the `BATTERY` log
+/// line reads (#380). A pack voltage on the air is the one reading that
+/// reaches an operator who is still in the field, which is the situation
+/// #380 exists for, and on a solar node in a winter it is the reading
+/// that says whether the panel is keeping up.
 ///
 /// The die temperature it does have: every nRF52840 carries one and the
-/// SoftDevice is enabled on both boards, so it is read here through the
-/// only legal path ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]).
+/// SoftDevice is enabled on every board we build, so it is read here
+/// through the only legal path
+/// ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]).
 fn collect_readings<R, C, S>(
     node: &leviculum_core::node::NodeCore<R, C, S>,
     sd: &nrf_softdevice::Softdevice,

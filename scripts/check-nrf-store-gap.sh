@@ -16,7 +16,7 @@
 # All three are link errors, so they cannot reach a board.
 #
 # WHAT THIS GATE ADDS:
-#   1. The NUMBER, printed for both bins on every run. A link error is a cliff
+#   1. The NUMBER, printed for every bin on every run. A link error is a cliff
 #      with no warning track: it says "does not fit" the first time it does not
 #      fit, and nothing before that says the gap is down to 8 KiB. The trend is
 #      the useful part, and only a printed number has one. Pass a minimum gap to
@@ -162,6 +162,8 @@ check() {
 rc=0
 build t114 bsp-t114
 build rak4631 bsp-rak4631,rak-baseboard
+build solarnode bsp-solarnode
 check t114 || rc=1
 check rak4631 || rc=1
+check solarnode || rc=1
 exit "$rc"

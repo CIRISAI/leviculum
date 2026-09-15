@@ -142,8 +142,12 @@ pub type TftPowerEn = peripherals::P0_03;
 // Battery / ADC
 /// Battery voltage sense (AIN2)
 pub type BatteryAdc = peripherals::P0_04;
-/// ADC divider enable (HIGH = enabled)
+/// ADC divider enable
 pub type AdcCtrl = peripherals::P0_06;
+/// The level on [`AdcCtrl`] that switches the divider ON. Active HIGH
+/// here; the solar node's is the other way round, which is why the
+/// polarity travels with the pin (`battery::DividerEnable`).
+pub const ADC_CTRL_ACTIVE: Level = Level::High;
 /// ADC multiplier: converts raw ADC reading to battery voltage (mV)
 pub const ADC_MULTIPLIER: f32 = 4.916;
 

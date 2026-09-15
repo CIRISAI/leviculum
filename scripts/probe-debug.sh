@@ -25,9 +25,10 @@ board_features() {
   local rtt=""
   [ -n "${LEVICULUM_RTT:-}" ] && rtt=",rtt"   # LEVICULUM_RTT=1 -> build the RTT debug firmware
   case "$1" in
-    rak4631) echo "bsp-rak4631,rak-baseboard${rtt}" ;;
-    t114)    echo "bsp-t114${rtt}" ;;
-    *) die "unknown board '$1' (use rak4631 | t114)" ;;
+    rak4631)   echo "bsp-rak4631,rak-baseboard${rtt}" ;;
+    t114)      echo "bsp-t114${rtt}" ;;
+    solarnode) echo "bsp-solarnode${rtt}" ;;
+    *) die "unknown board '$1' (use rak4631 | t114 | solarnode)" ;;
   esac
 }
 
@@ -63,7 +64,7 @@ probe-debug.sh - Leviculum firmware debugging via the RPi Debug Probe (SWD)
   recover              re-enumerate the probe USB to clear a wedged probe-rs hang
   fw-update            how to update the probe's own firmware
 
-  board = rak4631 | t114   (default: rak4631)
+  board = rak4631 | t114 | solarnode   (default: rak4631)
 
 Env: LEVICULUM_PROBE (default 2e8a:000c), PROBE_RS (default ~/.cargo/bin/probe-rs)
 EOF

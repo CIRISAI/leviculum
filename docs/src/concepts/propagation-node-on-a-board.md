@@ -5,7 +5,7 @@ V2, 2 MB on the T114. Neither board carries one: both beliefs came from
 an `EXTERNAL_FLASH_DEVICES` line that is a template default on both
 vendors, and three units answered nothing to a JEDEC read (081522b2; the
 evidence sits in the board files, `CONFIG`,
-`leviculum-nrf/src/boards/t114.rs:167` and `CONFIG`,
+`leviculum-nrf/src/boards/t114.rs:171` and `CONFIG`,
 `leviculum-nrf/src/boards/rak4631.rs:145`). So the store went where there
 is flash: **16 pages of the nRF52840's own flash between the firmware
 image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:85`,
@@ -845,7 +845,7 @@ statement that a part is fitted, when on both vendors it is a template
 default under a comment denying one. Neither board answered a JEDEC read
 on any unit we own; both sets of pin aliases are gone and the reasons
 are in the board files (`CONFIG`,
-`leviculum-nrf/src/boards/t114.rs:167`; `CONFIG`,
+`leviculum-nrf/src/boards/t114.rs:171`; `CONFIG`,
 `leviculum-nrf/src/boards/rak4631.rs:145`).
 
 The larger correction was this page's own premise. It costed a store on

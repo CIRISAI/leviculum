@@ -1070,6 +1070,12 @@ pub async fn init(
     reset: Peri<'static, AnyPin>,
     busy: Peri<'static, AnyPin>,
     dio1: Peri<'static, AnyPin>,
+    // The board's external RX-enable line, or `None` where DIO2 owns the
+    // whole antenna switch (T114, RAK4631). Passed through to the driver,
+    // which is where the switching happens — see `crate::boards` for why
+    // the front end is not one boolean, and `boards/solarnode.rs` for the
+    // board that needs it.
+    rx_enable: Option<Peri<'static, AnyPin>>,
     spi_freq: spim::Frequency,
     tcxo_voltage_reg: u8,
 ) -> Radio {
@@ -1087,8 +1093,18 @@ pub async fn init(
     let reset_pin = Output::new(reset, Level::High, OutputDrive::Standard);
     let busy_pin = Input::new(busy, Pull::None);
     let dio1_pin = Input::new(dio1, Pull::Down);
+    // Released at construction: the chip is not listening yet, and the very
+    // first thing the LoRa task does to it is a reset.
+    let rx_enable_pin = rx_enable.map(|pin| Output::new(pin, Level::Low, OutputDrive::Standard));
 
-    Sx1262::new(spi_device, reset_pin, busy_pin, dio1_pin, tcxo_voltage_reg)
+    Sx1262::new(
+        spi_device,
+        reset_pin,
+        busy_pin,
+        dio1_pin,
+        tcxo_voltage_reg,
+        rx_enable_pin,
+    )
 }
 
 // LoRa async task

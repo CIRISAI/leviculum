@@ -276,6 +276,19 @@ bsp-rak4631 = ["softdevice"]
 # T114, not on an optional baseboard, so one UF2 serves every board and a
 # board whose reading is implausible says so at runtime (#380).
 bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss", "battery"]
+# SenseCAP Solar Node P1-Pro (#233): XIAO nRF52840 Plus + Wio-SX1262 +
+# XIAO L76K on a carrier board. No display, so no `leviculum-screen`.
+#
+# Deliberately NOT pulling `gnss` and `battery` yet, which is where this
+# board differs from the T114 above: the bring-up milestone is boot,
+# identity, radio up, one packet received from a board we already trust,
+# and the two peripherals follow as their own steps with their own
+# evidence (Lead, 2026-09-15). The wiring for both is already in
+# `bin/solarnode.rs` behind those two feature gates — the T114's clippy
+# pass compiles it, since the bins are built under every feature set —
+# so the step that turns them on is one line here plus a rig run, not new
+# code.
+bsp-solarnode = ["softdevice"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
 gnss = [
@@ -315,6 +328,10 @@ path = "src/bin/t114.rs"
 [[bin]]
 name = "rak4631"
 path = "src/bin/rak4631.rs"
+
+[[bin]]
+name = "solarnode"
+path = "src/bin/solarnode.rs"
 
 # Measurement instrument, not firmware: prints the S140's required app
 # RAM base for a series of BLE configs (#255 T2 central-role design).

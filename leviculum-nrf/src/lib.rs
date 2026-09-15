@@ -10,11 +10,21 @@ extern crate alloc;
 // Bug #32 spike: exactly one BSP feature must be enabled. Mutex
 // enforced at compile time so any binary forgets-to-select-a-BSP or
 // sets-both fails fast at `cargo build`, not at link or runtime.
-#[cfg(all(feature = "bsp-rak4631", feature = "bsp-t114"))]
-compile_error!("`bsp-rak4631` and `bsp-t114` are mutually exclusive — pick exactly one");
+#[cfg(any(
+    all(feature = "bsp-rak4631", feature = "bsp-t114"),
+    all(feature = "bsp-rak4631", feature = "bsp-solarnode"),
+    all(feature = "bsp-t114", feature = "bsp-solarnode"),
+))]
+compile_error!(
+    "`bsp-rak4631`, `bsp-t114` and `bsp-solarnode` are mutually exclusive — pick exactly one"
+);
 
-#[cfg(not(any(feature = "bsp-rak4631", feature = "bsp-t114")))]
-compile_error!("must enable exactly one of `bsp-rak4631` or `bsp-t114`");
+#[cfg(not(any(
+    feature = "bsp-rak4631",
+    feature = "bsp-t114",
+    feature = "bsp-solarnode"
+)))]
+compile_error!("must enable exactly one of `bsp-rak4631`, `bsp-t114` or `bsp-solarnode`");
 
 pub mod announce;
 pub mod ble;

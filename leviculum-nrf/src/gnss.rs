@@ -105,12 +105,25 @@ pub struct GnssWiring {
     pub rx: Peri<'static, AnyPin>,
     /// TX at the MCU: the module's RX line.
     pub tx: Peri<'static, AnyPin>,
-    /// PPS, configured and held but not used.
-    pub pps: Peri<'static, AnyPin>,
+    /// PPS, configured and held but not used. `None` on a board that
+    /// breaks no pulse line out — the SenseCAP Solar Node exposes the
+    /// L76K's wakeup, reset and enable only, which makes it an
+    /// NMEA-only time source (#166, #233).
+    pub pps: Option<Peri<'static, AnyPin>>,
     /// Standby control, driven HIGH for the life of the task to keep the
     /// module awake (L76K: LOW would allow sleep). `None` on a board
     /// whose receiver has no such pin.
     pub standby: Option<Peri<'static, AnyPin>>,
+    /// The receiver's own power enable, driven HIGH for the life of the
+    /// task. `None` where the module has no switch of its own — either
+    /// because it is permanently powered (RAK19026, whose 3V3-S rail the
+    /// binary raises for four peripherals at once) or because its supply
+    /// is a shared rail the binary owns (T114: VEXT, see
+    /// [`crate::vext`]). The SenseCAP Solar Node is the board where the
+    /// switch belongs to the receiver alone, so it belongs here rather
+    /// than at board level: nothing else on that carrier goes dark with
+    /// it.
+    pub power_enable: Option<Peri<'static, AnyPin>>,
     pub module: ModuleKind,
 }
 
@@ -278,13 +291,25 @@ pub async fn gnss_task(wiring: GnssWiring) {
         mut tx,
         pps,
         standby,
+        power_enable,
         module,
     } = wiring;
 
     // Hold the PPS pin low-impedance enough that no spurious capture fires
     // before we wire it up. Drop returns it to its reset state on task exit
     // (which never happens for this task, but the convention is clear).
-    let _pps = Input::new(pps, Pull::Down);
+    // Nothing is configured at all on a board that has no such line: an
+    // absent pulse output is not the same as a quiet one, and a pin this
+    // board gave to something else must not be driven from here.
+    let _pps = pps.map(|pin| Input::new(pin, Pull::Down));
+
+    // Power first, and keep it on. Held for the life of the task for the
+    // same reason the standby line below is: dropping the output returns
+    // the pin to its reset state, which cuts the receiver's supply.
+    let _power_enable = power_enable.map(|pin| {
+        crate::log::log_fmt("[GNSS] ", format_args!("power enable held high"));
+        embassy_nrf::gpio::Output::new(pin, Level::High, OutputDrive::Standard)
+    });
 
     // Force the module awake and keep it that way. A receiver parked in
     // standby by whatever firmware ran before ours streams nothing, and

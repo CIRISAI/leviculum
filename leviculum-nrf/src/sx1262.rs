@@ -222,6 +222,20 @@ pub struct Sx1262<SPI> {
     /// with. The single source of truth for "the chip is armed"; every path
     /// that leaves RX consults it and spends at most one standby.
     rx_state: leviculum_rx_arming::RxArmState<ArmedWindow>,
+    /// The board's external RX-enable line, where it has one.
+    ///
+    /// `None` on a board whose DIO2 owns the whole antenna switch (T114,
+    /// RAK4631) — there the switch follows the chip and the host drives
+    /// nothing. `Some` on a front end that steers its receive side from a
+    /// host GPIO while DIO2 steers only the transmit side, which is the
+    /// Wio-SX1262 on the solar node (`boards/solarnode.rs`).
+    ///
+    /// It lives in the driver rather than in the loop above it because the
+    /// only correct place to move it is beside the command that changes the
+    /// chip's state: asserted immediately before `SetRx`/`SetCad`, released
+    /// before `SetTx` and on every standby. A caller could only bracket a
+    /// whole call and would have to know which calls listen.
+    rx_enable: Option<Output<'static>>,
 }
 
 /// What `SetRx` was programmed with, carried from the arming half to the
@@ -254,18 +268,23 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     ///
     /// `tcxo_voltage_reg` is the SetDIO3AsTcxoCtrl voltage select byte (0x02 = 1.8 V
     /// on T114 and RAK4631; see datasheet §13.3.6 Table 13-35).
+    ///
+    /// `rx_enable` is the board's external RX-enable line or `None`; see the
+    /// field of the same name. It is expected to arrive released (low).
     pub fn new(
         spi: SPI,
         reset: Output<'static>,
         busy: Input<'static>,
         dio1: Input<'static>,
         tcxo_voltage_reg: u8,
+        rx_enable: Option<Output<'static>>,
     ) -> Self {
         Self {
             spi,
             reset,
             busy,
             dio1,
+            rx_enable,
             preamble_len: 24,
             tcxo_voltage_reg,
             rx_ext_sf: 0,
@@ -295,8 +314,31 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.wait_busy_ms(100).await
     }
 
+    /// Point the board's front end at the receiver, or away from it.
+    ///
+    /// A no-op on a board whose DIO2 owns the whole antenna switch, and a
+    /// single GPIO write on one that also has a host-driven RX-enable line
+    /// ([`Self::rx_enable`]). Cheap enough to be unconditional at every site
+    /// that changes the chip's direction, which is what makes "asserted for
+    /// receive, released for transmit" a property of this driver rather than
+    /// of its callers' discipline — and what keeps the whole question out of
+    /// the loop above it.
+    fn rx_frontend(&mut self, listening: bool) {
+        if let Some(rxen) = self.rx_enable.as_mut() {
+            if listening {
+                rxen.set_high();
+            } else {
+                rxen.set_low();
+            }
+        }
+    }
+
     /// Reset the SX1262 via the reset pin.
     pub async fn reset(&mut self) {
+        // A reset chip listens to nothing; leave its front end released so
+        // the state of the pin and the state of the radio agree from the
+        // first instruction of this boot.
+        self.rx_frontend(false);
         self.reset.set_low();
         Timer::after_millis(10).await;
         self.reset.set_high();
@@ -362,6 +404,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
     /// Set standby mode (STBY_RC).
     pub async fn set_standby_rc(&mut self) -> Result<(), Error> {
+        // Standby is not listening. Released BEFORE the command rather than
+        // after: every path that leaves RX goes through here, so this is the
+        // one place that guarantees the front end cannot still be selecting
+        // the LNA once the chip has stopped receiving — and doing it first
+        // means an error return from the command below cannot leave it
+        // asserted either.
+        self.rx_frontend(false);
         self.write_command(opcode::SET_STANDBY, &[0x00]).await
     }
 
@@ -670,6 +719,16 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             .await
             .map_err(|_| Error::Spi)?;
 
+        // Off the receive path before the PA keys. DIO2 rises with `SetTx`
+        // and steers the transmit side of the switch; a switch asked for
+        // both positions at once passes neither, which on this front end is
+        // a transmit that goes nowhere.
+        //
+        // Not folded into the `disarm_rx` above: that call is a no-op
+        // whenever the chip left RX by itself at a terminating IRQ, and the
+        // line would then still be asserted from the window that ended.
+        self.rx_frontend(false);
+
         // Start TX (no hardware timeout, we use our own)
         let t = u24_be(0);
         self.write_command(opcode::SET_TX, &t).await?;
@@ -878,6 +937,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             site,
             armed_at_ms: embassy_time::Instant::now().as_millis(),
         });
+        // Onto the receive path before the receiver starts, not after: a
+        // window whose first symbols arrive through a switch still pointing
+        // at the PA loses them, and a preamble is where a LoRa frame is won
+        // or lost.
+        self.rx_frontend(true);
         let t = u24_be(hw_timeout);
         self.write_command(opcode::SET_RX, &t).await?;
 
@@ -1121,6 +1185,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
+        // A CAD is a receive: the chip runs its receiver for the detection
+        // symbols, so the front end is pointed at the LNA exactly as for a
+        // listening window. It is released again by whichever of the two
+        // outcomes follows — the key-up on a clear channel, or the standby
+        // on the timeout branch below. A detected-busy CAD leaves it
+        // asserted, which is where it wants to be anyway: the next thing
+        // that channel access does is listen.
+        self.rx_frontend(true);
         self.write_command(opcode::SET_CAD, &[]).await?;
 
         // Timeout sized from the CAD's listening symbols at the live symbol

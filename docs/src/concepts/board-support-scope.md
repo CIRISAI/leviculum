@@ -8,8 +8,8 @@ from growing with the hardware catalogue:
 > hardware configuration is only justified where universality is
 > unreachable, and the burden of proof lies with the specialised build.**
 
-This is not an aspiration. It is already how the two builds we have
-behave, and it was decided twice before it was written down.
+This is not an aspiration. It is already how the builds we have behave,
+and it was decided twice before it was written down.
 
 ## Why a family and not a board
 
@@ -73,7 +73,10 @@ presence.
 Three conditions, any one of which is sufficient:
 
 1. **The radio wiring differs.** No amount of runtime detection recovers
-   from pins that are simply elsewhere.
+   from pins that are simply elsewhere. The third build, `solarnode`
+   (Codeberg #233), is this case and nothing more interesting: the
+   Wio-SX1262 puts all seven pins elsewhere and adds an eighth, a host
+   RX-enable the other two families do not have.
 2. **A radio parameter is board-specific rather than family-specific and
    is compiled in.** The Elecrow ThinkNode M1 matches all seven T114 pins
    but runs its TCXO at 3.3 V against the family's 1.8 V. Either the

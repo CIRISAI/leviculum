@@ -62,12 +62,17 @@ lnflash-bundle:
 # Lint the embedded firmware workspace. leviculum-nrf is its OWN cargo
 # workspace — `--workspace` invocations in the repo root never reach it,
 # which let 11 clippy findings accumulate unseen (audit 2026-06-11).
-# Both BSP feature sets; clippy subsumes `cargo check` diagnostics.
+# All three BSP feature sets; clippy subsumes `cargo check` diagnostics.
+# Note that each of them compiles EVERY bin, not just its own: a board's
+# binary that only another board's feature set can compile is still
+# linted, which is what keeps the peripherals `bsp-solarnode` does not
+# switch on from rotting (Codeberg #233).
 # First run compiles the embedded deps into leviculum-nrf/target
 # (minutes); warm runs are seconds.
 lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
+    cd leviculum-nrf && cargo clippy --features bsp-solarnode -- -D warnings
     # leviculum-screen, leviculum-sd-policy, leviculum-gnss-time,
     # leviculum-gnss-presence, leviculum-gnss-init, leviculum-telemetry-policy,
     # leviculum-ble-tx, leviculum-announce-policy, leviculum-queue-budget,
@@ -883,6 +888,25 @@ flash-rak4631-one PORT:
 # bundle ships for this board (docs/src/concepts/board-support-scope.md).
 flash-rak4631-pocket:
     cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
+
+# What every SenseCAP Solar Node flash recipe tells the runner about this
+# board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
+# with entirely different radio wiring reports the same string, so it
+# confirms "an Adafruit bootloader on a XIAO nRF52840 is mounted" and
+# nothing more. That is exactly why `lnflash` has no manifest entry for
+# this board and must not be given one on this evidence (Codeberg #233).
+solarnode_env := 'LEVICULUM_USB_PID=0003 LEVICULUM_BOARD_NAME=SolarNode LEVICULUM_UF2_BOARD_ID=nRF52840-SeeedXiao-v1 LEVICULUM_DOUBLE_TAP_HINT="Measured on the unit 2026-09-15: a 1200-baud touch enters DFU, and a full VBUS power cycle does NOT leave it — getting out means writing a UF2 or pressing the button."'
+
+# The FIRST image goes onto the mass-storage volume by hand: stock firmware
+# has no 1200-baud-touch handler, so there is nothing for the runner to
+# touch. Once our firmware is on, this recipe works like the other two.
+# Flash every attached SenseCAP Solar Node P1-Pro with the current firmware.
+flash-solarnode:
+    cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
+
+# Flash a single SenseCAP Solar Node by port path or udev symlink.
+flash-solarnode-one PORT:
+    cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
 
 # Trigger Adafruit-UF2-bootloader on a stock-Meshtastic WisMesh Pocket V2.
 # Stock Meshtastic has no 1200-bps-touch handler and the device has no

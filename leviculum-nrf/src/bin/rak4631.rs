@@ -347,6 +347,9 @@ async fn main(spawner: Spawner) {
         p.P1_06.into(), // RESET
         p.P1_14.into(), // BUSY
         p.P1_15.into(), // DIO1
+        // No host-driven RX enable: DIO2 owns the whole antenna switch, and
+        // the module's P1.07 pad must not be driven (`boards/rak4631.rs`).
+        None,
         spim::Frequency::M4,
         rak4631::CONFIG.lora_tcxo_voltage_reg,
     )
@@ -497,10 +500,13 @@ async fn main(spawner: Spawner) {
                 ppi_b: p.PPI_CH1,
                 rx: p.P0_15.into(), // RX from ZOE-M8Q TX
                 tx: p.P0_16.into(), // TX to ZOE-M8Q RX
-                pps: p.P0_17.into(),
+                pps: Some(p.P0_17.into()),
                 // The ZOE-M8Q has no standby pin on this baseboard; it is
                 // woken through UBX (CFG-PMS) instead.
                 standby: None,
+                // The ZOE-M8Q sits on the baseboard's 3V3-S rail, raised
+                // above for four peripherals at once.
+                power_enable: None,
                 module: leviculum_nrf::gnss::ModuleKind::UbloxM8,
             },
         );

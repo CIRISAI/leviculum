@@ -103,10 +103,62 @@ const SAMPLES_PER_PUBLISH: u32 = 5;
 /// Samples between two `BATTERY` lines.
 const SAMPLES_PER_REPORT: u32 = 30;
 
-/// How long the divider needs after its enable pin goes high before the
-/// voltage on the ADC pin is the pack's. Meshtastic waits the same 10 ms
-/// on the same divider (`meshtastic/src/Power.cpp:243`).
+/// How long the divider needs after its enable pin is asserted before
+/// the voltage on the ADC pin is the pack's. Meshtastic waits the same
+/// 10 ms on the same divider (`meshtastic/src/Power.cpp:243`).
 const DIVIDER_SETTLE_MS: u64 = 10;
+
+/// A board's divider-enable line: the pin, and the level that switches
+/// the divider ON.
+///
+/// The polarity is part of the pin, not a property of this module. The
+/// T114 asserts high into a load switch; the SenseCAP Solar Node's
+/// `BAT_READ` sinks the low side of the XIAO's 1 M/510 k divider and is
+/// therefore active LOW (`boards/solarnode.rs`, which cites the variant
+/// that states it). Getting it backwards does not fail loudly — it
+/// reads a floating input that looks like a flat or an absent pack — so
+/// the board that knows says so here rather than leaving a convention
+/// for the next board to discover.
+pub struct DividerEnable {
+    /// The board's `AdcCtrl` pin.
+    pub pin: Peri<'static, AnyPin>,
+    /// The level that switches the divider on.
+    pub active: Level,
+}
+
+/// The enable line once it is a driven output: the pin plus the level
+/// that means "on".
+struct EnableLine {
+    out: Output<'static>,
+    active: Level,
+}
+
+impl EnableLine {
+    /// Drive the pin to its inactive level and take it. Inactive at
+    /// construction, because the divider is switched on per sample and
+    /// not for the lifetime of the task.
+    fn new(enable: DividerEnable) -> Self {
+        let inactive = match enable.active {
+            Level::High => Level::Low,
+            Level::Low => Level::High,
+        };
+        Self {
+            out: Output::new(enable.pin, inactive, OutputDrive::Standard),
+            active: enable.active,
+        }
+    }
+
+    fn on(&mut self) {
+        self.out.set_level(self.active);
+    }
+
+    fn off(&mut self) {
+        self.out.set_level(match self.active {
+            Level::High => Level::Low,
+            Level::Low => Level::High,
+        });
+    }
+}
 
 /// Translate the gain the arithmetic uses into the gain the channel is
 /// configured with.
@@ -134,23 +186,23 @@ fn saadc_gain(gain: AdcGain) -> saadc::Gain {
 
 /// Take one reading, in millivolts at the battery terminal.
 ///
-/// The divider-enable pin, where the board has one, is high only for the
-/// duration of the sample: on the T114 the divider is 490 kΩ across the
-/// pack, and leaving it enabled between samples would drain the pack for
-/// nothing 99 % of the time.
+/// The divider-enable pin, where the board has one, is asserted only for
+/// the duration of the sample: on the T114 the divider is 490 kΩ across
+/// the pack and on the solar node 1.51 MΩ, and leaving either enabled
+/// between samples would drain the pack for nothing 99 % of the time.
 async fn sample_pack_mv(
     adc: &mut Saadc<'static, 1>,
-    divider_enable: &mut Option<Output<'static>>,
+    divider_enable: &mut Option<EnableLine>,
     scale: &BatteryScale,
 ) -> u16 {
     if let Some(enable) = divider_enable.as_mut() {
-        enable.set_high();
+        enable.on();
         Timer::after(Duration::from_millis(DIVIDER_SETTLE_MS)).await;
     }
     let mut buf = [0i16; 1];
     adc.sample(&mut buf).await;
     if let Some(enable) = divider_enable.as_mut() {
-        enable.set_low();
+        enable.off();
     }
     scale.raw_to_battery_mv(buf[0])
 }
@@ -177,7 +229,7 @@ fn log_percent_gate(pack_mv: u16, cell_count: u8, reportable: bool) {
 pub async fn battery_task(
     saadc_periph: Peri<'static, peripherals::SAADC>,
     adc_pin: AnyInput<'static>,
-    divider_enable: Option<Peri<'static, AnyPin>>,
+    divider_enable: Option<DividerEnable>,
     scale: BatteryScale,
 ) {
     let mut config = Config::default();
@@ -192,10 +244,10 @@ pub async fn battery_task(
     ch.gain = saadc_gain(scale.gain());
     let mut adc = Saadc::new(saadc_periph, BatteryIrqs, config, [ch]);
 
-    // The enable pin starts LOW: the divider is switched on per sample,
-    // not for the lifetime of the task.
-    let mut divider_enable =
-        divider_enable.map(|pin| Output::new(pin, Level::Low, OutputDrive::Standard));
+    // The enable pin starts INACTIVE — which is not the same as low, see
+    // `EnableLine`: the divider is switched on per sample, not for the
+    // lifetime of the task.
+    let mut divider_enable = divider_enable.map(EnableLine::new);
 
     // One sample decides the cell count for the lifetime of the task.
     // Persisting it across boots waits for the flash store; redoing it
@@ -313,16 +365,22 @@ pub async fn battery_task(
 /// Convenience wrapper invoked from the bin file.
 ///
 /// `adc_pin` is the board's `BatteryAdc`, `divider_enable` its
-/// `AdcCtrl` where it has one (the T114 does, the RAK does not), and
-/// `divider_multiplier` its `ADC_MULTIPLIER`. All three come from the
-/// board file, which stays their single source — this module holds no
-/// copy of any of them. The ADC side of the scale is not a per-board
-/// choice and comes from [`leviculum_battery_scale::CONFIGURED_GAIN`].
+/// `AdcCtrl` *and the level that asserts it* where it has one (the T114
+/// does, active high; the solar node does, active low; the RAK does
+/// not), and `divider_multiplier` its `ADC_MULTIPLIER`. All of them come
+/// from the board file, which stays their single source — this module
+/// holds no copy of any of them.
+///
+/// The ADC side of the scale is not a per-board choice and comes from
+/// [`leviculum_battery_scale::CONFIGURED_GAIN`]. A variant header's
+/// `AREF_VOLTAGE` is *that* firmware's ADC configuration and not a
+/// property of the board's divider; folding it in here a second time is
+/// exactly the double count that crate's module doc exists to prevent.
 pub fn init(
     spawner: &Spawner,
     saadc_periph: Peri<'static, peripherals::SAADC>,
     adc_pin: impl saadc::Input + 'static,
-    divider_enable: Option<Peri<'static, AnyPin>>,
+    divider_enable: Option<DividerEnable>,
     divider_multiplier: f32,
 ) {
     spawner.must_spawn(battery_task(

@@ -1,6 +1,34 @@
 //! Board-specific pin mappings and shared board metadata.
+//!
+//! # The antenna switch is a two-shaped thing
+//!
+//! Every board here sets `SetDIO2AsRfSwitch` — the SX1262 raises DIO2
+//! for the duration of a transmit and the board's switch follows it.
+//! On the T114 and the RAK4631 that is the whole story, and both board
+//! files say so out loud: the RAK's antenna-switch pad exists on the
+//! schematic and must NOT be driven, because DIO2 owns it.
+//!
+//! The Wio-SX1262 on the solar node splits the job. DIO2 still steers
+//! the transmit side, but the receive side is a host GPIO
+//! ([`solarnode::LoRaRxEnable`]) that has to be asserted for a listening
+//! window and released before a key-up — with both asserted at once the
+//! switch is in neither position and the transmit goes nowhere.
+//!
+//! So a board's front end is not one boolean any more. It is: DIO2,
+//! always; plus an OPTIONAL host-driven RX-enable pin, which a board
+//! module declares as a type alias exactly like every other pin it
+//! owns, and which its binary hands to [`crate::lora::init`] as
+//! `Some(..)`. The pin cannot live in [`BoardConfig`] — a `Peri` is a
+//! moved handle, not a `const` — and it is deliberately not mirrored
+//! there as a flag either: the driver takes the pin itself, so a second
+//! copy of the fact could only ever be a copy that disagrees. The
+//! switching lives in `sx1262.rs` and `lora.rs`, i.e. in the interface,
+//! because knowing that this medium has a front end to steer is exactly
+//! the interface's business (`docs/src/concepts/interface-isolation.md`).
+//! Nothing about it reaches `transport.rs`.
 
 pub mod rak4631;
+pub mod solarnode;
 pub mod t114;
 
 /// Runtime board metadata consumed by shared init code (USB, flash, LoRa).
@@ -45,10 +73,14 @@ pub struct BoardConfig {
     /// the bus clock it is driven at. The boot probe refuses to hand out a
     /// device whose id does not match this ([`crate::qspi`]).
     ///
-    /// `None` means the board carries no part, and then nothing may
-    /// configure its QSPI pins at all: on the T114 those six nets are on
-    /// the expansion header and two of them have other functions in the
-    /// sibling variant, so driving them blind is not free. The evidence
-    /// is in [`t114`] where the pin aliases used to be (Codeberg #384).
+    /// `None` means no part is mounted, and then nothing may configure
+    /// this board's QSPI pins at all. It covers two different boards.
+    /// On the T114 and the RAK4631 there is no part to mount: those six
+    /// nets are on the expansion header, two of them have other
+    /// functions in the sibling variant, and driving them blind is not
+    /// free — the evidence is in [`t114`] and [`rak4631`] where the pin
+    /// aliases used to be (Codeberg #384). On the solar node a
+    /// P25Q16H really is fitted, on the XIAO module, and nothing in
+    /// this firmware uses it yet; see [`solarnode`].
     pub qspi_part: Option<&'static crate::qspi::FlashPart>,
 }
