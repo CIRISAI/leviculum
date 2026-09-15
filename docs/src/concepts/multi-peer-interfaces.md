@@ -84,7 +84,7 @@ The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 `leviculum-nrf/src/bin/t114.rs:244`) and hardcoded in the interface
 itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:618`), with the
 announce gate naming the same constant (`BLE_IFACE`,
-`leviculum-nrf/src/announce.rs:58`). The fan-out is a task that maps
+`leviculum-nrf/src/announce.rs:85`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
 `leviculum-nrf/src/ble/mod.rs:510`; `LINK_OUT`,
 `leviculum-nrf/src/ble/mod.rs:474`).

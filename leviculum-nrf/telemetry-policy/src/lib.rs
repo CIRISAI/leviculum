@@ -378,7 +378,14 @@ fn delta_lon_e6(a: i32, b: i32) -> i64 {
 /// out. Compares squares only after establishing that each component is
 /// itself below the threshold, so the squares cannot overflow `i64` for
 /// any threshold a firmware could hold.
-fn moved_at_least(a: Fix, b: Fix, min_m: u32) -> bool {
+/// Whether two fixes lie at least `min_m` metres apart.
+///
+/// Public because the announce cadence (#401) decides movement from the
+/// same displacement, against the same [`PolicyParams::TRACKER`]
+/// threshold. A second implementation of this test, however small, would
+/// be a second definition of "the board moved" that drifts the first time
+/// either is sharpened.
+pub fn moved_at_least(a: Fix, b: Fix, min_m: u32) -> bool {
     let threshold_mm = min_m as i64 * 1000;
     let dy_mm = (a.latitude_e6 as i64 - b.latitude_e6 as i64) * METRES_PER_DEGREE_LAT / 1000;
     let cos = cos_lat_q15((a.latitude_e6 / 2).saturating_add(b.latitude_e6 / 2));

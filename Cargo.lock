@@ -1928,6 +1928,9 @@ dependencies = [
 [[package]]
 name = "leviculum-announce-policy"
 version = "0.1.0"
+dependencies = [
+ "leviculum-telemetry-policy",
+]
 
 [[package]]
 name = "leviculum-ble-tx"
@@ -2075,6 +2078,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "leviculum-telemetry-policy"
+version = "0.1.0"
 
 [[package]]
 name = "libbz2-rs-sys"

@@ -18,9 +18,21 @@
 
 use leviculum_core::node::NodeEvent;
 
-/// Render the events that carry board-visible evidence.
-pub fn log_events(events: &[NodeEvent]) {
+/// Render the events that carry board-visible evidence, and feed the
+/// announce cadence the one event it takes from this stream.
+///
+/// The second job rides here because this is the only pass every bin
+/// already makes over every event batch, propagation role or not. Rule 4
+/// of #401: the FIRST announce heard from a destination buys one
+/// immediate announce, so two stationary boards in one room find each
+/// other in seconds instead of waiting out the hourly floor. It is a
+/// trigger and never a movement signal — see
+/// [`crate::announce::note_announce_heard`].
+pub fn log_events(events: &[NodeEvent], now_ms: u64) {
     for event in events {
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            crate::announce::note_announce_heard(now_ms, announce.destination_hash().as_bytes());
+        }
         if let NodeEvent::LinkRefused {
             destination_hash,
             links,

@@ -244,26 +244,22 @@ pub fn apply_config(wire: PnConfigWire) -> crate::telemetry::PendingSave {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// First announce after boot, the reference's own delay
-/// (`NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`).
-const ANNOUNCE_DELAY_SECS: u64 = 20;
+// The role's first announce after boot and its cadence both moved to
+// `leviculum_announce_policy::AnnounceCadence` (#401): the propagation
+// half and the board's own destination are decided together, because a
+// board whose own announce is withheld is unreachable as a recipient
+// while still usable as a mailbox. The boot delay is still the
+// reference's own (`NODE_ANNOUNCE_DELAY`,
+// `reference/LXMF/LXMF/LXMRouter.py:41`), and the cadence a moving board
+// runs is still the 300 s this role argued from the concept page's drain
+// numbers — a 10-minute hilltop stop still moves a >=30-message delta.
+// What changed is that a board which is NOT moving falls back to the
+// hourly floor instead of paying 300 s forever, and that a slow carrier
+// can stretch either.
+use leviculum_announce_policy::{AnnounceSlot, Decision};
 
-/// Announce cadence for opportunistic (hilltop) contact — instruction
-/// item 7, derived from the concept page's drain numbers rather than the
-/// reference's 360-minute host default:
-///
-/// * One announce at the field settings is ≈550 ms of airtime (§2's
-///   measured 544 ms for a 184 B frame); at 300 s that is ≈0.2 % duty
-///   against the 10 % cap — noise.
-/// * Draining messages costs ≈9 s of wall clock each at the duty cap
-///   (904 ms airtime × the 10 % cap). A contact must therefore survive
-///   discovery *and* leave transfer time: with a 300 s cadence the
-///   worst-case discovery is 5 minutes, and a 10-minute hilltop stop
-///   still moves a ≥30-message delta; the announce-heard sync trigger
-///   below makes everything after discovery transfer.
-/// * 300 s is also the discovery cadence precedent this project already
-///   runs on BLE, so the two carriers advertise the role at one rhythm.
-const PN_ANNOUNCE_INTERVAL_SECS: u64 = 300;
+/// How long the role holds its announce when its store did not mount.
+const ANNOUNCE_STORE_RETRY_MS: u64 = 60_000;
 
 /// Store maintenance cadence (`JOB_STORE_INTERVAL × PROCESSING_INTERVAL`,
 /// `reference/LXMF/LXMF/LXMRouter.py:871-900`).
@@ -603,7 +599,6 @@ pub struct Engine {
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
     next_maintenance_at_ms: u64,
-    next_announce_at_ms: Option<u64>,
     next_stats_at_ms: u64,
     announce_withheld_logged: bool,
     active: Option<ActiveDelivery>,
@@ -713,7 +708,6 @@ impl Engine {
             last_synced: None,
             next_sync_at_ms: 0,
             next_maintenance_at_ms: 0,
-            next_announce_at_ms: None,
             next_stats_at_ms: 0,
             announce_withheld_logged: false,
             active: None,
@@ -782,9 +776,9 @@ impl Engine {
         {
             return now_ms.saturating_add(WORK_POLL_MS);
         }
-        let mut due = self
-            .next_announce_at_ms
-            .unwrap_or(now_ms.saturating_add(ANNOUNCE_DELAY_SECS * 1000));
+        let mut due = now_ms.saturating_add(crate::announce::with_cadence(|cadence| {
+            cadence.wait_ms(AnnounceSlot::Propagation, now_ms)
+        }));
         due = due.min(self.next_maintenance_at_ms.max(now_ms + 1));
         due = due.min(self.next_stats_at_ms.max(now_ms + 1));
         due = due.min(self.next_sync_at_ms.max(now_ms + 1));
@@ -1705,15 +1699,18 @@ impl Engine {
         C: Clock,
         S: Storage,
     {
-        let due = *self
-            .next_announce_at_ms
-            .get_or_insert(now_ms + ANNOUNCE_DELAY_SECS * 1000);
-        if now_ms < due {
-            return;
-        }
         if !crate::record_store::mounted() {
             // A role whose store did not mount must not invite uploads
-            // it can never prove.
+            // it can never prove. Checked before the cadence is polled,
+            // so a withheld tick spends nothing: the deadline is pushed
+            // out by the retry rather than consumed by an announce that
+            // never happened.
+            if crate::announce::with_cadence(|cadence| {
+                cadence.wait_ms(AnnounceSlot::Propagation, now_ms)
+            }) > 0
+            {
+                return;
+            }
             if !self.announce_withheld_logged {
                 self.announce_withheld_logged = true;
                 crate::log::log_fmt_critical(
@@ -1721,11 +1718,16 @@ impl Engine {
                     format_args!("announce withheld reason=store-unmounted"),
                 );
             }
-            self.next_announce_at_ms = Some(now_ms + 60_000);
+            crate::announce::with_cadence(|cadence| {
+                cadence.defer(
+                    AnnounceSlot::Propagation,
+                    now_ms,
+                    now_ms + ANNOUNCE_STORE_RETRY_MS,
+                )
+            });
             return;
         }
-        self.announce_withheld_logged = false;
-        // NOT clock-gated (instruction item 6): a clockless board still
+        // NOT clock-gated (#384 item 6): a clockless board still
         // announces, with its uptime timebase. A peer treats the small
         // timebase as merely old — creation is unconditional, only
         // updates are ordered by it (`peer`,
@@ -1735,7 +1737,17 @@ impl Engine {
         // The age-based bookkeeping the jump would break is epoch-guarded
         // where it lives (expiry in `PropagationNode::tick`, the peer
         // cull refresh in `seed_clock`). [TIME_SOURCE] in the periodic
-        // banner says which clock stamped any given announce.
+        // banner says which clock stamped any given announce. The `true`
+        // below is that rule's consequence and not a shortcut:
+        // `AnnounceSlot::Propagation` is not clock-gated, so the flag is
+        // never read for this slot.
+        let announce = crate::announce::with_cadence(|cadence| {
+            cadence.poll(AnnounceSlot::Propagation, now_ms, true)
+        });
+        if announce != Some(Decision::Announce) {
+            return;
+        }
+        self.announce_withheld_logged = false;
         let app_data = self.role.announce_app_data(node.emission_secs());
         if let Ok(send) = node.announce_destination(&self.dest_hash, Some(&app_data)) {
             out.merge(send);
@@ -1743,12 +1755,15 @@ impl Engine {
             crate::log::log_fmt_critical(
                 "[INFO!] ",
                 format_args!(
-                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason=pn-periodic",
-                    d[0], d[1], d[2], d[3]
+                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason={}",
+                    d[0],
+                    d[1],
+                    d[2],
+                    d[3],
+                    AnnounceSlot::Propagation.as_str()
                 ),
             );
         }
-        self.next_announce_at_ms = Some(now_ms + PN_ANNOUNCE_INTERVAL_SECS * 1000);
     }
 
     /// Announce the role NOW, on every interface, because a host asked

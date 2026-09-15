@@ -30,8 +30,36 @@
 //! limit and the clock gate live in [`leviculum_announce_policy`], which
 //! is host-tested and which `lnsd` uses verbatim. This module is the
 //! wiring: read the gate, build the announce, write the line.
+//!
+//! # One cadence for both halves (Codeberg #401)
+//!
+//! The periodic cadence is no longer a constant and is no longer chosen
+//! at flash time. A board that moves announces fast, a board that does
+//! not falls back to an hourly floor, movement resuming or a previously
+//! unknown neighbour each buy one immediate announce, and the carrier's
+//! duty budget can stretch all of it. The rule is
+//! [`leviculum_announce_policy::AnnounceCadence`]; this module holds the
+//! board's single instance of it in [`with_cadence`], because the
+//! board's own announce and the propagation role
+//! ([`crate::pn::Engine::tick_announce`]) must be decided together. A
+//! board whose own announce is withheld is unreachable as a recipient
+//! while still usable as a mailbox, and two cadences would hide that
+//! asymmetry.
+//!
+//! What this module owes the cadence, on the board's side of the seam:
+//!
+//! * the position samples ([`sample_movement`], every
+//!   [`MOVEMENT_SAMPLE_INTERVAL_MS`] off the periodic arm's own wake),
+//! * the new-neighbour trigger ([`note_announce_heard`], from the event
+//!   pass),
+//! * the carrier's budget ([`note_duty_budget`], from
+//!   [`crate::lora::AnnounceCap`], the one place that already knows both
+//!   a frame's airtime and the band's lawful allowance).
 
-use leviculum_announce_policy::{Decision, PeerAnnounceLimiter, PeriodicAnnounce, Withheld};
+use leviculum_announce_policy::{
+    AnnounceCadence, AnnounceSlot, Decision, DutyBudget, PeerAnnounceLimiter, Withheld,
+    MOVEMENT_SAMPLE_INTERVAL_MS,
+};
 use leviculum_core::node::NodeCore;
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::Action;
@@ -56,10 +84,240 @@ const PEER_SLOTS: usize = 8;
 /// peer is behind.
 const BLE_IFACE: usize = 2;
 
+/// How many neighbours the new-neighbour trigger remembers.
+///
+/// A neighbour in this table has already bought its one announce and
+/// never buys another for the rest of the boot, which is what keeps rule
+/// 4 a trigger rather than a cadence. Thirty-two is well above the peer
+/// table the propagation role sizes for (`BOARD_MAX_PEERS`, 16), so a
+/// board reaches it only on a channel busier than anything either stack
+/// is provisioned for; the cost when it does is one extra announce for
+/// the neighbour whose entry was displaced, bounded again by the
+/// cadence's own trigger floor.
+const NEIGHBOUR_SLOTS: usize = 32;
+
+/// The one cadence both halves of the announce obey (#401).
+///
+/// A static rather than a field, because the two emitters are two
+/// objects with two lifetimes — [`AnnounceGate`] and
+/// [`crate::pn::Engine`], the second of which exists only on a boot that
+/// runs the propagation role — and the decision is one. Same locking
+/// shape as [`crate::identity`]'s statics, uncontended on the
+/// single-core cooperative executor.
+static CADENCE: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<AnnounceCadence>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(AnnounceCadence::new()));
+
+/// Destination hashes this boot has already heard an announce from, so a
+/// neighbour buys exactly one immediate announce and not one per
+/// announce it sends.
+static NEIGHBOURS: embassy_sync::blocking_mutex::Mutex<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    core::cell::RefCell<NeighbourTable>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(NeighbourTable::new()));
+
+/// The stretch last written as an `[ANNOUNCE_DUTY]` line, `0` for "no
+/// stretch in force". An edge, like `[ANNOUNCE_CAP]`'s: the line states a
+/// change, and a board that repeated it every minute would bury the
+/// events a capture is taken for.
+///
+/// 32 bits because thumbv7em has no 64-bit atomic, and a saturating cast
+/// because this value is only ever compared for equality: the worst a
+/// clamp could cost is one unwritten line at an interval of 49 days,
+/// which no band and no carrier produce.
+static LAST_STRETCH_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Run `f` against the board's one [`AnnounceCadence`].
+pub fn with_cadence<T>(f: impl FnOnce(&mut AnnounceCadence) -> T) -> T {
+    CADENCE.lock(|cell| f(&mut cell.borrow_mut()))
+}
+
+/// Tell the cadence what one announce frame costs on the live carrier and
+/// what the band in force lawfully allows.
+///
+/// Called from [`crate::lora::AnnounceCap::sync`], which is where both
+/// numbers already exist: it derives the frame's airtime from the PHY the
+/// radio is actually running, and the long-term airtime lock is what the
+/// interface resolved from its own TX frequency. Neither is re-derived.
+///
+/// The frame count is the announce SET — the board's own destination plus
+/// the propagation role when this boot registered one — because the two
+/// halves are decided together and a budget for one of them would be a
+/// budget for a cadence nobody runs.
+pub fn note_duty_budget(now_ms: u64, frame_airtime_ms: u64, lawful_duty_e4: u16) {
+    let frames_per_set = if crate::identity::propagation_hash().is_some() {
+        2
+    } else {
+        1
+    };
+    let budget = DutyBudget {
+        frame_airtime_ms,
+        frames_per_set,
+        lawful_duty_e4,
+    };
+    if with_cadence(|cadence| cadence.set_budget(budget)) {
+        log_stretch(now_ms);
+    }
+}
+
+/// An announce was heard from `destination`. Rule 4: the FIRST time, both
+/// halves announce at once.
+///
+/// This is what keeps two stationary boards in one room from waiting an
+/// hour to find each other, and it costs one announce rather than a raised
+/// cadence.
+///
+/// "Previously unknown" means: no announce from this destination has
+/// reached this board since boot. Deliberately NOT hop-filtered — a
+/// relayed announce from three hops away is still a node that may not
+/// know us, and the trigger it buys is bounded twice over (once per
+/// destination per boot, and never inside the cadence's own trigger
+/// floor), so the cost of counting it is at most one announce.
+///
+/// Explicitly not a movement signal. A changed neighbour set is free and
+/// immune to receiver drift, and it fails exactly where a fast announce
+/// is worth the most — the single hiker in empty terrain with no
+/// neighbours at all. It is a trigger here and nothing else: the cadence
+/// afterwards is the one the movement state asked for.
+pub fn note_announce_heard(now_ms: u64, destination: &[u8; 16]) {
+    let new = NEIGHBOURS.lock(|cell| cell.borrow_mut().insert(*destination));
+    if !new {
+        return;
+    }
+    with_cadence(|cadence| cadence.trigger(now_ms));
+    crate::log::log_fmt(
+        "[INFO ] ",
+        format_args!(
+            "[ANNOUNCE] trigger reason=new-neighbour peer={:02x}{:02x}{:02x}{:02x}",
+            destination[0], destination[1], destination[2], destination[3]
+        ),
+    );
+}
+
+/// `[ANNOUNCE_DUTY]`: the board is quieter than its configuration, and
+/// this says why.
+///
+/// Written at the same level as `[ANNOUNCE_CAP]` and for the same reason
+/// — without it the next person measures a cadence that is not the one in
+/// effect — naming the configured interval, the interval actually used,
+/// and the arithmetic that forced it.
+fn log_stretch(now_ms: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let (configured_ms, effective_ms, budget) = with_cadence(|cadence| {
+        (
+            cadence.configured_interval_ms(now_ms),
+            cadence.interval_ms(now_ms),
+            cadence.budget(),
+        )
+    });
+    let in_force = if effective_ms > configured_ms {
+        effective_ms.min(u32::MAX as u64) as u32
+    } else {
+        0
+    };
+    if LAST_STRETCH_MS.swap(in_force, Relaxed) == in_force {
+        return;
+    }
+    if in_force == 0 {
+        crate::log::log_fmt_critical(
+            "[ANNOUNCE_DUTY] ",
+            format_args!(
+                "stretch=lifted configured_ms={configured_ms} effective_ms={effective_ms}"
+            ),
+        );
+        return;
+    }
+    crate::log::log_fmt_critical(
+        "[ANNOUNCE_DUTY] ",
+        format_args!(
+            "stretch=in-force configured_ms={} effective_ms={} set_airtime_ms={} frames={} lawful_duty_e4={} share=1/{}",
+            configured_ms,
+            effective_ms,
+            budget.set_airtime_ms(),
+            budget.frames_per_set,
+            budget.lawful_duty_e4,
+            leviculum_announce_policy::OWN_ANNOUNCE_DUTY_SHARE,
+        ),
+    );
+}
+
+/// The neighbour set, as a fixed table with no allocation: a board with
+/// no heap left must still be able to answer "have I heard this one
+/// before".
+struct NeighbourTable {
+    slots: [Option<[u8; 16]>; NEIGHBOUR_SLOTS],
+    next: usize,
+}
+
+impl NeighbourTable {
+    const fn new() -> Self {
+        Self {
+            slots: [None; NEIGHBOUR_SLOTS],
+            next: 0,
+        }
+    }
+
+    /// Record a neighbour. `true` when it was not already known, which is
+    /// the edge rule 4 fires on. Overflow displaces in round-robin order,
+    /// the cheapest bound that never denies a genuinely new neighbour.
+    fn insert(&mut self, destination: [u8; 16]) -> bool {
+        if self.slots.contains(&Some(destination)) {
+            return false;
+        }
+        self.slots[self.next] = Some(destination);
+        self.next = (self.next + 1) % NEIGHBOUR_SLOTS;
+        true
+    }
+}
+
+/// The board's current position as the movement proof wants it, or `None`
+/// when there is nothing to judge.
+///
+/// `None` in three cases, and each is deliberate:
+///
+/// * no GNSS receiver in this binary, or no fix yet — a board that cannot
+///   observe its position has not proved movement, and the floor is the
+///   safe answer;
+/// * the receiver reports `valid=false` — `GnssFix` keeps the last good
+///   coordinates across non-valid sentences so the display has something
+///   to render, and a stale position offered as evidence is how a board
+///   invents a jump it never made;
+/// * a user has pinned a fixed position — that pin is an assertion that
+///   this board does not move and it replaces the sensor entirely
+///   (`leviculum_telemetry_policy::choose_position`), so the sensor is
+///   not consulted behind the user's back.
+#[must_use]
+pub fn movement_fix() -> Option<leviculum_telemetry_policy::Fix> {
+    if crate::telemetry::position_source_flags() & crate::telemetry::POSITION_SOURCE_FIXED != 0 {
+        return None;
+    }
+    #[cfg(not(feature = "gnss"))]
+    {
+        None
+    }
+    #[cfg(feature = "gnss")]
+    {
+        let fix = crate::baseboard::GNSS_FIX.try_get()?;
+        if !fix.valid {
+            return None;
+        }
+        Some(leviculum_telemetry_policy::Fix {
+            latitude_e6: (fix.latitude? * 1e6) as i32,
+            longitude_e6: (fix.longitude? * 1e6) as i32,
+            hdop_e2: fix.hdop.map(|h| (h * 100.0).clamp(0.0, 65535.0) as u16),
+        })
+    }
+}
+
 /// The board's announce occasions, and the gates on them.
 pub struct AnnounceGate {
     peers: PeerAnnounceLimiter<PEER_SLOTS>,
-    periodic: PeriodicAnnounce,
+    /// When the movement proof is next owed a position sample. Separate
+    /// from the announce deadline because the two are hours apart on a
+    /// still board: a detector polled only when an announce is due would
+    /// never see the board start moving.
+    next_sample_ms: u64,
     /// The last critical withhold reason written, so a standing
     /// condition is stated once and not once a minute for as long as it
     /// lasts. Same rule, and the same argument, as
@@ -69,21 +327,52 @@ pub struct AnnounceGate {
 }
 
 impl AnnounceGate {
-    /// Arm the periodic announce relative to `now_ms` (boot).
+    /// Arm both halves of the announce relative to `now_ms` (boot).
     #[must_use]
     pub fn new(now_ms: u64) -> Self {
+        with_cadence(|cadence| cadence.arm(now_ms));
         Self {
             peers: PeerAnnounceLimiter::new(),
-            periodic: PeriodicAnnounce::new(now_ms),
+            next_sample_ms: now_ms.saturating_add(MOVEMENT_SAMPLE_INTERVAL_MS),
             last_withheld: None,
         }
     }
 
     /// How long the caller may sleep before the next [`Self::periodic`]
     /// is worth calling.
+    ///
+    /// Clamped by the movement sample, not only by the announce deadline:
+    /// on a still board those are an hour apart, and the proof needs a
+    /// position every [`MOVEMENT_SAMPLE_INTERVAL_MS`] to have anything to
+    /// reason about when the board is picked up.
     #[must_use]
     pub fn periodic_wait_ms(&self, now_ms: u64) -> u64 {
-        self.periodic.wait_ms(now_ms)
+        let announce = with_cadence(|cadence| cadence.wait_ms(AnnounceSlot::Own, now_ms));
+        announce.min(self.next_sample_ms.saturating_sub(now_ms))
+    }
+
+    /// Feed the movement proof one position, if a sample is due.
+    ///
+    /// Rules 1 to 3 in one call: the sample decides the cadence, and a
+    /// board that has just been proven to be moving announces at once
+    /// rather than waiting for the tick.
+    fn sample_movement(&mut self, now_ms: u64) {
+        if now_ms < self.next_sample_ms {
+            return;
+        }
+        self.next_sample_ms = now_ms.saturating_add(MOVEMENT_SAMPLE_INTERVAL_MS);
+        let fix = movement_fix();
+        let resumed = with_cadence(|cadence| cadence.note_fix(now_ms, fix));
+        if resumed {
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!("[ANNOUNCE] trigger reason=movement-resumed"),
+            );
+        }
+        // The fast state can also END without a sample saying so (the
+        // fifteen-minute bound), and either edge changes what the budget
+        // has to cover.
+        log_stretch(now_ms);
     }
 
     /// A BLE peer completed its identity handshake: announce to it, on
@@ -145,8 +434,11 @@ impl AnnounceGate {
         S: Storage,
     {
         let now_ms = node.now_ms();
+        self.sample_movement(now_ms);
         let clock_ok = node.has_plausible_wall_clock();
-        let Some(decision) = self.periodic.poll(now_ms, clock_ok) else {
+        let Some(decision) =
+            with_cadence(|cadence| cadence.poll(AnnounceSlot::Own, now_ms, clock_ok))
+        else {
             return Vec::new();
         };
         let Some(hash) = delivery_hash else {
@@ -158,7 +450,7 @@ impl AnnounceGate {
                 let app_data = crate::telemetry::announce_app_data(node.identity());
                 match node.announce_destination(hash, Some(&app_data)) {
                     Ok(out) => {
-                        log_sent(hash, "periodic", None);
+                        log_sent(hash, AnnounceSlot::Own.as_str(), None);
                         out.actions
                     }
                     Err(_) => Vec::new(),

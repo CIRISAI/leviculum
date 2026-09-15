@@ -41,6 +41,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A board's announce cadence follows whether it moves, not a profile
+  chosen when it was flashed. A board that moves announces every five
+  minutes; one that does not falls back to one announce per hour, slow but
+  never silent. Movement resuming, or the first announce heard from a
+  destination this boot has not heard before, each buy one immediate
+  announce rather than a raised cadence. Movement has to be proven, not
+  measured once: the displacement must exceed the threshold across three
+  consecutive fixes, the accuracy gate must be satisfied, and the fast
+  state expires fifteen minutes after the last position confirming it, so
+  a fixed board whose receiver wanders costs airtime at worst and never
+  reachability. The board's own destination and the propagation role are
+  decided together, because a board whose own announce is withheld is
+  unreachable as a recipient while still usable as a mailbox.
+- A board's own announces may use at most a tenth of its lawful duty
+  budget. Locally originated announces bypass the transit announce cap by
+  design, matching the reference, so nothing governed them; the board now
+  stretches its configured interval until the announce set fits and writes
+  one `[ANNOUNCE_DUTY]` line naming the configured interval, the interval
+  actually used and the arithmetic that forced it. At a fast carrier this
+  changes nothing; at the slowest, five minutes becomes roughly half an
+  hour.
 - A shared-instance client's announce goes out at once, as the reference
   does. The core held the first announce of every local-client destination
   for 250 ms to batch a start-up burst; wire format and semantics were

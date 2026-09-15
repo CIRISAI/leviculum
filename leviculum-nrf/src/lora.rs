@@ -488,6 +488,28 @@ impl AnnounceCap {
         else {
             return;
         };
+        // The board's OWN announces bypass the cap above by design, the
+        // reference does the same, and #401 rule 5 closes that hole with
+        // the cap's own arithmetic: they may use at most a tenth of the
+        // lawful duty budget. Both inputs are already here and neither is
+        // re-derived — the frame's airtime is the duty ledger's own
+        // (`packet_airtime_ms`, the same call `announce_cap_bitrate_bps`
+        // makes), and the allowance is the long-term airtime lock this
+        // interface resolved from its own TX frequency.
+        crate::announce::note_duty_budget(
+            node.now_ms(),
+            leviculum_core::rnode::packet_airtime_ms(
+                leviculum_core::rnode::ANNOUNCE_CAP_REFERENCE_BYTES,
+                phy.bandwidth_hz,
+                phy.sf,
+                phy.cr,
+                phy.preamble_len,
+            ),
+            leviculum_core::rnode::firmware_default_lt_alock(
+                phy.frequency_hz as u64,
+                phy.lt_alock_present.then_some(phy.lt_alock),
+            ),
+        );
         node.register_interface_bitrate(IFACE_INDEX, bitrate_bps);
         // What an operator hunting a quiet board needs: the price this board
         // thinks its medium charges, and the silence one announce buys at

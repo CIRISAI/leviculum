@@ -19,7 +19,10 @@
 //!   mechanism this issue started with. Gated by
 //!   [`PeerAnnounceLimiter`].
 //! * **Periodic** — a node that reports rarely, or not at all, still has
-//!   to be findable. Gated by [`PeriodicAnnounce`].
+//!   to be findable. Gated by [`PeriodicAnnounce`], whose interval is no
+//!   longer a constant: #401 made it follow the board's own observation
+//!   of whether it moves. That rule, both its halves and the duty budget
+//!   that bounds them, lives in [`cadence`].
 //!
 //! Both gates share the clock rule: **without a plausible wall clock,
 //! nothing is announced.** The emission timestamp inside an announce is
@@ -41,6 +44,10 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod cadence;
+
+pub use cadence::*;
+
 /// A peer identity, as both stacks report it on peer-up and stamp on
 /// inbound packets: the 16-byte truncated destination hash.
 pub type PeerId = [u8; 16];
@@ -61,40 +68,12 @@ pub type PeerId = [u8; 16];
 /// and the peer's own path request is answered as before.
 pub const PEER_UP_ANNOUNCE_MIN_INTERVAL_MS: u64 = 15 * 60 * 1_000;
 
-/// The plain periodic announce of a node's own destination, on all
-/// interfaces: every 30 minutes.
-///
-/// **What the reference does.** Reticulum leaves an application
-/// destination's announce cadence to the application: `LXMRouter.announce`
-/// (`reference/LXMF/LXMF/LXMRouter.py:315`) is called by the app and LXMF
-/// runs no timer over the delivery destinations it holds. The one
-/// destination-announce timer the reference stack runs on its own behalf
-/// is Transport's management destination, `mgmt_announce_interval = 2*60*60`
-/// (`reference/Reticulum/RNS/Transport.py:194`, fired from the jobs loop at
-/// `reference/Reticulum/RNS/Transport.py:963`) — which this tree already
-/// matches for its own management destination
-/// (`leviculum_core::constants::MGMT_ANNOUNCE_INTERVAL_MS`). So there is
-/// no reference number for this cadence to copy, and the value is ours to
-/// argue.
-///
-/// **The airtime argument, on the leg that has one.** An LNode announce is
-/// about 180 bytes on the wire, and the compiled default LoRa profile is
-/// SF8 / BW125 / CR4:5 with an 18-symbol preamble (`RadioConfig::eu_medium`,
-/// `leviculum-nrf/src/lora.rs:279`). That is 533 ms of airtime per announce
-/// (`leviculum_core::rnode::airtime_ms_with_preamble(180, 125_000, 8, 5, 18)`).
-/// At one announce per 30 minutes that is 0.0296 % duty — a thirtieth of
-/// the strictest 1 % EU868 sub-band budget, and a three-hundredth of the
-/// 10 % that ERC 70-03 h1.7 allows on the 869.463 MHz channel the default
-/// profile actually uses. The airtime is not what bounds this number.
-///
-/// **What does bound it** is the operator's complaint: an hour of silence
-/// made a relay's hop count unjudgeable. Thirty minutes halves the worst
-/// case a node can be invisible for while staying three orders of
-/// magnitude under the legal budget on the slowest carrier we ship. The
-/// peer-up announce covers the common case (a phone that connects gets an
-/// announce at once), so this cadence is the backstop, not the primary
-/// path.
-pub const PERIODIC_ANNOUNCE_INTERVAL_MS: u64 = 30 * 60 * 1_000;
+// The plain periodic announce of a node's own destination used to be a
+// constant here, 30 minutes, argued from airtime alone. #401 replaced the
+// number with a rule: a board that moves announces every
+// [`MOVING_ANNOUNCE_INTERVAL_MS`], a board that does not falls back to
+// [`STILL_ANNOUNCE_INTERVAL_MS`], and either can be stretched by
+// [`DutyBudget`]. See [`AnnounceCadence`].
 
 /// How long after start the FIRST periodic announce fires.
 ///
@@ -257,50 +236,6 @@ impl<const N: usize> PeerAnnounceLimiter<N> {
     }
 }
 
-/// The timer half: a plain periodic announce on all interfaces,
-/// independent of telemetry.
-///
-/// The caller owns the wake-up; this owns the deadline. Ask
-/// [`wait_ms`](Self::wait_ms) how long to sleep, call
-/// [`poll`](Self::poll) when that expires (or on any earlier wake-up —
-/// a poll before the deadline is a no-op), and act on what it says.
-#[derive(Debug, Clone, Copy)]
-pub struct PeriodicAnnounce {
-    next_ms: u64,
-}
-
-impl PeriodicAnnounce {
-    /// Arm the first announce [`PERIODIC_ANNOUNCE_INITIAL_DELAY_MS`]
-    /// after `now_ms`.
-    #[must_use]
-    pub const fn new(now_ms: u64) -> Self {
-        Self {
-            next_ms: now_ms + PERIODIC_ANNOUNCE_INITIAL_DELAY_MS,
-        }
-    }
-
-    /// `None` before the deadline. At or after it, the decision — and
-    /// the deadline moves either way, so a caller that ignores the
-    /// answer still cannot spin.
-    pub fn poll(&mut self, now_ms: u64, clock_ok: bool) -> Option<Decision> {
-        if now_ms < self.next_ms {
-            return None;
-        }
-        if !clock_ok {
-            self.next_ms = now_ms + NO_CLOCK_RETRY_MS;
-            return Some(Decision::Withheld(Withheld::NoClock));
-        }
-        self.next_ms = now_ms + PERIODIC_ANNOUNCE_INTERVAL_MS;
-        Some(Decision::Announce)
-    }
-
-    /// How long until the next poll is worth making. Zero means "now".
-    #[must_use]
-    pub fn wait_ms(&self, now_ms: u64) -> u64 {
-        self.next_ms.saturating_sub(now_ms)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,59 +377,10 @@ mod tests {
         assert!(!gate.would_announce(&A, t0() + 1_000));
     }
 
-    /// The periodic timer: nothing before the initial delay, one
-    /// announce at it, nothing again until the interval.
-    #[test]
-    fn the_periodic_announce_fires_at_the_initial_delay_then_at_the_interval() {
-        let mut timer = PeriodicAnnounce::new(t0());
-        assert_eq!(timer.poll(t0(), true), None);
-        assert_eq!(
-            timer.poll(t0() + PERIODIC_ANNOUNCE_INITIAL_DELAY_MS - 1, true),
-            None
-        );
-        let first = t0() + PERIODIC_ANNOUNCE_INITIAL_DELAY_MS;
-        assert_eq!(timer.poll(first, true), Some(Decision::Announce));
-        assert_eq!(timer.poll(first + 1, true), None);
-        assert_eq!(
-            timer.poll(first + PERIODIC_ANNOUNCE_INTERVAL_MS - 1, true),
-            None
-        );
-        assert_eq!(
-            timer.poll(first + PERIODIC_ANNOUNCE_INTERVAL_MS, true),
-            Some(Decision::Announce)
-        );
-    }
-
-    /// Clockless: withheld with the named reason, and retried in a
-    /// minute rather than in half an hour.
-    #[test]
-    fn a_clockless_periodic_tick_is_withheld_and_retried_soon() {
-        let mut timer = PeriodicAnnounce::new(t0());
-        let first = t0() + PERIODIC_ANNOUNCE_INITIAL_DELAY_MS;
-        assert_eq!(
-            timer.poll(first, false),
-            Some(Decision::Withheld(Withheld::NoClock))
-        );
-        assert_eq!(timer.poll(first + NO_CLOCK_RETRY_MS - 1, true), None);
-        assert_eq!(
-            timer.poll(first + NO_CLOCK_RETRY_MS, true),
-            Some(Decision::Announce),
-            "the clock arrived during the minute; the announce follows it"
-        );
-    }
-
-    /// `wait_ms` is the sleep the caller owes, and it never returns a
-    /// deadline in the past.
-    #[test]
-    fn wait_ms_tracks_the_deadline() {
-        let mut timer = PeriodicAnnounce::new(t0());
-        assert_eq!(timer.wait_ms(t0()), PERIODIC_ANNOUNCE_INITIAL_DELAY_MS);
-        let first = t0() + PERIODIC_ANNOUNCE_INITIAL_DELAY_MS;
-        assert_eq!(timer.wait_ms(first), 0);
-        assert_eq!(timer.poll(first, true), Some(Decision::Announce));
-        assert_eq!(timer.wait_ms(first), PERIODIC_ANNOUNCE_INTERVAL_MS);
-        assert_eq!(timer.wait_ms(first + PERIODIC_ANNOUNCE_INTERVAL_MS * 2), 0);
-    }
+    // The periodic timer's own tests moved to `cadence`: its interval is
+    // no longer this crate's constant but the answer of
+    // `AnnounceCadence`, and a timer test that supplies its own interval
+    // would prove nothing about the cadence a board actually runs.
 
     /// The reason tokens are the log's vocabulary: pinned so a rename
     /// has to be deliberate.

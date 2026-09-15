@@ -49,6 +49,13 @@ pub fn note_propagation(hash: [u8; 16]) {
     PN_HASH.lock(|cell| cell.set(Some(hash)));
 }
 
+/// The `lxmf.propagation` destination this boot registered, or `None`
+/// when no role runs. The announce cadence reads it to know how many
+/// frames one tick of its budget has to pay for (#401).
+pub fn propagation_hash() -> Option<[u8; 16]> {
+    PN_HASH.lock(|cell| cell.get())
+}
+
 /// Lowercase hex of an optional 16-byte hash for the banner line;
 /// `none` for a destination this boot did not register.
 struct MaybeHex16(Option<[u8; 16]>);
