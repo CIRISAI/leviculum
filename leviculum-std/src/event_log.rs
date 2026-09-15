@@ -722,10 +722,31 @@ fn parse_t(line: &str) -> Option<u128> {
 ///
 /// `default_filter` is the env-filter directive used when `RUST_LOG`
 /// is unset (e.g. `"info"`, `"debug"`, …).
+///
+/// # The fmt layer writes to stderr, not stdout
+///
+/// `tracing_subscriber`'s default writer is stdout, and stdout is the
+/// data channel of every binary that installs this: `lnmsg` prints
+/// message bodies there, `lncp` its progress, `lnprobe` its reply
+/// lines.  A WARN on stdout splices a log line into that payload the
+/// moment something goes wrong — which is exactly when a caller is
+/// least able to cope with it.  `lnmsg`'s interop suite asserts a
+/// byte-empty stdout for a successful send and went red under load for
+/// precisely this reason (`CORE_PROCESSOR_OVER_BUDGET` from
+/// `driver::processor::report_budget`).
+///
+/// Diagnostics therefore go to stderr; every consumer we have captures
+/// both streams (periculum merges them into the node's daemon log,
+/// systemd into the journal), so nothing downstream sees a difference.
+/// Structured events are unaffected: they ride the [`EventLogLayer`]
+/// into `LEVICULUM_EVENT_LOG`'s file, not either terminal stream.
 pub fn install_global_subscriber(default_filter: &str) {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
-    let fmt_layer = fmt::layer().compact().with_filter(env_filter);
+    let fmt_layer = fmt::layer()
+        .compact()
+        .with_writer(std::io::stderr)
+        .with_filter(env_filter);
     if std::env::var(LOG_FILE_ENV_VAR).is_ok() {
         let _ = Registry::default().with(fmt_layer).with(layer()).try_init();
     } else {
@@ -737,9 +758,15 @@ pub fn install_global_subscriber(default_filter: &str) {
 /// instead of the terminal — service mode for a daemon whose reference
 /// counterpart logs to `<configdir>/logfile` when run with `-s`
 /// (`lxmd --service`, `reference/LXMF/LXMF/Utilities/lxmd.py:319-321`).
-/// Falls back to the terminal when the file cannot be opened, because a
-/// daemon that silences itself over a log-file permission error is
-/// undiagnosable.
+/// Falls back to [`install_global_subscriber`], i.e. to stderr, when the
+/// file cannot be opened, because a daemon that silences itself over a
+/// log-file permission error is undiagnosable.  The `eprintln!` below
+/// says "logging to stderr" and that is now literally where the
+/// fallback lands; keep the two in step if either moves.
+///
+/// The file writer itself is deliberately untouched by the stderr rule
+/// in [`install_global_subscriber`]: a caller that named a path asked
+/// for a file, and no data channel is involved.
 pub fn install_global_subscriber_to_file(default_filter: &str, path: &std::path::Path) {
     let file = match std::fs::OpenOptions::new()
         .create(true)

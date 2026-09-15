@@ -158,12 +158,15 @@ fn main() {
 }
 
 async fn run(args: Args) -> i32 {
+    // Diagnostics on stderr, stdout reserved for the reply lines a caller
+    // pipes — the same split as `event_log::install_global_subscriber`.
     tracing_subscriber::fmt()
         .compact()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new(log_filter(args.verbose))),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let Some(destination_hexhash) = args.destination_hash.as_deref() else {

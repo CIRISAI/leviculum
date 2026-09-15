@@ -1020,13 +1020,16 @@ async fn event_loop(mut event_rx: EventReceiver, state: Arc<Mutex<SessionState>>
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging: RUST_LOG env takes precedence, then -v flag
+    // Initialize logging: RUST_LOG env takes precedence, then -v flag.
+    // Diagnostics on stderr, stdout reserved for the data a caller pipes —
+    // the same split as `event_log::install_global_subscriber`.
     let default_filter = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_target(true)
+        .with_writer(std::io::stderr)
         .init();
 
     if let Some(n) = args.corrupt_every {

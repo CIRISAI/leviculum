@@ -150,12 +150,15 @@ async fn main() {
     let args = Args::parse();
 
     // RUST_LOG env takes precedence; otherwise use -v/-q flags.
+    // Diagnostics on stderr, stdout reserved for the data a caller pipes —
+    // the same split as `event_log::install_global_subscriber`.
     let (default_filter, _) = output_levels(args.verbose, args.quiet, args.silent);
     tracing_subscriber::fmt()
         .compact()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     if let Err(e) = run(args).await {

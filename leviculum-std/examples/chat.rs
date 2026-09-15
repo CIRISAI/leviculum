@@ -24,8 +24,12 @@ use leviculum_std::NodeEvent;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging (set RUST_LOG=debug for verbose output)
-    tracing_subscriber::fmt::init();
+    // Initialize logging (set RUST_LOG=debug for verbose output).
+    // Diagnostics on stderr, stdout reserved for the example's own output —
+    // the same split as `event_log::install_global_subscriber`.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     println!("Reticulum Chat Example");
     println!("======================");
