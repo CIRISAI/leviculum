@@ -204,6 +204,63 @@ echo "[install-ci] firmware toolchain: thumbv7em-none-eabihf + flip-link + llvm-
 cargo install --locked cargo-about --version 0.9.2 --features cli
 echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notices-guard)"
 
+# 6c. ESP32-S3 (Xtensa) firmware toolchain.  ESP32-S3 is an Xtensa part,
+#     not RISC-V, so stock rustc cannot target it at all: there is no
+#     `rustup target add xtensa-esp32s3-none-elf`, and the esp-rs fork of
+#     the compiler is the only thing that emits that triple.  espup is
+#     what installs the fork (plus the Xtensa LLVM and the xtensa-esp-elf
+#     GCC the linker needs).  espflash is the probe-rs of these parts: it
+#     wraps the linked ELF in a bootloader image and writes it over the
+#     USB serial/JTAG port.
+#
+#     Pinned, like cargo-about above and for the reason rust-toolchain.toml
+#     gives for the host pin: this is embedded code where the compiler
+#     generation decides codegen, and an unattributable stack-frame or
+#     image-size move is worse than a scheduled bump.
+#
+#       espup 0.17.1          newest release; 0.17.0 is yanked upstream.
+#       Xtensa Rust 1.97.0.0  newest esp-rs toolchain NOT marked
+#                             prerelease (1.98.0.0 / 1.98.1.0 still are).
+#                             It is rustc 1.97.0-nightly, i.e. the same
+#                             generation as the 1.97.1 host pin, so the
+#                             two compilers do not disagree about the
+#                             core crate a shared crate is built with.
+#       espflash 4.6.0        newest release; produces the image layout
+#                             esp-hal 1.2.x expects.
+#
+#     `--targets esp32s3` instead of espup's `all` default: every extra
+#     chip is more download and more disk, and there is exactly one
+#     ESP32-class board in the rig (the Heltec V4 — `esptool chip_id`
+#     says ESP32-S3, QFN56, rev v0.2).  Widen the list when a second
+#     one appears; espup reuses what is already installed.
+#     `--stable-version` pins what espup would use for RISC-V parts; it
+#     installs nothing today, because an Xtensa-only target list needs no
+#     stable toolchain, and it keeps a future esp32c* addition on the
+#     same compiler as rust-toolchain.toml.
+#
+#     Both steps are idempotent: cargo install skips a crate already at
+#     the requested version, and a repeat `espup install` of the same
+#     version reuses the existing GCC/LLVM/Rust trees (measured on
+#     schneckenschreck: 1.3 s, no download, identical byte count).
+#
+#     Disk cost, measured 2026-09-15: ~1.9 GB under
+#     ~/.rustup/toolchains/esp (790 MB xtensa-esp-elf GCC, 335 MB Xtensa
+#     LLVM, the rest Xtensa rustc + rust-src) plus ~450 MB of cargo
+#     registry and the two binaries.  Not free — check `df` before
+#     running this on a host that is near full.
+#
+#     Building for the chip additionally needs the environment espup
+#     writes to ~/export-esp.sh (LIBCLANG_PATH, and xtensa-esp-elf-gcc on
+#     PATH); source it in the shell that runs cargo.
+cargo install --locked espup --version 0.17.1
+"$HOME/.cargo/bin/espup" install \
+    --toolchain-version 1.97.0.0 \
+    --stable-version 1.97.1 \
+    --targets esp32s3
+cargo install --locked espflash --version 4.6.0
+echo "[install-ci] ESP32-S3 toolchain: espup 0.17.1 + Xtensa Rust 1.97.0.0 + espflash 4.6.0"
+echo "[install-ci]   xtensa builds need: . ~/export-esp.sh"
+
 # 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this
 #    installer was actually run from.  Lets a `git worktree`-based
