@@ -41,6 +41,13 @@ pub const LEV_ERR_TIMEOUT: c_int = -13;
 pub const LEV_ERR_AGAIN: c_int = -14;
 /// No cached identity for the destination; wait for an announce or request a path.
 pub const LEV_ERR_UNKNOWN_DEST: c_int = -15;
+/// Nothing was registered under the name the call asked to remove.
+///
+/// Not a failure of the operation so much as a statement about the state it
+/// found: `lev_deregister_request_handler` returns `LEV_OK` when it retired a
+/// handler and this when there was none, so a caller can tell the two apart
+/// without keeping its own book.
+pub const LEV_ERR_NO_HANDLER: c_int = -16;
 /// A panic was caught at the FFI boundary and converted to an error.
 pub const LEV_ERR_PANIC: c_int = -127;
 
@@ -87,11 +94,11 @@ pub(crate) fn set_last_error_static(msg: &'static CStr) {
 /// `Display` text as the thread-local detail string.
 ///
 /// This is not exhaustive over the `LEV_ERR_*` space: `LEV_ERR_CRYPTO`,
-/// `LEV_ERR_UNKNOWN_DEST`, `LEV_ERR_BUFFER_TOO_SMALL`, `LEV_ERR_AGAIN`, and
-/// `LEV_ERR_TIMEOUT` are returned directly by the call sites that detect those
-/// conditions, never derived here. A no-path send is mapped to `LEV_ERR_NO_PATH`
-/// (so callers can branch on it); other `Send`/`Link` errors surface as the
-/// generic `LEV_ERR_SEND`/`LEV_ERR_LINK`.
+/// `LEV_ERR_UNKNOWN_DEST`, `LEV_ERR_BUFFER_TOO_SMALL`, `LEV_ERR_AGAIN`,
+/// `LEV_ERR_NO_HANDLER`, and `LEV_ERR_TIMEOUT` are returned directly by the
+/// call sites that detect those conditions, never derived here. A no-path send
+/// is mapped to `LEV_ERR_NO_PATH` (so callers can branch on it); other
+/// `Send`/`Link` errors surface as the generic `LEV_ERR_SEND`/`LEV_ERR_LINK`.
 pub(crate) fn map_error(e: &leviculum_std::Error) -> c_int {
     use leviculum_std::Error;
     set_last_error(e.to_string());
@@ -137,6 +144,7 @@ pub extern "C" fn lev_strerror(code: c_int) -> *const c_char {
             LEV_ERR_TIMEOUT => b"timed out\0",
             LEV_ERR_AGAIN => b"resource temporarily unavailable\0",
             LEV_ERR_UNKNOWN_DEST => b"no cached identity for destination\0",
+            LEV_ERR_NO_HANDLER => b"no handler registered for that path\0",
             LEV_ERR_PANIC => b"panic at FFI boundary\0",
             _ => b"unknown error\0",
         };

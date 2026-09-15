@@ -677,10 +677,12 @@ Flat enums replace the Rust sum types at the boundary:
   `lev_register_request_handler(node, dest_hash, path, policy, const uint8_t
   *allow_identity_hashes, size_t n_ids)`, where `allow_identity_hashes` is
   `n_ids * 16` bytes of identity hashes (not generic ids) and is read only
-  for the `ALLOW_LIST` policy. There is no unregister in v1: registering a
-  handler for a `(dest_hash, path)` pair overwrites any previous one, and
-  handlers live for the node's lifetime. A C author should not look for a
-  `lev_unregister_request_handler`.
+  for the `ALLOW_LIST` policy. Registering a handler for a `(dest_hash,
+  path)` pair overwrites any previous one;
+  `lev_deregister_request_handler(node, dest_hash, path)` retires one,
+  returning `LEV_OK` if it removed a handler and `LEV_ERR_NO_HANDLER` if
+  there was none. Added in Codeberg #400; v1 shipped without it, which is
+  what this paragraph used to say.
 - Resource strategy: `LEV_RESOURCE_ACCEPT_NONE`, `LEV_RESOURCE_ACCEPT_ALL`,
   `LEV_RESOURCE_ACCEPT_APP`.
 - Destination direction and type, and event types, are likewise flat

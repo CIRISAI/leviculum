@@ -223,6 +223,83 @@ fn response_resource_on_unknown_link_reports_resource_error() {
     );
 }
 
+/// Codeberg #400. The file-response path fails like its two siblings: an
+/// error the caller can branch on, never a panic and never a silent success.
+#[test]
+fn file_response_on_unknown_link_reports_resource_error() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_node(dir.path(), |_| {});
+    let fake_link = [0x55u8; 16];
+    let request_id = [0x66u8; 16];
+    // Raw bytes, not a msgpack value: that is exactly what this call sends.
+    let data = b"raw file bytes";
+    // `{"name": "a.txt"}` as msgpack, the NomadNet shape.
+    let metadata = b"\x81\xa4name\xa5a.txt";
+    let rc = unsafe {
+        lev_send_file_response(
+            node.0,
+            fake_link.as_ptr(),
+            request_id.as_ptr(),
+            data.as_ptr(),
+            data.len(),
+            metadata.as_ptr(),
+            metadata.len(),
+            2000,
+        )
+    };
+    assert_eq!(
+        rc,
+        LEV_ERR_RESOURCE,
+        "unknown-link file response: {}",
+        last_error()
+    );
+}
+
+/// Codeberg #400. The metadata is what marks a response raw rather than
+/// wrapped, so a NULL one is a caller error and not an empty metadata block.
+#[test]
+fn file_response_without_metadata_is_rejected() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_node(dir.path(), |_| {});
+    let fake_link = [0x55u8; 16];
+    let request_id = [0x66u8; 16];
+    let data = b"raw file bytes";
+    let rc = unsafe {
+        lev_send_file_response(
+            node.0,
+            fake_link.as_ptr(),
+            request_id.as_ptr(),
+            data.as_ptr(),
+            data.len(),
+            ptr::null(),
+            0,
+            2000,
+        )
+    };
+    assert_eq!(rc, LEV_ERR_NULL_PTR, "NULL metadata must be refused");
+}
+
+/// Codeberg #400. Retiring a handler that was never registered reports
+/// `LEV_ERR_NO_HANDLER`, not success — the whole point of the return code is
+/// that a caller can tell the two apart without keeping its own book.
+#[test]
+fn deregistering_an_unregistered_handler_reports_no_handler() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_node(dir.path(), |_| {});
+    let dest = [0x77u8; 16];
+    let path = cstr("/page/never-served.mu");
+    let rc = unsafe { lev_deregister_request_handler(node.0, dest.as_ptr(), path.as_ptr()) };
+    assert_eq!(
+        rc,
+        LEV_ERR_NO_HANDLER,
+        "unregistered path: {}",
+        last_error()
+    );
+}
+
 #[test]
 fn request_on_unknown_link_reports_request_error() {
     let _serial = serial();

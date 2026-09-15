@@ -181,6 +181,28 @@ fn c_over_mdu_response_acceptance() {
     compile_and_run_on_free_addr("examples/c/response_resource.c", "response_resource_c");
 }
 
+/// Codeberg #400: a request answered with a file.
+///
+/// The failure mode the export exists for is not an error code either: a
+/// wrapping response call still succeeds, still completes, and still delivers
+/// *something* — a msgpack blob where the requester wanted the file, with the
+/// `{"name": ...}` it needed to save it missing entirely. So the assertions
+/// that matter are the two halves compared byte for byte.
+#[test]
+fn c_file_response_acceptance() {
+    compile_and_run_on_free_addr("examples/c/file_response.c", "file_response_c");
+}
+
+/// Codeberg #400: a request handler retired while the node keeps running.
+///
+/// Round one proves the path answers, so round two's silence means the
+/// handler is gone and not that the link died; the second retire must report
+/// `LEV_ERR_NO_HANDLER` rather than a success it did not have.
+#[test]
+fn c_deregister_handler_acceptance() {
+    compile_and_run_on_free_addr("examples/c/deregister_handler.c", "deregister_handler_c");
+}
+
 #[test]
 fn c_daemon_acceptance() {
     // Port 0: the kernel assigns the config-file node's listen port at bind;
@@ -210,6 +232,11 @@ fn the_two_node_examples_refuse_to_run_without_an_address() {
         (
             "examples/c/response_resource.c",
             "response_resource_c_noargs",
+        ),
+        ("examples/c/file_response.c", "file_response_c_noargs"),
+        (
+            "examples/c/deregister_handler.c",
+            "deregister_handler_c_noargs",
         ),
         ("examples/c/daemon.c", "daemon_c_noargs"),
     ] {

@@ -104,6 +104,7 @@ const char *lev_last_error(void);
 | `LEV_ERR_TIMEOUT` | -13 | the operation timed out |
 | `LEV_ERR_AGAIN` | -14 | non-fatal backpressure; retry later |
 | `LEV_ERR_UNKNOWN_DEST` | -15 | no cached identity for the destination |
+| `LEV_ERR_NO_HANDLER` | -16 | nothing was registered under the name the call asked to remove |
 | `LEV_ERR_PANIC` | -127 | a panic was caught at the FFI boundary |
 
 ## Identity
@@ -361,13 +362,18 @@ int lev_send_response(const struct leviculum_t *node, const uint8_t *link_id,
 int lev_send_response_resource(const struct leviculum_t *node, const uint8_t *link_id,
                                const uint8_t *request_id, const uint8_t *data, uintptr_t data_len,
                                int timeout_ms);
+int lev_send_file_response(const struct leviculum_t *node, const uint8_t *link_id,
+                           const uint8_t *request_id, const uint8_t *data, uintptr_t data_len,
+                           const uint8_t *metadata, uintptr_t metadata_len, int timeout_ms);
+int lev_deregister_request_handler(const struct leviculum_t *node, const uint8_t *dest_hash,
+                                   const char *path);
 ```
 
 - `lev_register_request_handler` registers a handler for `path` on a local
   destination. For `LEV_REQUEST_POLICY_ALLOW_LIST`, `allow_identity_hashes` is
   `n_ids * 16` bytes of identity hashes; otherwise pass `NULL, 0`. Registering
-  overwrites a previous handler for the same destination and path; there is no
-  unregister.
+  overwrites a previous handler for the same destination and path;
+  `lev_deregister_request_handler` retires one.
 - `lev_send_request` sends a request on an established link to `path` and writes
   the 16-byte request id into `out_request_id`. `data` is the msgpack-encoded
   payload (`NULL, 0` for none); `response_timeout_ms` is the request-response
@@ -384,6 +390,21 @@ int lev_send_response_resource(const struct leviculum_t *node, const uint8_t *li
   because the library prepends the request id itself. Use this and not
   `lev_send_resource` for an over-MDU answer: a plain resource carries no
   request id, so the requester never correlates it and waits out its deadline.
+- `lev_send_file_response` replies with a file rather than a value, the wire
+  form a NomadNet `/file/` download has. This is the one of the three response
+  calls whose name will not tell you it is different: `data` is sent as RAW
+  bytes with no `[request_id, response]` wrapper, and `metadata` (mandatory,
+  one valid msgpack value, typically `{"name": <basename>}`) travels beside
+  it. Its presence on the wire is what marks the response raw rather than
+  wrapped, so it must not be `NULL`. The requester reads the bytes with
+  `lev_event_data` and the metadata with `lev_event_metadata` off the one
+  `LEV_EVENT_RESPONSE_RECEIVED` event.
+- `lev_deregister_request_handler` retires the handler for `path`: `LEV_OK`
+  when one was registered and is now gone, `LEV_ERR_NO_HANDLER` when there was
+  none, so a caller can tell "retired" from "never registered" without keeping
+  its own book. Requests to a path with no handler are dropped without an
+  answer, so a requester sees its deadline expire as
+  `LEV_EVENT_REQUEST_TIMEOUT` — the same way any unserved path fails.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |

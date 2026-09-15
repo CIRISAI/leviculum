@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The C API serves a file and retires a handler. `lev_send_file_response`
+  sends a response Resource of the RAW bytes plus msgpack metadata, with no
+  `[request_id, response]` wrapper — the wire form a NomadNet `/file/`
+  download has, and the one of the three response calls whose name does not
+  say how it differs, so the doc comment says it instead. The requester reads
+  the bytes with `lev_event_data` and the `{"name": ...}` with
+  `lev_event_metadata` off one response event.
+  `lev_deregister_request_handler` takes a served path back down without
+  restarting the node, and answers which of the two things happened:
+  `LEV_OK` when it removed a handler, the new `LEV_ERR_NO_HANDLER` (-16) when
+  there was none. `lev_register_request_handler`'s doc no longer states that
+  there is no unregister.
+
 - `MessageState::Sending` is reported on `RouterEvent::MessageState` from
   every path that enters it — direct, opportunistic and propagated — so a
   message is observable while it is in flight instead of only when it is

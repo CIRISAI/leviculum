@@ -59,7 +59,8 @@ unsafe fn policy_from(
 ///
 /// `allow_identity_hashes` is `n_ids * 16` bytes of identity hashes, read only
 /// for `LEV_REQUEST_POLICY_ALLOW_LIST`. Registering overwrites any previous
-/// handler for the same destination and path; there is no unregister.
+/// handler for the same destination and path;
+/// `lev_deregister_request_handler` retires one.
 #[no_mangle]
 pub unsafe extern "C" fn lev_register_request_handler(
     node: *const leviculum_t,
@@ -94,6 +95,44 @@ pub unsafe extern "C" fn lev_register_request_handler(
         let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
         h.node().register_request_handler(dh, path, policy);
         LEV_OK
+    })
+}
+
+/// Retire the request handler for `path` on a local destination (16-byte hash).
+///
+/// `LEV_OK` when a handler was registered and is now gone; `LEV_ERR_NO_HANDLER`
+/// when there was none, so a caller can tell "retired" from "never registered"
+/// without keeping its own book. Requests to a path with no handler are
+/// dropped without an answer, so a requester sees its response deadline expire
+/// as `LEV_EVENT_REQUEST_TIMEOUT` — the same way any unserved path fails.
+#[no_mangle]
+pub unsafe extern "C" fn lev_deregister_request_handler(
+    node: *const leviculum_t,
+    dest_hash: *const u8,
+    path: *const c_char,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if dest_hash.is_null() || path.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        let path = match CStr::from_ptr(path).to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("path must be a valid UTF-8 string");
+                return LEV_ERR_INVALID_ARG;
+            }
+        };
+        let dh = DestinationHash::new(read_array::<LEV_ADDR_LEN>(dest_hash));
+        if h.node().deregister_request_handler(dh, path) {
+            LEV_OK
+        } else {
+            set_last_error(format!("no request handler registered for {path}"));
+            LEV_ERR_NO_HANDLER
+        }
     })
 }
 
@@ -238,6 +277,69 @@ pub unsafe extern "C" fn lev_send_response_resource(
         match block_on_timeout(
             h.runtime(),
             h.node().send_response_resource(&lid, &rid, payload),
+            timeout_ms,
+        ) {
+            Ok(Ok(())) => LEV_OK,
+            Ok(Err(e)) => map_error(&e),
+            Err(()) => LEV_ERR_TIMEOUT,
+        }
+    })
+}
+
+/// Answer a received request with a file-style response Resource (link id and
+/// request id, each 16 bytes).
+///
+/// The third of the response calls, and the one whose name alone will not tell
+/// you it is different: where `lev_send_response` and
+/// `lev_send_response_resource` both take one msgpack-encoded value and let
+/// the library add the `[request_id, response]` wrapper, this one sends
+/// `data`/`data_len` as RAW bytes with NO wrapper, carrying
+/// `metadata`/`metadata_len` alongside — the wire form a NomadNet `/file/`
+/// download has, whose metadata is the `{"name": <basename>}` map.
+///
+/// `metadata` must be one valid msgpack-encoded value and must not be NULL:
+/// its presence on the wire is what marks the response raw rather than
+/// wrapped, so a responder with nothing to say about the file still sends an
+/// encoded empty map rather than nothing. Blocks up to `timeout_ms` for the
+/// initial dispatch; the transfer completes in the background and the
+/// requester sees one response event carrying the bytes and the metadata.
+#[no_mangle]
+pub unsafe extern "C" fn lev_send_file_response(
+    node: *const leviculum_t,
+    link_id: *const u8,
+    request_id: *const u8,
+    data: *const u8,
+    data_len: usize,
+    metadata: *const u8,
+    metadata_len: usize,
+    timeout_ms: c_int,
+) -> c_int {
+    guard(LEV_ERR_PANIC, || {
+        let h = match node.as_ref() {
+            Some(h) => h,
+            None => return LEV_ERR_NULL_PTR,
+        };
+        if link_id.is_null() || request_id.is_null() || metadata.is_null() {
+            return LEV_ERR_NULL_PTR;
+        }
+        if data.is_null() && data_len > 0 {
+            return LEV_ERR_NULL_PTR;
+        }
+        let lid = LinkId::new(read_array::<LEV_ADDR_LEN>(link_id));
+        let rid = read_array::<LEV_ADDR_LEN>(request_id);
+        let payload: &[u8] = if data_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(data, data_len)
+        };
+        let meta: &[u8] = if metadata_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(metadata, metadata_len)
+        };
+        match block_on_timeout(
+            h.runtime(),
+            h.node().send_file_response(&lid, &rid, payload, meta),
             timeout_ms,
         ) {
             Ok(Ok(())) => LEV_OK,
