@@ -604,6 +604,17 @@ impl ReticulumNodeBuilder {
             devices: config.allowed_devices,
             ignored_devices: config.ignored_devices,
             multicast_loopback: Some(config.multicast_loopback),
+            multicast_address_type: Some(
+                match config.multicast_address_type {
+                    crate::interfaces::auto_interface::MulticastAddressType::Temporary => {
+                        "temporary"
+                    }
+                    crate::interfaces::auto_interface::MulticastAddressType::Permanent => {
+                        "permanent"
+                    }
+                }
+                .to_string(),
+            ),
             ..Default::default()
         });
         self

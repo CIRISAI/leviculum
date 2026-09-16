@@ -874,4 +874,83 @@ mod tests {
              ({allocated} ids allocated for 1 registrable slot)"
         );
     }
+
+    /// Codeberg #282, the whole config path for `multicast_address_type`:
+    /// file text -> `apply_interface_key` -> the AutoInterface builder -> the
+    /// multicast group address the orchestrator joins. Before the key was
+    /// read, a section asking for the permanent group derived the temporary
+    /// address regardless, so an `lnsd` node added to a permanent-type `rnsd`
+    /// peer group discovered nobody and nobody discovered it, with no error
+    /// on either side.
+    #[test]
+    fn auto_multicast_address_type_reaches_the_group_address() {
+        use crate::interfaces::auto_interface::{derive_multicast_address, MulticastAddressType};
+
+        fn group_address(section: &str) -> std::net::Ipv6Addr {
+            let config = crate::ini_config::parse_ini(section).expect("config parses");
+            let iface = config.interfaces.get("Auto").expect("auto section");
+            let auto = auto::auto_config_from(iface).expect("section resolves");
+            derive_multicast_address(
+                &auto.group_id,
+                &auto.discovery_scope,
+                auto.multicast_address_type,
+            )
+            .expect("group address derives")
+        }
+
+        let default = group_address("[interfaces]\n  [[Auto]]\n    type = AutoInterface\n");
+        let temporary = group_address(
+            "[interfaces]\n  [[Auto]]\n    type = AutoInterface\n \
+             multicast_address_type = temporary\n",
+        );
+        let permanent = group_address(
+            "[interfaces]\n  [[Auto]]\n    type = AutoInterface\n \
+             multicast_address_type = Permanent\n",
+        );
+
+        // An absent key, and an explicit `temporary`, are the group every
+        // existing deployment is already in.
+        assert_eq!(
+            default,
+            derive_multicast_address(b"reticulum", "link", MulticastAddressType::Temporary)
+                .unwrap(),
+        );
+        assert_eq!(temporary, default, "explicit temporary changes nothing");
+
+        // `permanent` is a different group, and it is Python's.
+        assert_eq!(
+            permanent,
+            derive_multicast_address(b"reticulum", "link", MulticastAddressType::Permanent)
+                .unwrap(),
+        );
+        assert_ne!(
+            permanent, default,
+            "a permanent-type section must not land in the temporary group"
+        );
+    }
+
+    /// An unrecognised value fails the build, and the failure names the key
+    /// and the value. Python resolves the same string to the temporary group
+    /// and says nothing (`AutoInterface.py:175-182`); that silence is the
+    /// bug, because the operator's next move is to suspect the network: no
+    /// log line anywhere mentions the address type.
+    #[test]
+    fn auto_build_refuses_an_unknown_multicast_address_type() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "Auto".to_string(),
+            interface_type: "AutoInterface".to_string(),
+            multicast_address_type: Some("permanant".to_string()),
+            ..Default::default()
+        };
+
+        let Err(err) = build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) else {
+            panic!("a typo in the group address must not build");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("multicast_address_type") && msg.contains("permanant"),
+            "the refusal names the key and the value: {msg}"
+        );
+    }
 }

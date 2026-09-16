@@ -251,6 +251,9 @@ fn render_interface_config(out: &mut String, iface: &InterfaceConfig) {
     if let Some(s) = &iface.discovery_scope {
         kv("discovery_scope", s.clone());
     }
+    if let Some(t) = &iface.multicast_address_type {
+        kv("multicast_address_type", t.clone());
+    }
     if let Some(d) = &iface.devices {
         kv("devices", d.clone());
     }

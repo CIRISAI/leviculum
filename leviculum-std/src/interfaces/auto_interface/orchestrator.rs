@@ -147,7 +147,11 @@ async fn run_auto_interface(
         return Ok(());
     }
 
-    let mcast_addr = derive_multicast_address(&config.group_id, &config.discovery_scope)?;
+    let mcast_addr = derive_multicast_address(
+        &config.group_id,
+        &config.discovery_scope,
+        config.multicast_address_type,
+    )?;
     let unicast_port = unicast_discovery_port(config.discovery_port);
     // Per-group tag appended to peer interface names so peers reachable in
     // multiple groups do not collide in the registry / rnstatus. `None` for

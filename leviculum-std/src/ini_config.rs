@@ -486,6 +486,13 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "devices" => iface.devices = Some(value.to_string()),
         "ignored_devices" => iface.ignored_devices = Some(value.to_string()),
         "multicast_loopback" => iface.multicast_loopback = Some(parse_bool(value)),
+        // Multicast address type (Codeberg #282, Python
+        // `multicast_address_type`, AutoInterface.py:109). Stored verbatim and
+        // resolved in the AutoInterface builder, which rejects a value it does
+        // not recognise: the type is part of the group address, so a typo here
+        // would otherwise put the node in a group of its own, discovering
+        // nobody and logging nothing.
+        "multicast_address_type" => iface.multicast_address_type = Some(value.to_string()),
         "flow_control" => iface.flow_control = Some(parse_bool(value)),
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),
@@ -1749,6 +1756,44 @@ mod tests {
         assert_eq!(auto.ignored_devices, Some("docker0".to_string()));
     }
 
+    /// Codeberg #282: `multicast_address_type` is a key the reference reads
+    /// (`AutoInterface.py:109`) and we used to drop into the unknown-key
+    /// catch-all, where it logged at `debug!` and changed nothing. Kept
+    /// verbatim here; the AutoInterface builder resolves it and rejects a
+    /// value it does not know.
+    #[test]
+    fn test_parse_auto_interface_multicast_address_type() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Auto Permanent]]
+    type = AutoInterface
+    multicast_address_type = permanent
+
+  [[Auto Default]]
+    type = AutoInterface
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config
+                .interfaces
+                .get("Auto Permanent")
+                .expect("auto iface")
+                .multicast_address_type,
+            Some("permanent".to_string()),
+        );
+        assert_eq!(
+            config
+                .interfaces
+                .get("Auto Default")
+                .expect("auto iface")
+                .multicast_address_type,
+            None,
+        );
+    }
+
     #[test]
     fn test_parse_auto_interface_defaults() {
         let config = parse_ini(
@@ -1769,6 +1814,7 @@ mod tests {
         assert_eq!(auto.data_port, None);
         assert_eq!(auto.devices, None);
         assert_eq!(auto.ignored_devices, None);
+        assert_eq!(auto.multicast_address_type, None);
     }
 
     #[test]

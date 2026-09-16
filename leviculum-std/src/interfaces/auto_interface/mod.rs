@@ -38,8 +38,56 @@ pub(crate) const DEDUP_TTL_SECS: f64 = 0.75;
 /// Hardware MTU for AutoInterface (matches Python `HW_MTU = 1196`)
 pub(crate) const AUTO_HW_MTU: u32 = 1196;
 
-/// Multicast address type: "1" = temporary
-const MULTICAST_ADDRESS_TYPE: &str = "1";
+/// Which multicast address type the discovery group address carries, the
+/// second nibble of `ff<type><scope>:...`.
+///
+/// Python-RNS selects it per interface with the `multicast_address_type`
+/// config key (`MULTICAST_PERMANENT_ADDRESS_TYPE`
+/// (`reference/Reticulum/RNS/Interfaces/AutoInterface.py:58-59`), resolved at
+/// `AutoInterface.py:175-182`). The type is part of the group address, so two
+/// nodes that disagree on it are not in the same multicast group and never
+/// see each other, with no error on either side - discovery failure looks
+/// exactly like an empty network (Codeberg #282).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MulticastAddressType {
+    /// `"1"` - a transient IPv6 group. The default, as in Python.
+    #[default]
+    Temporary,
+    /// `"0"` - a well-known (permanent) IPv6 group.
+    Permanent,
+}
+
+impl MulticastAddressType {
+    /// The nibble this type contributes to the group address text.
+    fn as_nibble(self) -> &'static str {
+        match self {
+            Self::Temporary => "1",
+            Self::Permanent => "0",
+        }
+    }
+
+    /// Parse a `multicast_address_type` config value.
+    ///
+    /// Accepts exactly the two spellings Python honours, case-insensitively
+    /// (`AutoInterface.py:175-182`), so a config file that selects a group
+    /// under `rnsd` selects the same group here.
+    ///
+    /// Returns `None` for anything else instead of falling back to
+    /// `Temporary` as Python does. That fallback is the reason this knob is
+    /// worth having at all: a node that silently lands in a group the
+    /// operator did not ask for discovers nobody, and no log line anywhere
+    /// points at the address type. Rejecting names the typo at startup
+    /// instead. The deviation is config-side only - every value Python acts
+    /// on resolves identically here, so the derived address and the wire
+    /// traffic are unchanged.
+    pub fn from_config_str(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "temporary" => Some(Self::Temporary),
+            "permanent" => Some(Self::Permanent),
+            _ => None,
+        }
+    }
+}
 
 // Scope mapping
 /// IPv6 multicast scope values matching Python's AutoInterface
@@ -73,6 +121,10 @@ pub struct AutoInterfaceConfig {
     /// on Linux) and giving reliable self-echo even on bridges that stop
     /// reflecting the group. Set to `false` to opt out.
     pub multicast_loopback: bool,
+    /// Multicast address type of the discovery group (Codeberg #282).
+    /// Defaults to `Temporary`, which is the group Python joins when the key
+    /// is absent, so an existing deployment keeps the group it has.
+    pub multicast_address_type: MulticastAddressType,
 }
 
 impl Default for AutoInterfaceConfig {
@@ -85,6 +137,7 @@ impl Default for AutoInterfaceConfig {
             allowed_devices: None,
             ignored_devices: None,
             multicast_loopback: true,
+            multicast_address_type: MulticastAddressType::Temporary,
         }
     }
 }
@@ -243,13 +296,18 @@ fn name_to_index(name: &str) -> u32 {
 }
 
 // Multicast address derivation
-/// Derive the IPv6 multicast discovery address from a group ID and scope.
+/// Derive the IPv6 multicast discovery address from a group ID, scope and
+/// address type.
 ///
 /// Matches Python's AutoInterface multicast address derivation:
 /// - SHA-256 hash the group_id
 /// - Take bytes [2..14] as big-endian 16-bit words
 /// - Format as `ff{type}{scope}:0:{word1}:{word2}:{word3}:{word4}:{word5}:{word6}`
-pub(crate) fn derive_multicast_address(group_id: &[u8], scope: &str) -> io::Result<Ipv6Addr> {
+pub(crate) fn derive_multicast_address(
+    group_id: &[u8],
+    scope: &str,
+    address_type: MulticastAddressType,
+) -> io::Result<Ipv6Addr> {
     let g = full_hash(group_id);
     let scope_byte = scope_to_byte(scope);
 
@@ -257,7 +315,7 @@ pub(crate) fn derive_multicast_address(group_id: &[u8], scope: &str) -> io::Resu
     // Python: gt = "0" then ":"+format(g[3]+(g[2]<<8)) for pairs at indices 2..14
     let addr_str = format!(
         "ff{}{}:0:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        MULTICAST_ADDRESS_TYPE,
+        address_type.as_nibble(),
         scope_byte,
         u16::from(g[3]) + (u16::from(g[2]) << 8),
         u16::from(g[5]) + (u16::from(g[4]) << 8),
@@ -635,18 +693,113 @@ pub(crate) async fn recv_from_any<S: std::borrow::Borrow<UdpSocket>>(
 mod tests {
     use super::*;
 
+    /// Codeberg #282: the address type selects the multicast GROUP, so the
+    /// two types must derive different addresses from the same group_id, and
+    /// each must be the address Python derives for that type
+    /// (`AutoInterface.py:212`, `"ff"+type+scope+":"+gt`) - the group words
+    /// are untouched, only the type nibble moves. A node configured
+    /// `permanent` that still derived `ff12:` would sit in the temporary
+    /// group with every other default node, exactly the silent failure the
+    /// knob exists to prevent.
+    #[test]
+    fn test_derive_multicast_address_honours_the_address_type() {
+        let temporary =
+            derive_multicast_address(b"reticulum", "link", MulticastAddressType::Temporary)
+                .unwrap();
+        let permanent =
+            derive_multicast_address(b"reticulum", "link", MulticastAddressType::Permanent)
+                .unwrap();
+
+        assert_eq!(
+            temporary,
+            "ff12:0:d70b:fb1c:16e4:5e39:485e:31e1"
+                .parse::<Ipv6Addr>()
+                .unwrap(),
+        );
+        assert_eq!(
+            permanent,
+            "ff02:0:d70b:fb1c:16e4:5e39:485e:31e1"
+                .parse::<Ipv6Addr>()
+                .unwrap(),
+        );
+        assert_ne!(
+            temporary, permanent,
+            "the two address types must be two different groups"
+        );
+    }
+
+    /// The scope nibble and the type nibble are independent positions in the
+    /// address; a permanent site-scoped group is `ff05:`.
+    #[test]
+    fn test_derive_multicast_address_permanent_site_scope() {
+        let addr = derive_multicast_address(b"reticulum", "site", MulticastAddressType::Permanent)
+            .unwrap();
+        assert!(
+            addr.to_string().starts_with("ff05:"),
+            "permanent + site should produce ff05: prefix, got {}",
+            addr
+        );
+    }
+
+    /// Accepts the two spellings Python accepts, case- and whitespace-
+    /// insensitively (`AutoInterface.py:175-182`), and rejects everything
+    /// else rather than falling back to temporary the way Python does. The
+    /// rejected cases include the raw nibbles `"0"` and `"1"`: Python treats
+    /// those as unrecognised and lands on temporary, so honouring them here
+    /// would make the same config file mean different groups on the two
+    /// stacks.
+    #[test]
+    fn test_multicast_address_type_from_config_str() {
+        for value in ["temporary", "Temporary", " TEMPORARY "] {
+            assert_eq!(
+                MulticastAddressType::from_config_str(value),
+                Some(MulticastAddressType::Temporary),
+                "{value:?} selects temporary"
+            );
+        }
+        for value in ["permanent", "Permanent", "  permanent\t"] {
+            assert_eq!(
+                MulticastAddressType::from_config_str(value),
+                Some(MulticastAddressType::Permanent),
+                "{value:?} selects permanent"
+            );
+        }
+        for value in ["0", "1", "", "permanant", "perm", "yes", "link"] {
+            assert_eq!(
+                MulticastAddressType::from_config_str(value),
+                None,
+                "{value:?} must be rejected, not silently resolved"
+            );
+        }
+    }
+
+    /// An absent key keeps the group every existing deployment is already in.
+    #[test]
+    fn test_multicast_address_type_defaults_to_temporary() {
+        assert_eq!(
+            MulticastAddressType::default(),
+            MulticastAddressType::Temporary
+        );
+        assert_eq!(
+            AutoInterfaceConfig::default().multicast_address_type,
+            MulticastAddressType::Temporary
+        );
+    }
+
     #[test]
     fn test_derive_multicast_address_matches_python() {
         // Python test vector: group_id=b"reticulum", scope="link"
         // Expected: ff12:0:d70b:fb1c:16e4:5e39:485e:31e1
-        let addr = derive_multicast_address(b"reticulum", "link").unwrap();
+        let addr = derive_multicast_address(b"reticulum", "link", MulticastAddressType::Temporary)
+            .unwrap();
         let expected: Ipv6Addr = "ff12:0:d70b:fb1c:16e4:5e39:485e:31e1".parse().unwrap();
         assert_eq!(addr, expected, "multicast address must match Python output");
     }
 
     #[test]
     fn test_derive_multicast_address_site_scope() {
-        let addr = derive_multicast_address(b"reticulum", "site").unwrap();
+        let addr = derive_multicast_address(b"reticulum", "site", MulticastAddressType::Temporary)
+            .unwrap();
         let addr_str = addr.to_string();
         // Scope "site" = "5", type = "1" → prefix ff15:
         assert!(
@@ -659,8 +812,15 @@ mod tests {
     #[test]
     fn test_derive_multicast_address_custom_group() {
         // Different group_id should produce a different address
-        let default_addr = derive_multicast_address(b"reticulum", "link").unwrap();
-        let custom_addr = derive_multicast_address(b"my_custom_network", "link").unwrap();
+        let default_addr =
+            derive_multicast_address(b"reticulum", "link", MulticastAddressType::Temporary)
+                .unwrap();
+        let custom_addr = derive_multicast_address(
+            b"my_custom_network",
+            "link",
+            MulticastAddressType::Temporary,
+        )
+        .unwrap();
         assert_ne!(default_addr, custom_addr);
     }
 
@@ -674,7 +834,7 @@ mod tests {
         let groups: [&[u8]; 3] = [b"reticulum", b"groupA", b"groupB"];
         let addrs: Vec<Ipv6Addr> = groups
             .iter()
-            .map(|g| derive_multicast_address(g, "link").unwrap())
+            .map(|g| derive_multicast_address(g, "link", MulticastAddressType::Temporary).unwrap())
             .collect();
 
         // All pairwise-distinct.
@@ -690,8 +850,8 @@ mod tests {
 
         // Deterministic: same group_id → same address.
         assert_eq!(
-            derive_multicast_address(b"groupA", "link").unwrap(),
-            derive_multicast_address(b"groupA", "link").unwrap(),
+            derive_multicast_address(b"groupA", "link", MulticastAddressType::Temporary).unwrap(),
+            derive_multicast_address(b"groupA", "link", MulticastAddressType::Temporary).unwrap(),
         );
     }
 

@@ -12,25 +12,25 @@ config a current `rnsd` would load (`ini_config.rs:303-308`).
 
 Pass an explicit config directory with `--config DIR` (`lnsd.rs`,
 `-c/--config`). With no flag, `lnsd` resolves the directory using the
-same order as Python Reticulum (`config.rs:668-685`):
+same order as Python Reticulum (`config.rs:675-692`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists
 2. `$HOME/.config/reticulum` — if that directory's `config` exists
 3. `$HOME/.reticulum` — fallback, used even if absent
 
 The config *file* is always named `config` inside that directory
-(`config.rs:687-689`). The storage directory defaults to
+(`config.rs:694-696`). The storage directory defaults to
 `<config_dir>/storage` and can be overridden with `--storage`
 (`lnsd.rs`, `-s/--storage`).
 
 This order is why the Debian package can install a system-wide config
 under `/etc/reticulum` and have Python clients connect to the live
-daemon with no extra flags (`config.rs:674-678`).
+daemon with no extra flags (`config.rs:681-685`).
 
 ## INI vs TOML detection
 
 `lnsd` accepts both the Python INI format and native TOML. Detection is
-by content, not just extension (`config.rs:630-656`):
+by content, not just extension (`config.rs:636-663`):
 
 - An explicit `.toml` extension forces TOML.
 - A file containing `[[` (the ConfigObj subsection marker Python uses
@@ -40,7 +40,7 @@ by content, not just extension (`config.rs:630-656`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:640-651`).
+as `false` (`ini_config.rs:647-658`).
 
 ## The `[reticulum]` section
 
@@ -100,14 +100,14 @@ supported-type filter (`interface_type` (`ini_config.rs:192-216`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:587-617`)). An interface of any other type is skipped
+(`ini_config.rs:594-624`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:206-214`)), not an
 error.
 
 The per-type tables below cover the six types most deployments use. All
 interface keys are parsed in `apply_interface_key`
-(`ini_config.rs:364-542`); the struct they land in, with its defaults,
-is `InterfaceConfig` (`config.rs:228-499`).
+(`ini_config.rs:364-549`); the struct they land in, with its defaults,
+is `InterfaceConfig` (`config.rs:228-505`).
 
 ### Keys common to every interface
 
@@ -169,13 +169,14 @@ multicast. No router or DHCP needed; the link must carry multicast.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `group_id` | string | unset | Multicast group identifier; isolate co-located meshes by setting different IDs. (`group_id` (`ini_config.rs:475`); `InterfaceConfig::group_id` (`config.rs:393-395`)) |
-| `discovery_scope` | string | unset | Multicast scope: `link`, `admin`, `site`, `organisation`, `global`. (`discovery_scope` (`ini_config.rs:476`); `InterfaceConfig::discovery_scope` (`config.rs:395-396`)) |
-| `discovery_port` | u16 | `29716` | Discovery (announce) port. (`discovery_port` (`ini_config.rs:477`); `InterfaceConfig::discovery_port` (`config.rs:397-398`)) |
-| `data_port` | u16 | `42671` | Data port. (`data_port` (`ini_config.rs:478`); `InterfaceConfig::data_port` (`config.rs:399-400`)) |
-| `devices` | string (CSV) | unset | Whitelist of NIC names to use. (`devices` (`ini_config.rs:479`); `InterfaceConfig::devices` (`config.rs:401-402`)) |
-| `ignored_devices` | string (CSV) | unset | Blacklist of NIC names to skip. (`ignored_devices` (`ini_config.rs:480`); `InterfaceConfig::ignored_devices` (`config.rs:403-404`)) |
-| `multicast_loopback` | bool | unset (inherits `true`) | Multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo mechanism. Unset inherits the default `true`, matching Python-RNS; set `no` to opt out. (`multicast_loopback` (`ini_config.rs:481`); `InterfaceConfig::multicast_loopback` (`config.rs:407-410`)) |
+| `group_id` | string | unset | Multicast group identifier; isolate co-located meshes by setting different IDs. (`group_id` (`ini_config.rs:482`); `InterfaceConfig::group_id` (`config.rs:393-395`)) |
+| `discovery_scope` | string | unset | Multicast scope: `link`, `admin`, `site`, `organisation`, `global`. (`discovery_scope` (`ini_config.rs:483`); `InterfaceConfig::discovery_scope` (`config.rs:395-396`)) |
+| `discovery_port` | u16 | `29716` | Discovery (announce) port. (`discovery_port` (`ini_config.rs:484`); `InterfaceConfig::discovery_port` (`config.rs:397-398`)) |
+| `data_port` | u16 | `42671` | Data port. (`data_port` (`ini_config.rs:485`); `InterfaceConfig::data_port` (`config.rs:399-400`)) |
+| `devices` | string (CSV) | unset | Whitelist of NIC names to use. (`devices` (`ini_config.rs:486`); `InterfaceConfig::devices` (`config.rs:401-402`)) |
+| `ignored_devices` | string (CSV) | unset | Blacklist of NIC names to skip. (`ignored_devices` (`ini_config.rs:487`); `InterfaceConfig::ignored_devices` (`config.rs:403-404`)) |
+| `multicast_loopback` | bool | unset (inherits `true`) | Multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo mechanism. Unset inherits the default `true`, matching Python-RNS; set `no` to opt out. (`multicast_loopback` (`ini_config.rs:488`); `InterfaceConfig::multicast_loopback` (`config.rs:403-406`)) |
+| `multicast_address_type` | string | unset (inherits `temporary`) | Multicast address type of the discovery group, `temporary` or `permanent`. It is part of the group address, so peers must agree on it: an `lnsd` node left on the default next to a `permanent`-type `rnsd` peer group discovers nobody, and nothing on either side says why. Unset inherits `temporary`, the group Python joins when the key is absent. A value that is neither spelling is refused at startup rather than resolved to `temporary` the way Python resolves it. (`multicast_address_type` (`ini_config.rs:489-495`); `InterfaceConfig::multicast_address_type` (`config.rs:408-413`); `MulticastAddressType` (`interfaces/auto_interface/mod.rs:42-91`)) |
 
 ### BLE (`BLEInterface`)
 
@@ -200,11 +201,11 @@ map onto this implementation:
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `device` | string | default adapter | BlueZ adapter to use, e.g. `hci0`. (`device` (`ini_config.rs:377`)) |
-| `max_connections` | usize | `4` | Simultaneous BLE link cap, both GATT roles counted together. The default is the firmware's `MAX_LINKS` (4), not the reference's 7: 3-4 links is the protocol's reliable ceiling. (`max_connections` (`ini_config.rs:541`); `InterfaceConfig::max_connections` (`config.rs:522-525`)) |
-| `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:542`); `InterfaceConfig::min_rssi` (`config.rs:526-528`)) |
-| `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:543`); `InterfaceConfig::discovery_interval` (`config.rs:529-531`)) |
-| `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:544`); `InterfaceConfig::enable_central` (`config.rs:532-534`)) |
-| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:545`); `InterfaceConfig::enable_peripheral` (`config.rs:535-537`)) |
+| `max_connections` | usize | `4` | Simultaneous BLE link cap, both GATT roles counted together. The default is the firmware's `MAX_LINKS` (4), not the reference's 7: 3-4 links is the protocol's reliable ceiling. (`max_connections` (`ini_config.rs:548`); `InterfaceConfig::max_connections` (`config.rs:528-531`)) |
+| `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:549`); `InterfaceConfig::min_rssi` (`config.rs:532-534`)) |
+| `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:550`); `InterfaceConfig::discovery_interval` (`config.rs:535-537`)) |
+| `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:551`); `InterfaceConfig::enable_central` (`config.rs:538-540`)) |
+| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:552`); `InterfaceConfig::enable_peripheral` (`config.rs:541-543`)) |
 
 ```ini
 [interfaces]
@@ -241,20 +242,20 @@ Serial keys:
 LoRa keys, derived from source — the meanings below describe the radio
 parameters the interface configures; the fields sit together in the
 RNode block of `InterfaceConfig` (`InterfaceConfig::frequency`
-(`config.rs:446-477`)):
+(`config.rs:452-483`)):
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `frequency` | u64 (Hz) | unset | LoRa centre frequency. (`frequency` (`ini_config.rs:464`); `InterfaceConfig::frequency` (`config.rs:446-448`)) |
-| `bandwidth` | u32 (Hz) | unset | LoRa bandwidth. (`bandwidth` (`ini_config.rs:465`); `InterfaceConfig::bandwidth` (`config.rs:460-461`)) |
-| `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`spreadingfactor` (`ini_config.rs:466`); `InterfaceConfig::spreading_factor` (`config.rs:463-464`)) |
-| `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`codingrate` (`ini_config.rs:467`); `InterfaceConfig::coding_rate` (`config.rs:465-466`)) |
-| `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`txpower` (`ini_config.rs:468`); `InterfaceConfig::tx_power` (`config.rs:467-468`); `resolve_tx_power` (`rnode.rs:702`); [deviation](../concepts/python-rns-compatibility.md)) |
-| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:482`); `InterfaceConfig::flow_control` (`config.rs:485-486`)) |
-| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:483`); `InterfaceConfig::airtime_limit_short` (`config.rs:487-488`)) |
-| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:484`); `InterfaceConfig::airtime_limit_long` (`config.rs:489-490`)) |
-| `csma_enabled` | bool | unset | Carried in the LNode radio-config frame and reported back, but current firmware no longer obeys it: LoRa channel access (pre-TX jitter plus CAD listen-before-talk) is always on, matching the RNode firmware, which offers no CSMA disable either. Only firmware older than the change still honours the flag. (`csma_enabled` (`ini_config.rs:485`); `InterfaceConfig::csma_enabled` (`config.rs:491-492`)) |
-| `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:473`); `InterfaceConfig::preamble_symbols` (`config.rs:457-469`); `derive_preamble_symbols` (`rnode.rs:858`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
+| `frequency` | u64 (Hz) | unset | LoRa centre frequency. (`frequency` (`ini_config.rs:464`); `InterfaceConfig::frequency` (`config.rs:452-454`)) |
+| `bandwidth` | u32 (Hz) | unset | LoRa bandwidth. (`bandwidth` (`ini_config.rs:465`); `InterfaceConfig::bandwidth` (`config.rs:466-467`)) |
+| `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`spreadingfactor` (`ini_config.rs:466`); `InterfaceConfig::spreading_factor` (`config.rs:469-470`)) |
+| `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`codingrate` (`ini_config.rs:467`); `InterfaceConfig::coding_rate` (`config.rs:471-472`)) |
+| `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`txpower` (`ini_config.rs:468`); `InterfaceConfig::tx_power` (`config.rs:473-474`); `resolve_tx_power` (`rnode.rs:702`); [deviation](../concepts/python-rns-compatibility.md)) |
+| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:496`); `InterfaceConfig::flow_control` (`config.rs:491-492`)) |
+| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:497`); `InterfaceConfig::airtime_limit_short` (`config.rs:493-494`)) |
+| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:498`); `InterfaceConfig::airtime_limit_long` (`config.rs:495-496`)) |
+| `csma_enabled` | bool | unset | Carried in the LNode radio-config frame and reported back, but current firmware no longer obeys it: LoRa channel access (pre-TX jitter plus CAD listen-before-talk) is always on, matching the RNode firmware, which offers no CSMA disable either. Only firmware older than the change still honours the flag. (`csma_enabled` (`ini_config.rs:499`); `InterfaceConfig::csma_enabled` (`config.rs:497-498`)) |
+| `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:473`); `InterfaceConfig::preamble_symbols` (`config.rs:463-475`); `derive_preamble_symbols` (`rnode.rs:858`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
 
 **Test-only:** `test_drop_direct_ingress` (bool, default off) emulates
 out-of-range placement on a co-located rig: the interface drops every
@@ -277,9 +278,9 @@ network on the link. They are common to all interface types:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `networkname` / `network_name` | string | unset | Network name for IFAC (either spelling). (`networkname` (`ini_config.rs:519`); `InterfaceConfig::networkname` (`config.rs:451-453`)) |
-| `passphrase` / `pass_phrase` | string | unset | IFAC passphrase (either spelling). (`passphrase` (`ini_config.rs:520`); `InterfaceConfig::passphrase` (`config.rs:453-454`)) |
-| `ifac_size` | usize (bits) | unset | IFAC size, specified in bits in the file and stored as bytes (`bits / 8`). Values below 8 bits are dropped, as Python drops them, so the interface falls back to its per-type default. (`ifac_size` (`ini_config.rs:527-533`); `InterfaceConfig::ifac_size` (`config.rs:455-456`)) |
+| `networkname` / `network_name` | string | unset | Network name for IFAC (either spelling). (`networkname` (`ini_config.rs:526`); `InterfaceConfig::networkname` (`config.rs:457-459`)) |
+| `passphrase` / `pass_phrase` | string | unset | IFAC passphrase (either spelling). (`passphrase` (`ini_config.rs:527`); `InterfaceConfig::passphrase` (`config.rs:459-460`)) |
+| `ifac_size` | usize (bits) | unset | IFAC size, specified in bits in the file and stored as bytes (`bits / 8`). Values below 8 bits are dropped, as Python drops them, so the interface falls back to its per-type default. (`ifac_size` (`ini_config.rs:534-540`); `InterfaceConfig::ifac_size` (`config.rs:461-462`)) |
 
 `networkname` and `passphrase` are secrets: `lnstest diag` redacts them
 before serialising a bundle (see the [`lnstest diag`](lnstest.md#diag) section).

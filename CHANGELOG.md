@@ -143,6 +143,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An AutoInterface joins the multicast group the config asks for: the
+  `multicast_address_type` key the reference has always read is read
+  here too, so an `lnsd` node added to a group of `rnsd` peers running
+  the permanent address type lands with them instead of alone in the
+  temporary group. The type is part of the group address, so the old
+  behaviour had no symptom to go on — the node discovered nobody,
+  nobody discovered it, and neither side logged anything. Unset still
+  means the temporary type, so no existing deployment changes group; a
+  value that is neither spelling is refused at startup rather than
+  quietly resolved to temporary the way Python resolves it (#282).
+
 - A board holds back the announces it relays instead of repeating every
   one at once: its LoRa interface registers what a frame costs on the
   carrier it is running, so the announce bandwidth cap engages in the

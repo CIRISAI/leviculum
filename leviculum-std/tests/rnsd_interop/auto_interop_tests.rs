@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use leviculum_std::driver::ReticulumNodeBuilder;
-use leviculum_std::interfaces::auto_interface::{enumerate_nics, AutoInterfaceConfig};
+use leviculum_std::interfaces::auto_interface::{
+    enumerate_nics, AutoInterfaceConfig, MulticastAddressType,
+};
 use leviculum_std::{Destination, DestinationType, Direction, Identity, NodeEvent};
 
 use crate::common::{
@@ -53,7 +55,7 @@ const AUTO_MAX_CHANNEL_PAYLOAD: usize = AUTO_LINK_MDU - CHANNEL_OVERHEAD;
 ///
 /// AutoInterface derives the unicast discovery port as `discovery_port + 1`,
 /// matching Python —
-/// `unicast_discovery_port` (leviculum-std/src/interfaces/auto_interface/mod.rs:434)
+/// `unicast_discovery_port` (leviculum-std/src/interfaces/auto_interface/mod.rs:492)
 /// — so one test occupies two consecutive numbers, and the allocator has to
 /// hand out both or the successor goes to the next caller.
 fn free_discovery_port() -> u16 {
@@ -899,5 +901,149 @@ async fn test_auto_group_isolation() {
     assert!(
         found_c.is_none(),
         "Node C (different group) should NOT receive announce"
+    );
+}
+
+// =========================================================================
+// Test 8: Multicast address type isolation (Codeberg #282)
+// =========================================================================
+
+/// The multicast address type is part of the group address, so it isolates
+/// exactly like `group_id` does — and that is the trap the knob exists for.
+///
+/// Same `group_id`, same discovery port, one node left on the default
+/// (`temporary`) while the others ask for `permanent`: the operator sees a
+/// node that discovers nobody and that nobody discovers, with no error on
+/// either side. Two nodes that agree on `permanent` must find each other on
+/// a real socket — the group address is `ff02:...` there, a range the join
+/// has to accept as readily as the `ff12:...` default.
+///
+/// This exercises IPv6 multicast over loopback on a NIC; no radio is
+/// involved on any side.
+#[tokio::test]
+async fn test_auto_multicast_address_type_isolation() {
+    if !have_suitable_nics() {
+        return;
+    }
+
+    // One group_id and one discovery port across all three, so the address
+    // type is the only thing that can separate them.
+    let discovery_port = free_discovery_port();
+    let permanent_config = |data_port| AutoInterfaceConfig {
+        group_id: b"test_mcast_type".to_vec(),
+        discovery_port,
+        data_port,
+        multicast_loopback: true,
+        multicast_address_type: MulticastAddressType::Permanent,
+        ..Default::default()
+    };
+    let config_a = permanent_config(port_alloc::free_udp_port());
+    let config_b = permanent_config(port_alloc::free_udp_port());
+    // Node C: everything identical except the address type, left at the
+    // default the way an `lnsd` node added to a permanent peer group would be.
+    let config_c = AutoInterfaceConfig {
+        group_id: b"test_mcast_type".to_vec(),
+        discovery_port,
+        data_port: port_alloc::free_udp_port(),
+        multicast_loopback: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        config_c.multicast_address_type,
+        MulticastAddressType::Temporary,
+        "the default must stay temporary, or every existing deployment moves group"
+    );
+
+    let storage_a = temp_storage("mcast_type", "a");
+    let storage_b = temp_storage("mcast_type", "b");
+    let storage_c = temp_storage("mcast_type", "c");
+
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .storage_path(storage_a.clone())
+        .add_auto_interface_with_config(config_a)
+        .build()
+        .await
+        .expect("build node A");
+
+    let mut node_b = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .storage_path(storage_b.clone())
+        .add_auto_interface_with_config(config_b)
+        .build()
+        .await
+        .expect("build node B");
+
+    let mut node_c = ReticulumNodeBuilder::new()
+        .enable_transport(true)
+        .storage_path(storage_c.clone())
+        .add_auto_interface_with_config(config_c)
+        .build()
+        .await
+        .expect("build node C");
+
+    node_a.start().await.expect("start A");
+    node_b.start().await.expect("start B");
+    node_c.start().await.expect("start C");
+
+    let mut events_b = node_b.take_event_receiver().expect("events B");
+    let mut events_c = node_c.take_event_receiver().expect("events C");
+
+    // Wait for discovery inside the permanent group.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let identity_a = Identity::generate(&mut rand_core::OsRng);
+    let dest_a = Destination::new(
+        Some(identity_a),
+        Direction::In,
+        DestinationType::Single,
+        "test",
+        &["auto_mcast_type"],
+    )
+    .expect("create destination A");
+    let dest_hash = *dest_a.hash();
+    node_a.register_destination(dest_a);
+    node_a
+        .announce_destination(&dest_hash, Some(b"mcast_type"))
+        .await
+        .expect("announce A");
+
+    // B agreed on `permanent`, so it is in A's group.
+    let found_b = wait_for_event(&mut events_b, Duration::from_secs(5), |event| {
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if *announce.destination_hash() == dest_hash {
+                return Some(());
+            }
+        }
+        None
+    })
+    .await;
+
+    // C is on the temporary address, a different group: it must hear nothing.
+    let found_c = wait_for_event(&mut events_c, Duration::from_secs(5), |event| {
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if *announce.destination_hash() == dest_hash {
+                return Some(());
+            }
+        }
+        None
+    })
+    .await;
+
+    node_a.stop().await.ok();
+    node_b.stop().await.ok();
+    node_c.stop().await.ok();
+    let _ = std::fs::remove_dir_all(&storage_a);
+    let _ = std::fs::remove_dir_all(&storage_b);
+    let _ = std::fs::remove_dir_all(&storage_c);
+
+    assert!(
+        found_b.is_some(),
+        "node B (permanent, same group) must receive the announce: a permanent-type \
+         group has to work end to end, not just derive a different address"
+    );
+    assert!(
+        found_c.is_none(),
+        "node C (temporary) must NOT receive an announce sent into the permanent group"
     );
 }
