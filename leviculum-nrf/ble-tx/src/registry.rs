@@ -714,8 +714,18 @@ impl<const N: usize> PeerRegistry<N> {
     /// The companion of [`addr_linked`](Self::addr_linked), one level
     /// up: that one catches a peer still advertising the address we are
     /// connected on, this one catches the same peer under a fresh
-    /// address, which is the case the board captures of #412 are made
-    /// of — seven of seven outgoing links on one rotating phone.
+    /// address — a board that rebooted, an lnsd adapter that
+    /// re-registered, any advertiser of OURS that draws a new one.
+    ///
+    /// What it does NOT catch is the capture #412 was opened on, and
+    /// the sources say so rather than the capture: Columba at 6674ae87
+    /// advertises the service UUID and nothing else
+    /// (`BleAdvertiser.kt:205-210`; `addManufacturerData` appears in
+    /// none of its 990 .kt files), so the phone that took seven of
+    /// seven outgoing links carries no capability record, yields no
+    /// hint, and is dialled exactly as before. That half needs Columba
+    /// to carry the hint too, or the dial ledger and role preference
+    /// from #412's design comment.
     ///
     /// `None` — an advertiser that carried no hint — is never a match:
     /// a peer that said nothing about who it is keeps exactly its

@@ -373,9 +373,12 @@ impl LinkTable {
     ///
     /// [`Self::knows_addr`] catches a peer still advertising the
     /// address we are linked on; this catches the same peer under a
-    /// fresh one, which is the case #412's board captures are made of.
-    /// `None` — an advertiser that carried no hint — is never a match,
-    /// so a pre-#412 board and a phone are dialled exactly as before.
+    /// fresh one — an advertiser of ours that rotated, rebooted or
+    /// re-registered. `None` — an advertiser that carried no hint — is
+    /// never a match, so a pre-#412 board and an Android Columba peer
+    /// are dialled exactly as before: Columba at 6674ae87 advertises
+    /// the service UUID alone, so the phone #412 measured has no record
+    /// to read a hint out of.
     ///
     /// Live links only, deliberately: a pending handshake has not said
     /// who it is yet, and [`Self::knows_addr`] already holds its

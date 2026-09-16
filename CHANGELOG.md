@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - A node's BLE advertisement now carries the first four bytes of its
-  identity hash, so a board recognises a peer it is already linked to
-  before it dials it and stops spending its single outgoing link on a
-  phone that keeps changing its Bluetooth address (Codeberg #412).
+  identity hash, so a board or `lnsd` recognises a peer it already holds
+  a link to before it dials it, and no longer spends its scarce outgoing
+  link on that peer under a new Bluetooth address. It reaches as far as
+  the record does: a peer that advertises no capability record, an
+  Android Columba among them, is dialled exactly as before
+  (Codeberg #412).
 
 - `lnflash` knows the SenseCAP Solar Node P1-Pro, so every control command
   reaches it: `--watch`, `--announce`, `--set-time`, `--set-name`,

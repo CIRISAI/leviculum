@@ -70,7 +70,7 @@ The fifth is different. One configured `BLEInterface` section is one
 Reticulum interface and one broadcast domain (`BLEInterface`,
 `leviculum-std/src/interfaces/ble/mod.rs:5`). Every outbound packet
 goes through one planner that decides which links get a copy
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:674`, driven
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:677`, driven
 from `send_packet`,
 `leviculum-std/src/interfaces/ble/mod.rs:796`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
@@ -114,11 +114,11 @@ including when the dial never connected at all (`CentralGone`,
 `leviculum-std/src/interfaces/ble/bluez.rs:290`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:626`, into `note_reset`,
-`leviculum-std/src/interfaces/ble/links.rs:966`). The firmware restarts
+`leviculum-std/src/interfaces/ble/links.rs:969`). The firmware restarts
 its strict phase only at a real connection event or teardown
-(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1579`); a dial
+(`note_strict_reset`, `leviculum-nrf/src/ble/columba.rs:1584`); a dial
 that timed out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1713`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:1718`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.
@@ -183,7 +183,7 @@ That is not a criticism of it — the Columba wire spec has one notify
 characteristic, and no software layer can conjure a second one. It is
 the reason "the reference spawns children, so we should" is not an
 argument here. Our own planner is explicit about the same limit
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:674`).
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:677`).
 
 The firmware is the exception, and it cuts the other way: the
 SoftDevice's notification takes a connection handle, so a board *can*
@@ -303,9 +303,9 @@ parent to lean on. Measured against the tree, not assumed:
 | Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:158`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:1773`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:1954`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:1962`) | **medium** | parent |
-| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:742`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:922`) | **medium** — one adapter | parent |
+| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:742`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:925`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1029`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:301`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1032`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:301`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |
@@ -359,7 +359,7 @@ cleanest behaviour of the four, and it is a real scenario: a rotated-
 address reconnect holds two links to one identity for a moment. Under
 C and D there is one interface and one path entry; the planner takes
 the first link it finds for that identity
-(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:674`), and a
+(`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:677`), and a
 peer loss is reported only when the *last* link for that identity dies
 (`knows_identity`, `leviculum-std/src/interfaces/ble/links.rs:365`).
 The observable difference is which of two equally good links carries

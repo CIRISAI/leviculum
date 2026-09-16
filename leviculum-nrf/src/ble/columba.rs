@@ -1472,13 +1472,18 @@ fn addr_already_linked(addr_value: u64) -> bool {
 /// [`addr_already_linked`], one level up, where a rotated address
 /// cannot hide.
 ///
-/// This is where the corpus night's 7-of-7 goes: without it, every
-/// rotation of a linked phone looks like a new device, wins the
-/// fallback class by its low RPA and takes the board's ONE central
-/// slot, and the duplicate is only found after the connect, the
-/// discovery and the identity read. The rule host-tested in
-/// [`leviculum_ble_tx::PeerRegistry::hint_linked`]; this is the lock
+/// Without it a linked peer that draws a new address looks like a new
+/// device, wins the fallback class by its low address and takes the
+/// board's ONE central slot, and the duplicate is only found after the
+/// connect, the discovery and the identity read. The rule host-tested
+/// in [`leviculum_ble_tx::PeerRegistry::hint_linked`]; this is the lock
 /// around the firmware's single registry instance.
+///
+/// It reaches exactly as far as the record does, which is our own two
+/// stacks: the corpus night's 7-of-7 was an Android Columba, and
+/// Columba at 6674ae87 advertises the service UUID alone — no
+/// manufacturer record, so no hint, so that phone is dialled exactly
+/// as it was (see [`leviculum_ble_tx::PeerRegistry::hint_linked`]).
 ///
 /// A HINT, and used in one direction only: to skip a dial. `None` — an
 /// advertiser that carried no hint — is never a match, so a pre-#412

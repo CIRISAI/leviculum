@@ -80,6 +80,14 @@
 //! [`manufacturer_data_with_hint`] writes it, and
 //! [`crate::peer::PeerAdvertisement::identity_hint`] reads it back.
 //!
+//! Its reach is the record's reach, and that is our own two stacks. An
+//! Android Columba advertises the service UUID alone and carries no
+//! capability record at all (6674ae87), so the rotating phone the #412
+//! capture is made of yields no hint and is dialled exactly as before.
+//! What this closes is a peer of OURS reappearing under a new address;
+//! closing the other half needs Columba to carry the hint too, or the
+//! dial ledger and role preference #412's design comment proposes.
+//!
 //! It is a HINT, like the free-slot count, and the same rules bind it.
 //! Four bytes collide one time in 2^32, negligible at our node counts,
 //! and the only cost of a false match is a skipped dial: the
