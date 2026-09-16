@@ -485,4 +485,104 @@ mod tests {
             }
         );
     }
+
+    // --- Per-board seeding (Codeberg #268) ------------------------------
+
+    /// The number of backoffs a board walks before the retry budget forces
+    /// the transmission: every attempt but the last yields a `Backoff`.
+    const LADDER_LEN: usize = CAD_MAX_RETRIES as usize - 1;
+
+    /// The backoff ladder one board walks when every CAD comes back busy,
+    /// driven exactly the way `lora_task` drives this type: construct from
+    /// the board's seed, adopt the bench PHY, start a packet, spend the
+    /// acquisition jitter (it comes off the same stream, so a ladder taken
+    /// without it is a different sequence), then CAD until the gate forces.
+    fn busy_backoff_ladder(seed: u32) -> [u64; LADDER_LEN] {
+        let mut access = ChannelAccess::new(seed);
+        access.set_phy(125_000, 7, 5);
+        access.begin_packet();
+        let _ = access.acquisition_jitter_ms();
+        let mut ladder = [0u64; LADDER_LEN];
+        for (attempt, slots) in ladder.iter_mut().enumerate() {
+            match access.cad_busy() {
+                Verdict::Backoff { slots: drawn } => *slots = drawn,
+                other => panic!("attempt {attempt}: expected a backoff, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(access.cad_busy(), Verdict::Transmit { forced: true, .. }),
+            "the ladder must end at the forced TX"
+        );
+        ladder
+    }
+
+    #[test]
+    fn a_board_walks_the_same_ladder_twice_from_its_own_seed() {
+        // Per-board entropy must not cost reproducibility: a seed still
+        // determines the whole sequence, which is what lets a host test
+        // assert exact decisions and a rig run be replayed.
+        assert_eq!(
+            busy_backoff_ladder(0x5EED_1234),
+            busy_backoff_ladder(0x5EED_1234)
+        );
+        assert_eq!(busy_backoff_ladder(1), busy_backoff_ladder(1));
+    }
+
+    #[test]
+    fn two_boards_with_their_own_seeds_do_not_share_a_backoff_ladder() {
+        // Codeberg #268: every board seeded this PRNG with one compile-time
+        // constant, so two boards with equal draw counts — the normal case
+        // early in a scenario, where the rig powers them together and they
+        // react to the same third-party frame — drew byte-identical
+        // backoffs and collided again on every one of the eight retries.
+        //
+        // The defect is stated first, so the test reads as a claim about
+        // seeding rather than about xorshift32: one shared seed IS one
+        // shared ladder, and the fix is that boards no longer share the
+        // seed.
+        assert_eq!(
+            busy_backoff_ladder(0xDEAD_BEEF),
+            busy_backoff_ladder(0xDEAD_BEEF)
+        );
+
+        // Distinct seeds: no pair of boards may walk the same ladder. The
+        // population is deliberately more than a handful — the first
+        // backoff is drawn from a window of CAD_CW_INITIAL slots, so two
+        // boards agreeing on their FIRST retry is expected roughly half
+        // the time and only the full ladder separates them.
+        const BOARDS: usize = 64;
+        let ladders: [[u64; LADDER_LEN]; BOARDS] = core::array::from_fn(|i| {
+            busy_backoff_ladder(0x9E37_79B9u32.wrapping_mul(i as u32 + 1))
+        });
+        for (i, a) in ladders.iter().enumerate() {
+            for (j, b) in ladders.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "boards {i} and {j} walk the same ladder {a:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_jitter_a_board_owes_is_drawn_from_the_same_stream_as_its_backoffs() {
+        // #268 is one seed feeding both draws, so a fix that de-tiled the
+        // jitter but left the backoff on a second, still-shared stream
+        // would look fixed and collide on every retry. Spending the jitter
+        // has to move the ladder.
+        let mut with_jitter = ChannelAccess::new(0x00C0_FFEE);
+        with_jitter.set_phy(125_000, 7, 5);
+        with_jitter.begin_packet();
+        let _ = with_jitter.acquisition_jitter_ms();
+
+        let mut without_jitter = ChannelAccess::new(0x00C0_FFEE);
+        without_jitter.set_phy(125_000, 7, 5);
+        without_jitter.begin_packet();
+
+        let mut moved = false;
+        for _ in 0..LADDER_LEN {
+            match (with_jitter.cad_busy(), without_jitter.cad_busy()) {
+                (Verdict::Backoff { slots: a }, Verdict::Backoff { slots: b }) => moved |= a != b,
+                (a, b) => panic!("expected two backoffs, got {a:?} and {b:?}"),
+            }
+        }
+        assert!(moved, "the backoff ladder ignored the jitter draw");
+    }
 }

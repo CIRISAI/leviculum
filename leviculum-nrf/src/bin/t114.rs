@@ -351,10 +351,7 @@ async fn main(spawner: Spawner) {
         // Per-board entropy for the TX channel-access randomness: a fixed
         // seed here would make co-booted boards draw identical pre-TX
         // jitter and collide anyway (see `lora_task`).
-        let channel_seed = {
-            use rand_core::RngCore as _;
-            leviculum_nrf::rng::RawHwRng::new().next_u32()
-        };
+        let channel_seed = leviculum_nrf::lora::channel_seed();
         spawner.must_spawn(leviculum_nrf::lora::lora_task(
             lora,
             radio_cfg,

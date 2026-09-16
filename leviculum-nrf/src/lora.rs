@@ -1140,6 +1140,30 @@ pub async fn init(
     )
 }
 
+/// One word of per-board, per-boot entropy for [`lora_task`]'s
+/// `channel_seed`.
+///
+/// Every board binary draws its seed through this one function instead of
+/// inlining the RNG call, so the question Codeberg #268 was filed about —
+/// *what seeds the channel-access randomness?* — has exactly one answer to
+/// read, and a board added later inherits it rather than re-deciding it.
+/// Back then the answer was a compile-time constant and every board walked
+/// the same jitter draw and the same CAD backoff ladder.
+///
+/// The hardware RNG is the source because it is the only per-board, per-boot
+/// entropy reachable here. It is reachable on both sides of BLE bring-up:
+/// [`crate::rng::RawHwRng`] goes through the SoftDevice syscall once the SD
+/// is enabled and falls back to direct register access while it is off, and
+/// the board binaries call this from `main` before `Softdevice::enable`.
+///
+/// A board's own sequence stays reproducible from its seed, so a host test
+/// drives the same decisions the firmware makes (see
+/// `leviculum_channel_access`); only the seed differs between boards.
+pub fn channel_seed() -> u32 {
+    use rand_core::RngCore as _;
+    crate::rng::RawHwRng::new().next_u32()
+}
+
 // LoRa async task
 //
 // `channel_seed` feeds the channel-access randomness (acquisition jitter,
