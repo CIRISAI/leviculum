@@ -388,7 +388,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["3-2", "3-2.3", "3-2.3.1", "3-2.3.4.4", "3-2.4", "usb3"],
+            vec![
+                "3-2",
+                "3-2.3",
+                "3-2.3.1",
+                "3-2.3.2",
+                "3-2.3.4.4",
+                "3-2.4",
+                "usb3"
+            ],
             "a device dir has no colon in its name and does have an idVendor"
         );
     }
@@ -430,9 +438,19 @@ mod tests {
         // than assuming "the one UF2 drive".
         let all = fixture().devices().unwrap();
         let ours: Vec<&Device> = all.iter().filter(|d| d.id.vid == 0x1209).collect();
-        assert_eq!(ours.len(), 2, "a T114 and a RAK4631, both running ours");
-        assert_ne!(ours[0].id, ours[1].id);
-        assert_ne!(ours[0].serial, ours[1].serial);
+        assert_eq!(
+            ours.len(),
+            3,
+            "a T114, a Solar Node and a RAK4631, all three running ours"
+        );
+        let mut ids: Vec<UsbId> = ours.iter().map(|d| d.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "each board answers on its own USB ID");
+        let mut serials: Vec<&str> = ours.iter().filter_map(|d| d.serial.as_deref()).collect();
+        serials.sort();
+        serials.dedup();
+        assert_eq!(serials.len(), 3, "and reports its own serial");
     }
 
     #[test]

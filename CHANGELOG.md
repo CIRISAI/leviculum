@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnflash` knows the SenseCAP Solar Node P1-Pro, so every control command
+  reaches it: `--watch`, `--announce`, `--set-time`, `--set-name`,
+  `--set-ble-tx-gap` and the `--radio-*` flags. The board runs our firmware
+  on the rig and answered none of them before, because no catalogue entry
+  claimed its USB ID (`1209:0003`). Flashing it by manifest stays refused and
+  is now refused by construction: a catalogue entry is split into a control
+  half and an optional flashing half, and this board has none — its
+  bootloader publishes `nRF52840-SeeedXiao-v1`, which is the XIAO module's
+  identifier and not this product's, so any DIY XIAO with a differently
+  wired radio answers to it. A bundle carrying an image for such a board
+  fails to load, `--board solarnode` is refused before the bus is read, and a
+  flash session that meets it on the bus names it, says why, and does not
+  reboot it. It is flashed with `just flash-solarnode` (Codeberg #233).
+
 - The C API serves a file and retires a handler. `lev_send_file_response`
   sends a response Resource of the RAW bytes plus msgpack metadata, with no
   `[request_id, response]` wrapper — the wire form a NomadNet `/file/`

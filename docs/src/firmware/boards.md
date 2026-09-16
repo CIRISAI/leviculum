@@ -180,7 +180,7 @@ radio pinout turned out to be the easy half.
 > same bootloader product string `HT-n5262` for the T114, for MeshSolar
 > and for the Heltec Mesh Pocket, whose radio is wired differently and
 > which is not covered here. Both our tools match that string exactly
-> (`board_for_id` (`lnflash/src/manifest.rs:394`),
+> (`board_for_id` (`lnflash/src/manifest.rs:485`),
 > `leviculum-nrf/tools/uf2-runner.sh:79`), so if the `INFO_UF2.TXT`
 > `Board-ID` is identical too, neither can tell a Mesh Pocket from a
 > T114. We cannot check that without the hardware. Until someone does,
@@ -231,9 +231,15 @@ everything this build does not touch.
 
 The bootloader cannot tell these apart. `nRF52840-SeeedXiao-v1` names the
 MCU module, and a DIY XIAO with an entirely different radio wired to the
-same pads reports exactly the same string, so `lnflash` has no manifest
+same pads reports exactly the same string, so `lnflash` has no *flashing*
 entry for this board and must not be given one on that evidence
-(Codeberg #233). For the bring-up the image goes onto the mass-storage
+(Codeberg #233). It does have a control-only catalogue entry, keyed on
+the USB ID our own firmware publishes (`1209:0003`), so `--watch`,
+`--announce`, `--set-time` and the `--radio-*` flags reach this board
+like any other; a bundle carrying an image named after it is refused when
+it loads. Writing firmware goes through `just flash-solarnode`, which is
+told the `Board-ID` explicitly by a person who can see which board is on
+the bench, and for the first flash the image goes onto the mass-storage
 volume by hand.
 
 ### ESP32 class: Heltec WiFi LoRa 32 V4
@@ -383,9 +389,12 @@ question worth asking.
 
 Which boards the bundle knows at all is `lnflash/catalogue.toml`, and it
 is a shorter list than the tables above on purpose. A row here says our
-image would drive that board's radio; a catalogue entry says the
-bootloader can be told apart from every other board's, which is the
-stricter of the two claims and the only one a write may rest on. See
+image would drive that board's radio; a catalogue entry with a `flashing`
+section says the bootloader can be told apart from every other board's,
+which is the stricter of the two claims and the only one a write may rest
+on. A catalogue entry without one — the Solar Node's, Codeberg #233 —
+makes the control commands reach the board and nothing else; a bundle
+naming such a board fails to load. See
 [Building and flashing](flashing.md), "Which boards the bundle carries".
 
 ## Build target

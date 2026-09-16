@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::entry;
 use crate::envelope::SessionReply;
 use crate::infouf2::InfoUf2;
-use crate::manifest::{self, Board, Catalogue, Manifest, Payload, Payloads};
+use crate::manifest::{self, Board, Catalogue, Flashing, Manifest, Payload, Payloads};
 use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
 use crate::telemetry::{self, TelemetryPlan};
@@ -132,6 +132,7 @@ pub enum Error {
 pub struct Confirmed<'m> {
     name: &'m str,
     board: &'m Board,
+    flashing: &'m Flashing,
     payloads: &'m Payloads,
     _private: (),
 }
@@ -144,6 +145,15 @@ impl<'m> Confirmed<'m> {
     /// The hardware facts, from the catalogue.
     pub fn board(&self) -> &'m Board {
         self.board
+    }
+
+    /// The flash window, the `Board-ID` and the SoftDevice constraint. A
+    /// `Confirmed` carries the flashing half directly rather than an
+    /// `Option` of it: a board without one has no `Board-ID` for
+    /// [`confirm_identity`] to have matched, so by the time this exists the
+    /// half is known to be there.
+    pub fn flashing(&self) -> &'m Flashing {
+        self.flashing
     }
 
     /// The images the bundle carries for it. A `Confirmed` cannot exist
@@ -177,11 +187,19 @@ pub fn confirm_identity<'m>(
             port: port.to_string(),
         });
     };
-    let Some((name, board)) = catalogue.board_for_id(board_id) else {
+    // Only a flashable board can come back from here, and the boards listed
+    // when none does are the flashable ones: naming a control-only board in
+    // this message would send the user looking for an image that no bundle
+    // is allowed to carry.
+    let Some((name, board, flashing)) = catalogue.board_for_id(board_id) else {
         return Err(Error::UnknownBoard {
             port: port.to_string(),
             board_id: board_id.to_string(),
-            available: catalogue.names().iter().map(|s| s.to_string()).collect(),
+            available: catalogue
+                .flashable_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         });
     };
     if let Some(asked) = asked_for {
@@ -198,6 +216,7 @@ pub fn confirm_identity<'m>(
     Ok(Confirmed {
         name,
         board,
+        flashing,
         payloads,
         _private: (),
     })
@@ -309,23 +328,23 @@ pub fn read_installed(drive: &Drive, info: &InfoUf2) -> Installed {
 pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<Image, Error> {
     // The only way to get the bytes, and it verifies the checksum.
     let bytes = payload.read(root)?;
-    let board = confirmed.board();
+    let flashing = confirmed.flashing();
     let image = match payload.convert.unwrap_or(manifest::Convert::None) {
         manifest::Convert::None => Image::parse(&bytes)?,
         manifest::Convert::HexToUf2 => {
             let text = String::from_utf8_lossy(&bytes);
-            Image::from_spans(&crate::ihex::parse(&text)?, board.flash.family_id)
+            Image::from_spans(&crate::ihex::parse(&text)?, flashing.flash.family_id)
         }
     };
     let file = payload.file.display().to_string();
 
     if let Some(actual) = image.family_id() {
-        if actual != board.flash.family_id {
+        if actual != flashing.flash.family_id {
             return Err(Error::WrongFamily {
                 file,
                 board: confirmed.name().to_string(),
                 actual,
-                expected: board.flash.family_id,
+                expected: flashing.flash.family_id,
             });
         }
     }
@@ -334,14 +353,14 @@ pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<
     // declined silently, which is expected for a SoftDevice image carrying
     // an MBR, so a low start is reported, not refused.
     let (low, high) = image.address_range().unwrap_or((0, 0));
-    if high > board.flash.writable_end {
+    if high > flashing.flash.writable_end {
         return Err(Error::OutsideWindow {
             file,
             board: confirmed.name().to_string(),
             low,
             high,
-            start: board.flash.writable_start,
-            end: board.flash.writable_end,
+            start: flashing.flash.writable_start,
+            end: flashing.flash.writable_end,
         });
     }
     Ok(image)
@@ -553,12 +572,35 @@ pub fn run(
     ui: &mut dyn Ui,
     opts: &Options,
 ) -> Result<Vec<Outcome>, Error> {
+    // `--board` is the only handle a user has for saying which board a run is
+    // for, so a name this tool does not flash is answered before the bus is
+    // read at all — and the boards offered instead are the flashable ones.
+    if let Some(asked) = &opts.board {
+        match catalogue.board(asked) {
+            Ok(board) => board.require_flashing(asked).map(|_| ())?,
+            Err(_) => {
+                return Err(manifest::Error::UnknownBoard {
+                    wanted: asked.clone(),
+                    available: catalogue
+                        .flashable_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                }
+                .into())
+            }
+        }
+    }
+
     let candidates = find_candidates(catalogue, sysfs)?;
     if candidates.is_empty() {
         ui.say("No board lnflash knows is attached.");
+        // The flashable ones, not every entry: this is a flashing session,
+        // and a user sent after a control-only board would be looking for an
+        // image no bundle may carry.
         ui.say(&format!(
-            "It knows: {}. Nothing to do.",
-            catalogue.names().join(", ")
+            "It flashes: {}. Nothing to do.",
+            catalogue.flashable_names().join(", ")
         ));
         // A board that is physically plugged in and still lands here is the
         // common case, not the exotic one: firmware that crashes before USB
@@ -1879,6 +1921,24 @@ fn resolve(
 ) -> Result<Option<Outcome>, Error> {
     let port = candidate.device.name.clone();
 
+    // Before anything is touched, dry run or not: a board this tool does not
+    // flash by manifest is left alone, and the reason is said out loud. It is
+    // on the bus because its catalogue entry makes the control commands work
+    // (Codeberg #233), and a flashing session that quietly skipped it would
+    // look exactly like one that failed to see it — which is the bug that
+    // entry was added to fix.
+    if let Err(err) = catalogue
+        .board(&candidate.hint)
+        .and_then(|board| board.require_flashing(&candidate.hint))
+    {
+        ui.say(&format!("{port}: {err}"));
+        ui.say(&format!(
+            "{port}: its control commands are unaffected — --announce, --set-time, --radio-* \
+             and --watch all reach it.\n"
+        ));
+        return Ok(None);
+    }
+
     if opts.dry_run && !candidate.in_bootloader {
         ui.say(&format!(
             "{port}: would enter the bootloader and confirm what it is there. \
@@ -1924,7 +1984,7 @@ fn resolve(
         ));
     }
 
-    let req = confirmed.board().softdevice_req(confirmed.name())?;
+    let req = confirmed.flashing().softdevice_req(confirmed.name())?;
     let precondition = check_softdevice(&installed, req.as_ref());
     let app_image = prepare(&confirmed.payloads().app, &manifest.root, &confirmed)?;
 
@@ -1961,7 +2021,7 @@ fn resolve(
             plan.push(describe_image(
                 "which writes",
                 &image,
-                confirmed.board().flash.writable_start,
+                confirmed.flashing().flash.writable_start,
             ));
             plan.push(format!(
                 "  its licence, {}, ships with it",
@@ -1984,7 +2044,7 @@ fn resolve(
     plan.push(describe_image(
         "which writes",
         &app_image,
-        confirmed.board().flash.writable_start,
+        confirmed.flashing().flash.writable_start,
     ));
 
     ui.say(&format!("\n{port}: this will"));
@@ -2015,7 +2075,7 @@ fn resolve(
 
     let mut drive = drive;
     if let Some(image) = remedy_image {
-        let declined = image.blocks_below(confirmed.board().flash.writable_start);
+        let declined = image.blocks_below(confirmed.flashing().flash.writable_start);
         let written = drive.write_image("SD.UF2", &image, declined)?;
         report_write(ui, &port, "SoftDevice", &written);
         drive.close()?;
@@ -2043,7 +2103,7 @@ fn resolve(
         remedy_took(&after, req.as_ref(), confirmed.name())?;
     }
 
-    let declined = app_image.blocks_below(confirmed.board().flash.writable_start);
+    let declined = app_image.blocks_below(confirmed.flashing().flash.writable_start);
     let written = drive.write_image("APP.UF2", &app_image, declined)?;
     report_write(ui, &port, "application", &written);
     drive.close()?;
@@ -2299,9 +2359,15 @@ fn enter_bootloader(
     // The hint is enough to choose *how to knock*; it is not enough to
     // choose what to write, which is why identity is confirmed afterwards.
     let board = catalogue.board(&candidate.hint)?;
+    // Knocking a board into its bootloader is already a change to it, and on
+    // a control-only board it is a change with no purpose: nothing may be
+    // written afterwards. `resolve` refuses such a board before it gets
+    // here; this is the second lock on the same door, because the cost of it
+    // being missed once is a board sitting in DFU with no image for it.
+    let flashing = board.require_flashing(&candidate.hint)?;
     let port = candidate.device.name.clone();
 
-    for mechanism in &board.entry {
+    for mechanism in &flashing.entry {
         match mechanism {
             manifest::Entry::Touch1200 => {
                 let Some(tty) = candidate.device.tty(0) else {
@@ -2322,11 +2388,11 @@ fn enter_bootloader(
                 ));
                 ui.wait_for_human(&entry::double_tap_instruction(
                     &format!("The board on {port}"),
-                    &board.double_tap,
+                    &flashing.double_tap,
                 ))?;
             }
         }
-        let ids = board.bootloader_ids(&candidate.hint)?;
+        let ids = flashing.bootloader_ids(&candidate.hint)?;
         if let Some(found) =
             entry::wait_for_bootloader(sysfs, &ids, Some(&candidate.device), opts.appear_within)?
         {
@@ -2666,7 +2732,7 @@ convert = "hex-to-uf2"
         )
         .unwrap();
         assert_eq!(confirmed.name(), "t114");
-        assert_eq!(confirmed.board().flash.app_base, 0x2_7000);
+        assert_eq!(confirmed.flashing().flash.app_base, 0x2_7000);
     }
 
     #[test]
@@ -2711,9 +2777,9 @@ convert = "hex-to-uf2"
         )
         .unwrap();
         assert_eq!(confirmed.name(), "rak4631");
-        assert_eq!(confirmed.board().flash.app_base, 0x2_7000);
+        assert_eq!(confirmed.flashing().flash.app_base, 0x2_7000);
         assert_eq!(
-            confirmed.board().identify.msc_label.as_deref(),
+            confirmed.flashing().identify.msc_label.as_deref(),
             Some("RAK4631")
         );
         // ...and the T114 on the same bench still resolves to the T114 image.
@@ -3001,15 +3067,17 @@ convert = "hex-to-uf2"
         // catalogue alone is enough.
         let found = find_candidates(&catalogue(), &sysfs()).unwrap();
         let names: Vec<&str> = found.iter().map(|c| c.device.name.as_str()).collect();
-        // 3-2.3.1 is our T114 application, 3-2.4 its bootloader, and 3-2.3.4.4
-        // our RAK4631 application on 1209:0002. Before #261 the last one was
-        // invisible: the catalogue listed no board claiming that ID, so
-        // `lnflash --set-time` addressed the two T114s and silently skipped
-        // the Pocket V2 sitting on the same hub.
-        assert_eq!(names, vec!["3-2.3.1", "3-2.3.4.4", "3-2.4"]);
+        // 3-2.3.1 is our T114 application, 3-2.4 its bootloader, 3-2.3.4.4 our
+        // RAK4631 on 1209:0002 and 3-2.3.2 our Solar Node on 1209:0003. Before
+        // #261 the RAK was invisible and before #233 the Solar Node was, for
+        // the same reason both times: the catalogue listed no board claiming
+        // that ID, so `lnflash --set-time` addressed the T114s and silently
+        // skipped whatever else was on the hub.
+        assert_eq!(names, vec!["3-2.3.1", "3-2.3.2", "3-2.3.4.4", "3-2.4"]);
         assert!(!found[0].in_bootloader);
         assert!(!found[1].in_bootloader);
-        assert!(found[2].in_bootloader);
+        assert!(!found[2].in_bootloader);
+        assert!(found[3].in_bootloader);
         // And each is hinted at its own board rather than at whichever entry
         // the catalogue happens to list first.
         assert!(
@@ -3018,18 +3086,26 @@ convert = "hex-to-uf2"
             found[0].describe()
         );
         assert!(
-            found[1].describe().contains("probably a rak4631"),
+            found[1].describe().contains("probably a solarnode"),
             "{:?}",
             found[1].describe()
         );
-        assert!(found[2].describe().contains("probably a t114"));
+        assert!(
+            found[2].describe().contains("probably a rak4631"),
+            "{:?}",
+            found[2].describe()
+        );
+        assert!(found[3].describe().contains("probably a t114"));
     }
 
     #[test]
-    fn the_configure_only_sessions_address_the_rak_as_well_as_the_t114() {
+    fn the_configure_only_sessions_address_every_running_board() {
         // Codeberg #261, seen from the rig: `--set-time` walked the bus, found
         // both T114s and never spoke to the Pocket V2, because no catalogue
-        // entry claimed its USB ID.
+        // entry claimed its USB ID. Codeberg #233 is the same report about the
+        // Solar Node, and it is in this list for the same reason — a board
+        // that carries traffic and answers control frames was addressed by
+        // nothing this tool ran.
         //
         // This stops at the enumeration step on purpose. Everything past it
         // opens the board's transport port, and this suite runs on the host
@@ -3052,9 +3128,10 @@ convert = "hex-to-uf2"
             ports,
             vec![
                 ("3-2.3.1", dev.path().join("ttyACM2")),
+                ("3-2.3.2", dev.path().join("ttyACM6")),
                 ("3-2.3.4.4", dev.path().join("ttyACM4")),
             ],
-            "both running boards, each on its own transport port (if02)"
+            "every running board, each on its own transport port (if02)"
         );
         // The bootloader on 3-2.4 has no clock to set and is not addressed.
         assert!(!ports.iter().any(|(port, _)| *port == "3-2.4"));
@@ -3095,6 +3172,7 @@ convert = "hex-to-uf2"
         fs::create_dir_all(&by_id).unwrap();
         symlink("../../ttyACM2", by_id.join("usb-leviculum_T114-if02")).unwrap();
         symlink("../../ttyACM4", by_id.join("usb-leviculum_RAK4631-if02")).unwrap();
+        symlink("../../ttyACM6", by_id.join("usb-leviculum_SolarNode-if02")).unwrap();
 
         let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
         let mut ui = crate::ui::testing::Fake::agreeing();
@@ -3104,6 +3182,7 @@ convert = "hex-to-uf2"
             ports,
             vec![
                 by_id.join("usb-leviculum_T114-if02"),
+                by_id.join("usb-leviculum_SolarNode-if02"),
                 by_id.join("usb-leviculum_RAK4631-if02"),
             ]
         );
@@ -3240,17 +3319,14 @@ convert = "hex-to-uf2"
         // scripted stub that runs the firmware's real decision function.
         let t114_pty = crate::sys::testpty::Pty::open();
         let rak_pty = crate::sys::testpty::Pty::open();
-        crate::envelope::testing::envelope_firmware_stub(
-            &t114_pty,
-            crate::envelope::testing::seen(),
-        );
-        crate::envelope::testing::envelope_firmware_stub(
-            &rak_pty,
-            crate::envelope::testing::seen(),
-        );
+        let solar_pty = crate::sys::testpty::Pty::open();
+        for pty in [&t114_pty, &rak_pty, &solar_pty] {
+            crate::envelope::testing::envelope_firmware_stub(pty, crate::envelope::testing::seen());
+        }
         let dev = dev_tree(&[
             ("ttyACM2", &t114_pty.slave_path),
             ("ttyACM4", &rak_pty.slave_path),
+            ("ttyACM6", &solar_pty.slave_path),
         ]);
         let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
 
@@ -3263,24 +3339,38 @@ convert = "hex-to-uf2"
             "{}",
             ui.transcript()
         );
+        // Every board on the bus, the Solar Node included: a session is
+        // successful only if it spoke to all of them, and #233 is exactly the
+        // case where one was passed over in silence.
+        for port in ["3-2.3.1", "3-2.3.2", "3-2.3.4.4"] {
+            assert!(
+                ui.transcript().contains(&format!("{port}: telemetry on")),
+                "{}",
+                ui.transcript()
+            );
+        }
     }
 
     #[test]
     fn a_storm_session_reaches_every_board_and_says_what_was_accepted() {
-        // The whole host path for #384's instrument: two running boards,
+        // The whole host path for #384's instrument: every running board,
         // the capability probe, the storm frame, the ack, and a transcript
         // an operator can act on. The stub runs the firmware's own
         // decision function, so the numbers asserted here are the numbers
         // a board would have classified.
         let t114_pty = crate::sys::testpty::Pty::open();
         let rak_pty = crate::sys::testpty::Pty::open();
+        let solar_pty = crate::sys::testpty::Pty::open();
         let t114_seen = crate::envelope::testing::seen();
         let rak_seen = crate::envelope::testing::seen();
+        let solar_seen = crate::envelope::testing::seen();
         crate::envelope::testing::envelope_firmware_stub(&t114_pty, t114_seen.clone());
         crate::envelope::testing::envelope_firmware_stub(&rak_pty, rak_seen.clone());
+        crate::envelope::testing::envelope_firmware_stub(&solar_pty, solar_seen.clone());
         let dev = dev_tree(&[
             ("ttyACM2", &t114_pty.slave_path),
             ("ttyACM4", &rak_pty.slave_path),
+            ("ttyACM6", &solar_pty.slave_path),
         ]);
         let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
 
@@ -3291,8 +3381,8 @@ convert = "hex-to-uf2"
         let mut ui = crate::ui::testing::Fake::agreeing();
         let ok = store_storm(&catalogue(), &sysfs, &mut ui, storm).unwrap();
         assert!(ok, "{}", ui.transcript());
-        // Both boards, both numbers.
-        for seen in [&t114_seen, &rak_seen] {
+        // Every board, the same numbers.
+        for seen in [&t114_seen, &rak_seen, &solar_seen] {
             assert_eq!(
                 crate::envelope::testing::store_storm_frame(seen),
                 Some(storm)

@@ -14,6 +14,18 @@
 //! and no image at all; before the split they loaded the whole bundle
 //! manifest to reach the USB IDs and refused to start without one.
 //!
+//! A catalogue entry is split once more, along the same seam (Codeberg
+//! #233). [`Board`] holds what talking to a running board needs — the USB
+//! IDs its firmware answers on — and an optional [`Flashing`] holds what
+//! writing an image needs: the bootloader's IDs, the `Board-ID` it
+//! publishes, the flash window, the SoftDevice constraint. The two rest on
+//! different evidence and must not be conflated: a board identifies itself
+//! over its transport port before a control frame does anything, while a
+//! write rests on a `Board-ID` that on some boards names a module rather
+//! than a product. A board whose `Board-ID` is not an identity therefore
+//! gets a control-only entry, and [`Confirmed`](crate::flow::Confirmed) —
+//! the token every write needs — cannot be made for one at all.
+//!
 //! The binary is board-agnostic. An `if board == "t114"` anywhere outside
 //! this module would mean the split has failed — a new nRF or RP2040 board
 //! is meant to be data entry, and a new chip family exactly one new
@@ -92,6 +104,8 @@ pub enum Error {
         wanted: String,
         available: Vec<String>,
     },
+    #[error("lnflash does not flash {board} by manifest: {why}")]
+    NotFlashable { board: String, why: String },
     #[error("board {board}: {field} is not a version constraint: {source}")]
     BadConstraint {
         board: String,
@@ -179,14 +193,46 @@ pub struct BundleInfo {
     pub built: Option<String>,
 }
 
-/// Everything this tool knows about one board — the four axes and the
-/// preconditions crossing them. All of it hardware fact, which is why it
-/// lives in the catalogue and not in a bundle: none of it changes when a new
-/// firmware release is cut.
+/// One board, as far as talking to it goes. All of it hardware fact, which
+/// is why it lives in the catalogue and not in a bundle: none of it changes
+/// when a new firmware release is cut.
+///
+/// What writing to it takes is [`Flashing`], and it is optional — see the
+/// module header. A board with none is control-only and has to say why in
+/// `not_flashable`; a board may not state both, and the catalogue will not
+/// load if either rule is broken.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Board {
-    /// Chip family, informational. `transport` is what decides behaviour.
+    /// Chip family, informational. The transport is what decides behaviour.
     pub family: String,
+    /// USB IDs worth talking to, and the whole handle the control commands
+    /// have. Never identity: they belong to whatever firmware is installed,
+    /// not to the board — which is safe here because the board on the other
+    /// end identifies itself before any control frame does anything, and a
+    /// wrong ID addresses nothing rather than writing anything.
+    #[serde(default)]
+    pub candidate_usb: Vec<String>,
+    /// What writing an image to this board takes. `None` is a decision, not
+    /// an omission: see `not_flashable`.
+    #[serde(default)]
+    pub flashing: Option<Flashing>,
+    /// Why this board has no [`Flashing`] half, in the words the user is
+    /// refused with. Mandatory exactly when `flashing` is absent, so
+    /// "control only" cannot be arrived at by forgetting something.
+    #[serde(default)]
+    pub not_flashable: Option<String>,
+}
+
+/// What writing an image to one board takes — the remaining three axes and
+/// the preconditions crossing them.
+///
+/// Held apart from [`Board`] because a write rests on evidence a control
+/// command does not need and must not be given on weaker: the `Board-ID`
+/// from `INFO_UF2.TXT`, which carries a write decision only where it is
+/// bound to the same physical unit as the radio wiring
+/// (docs/src/concepts/lnode-flashing.md, "Four axes").
+#[derive(Debug, Clone, Deserialize)]
+pub struct Flashing {
     pub transport: Transport,
     pub entry: Vec<Entry>,
     pub identify: Identify,
@@ -215,7 +261,11 @@ pub struct DoubleTap {
     pub docs: Option<String>,
 }
 
-/// The **identify** axis, in the two stages the order of work demands.
+/// The **identify** axis of the flashing half: what the bootloader says.
+///
+/// The board's application IDs are not here — they are [`Board`]'s
+/// `candidate_usb`, because they are the control half's evidence and a
+/// write may not rest on them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Identify {
     /// The truth, read from `INFO_UF2.TXT` after entering the bootloader.
@@ -224,10 +274,6 @@ pub struct Identify {
     /// USB IDs the bootloader answers on. Stage one only: it says a device
     /// is worth mounting, never what board it is.
     pub bootloader_usb: Vec<String>,
-    /// USB IDs worth trying a touch on. Stage one only, and weaker still —
-    /// these belong to whatever firmware is installed, not to the board.
-    #[serde(default)]
-    pub candidate_usb: Vec<String>,
     /// The mass-storage label the bootloader publishes. Reported to the
     /// user; never used to decide anything.
     #[serde(default)]
@@ -313,6 +359,50 @@ impl Payload {
 }
 
 impl Board {
+    /// The flashing half, or `None` for a control-only board.
+    pub fn flashing(&self) -> Option<&Flashing> {
+        self.flashing.as_ref()
+    }
+
+    /// The flashing half, or the refusal that says why there is none.
+    ///
+    /// Every path that is about to write — or about to reboot a board so it
+    /// can be written — goes through here, so "this board is not flashed by
+    /// manifest" is a single decision with a single wording rather than a
+    /// check each caller could forget.
+    pub fn require_flashing(&self, name: &str) -> Result<&Flashing, Error> {
+        self.flashing.as_ref().ok_or_else(|| Error::NotFlashable {
+            board: name.to_string(),
+            // The catalogue will not load with neither half stated, so the
+            // fallback is unreachable; it exists so that being wrong about
+            // that costs a vague sentence rather than a panic.
+            why: self
+                .not_flashable
+                .as_deref()
+                .unwrap_or("its catalogue entry states no flashing section")
+                .trim()
+                .to_string(),
+        })
+    }
+
+    /// USB IDs of the running application. The control half's whole handle,
+    /// and a hint — never identity — on the flashing side.
+    pub fn candidate_ids(&self, name: &str) -> Result<Vec<UsbId>, Error> {
+        parse_ids(&self.candidate_usb, name, "candidate_usb")
+    }
+
+    /// USB IDs this board's bootloader answers on, empty for a control-only
+    /// board. Empty is the honest answer there: lnflash has no image it may
+    /// write to that bootloader, so it has no business waiting for one.
+    pub fn bootloader_ids(&self, name: &str) -> Result<Vec<UsbId>, Error> {
+        match self.flashing() {
+            Some(flashing) => flashing.bootloader_ids(name),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+impl Flashing {
     /// The SoftDevice constraint, parsed. `None` means the board states no
     /// SoftDevice precondition at all.
     pub fn softdevice_req(&self, name: &str) -> Result<Option<VersionReq>, Error> {
@@ -322,7 +412,7 @@ impl Board {
             .map(|s| {
                 VersionReq::parse(s).map_err(|source| Error::BadConstraint {
                     board: name.to_string(),
-                    field: "requires.softdevice".into(),
+                    field: "flashing.requires.softdevice".into(),
                     source,
                 })
             })
@@ -333,12 +423,8 @@ impl Board {
         parse_ids(
             &self.identify.bootloader_usb,
             name,
-            "identify.bootloader_usb",
+            "flashing.identify.bootloader_usb",
         )
-    }
-
-    pub fn candidate_ids(&self, name: &str) -> Result<Vec<UsbId>, Error> {
-        parse_ids(&self.identify.candidate_usb, name, "identify.candidate_usb")
     }
 }
 
@@ -391,15 +477,36 @@ impl Catalogue {
     /// The board whose `Board-ID` matches what the bootloader published.
     /// This is stage two of identify — the answer a write is allowed to rest
     /// on — so it matches exactly, never as a substring.
-    pub fn board_for_id(&self, board_id: &str) -> Option<(&str, &Board)> {
-        self.board
-            .iter()
-            .find(|(_, b)| b.identify.info_uf2_board_id == board_id)
-            .map(|(name, b)| (name.as_str(), b))
+    ///
+    /// Only a board with a flashing half can come out of here, which is what
+    /// makes a control-only entry unreachable from the write path rather
+    /// than merely unlikely to be reached: there is no `Board-ID` on such an
+    /// entry to match in the first place.
+    pub fn board_for_id(&self, board_id: &str) -> Option<(&str, &Board, &Flashing)> {
+        self.board.iter().find_map(|(name, board)| {
+            let flashing = board.flashing()?;
+            (flashing.identify.info_uf2_board_id == board_id).then_some((
+                name.as_str(),
+                board,
+                flashing,
+            ))
+        })
     }
 
     pub fn names(&self) -> Vec<&str> {
         self.board.keys().map(String::as_str).collect()
+    }
+
+    /// The boards a bundle may carry an image for. What to list when a user
+    /// is being told which board to name on the flashing path — offering
+    /// them one that is control-only would send them after an image no
+    /// bundle is allowed to contain.
+    pub fn flashable_names(&self) -> Vec<&str> {
+        self.board
+            .iter()
+            .filter(|(_, board)| board.flashing().is_some())
+            .map(|(name, _)| name.as_str())
+            .collect()
     }
 }
 
@@ -463,42 +570,81 @@ fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
         return Err(bad("a catalogue with no boards in it".into()));
     }
     for (name, board) in &catalogue.board {
-        if board.identify.info_uf2_board_id.trim().is_empty() {
+        board.candidate_ids(name)?;
+
+        // The two halves are exclusive and exhaustive. Both stated is a
+        // contradiction; neither is an entry that can do nothing at all, and
+        // the reason a board is control-only has to be written down where the
+        // user who is refused can be shown it (Codeberg #233).
+        match (board.flashing(), &board.not_flashable) {
+            (Some(_), Some(_)) => {
+                return Err(bad(format!(
+                    "board {name}: states both a flashing section and not_flashable; one of the \
+                     two is wrong, and guessing which would either widen the flashing path or \
+                     silently close it"
+                )))
+            }
+            (None, None) => {
+                return Err(bad(format!(
+                    "board {name}: no flashing section and no not_flashable saying why. A board \
+                     this tool does not flash is a decision, and the user who is refused has to \
+                     be told the reason"
+                )))
+            }
+            (None, Some(why)) if why.trim().is_empty() => {
+                return Err(bad(format!(
+                    "board {name}: not_flashable is empty, so the refusal would carry no reason"
+                )))
+            }
+            (None, Some(_)) if board.candidate_usb.is_empty() => {
+                return Err(bad(format!(
+                    "board {name}: control-only and no candidate_usb, so nothing could ever find \
+                     it and the entry does nothing"
+                )))
+            }
+            (None, Some(_)) | (Some(_), None) => {}
+        }
+        let Some(flashing) = board.flashing() else {
+            continue;
+        };
+
+        if flashing.identify.info_uf2_board_id.trim().is_empty() {
             return Err(bad(format!(
-                "board {name}: identify.info_uf2_board_id is empty, so no board could ever \
-                 be confirmed and no write could ever be safe"
+                "board {name}: flashing.identify.info_uf2_board_id is empty, so no board could \
+                 ever be confirmed and no write could ever be safe"
             )));
         }
-        if board.entry.is_empty() {
+        if flashing.entry.is_empty() {
             return Err(bad(format!(
                 "board {name}: no entry mechanism, so the bootloader is unreachable"
             )));
         }
-        if board.identify.bootloader_usb.is_empty() {
+        if flashing.identify.bootloader_usb.is_empty() {
             return Err(bad(format!(
-                "board {name}: no identify.bootloader_usb, so the bootloader is unrecognisable"
+                "board {name}: no flashing.identify.bootloader_usb, so the bootloader is \
+                 unrecognisable"
             )));
         }
-        board.bootloader_ids(name)?;
-        board.candidate_ids(name)?;
-        board.softdevice_req(name)?;
+        flashing.bootloader_ids(name)?;
+        flashing.softdevice_req(name)?;
 
-        if board.flash.family_id == crate::uf2::FAMILY_NRF52_BOOTLOADER {
+        let flash = &flashing.flash;
+        if flash.family_id == crate::uf2::FAMILY_NRF52_BOOTLOADER {
             return Err(bad(format!(
                 "board {name}: flash.family_id is the bootloader family; that image rewrites \
                  MBR, bootloader and UICR, and a failure there needs SWD to undo"
             )));
         }
-        if board.flash.writable_start >= board.flash.writable_end {
+        if flash.writable_start >= flash.writable_end {
             return Err(bad(format!(
                 "board {name}: flash window {:#x}..{:#x} is empty",
-                board.flash.writable_start, board.flash.writable_end
+                flash.writable_start, flash.writable_end
             )));
         }
-        if !(board.flash.writable_start..board.flash.writable_end).contains(&board.flash.app_base) {
+        if !(flash.writable_start..flash.writable_end).contains(&flash.app_base) {
             return Err(bad(format!(
                 "board {name}: app_base {:#x} is outside the writable window {:#x}..{:#x}",
-                board.flash.app_base, board.flash.writable_start, board.flash.writable_end
+                flash.app_base, flash.writable_start, flash.writable_end
             )));
         }
     }
@@ -518,6 +664,13 @@ fn validate(manifest: &Manifest, catalogue: &Catalogue, path: &Path) -> Result<(
         // name is the only handle --board offers, so say it at load time
         // rather than after a board has been brought into its bootloader.
         let board = catalogue.board(name)?;
+        // The same argument, one step further: a bundle carrying an image for
+        // a board this tool does not flash by manifest is refused here, at
+        // load time, rather than at the drive. It is the bundle-side half of
+        // the control/flashing split — without it, a control-only entry would
+        // hold only as long as nobody wrote a payload section naming it
+        // (Codeberg #233).
+        let flashing = board.require_flashing(name)?;
 
         exists(manifest, &payloads.app.file, name, "app.file", path)?;
         if let Some(remedy) = &payloads.remedy.softdevice {
@@ -540,9 +693,10 @@ fn validate(manifest: &Manifest, catalogue: &Catalogue, path: &Path) -> Result<(
             // is allowed — "I cannot fix this, here is why" beats writing
             // anyway — but a remedy without the precondition it repairs is
             // nonsense.
-            if board.requires.softdevice.is_none() {
+            if flashing.requires.softdevice.is_none() {
                 return Err(bad(format!(
-                    "board {name}: a softdevice remedy with no requires.softdevice to trigger it"
+                    "board {name}: a softdevice remedy with no flashing.requires.softdevice to \
+                     trigger it"
                 )));
             }
         }
@@ -731,16 +885,17 @@ convert = "hex-to-uf2"
         // disk, which is what lets --set-time and --set-telemetry start.
         let catalogue = Catalogue::builtin().unwrap();
         let board = catalogue.board("t114").unwrap();
-        assert_eq!(board.transport, Transport::Uf2Msc);
-        assert_eq!(board.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
-        assert_eq!(board.identify.info_uf2_board_id, "HT-n5262");
-        assert_eq!(board.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
-        assert_eq!(board.flash.app_base, 0x2_7000);
+        let flashing = board.require_flashing("t114").unwrap();
+        assert_eq!(flashing.transport, Transport::Uf2Msc);
+        assert_eq!(flashing.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
+        assert_eq!(flashing.identify.info_uf2_board_id, "HT-n5262");
+        assert_eq!(flashing.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
+        assert_eq!(flashing.flash.app_base, 0x2_7000);
         assert_eq!(
-            board.softdevice_req("t114").unwrap().unwrap().as_str(),
+            flashing.softdevice_req("t114").unwrap().unwrap().as_str(),
             ">=7.0.1, <8.0.0"
         );
-        assert_eq!(catalogue.names(), vec!["rak4631", "t114"]);
+        assert_eq!(catalogue.names(), vec!["rak4631", "solarnode", "t114"]);
     }
 
     #[test]
@@ -750,15 +905,23 @@ convert = "hex-to-uf2"
         // measured; the test is what stops a typo in the transcription.
         let catalogue = catalogue();
         let board = catalogue.board("rak4631").unwrap();
-        assert_eq!(board.transport, Transport::Uf2Msc);
-        assert_eq!(board.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
-        assert_eq!(board.identify.info_uf2_board_id, "WisBlock-RAK4631-Board");
-        assert_eq!(board.identify.msc_label.as_deref(), Some("RAK4631"));
-        assert_eq!(board.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
-        assert_eq!(board.flash.app_base, 0x2_7000);
-        assert_eq!(board.flash.writable_end, 0xEA000);
+        let flashing = board.require_flashing("rak4631").unwrap();
+        assert_eq!(flashing.transport, Transport::Uf2Msc);
+        assert_eq!(flashing.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
         assert_eq!(
-            board.softdevice_req("rak4631").unwrap().unwrap().as_str(),
+            flashing.identify.info_uf2_board_id,
+            "WisBlock-RAK4631-Board"
+        );
+        assert_eq!(flashing.identify.msc_label.as_deref(), Some("RAK4631"));
+        assert_eq!(flashing.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
+        assert_eq!(flashing.flash.app_base, 0x2_7000);
+        assert_eq!(flashing.flash.writable_end, 0xEA000);
+        assert_eq!(
+            flashing
+                .softdevice_req("rak4631")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             ">=7.0.1, <8.0.0"
         );
     }
@@ -809,15 +972,127 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_board_lnflash_does_not_know_is_named_along_with_the_ones_it_does() {
-        // The XIAO nRF52840 family has no entry and is not meant to get one
-        // until a second discriminator exists (docs/src/firmware/boards.md).
+        // A bare XIAO nRF52840 is still not a board this tool knows, and is
+        // not meant to become one: the Solar Node entry added in #233 is that
+        // module on one specific carrier, reached only through the USB ID our
+        // firmware publishes. A DIY XIAO with a radio wired somewhere else
+        // answers to nothing here (docs/src/firmware/boards.md).
         match catalogue().board("xiao_nrf52840") {
             Err(Error::UnknownBoard { wanted, available }) => {
                 assert_eq!(wanted, "xiao_nrf52840");
-                assert_eq!(available, vec!["rak4631".to_string(), "t114".to_string()]);
+                assert_eq!(
+                    available,
+                    vec![
+                        "rak4631".to_string(),
+                        "solarnode".to_string(),
+                        "t114".to_string()
+                    ]
+                );
             }
             other => panic!("expected UnknownBoard, got {other:?}"),
         }
+        // And the flashing path names only the boards a bundle may carry an
+        // image for, which is not the same list.
+        assert_eq!(catalogue().flashable_names(), vec!["rak4631", "t114"]);
+    }
+
+    #[test]
+    fn the_solar_node_is_a_board_the_binary_talks_to_and_never_flashes() {
+        // Codeberg #233, both halves in one test.
+        //
+        // The first half is the ticket as reported: the board runs our
+        // firmware on the rig, carries traffic, and lnflash could not see it
+        // — 1209:0003 was claimed by no catalogue entry, so every control
+        // command walked straight past it.
+        let catalogue = catalogue();
+        let board = catalogue.board("solarnode").unwrap();
+        assert_eq!(
+            board.candidate_ids("solarnode").unwrap(),
+            vec!["1209:0003".parse::<UsbId>().unwrap()],
+            "the USB ID leviculum-nrf/src/boards/solarnode.rs publishes"
+        );
+
+        // The second half is the one that matters, and it is a refusal. The
+        // Board-ID this board's bootloader publishes belongs to the XIAO
+        // module, not to this product, so it may not carry a write decision:
+        // a DIY XIAO with the radio wired elsewhere reports the same string.
+        // The entry therefore has no flashing half at all.
+        assert!(board.flashing().is_none());
+        assert!(
+            catalogue.board_for_id("nRF52840-SeeedXiao-v1").is_none(),
+            "a mounted XIAO bootloader must resolve to no board, or the next \
+             step is a write onto unknown radio wiring"
+        );
+        assert!(!catalogue.flashable_names().contains(&"solarnode"));
+
+        // And the refusal carries its reason, because a user who is told
+        // "no" without one goes looking for the bundle that would say yes.
+        let err = board.require_flashing("solarnode").unwrap_err();
+        assert!(matches!(err, Error::NotFlashable { .. }), "{err:?}");
+        let text = format!("{err}");
+        assert!(text.contains("nRF52840-SeeedXiao-v1"), "{text}");
+        assert!(text.contains("#233"), "{text}");
+        assert!(text.contains("just flash-solarnode"), "{text}");
+    }
+
+    #[test]
+    fn a_bundle_offering_an_image_for_the_solar_node_will_not_load() {
+        // The catalogue half above is only worth as much as this: without a
+        // bundle-side refusal, "control only" would hold exactly until
+        // somebody added a payload section named after it — and the failure
+        // would then be a flash, not an error message.
+        let f = Fixture::new();
+        let text = format!(
+            "{}\n[board.solarnode.app]\nfile    = \"t114/leviculum-t114-0.8.0.uf2\"\n\
+             sha256  = \"{}\"\n",
+            f.manifest_text(),
+            f.sha("t114/leviculum-t114-0.8.0.uf2"),
+        );
+        f.write_manifest(&text);
+        let err = f.load().unwrap_err();
+        assert!(matches!(err, Error::NotFlashable { .. }), "{err:?}");
+        let said = format!("{err}");
+        assert!(said.contains("solarnode"), "{said}");
+        assert!(said.contains("nRF52840-SeeedXiao-v1"), "{said}");
+        // Distinct from both neighbouring refusals: this is not "no such
+        // board" and not "this bundle has no image", it is "not by manifest,
+        // ever".
+        assert!(!said.contains("knows no board"), "{said}");
+        assert!(!said.contains("carries no image"), "{said}");
+    }
+
+    #[test]
+    fn a_control_only_board_that_does_not_say_why_will_not_load() {
+        // The positive control for the rule that keeps the two halves apart:
+        // drop the reason and the catalogue refuses, so a future board cannot
+        // become control-only by an omission nobody notices.
+        let err = mutated_catalogue("not_flashable = \"\"\"", "unused_key = \"\"\"").unwrap_err();
+        assert!(
+            format!("{err}").contains("no not_flashable saying why"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_board_claiming_both_halves_will_not_load() {
+        // The other direction: an entry that states a flashing section *and*
+        // a reason it has none contradicts itself, and resolving it either
+        // way would be a guess about whether a board may be written to.
+        let err = mutated_catalogue(
+            "[board.t114.flashing]",
+            "not_flashable = \"because\"\n[board.t114.flashing]",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("states both"), "{err}");
+    }
+
+    #[test]
+    fn a_control_only_board_nothing_could_find_will_not_load() {
+        // A board with neither half is useless in the other direction too: no
+        // USB ID to find it by means an entry that does nothing at all.
+        let err =
+            mutated_catalogue("candidate_usb = [\"1209:0003\"]", "candidate_usb = []").unwrap_err();
+        assert!(format!("{err}").contains("no candidate_usb"), "{err}");
     }
 
     #[test]
@@ -1046,7 +1321,10 @@ convert = "hex-to-uf2"
         let f = Fixture::new();
         let catalogue = mutated_catalogue("softdevice = \">=7.0.1, <8.0.0\"", "").unwrap();
         let err = load(f.dir.path(), &catalogue).unwrap_err();
-        assert!(format!("{err}").contains("no requires.softdevice"), "{err}");
+        assert!(
+            format!("{err}").contains("no flashing.requires.softdevice"),
+            "{err}"
+        );
     }
 
     #[test]

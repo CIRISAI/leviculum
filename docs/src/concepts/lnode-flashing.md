@@ -82,7 +82,8 @@ caveat"). Telling its owner to press RESET twice sends them looking for a
 button that does not exist, which is a worse failure than saying nothing
 — they conclude the board is dead. So the wording is a board fact like
 any other and lives in `lnflash/catalogue.toml`
-(`[board.<name>.double_tap]`), not in a branch around the prompt; a board
+(`[board.<name>.flashing.double_tap]`), not in a branch around the
+prompt; a board
 that says nothing there gets the ordinary wording. `just flash-rak4631`
 carries the same line into the developer runner's prompt through
 `LEVICULUM_DOUBLE_TAP_HINT` (Codeberg #261).
@@ -638,12 +639,35 @@ they live in `lnflash/catalogue.toml`, compiled into the binary:
 
 ```toml
 [board.t114]
-family      = "nrf52840"
-transport   = "uf2-msc"
-entry       = ["touch-1200", "double-tap"]
-identify    = { info_uf2_board_id = "HT-n5262" }
+family        = "nrf52840"
+candidate_usb = ["1209:0001", "239a:8071"]
+
+[board.t114.flashing]
+transport = "uf2-msc"
+entry     = ["touch-1200", "double-tap"]
+identify  = { info_uf2_board_id = "HT-n5262", bootloader_usb = ["239a:0071"] }
 requires.softdevice = ">=7.0.1, <8.0.0"
 ```
+
+**The entry is itself split, along the same seam** (Codeberg #233). The
+top level is what *talking to a running board* needs, and it is one
+field: the USB IDs its firmware answers on. Everything a *write* needs
+sits under `flashing`, and that table is optional. A board with none is
+control-only — `--watch`, `--announce`, `--set-time` and the `--radio-*`
+flags reach it exactly as they reach any other board, while no bundle may
+carry an image for it, `--board <name>` is refused before the bus is
+read, and a flash session that meets it on the bus says so and does not
+even reboot it.
+
+That is not a lesser kind of support; it is the honest kind for a board
+whose `Board-ID` is not an identity. The two halves rest on different
+evidence: a control frame reaches a board that is up and identifying
+itself, while a write rests on what a bootloader publishes. The Solar
+Node is the first such entry, and the reason is data rather than a
+comment — a control-only board must state `not_flashable`, which is the
+sentence the user is refused with, and stating both halves or neither
+fails to load. The refusal is therefore impossible to lose to an edit
+that widens the entry by accident.
 
 **Release facts** — which images this tarball carries and what they
 hash to — are the bundle's:

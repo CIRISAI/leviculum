@@ -168,7 +168,7 @@ pub fn wait_for_interface_tty(
 
 /// The press, for a board whose RESET is a button on the outside of the case.
 /// A board that needs different words says so in the catalogue rather than
-/// here (`[board.<name>.double_tap]`).
+/// here (`[board.<name>.flashing.double_tap]`).
 const PRESS_RESET: &str =
     "press RESET twice, quickly — the second press within about half a second of the first.";
 
@@ -202,6 +202,8 @@ mod tests {
         crate::manifest::Catalogue::builtin()
             .unwrap()
             .board(board)
+            .unwrap()
+            .require_flashing(board)
             .unwrap()
             .double_tap
             .clone()

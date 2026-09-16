@@ -52,6 +52,13 @@ OUT_DIR="${OUT_DIR:-$ROOT/target/lnflash}"
 # board by name: the builds, the UF2 conversion, the staging, the manifest and
 # the licence assertions against the finished tarball all walk it.
 #
+# Not every board lnflash knows may be listed. A board whose catalogue entry
+# has no `flashing` section is control-only — its Board-ID names a module
+# rather than a product, so no manifest may key a write on it — and lnflash
+# refuses at load time to read a bundle that carries an image for one. The
+# SenseCAP Solar Node is the first (Codeberg #233); it is flashed by
+# `just flash-solarnode`, by a person who can see which board is on the bench.
+#
 # Which image a board gets is settled in docs/src/concepts/board-support-scope.md:
 # one build serves a pinout family, so the RAK4631 ships the baseboard build
 # that also runs on a bare module rather than a second, stripped one.

@@ -365,13 +365,18 @@ fn a_dry_run_reports_every_board_on_the_bus_and_writes_nothing() {
     );
     let said = stdout(&out);
     assert!(out.status.success(), "{said}");
-    // The T114 application on 3-2.3.1, its bootloader on 3-2.4, and — since
-    // Codeberg #261 — the RAK4631 application on 3-2.3.4.4. That third line is
-    // the ticket's other end: before the catalogue entry existed, a Pocket V2
-    // on the same hub was not a device lnflash could see at all.
-    assert!(said.contains("Found 3 device(s)"), "{said}");
+    // The T114 application on 3-2.3.1, its bootloader on 3-2.4, the RAK4631
+    // application on 3-2.3.4.4 since Codeberg #261, and the Solar Node on
+    // 3-2.3.2 since #233. The last two lines are those tickets' other end:
+    // before either catalogue entry existed, that board on the same hub was
+    // not a device lnflash could see at all.
+    assert!(said.contains("Found 4 device(s)"), "{said}");
     assert!(
         said.contains("3-2.3.1 [1209:0001] 183004F712B4A7FE"),
+        "{said}"
+    );
+    assert!(
+        said.contains("3-2.3.2 [1209:0003] CA8A59DF40E37463"),
         "{said}"
     );
     assert!(
@@ -389,12 +394,115 @@ fn a_dry_run_reports_every_board_on_the_bus_and_writes_nothing() {
         "{said}"
     );
     assert!(said.contains("leviculum T114 — probably a t114"), "{said}");
+    assert!(
+        said.contains("leviculum SolarNode — probably a solarnode"),
+        "{said}"
+    );
     // And it stops before doing anything to any of them.
     assert!(
         said.contains("rebooting a board is already a change"),
         "{said}"
     );
     assert!(!said.contains("copied"), "{said}");
+}
+
+#[test]
+fn asking_to_flash_the_solar_node_by_name_is_refused_before_the_bus_is_read() {
+    // `--board` is the only handle for saying which board a run is for, so
+    // the name of a board this tool does not flash has to be answered there
+    // — with the reason, and with the names that would have worked.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--board",
+            "solarnode",
+            "--yes",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("does not flash solarnode by manifest"),
+        "{err}"
+    );
+    assert!(err.contains("nRF52840-SeeedXiao-v1"), "{err}");
+    // Nothing on the bus was touched to find that out.
+    assert!(!stdout(&out).contains("Found"), "{}", stdout(&out));
+}
+
+#[test]
+fn asking_for_a_board_nobody_knows_names_the_ones_that_can_be_flashed() {
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--board",
+            "xiao_nrf52840",
+            "--yes",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("knows no board"), "{err}");
+    assert!(err.contains("rak4631, t114"), "{err}");
+    // The control-only board is not offered as an alternative here: no bundle
+    // may carry an image for it, so naming it would send the user hunting.
+    assert!(!err.contains("solarnode"), "{err}");
+}
+
+#[test]
+fn a_flash_session_leaves_the_solar_node_alone_and_says_why() {
+    // Codeberg #233 from the other side. Adding the board so the control
+    // commands reach it also puts it in front of the flashing session, and
+    // that session may not write to it: the Board-ID its bootloader publishes
+    // is the XIAO module's, and a DIY XIAO with different radio wiring reports
+    // the same string. So it is named, refused with the reason, and not even
+    // rebooted — the refusal comes before the entry step, which is itself a
+    // change to the board.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--dry-run",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    let said = stdout(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("3-2.3.2: lnflash does not flash solarnode by manifest"),
+        "{said}"
+    );
+    assert!(said.contains("nRF52840-SeeedXiao-v1"), "{said}");
+    assert!(said.contains("just flash-solarnode"), "{said}");
+    // The refusal is about writing only, and a user reading it has to be told
+    // that much or they will conclude the board is unsupported.
+    assert!(
+        said.contains("3-2.3.2: its control commands are unaffected"),
+        "{said}"
+    );
+    // The T114 in the same run still gets as far as a dry run does, so this is
+    // one board being refused rather than the session giving up.
+    assert!(
+        said.contains("3-2.3.1: would enter the bootloader"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("3-2.3.2: would enter the bootloader"),
+        "{said}"
+    );
 }
 
 #[test]

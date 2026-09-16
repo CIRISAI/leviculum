@@ -60,6 +60,24 @@ iface 3-2.3.4.4 1.1 01 0a
 iface 3-2.3.4.4 1.2 02 02; tty "3-2.3.4.4:1.2" ttyACM4
 iface 3-2.3.4.4 1.3 03 0a
 
+# Our application on a SenseCAP Solar Node P1-Pro: 1209:0003, the third board
+# on the rig (Codeberg #233). Added 2026-09-16, from the by-id link the rig
+# host publishes for it — usb-leviculum_leviculum_SolarNode_CA8A59DF40E37463 —
+# which is manufacturer, product and serial in that order. The four interfaces
+# are the firmware's, not the carrier's: the composite descriptor is shared by
+# every board we build (leviculum-nrf/src/usb.rs), and only the three strings
+# and the PID come from the board's BoardConfig.
+#
+# It is here because "lnflash sees it" is the whole point of that ticket, and a
+# catalogue row alone would not prove enumeration reaches it. No bootloader
+# counterpart is listed: this board has no flashing entry, so a mounted XIAO
+# DFU drive is nothing lnflash may act on.
+dev 3-2.3.2 1209 0003 CA8A59DF40E37463 "leviculum" "leviculum SolarNode"
+iface 3-2.3.2 1.0 00 02; tty "3-2.3.2:1.0" ttyACM5
+iface 3-2.3.2 1.1 01 0a
+iface 3-2.3.2 1.2 02 02; tty "3-2.3.2:1.2" ttyACM6
+iface 3-2.3.2 1.3 03 0a
+
 # The same T114 as above, in its bootloader: different USB ID, and the
 # serial's two 32-bit words swapped (183004F712B4A7FE -> 12B4A7FE183004F7).
 dev 3-2.4 239a 0071 12B4A7FE183004F7 "Adafruit Industries" "HT-n5262"

@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn with_several_boards_the_bare_flag_refuses_and_lists_them() {
-        // The fixture bus has two running boards; guessing between them
+        // The fixture bus has three running boards; guessing between them
         // would watch the wrong one silently.
         let (catalogue, sysfs) = fixture();
         let err = choose_target(&catalogue, &sysfs, "").unwrap_err();
@@ -820,6 +820,30 @@ mod tests {
         assert!(text.contains("several running boards"), "{text}");
         assert!(text.contains("183004F712B4A7FE"), "{text}");
         assert!(text.contains("DEC9947DAD9D2869"), "{text}");
+        // Codeberg #233 as it was reported: `--watch` listed the T114s and
+        // the Pocket V2 and not the Solar Node, so the one board whose log
+        // somebody wanted was the one that could not be named.
+        assert!(text.contains("CA8A59DF40E37463"), "{text}");
+        assert!(text.contains("leviculum SolarNode"), "{text}");
+    }
+
+    #[test]
+    fn the_solar_nodes_debug_log_can_be_asked_for_by_serial() {
+        // The other half of #233: being listed is no use if the name the
+        // listing prints does not then select the board.
+        let (catalogue, sysfs) = fixture();
+        match choose_target(&catalogue, &sysfs, "CA8A59DF40E37463").unwrap() {
+            Target::Board(device) => {
+                assert_eq!(device.name, "3-2.3.2");
+                assert_eq!(device.id, UsbId::new(0x1209, 0x0003));
+                // if00 is the debug CDC `--watch` reads.
+                assert_eq!(
+                    device.tty(DEBUG_INTERFACE).unwrap(),
+                    std::path::Path::new("/dev/ttyACM5")
+                );
+            }
+            Target::Path(_) => panic!("a serial is not a path"),
+        }
     }
 
     #[test]
