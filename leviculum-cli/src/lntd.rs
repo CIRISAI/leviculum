@@ -110,7 +110,7 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     home: Option<PathBuf>,
 
-    /// Database file (default: <home>/telemetry.db).
+    /// Database file (default: telemetry.db in the --home directory).
     #[arg(long, value_name = "FILE")]
     database: Option<PathBuf>,
 
