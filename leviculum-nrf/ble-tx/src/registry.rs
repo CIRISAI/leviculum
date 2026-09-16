@@ -43,6 +43,8 @@
 
 use leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS;
 
+use crate::adv::{identity_hint, IDENTITY_HINT_LEN};
+
 /// One interface's live links, indexed by the link's drain-table slot —
 /// the same index that selects its outbound queue, so the drain table,
 /// the fan-out and this registry can never disagree about which links
@@ -703,6 +705,37 @@ impl<const N: usize> PeerRegistry<N> {
     /// duplicate check (BLE addresses rotate, identities do not).
     pub fn is_linked(&self, peer: &[u8; 16]) -> bool {
         self.slots.iter().flatten().any(|id| id == peer)
+    }
+
+    /// Whether a live link's identity begins with this advertised
+    /// identity hint (#412) — the scanner's pre-dial exclusion for a
+    /// peer that rotated its address.
+    ///
+    /// The companion of [`addr_linked`](Self::addr_linked), one level
+    /// up: that one catches a peer still advertising the address we are
+    /// connected on, this one catches the same peer under a fresh
+    /// address, which is the case the board captures of #412 are made
+    /// of — seven of seven outgoing links on one rotating phone.
+    ///
+    /// `None` — an advertiser that carried no hint — is never a match:
+    /// a peer that said nothing about who it is keeps exactly its
+    /// pre-#412 standing and is dialled as before.
+    ///
+    /// It is a HINT and it is used in ONE direction only: to SKIP a
+    /// dial. Four bytes collide once in 2^32, and a false match costs
+    /// that peer one dial cycle — it is dialled at its next rotation.
+    /// Nothing durable is keyed on it: admission, duplicate
+    /// arbitration and peer identity all still come from
+    /// [`link_up`](Self::link_up)'s 16-byte handshake.
+    #[must_use]
+    pub fn hint_linked(&self, hint: Option<[u8; IDENTITY_HINT_LEN]>) -> bool {
+        let Some(hint) = hint else {
+            return false;
+        };
+        self.slots
+            .iter()
+            .flatten()
+            .any(|id| identity_hint(id) == hint)
     }
 
     /// The slot of a live link to this peer, if it holds one (Codeberg
@@ -1404,6 +1437,102 @@ mod tests {
         );
         reg.conn_down(1);
         assert!(!reg.addr_linked(0xC0DE));
+    }
+
+    /// The #412 dial decision, the whole of it: a candidate whose hint
+    /// matches an identity we already hold a live link to is NOT
+    /// dialled, one with an unknown hint IS, and one with no hint
+    /// behaves exactly as it did before the hint existed.
+    ///
+    /// The three cases are what the room capture is made of: `BOARD`
+    /// is the live link, `PHONE` the neighbour we still want, `None`
+    /// the pre-#412 board and the phone that speaks no capability
+    /// record at all.
+    #[test]
+    fn a_hint_matching_a_live_identity_is_not_dialled_and_nothing_else_changes() {
+        let mut reg = PeerRegistry::<4>::new();
+        // Nothing live: no hint matches, not even a real one.
+        assert!(!reg.hint_linked(Some(identity_hint(&BOARD))));
+        assert!(!reg.hint_linked(None));
+
+        reg.conn_up(1, 0xC0DE);
+        assert_eq!(
+            reg.link_up(1, BOARD, Origin::Incoming, 517, 0),
+            LinkUp::Accepted { first: true }
+        );
+
+        // 1. The live peer under ANY address — the rotation case, which
+        //    `addr_linked` cannot see.
+        assert!(reg.hint_linked(Some(identity_hint(&BOARD))));
+        assert!(
+            !reg.addr_linked(0xFACE),
+            "a fresh address is unknown to the address filter"
+        );
+        // 2. An unknown hint is still dialled.
+        assert!(!reg.hint_linked(Some(identity_hint(&PHONE))));
+        // 3. Silence is not a match: pre-#412 behaviour, unchanged.
+        assert!(!reg.hint_linked(None));
+
+        // Only the first four bytes decide — that is what is on the air.
+        let mut same_prefix = BOARD;
+        same_prefix[15] = 0xFF;
+        assert_ne!(same_prefix, BOARD);
+        assert!(
+            reg.hint_linked(Some(identity_hint(&same_prefix))),
+            "a four-byte collision skips the dial, which is its whole cost"
+        );
+        // …and one differing byte INSIDE the hint is a different peer.
+        let mut other_prefix = BOARD;
+        other_prefix[3] ^= 0x01;
+        assert!(!reg.hint_linked(Some(identity_hint(&other_prefix))));
+
+        // The exclusion lasts exactly as long as the link does.
+        assert_eq!(reg.link_down(1), Some(BOARD));
+        assert!(
+            !reg.hint_linked(Some(identity_hint(&BOARD))),
+            "the peer is dialled again as soon as the link is gone"
+        );
+    }
+
+    /// Every live identity is checked, not just the first slot, and a
+    /// connection with no identity yet excludes nothing — the hint
+    /// answers about PEERS, the address filter about connections.
+    #[test]
+    fn the_hint_covers_every_slot_and_only_identified_ones() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.conn_up(0, 0x1111);
+        reg.conn_up(3, 0x3333);
+        // Connected, identity not yet presented: the address filter
+        // holds this gap, the hint filter has nothing to say.
+        assert!(reg.addr_linked(0x1111));
+        assert!(!reg.hint_linked(Some(identity_hint(&A))));
+
+        assert_eq!(
+            reg.link_up(3, PHONE, Origin::Outgoing, 517, 0),
+            LinkUp::Accepted { first: true }
+        );
+        assert!(
+            reg.hint_linked(Some(identity_hint(&PHONE))),
+            "the last slot"
+        );
+        assert!(!reg.hint_linked(Some(identity_hint(&A))));
+
+        assert_eq!(
+            reg.link_up(0, A, Origin::Incoming, 517, 0),
+            LinkUp::Accepted { first: true }
+        );
+        assert!(reg.hint_linked(Some(identity_hint(&A))), "the first slot");
+        assert!(reg.hint_linked(Some(identity_hint(&PHONE))), "and still it");
+    }
+
+    /// `identity_hint` is the first four bytes and nothing else — the
+    /// value the capture prints as `peer=`, stated once for both ends.
+    #[test]
+    fn the_hint_is_the_leading_four_bytes_of_the_identity() {
+        assert_eq!(identity_hint(&BOARD), [0xb2, 0xa8, 0xbe, 0xa1]);
+        assert_eq!(identity_hint(&PHONE), [0xb9, 0x9a, 0xf2, 0xec]);
+        assert_eq!(identity_hint(&A), [0xaa; IDENTITY_HINT_LEN]);
+        assert_eq!(identity_hint(&B), [0xbb; IDENTITY_HINT_LEN]);
     }
 
     /// Two live connections on different slots: clearing one leaves the

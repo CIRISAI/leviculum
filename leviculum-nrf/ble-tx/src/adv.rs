@@ -60,7 +60,49 @@
 //! worst possible answer, since it would sort a perfectly free board
 //! last. With bit 3 clear it reads as "no slot information" and keeps
 //! today's behaviour. Bit budget: bit 0 the flag, bits 1-2 the count,
-//! bit 3 its validity, **four bits (4-7) still free**.
+//! bit 3 its validity, bit 4 the identity hint below, **three bits
+//! (5-7) still free**.
+//!
+//! # The identity hint (#412)
+//!
+//! The advertisement used to carry nothing about WHO was advertising,
+//! so a peer that rotates its address was indistinguishable from a new
+//! one and every rotation cost a dial — on the corpus night of
+//! 2026-09-14/15 one board spent all seven outgoing links it made on a
+//! single rotating phone and never dialled a neighbour board (#412).
+//! The post-connect Identity characteristic catches the duplicate, but
+//! only after the scarce central slot is already spent.
+//!
+//! Capability bit 4 ([`CAP_IDENTITY_HINT`]) says the record carries the
+//! first [`IDENTITY_HINT_LEN`] bytes of the advertiser's identity hash
+//! in bytes 4..8 — exactly the value every log line already prints as
+//! `peer=`. [`identity_hint`] derives it,
+//! [`manufacturer_data_with_hint`] writes it, and
+//! [`crate::peer::PeerAdvertisement::identity_hint`] reads it back.
+//!
+//! It is a HINT, like the free-slot count, and the same rules bind it.
+//! Four bytes collide one time in 2^32, negligible at our node counts,
+//! and the only cost of a false match is a skipped dial: the
+//! post-connect identity check stays the authority, and nothing durable
+//! — no link, no peer record, no route — may be keyed on the hint.
+//!
+//! Taking bit 4 needs no [`PROTOCOL_VERSION`] bump, for the same two
+//! reasons the slot hint did not: Columba never reads the record, and
+//! our own parser tests `payload.len() >=` the base length and reads
+//! `caps` at a fixed offset, so an older board sees a longer record,
+//! takes the `caps` byte it knows and ignores the tail.
+//!
+//! ## Exposure, decided (#412)
+//!
+//! The hint makes a node passively identifiable by four bytes to
+//! anyone listening, and there is deliberately **no opt-out flag**.
+//! That is not new information: the scan response already carries the
+//! `LN-<hex8>` device name ([`crate::device_name`]), which is the same
+//! identity prefix in ASCII, and every LoRa announce carries the full
+//! identity hash in the clear. A flag would therefore buy no privacy
+//! while adding a configuration surface and a second code path — so a
+//! later reader who wants this reopened has to change the device name
+//! and the announce first, not this record.
 //!
 //! # The byte budget
 //!
@@ -72,8 +114,17 @@
 //! |--------------------------------|------|-------|
 //! | Flags                          |  1   |  3    |
 //! | Complete 128-bit service UUIDs | 16   | 18    |
-//! | Manufacturer specific data     |  4   |  6    |
-//! | **sum**                        |      | **27** |
+//! | Manufacturer specific data     |  8   | 10    |
+//! | **sum**                        |      | **31** |
+//!
+//! That is the whole PDU: since the identity hint [`ADV_BYTES_USED`]
+//! EQUALS [`LEGACY_AD_CAPACITY`], and the test below asserts that
+//! equality rather than headroom, so that the day someone spends a
+//! byte that is not there the host says so.
+//! **The next AD structure does not fit**: it
+//! belongs in the scan response — where only the device name lives
+//! today, 13 of its own 31 bytes — or the advertisement has to move to
+//! extended advertising. Growing this record again is not an option.
 //!
 //! The `LN-<hex8>` device name ([`crate::device_name`]) does **not**
 //! compete for these bytes: it goes in the scan response, a second
@@ -168,27 +219,109 @@ pub const fn free_slots(caps: u8) -> Option<u8> {
     }
 }
 
-/// Length of the manufacturer-data payload: company ID (2, little
-/// endian) + version (1) + capability bits (1).
+/// Capability bit 4: bytes 4..8 of the record carry an identity hint
+/// (#412) — see the module docs.
+///
+/// Set by [`manufacturer_data_with_hint`] and by nothing else, so a
+/// record can never claim a hint it does not carry. A reader must test
+/// this bit AND the record's length before reading the tail: an
+/// implementation that set the bit on a four-byte record would
+/// otherwise read whatever the next AD structure begins with.
+pub const CAP_IDENTITY_HINT: u8 = 1 << 4;
+
+/// Bytes of the identity hash the hint carries: the first four, the
+/// prefix every log line already prints as `peer=`.
+///
+/// Four is what the advertising PDU had left (see the byte budget) and
+/// it is enough: one collision in 2^32 at node counts in the tens, and
+/// a collision costs one skipped dial, never a wrong link — the
+/// post-connect identity check is still the authority.
+pub const IDENTITY_HINT_LEN: usize = 4;
+
+/// Length of the manufacturer-data payload WITHOUT the identity hint:
+/// company ID (2, little endian) + version (1) + capability bits (1).
+///
+/// This is the record's floor, not its size: it is what a reader must
+/// require before it may read `caps`, which is why the parser tests
+/// `payload.len() >= MANUFACTURER_DATA_LEN` rather than `==`. A board
+/// that predates #412 advertises exactly this many bytes and is read
+/// by current firmware unchanged.
 pub const MANUFACTURER_DATA_LEN: usize = 4;
 
-/// The manufacturer-specific data payload advertised with `caps`.
+/// Length of the manufacturer-data payload WITH the identity hint —
+/// what this node advertises since #412.
+pub const MANUFACTURER_DATA_HINT_LEN: usize = MANUFACTURER_DATA_LEN + IDENTITY_HINT_LEN;
+
+/// The manufacturer-specific data payload advertised with `caps`, with
+/// no identity hint.
 ///
 /// This is the AD structure's *data*; the length and AD-type bytes in
 /// front of it are added by the advertisement builder, so on the wire
 /// the structure reads `05 FF FF FF 03 <caps>` — a length field of 5 and
 /// [`ad_structure_len`]`(4)` = 6 bytes consumed.
+///
+/// Since #412 no advertiser of ours emits this form — both stacks build
+/// [`manufacturer_data_with_hint`] — but it stays the base the hinted
+/// record is defined against, and the tests use it for what a pre-#412
+/// board puts on the air.
 #[must_use]
 pub const fn manufacturer_data(caps: u8) -> [u8; MANUFACTURER_DATA_LEN] {
     let [cid_lo, cid_hi] = COMPANY_ID.to_le_bytes();
     [cid_lo, cid_hi, PROTOCOL_VERSION, caps]
 }
 
+/// The first [`IDENTITY_HINT_LEN`] bytes of an identity hash: the value
+/// that goes on the air (#412) and the value a reader compares a live
+/// link's identity against.
+///
+/// One function for both ends, so "which four bytes" is stated once.
+#[must_use]
+pub const fn identity_hint(identity_hash: &[u8; 16]) -> [u8; IDENTITY_HINT_LEN] {
+    [
+        identity_hash[0],
+        identity_hash[1],
+        identity_hash[2],
+        identity_hash[3],
+    ]
+}
+
+/// The manufacturer-specific data payload advertised with `caps` and an
+/// identity hint (#412).
+///
+/// [`CAP_IDENTITY_HINT`] is set HERE rather than by the caller: the bit
+/// and the four bytes behind it are one fact, and a caller that could
+/// set one without the other would put a record on the air that lies
+/// about its own length. On the wire the structure reads
+/// `09 FF FF FF 03 <caps> <h0> <h1> <h2> <h3>` — a length field of 9
+/// and [`ad_structure_len`]`(8)` = 10 bytes consumed.
+#[must_use]
+pub const fn manufacturer_data_with_hint(
+    caps: u8,
+    hint: &[u8; IDENTITY_HINT_LEN],
+) -> [u8; MANUFACTURER_DATA_HINT_LEN] {
+    let [cid_lo, cid_hi] = COMPANY_ID.to_le_bytes();
+    [
+        cid_lo,
+        cid_hi,
+        PROTOCOL_VERSION,
+        caps | CAP_IDENTITY_HINT,
+        hint[0],
+        hint[1],
+        hint[2],
+        hint[3],
+    ]
+}
+
 /// Bytes of the advertising PDU the firmware's three AD structures use.
 /// Held against [`LEGACY_AD_CAPACITY`] by the tests below and asserted
 /// again at build time in `ble::columba`.
+///
+/// Since #412 this is the capacity exactly, not a fraction of it: the
+/// manufacturer record carries the identity hint, so the budget is
+/// spent and the next AD structure has to go in the scan response or
+/// wait for extended advertising.
 pub const ADV_BYTES_USED: usize =
-    ad_structure_len(1) + ad_structure_len(16) + ad_structure_len(MANUFACTURER_DATA_LEN);
+    ad_structure_len(1) + ad_structure_len(16) + ad_structure_len(MANUFACTURER_DATA_HINT_LEN);
 
 #[cfg(test)]
 mod tests {
@@ -196,21 +329,35 @@ mod tests {
     use crate::DEVICE_NAME_LEN;
 
     #[test]
-    fn the_advertisement_fits_the_legacy_pdu_with_room_to_spare() {
-        assert_eq!(ADV_BYTES_USED, 27);
+    fn the_advertisement_fills_the_legacy_pdu_to_the_last_byte() {
+        assert_eq!(ADV_BYTES_USED, 31);
         // Both constants: a const block fails the build, not one test run.
         const { assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY) };
-        assert_eq!(LEGACY_AD_CAPACITY - ADV_BYTES_USED, 4, "bytes left over");
+        // Equality, not headroom: #412's identity hint spent the four
+        // bytes that were left. The NEXT field goes in the scan
+        // response (13 of its 31 bytes used) or needs extended
+        // advertising — it cannot go here.
+        assert_eq!(
+            ADV_BYTES_USED, LEGACY_AD_CAPACITY,
+            "the advertising PDU is full"
+        );
     }
 
     #[test]
-    fn the_capability_record_costs_six_of_them() {
-        // The reviewer's "+5" is the AD *length field* (type byte plus
-        // four data bytes); the structure on the wire is one byte more.
-        let structure = ad_structure_len(MANUFACTURER_DATA_LEN);
-        assert_eq!(structure, 6);
-        assert_eq!(MANUFACTURER_DATA_LEN + 1, 5, "the length field's value");
-        assert_eq!(ADV_BYTES_USED - structure, 21, "adv before this batch");
+    fn the_capability_record_costs_ten_of_them() {
+        // The AD *length field* is the type byte plus the data bytes;
+        // the structure on the wire is one byte more.
+        let structure = ad_structure_len(MANUFACTURER_DATA_HINT_LEN);
+        assert_eq!(structure, 10);
+        assert_eq!(
+            MANUFACTURER_DATA_HINT_LEN + 1,
+            9,
+            "the length field's value"
+        );
+        assert_eq!(ADV_BYTES_USED - structure, 21, "the two fixed structures");
+        // What it cost before the hint, and what the four bytes bought.
+        assert_eq!(ad_structure_len(MANUFACTURER_DATA_LEN), 6);
+        assert_eq!(structure - ad_structure_len(MANUFACTURER_DATA_LEN), 4);
     }
 
     #[test]
@@ -284,14 +431,93 @@ mod tests {
     }
 
     #[test]
-    fn the_record_uses_four_of_the_eight_capability_bits() {
+    fn the_record_uses_five_of_the_eight_capability_bits() {
         // The budget the module docs state, held here so it cannot rot:
-        // bit 0 the flag, 1-2 the count, 3 its validity, 4-7 unclaimed.
-        let claimed = CAP_PERIPHERAL_ONLY | CAP_FREE_SLOTS_MASK | CAP_FREE_SLOTS_VALID;
-        assert_eq!(claimed, 0b0000_1111);
-        assert_eq!(claimed.count_zeros(), 4, "bits left for the next batch");
+        // bit 0 the flag, 1-2 the count, 3 its validity, 4 the identity
+        // hint, 5-7 unclaimed.
+        let claimed =
+            CAP_PERIPHERAL_ONLY | CAP_FREE_SLOTS_MASK | CAP_FREE_SLOTS_VALID | CAP_IDENTITY_HINT;
+        assert_eq!(claimed, 0b0001_1111);
+        assert_eq!(claimed.count_zeros(), 3, "bits left for the next batch");
         // Two bits is exactly the range PERIPH_SLOTS needs.
         assert_eq!(CAP_FREE_SLOTS_MASK >> CAP_FREE_SLOTS_SHIFT, PERIPH_SLOTS);
+        // And the hint bit is disjoint from every bit before it, so
+        // setting it cannot be read as a slot count or as the flag.
+        assert_eq!(
+            CAP_IDENTITY_HINT & (CAP_PERIPHERAL_ONLY | CAP_FREE_SLOTS_MASK | CAP_FREE_SLOTS_VALID),
+            0
+        );
+    }
+
+    /// Everything the hinted record has to be, in one place: the layout,
+    /// the bit that announces it, and the fact that neither half
+    /// disturbs what was already in the byte.
+    #[test]
+    fn the_hinted_record_is_the_old_one_plus_four_bytes_and_a_bit() {
+        const ID: [u8; 16] = [
+            0xb2, 0xa8, 0xbe, 0xa1, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+            0xbb, 0xcc,
+        ];
+        let hint = identity_hint(&ID);
+        assert_eq!(hint, [0xb2, 0xa8, 0xbe, 0xa1], "the log lines' peer= value");
+
+        let record = manufacturer_data_with_hint(CAP_PERIPHERAL_ONLY, &hint);
+        assert_eq!(
+            record,
+            [
+                0xFF,
+                0xFF,
+                0x03,
+                0x01 | CAP_IDENTITY_HINT,
+                0xb2,
+                0xa8,
+                0xbe,
+                0xa1
+            ]
+        );
+        assert_eq!(record.len(), MANUFACTURER_DATA_HINT_LEN);
+        // The first four bytes are byte-for-byte the un-hinted record
+        // with one more bit set: an older reader takes exactly these
+        // and ignores the rest.
+        assert_eq!(
+            record[..MANUFACTURER_DATA_LEN],
+            manufacturer_data(CAP_PERIPHERAL_ONLY | CAP_IDENTITY_HINT)
+        );
+        assert_eq!(&record[MANUFACTURER_DATA_LEN..], &hint);
+    }
+
+    #[test]
+    fn the_hint_bit_is_never_the_callers_to_set_and_never_disturbs_the_rest() {
+        // The builder owns the bit, so a record claiming a hint it does
+        // not carry cannot be constructed through this module.
+        for caps in 0..=255u8 {
+            let record = manufacturer_data_with_hint(caps, &[0; IDENTITY_HINT_LEN]);
+            assert_ne!(record[3] & CAP_IDENTITY_HINT, 0, "the bit is always set");
+            assert_eq!(
+                record[3] & !CAP_IDENTITY_HINT,
+                caps & !CAP_IDENTITY_HINT,
+                "no other bit moved"
+            );
+            // Free slots and the flag survive it, both directions.
+            assert_eq!(free_slots(record[3]), free_slots(caps));
+            assert_eq!(record[3] & CAP_PERIPHERAL_ONLY, caps & CAP_PERIPHERAL_ONLY);
+        }
+    }
+
+    #[test]
+    fn every_hint_value_rides_the_record_unchanged() {
+        // Including the bytes a naive framing would trip over: a zero
+        // hint, an all-ones hint, and one that looks like a length byte.
+        for hint in [
+            [0x00, 0x00, 0x00, 0x00],
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            [0x05, 0xFF, 0xFF, 0xFF],
+            [0xde, 0xad, 0xbe, 0xef],
+        ] {
+            let record = manufacturer_data_with_hint(with_free_slots(0, 2), &hint);
+            assert_eq!(&record[MANUFACTURER_DATA_LEN..], &hint);
+            assert_eq!(free_slots(record[3]), Some(2));
+        }
     }
 
     #[test]

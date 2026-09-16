@@ -25,8 +25,8 @@
 use leviculum_ble_tx::{
     addr_value, effective_tx_gap_ms, judge_duplicate, parse_peer_advertisement, should_initiate,
     usable_mtu, CandidateTable, ConnectDecision, DupRule, DupVerdict, Origin, ScanMode, TxGap,
-    MANUFACTURER_DATA_LEN, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN, MIN_USABLE_MTU, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_INTERVAL_MS,
@@ -364,6 +364,34 @@ impl LinkTable {
     /// is still reachable and the paths must stay.
     pub(crate) fn knows_identity(&self, identity: &IdentityHash) -> bool {
         self.links.iter().any(|l| &l.identity == identity)
+    }
+
+    /// Whether a live link's identity begins with this advertised
+    /// identity hint (#412) — the scanner's pre-dial exclusion for a
+    /// peer that rotated its address, the firmware's
+    /// `PeerRegistry::hint_linked` applied to this table's rows.
+    ///
+    /// [`Self::knows_addr`] catches a peer still advertising the
+    /// address we are linked on; this catches the same peer under a
+    /// fresh one, which is the case #412's board captures are made of.
+    /// `None` — an advertiser that carried no hint — is never a match,
+    /// so a pre-#412 board and a phone are dialled exactly as before.
+    ///
+    /// Live links only, deliberately: a pending handshake has not said
+    /// who it is yet, and [`Self::knows_addr`] already holds its
+    /// address.
+    ///
+    /// A HINT, used in one direction only — to SKIP a dial. Four bytes
+    /// collide once in 2^32 and the cost of a collision is one skipped
+    /// dial cycle; admission, duplicate arbitration and peer identity
+    /// all still come from the 16-byte handshake.
+    pub(crate) fn knows_identity_hint(&self, hint: Option<[u8; IDENTITY_HINT_LEN]>) -> bool {
+        let Some(hint) = hint else {
+            return false;
+        };
+        self.links
+            .iter()
+            .any(|l| leviculum_ble_tx::identity_hint(&l.identity) == hint)
     }
 
     /// Admission check + insert, shared by both roles.
@@ -767,6 +795,20 @@ pub(crate) fn local_name(identity: &IdentityHash) -> String {
     String::from_utf8_lossy(&leviculum_ble_tx::device_name(identity)).into_owned()
 }
 
+/// An identity hint as the logs print it (#412): the four bytes in hex,
+/// or `unknown` when the advertiser carried none.
+///
+/// `unknown` is its own token rather than `00000000`, matching the
+/// firmware's `IdentityHint` display and `free_slots`' `unknown` for
+/// the same reason: a peer that said nothing about who it is must not
+/// read in a capture as a peer named zero.
+pub(crate) fn hint_str(hint: Option<[u8; IDENTITY_HINT_LEN]>) -> String {
+    match hint {
+        Some(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
+        None => "unknown".to_string(),
+    }
+}
+
 /// A BLE address in display order as the number the v2.2 sort compares.
 /// `leviculum_ble_tx::addr_value` takes the wire (LSB-first) order; a
 /// `bluer::Address` is the displayed order, so it is reversed here once.
@@ -790,6 +832,13 @@ pub(crate) struct ScanDecision {
     /// window and nothing else: no decision about whether a link is
     /// permitted may depend on it, here or on a board.
     pub(crate) free_slots: Option<u8>,
+    /// The first four bytes of the advertiser's identity hash (#412),
+    /// `None` when it carried no hint. Read for exactly one thing —
+    /// a peer we already hold a live link to is not dialled again
+    /// ([`LinkTable::knows_identity_hint`]) — and never for whether a
+    /// link may be accepted: that is still the 16-byte handshake's
+    /// answer, here as on a board.
+    pub(crate) identity_hint: Option<[u8; IDENTITY_HINT_LEN]>,
 }
 
 /// Decide who connects, from the properties BlueZ hands a scanner.
@@ -816,7 +865,7 @@ pub(crate) fn decide_from_scan(
     manufacturer_ffff: Option<&[u8]>,
     mode: ScanMode,
 ) -> Option<ScanDecision> {
-    let mut pdu: Vec<u8> = Vec::with_capacity(2 + 16 + 2 + MANUFACTURER_DATA_LEN + 2);
+    let mut pdu: Vec<u8> = Vec::with_capacity(2 + 16 + 2 + MANUFACTURER_DATA_HINT_LEN + 2);
     if offers_service {
         pdu.push(17); // 1 type byte + 16 UUID bytes
         pdu.push(0x07); // Complete List of 128-bit Service Class UUIDs
@@ -849,6 +898,7 @@ pub(crate) fn decide_from_scan(
         caps_record: parsed.caps.is_some(),
         caps: parsed.caps.unwrap_or(0),
         free_slots: parsed.free_slots(),
+        identity_hint: parsed.identity_hint,
     })
 }
 
@@ -1351,6 +1401,90 @@ mod tests {
             displaced.is_none(),
             "reconnect after a loss is a first link again: peer-up reported"
         );
+    }
+
+    /// #412 on the daemon: the rebuilt PDU decodes the identity hint
+    /// out of BlueZ's CID-keyed payload, an old record yields none, and
+    /// the hint never moves the verdict.
+    #[test]
+    fn scan_decision_decodes_the_identity_hint_without_changing_the_rule() {
+        use leviculum_ble_tx::{identity_hint, CAP_IDENTITY_HINT};
+        let local: Addr = [0x18, 0x69, 0x45, 0x42, 0xAA, 0x0E];
+        let higher: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x01];
+        // What BlueZ hands us: the record MINUS the company ID.
+        let hint = identity_hint(&ID_A);
+        let mut hinted = vec![0x03, CAP_IDENTITY_HINT];
+        hinted.extend_from_slice(&hint);
+
+        let d = decide_from_scan(&local, &higher, true, Some(&hinted), ScanMode::Strict)
+            .expect("service offered");
+        assert_eq!(d.identity_hint, Some(hint));
+        assert!(d.caps_record);
+
+        // The same peer without the hint: same verdict, no hint.
+        let plain = decide_from_scan(&local, &higher, true, Some(&[0x03, 0x00]), ScanMode::Strict)
+            .expect("service offered");
+        assert_eq!(plain.identity_hint, None);
+        assert_eq!(d.decision, plain.decision, "the rule did not move");
+        assert_eq!(d.free_slots, plain.free_slots);
+
+        // A record claiming a hint it did not send: no hint, no panic.
+        let d = decide_from_scan(
+            &local,
+            &higher,
+            true,
+            Some(&[0x03, CAP_IDENTITY_HINT, 0xA1]),
+            ScanMode::Strict,
+        )
+        .expect("service offered");
+        assert_eq!(d.identity_hint, None);
+        assert_eq!(d.decision, plain.decision);
+    }
+
+    /// The dial decision itself (#412): a candidate whose hint matches
+    /// a live link is skipped, an unknown hint is dialled, and no hint
+    /// behaves exactly as before the hint existed.
+    #[test]
+    fn a_hint_matching_a_live_link_is_not_dialled_and_silence_is_not_a_match() {
+        use leviculum_ble_tx::identity_hint;
+        let mut t = table();
+        assert!(!t.knows_identity_hint(Some(identity_hint(&ID_A))));
+        assert!(!t.knows_identity_hint(None));
+
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 100, 0).0,
+            Admission::Accept
+        );
+        // The rotation case: a brand-new address, the same identity.
+        assert!(!t.knows_addr(&ADDR_2), "the address filter sees nothing");
+        assert!(t.knows_identity_hint(Some(identity_hint(&ID_A))));
+        // An unknown peer is still dialled, and so is a silent one.
+        assert!(!t.knows_identity_hint(Some(identity_hint(&ID_B))));
+        assert!(
+            !t.knows_identity_hint(None),
+            "pre-#412 behaviour, unchanged"
+        );
+
+        // Only the leading four bytes are on the air, so only they
+        // decide — a collision costs one skipped dial and nothing else.
+        let mut same_prefix = ID_A;
+        same_prefix[15] = 0x00;
+        assert_ne!(same_prefix, ID_A);
+        assert!(t.knows_identity_hint(Some(identity_hint(&same_prefix))));
+
+        // It lasts exactly as long as the link does.
+        let _ = t.remove_by_addr(&ADDR_1);
+        assert!(!t.knows_identity_hint(Some(identity_hint(&ID_A))));
+    }
+
+    /// `hint_str` keeps silence distinguishable from a real answer in
+    /// every capture — the same contract `free_slots`' `unknown` has.
+    #[test]
+    fn the_logged_hint_never_prints_silence_as_a_peer_named_zero() {
+        assert_eq!(hint_str(Some([0xb2, 0xa8, 0xbe, 0xa1])), "b2a8bea1");
+        assert_eq!(hint_str(Some([0x00; IDENTITY_HINT_LEN])), "00000000");
+        assert_eq!(hint_str(None), "unknown");
+        assert_ne!(hint_str(None), hint_str(Some([0x00; IDENTITY_HINT_LEN])));
     }
 
     /// The v2.2 §Connection Direction worked example, through the

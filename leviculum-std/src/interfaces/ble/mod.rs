@@ -535,14 +535,22 @@ impl BleTask {
                             Some(free) => format!("{free}"),
                             None => "unknown".to_string(),
                         },
+                        hint = %links::hint_str(decision.identity_hint),
                         initiate = u8::from(decision.decision.initiate()),
                         rule = decision.decision.as_str(),
                     );
                 }
+                // `knows_identity_hint` is the address filter above it
+                // keyed by IDENTITY (#412): a peer that rotated its
+                // address advertises as a stranger, and dialling it
+                // costs a connect, a discovery and an identity read
+                // before the duplicate is found. A peer that carried no
+                // hint matches nothing and is dialled exactly as before.
                 if !decision.decision.initiate()
                     || rssi < self.opts.min_rssi
                     || table.is_full()
                     || table.knows_addr(&addr.0)
+                    || table.knows_identity_hint(decision.identity_hint)
                     || dial_queue.knows(&addr.0)
                     || backoff_until.get(&addr.0).is_some_and(|until| *until > now)
                 {

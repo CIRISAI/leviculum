@@ -34,10 +34,31 @@
 //! to** can rotate its address and reappear in the scanner as a
 //! seemingly new device (v2.2 keys everything durable by identity, not
 //! address, for this exact reason — §"Why Not Use MAC Addresses as
-//! Keys?"). No pre-connection check can catch that, because the
-//! advertisement carries no identity; the firmware closes the hole
-//! post-connect by reading the Identity characteristic and dropping the
-//! link if that identity is already live.
+//! Keys?"). The firmware closes that hole post-connect by reading the
+//! Identity characteristic and dropping the link if that identity is
+//! already live — correct, but paid for after the dial, which on a
+//! board with one central slot is the whole outgoing capacity (#412).
+//! Since #412 the advertisement carries a four-byte identity hint
+//! ([`crate::adv`]) so most of those rotations are recognisable
+//! *before* the dial; see below.
+//!
+//! # The identity hint (#412)
+//!
+//! [`PeerAdvertisement::identity_hint`] is the first four bytes of the
+//! advertiser's identity hash, present iff the record set
+//! [`crate::adv::CAP_IDENTITY_HINT`] and is long enough to carry it.
+//! It answers one question and only one: **is this advertiser a peer I
+//! already hold a live link to?** — [`crate::PeerRegistry::hint_linked`]
+//! on a board, `LinkTable::knows_identity_hint` in lnsd, both in front
+//! of the dial, both alongside the address-keyed exclusion that was
+//! already there.
+//!
+//! What it must not become: `None` is not "unknown peer", it is "no
+//! answer", and it may never make a link permitted or refused. A false
+//! match costs one skipped dial and the peer is dialled at its next
+//! rotation; the post-connect identity check remains the authority for
+//! everything durable. A peer that advertises no hint behaves exactly
+//! as it did before #412.
 //!
 //! # The fallback mode (Codeberg #375)
 //!
@@ -68,7 +89,10 @@
 //! can be stale, and no decision about whether a link is *permitted*
 //! may ever depend on it.
 
-use crate::adv::{COMPANY_ID, MANUFACTURER_DATA_LEN, PROTOCOL_VERSION};
+use crate::adv::{
+    CAP_IDENTITY_HINT, COMPANY_ID, IDENTITY_HINT_LEN, MANUFACTURER_DATA_HINT_LEN,
+    MANUFACTURER_DATA_LEN, PROTOCOL_VERSION,
+};
 use crate::CAP_PERIPHERAL_ONLY;
 
 /// AD type 0x06: Incomplete List of 128-bit Service Class UUIDs.
@@ -91,6 +115,15 @@ pub struct PeerAdvertisement {
     /// a v2.2 peer that never spoke v0.3.0 — and per v0.3.0 §3.2 it
     /// means "assume full capability, fall back to the address sort".
     pub caps: Option<u8>,
+    /// The first four bytes of the advertiser's identity hash (#412),
+    /// when the record claimed one ([`crate::adv::CAP_IDENTITY_HINT`])
+    /// AND was long enough to carry it.
+    ///
+    /// `None` is "this advertiser said nothing about who it is" — a
+    /// pre-#412 board, a phone, another implementation — and is never
+    /// "nobody". It is a HINT (see the module docs): it orders a dial,
+    /// it never decides whether a link is permitted.
+    pub identity_hint: Option<[u8; IDENTITY_HINT_LEN]>,
 }
 
 impl PeerAdvertisement {
@@ -152,6 +185,24 @@ pub fn parse_peer_advertisement(data: &[u8], service_uuid_le: &[u8; 16]) -> Peer
                     && payload[2] >= PROTOCOL_VERSION =>
             {
                 parsed.caps = Some(payload[3]);
+                // #412: the tail is read only when the advertiser
+                // announced it AND sent it. Both conditions, not
+                // either: a record that sets the bit and stops at four
+                // bytes is malformed, and reading past it would take
+                // whatever the next AD structure begins with as an
+                // identity. A longer record than we know still yields
+                // exactly these four bytes — that is what makes the
+                // next field after this one somebody else's problem
+                // and not a re-parse of ours.
+                if payload[3] & CAP_IDENTITY_HINT != 0
+                    && payload.len() >= MANUFACTURER_DATA_HINT_LEN
+                {
+                    let mut hint = [0u8; IDENTITY_HINT_LEN];
+                    hint.copy_from_slice(
+                        &payload[MANUFACTURER_DATA_LEN..MANUFACTURER_DATA_HINT_LEN],
+                    );
+                    parsed.identity_hint = Some(hint);
+                }
             }
             _ => {}
         }
@@ -298,7 +349,18 @@ pub fn should_initiate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adv::{ad_structure_len, manufacturer_data, ADV_BYTES_USED};
+    use crate::adv::{
+        ad_structure_len, manufacturer_data, manufacturer_data_with_hint, with_free_slots,
+        ADV_BYTES_USED,
+    };
+
+    /// The identity behind [`own_advertisement`]'s hint — `b2a8bea1` is
+    /// `feld-t114`'s own transport hash, the one #412's capture is full
+    /// of.
+    const OWN_IDENTITY: [u8; 16] = [
+        0xb2, 0xa8, 0xbe, 0xa1, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0,
+        0xc0,
+    ];
 
     /// The service UUID in AD byte order, as `ble::columba` carries it.
     /// Restated here from the spec (37145b00-442d-4a94-917f-8f42c5da28e3,
@@ -309,14 +371,34 @@ mod tests {
         0x37,
     ];
 
-    /// Build the exact PDU our own firmware advertises: flags, complete
-    /// 128-bit service list, v0.3.0 capability record.
+    /// Build the exact PDU our own firmware advertises since #412:
+    /// flags, complete 128-bit service list, v0.3.0 capability record
+    /// WITH the identity hint.
     fn own_advertisement(caps: u8) -> Vec<u8> {
+        let mut pdu = legacy_prefix();
+        pdu.extend_from_slice(&[0x09, AD_TYPE_MANUFACTURER_DATA]);
+        pdu.extend_from_slice(&manufacturer_data_with_hint(
+            caps,
+            &crate::adv::identity_hint(&OWN_IDENTITY),
+        ));
+        pdu
+    }
+
+    /// The PDU a board that predates #412 advertises: the same two
+    /// fixed structures and the four-byte record, no hint.
+    fn legacy_advertisement(caps: u8) -> Vec<u8> {
+        let mut pdu = legacy_prefix();
+        pdu.extend_from_slice(&[0x05, AD_TYPE_MANUFACTURER_DATA]);
+        pdu.extend_from_slice(&manufacturer_data(caps));
+        pdu
+    }
+
+    /// Flags + the complete 128-bit service list: the 21 bytes both
+    /// forms share.
+    fn legacy_prefix() -> Vec<u8> {
         let mut pdu = vec![0x02, 0x01, 0x06];
         pdu.extend_from_slice(&[0x11, AD_TYPE_SERVICE_UUID128_COMPLETE]);
         pdu.extend_from_slice(&SERVICE_UUID_LE);
-        pdu.extend_from_slice(&[0x05, AD_TYPE_MANUFACTURER_DATA]);
-        pdu.extend_from_slice(&manufacturer_data(caps));
         pdu
     }
 
@@ -324,19 +406,32 @@ mod tests {
     fn our_own_advertisement_parses_back_to_what_we_meant() {
         let pdu = own_advertisement(CAP_PERIPHERAL_ONLY);
         assert_eq!(pdu.len(), ADV_BYTES_USED, "the budget adv.rs accounts");
+        assert_eq!(pdu.len(), 31, "and it is the whole PDU since #412");
         let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
         assert!(parsed.offers_service);
-        assert_eq!(parsed.caps, Some(CAP_PERIPHERAL_ONLY));
+        assert_eq!(
+            parsed.caps,
+            Some(CAP_PERIPHERAL_ONLY | crate::adv::CAP_IDENTITY_HINT)
+        );
+        assert_eq!(
+            parsed.identity_hint,
+            Some(crate::adv::identity_hint(&OWN_IDENTITY))
+        );
 
         let cleared = parse_peer_advertisement(&own_advertisement(0), &SERVICE_UUID_LE);
-        assert_eq!(cleared.caps, Some(0), "phase B: record stays, bit clears");
+        assert_eq!(
+            cleared.caps,
+            Some(crate::adv::CAP_IDENTITY_HINT),
+            "phase B: record stays, bit 0 clears"
+        );
     }
 
     #[test]
     fn a_v2_2_peer_without_the_record_reads_as_no_caps() {
         // Flags + service list only — what a pre-v0.3.0 peer advertises.
-        let pdu = &own_advertisement(0)[..3 + ad_structure_len(16)];
-        let parsed = parse_peer_advertisement(pdu, &SERVICE_UUID_LE);
+        let pdu = legacy_prefix();
+        assert_eq!(pdu.len(), 3 + ad_structure_len(16));
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
         assert!(parsed.offers_service);
         assert_eq!(parsed.caps, None);
     }
@@ -349,7 +444,9 @@ mod tests {
             let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
             assert!(parsed.offers_service);
             assert_eq!(parsed.free_slots(), Some(free));
-            // The record did not grow: the count went into spare bits.
+            // The count costs no bytes of its own: it went into spare
+            // bits of the byte that was already there, so the PDU is
+            // the accounted size whatever the count is.
             assert_eq!(pdu.len(), ADV_BYTES_USED);
             // And a peripheral-only peer can still say both things.
             let both = own_advertisement(with_free_slots(CAP_PERIPHERAL_ONLY, free));
@@ -367,7 +464,7 @@ mod tests {
     fn a_pre_item_3_record_reads_as_no_slot_information() {
         // Exactly what a board that predates #375 item 3 advertises:
         // the four-byte record with bit 0 set and nothing else.
-        let pdu = own_advertisement(CAP_PERIPHERAL_ONLY);
+        let pdu = legacy_advertisement(CAP_PERIPHERAL_ONLY);
         let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
         assert_eq!(parsed.caps, Some(CAP_PERIPHERAL_ONLY), "the record is read");
         assert_eq!(parsed.free_slots(), None, "but it claims no slot count");
@@ -375,11 +472,164 @@ mod tests {
         assert_eq!(
             PeerAdvertisement {
                 offers_service: true,
-                caps: None
+                caps: None,
+                identity_hint: None,
             }
             .free_slots(),
             None
         );
+    }
+
+    /// #412's four proof obligations on the record, in the order the
+    /// issue states them: old record, new record, presence bit clear,
+    /// malformed tail.
+    #[test]
+    fn an_old_record_yields_caps_and_no_hint() {
+        let pdu = legacy_advertisement(with_free_slots(CAP_PERIPHERAL_ONLY, 2));
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+        assert!(parsed.offers_service);
+        assert_eq!(
+            parsed.caps,
+            Some(with_free_slots(CAP_PERIPHERAL_ONLY, 2)),
+            "every pre-#412 bit still reads"
+        );
+        assert_eq!(parsed.free_slots(), Some(2));
+        assert_eq!(parsed.identity_hint, None, "no hint, and not a zero one");
+        // It is exactly four bytes shorter than what we advertise now.
+        assert_eq!(pdu.len() + IDENTITY_HINT_LEN, ADV_BYTES_USED);
+    }
+
+    #[test]
+    fn a_new_record_yields_the_same_caps_and_the_hint() {
+        // Same capability byte as the old record above, plus the bit
+        // the builder sets: nothing a pre-#412 reader cares about moved.
+        let pdu = own_advertisement(with_free_slots(CAP_PERIPHERAL_ONLY, 2));
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+        assert!(parsed.offers_service);
+        let legacy = parse_peer_advertisement(
+            &legacy_advertisement(with_free_slots(CAP_PERIPHERAL_ONLY, 2)),
+            &SERVICE_UUID_LE,
+        );
+        assert_eq!(
+            parsed.caps.map(|c| c & !CAP_IDENTITY_HINT),
+            legacy.caps,
+            "the hint bit is the only difference in the byte"
+        );
+        assert_eq!(parsed.free_slots(), legacy.free_slots());
+        assert_eq!(
+            parsed.identity_hint,
+            Some([0xb2, 0xa8, 0xbe, 0xa1]),
+            "the first four bytes of the identity, as peer= prints them"
+        );
+    }
+
+    #[test]
+    fn a_clear_presence_bit_yields_no_hint_even_with_bytes_behind_it() {
+        // Eight bytes on the air, the bit clear: a future revision may
+        // mean anything by that tail, and reading it as an identity
+        // would invent a peer. Hand-built, because the builder cannot
+        // produce this record.
+        let mut pdu = legacy_prefix();
+        pdu.extend_from_slice(&[0x09, AD_TYPE_MANUFACTURER_DATA, 0xFF, 0xFF, 0x03]);
+        pdu.push(CAP_PERIPHERAL_ONLY); // bit 4 clear
+        pdu.extend_from_slice(&[0xb2, 0xa8, 0xbe, 0xa1]);
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+        assert_eq!(parsed.caps, Some(CAP_PERIPHERAL_ONLY), "caps still read");
+        assert_eq!(parsed.identity_hint, None);
+    }
+
+    #[test]
+    fn a_truncated_or_malformed_tail_yields_no_hint_and_does_not_panic() {
+        let hint = [0xb2, 0xa8, 0xbe, 0xa1];
+        // The bit set on a record that stops at four bytes: the next AD
+        // structure must NOT be read as an identity.
+        let mut lying = legacy_prefix();
+        lying.extend_from_slice(&[
+            0x05,
+            AD_TYPE_MANUFACTURER_DATA,
+            0xFF,
+            0xFF,
+            0x03,
+            CAP_IDENTITY_HINT,
+        ]);
+        lying.extend_from_slice(&[0x05, 0x09, b'L', b'N', b'-', b'x']);
+        let parsed = parse_peer_advertisement(&lying, &SERVICE_UUID_LE);
+        assert_eq!(parsed.caps, Some(CAP_IDENTITY_HINT), "the byte is honest");
+        assert_eq!(parsed.identity_hint, None, "the tail it claims is absent");
+
+        // Every partial hint, one to three bytes short.
+        for short in 1..=IDENTITY_HINT_LEN {
+            let carried = IDENTITY_HINT_LEN - short;
+            let mut pdu = legacy_prefix();
+            let data_len = MANUFACTURER_DATA_LEN + carried;
+            pdu.push(u8::try_from(1 + data_len).expect("fits"));
+            pdu.extend_from_slice(&[AD_TYPE_MANUFACTURER_DATA, 0xFF, 0xFF, 0x03]);
+            pdu.push(CAP_IDENTITY_HINT);
+            pdu.extend_from_slice(&hint[..carried]);
+            let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+            assert_eq!(parsed.caps, Some(CAP_IDENTITY_HINT));
+            assert_eq!(parsed.identity_hint, None, "{carried} of 4 bytes is none");
+        }
+
+        // A length byte that runs off the end of the PDU mid-hint: the
+        // walk stops at the last whole structure and nothing is read.
+        let full = own_advertisement(0);
+        for cut in 1..=IDENTITY_HINT_LEN {
+            let parsed = parse_peer_advertisement(&full[..full.len() - cut], &SERVICE_UUID_LE);
+            assert!(parsed.offers_service, "the service list is still whole");
+            assert_eq!(parsed.caps, None, "the record itself never completed");
+            assert_eq!(parsed.identity_hint, None);
+        }
+
+        // Positive control for the loop above: the uncut PDU does yield
+        // both, so the Nones are the truncation and not the fixture.
+        let whole = parse_peer_advertisement(&full, &SERVICE_UUID_LE);
+        assert_eq!(whole.caps, Some(CAP_IDENTITY_HINT));
+        assert_eq!(whole.identity_hint, Some(hint));
+    }
+
+    #[test]
+    fn a_longer_record_than_we_know_still_yields_exactly_four_hint_bytes() {
+        // The forward-compatibility contract, now from the other side:
+        // a v0.4 advertiser that appended a field of its own is read for
+        // the parts we understand and no further.
+        let mut pdu = legacy_prefix();
+        pdu.extend_from_slice(&[0x0d, AD_TYPE_MANUFACTURER_DATA, 0xFF, 0xFF, 0x04]);
+        pdu.push(CAP_IDENTITY_HINT | CAP_PERIPHERAL_ONLY);
+        pdu.extend_from_slice(&[0xb2, 0xa8, 0xbe, 0xa1]);
+        pdu.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // somebody's future
+        let parsed = parse_peer_advertisement(&pdu, &SERVICE_UUID_LE);
+        assert_eq!(parsed.identity_hint, Some([0xb2, 0xa8, 0xbe, 0xa1]));
+        assert_eq!(
+            should_initiate(0, 1, parsed.caps, 2, ScanMode::Strict),
+            ConnectDecision::InitiatePeripheralOnlyPeer,
+            "and the rule it feeds is unchanged"
+        );
+    }
+
+    #[test]
+    fn the_hint_never_touches_the_connection_decision() {
+        // #412's hard limit: the hint orders a dial, it may not decide
+        // who initiates. Same addresses, same caps bits that matter,
+        // hint and no hint — the verdict is identical every time.
+        for mode in [ScanMode::Strict, ScanMode::Fallback] {
+            for base in [0u8, CAP_PERIPHERAL_ONLY] {
+                let hinted = parse_peer_advertisement(&own_advertisement(base), &SERVICE_UUID_LE);
+                let plain = parse_peer_advertisement(&legacy_advertisement(base), &SERVICE_UUID_LE);
+                assert_ne!(hinted.identity_hint, plain.identity_hint, "fixtures differ");
+                assert_eq!(
+                    should_initiate(0, 0x10, hinted.caps, 0x20, mode),
+                    should_initiate(0, 0x10, plain.caps, 0x20, mode),
+                    "base={base:#04x} mode={mode:?} low"
+                );
+                assert_eq!(
+                    should_initiate(0, 0x20, hinted.caps, 0x10, mode),
+                    should_initiate(0, 0x20, plain.caps, 0x10, mode),
+                    "base={base:#04x} mode={mode:?} high"
+                );
+                assert_eq!(hinted.free_slots(), plain.free_slots());
+            }
+        }
     }
 
     #[test]

@@ -30,13 +30,13 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
-    addr_value, judge_supervision_timeout, manufacturer_data, parse_peer_advertisement,
-    should_initiate, with_free_slots, CandidateTable, ConnParams, ConnParamsAsk, ConnParamsLine,
-    ConnParamsReq, ConnParamsReqLine, ConnectDecision, GattBytes, LinkPhase, LinkRole, LinkUp,
-    Origin, OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap, ADV_BYTES_USED,
-    CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, LEGACY_AD_CAPACITY, LINK_TIMEOUT_MS,
-    MANUFACTURER_DATA_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    addr_value, identity_hint, judge_supervision_timeout, manufacturer_data_with_hint,
+    parse_peer_advertisement, should_initiate, with_free_slots, CandidateTable, ConnParams,
+    ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision, GattBytes,
+    LinkPhase, LinkRole, LinkUp, Origin, OversizeFrom, OversizeLine, PeerRegistry, ScanMode, TxGap,
+    ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
+    LINK_TIMEOUT_MS, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, SCAN_FALLBACK_AFTER_MS,
+    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -263,12 +263,26 @@ fn free_peripheral_slots() -> u8 {
 ///
 /// Since #375 item 3 the same byte carries [`free_peripheral_slots`] in
 /// bits 1-3, so a searching peer can prefer the emptiest board instead
-/// of picking blind and being refused. The record does not grow — the
-/// bits were spare — and the count is a hint only: what it is read for
-/// is the ORDER of eligible targets (`leviculum_ble_tx::window`),
-/// never for whether a link may be accepted.
-fn capability_record() -> [u8; MANUFACTURER_DATA_LEN] {
-    manufacturer_data(with_free_slots(LOCAL_CAPS, free_peripheral_slots()))
+/// of picking blind and being refused. The record does not grow for
+/// that — the bits were spare — and the count is a hint only: what it
+/// is read for is the ORDER of eligible targets
+/// (`leviculum_ble_tx::window`), never for whether a link may be
+/// accepted.
+///
+/// Since #412 it also carries `hint`, the first four bytes of this
+/// board's identity hash, which grows the record from four bytes to
+/// eight and the whole advertisement to exactly
+/// [`LEGACY_AD_CAPACITY`]. That is what lets a scanning peer recognise
+/// us across an address rotation BEFORE it spends a dial on us. Also a
+/// hint only, and read for one thing: a peer already linked to us is
+/// not dialled again ([`hint_already_linked`]).
+///
+/// The hint is a parameter rather than a global: [`spawn`] is handed
+/// the identity and threads it to the tasks, so there is no second
+/// copy of it to go stale and no order in which this can be called
+/// before it is known.
+fn capability_record(hint: [u8; IDENTITY_HINT_LEN]) -> [u8; MANUFACTURER_DATA_HINT_LEN] {
+    manufacturer_data_with_hint(with_free_slots(LOCAL_CAPS, free_peripheral_slots()), &hint)
 }
 
 /// The advertising PDU as it stands at this instant: the two fixed AD
@@ -283,20 +297,24 @@ fn capability_record() -> [u8; MANUFACTURER_DATA_LEN] {
 /// `sd_ble_gap_adv_set_configure` it was already about to perform. No
 /// running advertisement is ever stopped to rewrite it, so no
 /// advertising interval is dropped and nothing needs rate-limiting.
-fn advertisement_now() -> LegacyAdvertisementPayload {
+fn advertisement_now(hint: [u8; IDENTITY_HINT_LEN]) -> LegacyAdvertisementPayload {
     LegacyAdvertisementBuilder::new()
         .flags(&[Flag::GeneralDiscovery, Flag::LE_Only])
         .services_128(ServiceList::Complete, &[RETICULUM_SVC_UUID_LE])
         .raw(
             AdvertisementDataType::MANUFACTURER_SPECIFIC_DATA,
-            &capability_record(),
+            &capability_record(hint),
         )
         .build()
 }
 
 // The advertisement builder panics on overflow, on a board, at boot. The
 // budget is arithmetic over constants, so it is decided here instead.
+// Since #412 it is an equality, not an inequality: the identity hint
+// spent the last four bytes, so anything added to this builder fails
+// the build rather than the boot.
 const _: () = assert!(ADV_BYTES_USED <= LEGACY_AD_CAPACITY);
+const _: () = assert!(ADV_BYTES_USED == LEGACY_AD_CAPACITY);
 
 /// Register the GATT service and spawn the Columba tasks: one
 /// peripheral task per incoming link slot (#372) and the central half.
@@ -367,7 +385,11 @@ pub fn spawn(
     // live slot count. This one is the boot witness for the line below:
     // it measures the same builder on the same AD structures, so the
     // byte budget is still reported from bytes and not from arithmetic.
-    let adv = advertisement_now();
+    // The four bytes that go on the air and that a peer compares a
+    // live link's identity against (#412), derived once here from the
+    // same hash the Identity characteristic above publishes.
+    let hint = identity_hint(&identity_hash);
+    let adv = advertisement_now(hint);
     let name = crate::name::boot_gap_name();
     let scan: &'static LegacyAdvertisementPayload = SCAN_DATA.init(
         LegacyAdvertisementBuilder::new()
@@ -384,18 +406,22 @@ pub fn spawn(
         "[BLE ] ",
         format_args!(
             "ADV adv_bytes={} scan_bytes={} cap={} peripheral_only={} periph_links={} \
-             free_slots={}",
+             free_slots={} hint={:02x}{:02x}{:02x}{:02x}",
             adv.as_ref().len(),
             scan.as_ref().len(),
             LEGACY_AD_CAPACITY,
-            u8::from(capability_record()[3] & CAP_PERIPHERAL_ONLY != 0),
+            u8::from(capability_record(hint)[3] & CAP_PERIPHERAL_ONLY != 0),
             super::PERIPH_LINKS,
             free_peripheral_slots(),
+            hint[0],
+            hint[1],
+            hint[2],
+            hint[3],
         ),
     );
 
     for index in 0..super::PERIPH_LINKS {
-        spawner.must_spawn(peripheral_task(sd, server, scan, index));
+        spawner.must_spawn(peripheral_task(sd, server, scan, index, hint));
     }
     // Phase B (#255): the central half — scan, decide, initiate. Both
     // halves of the protocol spawn here, behind the one entry point the
@@ -425,6 +451,7 @@ async fn peripheral_task(
     server: &'static NotifyAwareServer,
     scan: &'static LegacyAdvertisementPayload,
     index: usize,
+    hint: [u8; IDENTITY_HINT_LEN],
 ) {
     let incoming_tx = BLE_INCOMING.sender();
 
@@ -461,10 +488,11 @@ async fn peripheral_task(
             let config = peripheral::Config::default();
             // Built here, not at boot: the capability record carries
             // this board's free-slot count, which is current exactly
-            // now (#375 item 3). The payload lives across the await
-            // below, which is what the SoftDevice's pointer into it
-            // requires.
-            let adv = advertisement_now();
+            // now (#375 item 3). The identity hint (#412) in the same
+            // record is fixed for the life of the board and simply
+            // rides along. The payload lives across the await below,
+            // which is what the SoftDevice's pointer into it requires.
+            let adv = advertisement_now(hint);
             let advertisement = peripheral::ConnectableAdvertisement::ScannableUndirected {
                 adv_data: adv.as_ref(),
                 scan_data: scan.as_ref(),
@@ -1439,6 +1467,27 @@ fn addr_already_linked(addr_value: u64) -> bool {
     LIVE_PEERS.lock(|peers| peers.borrow().addr_linked(addr_value))
 }
 
+/// Whether the advertiser's identity hint (#412) belongs to a peer we
+/// already hold a live link to — the same exclusion as
+/// [`addr_already_linked`], one level up, where a rotated address
+/// cannot hide.
+///
+/// This is where the corpus night's 7-of-7 goes: without it, every
+/// rotation of a linked phone looks like a new device, wins the
+/// fallback class by its low RPA and takes the board's ONE central
+/// slot, and the duplicate is only found after the connect, the
+/// discovery and the identity read. The rule host-tested in
+/// [`leviculum_ble_tx::PeerRegistry::hint_linked`]; this is the lock
+/// around the firmware's single registry instance.
+///
+/// A HINT, and used in one direction only: to skip a dial. `None` — an
+/// advertiser that carried no hint — is never a match, so a pre-#412
+/// board and a phone behave exactly as they did. Nothing durable is
+/// keyed on it; admission is still the 16-byte identity handshake.
+fn hint_already_linked(hint: Option<[u8; IDENTITY_HINT_LEN]>) -> bool {
+    LIVE_PEERS.lock(|peers| peers.borrow().hint_linked(hint))
+}
+
 /// The number of distinct live peer identities on the BLE interface
 /// (Codeberg #365) — what the main loop mirrors into the core as the
 /// interface's peer count, next to the `is_online` mirror. Counted from
@@ -1689,6 +1738,24 @@ impl core::fmt::Display for FreeSlots {
     }
 }
 
+/// A peer's advertised identity hint as the `BLE_SCAN_DECISION` line
+/// prints it (#412): the four bytes in hex, or `unknown` when the peer
+/// carried none.
+///
+/// Its own token rather than `00000000`, for the same reason
+/// [`FreeSlots`] has one: silence and a real answer must not print the
+/// same, or a capture cannot tell why a dial was or was not skipped.
+struct IdentityHint(Option<[u8; IDENTITY_HINT_LEN]>);
+
+impl core::fmt::Display for IdentityHint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(h) => write!(f, "{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3]),
+            None => f.write_str("unknown"),
+        }
+    }
+}
+
 /// Whether the scanner must skip this address (see [`note_dead_end`]).
 fn dead_end(addr: u64) -> bool {
     DEAD_ENDS.lock(|table| table.borrow().contains(addr))
@@ -1774,12 +1841,21 @@ async fn find_peer_to_initiate(
                     // is ranked as if it had them all free, and reading
                     // that as "0 free" in a capture would invert the
                     // conclusion drawn from it.
+                    // hint is the DECODED identity hint (#412), the
+                    // same four bytes every other line prints as
+                    // `peer=`, so a capture can read "this dial was
+                    // skipped because we already hold that peer"
+                    // straight off. `unknown` is its own token for the
+                    // same reason free_slots has one: a peer that said
+                    // nothing about who it is is not a peer named
+                    // 00000000.
                     "BLE_SCAN_DECISION addr={:012x} caps_record={} caps={:#04x} free_slots={} \
-                     rule={} initiate={}",
+                     hint={} rule={} initiate={}",
                     peer_value,
                     u8::from(parsed.caps.is_some()),
                     parsed.caps.unwrap_or(0),
                     FreeSlots(free_slots),
+                    IdentityHint(parsed.identity_hint),
                     decision.as_str(),
                     u8::from(decision.initiate()),
                 ),
@@ -1787,8 +1863,16 @@ async fn find_peer_to_initiate(
         }
         // The third filter is the §4.5 exclusion: a dial to an address
         // we already hold a connection with can only time out (see
-        // [`addr_already_linked`]), so it never leaves the scanner.
-        if !decision.initiate() || dead_end(peer_value) || addr_already_linked(peer_value) {
+        // [`addr_already_linked`]), so it never leaves the scanner. The
+        // fourth is the same exclusion keyed by IDENTITY (#412): the
+        // peer that rotated its address is the one the address filter
+        // structurally cannot see, and on a board with one central slot
+        // that dial is the whole outgoing capacity.
+        if !decision.initiate()
+            || dead_end(peer_value)
+            || addr_already_linked(peer_value)
+            || hint_already_linked(parsed.identity_hint)
+        {
             return false;
         }
         window

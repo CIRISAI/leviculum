@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A node's BLE advertisement now carries the first four bytes of its
+  identity hash, so a board recognises a peer it is already linked to
+  before it dials it and stops spending its single outgoing link on a
+  phone that keeps changing its Bluetooth address (Codeberg #412).
+
 - `lnflash` knows the SenseCAP Solar Node P1-Pro, so every control command
   reaches it: `--watch`, `--announce`, `--set-time`, `--set-name`,
   `--set-ble-tx-gap` and the `--radio-*` flags. The board runs our firmware

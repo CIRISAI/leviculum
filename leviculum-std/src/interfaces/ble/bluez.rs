@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
-use leviculum_ble_tx::{manufacturer_data, COMPANY_ID};
+use leviculum_ble_tx::{identity_hint, manufacturer_data_with_hint, COMPANY_ID};
 
 /// The Columba GATT service and its three characteristics
 /// (BLE_PROTOCOL_v2.2 §GATT Service Structure).
@@ -55,9 +55,13 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// The advertisement carries the service UUID and the v0.3.0 capability
 /// record with flags 0x00 — dual-role, and deliberately *present* rather
 /// than omitted, so peers sort us by the confirmed rule instead of the
-/// assumed one. BlueZ places the `LN-<hex8>` local name in the scan
-/// response, where it does not compete with the 31 advertisement bytes
-/// (same layout as the firmware's).
+/// assumed one. Since #412 the record also carries the first four bytes
+/// of our identity hash, so a scanning peer can tell us from a stranger
+/// before it spends a dial; the firmware advertises the identical
+/// record, built by the identical function. BlueZ places the
+/// `LN-<hex8>` local name in the scan response, where it does not
+/// compete with the 31 advertisement bytes (same layout as the
+/// firmware's).
 pub(crate) async fn register_advertisement(
     adapter: &Adapter,
     identity: IdentityHash,
@@ -66,7 +70,8 @@ pub(crate) async fn register_advertisement(
     let name = super::links::local_name(&identity);
     // The manufacturer-record payload minus the company ID: BlueZ keys
     // the record by CID and prepends it on the wire.
-    let record = manufacturer_data(super::links::LOCAL_CAPS)[2..].to_vec();
+    let hint = identity_hint(&identity);
+    let record = manufacturer_data_with_hint(super::links::LOCAL_CAPS, &hint)[2..].to_vec();
 
     let advertisement = Advertisement {
         advertisement_type: AdvType::Peripheral,
@@ -78,7 +83,9 @@ pub(crate) async fn register_advertisement(
     };
     let adv = adapter.advertise(advertisement).await?;
     tracing::info!(
-        "BLE {iface}: advertising as {name} (service {SERVICE_UUID}, dual-role record present)"
+        "BLE {iface}: advertising as {name} (service {SERVICE_UUID}, dual-role record present, \
+         identity hint {})",
+        super::links::hint_str(Some(hint)),
     );
     Ok(adv)
 }

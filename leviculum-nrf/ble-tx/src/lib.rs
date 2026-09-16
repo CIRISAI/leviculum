@@ -46,9 +46,10 @@ pub mod session_census;
 pub mod window;
 
 pub use adv::{
-    ad_structure_len, free_slots, manufacturer_data, with_free_slots, ADV_BYTES_USED,
-    CAP_FREE_SLOTS_MASK, CAP_FREE_SLOTS_VALID, CAP_PERIPHERAL_ONLY, COMPANY_ID, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_LEN, PERIPH_SLOTS, PROTOCOL_VERSION,
+    ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,
+    with_free_slots, ADV_BYTES_USED, CAP_FREE_SLOTS_MASK, CAP_FREE_SLOTS_VALID, CAP_IDENTITY_HINT,
+    CAP_PERIPHERAL_ONLY, COMPANY_ID, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
+    MANUFACTURER_DATA_HINT_LEN, MANUFACTURER_DATA_LEN, PERIPH_SLOTS, PROTOCOL_VERSION,
 };
 pub use conn_params::{
     judge_supervision_timeout, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
