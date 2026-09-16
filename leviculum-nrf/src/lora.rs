@@ -482,10 +482,7 @@ impl AnnounceCap {
         let Some(phy) = running_config() else {
             return;
         };
-        let Some(bitrate_bps) =
-            self.tracker
-                .sync(phy.bandwidth_hz, phy.sf, phy.cr, phy.preamble_len)
-        else {
+        let Some(bitrate_bps) = self.tracker.sync_phy(&phy) else {
             return;
         };
         // The board's OWN announces bypass the cap above by design, the

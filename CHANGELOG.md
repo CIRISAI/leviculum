@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A board holds back the announces it relays instead of repeating every
+  one at once: its LoRa interface registers what a frame costs on the
+  carrier it is running, so the announce bandwidth cap engages in the
+  firmware too, and payload stops queueing behind other people's
+  announces on a slow PHY (#402).
+
 - An `lnsd` with an RNode interface holds back its transit announces
   whether or not the config spells out a `bitrate`: the interface now
   registers the announce-cap bitrate its live radio settings imply, which

@@ -1486,6 +1486,19 @@ impl AnnounceCapBitrate {
         self.registered_bps = bps;
         Some(bps)
     }
+
+    /// [`Self::sync`] against the settings a radio reports running.
+    ///
+    /// The firmware's own call (Codeberg #402): a board has no config file to
+    /// read a bitrate out of, it has a radio, and `RadioConfigWire` is what
+    /// that radio answers with. Spelled here rather than in the firmware so
+    /// the step from "what the chip is running" to "what the cap registers"
+    /// is on the host side of the cross-compile boundary and can be asserted
+    /// there — `leviculum-nrf` builds for thumbv7em and runs no host tests,
+    /// so anything left inside it is reachable only from hardware.
+    pub fn sync_phy(&mut self, phy: &RadioConfigWire) -> Option<u32> {
+        self.sync(phy.bandwidth_hz, phy.sf, phy.cr, phy.preamble_len)
+    }
 }
 
 /// Whether a bursting LoRa transmitter must yield the channel (open its

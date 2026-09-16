@@ -15619,6 +15619,169 @@ mod tests {
             );
         }
 
+        /// Codeberg #402, the board's side of the same boundary, asserted
+        /// where it can run.
+        ///
+        /// The board's LoRa interface itself cannot be constructed in a host
+        /// test: `leviculum-nrf` builds for thumbv7em-none-eabihf against
+        /// embassy and a SoftDevice, it is excluded from this workspace, and
+        /// it has no host test target at all — so `lora::AnnounceCap::sync`,
+        /// the main-loop call and `publish_running_config` stay reachable only
+        /// from hardware. What CAN be pulled to this side is the step that
+        /// carries the meaning: from the settings the radio reports running to
+        /// the bitrate the cap registers. That is `AnnounceCapBitrate::sync_phy`,
+        /// the call the firmware makes verbatim, and this test makes it on the
+        /// two PHYs a board actually boots and runs on.
+        ///
+        /// Named gap: that the main loop calls `sync` after every wake, and
+        /// that `running_config()` answers only once the chip is configured,
+        /// is firmware glue this test does not reach. It is covered on the rig
+        /// by the `[ANNOUNCE_CAP]` line the sync emits, which carries the
+        /// bitrate, the share and the holdoff, and by the ANN_TX count per
+        /// nine seconds the affected cells measure.
+        #[test]
+        fn a_board_phy_holds_transit_announces_and_never_its_own() {
+            use crate::rnode::{
+                announce_cap_bitrate_bps, derive_preamble_symbols, packet_airtime_ms,
+                AnnounceCapBitrate, RadioConfigWire, ANNOUNCE_CAP_REFERENCE_BYTES,
+            };
+
+            /// The board's own `RadioConfigWire`, as `publish_running_config`
+            /// hands it to the cap after the LoRa task programmed the chip.
+            fn phy(sf: u8, bandwidth_hz: u32) -> RadioConfigWire {
+                RadioConfigWire {
+                    frequency_hz: 869_463_000,
+                    bandwidth_hz,
+                    sf,
+                    cr: 5,
+                    tx_power_dbm: 22,
+                    preamble_len: derive_preamble_symbols(sf, 5, bandwidth_hz),
+                    csma_enabled: true,
+                    radio_silent: false,
+                    st_alock: 0,
+                    lt_alock: 0,
+                    lt_alock_present: false,
+                }
+            }
+
+            // The compiled default (SF8/BW125, `RadioConfig::eu_medium`) and
+            // the long-range profile the #402 capture ran on. Bands are +/-10 %
+            // around the on-air time of a 184 B frame worked out from the modem
+            // datasheet formula — 544 ms and 1764 ms at the 18-symbol preamble
+            // floor both profiles land on.
+            for (sf, bandwidth, band) in
+                [(8u8, 125_000u32, 2_422..2_961u32), (10, 125_000, 746..912)]
+            {
+                let mut tracker = AnnounceCapBitrate::new();
+                let bps = tracker
+                    .sync_phy(&phy(sf, bandwidth))
+                    .expect("the first sync after the radio came up registers");
+
+                let preamble = derive_preamble_symbols(sf, 5, bandwidth);
+                let airtime_ms =
+                    packet_airtime_ms(ANNOUNCE_CAP_REFERENCE_BYTES, bandwidth, sf, 5, preamble);
+                assert_eq!(
+                    bps,
+                    (ANNOUNCE_CAP_REFERENCE_BYTES as u64 * 8 * 1000 / airtime_ms) as u32,
+                    "sf={sf}: the registered bitrate is the reference announce over \
+                     the airtime this PHY charges it"
+                );
+                assert_eq!(
+                    bps,
+                    announce_cap_bitrate_bps(bandwidth, sf, 5, preamble),
+                    "sf={sf}: and it is the same number the host side registers \
+                     for the same PHY, across the drop-in boundary"
+                );
+                assert!(
+                    band.contains(&bps),
+                    "sf={sf}: {bps} bps is outside the band a {ANNOUNCE_CAP_REFERENCE_BYTES} B \
+                     frame measures at on this PHY ({band:?}); a term has gone missing"
+                );
+            }
+
+            // And the behaviour that buys: on the board's LoRa interface index,
+            // a transit announce past the holdoff is held while the board's own
+            // announce is not. `IFACE_INDEX` is 1 in the firmware
+            // (`leviculum-nrf/src/lora.rs`), spelled as a literal here because
+            // this crate cannot depend on the firmware crate.
+            const LORA: usize = 1;
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("serial_usb", 1)));
+            let _idx1 =
+                transport.register_interface(Box::new(MockInterface::new("lora_sx1262", 2)));
+            transport.set_local_client(0, true);
+
+            let mut tracker = AnnounceCapBitrate::new();
+            let bps = tracker
+                .sync_phy(&phy(10, 125_000))
+                .expect("the first sync registers");
+            transport.register_interface_bitrate(LORA, bps);
+
+            let step = transport.announce_jitter_max_ms() + 100;
+            let lora_sends = |actions: &[Action]| {
+                actions
+                    .iter()
+                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == LORA))
+                    .count()
+            };
+
+            let (raw1, _dh1) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw1).unwrap();
+            transport.clock.advance(step);
+            transport.poll();
+            let first = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(lora_sends(&first), 1, "the first relayed announce goes out");
+            let holdoff_until = transport.interface_announce_caps[&LORA].allowed_at_ms;
+            assert!(
+                holdoff_until > transport.clock.now_ms() + step,
+                "premise: at {bps} bps one announce buys more silence than a \
+                 scheduler step, or nothing below is tested"
+            );
+
+            let (raw2, _dh2) = make_announce_raw(2, PacketContext::None);
+            transport.process_incoming(0, &raw2).unwrap();
+            transport.clock.advance(step);
+            transport.poll();
+            let second = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                lora_sends(&second),
+                0,
+                "a relayed announce inside the holdoff must be held, which is the \
+                 airtime the #402 capture had no way of getting back"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&LORA].queue.len(),
+                1,
+                "held means queued fewest-hops-first, not dropped"
+            );
+
+            // The board's own announce, offered inside the same holdoff. A
+            // board that stopped announcing itself to save airtime would be a
+            // node nobody can reach — the cap must never touch this one.
+            assert!(transport.clock.now_ms() < holdoff_until, "premise");
+            let queued_before = transport.interface_announce_caps[&LORA].queue.len();
+            let (own, _dh3) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(0, &own).unwrap();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+            transport.clock.advance(step);
+            transport.poll();
+            let third = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert!(
+                third.iter().any(|a| matches!(a, Action::Broadcast { .. }))
+                    || lora_sends(&third) > 0,
+                "the board's own announce bypasses its own cap: {third:?}"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&LORA].queue.len(),
+                queued_before,
+                "and never queues behind the relay backlog"
+            );
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;
