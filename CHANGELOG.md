@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every board now reports its physical link — rssi, snr and Reticulum's
+  own quality figure — in the telemetry it sends. The radio has measured
+  all three on every reception since the driver existed and logged them;
+  the Telemeter has carried them since the codec existed; nothing put the
+  two together, so a report said where a board was and not how well it was
+  hearing, which on a mesh is the more actionable of the two.
+
+  The reading is **the last frame received**, deliberately: a mean over a
+  window averages whichever neighbours happened to transmit and falls when
+  a distant node joins, which on a viewer reads as the near link
+  degrading. It is also what the references mean by the same words —
+  `RNS.Link.rssi`/`.snr` keep the last received packet's figures and
+  `RNodeInterface.r_stat_rssi` belongs to the frame the stat bytes came
+  with — so our number and a Python-RNS peer's are one quantity. `q` is
+  Reticulum's `Q_SNR_*` map rather than a scale of ours, computed from the
+  spreading factor the frame was actually demodulated at; a PHY with no
+  defined scale sends `q` as nil and the two measurements beside it
+  regardless.
+
+  A board that has heard nothing for longer than the fastest reporting
+  cadence sends no physical-link sensor at all. A stale rssi is the one
+  reading in the set that states the opposite of the truth — a board whose
+  antenna fell off would go on reporting the last good link it had — so
+  the rule and its bound live in `leviculum-telemetry-policy`, beside the
+  cadence and where a host test can drive them (Codeberg #236).
+
 - The SenseCAP Solar Node P1-Pro reports its pack voltage on the `[BAT]`
   line like every other board, read through its own 1 MΩ/510 kΩ divider
   rather than the T114's and sampled with the longer acquisition window

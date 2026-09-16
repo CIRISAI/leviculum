@@ -15,7 +15,7 @@
 //! and a state machine that needs a radio to be exercised is a state
 //! machine that is never exercised.
 //!
-//! Two things live here, because they are one decision:
+//! Three things live here. The first two are one decision:
 //!
 //! * **The cadence policy** — [`Profile`] bundles the parameter defaults,
 //!   [`SendPolicy::poll`] answers "report now?" with a [`ReportReason`].
@@ -26,7 +26,12 @@
 //!   rather than hidden, and the immediate report of the concept's
 //!   observability rule fires on key arrival rather than on target
 //!   setting.
+//! * **The physical-link reading** ([`link`]) — which of the receptions
+//!   since the last report the next one describes, and when there is no
+//!   reading to describe at all. Also a rule over time rather than a
+//!   measurement, and also untestable inside the firmware crate.
 //!
+
 //! The configured target *is* the on-switch: no target is
 //! [`TargetState::Off`] and that is the default, which removes the
 //! on-without-target and off-with-target states entirely.
@@ -38,6 +43,11 @@
 //! possession — see [`SendPolicy::set_position_source`].
 
 #![cfg_attr(not(test), no_std)]
+
+/// What the board reports as its physical link: the meaning of the one
+/// rssi/snr pair a report carries, and the freshness bound that keeps a
+/// silent board from restating an old one.
+pub mod link;
 
 // ---------------------------------------------------------------------------
 // Profiles

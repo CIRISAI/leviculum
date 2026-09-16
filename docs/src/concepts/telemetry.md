@@ -209,6 +209,39 @@ already exact at the two decimals Sideband rounds to, so the value goes
 on the wire unrounded. Battery charge stays feature-gated — it needs a
 baseboard that has a gauge — and an absent sensor contributes no key.
 
+The same rule adds the physical link (SID `0x05`), which is the one
+sensor that describes the mesh rather than the box. **It is the last
+frame the radio received**, not a mean over a window and not the best of
+one: a mean on a mesh averages over whichever neighbours happened to
+transmit, so it falls when a distant node joins and reads on a viewer as
+the near link degrading. The last frame is also what the references
+report under this name — `RNS.Link.rssi`/`.snr` keep the last received
+packet's figures (`RNS/Link.py`), and `RNodeInterface`'s `r_stat_rssi`
+belong to the frame the stat bytes arrived with — so our `rssi` and a
+Python-RNS peer's `rssi` are the same quantity. `q` is Reticulum's own
+SNR-to-quality map (`RNodeInterface.Q_SNR_*`, whose floor drops 2 dB per
+spreading factor), not a scale of ours; where the PHY has none defined
+the slot goes out nil and the two measurements beside it still go.
+
+A board that has heard nothing for longer than the fastest reporting
+cadence sends **no physical-link sensor at all**, which is the general
+absence rule applied to a reading that would otherwise never expire: a
+stale rssi is the one number in the set that says the opposite of the
+truth. The rule and its bound live in
+`leviculum-nrf/telemetry-policy/src/link.rs`, where a host test can
+reach them.
+
+Two sensors of the type stay empty on every board we build, and for a
+reason worth writing down rather than a gap. `charging` inside the
+battery sensor is `None` because a voltage divider cannot tell charging
+from discharging and no board brings a charger status line to the MCU —
+upstream's own answer on the RAK4631 (`NRF_APM`) reads the nRF52's USB
+VBUS state, which is "USB is plugged in", not "the pack is gaining".
+`power_production` is empty for the same kind of reason: not one carrier
+exposes a panel current, and on the Solar Node in particular every XIAO
+pad is accounted for in `boards/solarnode.rs` with nothing left over
+(Codeberg #233).
+
 ### A reporting message carries no text
 
 A telemetry message sets `content` and `title` to empty. This is a hard

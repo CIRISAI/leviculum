@@ -33,6 +33,56 @@ pub static LORA_TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// reassembler feed).
 pub static LORA_RX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// The last frame this radio received, for the telemetry reporter's
+/// physical-link sensor (Codeberg #236). `None` until the first one.
+///
+/// A `Cell` behind a critical section rather than packed atomics, for the
+/// same reason [`RUNNING_CONFIG`] is one: the four fields are a single
+/// observation and must be read as one. Two frames cannot be half-mixed
+/// here, and the cost is a critical section on a path that was about to
+/// format a log line anyway.
+///
+/// **Successful receptions only.** A frame that failed its payload CRC is
+/// also a measurement, and `sx1262::CrcErrFrame` keeps it for exactly that
+/// reason — but it is a measurement of the population that did *not* get
+/// through, and reporting it as the link's rssi would mean a board whose
+/// link had just collapsed would report the signal of the frames that
+/// prove it. The `[LORA] RX err: Crc` line remains where that population
+/// is counted.
+static LAST_RECEPTION: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::Cell<Option<leviculum_telemetry_policy::link::Reception>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
+
+/// Record one successful reception's signal figures. Called from the
+/// frame sink, once per frame handed up.
+///
+/// The spreading factor is read here rather than at report time so it is
+/// the one this frame was demodulated at: a radio reconfigured in between
+/// would otherwise put an old frame's snr on a new PHY's quality scale
+/// (`leviculum_telemetry_policy::link::quality_percent`). `0` when the
+/// chip has not been configured yet — not reachable on this path, since a
+/// frame cannot arrive before the receiver was armed, and it yields no
+/// `q` rather than a wrong one if it ever is.
+fn note_reception(status: &crate::sx1262::RxStatus, at_ms: u64) {
+    let spreading_factor = running_config().map_or(0, |config| config.sf);
+    LAST_RECEPTION.lock(|slot| {
+        slot.set(Some(leviculum_telemetry_policy::link::Reception {
+            rssi_dbm: status.rssi,
+            snr_db: status.snr,
+            spreading_factor,
+            at_ms,
+        }))
+    });
+}
+
+/// The last successful reception, or `None` if this board has not
+/// received a frame since boot. What the telemetry reporter applies its
+/// freshness bound to.
+pub fn last_reception() -> Option<leviculum_telemetry_policy::link::Reception> {
+    LAST_RECEPTION.lock(|slot| slot.get())
+}
+
 // SPIM2, works on T114 (SPIM3 has a MISO read bug)
 bind_interrupts!(pub struct SpiIrqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
@@ -895,6 +945,11 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
     type Meta = crate::sx1262::RxStatus;
 
     async fn deliver(&mut self, frame: &[u8], status: &Self::Meta) {
+        // Before anything else, and for every frame rather than only the
+        // ones that complete a reassembly: what the physical link did is
+        // a property of the reception, not of whether the packet above it
+        // turned out to be whole.
+        note_reception(status, embassy_time::Instant::now().as_millis());
         crate::log::log_fmt(
             "[T114_LORA_LOOP] ",
             format_args!(

@@ -52,7 +52,7 @@ use leviculum_core::DestinationHash;
 use leviculum_lxmf::msgpack::Number;
 use leviculum_lxmf::telemetry::{
     build_report, celsius_from_quarter_degrees, screen_telemetry_request, Battery, Location,
-    Telemetry, TelemetryRequestVerdict,
+    PhysicalLink, Telemetry, TelemetryRequestVerdict,
 };
 use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::{
@@ -61,6 +61,9 @@ use leviculum_telemetry_policy::{
     TargetState, FIXED_POSITION_HDOP_E2,
 };
 
+/// Re-exported for the same reason [`TargetOutcome`] is: the board
+/// binaries fill [`Readings::link`] and never name the policy crate.
+pub use leviculum_telemetry_policy::link::Reading as LinkReading;
 /// Re-exported so the binaries name the outcome of
 /// [`Reporter::apply_target`] without also depending on the policy crate
 /// directly: the wiring layer is the seam, and the seam owns its
@@ -774,6 +777,11 @@ pub struct Readings {
     /// [`Readings::telemetry`] for why turning it into a float early would
     /// invent precision the sensor does not have.
     pub die_temperature_quarter_c: Option<i32>,
+    /// What the LoRa receiver last heard, if it heard it recently enough
+    /// to still describe the link. Filled by [`link_reading`], which is
+    /// where both halves of that sentence are decided; `None` here is a
+    /// report that carries no physical-link sensor at all.
+    pub link: Option<LinkReading>,
 }
 
 impl Readings {
@@ -811,6 +819,12 @@ impl Readings {
     /// Assemble the Telemeter for one report, with the location the
     /// caller decided on (`None` for a report that carries no position).
     ///
+    /// The physical link is packed as whole dBm and whole dB, which is
+    /// the resolution `leviculum_core::sx126x::packet_status_dbm` decodes
+    /// the chip's packet status at, plus Reticulum's own quality figure.
+    /// What the numbers mean and when there are none is
+    /// [`leviculum_telemetry_policy::link`]'s to say, not this function's.
+    ///
     /// The temperature is packed as a bare number in degrees Celsius
     /// (`SID_TEMPERATURE`), by the codec's own converter — the rounding
     /// convention is Sideband's and belongs beside the encoder that has to
@@ -823,6 +837,14 @@ impl Readings {
             temperature: self
                 .die_temperature_quarter_c
                 .map(celsius_from_quarter_degrees),
+            physical_link: self.link.map(|link| PhysicalLink {
+                rssi: Some(Number::Int(link.rssi_dbm as i64)),
+                snr: Some(Number::Int(link.snr_db as i64)),
+                // Absent rather than nil-with-a-guess when the PHY has no
+                // defined quality scale; the wire slot is nil-able for
+                // exactly this.
+                q: link.quality_percent.map(|q| Number::Int(q as i64)),
+            }),
             battery: self.battery_percent.map(|percent| Battery {
                 charge_percent: Number::Int(percent as i64),
                 // The baseboard reads a voltage divider, which cannot tell
@@ -831,9 +853,28 @@ impl Readings {
                 charging: None,
                 temperature: None,
             }),
+            // Power production is the one sensor of the type no board we
+            // build can fill: not one of them brings a panel current, a
+            // charger status or any other producer out to the MCU
+            // (Codeberg #233 for the Solar Node in particular, whose pad
+            // map is fully accounted for in `boards/solarnode.rs`).
             ..Telemetry::default()
         }
     }
+}
+
+/// The physical-link reading this board would report right now, freshness
+/// bound applied ([`leviculum_telemetry_policy::link::reading`]).
+///
+/// The wiring layer owns this, like everything else in this module: the
+/// radio's last reception comes from [`crate::lora`], the rule for what to
+/// do with it comes from the policy crate, and the board binaries do
+/// neither — they fill one field of [`Readings`].
+pub fn link_reading() -> Option<LinkReading> {
+    leviculum_telemetry_policy::link::reading(
+        crate::lora::last_reception(),
+        embassy_time::Instant::now().as_millis(),
+    )
 }
 
 /// The nRF52's die temperature in quarter-degrees Celsius, or `None` if

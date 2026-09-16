@@ -1235,6 +1235,10 @@ where
             .has_plausible_wall_clock()
             .then(|| node.emission_secs()),
         die_temperature_quarter_c: leviculum_nrf::telemetry::die_temperature_quarter_c(sd),
+        // Not feature-gated and not board-specific: every board we build
+        // has the same SX1262, and what it last heard is the one sensor
+        // that describes the mesh rather than the box.
+        link: leviculum_nrf::telemetry::link_reading(),
         ..Default::default()
     };
     #[cfg(not(feature = "gnss"))]
