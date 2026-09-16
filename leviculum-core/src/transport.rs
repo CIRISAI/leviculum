@@ -953,6 +953,10 @@ pub struct TransportLinkTableExport {
     /// Destination the link addresses (`IDX_LT_DSTHASH`).
     pub destination_hash: [u8; TRUNCATED_HASHBYTES],
     /// Whether an LRPROOF has validated the link (`IDX_LT_VALIDATED`).
+    ///
+    /// Read by expiry alone (Python Transport.py:687): an unvalidated entry
+    /// dies at `proof_timeout_ms`, a validated one at the inactivity window.
+    /// It is deliberately NOT a gate on repeating link data (#228).
     pub validated: bool,
     /// Deadline for the proof (ms since clock epoch, `IDX_LT_PROOF_TMO`).
     pub proof_timeout_ms: u64,
@@ -6279,142 +6283,146 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let for_local = self.is_for_local_client(&dest_hash);
         let for_local_link = self.is_for_local_client_link(&dest_hash);
         if self.config.enable_transport || from_local || for_local || for_local_link {
-            // Check link table for validated links
+            // Check the link table. No `validated` gate: the reference
+            // consults IDX_LT_VALIDATED only when expiring entries
+            // (Transport.py:687), never on the repeat (Transport.py:1647-1681).
+            // A relay that forwarded the LinkRequest but missed the returning
+            // LRPROOF still holds a fully populated entry -- both interfaces
+            // and both hop counts are frozen at request-forward time -- and
+            // the endpoints, which did see the proof, consider the link
+            // established. Refusing to carry their data until the entry
+            // expires strands a live link on one relay's RF luck (#228).
             if let Some(link_entry) = self.storage.get_link_entry(&dest_hash).cloned() {
-                if link_entry.validated {
-                    // Same-interface entry (the shared-medium relay case):
-                    // direction is undecidable by interface, so mirror Python's
-                    // either-count hop match (Transport.py:1653-1656) — repeat
-                    // ONLY when the taken hops equal the frozen taken or
-                    // remaining count, silent debug-level drop otherwise. Every
-                    // re-heard echo of a repeat arrives with a count matching
-                    // neither; this match is the loop breaker that stops the
-                    // relay<->relay DATA ping-pong on one shared channel (#226,
-                    // the sibling of the LRPROOF echo storm) — and for the
-                    // dedup-exempt contexts (Resource, Channel, Keepalive) it
-                    // is the ONLY one.
-                    //
-                    // Cross-interface entries keep the forwarding deviation: a
-                    // link established over an asymmetric path carries data
-                    // whose hop count differs from the relay's frozen counts;
-                    // dropping it would break the link (priority 1). Log the
-                    // mismatch, forward anyway (deviation from Python
-                    // Transport.py:1664-1668); no self-echo exists across
-                    // interfaces, and loops stay bounded by the global
-                    // max_hops drop.
-                    // Deliberate asymmetry vs the LRPROOF path: LRPROOF rewrites
-                    // the forwarded hop count to the frozen count, link data does
-                    // NOT (no rewrite_hops here), so "forwarding anyway" is
-                    // accurate. Do not "fix" this to match the LRPROOF wording.
-                    let same_iface =
-                        link_entry.next_hop_interface_index == link_entry.received_interface_index;
-                    let target_iface = if same_iface {
-                        if packet.hops == link_entry.remaining_hops
-                            || packet.hops == link_entry.hops
-                        {
-                            link_entry.next_hop_interface_index
-                        } else {
-                            crate::tracing::debug!(
-                                dest = %HexShort(&dest_hash),
-                                packet_hops = packet.hops,
-                                hops = link_entry.hops,
-                                remaining_hops = link_entry.remaining_hops,
-                                "Dropped link data on shared-medium relay, hops match neither count"
-                            );
-                            return Ok(());
-                        }
-                    } else if interface_index == link_entry.next_hop_interface_index {
-                        // From destination side.
-                        if packet.hops != link_entry.remaining_hops {
-                            crate::tracing::trace!(
-                                dest = %HexShort(&dest_hash),
-                                packet_hops = packet.hops,
-                                hops = link_entry.hops,
-                                remaining_hops = link_entry.remaining_hops,
-                                dir = "next_hop",
-                                "Link data hop asymmetry, forwarding anyway (remaining_hops)"
-                            );
-                        }
-                        link_entry.received_interface_index
-                    } else if interface_index == link_entry.received_interface_index {
-                        // From initiator side.
-                        if packet.hops != link_entry.hops {
-                            crate::tracing::trace!(
-                                dest = %HexShort(&dest_hash),
-                                packet_hops = packet.hops,
-                                hops = link_entry.hops,
-                                remaining_hops = link_entry.remaining_hops,
-                                dir = "received",
-                                "Link data hop asymmetry, forwarding anyway (taken hops)"
-                            );
-                        }
+                // Same-interface entry (the shared-medium relay case):
+                // direction is undecidable by interface, so mirror Python's
+                // either-count hop match (Transport.py:1653-1656) — repeat
+                // ONLY when the taken hops equal the frozen taken or
+                // remaining count, silent debug-level drop otherwise. Every
+                // re-heard echo of a repeat arrives with a count matching
+                // neither; this match is the loop breaker that stops the
+                // relay<->relay DATA ping-pong on one shared channel (#226,
+                // the sibling of the LRPROOF echo storm) — and for the
+                // dedup-exempt contexts (Resource, Channel, Keepalive) it
+                // is the ONLY one.
+                //
+                // Cross-interface entries keep the forwarding deviation: a
+                // link established over an asymmetric path carries data
+                // whose hop count differs from the relay's frozen counts;
+                // dropping it would break the link (priority 1). Log the
+                // mismatch, forward anyway (deviation from Python
+                // Transport.py:1664-1668); no self-echo exists across
+                // interfaces, and loops stay bounded by the global
+                // max_hops drop.
+                // Deliberate asymmetry vs the LRPROOF path: LRPROOF rewrites
+                // the forwarded hop count to the frozen count, link data does
+                // NOT (no rewrite_hops here), so "forwarding anyway" is
+                // accurate. Do not "fix" this to match the LRPROOF wording.
+                let same_iface =
+                    link_entry.next_hop_interface_index == link_entry.received_interface_index;
+                let target_iface = if same_iface {
+                    if packet.hops == link_entry.remaining_hops || packet.hops == link_entry.hops {
                         link_entry.next_hop_interface_index
                     } else {
-                        crate::tracing::trace!(
-                            "Dropped data packet for <{}> on {}, unknown link direction",
-                            HexShort(&dest_hash),
-                            self.iface_name(interface_index)
+                        crate::tracing::debug!(
+                            dest = %HexShort(&dest_hash),
+                            packet_hops = packet.hops,
+                            hops = link_entry.hops,
+                            remaining_hops = link_entry.remaining_hops,
+                            "Dropped link data on shared-medium relay, hops match neither count"
                         );
-                        return Ok(()); // Unknown direction
-                    };
-
-                    // Populate reverse table for link-routed data packets
-                    let now = self.clock.now_ms();
-                    self.storage.set_reverse(
-                        truncated_hash,
-                        ReverseEntry {
-                            timestamp_ms: now,
-                            receiving_interface_index: interface_index,
-                            outbound_interface_index: target_iface,
-                        },
-                    );
-
-                    // Deferred cache insert: hash was skipped in process_incoming()
-                    // because dest_hash is in link_table. Python adds the hash
-                    // exactly when it actually repeats (Transport.py:1675) —
-                    // hash-add-on-repeat, not blanket ingress dedup. Add it now
-                    // that direction is validated and we will forward: on a
-                    // shared medium a re-heard copy of this repeat dies in the
-                    // ingress dedup instead of being forwarded again (#226).
-                    // Unconditional, exactly Python :1675 — including local-client
-                    // ingress. Retransmissions over IPC (identical raw bytes)
-                    // survive anyway because the ingress dedup CHECK exempts
-                    // local-client link relays (is_local_link_relay) and the
-                    // Resource/Channel/Keepalive contexts, so the insert is inert
-                    // for them. Skipping the insert here instead opened a phantom
-                    // self-delivery: the relay's own repeat, re-heard off the
-                    // shared medium, passed dedup and was forwarded back onto the
-                    // ipc leg to the sender.
-                    self.storage.add_packet_hash(full_packet_hash);
-
-                    // Refresh the link entry on every actual repeat (Python
-                    // Transport.py:1681): LINK_TIMEOUT is a rolling inactivity
-                    // window. Without the refresh the relay expires an ACTIVE
-                    // link at absolute age LINK_TIMEOUT_MS and forces the
-                    // endpoints into teardown + re-establishment every 15
-                    // minutes. Idle expiry is untouched — no repeat, no refresh.
-                    if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
-                        entry.timestamp_ms = now;
+                        return Ok(());
                     }
-
-                    // Forward data via link table
+                } else if interface_index == link_entry.next_hop_interface_index {
+                    // From destination side.
+                    if packet.hops != link_entry.remaining_hops {
+                        crate::tracing::trace!(
+                            dest = %HexShort(&dest_hash),
+                            packet_hops = packet.hops,
+                            hops = link_entry.hops,
+                            remaining_hops = link_entry.remaining_hops,
+                            dir = "next_hop",
+                            "Link data hop asymmetry, forwarding anyway (remaining_hops)"
+                        );
+                    }
+                    link_entry.received_interface_index
+                } else if interface_index == link_entry.received_interface_index {
+                    // From initiator side.
+                    if packet.hops != link_entry.hops {
+                        crate::tracing::trace!(
+                            dest = %HexShort(&dest_hash),
+                            packet_hops = packet.hops,
+                            hops = link_entry.hops,
+                            remaining_hops = link_entry.remaining_hops,
+                            dir = "received",
+                            "Link data hop asymmetry, forwarding anyway (taken hops)"
+                        );
+                    }
+                    link_entry.next_hop_interface_index
+                } else {
                     crate::tracing::trace!(
-                        "Data packet for <{}> forwarding via link table to {}",
+                        "Dropped data packet for <{}> on {}, unknown link direction",
                         HexShort(&dest_hash),
-                        self.iface_name(target_iface)
+                        self.iface_name(interface_index)
                     );
-                    let mut forwarded = packet;
-                    return self.forward_on_interface_from(
-                        target_iface,
-                        Some(interface_index),
-                        &mut forwarded,
-                        ph8(&full_packet_hash),
-                        // Link-table repeat: interface known, peer not.
-                        // Same knowable-but-not-stored case as the LRPROOF
-                        // repeat above; see the note there.
-                        None,
-                    );
+                    return Ok(()); // Unknown direction
+                };
+
+                // Populate reverse table for link-routed data packets
+                let now = self.clock.now_ms();
+                self.storage.set_reverse(
+                    truncated_hash,
+                    ReverseEntry {
+                        timestamp_ms: now,
+                        receiving_interface_index: interface_index,
+                        outbound_interface_index: target_iface,
+                    },
+                );
+
+                // Deferred cache insert: hash was skipped in process_incoming()
+                // because dest_hash is in link_table. Python adds the hash
+                // exactly when it actually repeats (Transport.py:1675) —
+                // hash-add-on-repeat, not blanket ingress dedup. Add it now
+                // that the direction is resolved and we will forward: on a
+                // shared medium a re-heard copy of this repeat dies in the
+                // ingress dedup instead of being forwarded again (#226).
+                // Unconditional, exactly Python :1675 — including local-client
+                // ingress. Retransmissions over IPC (identical raw bytes)
+                // survive anyway because the ingress dedup CHECK exempts
+                // local-client link relays (is_local_link_relay) and the
+                // Resource/Channel/Keepalive contexts, so the insert is inert
+                // for them. Skipping the insert here instead opened a phantom
+                // self-delivery: the relay's own repeat, re-heard off the
+                // shared medium, passed dedup and was forwarded back onto the
+                // ipc leg to the sender.
+                self.storage.add_packet_hash(full_packet_hash);
+
+                // Refresh the link entry on every actual repeat (Python
+                // Transport.py:1681): LINK_TIMEOUT is a rolling inactivity
+                // window. Without the refresh the relay expires an ACTIVE
+                // link at absolute age LINK_TIMEOUT_MS and forces the
+                // endpoints into teardown + re-establishment every 15
+                // minutes. Idle expiry is untouched — no repeat, no refresh.
+                if let Some(entry) = self.storage.get_link_entry_mut(&dest_hash) {
+                    entry.timestamp_ms = now;
                 }
+
+                // Forward data via link table
+                crate::tracing::trace!(
+                    "Data packet for <{}> forwarding via link table to {}",
+                    HexShort(&dest_hash),
+                    self.iface_name(target_iface)
+                );
+                let mut forwarded = packet;
+                return self.forward_on_interface_from(
+                    target_iface,
+                    Some(interface_index),
+                    &mut forwarded,
+                    ph8(&full_packet_hash),
+                    // Link-table repeat: interface known, peer not.
+                    // Same knowable-but-not-stored case as the LRPROOF
+                    // repeat above; see the note there.
+                    None,
+                );
             }
 
             // Non-link-addressed packets: forward via path table.
@@ -16588,6 +16596,85 @@ mod tests {
             assert!(
                 forwarded_2,
                 "Retransmitted link-addressed data must NOT be dropped by relay dedup"
+            );
+        }
+
+        // Codeberg #228: the repeat must not gate on `validated`.
+        #[test]
+        fn test_relay_repeats_link_data_on_unvalidated_entry() {
+            // A relay that forwarded the LinkRequest but never saw the
+            // returning LRPROOF (RF loss on the proof alone) holds an
+            // UNVALIDATED link entry. Python's general repeat
+            // (Transport.py:1647-1681) reads only the interfaces and the two
+            // frozen hop counts; IDX_LT_VALIDATED is consulted nowhere but
+            // expiry (Transport.py:687). Gating the repeat on it strands a
+            // link the endpoints consider established: they exchanged request
+            // and proof, only this relay missed the proof, and it refuses to
+            // carry data until the link times out and is re-established.
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let link_id = [0xCD; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+
+            // Exactly the entry set_link_entry writes when the LinkRequest is
+            // forwarded: both interfaces and both hop counts frozen, only the
+            // proof still missing.
+            transport.storage_mut().set_link_entry(
+                link_id,
+                crate::storage_types::LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1, // if1 = toward destination
+                    remaining_hops: 1,
+                    received_interface_index: 0, // if0 = toward initiator
+                    hops: 1,
+                    validated: false,
+                    proof_timeout_ms: now + 900_000,
+                    destination_hash: [0x00; TRUNCATED_HASHBYTES],
+                    peer_signing_key: None,
+                },
+            );
+
+            // Wire hops = 0; process_incoming() increments to 1, matching
+            // link_entry.hops for initiator-side routing.
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: true,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Link,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: link_id,
+                context: PacketContext::Resource,
+                data: PacketData::Owned([0x42u8; 100].to_vec()),
+            };
+
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+
+            transport.process_incoming(0, &buf[..len]).unwrap();
+
+            let actions = transport.drain_actions();
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1)),
+                "Link data must be repeated toward the destination even while \
+                 the relay's entry is unvalidated (Python Transport.py:1647-1681 \
+                 has no validated gate)"
+            );
+            // And it must not be mistaken for one of our own links: the
+            // fall-through past the link table ends in the local-delivery
+            // branch, which would hand a foreign link's data to the node.
+            assert_eq!(
+                transport.pending_events(),
+                0,
+                "Relayed link data must not be delivered locally"
             );
         }
 

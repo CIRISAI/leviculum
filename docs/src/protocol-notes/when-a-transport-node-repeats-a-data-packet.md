@@ -77,6 +77,12 @@ back onto the medium the packet arrived on:
 gated on the taken hop count matching one of the two frozen counts, which is
 what stops the relay-to-relay echo on one channel.
 
+The hop counts are the whole gate. `IDX_LT_VALIDATED` is not consulted here
+-- expiry is its only reader (`Transport.py:687`) -- so a relay that forwarded
+the LINKREQUEST but lost the returning LRPROOF still carries the link's data.
+Gating the repeat on it instead would strand a link its two endpoints consider
+established, on one relay's RF luck (Codeberg #228).
+
 **Announces.** Rebroadcast is transport-id-independent by design; the
 `packet_filter` exemption at `Transport.py:1342` exists for it.
 
