@@ -97,6 +97,48 @@ configuration belongs to the flash"). The presets are the settings each
 regional Reticulum community has converged on; a default, not legal
 advice.
 
+## Two device classes, one policy
+
+Everything above was written about nRF52840 boards, because for a long
+time those were the only boards we had firmware for. `leviculum-esp`
+adds a second class — ESP32 and ESP32-S3 — and the policy does not
+change: **one build per pinout family** still holds, and a board file
+still describes a wiring rather than a product.
+
+What the second class does add is a layer the first one never had to name
+out loud, because with one SoC family there was nothing to separate it
+from. The split is:
+
+| Layer | Holds | Lives in |
+|---|---|---|
+| **Class** | the init order, the clock, which peripheral is the debug port, how the build stamp is formatted and emitted, the panic behaviour, the heap | `leviculum-esp/src/lib.rs` and the binary |
+| **Board** | which GPIO carries which net, the radio's seven pins, the LED and its polarity, the battery divider, whether a GNSS receiver is fitted, the supply-enable lines | `leviculum-esp/src/boards/<board>.rs` |
+| **Protocol** | every SX1262 opcode sequence, register bracket and timing calculation | `leviculum-core::sx126x`, shared with the nRF class |
+
+The third row is the one that earns the split. The sequences that decide
+what goes on the air are not per class and not per board; they were
+lifted into `leviculum-core` precisely so a host test could run them, and
+a second device class must not become a second copy of them. What a class
+crate implements is the two traits `leviculum_core::sx126x` reaches the
+hardware through — `CommandBus` and `RegisterBus` — and nothing above
+them.
+
+**Adding the second board of a class** is therefore: one
+`boards/<name>.rs` with its pins and its `BoardConfig`, one
+`src/bin/<name>.rs` that hands those pins to the shared init, one
+`[[bin]]` stanza, one `Justfile` recipe. No new idiom, and nothing in
+`lib.rs` moves. If adding a board does require moving something in
+`lib.rs`, that is the signal that the thing being moved was a board fact
+sitting in the class layer.
+
+**Where the classes differ, and why that is not a policy exception.** An
+ESP32-S3 board has no UF2 bootloader and no mass-storage volume, so
+nothing in the ESP class corresponds to the `Board-ID` discussion below;
+identification there happens over the serial protocol the ROM speaks, and
+the same question — is the identifier bound to the same unit as the
+wiring — has to be asked again on its own terms. The class boundary is
+about where code lives. It is not a second policy.
+
 ## The limit that bites
 
 Universality reaches exactly as far as the identification does. A build

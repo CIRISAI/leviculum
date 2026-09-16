@@ -252,6 +252,12 @@ echo "[install-ci] licence tooling: cargo-about 0.9.2 (just notices / just notic
 #     Building for the chip additionally needs the environment espup
 #     writes to ~/export-esp.sh (LIBCLANG_PATH, and xtensa-esp-elf-gcc on
 #     PATH); source it in the shell that runs cargo.
+#
+#     No pre-built core/alloc ships for this triple, so leviculum-esp
+#     builds them itself (`build-std` in its .cargo/config.toml).  That
+#     needs the `rust-src` component, which the espup install above
+#     already places in the esp toolchain; nothing further is required
+#     here for `just build-esp32` to run.
 cargo install --locked espup --version 0.17.1
 "$HOME/.cargo/bin/espup" install \
     --toolchain-version 1.97.0.0 \

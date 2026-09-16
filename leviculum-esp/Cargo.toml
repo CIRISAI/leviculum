@@ -1,0 +1,76 @@
+[package]
+name = "leviculum-esp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Reticulum firmware for ESP32-class boards (Heltec WiFi LoRa 32 V4)"
+
+# leviculum-esp is excluded from the root workspace and is its own
+# workspace root, exactly as `leviculum-nrf` is. Two reasons, and the
+# second is the one that matters:
+#
+#  * it cross-compiles (xtensa-esp32s3-none-elf) and carries its own
+#    `.cargo/config.toml` for the target and the linker script;
+#  * the Xtensa target does not exist in stock rustc at all. It needs the
+#    esp-rs compiler fork, pinned here by `rust-toolchain.toml`. A member
+#    of the host workspace would make `cargo test --workspace` on any
+#    machine require that fork.
+#
+# The host workspace therefore lists this directory under `exclude` and
+# neither `cargo metadata` nor `cargo test --workspace` sees it.
+[workspace]
+members = []
+
+[dependencies]
+# The protocol core, and with it the SX1262 command/register sequences
+# this crate implements a bus for. `default-features = false` drops
+# `tracing`: the firmware has no subscriber, and the callsite registry
+# costs image for nothing.
+leviculum-core = { path = "../leviculum-core", default-features = false }
+# The byte-exact debug-log line shape, including the trailing ` t=<ms>`
+# uptime stamp. Reached across into the nRF tree on purpose: the shape is
+# what every host-side consumer greps (`lnflash::verify` splits on
+# `[FW_BUILD]`, periculum's `fw_build_version_in` finds it), it is pinned
+# there by host tests, and a second copy in this crate would be a second
+# thing to keep in step. The crate is `no_std` with no dependencies of
+# its own and nothing in it is nRF-specific.
+leviculum-log-line = { path = "../leviculum-nrf/log-line" }
+
+# ESP32-S3 HAL. `unstable` is required for the USB Serial/JTAG driver and
+# for `Config::with_cpu_clock`; esp-hal gates everything that is not yet
+# 1.0-stable behind it.
+esp-hal = { version = "1.2.1", features = ["esp32s3", "unstable"] }
+# Emits the `esp_app_desc` structure the second-stage bootloader reads.
+# Without it `espflash save-image` produces an image the ROM refuses.
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+
+# The SX1262 buses are async, because `leviculum_core::sx126x`'s traits
+# are. `Spi<'_, Async>` implements `embedded_hal_async::spi::SpiBus`.
+embedded-hal-async = "1"
+# Same allocator crate and same configuration as `leviculum-nrf`.
+# `leviculum-core` is `no_std + alloc`, so linking it into a binary
+# requires a `#[global_allocator]` whether or not anything allocates yet.
+# esp-hal registers the `critical_section::Impl` the heap needs.
+embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
+
+# esp-bootloader-esp-idf is used only through `esp_app_desc!()`, which
+# expands to a static in a named link section; cargo-machete cannot see
+# a macro-only dependency.
+[package.metadata.cargo-machete]
+ignored = ["esp-bootloader-esp-idf"]
+
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = true           # link-time optimization across all crates
+codegen-units = 1    # single codegen unit for maximum LTO
+strip = "none"       # keep DWARF in the .elf for addr2line on a crash PC.
+                     # Does not bloat the flash image: `espflash save-image`
+                     # packages loadable sections only.
+debug = true         # emit the DWARF in the first place
+
+# Firmware binaries. One per pinout family, named after the board the
+# family is first proven on (docs/src/concepts/board-support-scope.md).
+[[bin]]
+name = "heltec_v4"
+path = "src/bin/heltec_v4.rs"

@@ -236,6 +236,55 @@ entry for this board and must not be given one on that evidence
 (Codeberg #233). For the bring-up the image goes onto the mass-storage
 volume by hand.
 
+### ESP32 class: Heltec WiFi LoRa 32 V4
+
+**A different crate and a different stage.** Everything above is
+`leviculum-nrf` on nRF52840 and describes firmware that routes packets.
+The ESP32 class is `leviculum-esp`, and as of step 1 it is a skeleton:
+one binary, `heltec_v4`, built for `xtensa-esp32s3-none-elf`. The row
+below is in this table so the board is not invisible, not because it is
+comparable to the families above.
+
+| Product | Level | Note |
+|---|---|---|
+| Heltec WiFi LoRa 32 V4 | **Skeleton** | Boots and identifies itself; no radio traffic, no interfaces, no transport |
+
+**What it can do after this step.** Bring the SoC up, open the USB
+Serial/JTAG port, and emit `[FW_BUILD] git_sha=<short> dirty=<true|false>
+t=<ms>` at boot and every five seconds after it, plus a `[BOARD]` line
+naming the board file the image was compiled against. Blink the status
+LED. Take the seven radio pins and hold the SX1262's SPI port open, with
+`leviculum_core::sx126x`'s `CommandBus` and `RegisterBus` implemented over
+esp-hal SPI.
+
+**What it cannot do.** Anything on the air. No opcode is issued to the
+radio, the front-end amplifier is never enabled, there is no interface,
+no transport, no identity, no persistence and no BLE. It does not
+interoperate with anything.
+
+Radio pins, read off the manufacturer's schematic (revisions 4.2 and 4.3,
+which agree on all seven): NSS `GPIO8`, SCK `GPIO9`, MOSI `GPIO10`,
+MISO `GPIO11`, NRESET `GPIO12`, BUSY `GPIO13`, DIO1 `GPIO14`. The TCXO is
+supplied from the SX1262's DIO3 through a ferrite bead; the voltage it
+needs is **not established** — the schematic names the part only as
+"32MHz" — and the constant is deliberately absent rather than guessed
+(`leviculum-esp/src/boards/heltec_v4.rs`).
+
+> **This board has a front end, and the two published schematics disagree
+> about how it is steered.** The V4 is the high-power variant: the SX1262
+> reaches the antenna through a KCT8103L PA/LNA whose CTX and CPS control
+> inputs are wired to *different* sources in revision 4.2 and revision
+> 4.3 — in 4.2 the SX1262's DIO2 drives CTX and `GPIO46` drives CPS, in
+> 4.3 DIO2 drives CPS and `GPIO5` drives CTX. Only CSD (`GPIO2`) agrees.
+> Which is right decides the transmit path, so the board revision has to
+> be read off the physical board before anything keys up. Step 1 does not
+> need the answer and does not pretend to have it.
+
+There is no `lnflash` entry and no UF2: the ESP32-S3 has no mass-storage
+bootloader. The image is written with `espflash` over the same USB port
+the banner comes out of, which is the SoC's own USB peripheral — there is
+no USB-to-UART bridge on this board.
+
 ### Not covered today
 
 Each of these is a separate pinout family, reachable by adding one board

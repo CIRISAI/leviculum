@@ -1,0 +1,15 @@
+[toolchain]
+# The Xtensa target does not exist in stock rustc: there is no
+# `rustup target add xtensa-esp32s3-none-elf`, only the esp-rs fork of the
+# compiler, installed by espup as the `esp` toolchain.
+#
+# The version is pinned in `scripts/install-ci.sh` (Xtensa Rust 1.97.0.0,
+# rustc 1.97.0-nightly), deliberately the same generation as the 1.97.1
+# host pin in the root `rust-toolchain.toml`, so a crate compiled for both
+# meets one compiler generation rather than two. The reason to pin is the
+# one the root file already states: codegen decides frame sizes, and an
+# unattributable move is worse than a scheduled bump.
+#
+# `channel = "esp"` names the installed toolchain, not a version; espup
+# owns which version sits behind that name.
+channel = "esp"

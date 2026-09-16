@@ -1,0 +1,30 @@
+# Overrides the repository-root `.cargo/config.toml`, whose `[build]
+# target` is the musl host triple. Cargo merges configs from the current
+# directory upward and the nearer file wins, so every cargo invocation
+# made inside `leviculum-esp/` builds for the ESP32-S3.
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+# The link step runs through xtensa-esp-elf-gcc (on PATH via
+# `~/export-esp.sh`). `-nostartfiles` because xtensa-lx-rt supplies the
+# reset vector, and `linkall.x` is esp-hal's linker script, emitted by its
+# build script into the target directory.
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-Wl,-Tlinkall.x",
+  # The ESP-IDF memory layout puts executable code and data in the same
+  # IRAM segment, so the linked image has a LOAD segment that is readable,
+  # writable and executable. Recent binutils warn about that on every link.
+  # It is a property of the platform's memory map and not of anything this
+  # crate does, and it is not fixable from here; silenced specifically
+  # rather than by allowing rustc's `linker_messages` lint, which would
+  # also swallow the linker messages that DO mean something.
+  "-C", "link-arg=-Wl,--no-warn-rwx-segments",
+]
+
+[unstable]
+# No pre-built std/core ships for this triple; the esp toolchain carries
+# rust-src and builds them here. `alloc` is in the list because
+# `leviculum-core` is `no_std + alloc`.
+build-std = ["core", "alloc"]

@@ -9,11 +9,13 @@
 /.deb-version
 /.deb-version-*
 leviculum-nrf/target/
+leviculum-esp/target/
 # leviculum-nrf/Cargo.lock is deliberately NOT ignored (Codeberg #288):
 # the firmware workspace is a binary artifact like the root workspace, so
 # its lock is tracked. While it was ignored every machine resolved the
 # dependency graph privately, which made both the shipped UF2 content and
-# THIRD-PARTY-NOTICES depend on who happened to build them.
+# THIRD-PARTY-NOTICES depend on who happened to build them. The same holds
+# for leviculum-esp/Cargo.lock.
 **/*.rs.bk
 
 # RNode firmware images extracted by `just flash-rnode-extract` (Mark's

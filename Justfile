@@ -96,6 +96,41 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
     cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale --target $(rustc -vV | sed -n 's/host: //p')
 
+# Build the ESP32-class firmware (Heltec WiFi LoRa 32 V4) and package the
+# flash image.
+#
+# NOT wired into `just fast` / `just standard`, and it must stay that way:
+# the Xtensa target does not exist in stock rustc, only in the esp-rs
+# compiler fork that `scripts/install-ci.sh` installs through espup. Making
+# a host gate depend on it would mean every machine and the pipeline need a
+# second, 1.8 GiB toolchain before `cargo test` can run. The reviewer runs
+# this recipe deliberately, the way the hardware gates are run.
+#
+# `~/export-esp.sh` is what espup writes; it puts xtensa-esp-elf-gcc (the
+# linker) and the Xtensa clang on PATH. leviculum-esp is its own cargo
+# workspace with its own rust-toolchain.toml, so the `esp` channel is
+# selected by entering the directory, not by a `+esp` on every line.
+build-esp32:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source ~/export-esp.sh
+    # espflash and espup are `cargo install`ed (scripts/install-ci.sh), so
+    # they live in ~/.cargo/bin, which a non-login shell may not have.
+    export PATH="$HOME/.cargo/bin:$PATH"
+    cd leviculum-esp
+    cargo fmt --check
+    cargo clippy --release -- -D warnings
+    # The root `doc-gate` runs `cargo doc --workspace`, which by
+    # construction never reaches an excluded workspace. Broken intra-doc
+    # links here would therefore be caught by nothing, so the gate is
+    # repeated where it applies.
+    RUSTDOCFLAGS="-D warnings" cargo doc --release --no-deps
+    cargo build --release
+    espflash save-image --chip esp32s3 --flash-size 16mb \
+        target/xtensa-esp32s3-none-elf/release/heltec_v4 \
+        target/xtensa-esp32s3-none-elf/release/heltec_v4.bin
+    ls -l target/xtensa-esp32s3-none-elf/release/heltec_v4.bin
+
 # Stack-frame gate for the firmware. The T114 stack grows down into the
 # SoftDevice RAM floor, so one oversized frame eats the whole margin and
 # surfaces as an SD internal assertion rather than a clean fault. A 94 KB

@@ -40,7 +40,14 @@ default-members = [
 # leviculum-nrf requires cross-compilation (thumbv7em-none-eabihf) and
 # cannot build with --workspace on the host.
 # Build with: cargo build -p leviculum-nrf --target thumbv7em-none-eabihf
-exclude = ["leviculum-nrf", "vendor/crossterm"]
+#
+# leviculum-esp is excluded for a harder reason than cross-compilation: its
+# target (xtensa-esp32s3-none-elf) does not exist in stock rustc at all, only
+# in the esp-rs compiler fork espup installs. As a member it would make
+# `cargo test --workspace` on any machine require that fork. It carries its
+# own workspace, Cargo.lock, .cargo/config.toml and rust-toolchain.toml.
+# Build with: just build-esp32  (or `cargo build --release` inside it)
+exclude = ["leviculum-nrf", "leviculum-esp", "vendor/crossterm"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
