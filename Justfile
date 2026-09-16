@@ -241,7 +241,7 @@ nrf-shellcheck:
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
-        scripts/push-clean.sh
+        scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -409,6 +409,18 @@ check-trailers:
 check-integ-bin-list:
     @bash scripts/check-integ-bin-list.sh
 
+# Codeberg #299: one workflow in .woodpecker/ must run the CI gate on every
+# push, with no `path:` filter. Until #299 an ordinary commit — Rust source,
+# no packaging file — reached the public forge with no test having run there:
+# the nightly's gate is filtered to the packaging paths, the trailer check
+# reads messages, and the pre-push hook is per-clone config that `--no-verify`
+# switches off. ~20 ms, reads the pipeline files, and self-tests its
+# classifier on six fixtures first. Same family, same reasons, as
+# check-submodules above — and it is deliberately not pinned to a filename, so
+# renaming the pipeline is not a regression.
+check-ci-pipeline:
+    @bash scripts/check-ci-pipeline.sh
+
 # Every long-lived process spawn goes through
 # `leviculum_std::process::spawn_supervised`, so the kernel takes the child down
 # with its parent however the parent dies. ~200 ms, no build: it reads the
@@ -511,20 +523,23 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
 
-# The gate .woodpecker/nightly.yml runs before it builds anything it publishes
-# (Codeberg #266). Until it existed, nothing between a commit landing on master
-# and a .deb appearing on the public releases page executed a single test: the
-# pre-push hook is per-clone local config, and `--no-verify` skips it.
+# The gate the forge runs: `.woodpecker/ci.yml` on every push (Codeberg #299)
+# and `.woodpecker/nightly.yml` before it builds anything it publishes (#266).
+# Until #266 nothing between a commit landing on master and a .deb appearing on
+# the public releases page executed a single test, and until #299 nothing ran
+# on an ordinary source commit at all: the pre-push hook is per-clone local
+# config, and `--no-verify` skips it. Both pipelines reach this recipe through
+# `scripts/ci-gate.sh`, which provisions the container they share.
 #
 # NOT an alias for `fast`, because `fast` cannot run in that pipeline's
 # container, and not for want of a package:
 #   check-submodules      — the pipeline clones with `submodules: false`
-#                           (nightly.yml:96-101), so every pin is "missing".
+#                           (nightly.yml:103-108), so every pin is "missing".
 #   lint-nrf              — leviculum-nrf is its own workspace, needs the
 #                           thumbv7em target plus flip-link as its linker.
 #   nrf-stack-frames      — reads a linked firmware ELF that is never built here.
@@ -540,7 +555,7 @@ fast: check-submodules check-trailers check-integ-bin-list check-supervised-spaw
 # integration-test targets did not build), and the ~3050 workspace lib tests.
 #
 # It is a recipe rather than four lines of YAML for the reason nightly.yml
-# records at :157-160 for the .deb build: a second copy in the pipeline file
+# records at :156-159 for the .deb build: a second copy in the pipeline file
 # drifts from the gate developers run, and the drift is found the same way.
 #
 # Measured cold (fresh rust:bookworm, empty target dir and cargo registry,

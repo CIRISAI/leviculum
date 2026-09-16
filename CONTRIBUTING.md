@@ -30,6 +30,13 @@ one owes.
 Do not commit while tests are red, and do not carry a red test forward
 as a known issue.
 
+On the forge, every push and every pull request runs `just ci-gate`
+(fmt, clippy over all targets, the workspace lib tests) through
+`.woodpecker/ci.yml`, and the commit-message check through
+`.woodpecker/commit-trailers.yml`. You do not have to install
+anything for those two to run; they are the checks that do not depend
+on your clone having our hooks.
+
 ## Commit messages and attribution
 
 Documentation and commit messages are English; no AI trailers. Commit

@@ -1,0 +1,48 @@
+# The gate every push pays (Codeberg #299).
+#
+# Until this file existed, an ordinary commit — Rust source and nothing else
+# — was merged, pushed and visible on a public forge without a single test
+# having run there. `.woodpecker/nightly.yml` does run the gate, but its push
+# trigger is filtered to the packaging paths (#266 bought that much), and
+# `.woodpecker/commit-trailers.yml` reads commit messages, not code. The only
+# thing covering the rest was `.githooks/pre-push`, which covers it well and
+# is not a gate: it is per-clone local config a fresh clone does not have,
+# `--no-verify` skips it, and it runs on the developer's toolchain rather
+# than this one — #298 is a record of what that difference can cost.
+#
+# So: no `path:` filter, and there must not be one. `scripts/check-ci-
+# pipeline.sh` fails the push path if no workflow here is triggered by
+# `push` with none, which is what stops this file from being narrowed back
+# to "only when packaging changes" by a future commit trying to save three
+# minutes.
+#
+# The trailer check stays its own file rather than folding in here. It costs
+# one `git log` and one `awk`, and a rejected commit message should not have
+# to wait out a clippy build to say so — nor should that rejection be read
+# out of a multi-minute build's log. periculum's single `.woodpecker.yml`
+# orders the two steps for exactly that reason; two files get it for free.
+when:
+  - event: [push, pull_request, manual]
+
+# Skip submodule init: three of the four submodules are reference trees the
+# gate never reads. The one it does need — reference/Reticulum, for lnomad's
+# renderer tests — is cloned --depth 1 by the script below.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: false
+      submodules: false
+
+steps:
+  # Provisioning and the gate are one script, shared with the nightly's
+  # `gate` step. A second copy of the apt/rustup lines in a second YAML file
+  # is how the two pipelines start disagreeing about what the gate needs,
+  # and the disagreement surfaces as a red nightly hours after the push that
+  # caused it went green. What the gate itself runs is `just ci-gate` — a
+  # recipe, so that the gate developers run and the gate the forge runs
+  # cannot drift either.
+  gate:
+    image: rust:bookworm
+    commands:
+      - bash scripts/ci-gate.sh

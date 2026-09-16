@@ -1,9 +1,12 @@
 # CI Pipeline
 
-A self-hosted CI pipeline runs entirely on the developer's machine.
-Four tiers with different time budgets and triggers automate the
-test discipline mandated by `CLAUDE.md` — no GitHub Actions, no
-external runners.
+Two things run tests here, and they are not the same thing. Four
+local tiers with different time budgets and triggers automate the
+test discipline mandated by `CLAUDE.md`, on the developer's machine —
+no GitHub Actions. On the forge, Woodpecker runs a smaller set on
+every push, because the local tiers are hooks a fresh clone does not
+have and `--no-verify` switches off. The tiers come first; the forge
+pipelines are below them.
 
 ## Tiers
 
@@ -16,6 +19,37 @@ external runners.
 
 Each tier runs everything from the lower tiers as well, so a green
 nightly proves the entire stack.
+
+## What the forge runs
+
+Three Woodpecker workflows on `ci.codeberg.org`, all in
+`.woodpecker/`:
+
+| File | Fires on | Runs |
+|------|----------|------|
+| `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, the workspace lib tests |
+| `commit-trailers.yml` | every push, every pull request, manual | `scripts/check-commit-trailers.sh` over the pushed range |
+| `nightly.yml` | cron, plus pushes touching the packaging paths | the same gate, then the .deb + tarball build; the cron run also publishes |
+
+`ci.yml` exists because until Codeberg #299 none of the others
+covered an ordinary source commit: the nightly's push trigger is
+filtered to the packaging paths, the trailer check reads messages
+rather than code, and what stood between a Rust-only commit and the
+public releases page was `.githooks/pre-push` — per-clone local
+config, skipped by `--no-verify`, running the developer's toolchain
+and not the pipeline's. So it carries no `path:` filter, and
+`scripts/check-ci-pipeline.sh` (part of `just fast`) fails the push
+path if any future edit gives it one.
+
+`just ci-gate` is a Justfile recipe rather than commands spelled out
+in YAML, and the container provisioning both pipelines need is
+`scripts/ci-gate.sh` rather than two copies of the same apt lines:
+one gate, one environment, no drift between the two files that run
+it. The gate is deliberately not an alias for `just fast` — the
+recipe's comment lists what a submodule-less host-target container
+cannot prove (the firmware workspace, the cross-compiles, the
+submodule pins), and those stay on the local push path, which has
+the targets. Measured cost, cold: 3m23s including provisioning.
 
 ## Installation
 
