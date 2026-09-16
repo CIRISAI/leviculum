@@ -93,6 +93,7 @@ fn desc_c() -> InterfaceDescriptor {
         name: None,
         reachable_on: Some("10.0.0.1".into()),
         port: Some(4965),
+        publish_ifac: true,
         ifac_netname: Some("mynet".into()),
         ifac_netkey: Some("secretkey".into()),
         ..Default::default()
@@ -117,6 +118,46 @@ fn encode_info_matches_python_vector_b() {
 fn encode_info_matches_python_vector_c() {
     let packed = encode_info(&desc_c(), &arr16(TID_HEX), true).unwrap();
     assert_eq!(packed, hx(C_PACKED));
+}
+
+/// Does `haystack` contain `needle` anywhere in its bytes?
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn encode_info_omits_ifac_without_publish_flag() {
+    // The credentials sit on the descriptor but publishing was never asked
+    // for: nothing about IFAC may reach the wire (Python gates both keys on
+    // discovery_publish_ifac, default False -- Codeberg #162).
+    let mut desc = desc_c();
+    desc.publish_ifac = false;
+    let packed = encode_info(&desc, &arr16(TID_HEX), true).unwrap();
+    assert!(
+        !contains(&packed, b"secretkey"),
+        "the passphrase must not be on the air without publish_ifac"
+    );
+    assert!(!contains(&packed, b"mynet"), "nor the network name");
+    // Vector C is the same descriptor WITH publishing on: its fixmap header
+    // counts two entries more, so the keys are gone rather than blanked.
+    assert_eq!(packed[0], hx(C_PACKED)[0] - 2);
+}
+
+#[test]
+fn encode_info_publishes_a_key_only_network() {
+    // A network keyed by a passphrase alone still publishes the passphrase,
+    // with the absent netname as msgpack nil -- Python writes both keys
+    // unconditionally under the flag and `sanitize(None)` is None
+    // (Discovery.py:164-166).
+    let mut desc = desc_c();
+    desc.ifac_netname = None;
+    let packed = encode_info(&desc, &arr16(TID_HEX), true).unwrap();
+    assert!(contains(&packed, b"secretkey"));
+    assert!(!contains(&packed, b"mynet"));
+    // Same entry count as vector C, with the 6-byte fixstr "mynet" replaced by
+    // the 1-byte nil.
+    assert_eq!(packed[0], hx(C_PACKED)[0]);
+    assert_eq!(packed.len(), hx(C_PACKED).len() - 5);
 }
 
 #[test]

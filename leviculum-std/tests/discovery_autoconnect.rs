@@ -426,9 +426,9 @@ async fn autoconnect_inherits_ifac_of_hearing_interface() {
         .expect("bootstrap interface present");
 
     // B advertises its backbone endpoint. The descriptor carries NO IFAC
-    // fields — exactly what our own advertisement path publishes
-    // (discovery.rs sets ifac_netname: None) — so only inheritance can
-    // protect the spawned client.
+    // fields — what our advertisement path publishes for an interface that
+    // did not ask for it (`publish_ifac`, Codeberg #162) — so only
+    // inheritance can protect the spawned client.
     let disco_identity = Identity::generate(&mut rand_core::OsRng);
     let disco_dest = Destination::new(
         Some(disco_identity),
@@ -576,4 +576,207 @@ async fn ifac_node_refuses_open_discovered_endpoint() {
     );
 
     let _ = node.stop().await;
+}
+
+// ===========================================================================
+// Codeberg #162: what a discovered peer authenticates with can also come out
+// of OUR announcer, not only out of Python's.
+// ===========================================================================
+
+/// Read back the discovered-interface records a node persisted under
+/// `storage`, so a test can assert on what actually came off the air.
+fn read_discovery_records(storage: &std::path::Path) -> Vec<DiscoveredInterfaceRecord> {
+    let dir = storage.join("discovery").join("interfaces");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| DiscoveredInterfaceRecord::decode_msgpack(&bytes))
+        .collect()
+}
+
+/// #162 end to end, without a seeded record anywhere: B advertises its own
+/// IFAC-protected backbone with `publish_ifac = yes`, and A -- which knows no
+/// credentials at all and hears B only over an OPEN bootstrap link -- brings
+/// the auto-connected link up under exactly the credentials B published.
+///
+/// This is the outbound half of the mechanism #151 consumed from Python: every
+/// other test in this file hands A its IFAC material (seeded record, or
+/// inherited from a protected hearing interface). Here the material can only
+/// have come off the air, out of our own announcer.
+///
+/// Proof of authentication, as in the inherit case: the open bootstrap link is
+/// removed once the auto-connect is up, so a probe destination registered on B
+/// afterwards can reach A only over the auto-connected link, and B's backbone
+/// drops unauthenticated traffic in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_ifac_record_connects_under_that_ifac() {
+    let bootstrap_port = next_port();
+    let backbone_port = next_port();
+
+    // Node B: an OPEN bootstrap server (so A can hear anything at all) plus the
+    // IFAC-protected backbone it advertises, publishing its access code.
+    let mut b_config = Config::default();
+    b_config.interfaces.insert(
+        "Open Bootstrap".to_string(),
+        InterfaceConfig {
+            name: "Open Bootstrap".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some("127.0.0.1".to_string()),
+            listen_port: Some(bootstrap_port),
+            ..Default::default()
+        },
+    );
+    b_config.interfaces.insert(
+        "Published Backbone".to_string(),
+        InterfaceConfig {
+            name: "Published Backbone".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: Some("127.0.0.1".to_string()),
+            listen_port: Some(backbone_port),
+            networkname: Some(IFAC_NETNAME.to_string()),
+            passphrase: Some(IFAC_NETKEY.to_string()),
+            discoverable: true,
+            publish_ifac: true,
+            discovery_name: Some("B Published Backbone".to_string()),
+            reachable_on: Some("127.0.0.1".to_string()),
+            discovery_announce_interval_secs: Some(0),
+            ..Default::default()
+        },
+    );
+    // Transport ON: `poll` lists candidates with Python's `only_transport=True`
+    // (autoconnect.rs), so a non-transport announcer is never auto-connected.
+    let b_storage = tempfile::tempdir().expect("tempdir b");
+    let mut node_b = ReticulumNodeBuilder::new()
+        .config(b_config)
+        .discovery_announce_job_interval_secs(1)
+        .storage_path(b_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build b");
+    node_b.start().await.expect("start b");
+
+    // Node A: an OPEN bootstrap client to B and auto-connect enabled. No IFAC
+    // configured, no seeded record -- everything it will authenticate with has
+    // to arrive in B's announce.
+    let mut a_config = Config::default();
+    a_config.interfaces.insert(
+        "Bootstrap Client".to_string(),
+        InterfaceConfig {
+            name: "Bootstrap Client".to_string(),
+            interface_type: "TCPClientInterface".to_string(),
+            target_host: Some("127.0.0.1".to_string()),
+            target_port: Some(bootstrap_port),
+            ..Default::default()
+        },
+    );
+    let a_storage = tempfile::tempdir().expect("tempdir a");
+    let mut node_a = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .autoconnect_discovered_interfaces(4)
+        .config(a_config)
+        .storage_path(a_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("build a");
+    node_a.start().await.expect("start a");
+
+    let bootstrap_up = wait_until(Duration::from_secs(10), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.online && !i.is_local_client)
+    })
+    .await;
+    assert!(bootstrap_up, "bootstrap A->B link did not come online");
+    let bootstrap_id = node_a
+        .interface_stats()
+        .iter()
+        .find(|i| !i.is_local_client && !i.name.starts_with("autoconnect/"))
+        .map(|i| i.interface_id)
+        .expect("bootstrap interface present");
+
+    // B's own announcer advertises the backbone; A persists the record and
+    // spawns the auto-connect client from it.
+    let heard = wait_until(Duration::from_secs(30), || {
+        !read_discovery_records(a_storage.path()).is_empty()
+    })
+    .await;
+    assert!(heard, "A persisted no discovery record at all");
+
+    let auto_connected = wait_until(Duration::from_secs(30), || {
+        node_a
+            .interface_stats()
+            .iter()
+            .any(|i| i.name.starts_with("autoconnect/") && i.online)
+    })
+    .await;
+    assert!(
+        auto_connected,
+        "A did not auto-connect B's self-advertised backbone; interfaces = {:?}",
+        node_a.interface_stats()
+    );
+
+    // The record A wrote must carry the published access code; without it the
+    // link below is open and B's IFAC'd backbone would drop every packet.
+    let records = read_discovery_records(a_storage.path());
+    assert!(
+        records
+            .iter()
+            .any(|r| r.ifac_netname.as_deref() == Some(IFAC_NETNAME)
+                && r.ifac_netkey.as_deref() == Some(IFAC_NETKEY)),
+        "the persisted record carries no published IFAC material: {:?}",
+        records
+            .iter()
+            .map(|r| (
+                r.name.clone(),
+                r.ifac_netname.clone(),
+                r.ifac_netkey.clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // Remove the open bootstrap link: from here on only the auto-connected
+    // link remains, and it carries traffic only if it is authenticated.
+    node_a
+        .remove_interface(bootstrap_id)
+        .expect("remove bootstrap interface");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let probe_identity = Identity::generate(&mut rand_core::OsRng);
+    let probe_dest = Destination::new(
+        Some(probe_identity),
+        Direction::In,
+        DestinationType::Single,
+        "test162",
+        &["published", "probe"],
+    )
+    .expect("probe destination");
+    let probe_hash = *probe_dest.hash();
+    node_b.register_destination(probe_dest);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut path_learned = false;
+    while Instant::now() < deadline {
+        node_b
+            .announce_destination(&probe_hash, None)
+            .await
+            .expect("announce probe");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if node_a.has_path(&probe_hash) {
+            path_learned = true;
+            break;
+        }
+    }
+    assert!(
+        path_learned,
+        "A never learned B's probe path over the auto-connected link; the \
+         spawned client did not pick up the PUBLISHED IFAC (Codeberg #162)"
+    );
+
+    let _ = node_a.stop().await;
+    let _ = node_b.stop().await;
 }

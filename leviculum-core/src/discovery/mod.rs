@@ -135,9 +135,13 @@ pub struct InterfaceDescriptor {
     pub spreadingfactor: Option<u64>,
     /// Coding rate (RNode).
     pub codingrate: Option<u64>,
-    /// IFAC network name, published only when both IFAC fields are set.
+    /// Publish the IFAC credentials below in the announce (Python
+    /// `discovery_publish_ifac`). Off by default: the passphrase reaches the
+    /// air only on an explicit per-interface opt-in.
+    pub publish_ifac: bool,
+    /// IFAC network name, published (as nil when unset) under [`publish_ifac`](Self::publish_ifac).
     pub ifac_netname: Option<String>,
-    /// IFAC network key, published only when both IFAC fields are set.
+    /// IFAC network key, published (as nil when unset) under [`publish_ifac`](Self::publish_ifac).
     pub ifac_netkey: Option<String>,
 }
 
@@ -275,15 +279,22 @@ fn encode_info(
         _ => {}
     }
 
-    // IFAC fields are published only when both are present (Discovery.py adds
-    // them together under discovery_publish_ifac).
-    if let (Some(netname), Some(netkey)) = (&desc.ifac_netname, &desc.ifac_netkey) {
-        msgpack::write_uint(&mut body, KEY_IFAC_NETNAME);
-        msgpack::write_str(&mut body, &sanitize(netname));
-        count += 1;
-        msgpack::write_uint(&mut body, KEY_IFAC_NETKEY);
-        msgpack::write_str(&mut body, &sanitize(netkey));
-        count += 1;
+    // Both IFAC keys go out together under the publish flag, each nil when that
+    // half is unset (Discovery.py:164-166 writes `sanitize(...)` for both, and
+    // `sanitize(None)` is None). A network keyed by a passphrase alone thus
+    // still publishes the passphrase, which is what its peers need.
+    if desc.publish_ifac {
+        for (key, value) in [
+            (KEY_IFAC_NETNAME, &desc.ifac_netname),
+            (KEY_IFAC_NETKEY, &desc.ifac_netkey),
+        ] {
+            msgpack::write_uint(&mut body, key);
+            match value {
+                Some(v) => msgpack::write_str(&mut body, &sanitize(v)),
+                None => msgpack::write_nil(&mut body),
+            }
+            count += 1;
+        }
     }
 
     let mut out = Vec::with_capacity(1 + body.len());

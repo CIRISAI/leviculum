@@ -287,6 +287,14 @@ pub struct InterfaceConfig {
     /// encrypt request without one skips the interface.
     #[serde(default)]
     pub discovery_encrypt: bool,
+    /// Publish this interface's own IFAC `networkname`/`passphrase` in its
+    /// discovery announce (Python `publish_ifac`), so a peer that discovers us
+    /// can bring up an authenticated link without being told the credentials
+    /// out of band. Off by default, and deliberately so: it puts the
+    /// passphrase on the air. Pair it with `discovery_encrypt` to keep the
+    /// credentials readable only to holders of the network identity.
+    #[serde(default)]
+    pub publish_ifac: bool,
     /// Discovery announce interval in minutes (Python `announce_interval`,
     /// clamped to a 5-minute floor, default 6 hours). Superseded by
     /// `discovery_announce_interval_secs` when that is set.
@@ -612,6 +620,7 @@ impl Default for InterfaceConfig {
             discovery_name: None,
             reachable_on: None,
             discovery_encrypt: false,
+            publish_ifac: false,
             announce_interval: None,
             discovery_announce_interval_secs: None,
             device: None,

@@ -83,6 +83,15 @@ pub(crate) fn descriptor_from_config(cfg: &InterfaceConfig) -> Option<InterfaceD
             return None;
         }
     }
+    // Python `publish_ifac`: the announce carries this interface's own IFAC
+    // credentials, which are its `networkname`/`passphrase`
+    // (Reticulum.py:752-766, 861). Off by default -- the passphrase goes on the
+    // air only on an explicit opt-in (Codeberg #162).
+    if cfg.publish_ifac {
+        desc.publish_ifac = true;
+        desc.ifac_netname = cfg.networkname.clone();
+        desc.ifac_netkey = cfg.passphrase.clone();
+    }
     Some(desc)
 }
 

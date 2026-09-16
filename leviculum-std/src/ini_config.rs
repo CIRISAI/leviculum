@@ -170,6 +170,15 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                 name
             );
         }
+        // `publish_ifac` advertises the interface's own access code; with no
+        // network_name or passphrase there is none to advertise (Codeberg #162).
+        if iface.publish_ifac && !has_ident {
+            tracing::warn!(
+                "interface '{}': publish_ifac is set without network_name or passphrase -- the \
+                 discovery announce has no access code to publish.",
+                name
+            );
+        }
     }
 
     // RNS 1.3.x semantic: shared_instance_type = tcp disables AF_UNIX and
@@ -453,6 +462,12 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         // effect. Before this it fell into the unknown-key catch-all, so a
         // config-file deployment could never turn on encrypted discovery.
         "discovery_encrypt" => iface.discovery_encrypt = parse_bool(value),
+        // Advertise this interface's own IFAC credentials in its discovery
+        // announce (Python `publish_ifac`, Reticulum.py:861). Without it a
+        // discovered peer can see us but not authenticate to us; with it the
+        // passphrase is on the air, so it stays an explicit per-interface
+        // opt-in exactly as in the reference (Codeberg #162).
+        "publish_ifac" => iface.publish_ifac = parse_bool(value),
         "discovery_name" => iface.discovery_name = Some(value.to_string()),
         "reachable_on" => iface.reachable_on = Some(value.to_string()),
         // Python config key is `announce_interval` in MINUTES (as_int, *60 with a
@@ -2304,6 +2319,82 @@ mod tests {
             parse_announce_app_data(&app, &network_id, MIN_REQUIRED_STAMP_VALUE).is_none(),
             "plaintext parser must reject an encrypted announce"
         );
+    }
+
+    #[test]
+    fn test_publish_ifac_end_to_end_from_config() {
+        // Codeberg #162: `publish_ifac = yes` on a discoverable interface must
+        // put THIS interface's own IFAC netname/netkey into the announce, so a
+        // peer that discovers us can bring the authenticated link up on its own
+        // (Python `publish_ifac`, Reticulum.py:861 / Discovery.py:164-166).
+        // Publishing is an explicit opt-in: the identical interface without the
+        // key must advertise no IFAC material at all.
+        use leviculum_core::discovery::{
+            build_announce_app_data, parse_announce_app_data, MIN_REQUIRED_STAMP_VALUE,
+        };
+
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[Published Backbone]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    network_name = closednet
+    passphrase = closedkey
+    discoverable = yes
+    reachable_on = 1.2.3.4
+    publish_ifac = yes
+
+  [[Quiet Backbone]]
+    type = TCPServerInterface
+    listen_ip = 0.0.0.0
+    listen_port = 4343
+    network_name = closednet
+    passphrase = closedkey
+    discoverable = yes
+    reachable_on = 1.2.3.4
+"#,
+        )
+        .unwrap();
+
+        let descriptor = |iface_name: &str| {
+            let iface = config.interfaces.get(iface_name).expect("iface");
+            crate::discovery::descriptor_from_config(iface).expect("descriptor")
+        };
+
+        // The opt-in interface, all the way onto the wire and back.
+        let app = build_announce_app_data(
+            &descriptor("Published Backbone"),
+            &[0u8; 16],
+            true,
+            &mut rand_core::OsRng,
+        )
+        .expect("built announce");
+        let published =
+            parse_announce_app_data(&app, &[0u8; 16], MIN_REQUIRED_STAMP_VALUE).expect("parsed");
+        assert_eq!(
+            published.ifac_netname.as_deref(),
+            Some("closednet"),
+            "publish_ifac = yes must advertise the interface's network_name"
+        );
+        assert_eq!(
+            published.ifac_netkey.as_deref(),
+            Some("closedkey"),
+            "publish_ifac = yes must advertise the interface's passphrase"
+        );
+
+        // The identical interface without the key keeps its credentials out of
+        // the descriptor, which is what the encoder gates on (the wire-level
+        // half of this is `encode_info_omits_ifac_without_publish_flag` in
+        // core, where a stamp costs nothing).
+        let quiet = descriptor("Quiet Backbone");
+        assert!(
+            !quiet.publish_ifac,
+            "publishing the passphrase must stay an explicit opt-in"
+        );
+        assert_eq!(quiet.ifac_netname, None);
+        assert_eq!(quiet.ifac_netkey, None);
     }
 
     #[test]
