@@ -480,7 +480,7 @@ carries hard obligations:
   proof-of-work jobs and shutdown are all channel sends
   (`leviculum-lxmf-node/src/processor.rs:15-30`).
 - `PROCESSOR_TICK_BUDGET` is 5 ms per hook call
-  (`leviculum-std/src/driver/processor.rs:172`), reported rather than
+  (`leviculum-std/src/driver/processor.rs:181`), reported rather than
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`

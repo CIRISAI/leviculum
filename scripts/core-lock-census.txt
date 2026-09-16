@@ -1,0 +1,89 @@
+# Pinned census of the public methods that take the core lock (Codeberg #199).
+#
+# `93ba351` shipped a seam (`leviculum_std::driver::CoreProcessor`) that runs
+# consumer code while the driver holds the core mutex. That mutex is a
+# non-reentrant `std::sync::Mutex`, so any handle the consumer smuggled into a
+# hook that re-locks it hangs the node on the first call -- in safe synchronous
+# code, with no `.await`, with nothing for a compiler to catch.
+#
+# The seam described that residue in words: "roughly forty plain synchronous
+# `pub fn`s". A phrase cannot be wrong loudly, and this one was: the real set
+# is 58, and nothing anywhere noticed it growing. Every line below is one way
+# for a hook holding a node handle to deadlock the node.
+#
+# scripts/check-core-lock-census.py rebuilds this list from the sources and
+# fails `just fast` on any difference, so the forty-first arrives as a diff
+# and its author gets asked whether it needs to be public at all.
+#
+# Format: one `<defining module>::<Type>::<method>` per line, sorted, plus a
+# TOTAL line the prose cites. The module segment is where the method is
+# DEFINED, which for a type lifted out of a private module by `pub use` is not
+# the path a consumer writes: `driver::sender::PacketSender::send` is
+# `leviculum_std::driver::PacketSender::send` to a caller.
+#
+# DIRECT acquisition only -- a `pub fn` that reaches the lock through a private
+# helper is equally fatal to a hook and is not counted here. See the script's
+# module docstring for why, and for what guards the gap.
+#
+# Baseline measured 2026-09-17 (Codeberg #199).
+
+TOTAL 58
+
+driver::ReticulumNode::accept_resource
+driver::ReticulumNode::active_link_count
+driver::ReticulumNode::announce_destination
+driver::ReticulumNode::close_link
+driver::ReticulumNode::connect
+driver::ReticulumNode::connect_awaited
+driver::ReticulumNode::deregister_request_handler
+driver::ReticulumNode::destination_ratchet_public
+driver::ReticulumNode::diagnostic_dump
+driver::ReticulumNode::drop_all_paths_via
+driver::ReticulumNode::get_identity
+driver::ReticulumNode::get_path_clone
+driver::ReticulumNode::get_remote_identity
+driver::ReticulumNode::has_path
+driver::ReticulumNode::hops_to
+driver::ReticulumNode::identify_link
+driver::ReticulumNode::identity_hash
+driver::ReticulumNode::interface_stats
+driver::ReticulumNode::is_transport_enabled
+driver::ReticulumNode::known_remote_ratchet
+driver::ReticulumNode::link_destination
+driver::ReticulumNode::link_is_established
+driver::ReticulumNode::link_mdu
+driver::ReticulumNode::link_negotiated_mtu
+driver::ReticulumNode::link_stats
+driver::ReticulumNode::next_hop_link_profile
+driver::ReticulumNode::now_ms
+driver::ReticulumNode::path_count
+driver::ReticulumNode::path_table_entries
+driver::ReticulumNode::pending_link_count
+driver::ReticulumNode::rate_table_entries
+driver::ReticulumNode::register_destination
+driver::ReticulumNode::register_request_handler
+driver::ReticulumNode::reject_resource
+driver::ReticulumNode::remember_identity
+driver::ReticulumNode::remove_path
+driver::ReticulumNode::request_path
+driver::ReticulumNode::send_file_response
+driver::ReticulumNode::send_proof
+driver::ReticulumNode::send_request
+driver::ReticulumNode::send_request_awaited
+driver::ReticulumNode::send_resource
+driver::ReticulumNode::send_resource_awaited
+driver::ReticulumNode::send_response
+driver::ReticulumNode::send_response_resource
+driver::ReticulumNode::send_single_packet
+driver::ReticulumNode::set_announce_control
+driver::ReticulumNode::set_interface_announce_cap
+driver::ReticulumNode::set_resource_strategy
+driver::ReticulumNode::start
+driver::ReticulumNode::transport_stats
+driver::ReticulumNode::tunnel_ids
+driver::ReticulumNode::unregister_destination
+driver::sender::PacketSender::send
+driver::sender::PacketSender::send_measured
+driver::stream::LinkHandle::close
+driver::stream::LinkHandle::send
+driver::stream::LinkHandle::try_send

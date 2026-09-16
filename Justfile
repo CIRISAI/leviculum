@@ -446,6 +446,15 @@ check-plain-clone:
 check-supervised-spawns:
     @python3 scripts/check-supervised-spawns.py
 
+# Codeberg #199: the public methods that take the core lock, counted rather
+# than described. A `CoreProcessor` hook runs with that lock held, so every one
+# of them is a way for a consumer holding a node handle to deadlock the node in
+# safe synchronous code -- and the seam documented the set as "roughly forty"
+# until this gate counted 58. Same shape and same reasons as the spawn census
+# above: a text scan, sub-second, no build, fails naming the method.
+check-core-lock-census:
+    @python3 scripts/check-core-lock-census.py
+
 # The guards in .githooks/pre-push and the remedy their refusals print
 # (scripts/push-clean.sh), driven against scratch repositories (~0.3 s, no
 # build). They are cold code: they fire on the rare wrong push and nothing
@@ -534,7 +543,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-plain-clone check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -17,7 +17,9 @@
 //! not reentrant, so any handle the consumer smuggled in that re-locks the core
 //! hangs the node — in safe synchronous code, with no `.await`, with nothing
 //! for a compiler to catch. `ReticulumNode::has_path` is one line and one of
-//! roughly forty.
+//! 58, counted rather than guessed: `scripts/check-core-lock-census.py`
+//! rebuilds that set from the sources on every `just fast` and pins it in
+//! `scripts/core-lock-census.txt`.
 //!
 //! A deadlock is the worst failure this daemon produces: no stack, no log, no
 //! exit code. The node stops and looks alive to every supervisor. So every

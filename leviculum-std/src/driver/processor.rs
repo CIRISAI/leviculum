@@ -44,14 +44,23 @@
 //! (`leviculum-std/src/driver/sender.rs:76-86`), so such a call does not reach
 //! the bounded channel at all. It deadlocks earlier, on the mutex.
 //!
-//! And no `block_on` is needed to get there. [`super::ReticulumNode`] carries
-//! roughly forty plain synchronous `pub fn`s that open with
-//! `self.inner.lock_recover()` — `has_path`, `hops_to`, `get_identity`,
-//! `transport_stats`, `link_is_established` and so on. A processor holding an
-//! `Arc<ReticulumNode>` deadlocks the entire node on its first `on_event`, in
-//! safe synchronous code, with no `.await`, no channel and nothing for a
-//! compile-fail fixture to catch. The async API is one instance of the rule,
-//! and not the instance a consumer is likely to hit.
+//! And no `block_on` is needed to get there. 58 public methods of this crate
+//! open by taking the core lock: 53 on [`super::ReticulumNode`] —
+//! `has_path`, `hops_to`, `get_identity`, `transport_stats`,
+//! `link_is_established` and so on — and five on [`super::PacketSender`] and
+//! [`super::LinkHandle`], the two handles a processor is likeliest to have
+//! been given. A processor holding any of them deadlocks the entire node on
+//! its first `on_event`, in safe synchronous code, with no `.await`, no
+//! channel and nothing for a compile-fail fixture to catch. The async API is
+//! one instance of the rule, and not the instance a consumer is likely to
+//! hit.
+//!
+//! That 58 is a census, not an estimate: `scripts/check-core-lock-census.py`
+//! rebuilds the list from the sources and pins it in
+//! `scripts/core-lock-census.txt`, so the fifty-ninth arrives as a diff and
+//! its author is asked whether it has to be public at all. Two revisions of
+//! this comment described the set in words instead, and were low by nearly
+//! half the whole time.
 //!
 //! That hole is not closed — it cannot be, see below — but since Codeberg #198
 //! it is no longer silent. Every acquisition through
@@ -226,11 +235,14 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 /// **It may not own a handle to the node it runs inside.** Both methods are
 /// called with the core mutex held, and that mutex is not reentrant, so any
 /// call that re-locks it hangs the node. That is not confined to the async
-/// API: [`super::ReticulumNode`] exposes roughly forty synchronous `pub fn`s
-/// that lock the core — `has_path`, `hops_to`, `get_identity`,
-/// `transport_stats` — and one of them in an `on_event` body is a deadlock in
-/// ordinary safe code. Everything a hook needs is on the `core` argument;
-/// anything else belongs on the far side of a channel.
+/// API: 58 public methods of this crate lock the core — `has_path`,
+/// `hops_to`, `get_identity`, `transport_stats` and 49 more on
+/// [`super::ReticulumNode`], plus five on [`super::PacketSender`] and
+/// [`super::LinkHandle`] — and one of them in an `on_event` body is a
+/// deadlock in ordinary safe code. The full list is
+/// `scripts/core-lock-census.txt`, pinned by a gate so it cannot grow
+/// quietly. Everything a hook needs is on the `core` argument; anything else
+/// belongs on the far side of a channel.
 ///
 /// Since Codeberg #198 that mistake reports itself: the re-entrant acquisition
 /// panics naming the mutex, this hook is detached, and the node continues. It

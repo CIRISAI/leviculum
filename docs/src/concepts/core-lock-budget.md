@@ -192,7 +192,7 @@ reads a little above the send table at the same size; the gap is under
 It is recorded here rather than in the issue because this page is where
 a caller looks for it, and because a number that lives only in a tracker
 cannot be cited from the tree: `PROCESSOR_TICK_BUDGET`
-(`leviculum-std/src/driver/processor.rs:172`) is set against this
+(`leviculum-std/src/driver/processor.rs:181`) is set against this
 measurement, and until it was written down the only number behind a
 public constant could not be traced at all.
 
@@ -247,10 +247,23 @@ reach the bounded channel at all, because `PacketSender::send`
 block and releases it *before* its `.await`. It deadlocks one line
 earlier, on the mutex.
 
-And no `block_on` is needed. `ReticulumNode` carries roughly forty
-plain synchronous `pub fn`s that open by locking the core —
-`has_path` (`leviculum-std/src/driver/mod.rs:2654`) is
-`self.inner.lock_recover().has_path(dest_hash)` and is entirely typical.
+And no `block_on` is needed. The number is **58**, and it is a number
+rather than a phrase on purpose: `scripts/check-core-lock-census.py`
+rebuilds the list of public methods that lock the core out of the
+sources on every `just fast` and pins it, name by name, in a
+checked-in file (`TOTAL`, `scripts/core-lock-census.txt:30`). Two
+earlier revisions of this page estimated the size of this set in words
+and were low by nearly half — which is what an estimate nothing can
+check is worth.
+
+53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
+open by locking the core, of which `has_path`
+(`leviculum-std/src/driver/mod.rs:2654`) is
+`self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
+The other five are on `PacketSender` and `LinkHandle`, which matters
+more than the count suggests: those are the two handles a callee is
+most likely to have been handed in the first place.
+
 A callee holding an `Arc<ReticulumNode>` deadlocks the node on its first
 invocation, in ordinary safe synchronous code, with no `.await`, no
 channel, and nothing a compile-fail fixture can catch.
