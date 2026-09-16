@@ -15512,6 +15512,113 @@ mod tests {
             );
         }
 
+        /// Codeberg #404, the behavioural half: at the bitrate an RNode
+        /// interface derives from its live radio settings — which since #404
+        /// is what a config WITHOUT a `bitrate` key registers — a transit
+        /// announce past the holdoff is held back, and a locally originated
+        /// one goes out anyway.
+        ///
+        /// Both directions in one test on purpose. A cap that also silenced
+        /// our own announces would be a node the mesh never learns a path to,
+        /// and the held-transit half alone goes green on exactly that bug: it
+        /// only ever asks whether something was withheld.
+        ///
+        /// The PHY is the long-range one the #402 capture ran on, and the
+        /// bitrate is re-derived here rather than written down, so the test
+        /// follows the arithmetic if the arithmetic is ever sharpened.
+        #[test]
+        fn an_rnode_phy_holds_transit_announces_and_never_our_own() {
+            use crate::rnode::{announce_cap_bitrate_bps, derive_preamble_symbols};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("rnode", 2)));
+            let _idx2 = transport.register_interface(Box::new(MockInterface::new("local", 3)));
+            // A local IPC client: an announce arriving here is ours, and the
+            // hop adjust nets it back to hops == 0 (Transport.py:1247).
+            transport.set_local_client(2, true);
+
+            // SF10/BW125/CR4:5 with the preamble the RNode firmware programs
+            // there — the same call `interfaces::rnode::announce_cap_bitrate`
+            // makes on the host side of the drop-in boundary.
+            let bps =
+                announce_cap_bitrate_bps(125_000, 10, 5, derive_preamble_symbols(10, 5, 125_000));
+            assert!(bps > 0, "premise: this PHY has a computable airtime");
+            transport.register_interface_bitrate(1, bps);
+
+            let step = transport.announce_jitter_max_ms() + 100;
+            let sends_on_rnode = |actions: &[Action]| {
+                actions
+                    .iter()
+                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                    .count()
+            };
+
+            // First transit announce: allowed, and it arms a holdoff.
+            let (raw1, _dh1) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw1).unwrap();
+            transport.clock.advance(step);
+            transport.poll();
+            let first = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                sends_on_rnode(&first),
+                1,
+                "the first transit announce goes out"
+            );
+            let holdoff_until = transport.interface_announce_caps[&1].allowed_at_ms;
+            assert!(
+                holdoff_until > transport.clock.now_ms() + step,
+                "premise: at {bps} bps the holdoff outlasts the next scheduler \
+                 step, or the rest of this test proves nothing"
+            );
+
+            // Second transit announce inside the holdoff: held, not sent.
+            let (raw2, _dh2) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &raw2).unwrap();
+            transport.clock.advance(step);
+            transport.poll();
+            let second = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                sends_on_rnode(&second),
+                0,
+                "a transit announce inside the holdoff must be held"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&1].queue.len(),
+                1,
+                "held means queued for the drain, not dropped"
+            );
+
+            // Our own announce, offered deeper inside the same holdoff: out at
+            // once. `forward_on_all` puts it on every interface in one
+            // Broadcast, so it is counted there and not per interface.
+            assert!(
+                transport.clock.now_ms() < holdoff_until,
+                "premise: the local announce is offered inside the holdoff"
+            );
+            let queued_before = transport.interface_announce_caps[&1].queue.len();
+            let (local_raw, _dh3) = make_announce_raw(0, PacketContext::None);
+            transport.process_incoming(2, &local_raw).unwrap();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+            transport.clock.advance(step);
+            transport.poll();
+            let third = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert!(
+                third.iter().any(|a| matches!(a, Action::Broadcast { .. }))
+                    || sends_on_rnode(&third) > 0,
+                "a locally originated announce bypasses the cap: {third:?}"
+            );
+            assert_eq!(
+                transport.interface_announce_caps[&1].queue.len(),
+                queued_before,
+                "and it is never queued behind the transit backlog"
+            );
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;

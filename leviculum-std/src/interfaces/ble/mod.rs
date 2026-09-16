@@ -163,6 +163,7 @@ pub(crate) fn spawn_ble_interface(
         hw_mtu: None,
         is_local_client: false,
         bitrate: Some(BLE_BITRATE_GUESS),
+        announce_cap_bitrate: None,
         tx_jitter_max_ms: None,
         ifac: None,
         mode: InterfaceMode::default(),

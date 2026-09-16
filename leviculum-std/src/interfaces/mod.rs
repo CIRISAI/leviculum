@@ -537,6 +537,25 @@ pub(crate) struct InterfaceInfo {
     /// On-air bitrate in bits/sec (e.g., LoRa ~5468 bps for SF7/CR5/BW125kHz).
     /// `None` for interfaces without a fixed bitrate (TCP, UDP).
     pub bitrate: Option<u32>,
+    /// Bits per second to register for announce bandwidth capping
+    /// (`Transport::register_interface_bitrate`), or `None` for a medium on
+    /// which an announce is cheap enough to need no cap (TCP, UDP, I2P,
+    /// Local, BLE).
+    ///
+    /// Not [`Self::bitrate`], and deliberately a second number: `bitrate` is
+    /// the nominal symbol rate, reported and never scheduled on, while the
+    /// cap's holdoff (`len * 8 * 1000 / (bitrate * cap% / 100)`) needs the
+    /// EFFECTIVE rate — the reference announce divided by the airtime it
+    /// actually costs (`leviculum_core::rnode::announce_cap_bitrate_bps`).
+    /// At SF10/BW125/CR4:5 the two differ by a third, and a cap built on the
+    /// nominal rate buys that much less silence than it believes.
+    ///
+    /// Filled from the live radio settings by the interface that programmed
+    /// them, because only the interface knows what a frame costs on its
+    /// carrier; the driver routes the number to transport and decides
+    /// nothing. An explicit `bitrate` key in the config still overrides it
+    /// (Codeberg #404).
+    pub announce_cap_bitrate: Option<u32>,
     /// Ceiling of the randomised pre-TX jitter this interface applies before
     /// putting a frame on the air, in milliseconds. `None` for interfaces that
     /// transmit as soon as they are asked (TCP, UDP, Local, Serial).
@@ -789,6 +808,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),

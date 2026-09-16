@@ -274,6 +274,90 @@ mod tests {
         );
     }
 
+    /// Codeberg #404: an RNode section with no `bitrate` line still tells the
+    /// driver what an announce costs on its carrier, so `lnsd` caps its transit
+    /// announces exactly like a Python `RNodeInterface` on the same channel —
+    /// which sets `self.bitrate` from the live radio settings unconditionally
+    /// (`RNodeInterface.py:695`) and has therefore always been capped.
+    ///
+    /// The expectation is re-derived here from the airtime the PHY actually
+    /// costs (`packet_airtime_ms` over the reference announce, the same call
+    /// the interface charges to its duty ledger), never a number copied out of
+    /// the implementation: a constant would go green on any refactor that
+    /// changed the arithmetic. The band checks underneath are the independent
+    /// half — they come from the measured on-air time of an announce-sized
+    /// frame (#402, 2026-09-14), so a formula that silently lost its preamble
+    /// or its coding rate fails them even if both sides of the equality moved
+    /// together.
+    #[tokio::test]
+    async fn rnode_without_a_bitrate_key_declares_its_announce_cap_bitrate() {
+        use leviculum_core::rnode::{
+            derive_preamble_symbols, packet_airtime_ms, ANNOUNCE_CAP_REFERENCE_BYTES,
+        };
+
+        // (sf, bandwidth, band the effective rate must land in).
+        //
+        // The bands are +/-10 % around the on-air time of a 184 B frame
+        // (183 B reference announce plus the 1 B LoRa framing header) worked
+        // out by hand from the modem datasheet formula, not read back out of
+        // this tree: 169 ms at SF7/BW250 with the 47-symbol preamble the
+        // firmware programs there, 1764 ms at SF10/BW125 with its 18-symbol
+        // floor. Tight enough that dropping either the preamble term
+        // (10096 / 905 bps) or the coding-rate term falls outside.
+        let phys: [(u8, u32, core::ops::Range<u32>); 2] =
+            [(7, 250_000, 7_800..9_530), (10, 125_000, 746..912)];
+
+        for (sf, bandwidth, band) in phys {
+            let owner = CtxOwner::new();
+            let config = InterfaceConfig {
+                interface_type: "RNodeInterface".to_string(),
+                port: Some("/dev/nonexistent-test-port".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(bandwidth),
+                spreading_factor: Some(sf),
+                coding_rate: Some(5),
+                // The point of the test: no `bitrate` key anywhere.
+                bitrate: None,
+                ..Default::default()
+            };
+
+            let Built::Handles(handles) = rnode::build(0, &config, &owner.ctx())
+                .expect("a valid RNode section builds without hardware")
+            else {
+                panic!("an RNode section produces its own handle");
+            };
+            let info = &handles[0].info;
+
+            let preamble = derive_preamble_symbols(sf, 5, bandwidth);
+            let airtime_ms =
+                packet_airtime_ms(ANNOUNCE_CAP_REFERENCE_BYTES, bandwidth, sf, 5, preamble);
+            let expected = (ANNOUNCE_CAP_REFERENCE_BYTES as u64 * 8 * 1000 / airtime_ms) as u32;
+
+            assert_eq!(
+                info.announce_cap_bitrate,
+                Some(expected),
+                "sf={sf} bw={bandwidth}: the cap bitrate must be the reference \
+                 announce over the airtime it costs at the live settings"
+            );
+            assert!(
+                band.contains(&expected),
+                "sf={sf} bw={bandwidth}: {expected} bps is outside the band a \
+                 {ANNOUNCE_CAP_REFERENCE_BYTES} B frame measures at on this PHY ({band:?}); \
+                 the airtime arithmetic has lost a term"
+            );
+            // The nominal symbol rate stays what it was, and stays separate:
+            // the cap needs the effective rate, and on a slow PHY the two are
+            // far enough apart that swapping them would be a third of the
+            // intended silence.
+            assert!(
+                info.bitrate.is_some_and(|nominal| nominal > expected),
+                "sf={sf} bw={bandwidth}: the nominal rate ({:?}) must stay above \
+                 the effective one ({expected}) and must not have been replaced by it",
+                info.bitrate
+            );
+        }
+    }
+
     /// Every `warn!` message emitted while the returned guard lives.
     fn warn_tap() -> (
         std::sync::Arc<std::sync::Mutex<Vec<String>>>,

@@ -678,7 +678,13 @@ fn peer_up_announce(
 /// - `bitrate` (Codeberg #93): a key that cleared `MINIMUM_BITRATE` overrides
 ///   the medium default and feeds announce bandwidth capping / timing, where
 ///   Python applies `configured_bitrate` (Reticulum.py:887, Transport.py:1257).
-///   Media-agnostic: transport only sees bits per second.
+///   Media-agnostic: transport only sees bits per second. Since #404 it is an
+///   override and no longer the only source: an interface that knows what an
+///   announce costs on its carrier (`InterfaceInfo::announce_cap_bitrate`) has
+///   already registered its own value in the handle loop, and this call
+///   replaces it when the operator wrote a `bitrate` line. A config without
+///   one is capped exactly like a config with one, which is what Python's
+///   unconditional `self.bitrate` gives an RNode neighbour.
 /// - `announce_cap` (Codeberg #92, Reticulum.py:713-716, 774): the setter
 ///   reports `false` when the interface has no cap entry at all — with no
 ///   configured bitrate there is nothing to take a share of, so say that rather
@@ -1477,6 +1483,22 @@ impl ReticulumNode {
                                 tx_jitter_max_ms: handle.info.tx_jitter_max_ms,
                             },
                         );
+                    }
+                    // Codeberg #404: the interface's own announce-cap bitrate,
+                    // registered here and not in the config loop below, because
+                    // it is keyed by the handle's id — and a multi-vport RNode
+                    // draws ids past its config index for every vport but the
+                    // first. Ordering is deliberate: an explicit `bitrate` key
+                    // reaches `apply_bitrate_and_announce_cap` afterwards and
+                    // REPLACES this entry, so the config still overrides the
+                    // medium.
+                    if let Some(bps) = handle.info.announce_cap_bitrate {
+                        tracing::info!(
+                            "Interface {} announce-cap bitrate: {} bps (from radio settings)",
+                            handle.info.name,
+                            bps
+                        );
+                        core.register_interface_bitrate(handle.info.id.0, bps);
                     }
                     stats.insert(handle.info.id.0, Arc::clone(&handle.counters));
                     ready.insert(handle.info.id.0, Arc::clone(&handle.ready));
@@ -4278,6 +4300,7 @@ async fn run_event_loop(
                 let inherited_mode = handle.info.mode;
                 let inherited_kind = handle.info.kind;
                 let inherited_ingress = handle.info.ingress_control;
+                let announce_cap_bps = handle.info.announce_cap_bitrate;
                 {
                     let mut core = inner.lock_recover();
                     core.set_interface_name(iface_idx, handle.info.name.clone());
@@ -4293,6 +4316,14 @@ async fn run_event_loop(
                     // and the inbound-side propagation rules apply to this peer.
                     core.set_interface_mode(iface_idx, inherited_mode);
                     core.set_interface_kind(iface_idx, inherited_kind);
+                    // Codeberg #404: a runtime-attached radio is capped like a
+                    // configured one. `None` for every medium that declares no
+                    // announce-cap bitrate, which is every dynamically spawned
+                    // interface today except an RNode attached through
+                    // `spawn_rnode_channel_interface`.
+                    if let Some(bps) = announce_cap_bps {
+                        core.register_interface_bitrate(iface_idx, bps);
+                    }
                     // Ingress control (Codeberg #8, reshaped in #189): a
                     // dynamically-spawned interface inherits its listener's
                     // configured value, mirroring `spawned_interface
@@ -5641,6 +5672,7 @@ mod tests {
                     hw_mtu: None,
                     is_local_client: false,
                     bitrate: None,
+                    announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
                     ifac,
                     mode: leviculum_core::traits::InterfaceMode::default(),
@@ -6353,6 +6385,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -6884,6 +6917,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -6935,6 +6969,7 @@ mod tests {
                     hw_mtu: None,
                     is_local_client: false,
                     bitrate: None,
+                    announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7003,6 +7038,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7026,6 +7062,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7078,6 +7115,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7149,6 +7187,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7171,6 +7210,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7245,6 +7285,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7299,6 +7340,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7353,6 +7395,7 @@ mod tests {
                 hw_mtu: Some(500),
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7623,6 +7666,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -8323,6 +8367,7 @@ mod tests {
                 hw_mtu: None,
                 is_local_client: false,
                 bitrate: None,
+                announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),

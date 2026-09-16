@@ -165,6 +165,38 @@ fn compute_jitter_max_ms(sf: u8, bandwidth_hz: u32) -> u64 {
     (airtime_ms * 2).max(500)
 }
 
+/// What an announce costs on this interface's carrier, as the bits per second
+/// the core's announce bandwidth cap takes its 2 % share of (Codeberg #404).
+///
+/// Python's `RNodeInterface` sets `self.bitrate` from the live radio settings
+/// unconditionally (`RNodeInterface.py:695`), so a Python RNode neighbour on
+/// the same channel holds back its transit announces whether or not anybody
+/// wrote a `bitrate` line in a config file. Ours registered the config key or
+/// nothing at all, which left the cap inert on the one medium where an
+/// announce is most expensive.
+///
+/// The number is the effective rate out of the airtime arithmetic, not the
+/// nominal symbol rate (see [`rnode::announce_cap_bitrate_bps`] for why the
+/// two differ by a third at SF10 and why the deviation rule permits it). The
+/// preamble is the RNode firmware's own derivation from the PHY
+/// ([`rnode::derive_preamble_symbols`]) rather than the modem default, because
+/// that is what the firmware programs and therefore what goes on the air —
+/// this interface never sends a preamble length, it sends the PHY and lets the
+/// firmware derive it.
+fn announce_cap_bitrate(sf: u8, cr: u8, bandwidth_hz: u32) -> Option<u32> {
+    let bps = rnode::announce_cap_bitrate_bps(
+        bandwidth_hz,
+        sf,
+        cr,
+        rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
+    );
+    // 0 is the value that REMOVES a cap entry, and it is what the arithmetic
+    // returns for a PHY whose airtime is not computable. A radio that cannot
+    // be described is not transmitting announces to cap, so say `None` and let
+    // the config key (or nothing) decide.
+    (bps > 0).then_some(bps)
+}
+
 /// Default channel buffer size for RNode interfaces.
 /// Smaller than TCP because LoRa bitrates are orders of magnitude lower.
 pub(crate) const RNODE_DEFAULT_BUFFER_SIZE: usize = 64;
@@ -1670,6 +1702,10 @@ where
     let task_counters = Arc::clone(&counters);
     let task_ready = Arc::clone(&ready);
     let bitrate = rnode::compute_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
+    // Copied out beside `bitrate` and for the same reason: `ctx` moves into
+    // the reconnect task below, and the handle must report the PHY the task is
+    // about to program, not a second guess at it.
+    let announce_cap_bps = announce_cap_bitrate(ctx.radio.sf, ctx.radio.cr, ctx.radio.bandwidth);
     // Copied out before `ctx` moves into the task: the handle reports the
     // same pre-TX jitter ceiling the TX loop actually draws against, rather
     // than recomputing it and risking the two drifting apart.
@@ -1709,6 +1745,7 @@ where
             hw_mtu: Some(rnode::HW_MTU as u32),
             is_local_client: false,
             bitrate: Some(bitrate),
+            announce_cap_bitrate: announce_cap_bps,
             tx_jitter_max_ms: Some(tx_jitter_max_ms),
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
@@ -2507,6 +2544,10 @@ pub(crate) fn spawn_rnode_multi_interface(
                 hw_mtu: Some(rnode::HW_MTU as u32),
                 is_local_client: false,
                 bitrate: Some(bitrate),
+                // Each vport is an independent logical interface on its own
+                // carrier, so each takes its own share; capping only the
+                // section-index one would leave the rest uncapped.
+                announce_cap_bitrate: announce_cap_bitrate(sub.sf, sub.cr, sub.bandwidth),
                 tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.bandwidth)),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),

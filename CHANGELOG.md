@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An `lnsd` with an RNode interface holds back its transit announces
+  whether or not the config spells out a `bitrate`: the interface now
+  registers the announce-cap bitrate its live radio settings imply, which
+  is what a Python `RNodeInterface` on the same channel has always done
+  (#404).
+
 - SF5 and SF6 are refused with a reason instead of being configured and
   then carrier-sensed against the SF7 threshold: no `cadDetPeak` for
   either is published in anything this tree holds, and a wrong
