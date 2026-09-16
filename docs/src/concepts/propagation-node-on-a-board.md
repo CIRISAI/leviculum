@@ -523,9 +523,9 @@ transmissions in the run (SF8, BW 125 kHz, CR 4:5, 18-symbol preamble).
 Our airtime model agrees: computed 543 ms for the 184-byte frame the
 same log reports as `airtime_ms=544` (`airtime_ms_with_preamble`,
 `leviculum-core/src/rnode.rs:909`; preamble from
-`derive_preamble_symbols`, `leviculum-core/src/rnode.rs:839`, which
+`derive_preamble_symbols`, `leviculum-core/src/rnode.rs:858`, which
 floors at 18, `LORA_PREAMBLE_SYMBOLS_MIN`,
-`leviculum-core/src/rnode.rs:776`).
+`leviculum-core/src/rnode.rs:793`).
 
 At 904 ms per message and the 10 % duty-cycle cap the firmware enforces
 (`[LORA_AIRTIME_LOCK] lt=1000 lt_cap=10.00%` in the same run), the full

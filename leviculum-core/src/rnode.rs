@@ -624,6 +624,10 @@ pub enum ConfigError {
     InvalidBandwidth,
     TxPowerOutOfRange,
     SpreadingFactorOutOfRange,
+    /// SF5 or SF6: a spreading factor the modem modulates but the driver
+    /// cannot carrier-sense at, because no `cadDetPeak` for it is published
+    /// in anything this tree holds ([`crate::sx126x::cad_params`]).
+    SpreadingFactorWithoutCarrierDetect,
     CodingRateOutOfRange,
 }
 
@@ -634,8 +638,13 @@ impl core::fmt::Display for ConfigError {
             Self::InvalidBandwidth => write!(f, "invalid bandwidth"),
             Self::TxPowerOutOfRange => write!(f, "TX power out of range (0-{MAX_TX_POWER} dBm)"),
             Self::SpreadingFactorOutOfRange => {
-                write!(f, "spreading factor out of range (5-12)")
+                write!(f, "spreading factor out of range (7-12)")
             }
+            Self::SpreadingFactorWithoutCarrierDetect => write!(
+                f,
+                "SF5 and SF6 have no published channel-activity-detection \
+                 threshold, so the driver cannot carrier-sense at them (7-12)"
+            ),
             Self::CodingRateOutOfRange => write!(f, "coding rate out of range (5-8)"),
         }
     }
@@ -747,8 +756,18 @@ pub fn validate_config(freq: u32, bw: u32, txp: u8, sf: u8, cr: u8) -> Result<()
     if txp > MAX_TX_POWER {
         return Err(ConfigError::TxPowerOutOfRange);
     }
-    if !(5..=12).contains(&sf) {
-        return Err(ConfigError::SpreadingFactorOutOfRange);
+    // SF5 and SF6 are refused rather than accepted-and-approximated: the
+    // modem modulates them, but `sx126x::cad_params` has no carrier-detect
+    // threshold for either, and the driver used to substitute the SF7/SF8 pair
+    // without saying so (Codeberg #350). A configuration that cannot be
+    // honoured is refused where the operator can still read the reason, which
+    // is here — the other side of the same principle as #349, where a power
+    // that *can* be brought into range is honoured as near as the part allows
+    // and the substitution is stated.
+    match sf {
+        7..=12 => {}
+        5 | 6 => return Err(ConfigError::SpreadingFactorWithoutCarrierDetect),
+        _ => return Err(ConfigError::SpreadingFactorOutOfRange),
     }
     if !(5..=8).contains(&cr) {
         return Err(ConfigError::CodingRateOutOfRange);
@@ -2357,7 +2376,11 @@ mod tests {
     fn test_validate_config_ok() {
         assert!(validate_config(868_000_000, 125_000, 17, 7, 5).is_ok());
         assert!(validate_config(915_000_000, 500_000, 22, 12, 8).is_ok());
-        assert!(validate_config(2_400_000_000, 250_000, 0, 5, 5).is_ok());
+        // SF7 rather than the SF5 this case used to carry: SF5 and SF6 are
+        // refused since #350, so a case meant to exercise the 2.4 GHz
+        // frequency and the explicit 0 dBm would otherwise be failing on the
+        // spreading factor and proving neither.
+        assert!(validate_config(2_400_000_000, 250_000, 0, 7, 5).is_ok());
     }
 
     #[test]
@@ -2607,6 +2630,22 @@ mod tests {
             validate_config(868_000_000, 125_000, 17, 13, 5),
             Err(ConfigError::SpreadingFactorOutOfRange)
         );
+        // SF5 and SF6 are a refusal of their own kind, and the message says
+        // which: they are inside every range an operator would look up — the
+        // modem modulates them, the wire field carries them — and what stops
+        // them is that the driver has no carrier-detect threshold for either
+        // (#350). A plain "out of range" would send the reader to the
+        // datasheet to check something that is not wrong.
+        for sf in [5u8, 6] {
+            assert_eq!(
+                validate_config(868_000_000, 125_000, 17, sf, 5),
+                Err(ConfigError::SpreadingFactorWithoutCarrierDetect),
+                "SF{sf}"
+            );
+        }
+        let said = alloc::format!("{}", ConfigError::SpreadingFactorWithoutCarrierDetect);
+        assert!(said.contains("SF5 and SF6"), "{said}");
+        assert!(said.contains("carrier-sense"), "{said}");
     }
 
     #[test]

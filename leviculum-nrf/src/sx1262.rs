@@ -121,6 +121,17 @@ pub enum Error {
     /// was never armed looks exactly like a quiet channel, which is the one
     /// failure this driver must not be able to report as a timeout.
     NotArmed,
+    /// [`Sx1262::cad`] was called for a spreading factor
+    /// [`leviculum_core::sx126x::cad_params`] has no detection threshold for,
+    /// i.e. SF5 or SF6.
+    ///
+    /// The host's config validator refuses both, so this is the backstop for a
+    /// configuration that reached the modem another way — a flash page written
+    /// by older tooling, a hand-built frame. An error rather than a
+    /// substituted threshold: a carrier-sense decision taken against the wrong
+    /// correlation peak is worse than one that was never taken, because the
+    /// second is visible right here and the first is visible nowhere.
+    NoCarrierDetect,
 }
 
 /// Hand-written so `Crc` keeps printing as the bare word it always did.
@@ -139,6 +150,7 @@ impl core::fmt::Debug for Error {
             Error::Timeout => "Timeout",
             Error::Crc(_) => "Crc",
             Error::NotArmed => "NotArmed",
+            Error::NoCarrierDetect => "NoCarrierDetect",
         })
     }
 }
@@ -674,6 +686,23 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             &[sf, bw, cr, ldro, 0, 0, 0, 0],
         )
         .await?;
+        // A spreading factor the modem modulates but the driver cannot
+        // carrier-sense at (SF5, SF6 — Codeberg #350). The host validator
+        // refuses those, so reaching here means the configuration came from
+        // somewhere that does not validate, and the board is about to transmit
+        // without channel access. On the critical sink, once per configure:
+        // the alternative is a board whose every key-up is blind and whose log
+        // says nothing that was not also true of a working one.
+        if leviculum_core::sx126x::cad_params(sf).is_none() {
+            crate::log::log_fmt_critical(
+                "[SX_CAD] ",
+                format_args!(
+                    "no detection threshold for sf={}: every transmission on this \
+                     configuration keys without carrier sense",
+                    sf
+                ),
+            );
+        }
         self.set_packet_params(0xFF).await?;
         // Private network sync word (matches RNode)
         self.write_register(reg::LORA_SYNC_WORD, &[0x14, 0x24])
@@ -1144,20 +1173,21 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// was detected (channel busy), false if clear. Blocks until CadDone IRQ.
     /// Exit mode 0x00 leaves the chip in STBY_RC regardless of result.
     pub async fn cad(&mut self, sf: u8) -> Result<bool, Error> {
-        // Datasheet Table 13-81 recommended cadDetPeak values per SF.
-        // cadSymbolNum: 0x02 = 4 symbols, 0x03 = 8 symbols. For sf>=10 the
-        // packet airtime is long (SF10 ~2.7s) and a 4-symbol CAD window usually
-        // misses an in-progress peer transmission, so both nodes transmit and
-        // collide. Listen over 8 symbols at slow SF to span more of the peer's
-        // airtime and detect "busy" reliably. cadDetPeak unchanged.
-        let (cad_sym_num, cad_det_peak) = match sf {
-            7 | 8 => (0x02, 0x16),
-            9 => (0x02, 0x17),
-            10 => (0x03, 0x18),
-            11 => (0x03, 0x19),
-            12 => (0x03, 0x1A),
-            _ => (0x02, 0x16),
+        // The pair per spreading factor is `sx126x::cad_params` in core, where
+        // a host test can hold it against the range the config validator
+        // accepts. It used to be a match here ending in a catch-all that gave
+        // every unlisted spreading factor the SF7/SF8 threshold, which is how
+        // SF5 and SF6 — accepted by that validator — came to carrier-sense
+        // against a correlation peak that is not theirs (Codeberg #350).
+        //
+        // `None` is refused rather than approximated. A node that cannot
+        // carrier-sense is not one that should transmit on a guess: the caller
+        // books this as a CAD error, says so, and its channel-access policy
+        // decides what to do with a detection it did not get.
+        let Some(params) = leviculum_core::sx126x::cad_params(sf) else {
+            return Err(Error::NoCarrierDetect);
         };
+        let (cad_sym_num, cad_det_peak) = (params.symbol_num, params.detection_peak);
         let cad_det_min = 0x0A;
         let cad_exit_mode = 0x00; // CAD-only, return to STBY_RC
         let cad_timeout = [0u8; 3];
@@ -1200,8 +1230,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
 
         // Timeout sized from the CAD's listening symbols at the live symbol
         // time (SF and BW); a fixed per-SF table here assumed BW125.
-        let cad_symbols: u8 = if cad_sym_num == 0x03 { 8 } else { 4 };
-        let timeout_ms = irq::cad_timeout_ms(self.rx_ext_bw_hz, sf, cad_symbols);
+        let timeout_ms = irq::cad_timeout_ms(self.rx_ext_bw_hz, sf, params.symbols());
         match with_timeout(
             Duration::from_millis(timeout_ms as u64),
             self.dio1.wait_for_high(),

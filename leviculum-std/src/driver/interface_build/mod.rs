@@ -715,7 +715,8 @@ mod tests {
                 },
             ),
             (
-                "outside the LoRa spreading factors 5..=12",
+                "outside the LoRa spreading factors the driver carrier-senses \
+                 at, 7..=12",
                 Radio {
                     sf: 13,
                     ..Radio::lawful()

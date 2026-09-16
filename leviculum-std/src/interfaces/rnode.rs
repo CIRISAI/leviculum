@@ -3669,7 +3669,12 @@ mod tests {
                     bandwidth: 500_000,
                     tx_power: 0,
                     tx_power_derived: false,
-                    sf: 5,
+                    // SF8, not the SF5 this fixture used to carry: SF5 and SF6
+                    // are refused by `validate_config` since #350, and the
+                    // hub validates every vport's block before it configures
+                    // the radio. Still one apart from the other vport's SF7,
+                    // so the two blocks stay distinguishable.
+                    sf: 8,
                     cr: 5,
                     st_alock: None,
                     lt_alock: None,
@@ -3914,7 +3919,12 @@ mod tests {
                     bandwidth: 500_000,
                     tx_power: 0,
                     tx_power_derived: false,
-                    sf: 5,
+                    // SF8, not the SF5 this fixture used to carry: SF5 and SF6
+                    // are refused by `validate_config` since #350, and the
+                    // hub validates every vport's block before it configures
+                    // the radio. Still one apart from the other vport's SF7,
+                    // so the two blocks stay distinguishable.
+                    sf: 8,
                     cr: 5,
                     st_alock: None,
                     lt_alock: None,
@@ -4079,7 +4089,12 @@ mod tests {
                     bandwidth: 500_000,
                     tx_power: 0,
                     tx_power_derived: false,
-                    sf: 5,
+                    // SF8, not the SF5 this fixture used to carry: SF5 and SF6
+                    // are refused by `validate_config` since #350, and the
+                    // hub validates every vport's block before it configures
+                    // the radio. Still one apart from the other vport's SF7,
+                    // so the two blocks stay distinguishable.
+                    sf: 8,
                     cr: 5,
                     st_alock: None,
                     lt_alock: None,

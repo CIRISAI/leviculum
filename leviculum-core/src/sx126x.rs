@@ -262,6 +262,82 @@ pub fn cad_timeout_ms(bw_hz: u32, sf: u8, cad_symbols: u8) -> u32 {
     (cad_us.div_ceil(1_000) + SOFT_TIMEOUT_SLACK_MS).min(u32::MAX as u64) as u32
 }
 
+/// The two `SetCadParams` arguments that decide a carrier-detect verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CadParams {
+    /// `cadSymbolNum`: how many symbols the receiver listens over. `0x02` is
+    /// 4 symbols, `0x03` is 8.
+    pub symbol_num: u8,
+    /// `cadDetPeak`: the correlation threshold the peak must clear to count
+    /// as a detection. Spreading-factor dependent — the despread correlation
+    /// peak of a given signal is a different number at every SF — which is
+    /// why there is a table and not a constant.
+    pub detection_peak: u8,
+}
+
+impl CadParams {
+    /// The listening symbols `symbol_num` encodes, for sizing the software
+    /// timeout around the detection.
+    pub fn symbols(&self) -> u8 {
+        if self.symbol_num == 0x03 {
+            8
+        } else {
+            4
+        }
+    }
+}
+
+/// `cadSymbolNum`/`cadDetPeak` for `sf`, or `None` for a spreading factor
+/// this tree has no published values for.
+///
+/// # Why a `None` and not a fallback
+///
+/// The driver's table used to end in a catch-all that handed every unlisted
+/// spreading factor the SF7/SF8 pair, silently (Codeberg #350). A CAD
+/// threshold is not a default one can fall back to: too low and the detector
+/// fires on noise, so the node backs off a channel nobody is using; too high
+/// and it misses a frame in the air, so the node transmits over it. Both
+/// outcomes are collision avoidance doing the opposite of its job, both are
+/// invisible from the node itself, and which of the two a wrong threshold
+/// produces is not even predictable — so a guess is worse than a refusal.
+/// `None` is the refusal, and [`crate::rnode::validate_config`] is where it
+/// is turned into one an operator sees before the radio is configured rather
+/// than after it is on the air.
+///
+/// # The values
+///
+/// SF7-SF12 are the reference RNode firmware's and were measured against it
+/// on the rig; they are what every archived LNode capture was taken with. The
+/// SX1262 datasheet's recommended-settings table is the source (cited in this
+/// tree as "Table 13-81" since the driver was written), but **the datasheet
+/// itself is not in the tree** — `docs/src/sx1262-datasheet-reference.md` is
+/// a driver-development extract that stops short of the CAD tables, and
+/// `reference/RNode_Firmware` never programs `SetCadParams` at all. So the
+/// SF5 and SF6 entries cannot be added by reading anything available here,
+/// and they are not invented: at those spreading factors the symbol is short
+/// and the correlation peak sits elsewhere again, so interpolating from SF7
+/// would be a number with the shape of a measurement and none of the
+/// authority.
+///
+/// `cadSymbolNum` is not from the table. From SF10 up the airtime of a frame
+/// is seconds and a 4-symbol window usually lands in the middle of a peer's
+/// transmission without seeing its preamble, so those listen over 8; the
+/// thresholds are unchanged by that choice.
+pub fn cad_params(sf: u8) -> Option<CadParams> {
+    let (symbol_num, detection_peak) = match sf {
+        7 | 8 => (0x02, 0x16),
+        9 => (0x02, 0x17),
+        10 => (0x03, 0x18),
+        11 => (0x03, 0x19),
+        12 => (0x03, 0x1A),
+        _ => return None,
+    };
+    Some(CadParams {
+        symbol_num,
+        detection_peak,
+    })
+}
+
 /// Whether `SetModulationParams` must enable the low-data-rate optimisation
 /// for the given modulation.
 ///
@@ -1358,6 +1434,72 @@ mod tests {
             assert_eq!(plan.requested_dbm, requested, "{requested} dBm");
             assert_eq!(plan.clamped, clamped, "{requested} dBm");
         }
+    }
+
+    /// Every spreading factor the validator accepts has its own pair, and the
+    /// pairs are the ones the archived captures were taken with.
+    ///
+    /// Written out rather than derived: the defect was a catch-all arm that
+    /// handed unlisted spreading factors the SF7/SF8 pair, and a test that
+    /// computed the expected value the way the code does would have passed
+    /// against it.
+    #[test]
+    fn each_spreading_factor_has_the_detection_pair_it_was_measured_with() {
+        for (sf, symbol_num, detection_peak) in [
+            (7u8, 0x02u8, 0x16u8),
+            (8, 0x02, 0x16),
+            (9, 0x02, 0x17),
+            (10, 0x03, 0x18),
+            (11, 0x03, 0x19),
+            (12, 0x03, 0x1A),
+        ] {
+            let p = cad_params(sf).unwrap_or_else(|| panic!("SF{sf} must have a pair"));
+            assert_eq!(p.symbol_num, symbol_num, "SF{sf} cadSymbolNum");
+            assert_eq!(p.detection_peak, detection_peak, "SF{sf} cadDetPeak");
+            assert_eq!(p.symbols(), if symbol_num == 0x03 { 8 } else { 4 });
+        }
+    }
+
+    /// The validator and the driver's table are one decision, and this is the
+    /// assertion that keeps them one.
+    ///
+    /// Codeberg #350: the validator accepted SF5 through SF12 while the driver
+    /// had arms for SF7 through SF12 and a silent catch-all, so two of the
+    /// accepted spreading factors carrier-sensed against the SF7 threshold.
+    /// Widening either side alone puts this red — accept an SF with no pair
+    /// and a node guesses at the channel; add a pair for an SF nobody can
+    /// configure and the table has grown a row no traffic ever reaches.
+    #[test]
+    fn the_validator_accepts_exactly_the_spreading_factors_the_driver_can_detect_on() {
+        for sf in 0u8..=20 {
+            let accepted = crate::rnode::validate_config(868_000_000, 125_000, 17, sf, 5).is_ok();
+            assert_eq!(
+                accepted,
+                cad_params(sf).is_some(),
+                "SF{sf}: the validator says {accepted}, the carrier-detect table says {}",
+                cad_params(sf).is_some()
+            );
+        }
+    }
+
+    /// The refusal names its own reason rather than reading as an ordinary
+    /// range check, because SF5 and SF6 are inside every range an operator
+    /// would look up: the modem modulates them and the wire field carries
+    /// them.
+    #[test]
+    fn sf5_and_sf6_are_refused_for_the_reason_they_are_refused_for() {
+        for sf in [5u8, 6] {
+            assert_eq!(
+                crate::rnode::validate_config(868_000_000, 125_000, 17, sf, 5),
+                Err(crate::rnode::ConfigError::SpreadingFactorWithoutCarrierDetect),
+                "SF{sf}"
+            );
+        }
+        // Out of the modem's range entirely is still the plain range error.
+        assert_eq!(
+            crate::rnode::validate_config(868_000_000, 125_000, 17, 13, 5),
+            Err(crate::rnode::ConfigError::SpreadingFactorOutOfRange)
+        );
     }
 
     /// The clamp is the reference's, bound to the reference's own numbers.

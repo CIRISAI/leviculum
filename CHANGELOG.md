@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- SF5 and SF6 are refused with a reason instead of being configured and
+  then carrier-sensed against the SF7 threshold: no `cadDetPeak` for
+  either is published in anything this tree holds, and a wrong
+  detection threshold makes a node either transmit over a frame in the
+  air or back off on noise (#350).
+
 - A board's `[LORA] active config` line reports the transmit power it
   programmed, not the one it was asked for: `txp` is the effective dBm,
   beside `txp_requested` and a `txp_honoured=yes|no` that names a
