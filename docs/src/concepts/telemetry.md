@@ -477,6 +477,41 @@ their index stamps (there is no re-index).
   distinguish the two cases is worth building before the third support
   question arrives.
 
+## What a receiving node owes
+
+`lntd` (`leviculum-cli/src/lntd.rs`) is the endpoint side of the same
+contract: one announced LXMF delivery destination, whose hash is what
+`lnflash --set-telemetry` writes into a board. It attaches to a running
+shared instance the way `lnmsg` and `lnpnd` do, and every report it
+accepts becomes one row in a SQLite file.
+
+The rule it is built around is the inverse of the decoder's tolerance.
+`Telemeter.from_packed` skips a sensor ID it has no class for, and our
+decoder skips it too — right for a codec, wrong for an archive. So the
+**raw Telemeter blob is stored on every row**, beside the columns for
+the sensors we did understand. A field test that silently dropped the
+one field nobody had implemented yet would have nothing to go back to,
+and Sideband's sensor set is still growing. A blob that does not decode
+at all is likewise a row that says so rather than a message on the
+floor; the only thing that produces no row is a Telemeter map with zero
+entries, which is what the producer rule above says never to send.
+
+Two further consequences of "lose nothing", both tested in
+`leviculum-cli/src/lntd_store.rs`:
+
+- **The LXMF message id is a UNIQUE column.** A restart across a write
+  neither loses the row already committed nor doubles it when the same
+  report is delivered again.
+- **The database is the only durable state, and the hooks never touch
+  it.** Rows cross a channel to a thread that owns the connection, so a
+  `synchronous = FULL` fsync never happens under the core lock. Shutdown
+  drops the sender and waits for that thread, so a report already handed
+  over is written before the process returns.
+
+There is no query surface and no viewer. WAL mode is what makes the
+operator's own `sqlite3` session safe against the daemon that is still
+writing.
+
 ## The extension ladder
 
 The format is fixed by implementations we do not control, so extending

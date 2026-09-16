@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), and probe tool (lnprobe)"
+description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), probe tool (lnprobe), and telemetry collector (lntd)"
 
 [[bin]]
 name = "lnsd"
@@ -28,12 +28,19 @@ name = "lnprobe"
 path = "src/lnprobe.rs"
 
 [[bin]]
+name = "lntd"
+path = "src/lntd.rs"
+
+[[bin]]
 name = "auto-crossmachine-test"
 path = "src/bin/auto_crossmachine_test.rs"
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }
 leviculum-std = { path = "../leviculum-std" }
+# `lntd` only: the LXMF delivery destination it collects on, and the
+# Telemeter decoder it writes rows from.
+leviculum-lxmf = { path = "../leviculum-lxmf" }
 tokio.workspace = true
 tracing = { workspace = true, features = ["std"] }
 tracing-subscriber.workspace = true
@@ -45,6 +52,7 @@ serde_json = "1"
 # `lnstest diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
 toml.workspace = true
 tempfile = "3"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 
 # `cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl`
 # builds a .deb whose binaries are statically linked and therefore
