@@ -90,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A board's `[LORA] active config` line reports the transmit power it
+  programmed, not the one it was asked for: `txp` is the effective dBm,
+  beside `txp_requested` and a `txp_honoured=yes|no` that names a
+  substitution in a word (#349).
+
 - A board whose telemetry target is unreachable no longer announces at
   the tick rate. The telemetry tick puts the delivery announce on the
   air before the report exists, and the paths that give up after it —

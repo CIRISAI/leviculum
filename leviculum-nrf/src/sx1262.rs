@@ -612,7 +612,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         cr: u8, // SX1262 coding rate code: 0x01 = 4/5
         power_dbm: i8,
         preamble_len: u16,
-    ) -> Result<(), Error> {
+    ) -> Result<leviculum_core::sx126x::TxPowerProgram, Error> {
         // The third path that leaves RX, and the least obvious one: the loop
         // takes a runtime config override at the top of an iteration, which
         // can be the iteration right after a reception re-armed the receiver
@@ -642,9 +642,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // line.
         //
         // The read-back goes out through `facts`, unconditionally, on the sink
-        // that survives a boot nobody was attached for: `[LORA] active config`
-        // reports the *request*, so without this nothing an operator can read
-        // names the power the chip was actually given.
+        // that survives a boot nobody was attached for. The program is also
+        // returned to the caller, which is what puts the effective power on
+        // the `[LORA] active config` line: that line used to carry the
+        // request, so a board asked for a power it could not deliver reported
+        // the number it had been given rather than the one it was radiating.
         let programmed = leviculum_core::sx126x::program_tx_power(self, power_dbm).await?;
         leviculum_log_line::facts::tx_power_programmed(
             &mut crate::lora::FirmwareLog,
@@ -685,7 +687,8 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // the LNode receives almost nothing at slow spreading factors.
         // Persistent setting, re-asserted on every reconfig via this path.
         self.write_command(opcode::SET_STOP_RX_TIMER_ON_PREAMBLE, &[0x01])
-            .await
+            .await?;
+        Ok(programmed)
     }
 
     // TX

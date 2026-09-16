@@ -36,13 +36,17 @@
 //! sink, where it cannot lap the ring before a reader arrives.
 //!
 //! A third joins them on the same terms: [`tx_power_programmed`] states what
-//! the PA was actually programmed with. The settings line above reports the
-//! *request*, and for as long as the driver hardcoded `SetTxParams` those two
-//! were different numbers — a board configured for 2 dBm said `txp=2` and
-//! radiated about 14. Nothing readable off a running board named the
-//! programmed power, so the sweep that would have caught it had nothing to
-//! verify a point against. Unconditional, like the cap line: "what is this
-//! board radiating" is not a question a silence can answer.
+//! the PA was actually programmed with, down to the `SetPaConfig` bytes. For
+//! as long as the driver hardcoded `SetTxParams` a board configured for 2 dBm
+//! said `txp=2` and radiated about 14, and nothing readable off a running
+//! board named the programmed power, so the sweep that would have caught it
+//! had nothing to verify a point against. Unconditional, like the cap line:
+//! "what is this board radiating" is not a question a silence can answer.
+//!
+//! The settings line carries the same answer in its own terms — `txp` is the
+//! programmed power and `txp_requested` the configured one — so the two lines
+//! cannot disagree about what the board is doing, and the shorter one is
+//! enough for the operator who only wants the number.
 //!
 //! The functions take a sink rather than calling the firmware's logger, so
 //! the routing is assertable on the host: `leviculum-nrf` cross-compiles to
@@ -82,8 +86,21 @@ pub struct ActiveRadioConfig {
     pub sf: u8,
     pub bw_hz: u32,
     pub cr_denom: u8,
+    /// The transmit power the PA was **programmed** with: the byte
+    /// `SetTxParams` was given, not the one the configuration asked for.
     pub txp_dbm: i8,
+    /// What the configuration asked for, which is the same number unless the
+    /// request was outside what the part can deliver.
+    pub txp_requested_dbm: i8,
     pub csma: bool,
+}
+
+impl ActiveRadioConfig {
+    /// Whether the transmit power the operator asked for is the one the board
+    /// is running.
+    fn txp_honoured(&self) -> bool {
+        self.txp_dbm == self.txp_requested_dbm
+    }
 }
 
 /// `[LORA] active config: …` — what the radio is set to, emitted after
@@ -92,13 +109,36 @@ pub struct ActiveRadioConfig {
 /// Critical: it is emitted once at boot and once per runtime
 /// reconfiguration, and a board reconfigured in the field has to be able to
 /// say what it was reconfigured to.
+///
+/// `txp` is the **programmed** power, `txp_requested` the configured one, and
+/// `txp_honoured` states the comparison in a word that greps. The line used to
+/// carry the request alone, under the name the programmed value now has, and
+/// that is what let Codeberg #349 survive a whole corpus: 91 hardware
+/// scenarios ask for 2 dBm, the driver could reach nothing below 14, and the
+/// one line an operator reads said `txp=2`. A line that reports a
+/// substitution as the request is worse than no line at all — it answers the
+/// question wrongly rather than declining to answer it.
+///
+/// All three keys are unconditional, for the same reason the
+/// [`tx_power_programmed`] line is: a key that appears only in the
+/// interesting case cannot be grepped for across a corpus, because the reader
+/// would have to know in advance which runs to look at, which is precisely
+/// what they are trying to find out.
 pub fn active_radio_config<S: LineSink>(sink: &mut S, c: &ActiveRadioConfig) {
     sink.line(
         Route::Critical,
         "[LORA] ",
         format_args!(
-            "active config: freq={} sf={} bw={} cr={} txp={} csma={}",
-            c.freq_hz, c.sf, c.bw_hz, c.cr_denom, c.txp_dbm, c.csma
+            "active config: freq={} sf={} bw={} cr={} txp={} txp_requested={} \
+             txp_honoured={} csma={}",
+            c.freq_hz,
+            c.sf,
+            c.bw_hz,
+            c.cr_denom,
+            c.txp_dbm,
+            c.txp_requested_dbm,
+            if c.txp_honoured() { "yes" } else { "no" },
+            c.csma
         ),
     );
 }
@@ -306,6 +346,7 @@ mod tests {
             bw_hz: 125_000,
             cr_denom: 5,
             txp_dbm: 22,
+            txp_requested_dbm: 22,
             csma: true,
         }
     }
@@ -320,9 +361,49 @@ mod tests {
                 Route::Critical,
                 String::from(
                     "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=22 \
-                     csma=true t=191\r\n"
+                     txp_requested=22 txp_honoured=yes csma=true t=191\r\n"
                 )
             )]
+        );
+    }
+
+    /// Codeberg #349: the line names the power the PA was programmed with,
+    /// and says in a word whether that is the power that was asked for.
+    #[test]
+    fn a_substituted_transmit_power_is_stated_on_the_configuration_line() {
+        let mut sink = Recorder::default();
+        active_radio_config(
+            &mut sink,
+            &ActiveRadioConfig {
+                txp_dbm: 14,
+                txp_requested_dbm: 2,
+                ..eu_medium()
+            },
+        );
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[LORA] active config: freq=869463000 sf=8 bw=125000 cr=5 txp=14 \
+                     txp_requested=2 txp_honoured=no csma=true t=191\r\n"
+                )
+            )]
+        );
+    }
+
+    /// The ordinary case still states all three, so a corpus can be grepped
+    /// for `txp_honoured=no` without knowing which runs to look at first.
+    #[test]
+    fn an_honoured_transmit_power_states_the_comparison_too() {
+        let mut sink = Recorder::default();
+        active_radio_config(&mut sink, &eu_medium());
+        assert!(
+            sink.lines[0]
+                .1
+                .contains("txp=22 txp_requested=22 txp_honoured=yes"),
+            "{}",
+            sink.lines[0].1
         );
     }
 

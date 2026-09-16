@@ -640,13 +640,24 @@ impl leviculum_log_line::facts::LineSink for FirmwareLog {
 
 /// The human-readable half of a config, as the `[LORA] active config:` line
 /// states it.
-fn active_facts(config: &RadioConfig) -> leviculum_log_line::facts::ActiveRadioConfig {
+///
+/// `programmed` is what `configure_lora` put on the SPI bus, and it is a
+/// parameter rather than a field of `config` on purpose: the transmit power on
+/// this line has to be the byte the PA was given, and the only place that byte
+/// exists is the return value of the call that wrote it (Codeberg #349). A
+/// config carries a *request*, and reading the power off it is exactly the
+/// mistake this line used to make.
+fn active_facts(
+    config: &RadioConfig,
+    programmed: &leviculum_core::sx126x::TxPowerProgram,
+) -> leviculum_log_line::facts::ActiveRadioConfig {
     leviculum_log_line::facts::ActiveRadioConfig {
         freq_hz: config.frequency_hz,
         sf: config.sf,
         bw_hz: config.bw_hz,
         cr_denom: config.cr_denom,
-        txp_dbm: config.tx_power_dbm,
+        txp_dbm: programmed.programmed_dbm,
+        txp_requested_dbm: programmed.requested_dbm,
         csma: config.csma_enabled,
     }
 }
@@ -1166,10 +1177,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         )
         .await
     {
-        Ok(()) => {
+        Ok(programmed) => {
             leviculum_log_line::facts::active_radio_config(
                 &mut FirmwareLog,
-                &active_facts(&config),
+                &active_facts(&config, &programmed),
             );
             publish_running_config(&config);
         }
@@ -1248,10 +1259,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 )
                 .await
             {
-                Ok(()) => {
+                Ok(programmed) => {
                     leviculum_log_line::facts::active_radio_config(
                         &mut FirmwareLog,
-                        &active_facts(&new_cfg),
+                        &active_facts(&new_cfg, &programmed),
                     );
                     config = new_cfg;
                     publish_running_config(&config);

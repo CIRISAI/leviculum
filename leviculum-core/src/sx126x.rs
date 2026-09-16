@@ -402,8 +402,25 @@ pub struct TxPowerProgram {
 /// has always accepted (`lnflash/src/radio.rs:76`).
 ///
 /// **A value the chip cannot do is clamped and announced, never refused.**
-/// The announcement is the caller's `[SX_TX_POWER]` line, and
-/// [`TxPowerProgram::clamped`] is what it reports.
+/// The operator is the operator (Codeberg #257), so the stack warns and
+/// obeys; what it must never do is substitute in silence.
+///
+/// **Upwards least of all.** A clamp towards [`TX_POWER_MIN_DBM`] costs range
+/// and is visible as a link that does not reach; a clamp towards
+/// [`TX_POWER_MAX_DBM`] — and the four-row profile table this replaces rounded
+/// *up*, from a requested 2 dBm to a radiated 14 — is silent on the air and
+/// wrong in two ways at once. A power request is a legal statement, because
+/// the e.r.p. ceiling of the sub-band is a limit the operator is answerable
+/// for, and a safety statement, because the shielded room, the inline
+/// attenuator and the instrument on the other end of it are all specified
+/// against the number in the config. And it invalidates the measurement: 91
+/// hardware scenarios carry `txpower = 2`, chosen for a shielded bench, so a
+/// board radiating 14 turns every series whose independent variable was power
+/// into a series with no independent variable at all. Hence
+/// [`TxPowerProgram::clamped`] and the two lines that carry it
+/// (`[SX_TX_POWER]` and `[LORA] active config`), on the log sink that survives
+/// a boot nobody was attached for: the substitution has to be legible without
+/// being looked for.
 pub fn plan_tx_power(requested_dbm: i8) -> TxPowerProgram {
     let programmed_dbm = requested_dbm.clamp(TX_POWER_MIN_DBM, TX_POWER_MAX_DBM);
     TxPowerProgram {
@@ -1308,6 +1325,39 @@ mod tests {
 
         assert_eq!(plan_tx_power(i8::MIN).programmed_dbm, TX_POWER_MIN_DBM);
         assert_eq!(plan_tx_power(i8::MAX).programmed_dbm, TX_POWER_MAX_DBM);
+    }
+
+    /// The points the retired profile table snapped, each asserted as the
+    /// value that now reaches `SetTxParams`.
+    ///
+    /// The table had four rows and only ever raised, so everything under its
+    /// lowest row came out at 14 dBm: `2` and `13` are the two the corpus and
+    /// the bench actually use, `16` sat between rows, and `30` is over the top
+    /// of the part. The negative is the half `lnflash --radio-txpower` accepts
+    /// and the old code could not express at all. Asserting the effective
+    /// value rather than the request is the whole point of the case: a test
+    /// that echoed the request back would have passed against the defect.
+    #[test]
+    fn the_powers_the_profile_table_used_to_round_up_are_programmed_verbatim() {
+        for (requested, effective, clamped) in [
+            (-40i8, TX_POWER_MIN_DBM, true),
+            (-9, -9, false),
+            (2, 2, false),
+            (13, 13, false),
+            (14, 14, false),
+            (16, 16, false),
+            (17, 17, false),
+            (22, 22, false),
+            (30, TX_POWER_MAX_DBM, true),
+        ] {
+            let plan = plan_tx_power(requested);
+            assert_eq!(
+                plan.programmed_dbm, effective,
+                "{requested} dBm must be programmed as {effective}, not as the request"
+            );
+            assert_eq!(plan.requested_dbm, requested, "{requested} dBm");
+            assert_eq!(plan.clamped, clamped, "{requested} dBm");
+        }
     }
 
     /// The clamp is the reference's, bound to the reference's own numbers.
