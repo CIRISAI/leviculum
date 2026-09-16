@@ -1,13 +1,16 @@
 //! GNSS driver task: baud sweep, presence tri-state, NMEA fold.
 //!
-//! One task, two boards, two receivers. UARTE0 on P0.15/P0.16 carries
+//! One task, three boards, two receivers. UARTE0 on P0.15/P0.16 carries
 //! the WisMesh Pocket V2's u-blox ZOE-M8Q (RAK19026 VC baseboard); on
 //! P1.07/P1.05 it carries the Heltec Mesh Node T114's Quectel L76K
-//! (Codeberg #69). Everything below the module-init step is identical
-//! for both, because nothing in it is module-specific: a baud sweep, a
-//! presence tri-state and an NMEA fold work on sentences, and sentences
-//! are sentences. The two differences are named in [`GnssWiring`] — which
-//! pins, and which [`ModuleKind`] the one-shot init speaks.
+//! (Codeberg #69); on P1.11/P1.12 it carries the SenseCAP Solar Node's
+//! XIAO L76K, which is the same receiver on a different carrier and
+//! therefore the same [`ModuleKind`] (#233). Everything below the
+//! module-init step is identical for all three, because nothing in it is
+//! module-specific: a baud sweep, a presence tri-state and an NMEA fold
+//! work on sentences, and sentences are sentences. The differences are
+//! all named in [`GnssWiring`] — which pins, which control lines exist,
+//! and which [`ModuleKind`] the one-shot init speaks.
 //!
 //! The `gnss` cargo feature only says the board routes this UART; whether a
 //! receiver is attached and delivering is a runtime question with three
@@ -66,7 +69,10 @@
 //!
 //! The PPS pin (P0.17 on the V2, P1.04 on the T114) is configured as a
 //! pull-down input but not used — reserved for a future
-//! timestamp-capture iteration.
+//! timestamp-capture iteration. The Solar Node breaks no pulse line out
+//! at all and passes `pps: None`, which is not the same thing: an absent
+//! output is not a quiet one, and the pad that would carry it on a XIAO
+//! is that board's battery ADC.
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Input, Level, OutputDrive, Pull};
@@ -87,7 +93,10 @@ use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
 pub enum ModuleKind {
     /// u-blox ZOE-M8Q (WisMesh Pocket V2), UBX binary protocol.
     UbloxM8,
-    /// Quectel L76K (Heltec Mesh Node T114), CASIC `$PCAS` sentences.
+    /// Quectel L76K, CASIC `$PCAS` sentences. On the Heltec Mesh Node
+    /// T114 as a bare module, on the SenseCAP Solar Node as Seeed's
+    /// XIAO L76K carrier — the same part, the same command language,
+    /// the same probe answer, so one variant serves both.
     QuectelL76k,
 }
 

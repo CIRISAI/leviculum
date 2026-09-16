@@ -17,11 +17,13 @@
 //! The bring-up milestone was deliberately small: boot, identity over
 //! USB, radio up, one packet received from a board we already trust.
 //! The peripherals follow as their own steps with their own evidence
-//! (Lead, 2026-09-15). Battery is the second step and is in
-//! `bsp-solarnode` now (#233); GNSS is wired below under its own feature
-//! gate and is not yet, because the first bring-up has to confirm the
-//! L76K's TX/RX pair is the way round `boards/solarnode.rs` reads it out
-//! of the pad names, and a swapped pair produces silence, not an error.
+//! (Lead, 2026-09-15). Battery was the second step; the XIAO L76K is the
+//! third and is in `bsp-solarnode` since 2026-09-16 (#233). Its pins,
+//! including the direction of the UART pair, are settled from the two
+//! Seeed variants rather than left to the bench — `boards/solarnode.rs`
+//! carries the three citations — so what the bench still owes is a
+//! `[GNSS]` heartbeat with rising sentence counts and a fix, not a
+//! wiring decision.
 
 #![no_std]
 #![no_main]
@@ -474,27 +476,33 @@ async fn main(spawner: Spawner) {
     // No display on this board: no ST7789, no `leviculum-screen` path,
     // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233).
 
-    // XIAO L76K on UARTE0, at 9600 baud. Pin naming is from the MCU's
-    // side, as everywhere else in this tree: the MCU transmits on P1.11
-    // and receives on P1.12.
+    // XIAO L76K on UARTE0, sweep starting at the module's 9600 default.
+    // Pin naming is from the MCU's side, as everywhere else in this tree:
+    // the MCU transmits on P1.11 and receives on P1.12. That direction is
+    // the one number in the map worth doubting — Meshtastic's
+    // GPS_TX_PIN/GPS_RX_PIN naming is inconsistent across variants — and
+    // `boards/solarnode.rs` settles it from three places that agree
+    // (the D6 row of `g_ADigitalPinMap`, `PIN_SERIAL1_TX`, and the
+    // sibling kit variant's "This is data from the MCU"). If the presence
+    // machine still reports `no-hardware` on a board whose L76K is
+    // powered, swapping this pair is nonetheless the cheapest first
+    // experiment: a crossed pair is silent, not an error.
     //
-    // That direction is the one number in the map worth doubting, and
-    // `boards/solarnode.rs` says why: Meshtastic's GPS_TX_PIN/GPS_RX_PIN
-    // naming is inconsistent across variants, and a swapped pair produces
-    // silence rather than an error — the receiver would settle on
-    // `no-hardware` with perfectly good wiring. FIRST BRING-UP CONFIRMS
-    // IT. If the presence machine reports `no-hardware` on a board whose
-    // L76K is powered, swap this pair before suspecting the module.
-    //
-    // P0.02 is the standby/wakeup control the driver holds high. There is
-    // no PPS line broken out on this carrier, hence `pps: None`: the
-    // pulse output is not merely unused here, it is not on a pad, and
-    // P0.31 (which would carry it on a XIAO) is the battery ADC. So this
-    // board is an NMEA-only time source (#166).
+    // P0.02 is the standby/wakeup control the driver holds high (the
+    // variant sets no GPS_STANDBY_ACTIVE, so the upstream default "LOW is
+    // standby" applies and HIGH is awake). There is no PPS line broken
+    // out on this carrier, hence `pps: None`: the pulse output is not
+    // merely unused here, it is not on a pad, and P0.31 (which would
+    // carry it on a XIAO) is the battery ADC. So this board is an
+    // NMEA-only time source (#166).
     //
     // P1.05 is the receiver's own power enable. It goes into the wiring
     // rather than being raised here: nothing else on this carrier is on
-    // that switch, so the task that needs it is the task that owns it.
+    // that switch, so the task that needs it is the task that owns it —
+    // and the task raises it before it opens the UART, which is the order
+    // that matters (an unpowered module's TX line is a floating input).
+    // P1.03, the module's reset, is left in its reset state on purpose;
+    // upstream's `initVariant` does not touch it either.
     #[cfg(feature = "gnss")]
     {
         leviculum_nrf::gnss::init(
@@ -1202,9 +1210,8 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// The per-board part of telemetry is exactly this function: which
 /// peripherals exist. This board has an L76K like the T114's and a
 /// battery sampler like both, so the two `cfg` arms below read the same
-/// way they do there. `battery` is on (#233) and its reading is on the
-/// air; `gnss` is not yet, and its arm compiles under the T114's feature
-/// set until it is.
+/// way they do there, and since 2026-09-16 both features are on (#233):
+/// a pack voltage and a position from the same report.
 ///
 /// The battery field is filled from the same ADC task the `BATTERY` log
 /// line reads (#380). A pack voltage on the air is the one reading that

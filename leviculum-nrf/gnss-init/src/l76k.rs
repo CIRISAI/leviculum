@@ -1,18 +1,24 @@
 //! One-shot Quectel L76K boot init: probe, constellations, sentence
 //! selection, navigation mode (Codeberg #69).
 //!
-//! The Heltec Mesh Node T114 carries a Quectel L76K on P1.05/P1.07. It
-//! is not a u-blox part and does not speak UBX: the L76K is built around
-//! a CASIC-family baseband (AT6558 lineage) and is configured with
+//! The Heltec Mesh Node T114 carries a Quectel L76K on P1.05/P1.07, and
+//! the SenseCAP Solar Node P1-Pro carries Seeed's XIAO L76K — the same
+//! part on a carrier of its own — on P1.11/P1.12 (#233). It is not a
+//! u-blox part and does not speak UBX: the L76K is built around a
+//! CASIC-family baseband (AT6558 lineage) and is configured with
 //! proprietary `$PCAS` NMEA sentences. So the [`crate::ubx`] sequence
 //! next door is not merely wrong bytes here, it is the wrong protocol —
 //! but the *shape* is identical, and that shape is [`ModuleInit`].
 //!
 //! The reference is Meshtastic's `GNSS_MODEL_MTK` branch
-//! (`meshtastic/src/gps/GPS.cpp:536-550`, reached for `GPS_L76K` boards,
-//! of which `variants/nrf52840/heltec_mesh_node_t114/variant.h` is one).
-//! It sends exactly three sentences, 250 ms apart. We send those three,
-//! with one deliberate difference and one addition:
+//! (`meshtastic/src/gps/GPS.cpp:536-550`), reached for `GPS_L76K`
+//! boards, of which both
+//! `variants/nrf52840/heltec_mesh_node_t114/variant.h` and
+//! `variants/nrf52840/seeed_solar_node/variant.h` are ones: the second
+//! defines `GPS_L76K` and `GPS_BAUDRATE 9600` exactly as the first does,
+//! which is why this sequence needs no per-board branch and no board
+//! layer overrides it. It sends exactly three sentences, 250 ms apart.
+//! We send those three, with one deliberate difference and one addition:
 //!
 //! 1. **`$PCAS06,0`** (added, first): the version query. Its answer,
 //!    `$GPTXT,01,01,02,SW=…`, is the *only* positive evidence that the
@@ -48,13 +54,16 @@
 //! constant it could be kept in step with — it is whatever the presence
 //! machine's sweep locked. Setting a baud here would desynchronise the
 //! line we are talking on, for no gain: the sweep already finds 9600
-//! (the L76K default, `meshtastic/src/configuration.h:354`, not
-//! overridden by the T114 variant), 38400 and 115200.
+//! (the L76K default, `meshtastic/src/configuration.h:354`, and the
+//! explicit `GPS_BAUDRATE 9600` of both carrying variants), 38400 and
+//! 115200.
 //!
-//! **Standby.** The L76K has a hardware standby pin (T114: P1.02, high
-//! = force wake, `variant.h:170` with `GPS_STANDBY_ACTIVE LOW` from
-//! `GPS.h:22-23`). Waking it is a GPIO act, not a sentence, so it
-//! belongs to the driver and not to this crate — but it is the same
+//! **Standby.** The L76K has a hardware standby pin (T114: P1.02,
+//! `variant.h:170`; Solar Node: P0.02, `PIN_GPS_STANDBY D0`). High is
+//! force-wake on both, since neither variant overrides the
+//! `GPS_STANDBY_ACTIVE LOW` default in `GPS.h:22-23`. Waking it is a
+//! GPIO act, not a sentence, so it belongs to the driver and not to
+//! this crate — but it is the same
 //! lesson #324 taught on the Pocket V2 (a module parked in a low-power
 //! state by whatever firmware ran before ours), and the driver holds
 //! that pin high for its whole life.

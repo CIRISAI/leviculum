@@ -93,33 +93,93 @@ pub type UserButton = peripherals::P1_01;
 pub type TouchButton = peripherals::P1_07;
 
 // GNSS (XIAO L76K)
-/// GNSS UART TX — **MCU → L76K** (`D6`).
+/// GNSS UART TX — **MCU → L76K** (`D6`, index 6 = P1.11).
 ///
 /// Named from the MCU's side, as every other board file in this tree
 /// is. Meshtastic's `GPS_TX_PIN`/`GPS_RX_PIN` naming is inconsistent
 /// across variants (the T114's own comments say the opposite of what
-/// its code does, see `boards/t114.rs`), so the direction here is taken
-/// from the XIAO's pad names: the sibling kit variant states
-/// `#define GPS_TX_PIN D6 // This is data from the MCU`, and D6 is the
-/// pad the XIAO datasheet calls UART TX. **First bring-up confirms
-/// it** — a swapped pair produces silence, not an error, so a receiver
-/// that reports `no-hardware` on this board is a reason to try the pair
-/// the other way round before concluding the module is dead.
+/// its code does, see `boards/t114.rs`), so the direction is not taken
+/// from that name. Three independent statements in the two variants
+/// for these same two modules settle it, and all three say D6 is the
+/// **MCU's** transmitter:
+///
+/// 1. `seeed_solar_node/variant.cpp`, the mapping table itself:
+///    `43, // D6  P1.11 (UART_TX) GNSS_TX`. `UART_TX` is the XIAO pad
+///    name, which is a property of the module and not of a variant
+///    author's habit.
+/// 2. `seeed_solar_node/variant.h:120` with `:115`:
+///    `#define PIN_SERIAL1_TX GPS_TX_PIN` and `#define GPS_TX_PIN D6`.
+///    In the Adafruit nRF52 core `PIN_SERIAL1_TX` is the pin the MCU
+///    drives. (The trailing comment on that same line 115 reads `// 44`,
+///    which is P1.12 and therefore D7 — a fourth reminder that in this
+///    header the comments are not the map. The table is.)
+/// 3. `seeed_xiao_nrf52840_kit/variant.h:181-182`, the sibling carrier
+///    for the same XIAO and the same L76K, spells it out:
+///    `#define GPS_TX_PIN D6 // This is data from the MCU`,
+///    `#define GPS_RX_PIN D7 // This is data from the GNSS module`.
+///
+/// It stays worth knowing on the bench that a swapped pair produces
+/// silence rather than an error: a receiver that settles on
+/// `no-hardware` while [`GnssEnable`] is high is a reason to try the
+/// pair the other way round before concluding the module is dead.
 pub type GnssTx = peripherals::P1_11;
-/// GNSS UART RX — L76K → MCU (`D7`).
+/// GNSS UART RX — L76K → MCU (`D7`, index 7 = P1.12). See [`GnssTx`]
+/// for the citations that fix the direction of the pair.
 pub type GnssRx = peripherals::P1_12;
-/// GNSS standby / wakeup control (`D0`, `PIN_GPS_STANDBY`).
+/// GNSS standby / wakeup control (`D0`, index 0 = P0.02,
+/// `PIN_GPS_STANDBY`).
+///
+/// **HIGH is awake.** The variant defines no `GPS_STANDBY_ACTIVE`, so
+/// Meshtastic's default applies (`src/gps/GPS.h:22-23`,
+/// `#define GPS_STANDBY_ACTIVE LOW`), and `GPS::writePinStandby` writes
+/// that level for standby and its inverse for awake
+/// (`src/gps/GPS.cpp:904-916`). The driver therefore holds this pin
+/// high for the life of the task, exactly as on the T114.
 pub type GnssStandby = peripherals::P0_02;
-/// GNSS reset (`D17`).
+/// GNSS reset (`D17`, index 17 = P1.03).
+///
+/// Declared for completeness and deliberately **not driven**: the
+/// solar node's `initVariant` never configures it either, so the pin
+/// stays in its reset state (input, disconnected) and the module comes
+/// up on its own internal reset. Asserting it at boot would be a forced
+/// restart on every power-up, which is the ephemeris-wiping cold start
+/// `gnss-init` argues against sending as a command.
 pub type GnssReset = peripherals::P1_03;
-/// GNSS power enable (`D18`, `GPS_EN`). HIGH powers the receiver —
-/// `initVariant` ends by raising it.
+/// GNSS power enable (`D18`, index 18 = P1.05, `GPS_EN`).
+///
+/// **HIGH powers the receiver**, and this switch belongs to the
+/// receiver alone — nothing else on the carrier goes dark with it,
+/// which is why the driver owns it rather than a board-level rail
+/// helper (contrast the T114's shared VEXT, [`crate::vext`]).
+/// `initVariant` in `seeed_solar_node/variant.cpp` writes it LOW while
+/// it configures the QSPI CS, the battery divider and the two LEDs, and
+/// then ends by writing it HIGH — so upstream's own order is *enable
+/// last*, after the rest of the board is set up.
+///
+/// **Order relative to the UART:** our driver raises this pin as its
+/// first act and builds the `Uarte` a few statements later, which is
+/// the opposite order and is the safe one. The L76K's TX line is
+/// unpowered until this pin is high, so a UART opened first would see a
+/// floating input; opening it after means the first bytes the sweep
+/// reads are bytes the module actually sent. Nothing needs to wait for
+/// the rail beyond that: the presence machine sweeps for as long as it
+/// takes and re-sweeps on sentence starvation, so a receiver still
+/// booting is a few silent seconds, not a missed window.
+///
+/// The board has no `VGNSS_Ctrl` net. That name belongs to the Heltec
+/// V4's ESP32 carrier (`leviculum-esp/src/boards/heltec_v4.rs`), where
+/// it gates a GNSS *header* supply through Q7; the analogue here is
+/// this pin and nothing else.
 pub type GnssEnable = peripherals::P1_05;
-/// GNSS UART baud rate. The L76K ships at 9600, and unlike the other
-/// boards in this tree there is **no PPS line broken out**: the carrier
-/// exposes wakeup, reset and enable only, and P0.31 is the battery ADC.
-/// So this board is an NMEA-only time source (#166), which is the
-/// weaker of the two kinds.
+/// GNSS UART baud rate. The L76K ships at 9600
+/// (`seeed_solar_node/variant.h`, `#define GPS_BAUDRATE 9600`, the same
+/// value the T114's variant carries), which is where the presence
+/// machine's sweep starts.
+///
+/// Unlike the other boards in this tree there is **no PPS line broken
+/// out**: the carrier exposes wakeup, reset and enable only, and P0.31
+/// is the battery ADC. So this board is an NMEA-only time source
+/// (#166), which is the weaker of the two kinds.
 pub const GNSS_BAUD: u32 = 9600;
 
 // Grove / I²C, on the NFC pins

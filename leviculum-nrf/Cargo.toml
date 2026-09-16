@@ -287,13 +287,16 @@ bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss", "battery"]
 # node whose state of charge nobody knows is a node nobody knows will
 # still be there tomorrow.
 #
-# `gnss` is still deliberately NOT pulled: the L76K is its own step with
-# its own evidence, and the first bring-up has to confirm the TX/RX pair
-# is the way round `boards/solarnode.rs` reads it out of the pad names.
-# The wiring is already in `bin/solarnode.rs` behind that gate — the
-# T114's clippy pass compiles it, since the bins are built under every
-# feature set.
-bsp-solarnode = ["softdevice", "battery"]
+# `gnss` is on since 2026-09-16, the third of those steps. It is
+# unconditional for the same universal-build reason as the divider: the
+# XIAO L76K is a module of the carrier board, not an optional part, and a
+# receiver that is absent or unpowered reports itself as `no-hardware` at
+# runtime rather than needing a UF2 of its own (#240). The module speaks
+# the same CASIC `$PCAS` language as the T114's L76K and answers the same
+# probe, so `leviculum-gnss-init` needs no board-specific branch — the two
+# differences are pins and the absent PPS line, and both live in the
+# `GnssWiring` value in `bin/solarnode.rs`.
+bsp-solarnode = ["softdevice", "battery", "gnss"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
 gnss = [

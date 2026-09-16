@@ -218,16 +218,16 @@ key-up (`rx_frontend`, `leviculum-nrf/src/sx1262.rs:338`;
 
 | Product | Level | Note |
 |---|---|---|
-| Seeed SenseCAP Solar Node P1-Pro | **Bring-up** | On the rig since 2026-09-15; radio not yet confirmed on air |
+| Seeed SenseCAP Solar Node P1-Pro | **Bring-up** | On the rig since 2026-09-15; radio and GNSS not yet confirmed on the bench |
 | Seeed XIAO nRF52840 + Wio-SX1262 kit | Expected | Same two modules, same seven pins plus RXEN |
 | Wio Tracker L1 / L1 e-ink | Not covered | Different carrier, LEDs and battery sense not checked |
 
-The image drives, besides the radio, one LED on `P0.19` and the battery
-divider on `P0.31`/`P0.14`. No display, and the L76K GNSS is not compiled
-into `bsp-solarnode` yet, so the pins a carrier board might reuse for it
-stay unconfigured. That is much of the reason the kit above can be
-*Expected* at all — the modules decide the radio, and the carrier decides
-everything this build does not touch.
+The image drives, besides the radio, one LED on `P0.19`, the battery
+divider on `P0.31`/`P0.14` and the XIAO L76K GNSS on `P1.11`/`P1.12`.
+There is no display. That the kit above can be *Expected* at all is
+largely because the modules decide the radio and the carrier decides the
+rest: a carrier that omits the L76K reports `no-hardware` at run time
+rather than needing an image of its own.
 
 The battery sampler is in (Codeberg #233), and it reads *this* board's
 divider: the XIAO module's own 1 MΩ over 510 kΩ, which puts the whole
@@ -358,7 +358,7 @@ name = "solarnode"
 path = "src/bin/solarnode.rs"
 ```
 
-(`leviculum-nrf/Cargo.toml:329-339`)
+(`leviculum-nrf/Cargo.toml:332-342`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -369,11 +369,11 @@ board. Exactly one BSP feature must be enabled per build; a
 |---------|--------|------|
 | `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:278` |
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:262` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery). No display; GNSS not yet | `leviculum-nrf/Cargo.toml:296` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:298` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:299` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:305` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:306` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:299` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:301` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:302` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:308` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:309` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
