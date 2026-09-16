@@ -14,11 +14,14 @@
 //! line (`sx1262.rs`) and the divider-enable polarity the battery
 //! sampler now takes from the board (`battery.rs`).
 //!
-//! The bring-up milestone is deliberately small: boot, identity over
+//! The bring-up milestone was deliberately small: boot, identity over
 //! USB, radio up, one packet received from a board we already trust.
-//! GNSS and battery are wired below under their own feature gates but
-//! are NOT in `bsp-solarnode` yet — each is its own step with its own
-//! evidence (Lead, 2026-09-15).
+//! The peripherals follow as their own steps with their own evidence
+//! (Lead, 2026-09-15). Battery is the second step and is in
+//! `bsp-solarnode` now (#233); GNSS is wired below under its own feature
+//! gate and is not yet, because the first bring-up has to confirm the
+//! L76K's TX/RX pair is the way round `boards/solarnode.rs` reads it out
+//! of the pad names, and a swapped pair produces silence, not an error.
 
 #![no_std]
 #![no_main]
@@ -514,12 +517,18 @@ async fn main(spawner: Spawner) {
         info!("gnss task spawned (L76K)");
     }
 
-    // Battery sense on P0.31 (AIN7) through the XIAO module's own
-    // 1 M/510 k divider, which `ADC_MULTIPLIER` = 2.9608 encodes, with
-    // P0.14 as its enable — **active low** here, unlike the T114's, which
-    // is why the polarity travels with the pin (`boards/solarnode.rs`,
-    // `battery::DividerEnable`). Asserted only for the duration of a
-    // sample so 1.51 MΩ does not sit across the pack for a winter.
+    // Battery sense on P0.31 (AIN7) through the XIAO module's own 1 M/510 k
+    // divider, with P0.14 as its enable — **active low** here, unlike the
+    // T114's, which is why the polarity travels with the pin
+    // (`boards/solarnode.rs`, `battery::DividerEnable`). Asserted only for
+    // the duration of a sample so 1.51 MΩ does not sit across the pack for
+    // a winter.
+    //
+    // `for_divider` and not `for_board`: this board states its divider as
+    // the two resistors rather than as their ratio, and both halves of the
+    // channel configuration come out of them — the 2.9608 the conversion
+    // divides by AND the 20 µs acquisition window 338 kΩ of source needs,
+    // where the other two boards' dividers are inside the 10 µs default.
     #[cfg(feature = "battery")]
     {
         leviculum_nrf::battery::init(
@@ -530,7 +539,7 @@ async fn main(spawner: Spawner) {
                 pin: p.P0_14.into(),
                 active: solarnode::ADC_CTRL_ACTIVE,
             }),
-            solarnode::ADC_MULTIPLIER,
+            leviculum_nrf::battery::BatteryScale::for_divider(solarnode::BATTERY_DIVIDER),
         );
         info!("battery task spawned");
     }
@@ -1193,9 +1202,9 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// The per-board part of telemetry is exactly this function: which
 /// peripherals exist. This board has an L76K like the T114's and a
 /// battery sampler like both, so the two `cfg` arms below read the same
-/// way they do there — and, while `bsp-solarnode` switches neither
-/// feature on, both arms compile under the T114's feature set and the
-/// numbers arrive the day the features do (#233).
+/// way they do there. `battery` is on (#233) and its reading is on the
+/// air; `gnss` is not yet, and its arm compiles under the T114's feature
+/// set until it is.
 ///
 /// The battery field is filled from the same ADC task the `BATTERY` log
 /// line reads (#380). A pack voltage on the air is the one reading that

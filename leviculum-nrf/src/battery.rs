@@ -63,13 +63,15 @@
 //!
 //! # Where the numbers live
 //!
-//! Nothing quantitative is in this file. The ADC gain, the conversion,
-//! the cell classification and the line's bytes are all in
-//! [`leviculum_battery_scale`], where a host test can hold them —
-//! notably the full scale, which is *derived from* the gain this module
-//! configures rather than written down beside it. The divider
-//! multiplier and the pins come from the board file (`boards/t114.rs`,
-//! `boards/rak4631.rs`), which stays their single source.
+//! Nothing quantitative is in this file. The ADC gain, the acquisition
+//! window, the conversion, the cell classification and the line's bytes
+//! are all in [`leviculum_battery_scale`], where a host test can hold
+//! them — notably the full scale, which is *derived from* the gain this
+//! module configures rather than written down beside it, and the
+//! acquisition window, which is derived from the board's divider. The
+//! divider itself and the pins come from the board file
+//! (`boards/t114.rs`, `boards/rak4631.rs`, `boards/solarnode.rs`),
+//! which stays their single source.
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Level, Output, OutputDrive};
@@ -79,9 +81,14 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 
 use leviculum_battery_scale::{
-    classify_cell_count, pack_percent, AdcGain, BatteryEwma, BatteryLine, BatteryPercentLine,
-    BatteryScale, BatteryWindow,
+    classify_cell_count, pack_percent, AcquisitionTime, AdcGain, BatteryEwma, BatteryLine,
+    BatteryPercentLine, BatteryWindow,
 };
+
+/// Re-exported so a bin can build its board's scale without naming the
+/// crate: the board file states the divider, the bin picks the
+/// constructor that matches how it states it.
+pub use leviculum_battery_scale::{BatteryScale, Divider};
 
 use crate::baseboard::{BatteryState, BATTERY_STATE};
 
@@ -115,10 +122,19 @@ const DIVIDER_SETTLE_MS: u64 = 10;
 /// T114 asserts high into a load switch; the SenseCAP Solar Node's
 /// `BAT_READ` sinks the low side of the XIAO's 1 M/510 k divider and is
 /// therefore active LOW (`boards/solarnode.rs`, which cites the variant
-/// that states it). Getting it backwards does not fail loudly — it
-/// reads a floating input that looks like a flat or an absent pack — so
-/// the board that knows says so here rather than leaving a convention
-/// for the next board to discover.
+/// that states it). Getting it backwards does not fail loudly — nothing
+/// refuses to compile and nothing errors at run time — so the board that
+/// knows says so here rather than leaving a convention for the next
+/// board to discover.
+///
+/// What it *does* produce is a reading outside any pack, and which side
+/// depends on the board. A sinking enable left inactive stops being a
+/// return and becomes a pull-up through the divider's low leg, so the
+/// solar node reads 9.5 V and upwards — `classify_cell_count` calls that
+/// implausible and the boot line says so
+/// (`battery-scale`'s `a_divider_left_disabled_reads_implausible_on_this_board`).
+/// A switching enable left inactive leaves the pin floating instead.
+/// Both are rejected; neither is a pack.
 pub struct DividerEnable {
     /// The board's `AdcCtrl` pin.
     pub pin: Peri<'static, AnyPin>,
@@ -169,7 +185,7 @@ impl EnableLine {
 /// ([`AdcGain::full_scale_mv`]). A gain changed in one place therefore
 /// cannot fail to change in the other — which is what happened before,
 /// when the register value came from an embassy default
-/// (`ChannelConfig::single_ended`, `embassy-nrf-0.9.0/src/saadc.rs:100`)
+/// (`ChannelConfig::single_ended`, `embassy-nrf-0.9.0/src/saadc.rs:104`)
 /// and the 3600 it implies was a hard-coded constant in the conversion.
 fn saadc_gain(gain: AdcGain) -> saadc::Gain {
     match gain {
@@ -181,6 +197,26 @@ fn saadc_gain(gain: AdcGain) -> saadc::Gain {
         AdcGain::Unity => saadc::Gain::GAIN1,
         AdcGain::Two => saadc::Gain::GAIN2,
         AdcGain::Four => saadc::Gain::GAIN4,
+    }
+}
+
+/// The same seam for the acquisition window: the scale carries the one
+/// the board's divider needs, this writes it.
+///
+/// It is a second embassy default that was never a statement
+/// (`Time::_10US`, `embassy-nrf-0.9.0/src/saadc.rs:109`) and it is the
+/// one the T114's divider happened to satisfy and the Solar Node's does
+/// not — 338 kΩ of source against the 100 kΩ the part specifies 10 µs
+/// for. Getting it wrong reads low and stays plausible, which is the
+/// failure mode this whole crate exists to make impossible.
+fn saadc_time(time: AcquisitionTime) -> saadc::Time {
+    match time {
+        AcquisitionTime::ThreeUs => saadc::Time::_3US,
+        AcquisitionTime::FiveUs => saadc::Time::_5US,
+        AcquisitionTime::TenUs => saadc::Time::_10US,
+        AcquisitionTime::FifteenUs => saadc::Time::_15US,
+        AcquisitionTime::TwentyUs => saadc::Time::_20US,
+        AcquisitionTime::FortyUs => saadc::Time::_40US,
     }
 }
 
@@ -235,13 +271,16 @@ pub async fn battery_task(
     let mut config = Config::default();
     config.resolution = Resolution::_12BIT;
     let mut ch = ChannelConfig::single_ended(adc_pin);
-    // Both of these are what `single_ended` would have defaulted to
-    // today. They are written down because the conversion depends on
-    // them and a default is not a statement: `leviculum_battery_scale`
-    // derives the full-scale millivolts from this gain, so the two move
-    // together or a test fails.
+    // All three of these are what `single_ended` would have defaulted to
+    // on the two boards that predate the Solar Node. They are written
+    // down because the conversion depends on them and a default is not a
+    // statement: `leviculum_battery_scale` derives the full-scale
+    // millivolts from this gain, so the two move together or a test
+    // fails. The acquisition time is the one that is no longer the same
+    // on every board — see `saadc_time`.
     ch.reference = Reference::INTERNAL;
     ch.gain = saadc_gain(scale.gain());
+    ch.time = saadc_time(scale.acquisition_time());
     let mut adc = Saadc::new(saadc_periph, BatteryIrqs, config, [ch]);
 
     // The enable pin starts INACTIVE — which is not the same as low, see
@@ -264,10 +303,11 @@ pub async fn battery_task(
     crate::log::log_fmt_critical(
         "[BAT] ",
         format_args!(
-            "init pack_mv={} cells={}S full_scale_mv={}",
+            "init pack_mv={} cells={}S full_scale_mv={} acq_us={}",
             first_mv,
             class.cells,
-            scale.terminal_full_scale_mv()
+            scale.terminal_full_scale_mv(),
+            scale.acquisition_time().micros()
         ),
     );
     if !class.plausible {
@@ -367,26 +407,33 @@ pub async fn battery_task(
 /// `adc_pin` is the board's `BatteryAdc`, `divider_enable` its
 /// `AdcCtrl` *and the level that asserts it* where it has one (the T114
 /// does, active high; the solar node does, active low; the RAK does
-/// not), and `divider_multiplier` its `ADC_MULTIPLIER`. All of them come
-/// from the board file, which stays their single source — this module
-/// holds no copy of any of them.
+/// not), and `scale` is built from the board file's own statement of its
+/// divider. All of them come from the board file, which stays their
+/// single source — this module holds no copy of any of them.
 ///
-/// The ADC side of the scale is not a per-board choice and comes from
-/// [`leviculum_battery_scale::CONFIGURED_GAIN`]. A variant header's
-/// `AREF_VOLTAGE` is *that* firmware's ADC configuration and not a
-/// property of the board's divider; folding it in here a second time is
-/// exactly the double count that crate's module doc exists to prevent.
+/// The scale rather than a bare multiplier, because how a board states
+/// its divider is itself board knowledge: the T114 and the RAK state a
+/// ratio and use [`BatteryScale::for_board`]; the solar node states its
+/// two resistors and uses [`BatteryScale::for_divider`], which is what
+/// lets the acquisition window be derived instead of defaulted.
+///
+/// The ADC's gain is not a per-board choice and comes from
+/// [`leviculum_battery_scale::CONFIGURED_GAIN`] either way. A variant
+/// header's `AREF_VOLTAGE` is *that* firmware's ADC configuration and
+/// not a property of the board's divider; folding it in here a second
+/// time is exactly the double count that crate's module doc exists to
+/// prevent.
 pub fn init(
     spawner: &Spawner,
     saadc_periph: Peri<'static, peripherals::SAADC>,
     adc_pin: impl saadc::Input + 'static,
     divider_enable: Option<DividerEnable>,
-    divider_multiplier: f32,
+    scale: BatteryScale,
 ) {
     spawner.must_spawn(battery_task(
         saadc_periph,
         adc_pin.degrade_saadc(),
         divider_enable,
-        BatteryScale::for_board(divider_multiplier),
+        scale,
     ));
 }

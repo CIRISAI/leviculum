@@ -167,23 +167,37 @@ pub type BatteryAdc = peripherals::P0_31;
 pub type AdcCtrl = peripherals::P0_14;
 /// The level on [`AdcCtrl`] that switches the divider ON.
 pub const ADC_CTRL_ACTIVE: Level = Level::Low;
-/// ADC multiplier: volts at [`BatteryAdc`] back to volts at the
-/// battery terminal.
+/// The battery divider, as the two resistors it is: R17 = 1 MΩ from the
+/// terminal to [`BatteryAdc`], R18 = 510 kΩ from the pin down to
+/// [`AdcCtrl`].
 ///
-/// The XIAO nRF52840's divider is R17 = 1 MΩ over R18 = 510 kΩ, stated
-/// in `seeed_xiao_nrf52840_kit/variant.h` beside its `ADC_MULTIPLIER`,
-/// so the factor is (1000 + 510) / 510 = 2.9608. The solar node's own
-/// variant rounds it to `ADC_MULTIPLIER 3.3`, and that 3.3 is not this
-/// number: it is paired there with `AREF_VOLTAGE 3.3` while the variant
-/// defines no `VBAT_AR_INTERNAL`, so Meshtastic reads the pin at the
-/// 3.6 V full scale its `analogReference(AR_INTERNAL)` default sets and
-/// converts as if it were 3.3 V. Their product, 3.3 × 3.3/3.6 = 3.03,
-/// lands within 2 % of the resistors — which is why nobody noticed.
-/// We take the resistors. Our own full scale is not a board property at
-/// all; it is the chip's internal 0.6 V reference divided by the gain
+/// Both values are stated in `seeed_xiao_nrf52840_kit/variant.h:202`
+/// beside its `ADC_MULTIPLIER`, so the factor is
+/// (1000 + 510) / 510 = 2.9608. The solar node's own variant rounds it
+/// to `ADC_MULTIPLIER 3.3`, and that 3.3 is not this number: it is
+/// paired there with `AREF_VOLTAGE 3.3` while the variant defines no
+/// `VBAT_AR_INTERNAL`, so Meshtastic reads the pin at the 3.6 V full
+/// scale its `analogReference(AR_INTERNAL)` default sets and converts as
+/// if it were 3.3 V. Their product, 3.3 × 3.3/3.6 = 3.03, lands within
+/// 2 % of the resistors — which is why nobody noticed. We take the
+/// resistors. Our own full scale is not a board property at all; it is
+/// the chip's internal 0.6 V reference divided by the gain
 /// `leviculum_battery_scale::CONFIGURED_GAIN` sets, and that crate's
-/// module doc argues why it must not be multiplied in twice.
-pub const ADC_MULTIPLIER: f32 = 2.9608;
+/// module doc argues why it must not be multiplied in twice. Through
+/// this divider at that gain the board's whole measurable range is
+/// 10 660 mV, 2.6 mV per count.
+///
+/// **The two resistors and not their ratio**, unlike the T114's and the
+/// RAK's. The ratio decides the conversion, but their magnitude decides
+/// how long the SAADC must hold the input before converting: 1 MΩ ∥
+/// 510 kΩ is 338 kΩ of source, where the nRF52840 specifies the 10 µs
+/// window every board was sampled with for 100 kΩ (PS v1.8 §6.23). The
+/// T114's 490 kΩ chain presents 80 kΩ and is inside it; this one is not,
+/// so `leviculum_battery_scale::BatteryScale::for_divider` derives 20 µs
+/// from these numbers rather than a constant being written down here.
+/// A multiplier could not have carried that.
+pub const BATTERY_DIVIDER: leviculum_battery_scale::Divider =
+    leviculum_battery_scale::Divider::new(1_000_000, 510_000);
 
 /// Create the green LED output. **Active HIGH**; off at boot.
 pub fn led(pin: Peri<'static, LedPin>) -> Output<'static> {

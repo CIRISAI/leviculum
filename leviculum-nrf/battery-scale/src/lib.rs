@@ -10,7 +10,7 @@
 //!
 //! The full scale is `reference / gain`. The firmware never set either:
 //! `ChannelConfig::single_ended` *happens* to pick `Reference::INTERNAL`
-//! (0.6 V) and `Gain::GAIN1_6` (`embassy-nrf-0.9.0/src/saadc.rs:100`),
+//! (0.6 V) and `Gain::GAIN1_6` (`embassy-nrf-0.9.0/src/saadc.rs:104`),
 //! which makes the full scale 3.6 V, which is the 3600 the conversion
 //! divided by. Nothing said so, nothing checked it, and the day that
 //! default moves — an embassy release, an `_nrf54l`-style cfg, a second
@@ -35,6 +35,15 @@
 //! gives 1.73 the same way. The variants' `AREF_VOLTAGE 3.0` is *their*
 //! ADC gain choice and not ours — gain and divider are independent, so
 //! our 3600 stays right beside their 4.916.
+//!
+//! A board that knows its two resistors rather than only their ratio
+//! passes them instead, as [`Divider`] ([`BatteryScale::for_divider`]).
+//! That is not tidiness: the ratio decides the conversion, but the
+//! *magnitude* decides how long the SAADC has to hold the input before
+//! it converts ([`AcquisitionTime`]), and a multiplier alone cannot say.
+//! `boards/solarnode.rs` states 1 MΩ over 510 kΩ, which divides like a
+//! 2.9608 multiplier and samples like nothing else we have — 338 kΩ of
+//! source where the T114's 490 kΩ chain presents 80 kΩ.
 //!
 //! # What the percentage guard costs
 //!
@@ -166,6 +175,164 @@ impl AdcGain {
 /// reading in the field.
 pub const CONFIGURED_GAIN: AdcGain = AdcGain::OneSixth;
 
+/// How long the SAADC holds its input connected before it converts, as
+/// the `TACQ` field the channel is configured with.
+///
+/// Mirrors `embassy_nrf::saadc::Time` for the nRF52840 rather than
+/// depending on it, for the same reason [`AdcGain`] mirrors
+/// `saadc::Gain`: this crate builds for the host. The firmware maps one
+/// to the other at a single `match`.
+///
+/// This is the second default that was never a statement. The
+/// conversion's correctness rests on the sampling capacitor having
+/// reached the pin's voltage by the end of the window, and how long that
+/// takes is set by the source resistance the *board's divider* presents
+/// — so it is a per-board number, and until this existed every board got
+/// `Time::_10US` because that is what `ChannelConfig::single_ended`
+/// happens to pick (`embassy-nrf-0.9.0/src/saadc.rs:109`). On a divider
+/// of a few tens of kΩ that is right; on one of a few hundred it is
+/// outside what the part specifies, and the failure mode is a reading
+/// that is low by an amount nothing in the log distinguishes from a
+/// discharged pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AcquisitionTime {
+    /// `TACQ = 3 µs`.
+    ThreeUs,
+    /// `TACQ = 5 µs`.
+    FiveUs,
+    /// `TACQ = 10 µs` — what `ChannelConfig::single_ended` defaults to.
+    TenUs,
+    /// `TACQ = 15 µs`.
+    FifteenUs,
+    /// `TACQ = 20 µs`.
+    TwentyUs,
+    /// `TACQ = 40 µs` — the longest the part offers.
+    FortyUs,
+}
+
+/// The acquisition times, shortest first, each with the largest source
+/// resistance the nRF52840 specifies it for.
+///
+/// nRF52840 PS v1.8, §6.23 (SAADC electrical specification), the
+/// `TACQ` / maximum-source-resistance table. Shortest first because
+/// [`AcquisitionTime::for_source_ohms`] takes the first row that covers
+/// a source: a longer window than needed is time the ADC holds the
+/// divider enabled for nothing.
+const ACQUISITION_TABLE: [(AcquisitionTime, u32); 6] = [
+    (AcquisitionTime::ThreeUs, 10_000),
+    (AcquisitionTime::FiveUs, 40_000),
+    (AcquisitionTime::TenUs, 100_000),
+    (AcquisitionTime::FifteenUs, 200_000),
+    (AcquisitionTime::TwentyUs, 400_000),
+    (AcquisitionTime::FortyUs, 800_000),
+];
+
+impl AcquisitionTime {
+    /// The window in microseconds.
+    pub const fn micros(self) -> u32 {
+        match self {
+            AcquisitionTime::ThreeUs => 3,
+            AcquisitionTime::FiveUs => 5,
+            AcquisitionTime::TenUs => 10,
+            AcquisitionTime::FifteenUs => 15,
+            AcquisitionTime::TwentyUs => 20,
+            AcquisitionTime::FortyUs => 40,
+        }
+    }
+
+    /// The largest source resistance the part specifies this window for.
+    pub const fn max_source_ohms(self) -> u32 {
+        let mut i = 0;
+        while i < ACQUISITION_TABLE.len() {
+            let (t, ohms) = ACQUISITION_TABLE[i];
+            if t as u8 == self as u8 {
+                return ohms;
+            }
+            i += 1;
+        }
+        // Unreachable: the table covers every variant, and a test asserts
+        // it. Answering with the smallest bound rather than panicking in
+        // a `const fn` keeps a missed row conservative.
+        ACQUISITION_TABLE[0].1
+    }
+
+    /// The shortest window the part specifies for a source of
+    /// `source_ohms`, or [`None`] when no window covers it.
+    ///
+    /// `None` is not a detail to paper over: above 800 kΩ the part
+    /// specifies nothing at all, so the board's divider is the thing that
+    /// has to change, not the register.
+    pub const fn for_source_ohms(source_ohms: u32) -> Option<Self> {
+        let mut i = 0;
+        while i < ACQUISITION_TABLE.len() {
+            let (t, ohms) = ACQUISITION_TABLE[i];
+            if source_ohms <= ohms {
+                return Some(t);
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+/// A board's resistive battery divider, as the two resistors it is.
+///
+/// The multiplier a board file used to state as one `f32` is derivable
+/// from these and so is the source resistance the ADC sees, which is the
+/// number that decides [`AcquisitionTime`] — and which a bare multiplier
+/// cannot express at all: 100 kΩ over 390 kΩ and 1 MΩ over 3.9 MΩ divide
+/// identically and are two very different things to sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divider {
+    high_ohms: u32,
+    low_ohms: u32,
+}
+
+impl Divider {
+    /// `high_ohms` is the resistor between the battery terminal and the
+    /// ADC pin, `low_ohms` the one between the pin and the divider's
+    /// return — ground, or an enable pin that sinks it (see
+    /// `boards/solarnode.rs`).
+    pub const fn new(high_ohms: u32, low_ohms: u32) -> Self {
+        Self {
+            high_ohms,
+            low_ohms,
+        }
+    }
+
+    /// The factor from volts at the pin back to volts at the terminal,
+    /// in thousandths: `(high + low) / low`.
+    ///
+    /// Computed in `u64` and rounded to nearest, so it matches to the
+    /// millivolt what a board file that states the same divider as a
+    /// decimal arrives at, without either of them being the source of
+    /// the other.
+    pub const fn multiplier_milli(&self) -> u32 {
+        let total = self.high_ohms as u64 + self.low_ohms as u64;
+        let low = self.low_ohms as u64;
+        ((total * 1000 + low / 2) / low) as u32
+    }
+
+    /// The resistance the ADC pin looks back into while the divider is
+    /// enabled: the two resistors in parallel, since one goes to the
+    /// pack and the other to the return and both are low-impedance ends.
+    pub const fn source_ohms(&self) -> u32 {
+        let high = self.high_ohms as u64;
+        let low = self.low_ohms as u64;
+        let sum = high + low;
+        if sum == 0 {
+            return 0;
+        }
+        (high * low / sum) as u32
+    }
+
+    /// The shortest acquisition window the part specifies for this
+    /// divider, or [`None`] when it specifies none.
+    pub const fn acquisition_time(&self) -> Option<AcquisitionTime> {
+        AcquisitionTime::for_source_ohms(self.source_ohms())
+    }
+}
+
 /// Everything between a raw count and a millivolt reading at the
 /// battery terminal: the ADC's configured gain and the board's external
 /// divider.
@@ -177,6 +344,9 @@ pub const CONFIGURED_GAIN: AdcGain = AdcGain::OneSixth;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatteryScale {
     gain: AdcGain,
+    /// The acquisition window the channel must be configured with for a
+    /// sample through this divider to have settled.
+    acquisition_time: AcquisitionTime,
     /// The board's divider multiplier in thousandths. Integer, because
     /// the conversion is integer: 1.73 → 1730, 4.916 → 4916.
     multiplier_milli: u32,
@@ -195,30 +365,72 @@ impl BatteryScale {
     /// thousandths here, which is exact for both boards we have (1.730
     /// and 4.916) and is 2 mV of resolution at a 6 V full scale for any
     /// board we do not.
+    ///
+    /// The acquisition window is [`AcquisitionTime::TenUs`], which is
+    /// what the channel has always been configured with — see that
+    /// type's doc. A multiplier alone cannot say whether that is right:
+    /// it is the *magnitude* of the two resistors that decides, and this
+    /// constructor is not told it. A board that states its resistors
+    /// uses [`Self::for_divider`] and gets the window derived.
     pub const fn new(gain: AdcGain, divider_multiplier: f32) -> Self {
         let multiplier_milli = (divider_multiplier * 1000.0 + 0.5) as u32;
-        Self {
-            gain,
-            multiplier_milli,
-            terminal_full_scale_mv: (gain.full_scale_mv() * multiplier_milli + 500) / 1000,
-        }
+        Self::from_parts(gain, AcquisitionTime::TenUs, multiplier_milli)
     }
 
     /// The scale for a board whose divider multiplier is
     /// `divider_multiplier`, at the gain the firmware actually
     /// configures ([`CONFIGURED_GAIN`]).
     ///
-    /// The one constructor the firmware uses: a board file states its
-    /// multiplier and nothing else, and the ADC side of the arithmetic
-    /// is not a per-board choice.
+    /// A board file states its multiplier and nothing else. Both boards
+    /// that predate [`Divider`] are on this path and their readings are
+    /// unchanged by its arrival, which is asserted below rather than
+    /// asserted here.
     pub const fn for_board(divider_multiplier: f32) -> Self {
         Self::new(CONFIGURED_GAIN, divider_multiplier)
+    }
+
+    /// The scale for a board that states its divider as the two
+    /// resistors it is, at the gain the firmware actually configures
+    /// ([`CONFIGURED_GAIN`]).
+    ///
+    /// Both halves of the channel configuration come from the same pair
+    /// of numbers: the multiplier the conversion divides by, and the
+    /// acquisition window the source resistance needs. A divider the
+    /// part specifies no window for falls back to the longest one it
+    /// has, [`AcquisitionTime::FortyUs`] — the best available, and
+    /// [`Divider::acquisition_time`] is the honest answer for anything
+    /// that has to know the part is out of its envelope.
+    pub const fn for_divider(divider: Divider) -> Self {
+        let acq = match divider.acquisition_time() {
+            Some(t) => t,
+            None => AcquisitionTime::FortyUs,
+        };
+        Self::from_parts(CONFIGURED_GAIN, acq, divider.multiplier_milli())
+    }
+
+    const fn from_parts(
+        gain: AdcGain,
+        acquisition_time: AcquisitionTime,
+        multiplier_milli: u32,
+    ) -> Self {
+        Self {
+            gain,
+            acquisition_time,
+            multiplier_milli,
+            terminal_full_scale_mv: (gain.full_scale_mv() * multiplier_milli + 500) / 1000,
+        }
     }
 
     /// The gain the channel must be configured with for this scale to be
     /// true.
     pub const fn gain(&self) -> AdcGain {
         self.gain
+    }
+
+    /// The acquisition window the channel must be configured with for a
+    /// sample through this board's divider to have settled.
+    pub const fn acquisition_time(&self) -> AcquisitionTime {
+        self.acquisition_time
     }
 
     /// The board's divider multiplier in thousandths (1.73 → 1730).
@@ -229,10 +441,12 @@ impl BatteryScale {
     /// Millivolts at the battery terminal that read [`RAW_FULL_SCALE`].
     ///
     /// The RAK's 1.73 divider puts this at 6228 mV — a 1S pack uses
-    /// two thirds of the range. The T114's 4.916 puts it at 14 698 mV,
+    /// two thirds of the range. The T114's 4.916 puts it at 17 698 mV,
     /// so a 1S pack at 4.2 V sits at 0.854 V on the pin and one LSB is
-    /// 3.6 mV at the terminal. Ample either way; a reading *above* this
-    /// is impossible and one near it means the input is floating.
+    /// 4.3 mV at the terminal; the Solar Node's 1 M/510 k lands between
+    /// them at 10 660 mV, 2.6 mV per count. Ample on all three; a
+    /// reading *above* this is impossible and one near it means the
+    /// input is floating.
     pub const fn terminal_full_scale_mv(&self) -> u32 {
         self.terminal_full_scale_mv
     }
@@ -1012,6 +1226,286 @@ mod tests {
         assert_eq!(
             BatteryPercentLine::new(7400, 2, true).to_string(),
             "BATTERY_PCT reportable=1 pack_mv=7400 cells=2S band_lo_mv=5000 band_hi_mv=8660"
+        );
+    }
+
+    // ---- SenseCAP Solar Node P1-Pro (Codeberg #233) ----
+    //
+    // Its divider is the XIAO nRF52840's own, R17 = 1 MΩ over R18 =
+    // 510 kΩ, stated in `seeed_xiao_nrf52840_kit/variant.h:202` and
+    // quoted in `boards/solarnode.rs`. Every number below is that
+    // divider's and differs from the T114's, which is the point: a test
+    // these constants pass and 4.916 also passes is not a test of this
+    // board. Several of them assert the T114 answer alongside, so the
+    // divergence is visible rather than merely claimed.
+
+    /// The board's divider, as its board file states it.
+    const SOLARNODE: Divider = Divider::new(1_000_000, 510_000);
+
+    /// The scale the solar node's `bin` builds.
+    fn solarnode_scale() -> BatteryScale {
+        BatteryScale::for_divider(SOLARNODE)
+    }
+
+    /// The resistors divide like the multiplier the board file's prose
+    /// derives from them, to the thousandth — so the two statements of
+    /// the same divider cannot drift, and the reading is 2.9608's and
+    /// not 3.3's.
+    #[test]
+    fn the_solar_nodes_resistors_give_the_multiplier_its_board_file_states() {
+        assert_eq!(SOLARNODE.multiplier_milli(), 2961);
+        // (1000 + 510) / 510 = 2.9608, rounded to thousandths.
+        assert_eq!(BatteryScale::for_board(2.9608).multiplier_milli(), 2961);
+        // And NOT the variant's own `ADC_MULTIPLIER 3.3`, which is that
+        // firmware's multiplier paired with its own wrong full scale.
+        // Taken at ours it would read every pack 11 % high.
+        assert_ne!(SOLARNODE.multiplier_milli(), 3300);
+        assert_eq!(BatteryScale::for_board(3.3).terminal_full_scale_mv(), 11880);
+    }
+
+    /// The whole measurable range on this board, and that it is neither
+    /// of the other two boards' ranges.
+    #[test]
+    fn the_solar_nodes_full_scale_is_its_own_and_not_the_t114s() {
+        let sn = solarnode_scale();
+        assert_eq!(sn.terminal_full_scale_mv(), 10_660);
+        assert_eq!(
+            BatteryScale::for_board(4.916).terminal_full_scale_mv(),
+            17_698
+        );
+        assert_eq!(BatteryScale::for_board(1.73).terminal_full_scale_mv(), 6228);
+        assert_eq!(sn.gain(), CONFIGURED_GAIN);
+    }
+
+    /// Both ends of the raw range, exactly.
+    #[test]
+    fn the_solar_nodes_scale_maps_both_ends_of_the_raw_range() {
+        let sn = solarnode_scale();
+        assert_eq!(sn.raw_to_battery_mv(0), 0);
+        assert_eq!(sn.raw_to_battery_mv(-1), 0);
+        assert_eq!(sn.raw_to_battery_mv(1), 2);
+        assert_eq!(sn.raw_to_battery_mv(4094), 10_657);
+        assert_eq!(sn.raw_to_battery_mv(4095), 10_660);
+        // One count is 2.6 mV at the terminal here — the finest of the
+        // three boards, since this divider throws away the least.
+        let step = sn.raw_to_battery_mv(2001) - sn.raw_to_battery_mv(2000);
+        assert!(step <= 3, "one count moved the reading by {step} mV");
+    }
+
+    /// A full single cell, read through this divider — and the same raw
+    /// count read through the T114's, which is a different pack
+    /// entirely. This is the assertion the instruction's rule is about:
+    /// swap the constants and it fails, loudly.
+    #[test]
+    fn a_full_cell_on_the_solar_node_is_a_two_cell_pack_on_the_t114() {
+        let sn = solarnode_scale();
+        let t114 = BatteryScale::for_board(4.916);
+        // 4.2 V at the terminal is 4200 / 2.9608 = 1418.5 mV at the pin,
+        // which is 1418.5 / 3600 × 4095 = 1613 counts.
+        let raw = 1613;
+        assert_eq!(sn.raw_to_battery_mv(raw), 4198);
+        assert_eq!(classify_cell_count(sn.raw_to_battery_mv(raw)).cells, 1);
+        assert_eq!(pack_percent(sn.raw_to_battery_mv(raw), 1), Some(100));
+        // The identical count with the T114's divider compiled in.
+        assert_eq!(t114.raw_to_battery_mv(raw), 6971);
+        assert_eq!(classify_cell_count(t114.raw_to_battery_mv(raw)).cells, 2);
+    }
+
+    /// The raw counts at which this board's readings cross each
+    /// classification boundary. They are this divider's counts: the same
+    /// counts on the T114 land on the other side of every one of them.
+    #[test]
+    fn the_classification_boundaries_sit_at_this_boards_raw_counts() {
+        let sn = solarnode_scale();
+        // The protection cut-off, 2.5 V.
+        assert_eq!(sn.raw_to_battery_mv(960), 2499);
+        assert!(!classify_cell_count(sn.raw_to_battery_mv(960)).plausible);
+        assert_eq!(sn.raw_to_battery_mv(961), 2501);
+        assert!(classify_cell_count(sn.raw_to_battery_mv(961)).plausible);
+        // The 1S/2S split, 6.0 V.
+        assert_eq!(sn.raw_to_battery_mv(2304), 5997);
+        assert_eq!(classify_cell_count(sn.raw_to_battery_mv(2304)).cells, 1);
+        assert_eq!(sn.raw_to_battery_mv(2305), 6000);
+        assert_eq!(classify_cell_count(sn.raw_to_battery_mv(2305)).cells, 2);
+        // The ceiling above which nothing is a pack, 9.0 V.
+        assert_eq!(sn.raw_to_battery_mv(3457), 8999);
+        assert!(classify_cell_count(sn.raw_to_battery_mv(3457)).plausible);
+        assert_eq!(sn.raw_to_battery_mv(3458), 9001);
+        assert!(!classify_cell_count(sn.raw_to_battery_mv(3458)).plausible);
+        // The T114's divider at those same four counts is nowhere near
+        // any of them.
+        let t114 = BatteryScale::for_board(4.916);
+        for raw in [960, 961, 2304, 2305, 3457, 3458] {
+            assert_ne!(
+                t114.raw_to_battery_mv(raw),
+                sn.raw_to_battery_mv(raw),
+                "raw={raw} read the same through both dividers"
+            );
+        }
+    }
+
+    /// What the enable pin getting it backwards looks like here, and that
+    /// it is rejected rather than reported.
+    ///
+    /// `AdcCtrl` is P0.14, **active LOW**: it sinks the low side of the
+    /// divider. Left inactive — driven high, which is what
+    /// `EnableLine::new` does at construction and what a flipped
+    /// polarity would leave it at during the sample — R18 no longer goes
+    /// to a return at all; it goes to the 3.3 V rail, and the pin sits
+    /// between the pack and that rail rather than at the pack's 1/2.9608
+    /// share of it. For any live pack (3.0 to 4.2 V) that is 3.198 V to
+    /// above full scale, i.e. raw 3638 upwards, which this divider reads
+    /// as 9470 mV and more. Every one of those is above
+    /// `PLAUSIBLE_CEILING_MV`, so the board says `implausible first
+    /// reading` instead of publishing a pack that is not there.
+    #[test]
+    fn a_divider_left_disabled_reads_implausible_on_this_board() {
+        let sn = solarnode_scale();
+        assert_eq!(sn.raw_to_battery_mv(3638), 9470);
+        for raw in 3638..=4095 {
+            let mv = sn.raw_to_battery_mv(raw);
+            assert!(
+                !classify_cell_count(mv).plausible,
+                "raw={raw} ({mv} mV) passed as a pack with the divider disabled"
+            );
+            assert_eq!(pack_percent(mv, 1), None, "raw={raw}");
+        }
+        // And the other way the polarity can fail: held inactive so hard
+        // that nothing reaches the pin at all reads as zero, which is
+        // also not a pack.
+        assert_eq!(sn.raw_to_battery_mv(0), 0);
+        assert!(!classify_cell_count(0).plausible);
+    }
+
+    /// What the divider settles: this board cannot see a series pack of
+    /// more than two cells, whatever is in its enclosure. 10.66 V is the
+    /// whole range, a 3S pack floors at 11.1 V nominal and a 4S at
+    /// 14.8 V, so either would sit above full scale and read as a stuck
+    /// input — and would put more than the ADC's 3.6 V on the pin on the
+    /// way. The board file states the divider; the divider states this;
+    /// nothing in either states the pack's topology, and this crate does
+    /// not guess it.
+    #[test]
+    fn the_solar_nodes_divider_cannot_see_a_series_pack_above_two_cells() {
+        let sn = solarnode_scale();
+        let full_scale = sn.terminal_full_scale_mv() as u16;
+        assert_eq!(full_scale, 10_660);
+        // A 2S pack, charged, fits with room to spare.
+        assert!(8400 < full_scale);
+        assert_eq!(classify_cell_count(8400).cells, 2);
+        // 3S and 4S nominal do not fit at all.
+        assert!(11_100 > full_scale);
+        assert!(14_800 > full_scale);
+        // And the reading a pack that big produces is the saturated one,
+        // which is already rejected.
+        assert_eq!(sn.raw_to_battery_mv(4095), full_scale);
+        assert!(!classify_cell_count(full_scale).plausible);
+    }
+
+    /// The acquisition table is the part's, row for row, and every
+    /// variant is in it.
+    #[test]
+    fn the_acquisition_table_covers_every_window_the_part_has() {
+        use AcquisitionTime::*;
+        for (t, micros, max_ohms) in [
+            (ThreeUs, 3, 10_000),
+            (FiveUs, 5, 40_000),
+            (TenUs, 10, 100_000),
+            (FifteenUs, 15, 200_000),
+            (TwentyUs, 20, 400_000),
+            (FortyUs, 40, 800_000),
+        ] {
+            assert_eq!(t.micros(), micros, "{t:?}");
+            assert_eq!(t.max_source_ohms(), max_ohms, "{t:?}");
+        }
+        // The shortest window that covers a source, not merely one that
+        // does: a longer window holds the divider enabled for nothing.
+        assert_eq!(AcquisitionTime::for_source_ohms(0), Some(ThreeUs));
+        assert_eq!(AcquisitionTime::for_source_ohms(10_000), Some(ThreeUs));
+        assert_eq!(AcquisitionTime::for_source_ohms(10_001), Some(FiveUs));
+        assert_eq!(AcquisitionTime::for_source_ohms(100_000), Some(TenUs));
+        assert_eq!(AcquisitionTime::for_source_ohms(100_001), Some(FifteenUs));
+        assert_eq!(AcquisitionTime::for_source_ohms(800_000), Some(FortyUs));
+        // Above the last row the part specifies nothing, and this says so
+        // rather than handing back the longest and calling it covered.
+        assert_eq!(AcquisitionTime::for_source_ohms(800_001), None);
+    }
+
+    /// The reason the resistors are in the board file and not just their
+    /// ratio: this divider needs a longer acquisition window than the
+    /// default every board got, and the T114's does not.
+    #[test]
+    fn the_solar_nodes_divider_needs_a_longer_window_than_the_t114s() {
+        // 1 MΩ ∥ 510 kΩ.
+        assert_eq!(SOLARNODE.source_ohms(), 337_748);
+        assert_eq!(
+            SOLARNODE.acquisition_time(),
+            Some(AcquisitionTime::TwentyUs)
+        );
+        assert_eq!(
+            solarnode_scale().acquisition_time(),
+            AcquisitionTime::TwentyUs
+        );
+        // Above the 100 kΩ the 10 µs default is specified for, which is
+        // the whole finding — sampled at 10 µs this divider is outside
+        // what the part guarantees.
+        assert!(SOLARNODE.source_ohms() > AcquisitionTime::TenUs.max_source_ohms());
+
+        // The T114's divider, `AIN2 = VBAT * (100/490)` at the 490 kΩ
+        // across the pack its own module doc states: 100 kΩ over 390 kΩ,
+        // 79.6 kΩ of source. Inside the default's envelope, so nothing
+        // about that board's sampling changes.
+        let t114 = Divider::new(390_000, 100_000);
+        assert_eq!(t114.source_ohms(), 79_591);
+        assert_eq!(t114.acquisition_time(), Some(AcquisitionTime::TenUs));
+    }
+
+    /// The two boards that predate [`Divider`] keep the window they have
+    /// always been sampled with, so its arrival changes no reading on
+    /// either. A multiplier says nothing about source resistance, and
+    /// this constructor does not pretend otherwise.
+    #[test]
+    fn a_multiplier_only_board_keeps_the_window_it_has_always_had() {
+        assert_eq!(
+            BatteryScale::for_board(4.916).acquisition_time(),
+            AcquisitionTime::TenUs
+        );
+        assert_eq!(
+            BatteryScale::for_board(1.73).acquisition_time(),
+            AcquisitionTime::TenUs
+        );
+    }
+
+    /// Stating the same divider both ways must produce the same
+    /// conversion, or the resistors and the decimal have drifted.
+    #[test]
+    fn the_resistors_and_the_decimal_convert_identically() {
+        let from_resistors = solarnode_scale();
+        let from_decimal = BatteryScale::for_board(2.9608);
+        assert_eq!(
+            from_resistors.terminal_full_scale_mv(),
+            from_decimal.terminal_full_scale_mv()
+        );
+        for raw in 0..=4095i16 {
+            assert_eq!(
+                from_resistors.raw_to_battery_mv(raw),
+                from_decimal.raw_to_battery_mv(raw),
+                "raw={raw}"
+            );
+        }
+    }
+
+    /// A divider no acquisition window covers still has to be sampled
+    /// somehow, and the longest window is what the part has. The
+    /// `Divider` says `None` so nothing can call it covered.
+    #[test]
+    fn a_divider_beyond_the_table_takes_the_longest_window_and_says_so() {
+        let huge = Divider::new(10_000_000, 10_000_000);
+        assert_eq!(huge.source_ohms(), 5_000_000);
+        assert_eq!(huge.acquisition_time(), None);
+        assert_eq!(
+            BatteryScale::for_divider(huge).acquisition_time(),
+            AcquisitionTime::FortyUs
         );
     }
 

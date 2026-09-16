@@ -516,7 +516,7 @@ async fn main(spawner: Spawner) {
                 pin: p.P0_06.into(),
                 active: t114::ADC_CTRL_ACTIVE,
             }),
-            t114::ADC_MULTIPLIER,
+            leviculum_nrf::battery::BatteryScale::for_board(t114::ADC_MULTIPLIER),
         );
         info!("battery task spawned");
     }

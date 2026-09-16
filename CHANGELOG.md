@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The SenseCAP Solar Node P1-Pro reports its pack voltage on the `[BAT]`
+  line like every other board, read through its own 1 MΩ/510 kΩ divider
+  rather than the T114's and sampled with the longer acquisition window
+  that divider's 338 kΩ of source resistance needs (Codeberg #233).
+
 - A node's BLE advertisement now carries the first four bytes of its
   identity hash, so a board or `lnsd` recognises a peer it already holds
   a link to before it dials it, and no longer spends its scarce outgoing
