@@ -461,15 +461,24 @@ mod tests {
 
     /// The reference's own example config must parse: the drop-in claim
     /// is that a config written for lxmd drives lnpnd.
+    ///
+    /// The text is vendored rather than sliced out of
+    /// `reference/LXMF/LXMF/Utilities/lxmd.py` at compile time (Codeberg
+    /// #300): an `include_str!` into a submodule is a compile-time
+    /// dependency, and the forge gate clones with `submodules: false`, so
+    /// this whole crate's lib tests failed to build there. It is the
+    /// `__default_lxmd_config__` literal verbatim, at submodule pin
+    /// 795fdaa2 (LXMF 1.1.0); re-extract it with
+    ///
+    /// ```text
+    /// python3 -c 'import sys,re; t=open(sys.argv[1]).read(); m="__default_lxmd_config__ = \"\"\""; \
+    ///   s=t.index(m)+len(m); sys.stdout.write(t[s:s+t[s:].index("\"\"\"")])' \
+    ///   reference/LXMF/LXMF/Utilities/lxmd.py > lnpnd/tests_data/lxmd_example_config.conf
+    /// ```
     #[test]
     fn the_reference_example_config_parses() {
-        let text = include_str!("../../reference/LXMF/LXMF/Utilities/lxmd.py");
-        let start = text
-            .find("__default_lxmd_config__ = \"\"\"")
-            .expect("reference example config present")
-            + "__default_lxmd_config__ = \"\"\"".len();
-        let end = start + text[start..].find("\"\"\"").expect("terminated");
-        let config = RawConfig::parse(&text[start..end]).expect("parses");
+        let text = include_str!("../tests_data/lxmd_example_config.conf");
+        let config = RawConfig::parse(text).expect("parses");
         assert_eq!(config.get("propagation", "enable_node"), Some("no"));
         assert_eq!(config.get("propagation", "announce_interval"), Some("360"));
         assert_eq!(config.get("lxmf", "display_name"), Some("Anonymous Peer"));

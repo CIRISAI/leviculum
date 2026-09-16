@@ -99,7 +99,9 @@ when:
 
 # Skip submodule init: reference/ holds the Python reference Reticulum
 # implementation and two firmware reference repos, none of which the
-# .deb build touches. Saves bandwidth + clone time on every step.
+# .deb build or the gate step touches (Codeberg #300 moved the last
+# compile-time fixture reads out of them). Saves bandwidth + clone time
+# on every step.
 clone:
   git:
     image: woodpeckerci/plugin-git

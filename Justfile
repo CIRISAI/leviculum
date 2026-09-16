@@ -241,7 +241,8 @@ nrf-shellcheck:
         scripts/check-nrf-gap-device-name.sh \
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
-        scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh
+        scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
+        scripts/check-plain-clone.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -421,6 +422,16 @@ check-integ-bin-list:
 check-ci-pipeline:
     @bash scripts/check-ci-pipeline.sh
 
+# Codeberg #300: the tree must build from a clone without submodules, which is
+# what both forge pipelines and every contributor start from. An
+# `include_str!` into `reference/` is a compile-time dependency, so the crate
+# holding it does not build there — its tests are lost, not skipped — and
+# `cargo test --workspace --lib` fails outright. Three had accumulated
+# (lnomad, leviculum-micron, lnpnd) and the CI gate paid for a submodule fetch
+# to work around them. ~50 ms of grep, self-tested on five fixtures first.
+check-plain-clone:
+    @bash scripts/check-plain-clone.sh
+
 # Every long-lived process spawn goes through
 # `leviculum_std::process::spawn_supervised`, so the kernel takes the child down
 # with its parent however the parent dies. ~200 ms, no build: it reads the
@@ -523,7 +534,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-plain-clone check-supervised-spawns prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -554,6 +565,12 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 # every workspace target (#220 — `--lib` gates were green on a tree where eight
 # integration-test targets did not build), and the ~3050 workspace lib tests.
 #
+# check-plain-clone is the one check-* that does belong here, and it goes
+# first: it asserts the precondition the rest of this recipe rests on — that
+# no crate needs a submodule to compile (#300) — costs one grep, and its
+# failure message is worth more than the compiler's when the answer is "the
+# fixture moved back into reference/".
+#
 # It is a recipe rather than four lines of YAML for the reason nightly.yml
 # records at :156-159 for the .deb build: a second copy in the pipeline file
 # drifts from the gate developers run, and the drift is found the same way.
@@ -563,6 +580,7 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 # executed across 10 units. The step's provisioning — musl-tools, the rustfmt
 # and clippy components, `cargo install just`, one shallow submodule — costs
 # 1m11s on top, so the pipeline pays 3m23s to stop shipping untested .debs.
+# The submodule fetch left that provisioning with #300; ~5 s and 27 MB less.
 # Re-measured after the widening below, on schneckenschreck with an empty
 # target dir but a warm cargo registry: 1m58s, 3057 tests across 10 units.
 #
@@ -570,6 +588,7 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 # check compiles, so the check line was a second pass over the same targets.
 # The lint findings that kept clippy off test code until 2026-08-18 are fixed.
 ci-gate:
+    @bash scripts/check-plain-clone.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib

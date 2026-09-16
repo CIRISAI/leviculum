@@ -1493,7 +1493,14 @@ mod tests {
 
     #[test]
     fn readme_mu_renders_without_panic() {
-        let src = include_str!("../../reference/Reticulum/README.mu");
+        // Real-world markup, vendored rather than read out of
+        // `reference/Reticulum` (Codeberg #300): an `include_str!` into a
+        // submodule is a compile-time dependency, so without it this crate's
+        // lib tests do not build at all and lnomad contributes zero tests to
+        // a plain clone's gate. The file is a verbatim copy of README.mu at
+        // submodule pin d5e62d4e, pinned deliberately — re-copy it only when
+        // a renderer change wants newer markup to chew on.
+        let src = include_str!("../tests_data/reticulum_readme.mu");
         let d = parse(src);
         let page = render(&d, 80);
         assert!(!page.text.is_empty());

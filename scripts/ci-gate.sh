@@ -19,14 +19,18 @@
 #   just             — not packaged in Debian bookworm, and the gate is a
 #                      Justfile recipe on purpose (see the recipe's comment).
 #                      ~45 s.
-#   reference/Reticulum — both pipelines clone with `submodules: false`, but
-#                      lnomad's renderer tests `include_str!` its README.mu,
-#                      so without it lnomad's lib tests do not compile and
-#                      the crate contributes zero tests to its own gate.
-#                      --depth 1, one submodule of four, ~5 s.
+#
+# No submodule is fetched. One used to be — reference/Reticulum, --depth 1,
+# ~5 s and 27 MB — because three compile-time `include_str!`s reached into
+# the vendored trees for fixtures and the crates holding them did not build
+# without them. Those fixtures now live in the crates' own `tests_data/`
+# (Codeberg #300), so the gate builds what a plain `git clone` builds, and
+# github.com is out of its dependency set. `just check-plain-clone` is what
+# keeps it that way.
 #
 # Measured cold on 2026-08-18 (fresh image, empty target dir and registry,
-# 4 cores): 1m11s provisioning + 2m12s gate = 3m23s.
+# 4 cores): 1m11s provisioning + 2m12s gate = 3m23s, of which the submodule
+# fetch removed above was ~5 s.
 #
 # Usage (inside a CI container):
 #   bash scripts/ci-gate.sh
@@ -54,6 +58,5 @@ fi
 apt-get update && apt-get install -y musl-tools
 rustup component add rustfmt clippy
 cargo install --locked just
-git submodule update --init --depth 1 reference/Reticulum
 
 just ci-gate

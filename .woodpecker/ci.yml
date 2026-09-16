@@ -24,9 +24,12 @@
 when:
   - event: [push, pull_request, manual]
 
-# Skip submodule init: three of the four submodules are reference trees the
-# gate never reads. The one it does need — reference/Reticulum, for lnomad's
-# renderer tests — is cloned --depth 1 by the script below.
+# Skip submodule init: all four are reference trees the gate never reads.
+# reference/Reticulum was the exception until Codeberg #300 — three
+# compile-time `include_str!`s pulled fixtures out of the vendored trees, so
+# without it whole crates failed to build — and those fixtures now live in
+# the crates' own tests_data/. `just check-plain-clone` holds that property,
+# which is what lets this stay false.
 clone:
   git:
     image: woodpeckerci/plugin-git

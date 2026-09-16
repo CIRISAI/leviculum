@@ -539,9 +539,16 @@ fn empty_input_is_one_blank() {
 
 // --- README.mu whole-document parse -------------------------------------
 
+/// Real-world markup for the whole-document tests, vendored rather than read
+/// out of `reference/Reticulum` (Codeberg #300): an `include_str!` into a
+/// submodule is a compile-time dependency, so a clone without submodules
+/// cannot build this test target at all. Verbatim copy of README.mu at
+/// submodule pin d5e62d4e, pinned deliberately.
+const README_MU: &str = include_str!("../tests_data/reticulum_readme.mu");
+
 #[test]
 fn parses_full_readme_without_panicking() {
-    let readme = include_str!("../../reference/Reticulum/README.mu");
+    let readme = README_MU;
     let doc = parse(readme);
 
     // Plausible block count: the file is a few hundred lines.
@@ -713,6 +720,6 @@ fn ordinary_text_survives_the_filter_untouched() {
         "Grüße, 日本語, emoji 🛰, and math ∑ — all fine"
     );
     // The full README still parses to the same document it did before.
-    let readme = include_str!("../../reference/Reticulum/README.mu");
+    let readme = README_MU;
     assert_escape_free(&parse(readme), "README.mu");
 }
