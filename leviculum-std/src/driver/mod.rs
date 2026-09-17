@@ -4667,6 +4667,11 @@ async fn run_event_loop(
                     let operator_ifac_present = ifac_configs
                         .keys()
                         .any(|k| !autoconnect_spawned_ids.contains(k));
+                    // Read live, exactly as Python reads
+                    // `RNS.Reticulum.transport_enabled()` at auto-connect time
+                    // (Discovery.py:671).
+                    let transport_enabled =
+                        inner.lock_recover().transport_config().enable_transport;
                     let mut spawner = AutoConnectLiveSpawner {
                         next_id: &autoconnect_wiring.next_id,
                         new_iface_tx: &autoconnect_wiring.new_iface_tx,
@@ -4679,6 +4684,7 @@ async fn run_event_loop(
                         operator_ifac_present,
                         spawned_ids: &mut autoconnect_spawned_ids,
                         refused_warned: &mut autoconnect_refused_warned,
+                        transport_enabled,
                     };
                     manager.poll(&live, now_unix, &mut spawner);
                     let teardown_ids = spawner.teardown_ids;
@@ -4838,6 +4844,13 @@ struct AutoConnectLiveSpawner<'a> {
     spawned_ids: &'a mut std::collections::BTreeSet<usize>,
     /// #151: endpoints already warned about as refused (fail closed).
     refused_warned: &'a mut std::collections::BTreeSet<[u8; leviculum_core::discovery::STAMP_SIZE]>,
+    /// Whether this node routes for others. An auto-connected interface comes
+    /// up as a gateway on a transport node and stays `Full` otherwise, which
+    /// is Python `mode = MODE_GATEWAY if transport_enabled() else None`
+    /// (`Discovery.py:671`; `_add_interface` turns that `None` into
+    /// `MODE_FULL`, Reticulum.py:1069). Read live at poll time, as Python
+    /// reads it.
+    transport_enabled: bool,
 }
 
 impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
@@ -4902,6 +4915,17 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
         });
+        // A discovered peer we dialled ourselves comes up as a gateway while
+        // this node routes for others, and stays `Full` otherwise: Python
+        // `mode = MODE_GATEWAY if RNS.Reticulum.transport_enabled() else None`
+        // (Discovery.py:671), where `_add_interface` substitutes MODE_FULL for
+        // that `None` (Reticulum.py:1069). The dynamic-registration branch
+        // hands `info.mode` to `set_interface_mode`, so a path request for a
+        // destination we have never seen is re-originated over this link
+        // (`InterfaceMode::discovers_paths`, Codeberg #104).
+        if self.transport_enabled {
+            handle.info.mode = leviculum_core::traits::InterfaceMode::Gateway;
+        }
         // #151: carry the resolved IFAC on the handle; the dynamic-
         // registration branch applies `info.ifac` to core + ifac_configs
         // exactly like a server-accepted child (the fc1bae4 mechanism).
@@ -5959,6 +5983,9 @@ mod tests {
         heard_ifac: HeardIfacMap,
         spawned_ids: std::collections::BTreeSet<usize>,
         refused_warned: std::collections::BTreeSet<[u8; 32]>,
+        /// The transport node case (a public hub) by default; the
+        /// transport-off case sets this false.
+        transport_enabled: bool,
     }
 
     impl SpawnerFixture {
@@ -5975,6 +6002,7 @@ mod tests {
                 heard_ifac: BTreeMap::new(),
                 spawned_ids: std::collections::BTreeSet::new(),
                 refused_warned: std::collections::BTreeSet::new(),
+                transport_enabled: true,
             }
         }
 
@@ -5996,6 +6024,7 @@ mod tests {
                 operator_ifac_present,
                 spawned_ids: &mut self.spawned_ids,
                 refused_warned: &mut self.refused_warned,
+                transport_enabled: self.transport_enabled,
             };
             spawner.spawn_tcp_client(
                 &format!("autoconnect/{}", rec.name),
@@ -6118,6 +6147,47 @@ mod tests {
         assert!(
             handle.info.ifac.is_none(),
             "open-network auto-connect must stay unauthenticated"
+        );
+    }
+
+    /// An auto-connected discovered interface comes up as a gateway on a
+    /// transport node, mirroring Python `mode = MODE_GATEWAY if
+    /// RNS.Reticulum.transport_enabled()` (`Discovery.py:671`). Without it the
+    /// link a hub discovered and dialled itself is `Full`, and a path request
+    /// for a destination this node has never seen is not re-originated over it
+    /// (`InterfaceMode::discovers_paths`, Codeberg #104).
+    #[tokio::test]
+    async fn autoconnect_spawn_is_gateway_on_transport_node() {
+        use leviculum_core::traits::InterfaceMode;
+        let mut fx = SpawnerFixture::new();
+        let rec = discovered_tcp_record(None, None, 5);
+
+        fx.spawn(&rec, false).expect("spawn succeeds");
+        let handle = fx.new_iface_rx.try_recv().expect("handle registered");
+        assert_eq!(
+            handle.info.mode,
+            InterfaceMode::Gateway,
+            "an auto-connected interface on a transport node must be a gateway"
+        );
+    }
+
+    /// The other half of the same reference line: with transport off, Python
+    /// passes `mode = None` to `_add_interface`, which substitutes
+    /// `MODE_FULL` (Reticulum.py:1069). A leaf node does not advertise itself
+    /// as a gateway on a link it dialled.
+    #[tokio::test]
+    async fn autoconnect_spawn_is_full_without_transport() {
+        use leviculum_core::traits::InterfaceMode;
+        let mut fx = SpawnerFixture::new();
+        fx.transport_enabled = false;
+        let rec = discovered_tcp_record(None, None, 6);
+
+        fx.spawn(&rec, false).expect("spawn succeeds");
+        let handle = fx.new_iface_rx.try_recv().expect("handle registered");
+        assert_eq!(
+            handle.info.mode,
+            InterfaceMode::Full,
+            "without transport the auto-connected interface keeps the Full default"
         );
     }
 

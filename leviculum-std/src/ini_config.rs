@@ -200,7 +200,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     }
 
     // Filter out unsupported interface types
-    let supported: HashMap<String, InterfaceConfig> = interfaces
+    let mut supported: HashMap<String, InterfaceConfig> = interfaces
         .into_iter()
         .filter(|(name, iface)| match iface.interface_type.as_str() {
             "TCPServerInterface"
@@ -226,10 +226,57 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         })
         .collect();
 
+    promote_discoverable_modes(&mut supported);
+
     Ok(Config {
         reticulum,
         interfaces: supported,
     })
+}
+
+/// Raise a discoverable interface that carries no mode to gateway, and an
+/// RNode one to access point, mirroring Python `_synthesize_interface`
+/// (Reticulum.py:869-876).
+///
+/// A public hub's config says `discoverable = yes` and nothing about `mode`;
+/// Python's rnsd then runs that interface as a gateway, and the operator never
+/// learns it from the config file. We used to leave it `Full`, and a `Full`
+/// interface does not re-originate a path request for a destination this node
+/// has never seen (`InterfaceMode::discovers_paths`, Codeberg #104) — which is
+/// exactly a public hub's daily work.
+///
+/// Where we depart from the reference: Python promotes whenever the resolved
+/// mode is neither gateway nor AP, so it overrides an explicitly configured
+/// `mode = full` / `roaming` too (and skips the promotion entirely when the
+/// interface sets `ignore_config_warnings`, since the promotion sits inside
+/// that guard). We only fill a mode the operator left unset. A mode written
+/// down in the config file is an instruction, not a default.
+///
+/// Idempotent: a second call sees the mode it wrote and changes nothing, so
+/// the [`crate::config::Config::load`] pass over a TOML config cannot log or
+/// promote twice.
+pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, InterfaceConfig>) {
+    for (name, iface) in interfaces.iter_mut() {
+        if !iface.discoverable || iface.mode.is_some() {
+            continue;
+        }
+        // Python's own two branches, by interface type (Reticulum.py:872-876).
+        let (mode, label) = match iface.interface_type.as_str() {
+            "RNodeInterface" | "RNodeMultiInterface" => ("access_point", "AP"),
+            _ => ("gateway", "gateway"),
+        };
+        iface.mode = Some(mode.to_string());
+        // Python logs this at NOTICE; our levels fold notice into info
+        // (lnsd.rs:221-223). The wording is the reference's, because the point
+        // is the same: the operator must be able to see in the log why the
+        // mode is not what the config file says.
+        tracing::info!(
+            "Discovery enabled on interface {} without gateway or AP mode. \
+             Auto-configured to {} mode.",
+            name,
+            label
+        );
+    }
 }
 
 /// Warn about keys that parse but that this daemon does not act on.
@@ -1094,6 +1141,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.interfaces.get("If").unwrap().mode, None);
+    }
+
+    /// Python raises a discoverable interface that carries no gateway/AP mode
+    /// to gateway (Reticulum.py:869-876). A public hub inherits its mode from
+    /// `discoverable = yes` alone and never writes `mode` down; without the
+    /// promotion it comes up `Full`, which does not re-originate path
+    /// discovery for destinations it has never seen
+    /// (`InterfaceMode::discovers_paths`, Codeberg #104).
+    #[test]
+    fn test_discoverable_without_mode_becomes_gateway() {
+        use leviculum_core::traits::InterfaceMode;
+        let cfg = parse_ini(
+            "[interfaces]\n  [[Hub]]\n    type = TCPServerInterface\n    listen_port = 4242\n    discoverable = yes\n",
+        )
+        .unwrap();
+        let raw = cfg.interfaces.get("Hub").unwrap().mode.clone();
+        assert_eq!(
+            raw.as_deref().and_then(InterfaceMode::from_config_str),
+            Some(InterfaceMode::Gateway),
+            "discoverable without a mode must be promoted to gateway"
+        );
+    }
+
+    /// Same promotion, RNode branch: Python sends the two RNode types to
+    /// access point instead of gateway (Reticulum.py:872-874).
+    #[test]
+    fn test_discoverable_rnode_without_mode_becomes_access_point() {
+        use leviculum_core::traits::InterfaceMode;
+        for iface_type in ["RNodeInterface", "RNodeMultiInterface"] {
+            let cfg = parse_ini(&format!(
+                "[interfaces]\n  [[Radio]]\n    type = {iface_type}\n    port = /dev/ttyUSB0\n    discoverable = yes\n"
+            ))
+            .unwrap();
+            let raw = cfg.interfaces.get("Radio").unwrap().mode.clone();
+            assert_eq!(
+                raw.as_deref().and_then(InterfaceMode::from_config_str),
+                Some(InterfaceMode::AccessPoint),
+                "{iface_type}: discoverable without a mode must be promoted to access point"
+            );
+        }
+    }
+
+    /// The promotion fills a gap the operator left; it never overrides one
+    /// they closed. Every explicit spelling survives verbatim.
+    #[test]
+    fn test_discoverable_explicit_mode_survives_promotion() {
+        for spelling in ["full", "roaming", "boundary", "ptp", "gw", "access_point"] {
+            let cfg = parse_ini(&format!(
+                "[interfaces]\n  [[Hub]]\n    type = TCPServerInterface\n    listen_port = 4242\n    discoverable = yes\n    mode = {spelling}\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                cfg.interfaces.get("Hub").unwrap().mode.as_deref(),
+                Some(spelling),
+                "an explicitly configured mode must survive the discovery promotion"
+            );
+        }
+    }
+
+    /// Control: the promotion is keyed on `discoverable`, so an ordinary
+    /// interface keeps the `Full` default. Without this the test above could
+    /// pass by promoting everything.
+    #[test]
+    fn test_non_discoverable_interface_is_not_promoted() {
+        let cfg = parse_ini(
+            "[interfaces]\n  [[Hub]]\n    type = TCPServerInterface\n    listen_port = 4242\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces.get("Hub").unwrap().mode,
+            None,
+            "a non-discoverable interface keeps the Full default"
+        );
     }
 
     #[test]

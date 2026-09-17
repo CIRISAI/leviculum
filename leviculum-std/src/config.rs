@@ -790,23 +790,30 @@ impl Config {
             .map_err(|e| Error::Config(format!("Failed to read config: {e}")))?;
 
         // Explicit .toml extension → TOML only
-        if path.extension().is_some_and(|e| e == "toml") {
-            return toml::from_str(&content)
-                .map_err(|e| Error::Config(format!("Failed to parse TOML config: {e}")));
-        }
-
-        // Python INI configs use [[ for interface subsections.
-        // TOML uses [[ for array-of-tables, which our configs never use.
-        if content.contains("[[") {
-            return crate::ini_config::parse_ini(&content)
-                .map_err(|e| Error::Config(format!("Failed to parse INI config: {e}")));
-        }
-
-        // Default: try TOML first, fall back to INI
-        toml::from_str(&content).or_else(|_| {
+        let mut config = if path.extension().is_some_and(|e| e == "toml") {
+            toml::from_str(&content)
+                .map_err(|e| Error::Config(format!("Failed to parse TOML config: {e}")))?
+        } else if content.contains("[[") {
+            // Python INI configs use [[ for interface subsections.
+            // TOML uses [[ for array-of-tables, which our configs never use.
             crate::ini_config::parse_ini(&content)
-                .map_err(|e| Error::Config(format!("Failed to parse config: {e}")))
-        })
+                .map_err(|e| Error::Config(format!("Failed to parse INI config: {e}")))?
+        } else {
+            // Default: try TOML first, fall back to INI
+            toml::from_str(&content).or_else(|_| {
+                crate::ini_config::parse_ini(&content)
+                    .map_err(|e| Error::Config(format!("Failed to parse config: {e}")))
+            })?
+        };
+
+        // A discoverable interface with no mode written down is a gateway
+        // (Python Reticulum.py:869-876). `parse_ini` already did this for the
+        // INI branches; run it here too so a TOML config gets the same
+        // treatment. The pass is idempotent, so the INI branches neither
+        // promote nor log a second time.
+        crate::ini_config::promote_discoverable_modes(&mut config.interfaces);
+
+        Ok(config)
     }
 
     /// Save configuration to a file

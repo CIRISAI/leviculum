@@ -107,6 +107,21 @@ fn the_backbone_listener_becomes_a_discoverable_tcp_server() {
     // MINUTES (`as_int(...)*60`, Reticulum.py:852-854). Stored verbatim;
     // the conversion happens where the announce job is built.
     assert_eq!(iface.announce_interval, Some(360));
+    // The file says nothing about `mode`, and Python's rnsd still runs this
+    // listener as a gateway: `discoverable` without gateway/AP mode is raised
+    // to gateway (Reticulum.py:869-876). It is not cosmetic — a `Full`
+    // interface does not re-originate a path request for a destination it has
+    // never seen (`InterfaceMode::discovers_paths`, Codeberg #104), which is
+    // what a public hub is asked for all day. lnstatus showed Full here on
+    // 2026-09-17 where the rnsd it replaced showed Gateway.
+    assert_eq!(
+        iface
+            .mode
+            .as_deref()
+            .and_then(leviculum_core::traits::InterfaceMode::from_config_str),
+        Some(leviculum_core::traits::InterfaceMode::Gateway),
+        "a discoverable listener with no configured mode runs as a gateway"
+    );
 }
 
 #[test]
