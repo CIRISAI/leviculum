@@ -59,13 +59,55 @@ pub(crate) const I2P_DEFAULT_RECONNECT_WAIT: Duration = Duration::from_secs(15);
 
 /// Keepalive cadence. Python sends `FLAG FLAG` (an empty HDLC frame) when the
 /// stream has been write-idle for `I2P_PROBE_AFTER` (10 s); the empty frame
-/// keeps the I2P tunnel warm and surfaces a dead tunnel as a write error. We
-/// emit it on a fixed 10 s cadence, which the deframer treats as a no-op.
+/// keeps the I2P tunnel warm. We emit it on a fixed 10 s cadence, which the
+/// deframer treats as a no-op.
+///
+/// The write cannot double as liveness detection here: our socket is to the
+/// local SAM bridge, so writes into it keep succeeding whatever happened to the
+/// tunnel behind it. What the keepalive buys is the *peer's* watchdog and ours
+/// — it guarantees a live tunnel carries bytes every 10 s in each direction,
+/// which is what makes `I2P_READ_TIMEOUT` below a sound deadness signal.
 const I2P_KEEPALIVE: Duration = Duration::from_secs(10);
+
+/// Read-liveness threshold: no byte at all for this long means the tunnel behind
+/// the loopback socket is gone, whatever the socket says (Codeberg #284).
+///
+/// Python's `I2P_READ_TIMEOUT`, same value and same role:
+/// `(I2P_PROBE_INTERVAL * I2P_PROBES + I2P_PROBE_AFTER) * 2` = `(9*5 + 10) * 2`
+/// (I2PInterface.py:394), after which its `read_watchdog` shuts the socket down
+/// and lets the reconnect path run (I2PInterface.py:698). With a keepalive every
+/// 10 s from a live peer this is eleven missed keepalives, so it does not fire
+/// on a merely quiet link.
+const I2P_READ_TIMEOUT: Duration = Duration::from_secs((9 * 5 + 10) * 2);
+
+/// Upper bound on the read-watchdog polling period. At the production
+/// threshold this puts the check on a one-second cadence, as in Python.
+const WATCHDOG_MAX_PERIOD: Duration = Duration::from_secs(1);
 
 /// Read buffer sizing, mirroring the TCP interface.
 const READ_BUFFER_MULTIPLIER: usize = 4;
 const FRAME_BUFFER_MULTIPLIER: usize = 2;
+
+/// The two time bounds an I2P sub-interface runs under. Grouped so both the
+/// client and the server config carry them, and so tests can shorten them
+/// without waiting out the production values.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct I2pTimeouts {
+    /// Deadline for a single SAM command during tunnel setup.
+    pub sam_command: Duration,
+    /// How long an established stream may go without a single received byte
+    /// before it is torn down so the tunnel is rebuilt.
+    pub read_idle: Duration,
+}
+
+impl Default for I2pTimeouts {
+    fn default() -> Self {
+        Self {
+            sam_command: sam::SAM_COMMAND_TIMEOUT,
+            read_idle: I2P_READ_TIMEOUT,
+        }
+    }
+}
 
 /// Generate a random SAM session id (Python i2plib `generate_session_id`:
 /// `"reticulum-" + 6 random letters`). The nick must be unique per live
@@ -88,6 +130,7 @@ pub(crate) struct I2pClientConfig {
     pub peer: String,
     pub buffer_size: usize,
     pub reconnect_wait: Duration,
+    pub timeouts: I2pTimeouts,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     /// Resolved `ingress_control` of the parent I2P interface entry, inherited
@@ -106,6 +149,7 @@ pub(crate) struct I2pServerConfig {
     pub buffer_size: usize,
     pub name_prefix: String,
     pub reconnect_wait: Duration,
+    pub timeouts: I2pTimeouts,
     pub next_id: Arc<AtomicUsize>,
     pub new_interface_tx: mpsc::Sender<InterfaceHandle>,
     pub ifac: Option<leviculum_core::ifac::IfacConfig>,
@@ -145,6 +189,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
             incoming_tx,
             outgoing_rx,
             config.reconnect_wait,
+            config.timeouts,
             task_counters,
             config.reconnect_notify,
             task_ready,
@@ -194,6 +239,7 @@ async fn i2p_client_task(
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     reconnect_wait: Duration,
+    timeouts: I2pTimeouts,
     counters: Arc<InterfaceCounters>,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     ready: Arc<ReadySignal>,
@@ -203,8 +249,14 @@ async fn i2p_client_task(
     let mut has_connected_before = false;
 
     loop {
-        match establish_client_stream(&sam_address, &nick, &peer, outbound_socket_hook.as_ref())
-            .await
+        match establish_client_stream(
+            &sam_address,
+            &nick,
+            &peer,
+            outbound_socket_hook.as_ref(),
+            timeouts.sam_command,
+        )
+        .await
         {
             Ok((ctrl, stream)) => {
                 tracing::info!("{}: I2P stream established to {}", name, peer);
@@ -227,6 +279,7 @@ async fn i2p_client_task(
                     incoming_tx.clone(),
                     outgoing_rx,
                     Arc::clone(&counters),
+                    timeouts.read_idle,
                 )
                 .await;
                 drop(ctrl);
@@ -255,13 +308,15 @@ async fn establish_client_stream(
     nick: &str,
     peer: &str,
     hook: Option<&crate::socket_hook::OutboundSocketHook>,
+    deadline: Duration,
 ) -> Result<(TcpStream, TcpStream), SamError> {
     // 1. Control socket: HELLO + SESSION CREATE (transient destination).
     let mut ctrl = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
-    sam::handshake(&mut ctrl).await?;
+    sam::handshake(&mut ctrl, deadline).await?;
     let reply = sam::command(
         &mut ctrl,
         &sam::session_create("STREAM", nick, sam::TRANSIENT_DESTINATION, ""),
+        deadline,
     )
     .await?;
     if !reply.ok() {
@@ -269,12 +324,17 @@ async fn establish_client_stream(
     }
 
     // 2. Resolve the peer to a full base64 destination.
-    let dest_b64 = resolve_destination(sam_address, peer, hook).await?;
+    let dest_b64 = resolve_destination(sam_address, peer, hook, deadline).await?;
 
     // 3. Stream socket: HELLO + STREAM CONNECT.
     let mut stream = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
-    sam::handshake(&mut stream).await?;
-    let reply = sam::command(&mut stream, &sam::stream_connect(nick, &dest_b64, false)).await?;
+    sam::handshake(&mut stream, deadline).await?;
+    let reply = sam::command(
+        &mut stream,
+        &sam::stream_connect(nick, &dest_b64, false),
+        deadline,
+    )
+    .await?;
     if !reply.ok() {
         return Err(SamError::Result(reply.result().to_string()));
     }
@@ -289,13 +349,14 @@ async fn resolve_destination(
     sam_address: &str,
     peer: &str,
     hook: Option<&crate::socket_hook::OutboundSocketHook>,
+    deadline: Duration,
 ) -> Result<String, SamError> {
     if !peer.ends_with(".i2p") {
         return Ok(peer.to_string());
     }
     let mut lookup = crate::socket_hook::connect_hooked_host(sam_address, hook).await?;
-    sam::handshake(&mut lookup).await?;
-    let reply = sam::command(&mut lookup, &sam::naming_lookup(peer)).await?;
+    sam::handshake(&mut lookup, deadline).await?;
+    let reply = sam::command(&mut lookup, &sam::naming_lookup(peer), deadline).await?;
     if !reply.ok() {
         return Err(SamError::Result(reply.result().to_string()));
     }
@@ -347,7 +408,7 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
         config.outbound_socket_hook.as_ref(),
     )
     .await?;
-    sam::handshake(&mut ctrl).await?;
+    sam::handshake(&mut ctrl, config.timeouts.sam_command).await?;
 
     // Persistent destination: reuse the stored private key if present, else ask
     // SAM for a fresh one (TRANSIENT) and persist what it generates so the
@@ -359,6 +420,7 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
     let reply = sam::command(
         &mut ctrl,
         &sam::session_create("STREAM", &nick, &dest_arg, ""),
+        config.timeouts.sam_command,
     )
     .await?;
     if !reply.ok() {
@@ -394,14 +456,22 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
             config.outbound_socket_hook.as_ref(),
         )
         .await?;
-        sam::handshake(&mut accept_sock).await?;
-        let reply = sam::command(&mut accept_sock, &sam::stream_accept(&nick, false)).await?;
+        sam::handshake(&mut accept_sock, config.timeouts.sam_command).await?;
+        let reply = sam::command(
+            &mut accept_sock,
+            &sam::stream_accept(&nick, false),
+            config.timeouts.sam_command,
+        )
+        .await?;
         if !reply.ok() {
             // e.g. the session died (INVALID_ID); let the caller rebuild it.
             return Err(SamError::Result(reply.result().to_string()));
         }
 
         // Block until a peer connects; the first line is its base64 destination.
+        // This is the one read here that deliberately has no deadline: an
+        // endpoint waits for inbound connections for as long as it is up, and
+        // no wait is too long for one. Every other SAM read is bounded.
         let peer_dest = sam::read_line(&mut accept_sock).await?;
         let peer_b32 = Destination::from_public_base64(peer_dest.trim())
             .map(|d| d.base32())
@@ -417,6 +487,7 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
             config.buffer_size,
             config.ifac.clone(),
             config.ingress_control,
+            config.timeouts.read_idle,
         );
         if config.new_interface_tx.send(handle).await.is_err() {
             return Ok(()); // event loop shut down
@@ -434,6 +505,7 @@ fn spawn_i2p_accepted(
     buffer_size: usize,
     ifac: Option<leviculum_core::ifac::IfacConfig>,
     ingress_control: bool,
+    read_idle: Duration,
 ) -> InterfaceHandle {
     let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
     let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
@@ -442,7 +514,15 @@ fn spawn_i2p_accepted(
     let task_name = name.clone();
     let task_counters = Arc::clone(&counters);
     tokio::spawn(async move {
-        let _rx = i2p_stream_task(task_name, stream, incoming_tx, outgoing_rx, task_counters).await;
+        let _rx = i2p_stream_task(
+            task_name,
+            stream,
+            incoming_tx,
+            outgoing_rx,
+            task_counters,
+            read_idle,
+        )
+        .await;
     });
 
     InterfaceHandle {
@@ -474,7 +554,9 @@ fn spawn_i2p_accepted(
 /// Read path: drain the socket, HDLC-deframe, forward frames to `incoming_tx`.
 /// Write path: HDLC-frame outgoing packets and write them to the socket.
 /// Keepalive: on a 10 s idle cadence, emit an empty HDLC frame (`FLAG FLAG`) to
-/// keep the tunnel warm and to detect a silently-dead tunnel as a write error.
+/// keep the tunnel warm.
+/// Watchdog: if `read_idle` passes without a single received byte, return, which
+/// tears the stream down and lets the caller rebuild the tunnel.
 ///
 /// Returns `outgoing_rx` on stream loss so the client reconnect loop can reuse
 /// the channel with a freshly built tunnel.
@@ -484,16 +566,28 @@ async fn i2p_stream_task(
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
+    read_idle: Duration,
 ) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
 
     let mut deframer = Deframer::with_max_frame(I2P_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
+    let mut last_read = tokio::time::Instant::now();
     let mut keepalive = tokio::time::interval(I2P_KEEPALIVE);
     // The first tick fires immediately; skip it so we do not emit a keepalive
     // before any real traffic.
     keepalive.tick().await;
+    // Watchdog cadence: ten checks inside the threshold, at most one a second
+    // (Python's `read_watchdog` polls once a second against its 110 s
+    // threshold, I2PInterface.py:672). The resolution only sets how late the
+    // teardown is, never whether it happens.
+    let mut watchdog = tokio::time::interval(
+        (read_idle / 10)
+            .min(WATCHDOG_MAX_PERIOD)
+            .max(Duration::from_millis(1)),
+    );
+    watchdog.tick().await;
 
     loop {
         tokio::select! {
@@ -507,6 +601,7 @@ async fn i2p_stream_task(
                                     return outgoing_rx;
                                 }
                                 Ok(n) => {
+                                    last_read = tokio::time::Instant::now();
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
                                     for r in deframer.process(&read_buf[..n]) {
                                         // HW_MTU enforcement lives in the deframer now.
@@ -554,9 +649,25 @@ async fn i2p_stream_task(
                 }
             }
 
+            _ = watchdog.tick() => {
+                // A dead I2P tunnel behind a healthy loopback socket produces
+                // no error on either side, so silence is the only symptom
+                // there is. Returning here drops the stream, which is what
+                // makes the rebuild path reachable at all (Codeberg #284).
+                let idle = last_read.elapsed();
+                if idle >= read_idle {
+                    tracing::warn!(
+                        "I2P interface {}: nothing received for {:?}, tearing down the stream so the tunnel is rebuilt",
+                        name,
+                        idle
+                    );
+                    return outgoing_rx;
+                }
+            }
+
             _ = keepalive.tick() => {
                 // Empty HDLC frame: two FLAG bytes. The peer's deframer treats
-                // it as a no-op; a write error means the tunnel is dead.
+                // it as a no-op, and it feeds the peer's own read watchdog.
                 if let Err(e) = writer.write_all(&[leviculum_core::framing::hdlc::FLAG, leviculum_core::framing::hdlc::FLAG]).await {
                     tracing::debug!("I2P interface {} keepalive write error: {}", name, e);
                     return outgoing_rx;

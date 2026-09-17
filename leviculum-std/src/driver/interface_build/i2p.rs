@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::i2p::{
-    spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2P_DEFAULT_BUFFER_SIZE,
-    I2P_DEFAULT_RECONNECT_WAIT,
+    spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2pTimeouts,
+    I2P_DEFAULT_BUFFER_SIZE, I2P_DEFAULT_RECONNECT_WAIT,
 };
 use leviculum_core::transport::InterfaceId;
 
@@ -52,6 +52,7 @@ pub(super) fn build(
             buffer_size,
             name_prefix: format!("i2p_{}", idx),
             reconnect_wait,
+            timeouts: I2pTimeouts::default(),
             next_id: ctx.next_id.clone(),
             new_interface_tx: ctx.new_iface_tx.clone(),
             ifac: ifac.clone(),
@@ -95,6 +96,7 @@ pub(super) fn build(
                 peer: peer.clone(),
                 buffer_size,
                 reconnect_wait,
+                timeouts: I2pTimeouts::default(),
                 ifac: ifac.clone(),
                 reconnect_notify: Some(ctx.reconnect_tx.clone()),
                 ingress_control,

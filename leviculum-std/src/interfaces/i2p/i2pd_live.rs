@@ -34,7 +34,9 @@ async fn sam_socket() -> TcpStream {
     let mut s = TcpStream::connect(SAM)
         .await
         .expect("connect to i2pd SAM (is i2pd running with sam.enabled?)");
-    sam::handshake(&mut s).await.expect("SAM HELLO handshake");
+    sam::handshake(&mut s, sam::SAM_COMMAND_TIMEOUT)
+        .await
+        .expect("SAM HELLO handshake");
     s
 }
 
@@ -50,6 +52,7 @@ async fn live_session_create_matches_dialect() {
             sam::TRANSIENT_DESTINATION,
             "",
         ),
+        sam::SAM_COMMAND_TIMEOUT,
     )
     .await
     .expect("SESSION CREATE reply");
@@ -73,6 +76,7 @@ async fn live_loopback_stream_crosses() {
     let reply = sam::command(
         &mut srv_ctrl,
         &sam::session_create("STREAM", "reticulum-srv", sam::TRANSIENT_DESTINATION, ""),
+        sam::SAM_COMMAND_TIMEOUT,
     )
     .await
     .expect("server SESSION CREATE");
@@ -85,9 +89,13 @@ async fn live_loopback_stream_crosses() {
     // destination line, then the HDLC frame.
     let accept = tokio::spawn(async move {
         let mut a = sam_socket().await;
-        let r = sam::command(&mut a, &sam::stream_accept("reticulum-srv", false))
-            .await
-            .expect("STREAM ACCEPT");
+        let r = sam::command(
+            &mut a,
+            &sam::stream_accept("reticulum-srv", false),
+            sam::SAM_COMMAND_TIMEOUT,
+        )
+        .await
+        .expect("STREAM ACCEPT");
         assert!(r.ok(), "STREAM ACCEPT: {}", r.result());
         // First line once a peer connects: its destination.
         let _peer = sam::read_line(&mut a).await.expect("peer dest line");
@@ -107,6 +115,7 @@ async fn live_loopback_stream_crosses() {
     let reply = sam::command(
         &mut cli_ctrl,
         &sam::session_create("STREAM", "reticulum-cli", sam::TRANSIENT_DESTINATION, ""),
+        sam::SAM_COMMAND_TIMEOUT,
     )
     .await
     .expect("client SESSION CREATE");
@@ -120,6 +129,7 @@ async fn live_loopback_stream_crosses() {
             let r = sam::command(
                 &mut stream,
                 &sam::stream_connect("reticulum-cli", &srv_full, false),
+                sam::SAM_COMMAND_TIMEOUT,
             )
             .await
             .expect("STREAM CONNECT");

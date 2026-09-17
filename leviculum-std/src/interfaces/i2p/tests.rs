@@ -130,6 +130,7 @@ async fn announce_crosses_i2p_loopback() {
         buffer_size: 32,
         name_prefix: "srv".to_string(),
         reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
         next_id,
         new_interface_tx: new_tx,
         ingress_control: false,
@@ -144,6 +145,7 @@ async fn announce_crosses_i2p_loopback() {
         peer: "somepeer.b32.i2p".to_string(),
         buffer_size: 32,
         reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
         ifac: None,
         reconnect_notify: None,
         ingress_control: false,
@@ -201,6 +203,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         buffer_size: 32,
         name_prefix: "srv".to_string(),
         reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
         next_id,
         new_interface_tx: new_tx,
         ingress_control: false,
@@ -214,6 +217,7 @@ async fn hdlc_escaping_survives_i2p_stream() {
         peer: "peer.b32.i2p".to_string(),
         buffer_size: 32,
         reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
         ifac: None,
         reconnect_notify: None,
         ingress_control: false,
@@ -256,6 +260,7 @@ async fn socket_hook_covers_every_sam_dial() {
         peer: "somepeer.b32.i2p".to_string(),
         buffer_size: 32,
         reconnect_wait: Duration::from_secs(30),
+        timeouts: I2pTimeouts::default(),
         ifac: None,
         reconnect_notify: None,
         ingress_control: false,
@@ -281,4 +286,218 @@ fn keyfile_roundtrip() {
     assert!(load_keyfile(&path).is_none());
     save_keyfile(&path, GOLDEN_PRIV);
     assert_eq!(load_keyfile(&path).as_deref(), Some(GOLDEN_PRIV));
+}
+
+/// Poll `cond` until it holds or `deadline` passes. Returns what it last saw.
+async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cond()
+}
+
+/// A TCP listener that accepts and then says nothing at all, holding every
+/// connection open so the client sees neither a reply nor an EOF. Counts the
+/// connections it accepted.
+async fn start_silent_listener(accepts: Arc<AtomicUsize>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // Hold every accepted socket: dropping one would close it, and the
+        // client would fail on the EOF rather than on the deadline under test.
+        let mut held = Vec::new();
+        loop {
+            match listener.accept().await {
+                Ok((sock, _)) => {
+                    accepts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    held.push(sock);
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    addr
+}
+
+/// Codeberg #284, half one, end to end: a SAM bridge that accepts the TCP
+/// connection and never answers must not wedge the client task. Before the
+/// deadline on SAM commands the first `HELLO` parked forever, the task never
+/// returned, and the reconnect loop that rebuilds the tunnel never ran once --
+/// so the bridge saw exactly one connection for the lifetime of the daemon.
+#[tokio::test]
+async fn a_silent_sam_bridge_does_not_wedge_the_client() {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let addr = start_silent_listener(Arc::clone(&accepts)).await;
+
+    let _client = spawn_i2p_client(I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: addr.to_string(),
+        peer: "peer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_millis(100),
+        timeouts: I2pTimeouts {
+            sam_command: Duration::from_millis(200),
+            read_idle: Duration::from_secs(60),
+        },
+        ifac: None,
+        reconnect_notify: None,
+        ingress_control: false,
+        outbound_socket_hook: None,
+    });
+
+    let retried = wait_until(Duration::from_secs(10), || {
+        accepts.load(std::sync::atomic::Ordering::Relaxed) >= 3
+    })
+    .await;
+    assert!(
+        retried,
+        "client must keep retrying a silent bridge; it dialled {} time(s)",
+        accepts.load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+/// Codeberg #284, half two, minimal: a stream whose socket is perfectly healthy
+/// but carries no bytes is a dead tunnel, and nothing else can tell us so --
+/// writes into the local SAM bridge keep succeeding. The stream task has to
+/// return on its own, which is what puts the caller back on the rebuild path.
+#[tokio::test]
+async fn read_watchdog_tears_down_a_silent_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        // Drain the keepalives so the socket never backs up, and never answer.
+        let mut scratch = [0u8; 256];
+        loop {
+            match sock.read(&mut scratch).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+    // Both ends of each channel stay alive for the whole test: a closed channel
+    // would end the task for a reason that is not the watchdog.
+    let (_outgoing_tx, outgoing_rx) = mpsc::channel(8);
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        i2p_stream_task(
+            "silent".to_string(),
+            stream,
+            incoming_tx,
+            outgoing_rx,
+            Arc::new(InterfaceCounters::new()),
+            Duration::from_millis(300),
+        ),
+    )
+    .await
+    .expect("the stream task must return on the read watchdog, not run forever");
+}
+
+/// A SAM bridge that completes the whole handshake and then delivers nothing on
+/// the stream: the tunnel behind the loopback socket is dead, the socket is not.
+/// Counts `STREAM CONNECT` commands, i.e. tunnel builds.
+async fn start_dead_tunnel_sam(connects: Arc<AtomicUsize>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let connects = Arc::clone(&connects);
+            tokio::spawn(async move {
+                match sam::read_line(&mut sock).await {
+                    Ok(l) if l.starts_with("HELLO") => {}
+                    _ => return,
+                }
+                let _ = sock.write_all(b"HELLO REPLY RESULT=OK VERSION=3.1\n").await;
+                let cmd = match sam::read_line(&mut sock).await {
+                    Ok(l) => l,
+                    Err(_) => return,
+                };
+                if cmd.starts_with("SESSION CREATE") {
+                    let reply = format!("SESSION STATUS RESULT=OK DESTINATION={GOLDEN_PRIV}\n");
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                } else if cmd.starts_with("NAMING LOOKUP") {
+                    let reply = format!("NAMING REPLY RESULT=OK NAME=x VALUE={GOLDEN_PUB}\n");
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                } else if cmd.starts_with("STREAM CONNECT") {
+                    connects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = sock.write_all(b"STREAM STATUS RESULT=OK\n").await;
+                }
+                // Whatever the command was: hold the socket open and stay
+                // silent from here on, draining whatever arrives.
+                let mut scratch = [0u8; 256];
+                loop {
+                    match sock.read(&mut scratch).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+
+    addr
+}
+
+/// Codeberg #284, half two, end to end: the rebuild path already existed but was
+/// unreachable, because a dead tunnel behind a live loopback socket raises no
+/// error to reach it with. With the read watchdog the client tears the stream
+/// down itself and builds a new tunnel, so `STREAM CONNECT` happens again.
+#[tokio::test]
+async fn a_dead_tunnel_behind_a_live_socket_is_rebuilt() {
+    let connects = Arc::new(AtomicUsize::new(0));
+    let addr = start_dead_tunnel_sam(Arc::clone(&connects)).await;
+
+    let handle = spawn_i2p_client(I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: addr.to_string(),
+        peer: "peer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_millis(100),
+        timeouts: I2pTimeouts {
+            sam_command: Duration::from_secs(2),
+            read_idle: Duration::from_millis(300),
+        },
+        ifac: None,
+        reconnect_notify: None,
+        ingress_control: false,
+        outbound_socket_hook: None,
+    });
+
+    handle
+        .ready
+        .wait(Duration::from_secs(5))
+        .await
+        .expect("client should establish its first stream");
+    assert!(
+        handle.counters.is_online(),
+        "interface should report itself up once the stream is established"
+    );
+
+    let rebuilt = wait_until(Duration::from_secs(10), || {
+        connects.load(std::sync::atomic::Ordering::Relaxed) >= 2
+    })
+    .await;
+    assert!(
+        rebuilt,
+        "a dead tunnel must be rebuilt; STREAM CONNECT was issued {} time(s)",
+        connects.load(std::sync::atomic::Ordering::Relaxed)
+    );
 }

@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,11 +52,25 @@ pub(crate) const TRANSIENT_DESTINATION: &str = "TRANSIENT";
 /// misbehaving bridge stream unbounded data into a line buffer.
 const MAX_SAM_LINE: usize = 8192;
 
+/// Deadline for a single SAM command (write + single-line reply). A bridge that
+/// accepts the TCP connection and then never answers would otherwise park the
+/// caller forever, and with it the reconnect loop that would rebuild the tunnel
+/// (Codeberg #284).
+///
+/// This is a backstop against a silent bridge, not a policy timer for how long
+/// I2P may take: a router that cannot build the session or reach the peer
+/// answers with a `RESULT` of its own (`CANT_REACH_PEER`, `KEY_NOT_FOUND`, ...)
+/// well inside two minutes, and a cold router that is merely slow still answers.
+/// Only a bridge that has stopped talking altogether reaches this.
+pub(crate) const SAM_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Errors from the SAM client layer.
 #[derive(Debug)]
 pub(crate) enum SamError {
     /// Underlying socket I/O failure.
     Io(io::Error),
+    /// The SAM bridge did not finish a command within its deadline.
+    Timeout(Duration),
     /// The SAM bridge returned a non-OK `RESULT`, carrying the raw result code.
     Result(String),
     /// A reply could not be parsed as a SAM message.
@@ -68,6 +83,7 @@ impl std::fmt::Display for SamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SamError::Io(e) => write!(f, "SAM I/O error: {e}"),
+            SamError::Timeout(d) => write!(f, "SAM bridge did not reply within {d:?}"),
             SamError::Result(r) => write!(f, "SAM returned RESULT={r}"),
             SamError::Protocol(m) => write!(f, "SAM protocol error: {m}"),
             SamError::Encoding(m) => write!(f, "SAM encoding error: {m}"),
@@ -389,22 +405,31 @@ pub(crate) async fn read_line<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Write a SAM command and read the single-line reply.
+/// Write a SAM command and read the single-line reply, bounded by `deadline`.
+///
+/// The bound covers the write as well as the reply: both sides of a stalled
+/// loopback socket can block, and either one parks the caller for good.
 pub(crate) async fn command<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     stream: &mut S,
     cmd: &str,
+    deadline: Duration,
 ) -> Result<Message, SamError> {
-    stream.write_all(cmd.as_bytes()).await?;
-    stream.flush().await?;
-    let line = read_line(stream).await?;
-    Message::parse(&line)
+    tokio::time::timeout(deadline, async {
+        stream.write_all(cmd.as_bytes()).await?;
+        stream.flush().await?;
+        let line = read_line(stream).await?;
+        Message::parse(&line)
+    })
+    .await
+    .map_err(|_| SamError::Timeout(deadline))?
 }
 
 /// Perform the `HELLO VERSION` handshake on a freshly connected SAM socket.
 pub(crate) async fn handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     stream: &mut S,
+    deadline: Duration,
 ) -> Result<(), SamError> {
-    let reply = command(stream, &hello()).await?;
+    let reply = command(stream, &hello(), deadline).await?;
     if reply.ok() {
         Ok(())
     } else {
@@ -533,6 +558,55 @@ mod tests {
         let mut rest = [0u8; 8];
         let n = b.read(&mut rest).await.unwrap();
         assert_eq!(&rest[..n], b"LEFTOVER");
+    }
+
+    /// Minimal reproducer for Codeberg #284, half one: a bridge that accepts
+    /// the connection and then never answers must fail the command, not park
+    /// the caller. Without the deadline in `command` this never returns, and
+    /// the whole point of the bug is that nothing upstream notices.
+    #[tokio::test]
+    async fn command_against_a_silent_bridge_times_out() {
+        let (mut bridge, mut client) = tokio::io::duplex(256);
+        // The bridge reads the command and then goes quiet, holding the socket
+        // open -- no EOF, no error, no reply.
+        tokio::spawn(async move {
+            let _ = read_line(&mut bridge).await;
+            std::future::pending::<()>().await;
+        });
+
+        let deadline = Duration::from_millis(200);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            command(&mut client, &hello(), deadline),
+        )
+        .await
+        .expect("command must return on its own deadline, not park forever");
+
+        match result {
+            Err(SamError::Timeout(d)) => assert_eq!(d, deadline),
+            other => panic!("expected a timeout error, got {other:?}"),
+        }
+    }
+
+    /// The deadline must not truncate a reply that arrives in time: a bridge
+    /// that answers late but inside the deadline is still a working bridge.
+    #[tokio::test]
+    async fn command_accepts_a_slow_but_timely_reply() {
+        let (mut bridge, mut client) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            let _ = read_line(&mut bridge).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = bridge
+                .write_all(b"HELLO REPLY RESULT=OK VERSION=3.1\n")
+                .await;
+            std::future::pending::<()>().await;
+        });
+
+        let reply = command(&mut client, &hello(), Duration::from_secs(5))
+            .await
+            .expect("a reply inside the deadline must be accepted");
+        assert!(reply.ok());
+        assert_eq!(reply.get("VERSION"), Some("3.1"));
     }
 
     #[test]
