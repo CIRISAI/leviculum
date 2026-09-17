@@ -242,7 +242,8 @@ nrf-shellcheck:
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
-        scripts/check-plain-clone.sh
+        scripts/check-plain-clone.sh \
+        scripts/publish-nightly.sh scripts/test-publish-nightly.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -422,6 +423,20 @@ check-integ-bin-list:
 check-ci-pipeline:
     @bash scripts/check-ci-pipeline.sh
 
+# Codeberg #286: the nightly publish step, driven against a fake forge.
+#
+# It is the one script in the tree whose only production run is unattended,
+# on a machine nobody is watching, against the public releases page — and it
+# used to delete the previous build's assets BEFORE uploading the new ones,
+# with no status check on the upload at all. A 500 from Codeberg therefore
+# left the release empty, the README's hardcoded download URLs at 404, and
+# the pipeline green. `scripts/test-publish-nightly.sh` injects that 500, a
+# failing delete and an empty dist/ into the real script and asserts what the
+# release holds afterwards. ~0.4 s, no network: `curl` and `git` are fixtures
+# on PATH.
+publish-selftest:
+    @bash scripts/test-publish-nightly.sh
+
 # Codeberg #300: the tree must build from a clone without submodules, which is
 # what both forge pipelines and every contributor start from. An
 # `include_str!` into `reference/` is a compile-time dependency, so the crate
@@ -543,7 +558,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

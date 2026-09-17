@@ -3,7 +3,10 @@
 # release. Called from .woodpecker/nightly.yml. Stable download URL:
 #   https://codeberg.org/${CI_REPO}/releases/download/nightly/<filename>
 #
-# The release is rolling: same tag every night, assets overwritten.
+# The release is rolling: same tag every night, assets overwritten. The
+# overwrite is an upload-then-delete swap, never the other way round:
+# the previous build stays downloadable until the new one is fully up
+# (Codeberg #286).
 # Version info for each build is embedded in the binaries themselves
 # (lnsd --version) and in the release body.
 #
@@ -104,10 +107,43 @@ Verify with \`lnsd --version\` after install.
 EOF
 )
 
+# --- Forge requests -------------------------------------------------------
+#
+# `curl` without `-f` exits 0 on an HTTP 4xx or 5xx: from its point of view
+# the transfer succeeded, and the caller sees a successful command. Every
+# request below that CHANGES the release therefore goes through this wrapper,
+# which puts the HTTP status on stdout and leaves the response body in $RESP
+# for the failure path to print. A connection failure yields `000`, which is
+# a failure like any other status. (Codeberg #286: the upload loop had no
+# status check at all, wrote its output to /dev/null and had no failure
+# branch, so a 500 from the forge ended in `[publish] done`.)
+RESP="$(mktemp)"
+trap 'rm -f "$RESP"' EXIT
+
+api() {  # <curl args...> — HTTP status on stdout, body in $RESP
+    curl -sS -o "$RESP" -w '%{http_code}' "$@" || true
+}
+
+ok() { case "$1" in 2*) return 0 ;; *) return 1 ;; esac; }
+
+die() {  # <message...> — print the forge's own answer with it
+    echo "[publish] $*"
+    sed 's/^/[publish]   /' "$RESP"
+    echo
+    exit 1
+}
+
 # Find existing release
 echo "[publish] looking up release tag=${TAG}"
 release_json=$(curl -sS -H "$AUTH_HEADER" "$API/repos/$CI_REPO/releases/tags/$TAG" || echo '{}')
 release_id=$(echo "$release_json" | jq -r '.id // empty')
+
+# The previous build's assets. They are NOT deleted here: they stay in place
+# until this run has uploaded every file that replaces them, so a run that
+# dies halfway leaves a release with stale assets rather than an empty one.
+# The README's download URLs are hardcoded to those names and 404 the moment
+# the release is empty, which is what the old delete-then-upload order cost.
+replaced_asset_ids=""
 
 if [ -z "$release_id" ]; then
     echo "[publish] no existing release, creating"
@@ -117,51 +153,95 @@ if [ -z "$release_id" ]; then
     # found." Use the default branch from Woodpecker, which is
     # 'master' here. The exact build SHA still appears in the body.
     BRANCH="${CI_REPO_DEFAULT_BRANCH:-master}"
-    release_json=$(jq -n \
+    status=$(jq -n \
         --arg tag "$TAG" \
         --arg target "$BRANCH" \
         --arg body "$RELEASE_BODY" \
         '{tag_name:$tag, target_commitish:$target, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
-        | curl -sS -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+        | api -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases" -d @-)
-    release_id=$(echo "$release_json" | jq -r '.id')
-    if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-        echo "[publish] create failed: $release_json"; exit 1
-    fi
+    ok "$status" || die "create failed: HTTP $status"
+    release_id=$(jq -r '.id // empty' < "$RESP")
+    [ -n "$release_id" ] || die "create returned HTTP $status with no release id:"
     echo "[publish] created release id=${release_id}"
 else
     echo "[publish] found release id=${release_id}, refreshing body"
-    jq -n \
+    status=$(jq -n \
         --arg body "$RELEASE_BODY" \
         '{body:$body}' \
-        | curl -sS -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
-            "$API/repos/$CI_REPO/releases/$release_id" -d @- >/dev/null
+        | api -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+            "$API/repos/$CI_REPO/releases/$release_id" -d @-)
+    ok "$status" || die "body refresh failed: HTTP $status"
+    replaced_asset_ids=$(echo "$release_json" | jq -r '.assets[].id')
+fi
 
-    echo "[publish] deleting existing assets"
+shopt -s nullglob
+ASSETS=("$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256)
+shopt -u nullglob
+
+# An empty dist/ empties the release just as thoroughly as a failed upload
+# does, and it is the likelier of the two: a build step that produced nothing
+# still leaves the directory behind.
+if [ "${#ASSETS[@]}" -eq 0 ]; then
+    echo "[publish] dist/ contains no .deb, .tar.gz or .sha256 — nothing to publish."
+    echo "[publish] The release keeps the previous build's assets. Failing the run."
+    exit 1
+fi
+
+echo "[publish] uploading ${#ASSETS[@]} new assets"
+uploaded_ids=()
+for f in "${ASSETS[@]}"; do
+    name=$(basename "$f")
+    status=$(api -X POST -H "$AUTH_HEADER" \
+        -F "attachment=@${f}" \
+        "$API/repos/$CI_REPO/releases/$release_id/assets?name=${name}")
+    if ! ok "$status"; then
+        echo "[publish]   → $name FAILED, HTTP $status"
+        sed 's/^/[publish]   /' "$RESP"; echo
+        # Undo this run's uploads so the release is exactly what it was
+        # before: the previous build, complete and downloadable. Forgejo
+        # accepts two assets under one name (that is how 12 stale entries
+        # once accumulated on this tag), so leaving them would publish a
+        # half-swapped release under the README's download URLs.
+        if [ "${#uploaded_ids[@]}" -gt 0 ]; then
+            echo "[publish] rolling back ${#uploaded_ids[@]} asset(s) uploaded by this run"
+            for id in "${uploaded_ids[@]}"; do
+                rb=$(api -X DELETE -H "$AUTH_HEADER" \
+                    "$API/repos/$CI_REPO/releases/$release_id/assets/$id")
+                echo "[publish]   rollback asset $id → HTTP $rb"
+            done
+        fi
+        echo "[publish] upload failed; release left at the previous build."
+        exit 1
+    fi
+    asset_id=$(jq -r '.id // empty' < "$RESP")
+    uploaded_ids+=("$asset_id")
+    echo "[publish]   → $name  HTTP $status id=${asset_id:-?}"
+done
+
+if [ -n "$replaced_asset_ids" ]; then
+    echo "[publish] deleting the assets this run replaced"
     # Forgejo's asset-delete endpoint is
     # /repos/{owner}/{repo}/releases/{release_id}/assets/{attachment_id}.
     # The release_id segment is mandatory — omitting it yields a silent
-    # 404 with -sS, which is exactly what happened before this fix and
+    # 404 with -sS, which is exactly what happened before 3cece2ce and
     # caused assets to accumulate across runs (12 stale entries on the
     # nightly tag pointing at three different builds).
-    echo "$release_json" | jq -r '.assets[].id' | while read -r asset_id; do
+    delete_failed=0
+    while read -r asset_id; do
         [ -n "$asset_id" ] || continue
-        http_code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
-            -H "$AUTH_HEADER" \
+        status=$(api -X DELETE -H "$AUTH_HEADER" \
             "$API/repos/$CI_REPO/releases/$release_id/assets/$asset_id")
-        echo "[publish]   delete asset $asset_id → HTTP $http_code"
-    done
+        echo "[publish]   delete asset $asset_id → HTTP $status"
+        ok "$status" || delete_failed=1
+    done <<< "$replaced_asset_ids"
+    if [ "$delete_failed" -ne 0 ]; then
+        echo "[publish] a replaced asset survived the swap: the release now holds two"
+        echo "[publish] files under that name, and the download URL serves whichever"
+        echo "[publish] Forgejo picks. Delete the stale one by hand. Failing the run."
+        exit 1
+    fi
 fi
-
-echo "[publish] uploading new assets"
-shopt -s nullglob
-for f in "$DIST"/*.deb "$DIST"/*.tar.gz "$DIST"/*.sha256; do
-    name=$(basename "$f")
-    echo "[publish]   → $name"
-    curl -sS -X POST -H "$AUTH_HEADER" \
-        -F "attachment=@${f}" \
-        "$API/repos/$CI_REPO/releases/$release_id/assets?name=${name}" >/dev/null
-done
 
 # The release rolls, so the git tag must roll with it. Forgejo points the
 # tag at a commit only when the release is CREATED (the branch above);
@@ -169,9 +249,10 @@ done
 # frozen at its creation commit (05a17675, 2026-05-06) while the assets
 # beside it moved on nightly — the release page's "Source code" links
 # served months-old source next to current binaries. Force-push the tag to
-# the commit this run actually built, after the assets are up so a failed
-# upload never moves it. The commit is already on the remote (CI builds
-# pushed commits), so this transfers no objects, only the ref.
+# the commit this run actually built, after the swap is complete so a failed
+# upload or a surviving stale asset never moves it. The commit is already on
+# the remote (CI builds pushed commits), so this transfers no objects, only
+# the ref.
 #
 # The push authenticates through a one-shot credential helper, never a
 # token-in-URL remote: when a push fails, git prints the full remote URL
