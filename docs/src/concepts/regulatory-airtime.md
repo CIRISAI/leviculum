@@ -42,7 +42,7 @@ nothing may treat it as one.
 A node that is not told otherwise obeys the band it is on. When no
 `airtime_limit_long` is configured, the host derives the lawful
 long-term limit from the TX frequency (`resolve_lt_alock`,
-`leviculum-std/src/driver/mod.rs:353-368`) and sends it to the modem; a
+`leviculum-std/src/driver/mod.rs:443-477`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
 `leviculum-core/src/rnode.rs:1339`). Both read the same table,
