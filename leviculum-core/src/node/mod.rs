@@ -63,6 +63,8 @@ mod mvr_ble_peer_loss_reroute;
 mod mvr_ble_peer_up_announce;
 #[cfg(test)]
 mod mvr_ble_routed_delivery_hint;
+#[cfg(test)]
+mod mvr_board_radio_pathresolve;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
 #[cfg(test)]

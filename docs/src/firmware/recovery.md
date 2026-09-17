@@ -119,7 +119,7 @@ the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash`
 (`leviculum-nrf/src/bin/t114.rs:208`) and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:554`, and again on the 5 s
+full hash (`leviculum-nrf/src/bin/t114.rs:570`, and again on the 5 s
 banner). Both are on the boot-critical log path, so attaching after the
 board has come up still shows them (Codeberg #234).
 

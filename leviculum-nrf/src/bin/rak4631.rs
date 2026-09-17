@@ -305,8 +305,24 @@ async fn main(spawner: Spawner) {
     // `leviculum-core/src/node/mvr_link_mtu_asymmetry.rs`. Read that price
     // before tidying this number back down.
     node.set_interface_hw_mtu(1, 508);
+    // The board is the mesh's relay on this link, so it must answer "where
+    // is X" for the nodes behind it, not only for the daemon on its serial
+    // line (#117 set that one alone). A `Full` interface returns from
+    // `handle_path_request` case 3 without re-originating discovery
+    // (`Full.discovers_paths() == false`), which left the LoRa and BLE sides
+    // of a board deaf to path requests and the announce-capped queue -- 2 %
+    // of link capacity, ~13.4 s per relayed announce at SF7 -- as the only
+    // way anything could be resolved across the carrier seam. That cost
+    // `ble_lora_transport` its `file_transfer` step: the host's path request
+    // reached the pocket board over BLE and produced no action, and the
+    // listener's announce arrived 91 s later, 1.2 s after the step's 60 s
+    // budget. Re-origination excludes the receiving interface, so this adds
+    // no airtime to the band the question came in on. Pinned in
+    // `leviculum-core/src/node/mvr_board_radio_pathresolve.rs`.
+    node.set_interface_mode(1, leviculum_core::InterfaceMode::Gateway);
     node.set_interface_name(2, alloc::string::String::from("ble"));
     node.set_interface_hw_mtu(2, 564);
+    node.set_interface_mode(2, leviculum_core::InterfaceMode::Gateway);
 
     // #234: boot-critical, because `log_fmt` DROPS a line while the
     // runtime-drain gate is shut — it returns before the ring buffer and

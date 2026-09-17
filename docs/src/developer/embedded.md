@@ -65,11 +65,11 @@ you must dispatch.
 The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
-loop (`leviculum-nrf/src/bin/t114.rs:543-600`), here with three interfaces
+loop (`leviculum-nrf/src/bin/t114.rs:559-616`), here with three interfaces
 (serial, LoRa, BLE) selected over with Embassy's `select4`:
 
 ```rust
-// Adapted from leviculum-nrf/src/bin/t114.rs:543
+// Adapted from leviculum-nrf/src/bin/t114.rs:559
 loop {
     let deadline = node
         .next_deadline()
