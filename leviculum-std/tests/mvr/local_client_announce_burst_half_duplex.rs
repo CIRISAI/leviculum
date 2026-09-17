@@ -11,15 +11,31 @@
 //! exactly one question worth asking: does a start-up burst now arrive at
 //! the radio as a burst?
 //!
-//! It does not, and the reason is where the reason belongs. The RNode
-//! interface applies a randomised 0..`jitter_max` delay to the first frame
-//! after idle and a fixed `MIN_SPACING_MS` (50 ms) between queued frames
-//! (`leviculum-std/src/interfaces/rnode.rs:794-797`), which is the
-//! interface-isolation rule's own answer: only the interface knows it is
-//! half duplex, and collision avoidance lives there. The core's hold was
-//! a second, weaker copy of that one layer too low — and a 250 ms hold
-//! cannot separate N simultaneous registrations anyway, because it delays
-//! them all by the same 250 ms.
+//! Not as a burst at the *serial* boundary, which is what this test
+//! measures. The RNode interface applies a randomised 0..`jitter_max`
+//! delay to the first frame after idle and a fixed `MIN_SPACING_MS`
+//! (50 ms) between queued frames
+//! (`leviculum-std/src/interfaces/rnode.rs:1376-1385`), so the frames
+//! reach the modem separated. The core's hold was a second, weaker copy
+//! of that one layer too low — and a 250 ms hold cannot separate N
+//! simultaneous registrations anyway, because it delays them all by the
+//! same 250 ms.
+//!
+//! What this test does NOT show is that the frames are separated *on the
+//! air*, and the name must not be read that way. 50 ms is the serial
+//! floor (`MIN_SPACING_MS` is documented as exactly that), not an
+//! airtime; at the hardware corpus' SF7 / BW 62.5 kHz every frame in the
+//! band is far longer than that. Measured on the rig
+//! (`lora_lncp_proof_retry`, run hardware_20260803T184800+0200): host TX
+//! to peer RX is ~400 ms for an 86-byte frame, ~750 ms for 167 bytes and
+//! ~1150 ms for 183 bytes. Two frames written 50 ms apart therefore both
+//! sit in the firmware queue and leave back to back, and the sender stays
+//! deaf for their combined airtime. Codeberg #187 is one instance:
+//! an announce queued behind a priority link request went to serial 51 ms
+//! after it, and the proof coming back was lost along with the announce —
+//! both directions, one collision. The airtime-aware alternative
+//! (`leviculum_core::rnode::compute_spacing_ms`) exists and has no caller;
+//! wiring it in is Bug #25, attempted in c2eba153 and reverted in 12f99a02.
 //!
 //! ## Topology
 //!
