@@ -146,6 +146,8 @@ mod mvr_shared_client_1hop;
 #[cfg(test)]
 mod mvr_single_decrypt_drop;
 #[cfg(test)]
+mod mvr_stale_link_retransmit;
+#[cfg(test)]
 mod mvr_teardown_resource_fail;
 #[cfg(test)]
 mod mvr_unknown_context_relay;

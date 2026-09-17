@@ -3466,16 +3466,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             seq = sequence,
                             "link_mgr: queuing channel retransmit"
                         );
-                        // Build retransmission packet
-                        let packet = if let Some(link) = self.links.get(&link_id) {
-                            link.build_data_packet_with_context(
+                        // Build retransmission packet. Stale is allowed here
+                        // (leviculum#272): the retry has already been charged
+                        // by `Channel::poll`, and only a transmission can
+                        // provoke the inbound that recovers the link.
+                        let packet = match self.links.get(&link_id) {
+                            Some(link) => match link.build_retransmit_packet_with_context(
                                 &data,
                                 PacketContext::Channel,
                                 &mut self.rng,
-                            )
-                            .ok()
-                        } else {
-                            None
+                            ) {
+                                Ok(pkt) => Some(pkt),
+                                Err(e) => {
+                                    crate::tracing::warn!(
+                                        "link_mgr: channel retransmit seq={} on link <{}> built nothing ({:?}, state {:?}); try {} is spent unsent",
+                                        sequence,
+                                        HexShort(link_id.as_bytes()),
+                                        e,
+                                        link.state(),
+                                        tries,
+                                    );
+                                    None
+                                }
+                            },
+                            None => None,
                         };
                         // link borrow released here
 
@@ -3554,16 +3568,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(result) = out_result {
                 match result {
                     ResourcePollResult::RetransmitAdv(adv_bytes) => {
-                        // Re-send advertisement
-                        let pkt = if let Some(link) = self.links.get(&link_id) {
-                            link.build_data_packet_with_context(
+                        // Re-send advertisement. Stale is allowed (leviculum#272):
+                        // the resource's retry has already been charged, and a
+                        // silent no-op would spend the budget on nothing.
+                        let pkt = match self.links.get(&link_id) {
+                            Some(link) => match link.build_retransmit_packet_with_context(
                                 &adv_bytes,
                                 PacketContext::ResourceAdv,
                                 &mut self.rng,
-                            )
-                            .ok()
-                        } else {
-                            None
+                            ) {
+                                Ok(pkt) => Some(pkt),
+                                Err(e) => {
+                                    crate::tracing::warn!(
+                                        "link_mgr: resource ADV retransmit on link <{}> built nothing ({:?}, state {:?}); the retry is spent unsent",
+                                        HexShort(link_id.as_bytes()),
+                                        e,
+                                        link.state(),
+                                    );
+                                    None
+                                }
+                            },
+                            None => None,
                         };
                         if let Some(pkt) = pkt {
                             if let Some(link) = self.links.get_mut(&link_id) {
@@ -3655,16 +3680,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(result) = in_result {
                 match result {
                     ResourcePollResult::RetransmitAdv(req_bytes) => {
-                        // Re-send last REQ
-                        let pkt = if let Some(link) = self.links.get(&link_id) {
-                            link.build_data_packet_with_context(
+                        // Re-send last REQ. Stale is allowed (leviculum#272):
+                        // same reasoning as the ADV arm above.
+                        let pkt = match self.links.get(&link_id) {
+                            Some(link) => match link.build_retransmit_packet_with_context(
                                 &req_bytes,
                                 PacketContext::ResourceReq,
                                 &mut self.rng,
-                            )
-                            .ok()
-                        } else {
-                            None
+                            ) {
+                                Ok(pkt) => Some(pkt),
+                                Err(e) => {
+                                    crate::tracing::warn!(
+                                        "link_mgr: resource REQ retransmit on link <{}> built nothing ({:?}, state {:?}); the retry is spent unsent",
+                                        HexShort(link_id.as_bytes()),
+                                        e,
+                                        link.state(),
+                                    );
+                                    None
+                                }
+                            },
+                            None => None,
                         };
                         if let Some(pkt) = pkt {
                             if let Some(link) = self.links.get_mut(&link_id) {

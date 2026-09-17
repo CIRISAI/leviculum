@@ -2122,10 +2122,46 @@ impl Link {
         packet_context: PacketContext,
         rng: &mut impl CryptoRngCore,
     ) -> Result<alloc::vec::Vec<u8>, LinkError> {
+        self.require_state(LinkState::Active)?;
+        self.encode_data_packet(plaintext, packet_context, rng)
+    }
+
+    /// Build a data packet that RE-sends payload already given to the peer.
+    ///
+    /// Same bytes as [`Self::build_data_packet_with_context`], but permitted on
+    /// a `Stale` link as well as an `Active` one. A stale link recovers by
+    /// receiving something, and the only thing that can provoke an inbound
+    /// packet during the stale grace window is a transmission — so refusing to
+    /// retransmit makes the recovery path unreachable and burns the retry
+    /// budget on nothing (leviculum#272).
+    ///
+    /// Reference: RNS draws the same line. First transmission is Active-only
+    /// (`Channel.py:669-673`, `LinkChannelOutlet.send` checks
+    /// `link.status == ACTIVE`); the retransmit is not (`Channel.py:675-679`,
+    /// `LinkChannelOutlet.resend` -> `packet.resend()` with no status check),
+    /// and the peer's reply flips STALE back to ACTIVE (`Link.py:983-984`).
+    /// [`Self::build_keepalive_packet`] already carries this rule.
+    pub fn build_retransmit_packet_with_context(
+        &self,
+        plaintext: &[u8],
+        packet_context: PacketContext,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<alloc::vec::Vec<u8>, LinkError> {
+        if self.state != LinkState::Active && self.state != LinkState::Stale {
+            return Err(LinkError::InvalidState);
+        }
+        self.encode_data_packet(plaintext, packet_context, rng)
+    }
+
+    /// Encrypt and frame a link data packet. State check is the caller's.
+    fn encode_data_packet(
+        &self,
+        plaintext: &[u8],
+        packet_context: PacketContext,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<alloc::vec::Vec<u8>, LinkError> {
         use crate::destination::DestinationType;
         use crate::packet::{HeaderType, PacketFlags, PacketType, TransportType};
-
-        self.require_state(LinkState::Active)?;
 
         // Encrypt the data
         let encrypted_len = Self::encrypted_size(plaintext.len());
