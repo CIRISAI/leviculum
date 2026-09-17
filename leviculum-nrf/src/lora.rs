@@ -1424,14 +1424,31 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // has keyed yet. Spent in `rx_once`, so a peer that keys inside
             // the window is received, not talked over; burst continuations
             // (same acquisition) owe nothing and skip this entirely.
+            //
+            // `rx_once` returns the instant it receives, which is the
+            // common case here — the window is most often opened right
+            // after hearing something. The part of the draw that did not
+            // get listened through is still owed: the frame that cut the
+            // window short released every other waiting node at the same
+            // instant, so keying up on its heels is precisely the phase
+            // lock the draw exists to break. Hence the elapsed report and
+            // the `continue` back into the remainder, rather than falling
+            // through to CAD. Wall-clock elapsed (floor 1 ms so a radio
+            // erroring out instantly still drains the debt) bounds the
+            // resumes at the drawn window.
             let jitter_ms = access.acquisition_jitter_ms();
             if jitter_ms > 0 {
                 crate::log::log_fmt(
-                    "[LORA_JITTER] ",
+                    if access.jitter_was_drawn() {
+                        "[LORA_JITTER] "
+                    } else {
+                        "[LORA_JITTER_RESUME] "
+                    },
                     format_args!("wait_ms={} slot_ms={}", jitter_ms, access.jitter_slot()),
                 );
                 let rx_ms = jitter_ms.clamp(1, 10_000) as u32;
                 reassembler.check_timeout(rx_timeout_count, 10);
+                let jitter_start = embassy_time::Instant::now();
                 if rx_once(
                     &mut radio,
                     &mut rx_buf,
@@ -1445,6 +1462,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 {
                     consecutive_empty_acks = 0;
                 }
+                access.jitter_spent(jitter_start.elapsed().as_millis().max(1));
                 continue;
             }
 

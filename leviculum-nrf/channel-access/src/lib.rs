@@ -131,6 +131,8 @@ pub struct ChannelAccess {
     rng: u32,
     jitter_slot_ms: u64,
     jitter_owed: bool,
+    jitter_remaining_ms: u64,
+    jitter_was_drawn: bool,
     attempt: u8,
     cw: u8,
 }
@@ -159,6 +161,8 @@ impl ChannelAccess {
             rng: if seed == 0 { 0x9E37_79B9 } else { seed },
             jitter_slot_ms: JITTER_SLOT_MIN_MS,
             jitter_owed: true,
+            jitter_remaining_ms: 0,
+            jitter_was_drawn: false,
             attempt: 0,
             cw: CAD_CW_INITIAL,
         }
@@ -176,9 +180,12 @@ impl ChannelAccess {
     }
 
     /// The channel was yielded back (a post-TX listening window ran, or is
-    /// about to): the next acquisition owes jitter again.
+    /// about to): the next acquisition owes jitter again. Any remainder
+    /// of a previous, abandoned draw is dropped — a new acquisition draws
+    /// afresh rather than inheriting a leftover.
     pub fn channel_released(&mut self) {
         self.jitter_owed = true;
+        self.jitter_remaining_ms = 0;
     }
 
     /// A new packet starts contending: reset the retry gate. Does not
@@ -189,19 +196,46 @@ impl ChannelAccess {
         self.cw = CAD_CW_INITIAL;
     }
 
-    /// The randomised pre-TX wait for this acquisition, in ms: DIFS plus a
-    /// uniform draw of 0..=13 slots ([`JITTER_DIFS_SLOTS`],
-    /// [`JITTER_CW_SLOTS`]) the first time it is asked after a channel
-    /// release, `0` on every later ask until the next release. The caller
-    /// spends the wait listening, so a peer that keys during it is heard,
-    /// not talked over.
+    /// The randomised pre-TX wait this acquisition still owes, in ms: on
+    /// the first ask after a channel release, DIFS plus a uniform draw of
+    /// 0..=13 slots ([`JITTER_DIFS_SLOTS`], [`JITTER_CW_SLOTS`]); on every
+    /// later ask, whatever is LEFT of that draw after the caller has
+    /// reported what it actually listened through ([`Self::jitter_spent`]),
+    /// and `0` once the whole wait has been served.
+    ///
+    /// Asking is not serving. The caller spends the wait listening, so a
+    /// peer that keys during it is heard rather than talked over — but the
+    /// listen returns early on a reception, and a wait that ends that way
+    /// has de-tiled nothing: the frame that ended it releases every other
+    /// waiting node at the same instant, which is the phase lock the draw
+    /// exists to break. Handing the value out therefore cannot discharge
+    /// the debt; only listening it through can.
     pub fn acquisition_jitter_ms(&mut self) -> u64 {
-        if !self.jitter_owed {
-            return 0;
+        if self.jitter_owed {
+            self.jitter_owed = false;
+            let draw = (xorshift32(&mut self.rng) % JITTER_CW_SLOTS) as u64;
+            self.jitter_remaining_ms = (JITTER_DIFS_SLOTS + draw) * self.jitter_slot_ms;
+            self.jitter_was_drawn = true;
+        } else {
+            self.jitter_was_drawn = false;
         }
-        self.jitter_owed = false;
-        let draw = (xorshift32(&mut self.rng) % JITTER_CW_SLOTS) as u64;
-        (JITTER_DIFS_SLOTS + draw) * self.jitter_slot_ms
+        self.jitter_remaining_ms
+    }
+
+    /// Report how long the caller actually listened through the wait
+    /// [`Self::acquisition_jitter_ms`] last handed it. Wall-clock elapsed
+    /// is the right figure and may overshoot the window; the debt
+    /// saturates at zero.
+    pub fn jitter_spent(&mut self, ms: u64) {
+        self.jitter_remaining_ms = self.jitter_remaining_ms.saturating_sub(ms);
+    }
+
+    /// Whether the last [`Self::acquisition_jitter_ms`] was a fresh draw
+    /// rather than the remainder of one already part-served. Only the log
+    /// line reads this, so a run's records distinguish an acquisition's
+    /// one draw from the windows that resume it.
+    pub const fn jitter_was_drawn(&self) -> bool {
+        self.jitter_was_drawn
     }
 
     /// The retry count so far, for the `[LORA_CAD]` log lines.
@@ -321,7 +355,12 @@ mod tests {
     fn jitter_is_owed_once_per_acquisition_not_once_per_packet() {
         let mut access = ChannelAccess::new(7);
         access.set_phy(125_000, 7, 5);
-        assert!(access.acquisition_jitter_ms() > 0);
+        let drawn = access.acquisition_jitter_ms();
+        assert!(drawn > 0);
+        // The transmit path listens the wait through; only then does it
+        // probe the channel and key up.
+        access.jitter_spent(drawn);
+        assert_eq!(access.acquisition_jitter_ms(), 0);
         // Burst continuation: more packets, same acquisition, no new wait.
         access.begin_packet();
         assert_eq!(access.acquisition_jitter_ms(), 0);
@@ -330,6 +369,70 @@ mod tests {
         // The channel is yielded back: the next acquisition owes again.
         access.channel_released();
         assert!(access.acquisition_jitter_ms() > 0);
+    }
+
+    #[test]
+    fn a_jitter_wait_cut_short_by_a_reception_is_still_owed() {
+        // The minimal reproducer for the bench_dual_pair_fast red of
+        // 2026-09-17. The wait is spent listening, so the transmit path's
+        // `rx_once` returns the moment a frame arrives: on lnode_a a
+        // 288 ms draw was cut at 143 ms by an incoming proof, and the
+        // path then went straight to CAD and keyed up 11 ms after that
+        // frame ended — phase-locked with every other node the same frame
+        // had just released, which is the exact collision the draw exists
+        // to break.
+        //
+        // No transmission happened, so the acquisition is not over and
+        // the debt must survive the interruption. Asking is not serving.
+        let mut access = ChannelAccess::new(0x5EED_0001);
+        access.set_phy(250_000, 7, 5);
+        let drawn = access.acquisition_jitter_ms();
+        assert!(drawn > 0, "boot owes jitter");
+        assert_ne!(
+            access.acquisition_jitter_ms(),
+            0,
+            "a wait that was never served was forgiven by being asked for"
+        );
+
+        // Part-served: the remainder is what is still owed, and it is a
+        // resume, not a second draw.
+        let served = drawn / 3;
+        access.jitter_spent(served);
+        assert_eq!(access.acquisition_jitter_ms(), drawn - served);
+        assert!(!access.jitter_was_drawn(), "the resume redrew the window");
+
+        // Listened through: only now may the acquisition probe the channel.
+        access.jitter_spent(drawn - served);
+        assert_eq!(access.acquisition_jitter_ms(), 0);
+    }
+
+    #[test]
+    fn spending_more_than_is_owed_does_not_wrap_the_debt() {
+        // The caller reports wall-clock elapsed, which overshoots the
+        // window by the radio's own turnaround; that must land on zero,
+        // not on u64::MAX minus epsilon.
+        let mut access = ChannelAccess::new(0x5EED_0002);
+        access.set_phy(250_000, 7, 5);
+        let drawn = access.acquisition_jitter_ms();
+        access.jitter_spent(drawn + 10_000);
+        assert_eq!(access.acquisition_jitter_ms(), 0);
+    }
+
+    #[test]
+    fn a_release_redraws_rather_than_resuming_a_part_served_wait() {
+        // A yield handed the channel back: that is a new acquisition and
+        // owes a full fresh draw, not the leftover of an abandoned one.
+        let mut access = ChannelAccess::new(0x5EED_0003);
+        access.set_phy(250_000, 7, 5);
+        let drawn = access.acquisition_jitter_ms();
+        access.jitter_spent(drawn / 2);
+        access.channel_released();
+        let redrawn = access.acquisition_jitter_ms();
+        assert!(access.jitter_was_drawn(), "a release did not redraw");
+        assert!(
+            redrawn >= JITTER_DIFS_SLOTS * access.jitter_slot(),
+            "a fresh acquisition drew only {redrawn}, i.e. a leftover"
+        );
     }
 
     #[test]
