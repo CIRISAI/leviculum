@@ -43,6 +43,16 @@
 //!   - GREEN here: the logic round-trips fine host-side, which pins the
 //!     on-device failure to radio/timing behaviour, not shared core logic.
 //!
+//! ## The repeat question (Codeberg #120)
+//!
+//! The same model answers what the SECOND host request costs on air, which is
+//! what every `path_soak` iteration after the first one really measures. The
+//! host's `rnpath drop` clears the HOST path table; `alpha` keeps its own entry
+//! and its cached announce and answers from them, so the radio is not
+//! re-exercised. `lnode_pathresolve_repeat_request_is_answered_from_cache_without_lora_tx`
+//! pins that: iteration 1 re-originates onto the LoRa link, iteration 2 puts
+//! nothing on it at all.
+//!
 //! Sans-I/O: no LoRa, no Docker, no Python, sub-second wall clock.
 
 extern crate std;
@@ -154,27 +164,30 @@ fn is_path_request_for(data: &[u8], dest: &crate::DestinationHash) -> bool {
     }
 }
 
-/// Every packet an output wants to put on the wire, with the sending interface
-/// resolved. A `Broadcast` reaches an interface iff it is not excluded.
-fn lora_bound(output: &TickOutput, lora_iface: usize) -> Vec<Vec<u8>> {
+/// Every packet an output wants to put on the wire that reaches `on_iface`,
+/// with the sending interface resolved. A `Broadcast` reaches an interface iff
+/// it is not excluded.
+fn bound_for(output: &TickOutput, on_iface: usize) -> Vec<Vec<u8>> {
     output
         .actions
         .iter()
         .filter_map(|a| match a {
-            Action::SendPacket { iface, data, .. } => (iface.0 == lora_iface).then(|| data.clone()),
+            Action::SendPacket { iface, data, .. } => (iface.0 == on_iface).then(|| data.clone()),
             Action::Broadcast {
                 data,
                 exclude_iface,
                 exclude_ifaces,
             } => {
-                let excluded = exclude_iface.map(|i| i.0) == Some(lora_iface)
-                    || exclude_ifaces.iter().any(|i| i.0 == lora_iface);
+                let excluded = exclude_iface.map(|i| i.0) == Some(on_iface)
+                    || exclude_ifaces.iter().any(|i| i.0 == on_iface);
                 (!excluded).then(|| data.clone())
             }
         })
         .collect()
 }
 
+/// Alpha's host-facing serial interface index (Gateway mode).
+const ALPHA_SERIAL: usize = 0;
 /// Alpha's LoRa interface index (`serial`=0 Gateway, `lora`=1 Full).
 const ALPHA_LORA: usize = 1;
 /// Beta's LoRa interface index (its only interface).
@@ -188,6 +201,17 @@ struct Trace {
     alpha_hops: Option<u8>,
 }
 
+/// One modelled resolve, with both nodes kept alive afterwards so a test can
+/// ask what a SECOND host request does to the very pair that just resolved
+/// (Codeberg #120). Dropping them at the end of `run` would make the repeat
+/// question unanswerable: a fresh pair holds no cache, which is the whole
+/// point.
+struct Resolved {
+    trace: Trace,
+    beta_probe: crate::DestinationHash,
+    alpha: Node,
+}
+
 /// Run the radio-free path-resolve round trip and report what happened.
 ///
 /// `beta_preannounce` models whether beta has already broadcast its probe once
@@ -195,13 +219,13 @@ struct Trace {
 /// which populates beta's own announce cache. `handle_path_request` case 1
 /// only schedules a deferred answer when that cache is present, so this toggle
 /// separates a warm beta from a cold-start beta.
-fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
+fn run(beta_preannounce: bool) -> Resolved {
     let mut alpha = make_node();
     let alpha_serial = add_iface(&mut alpha, "serial_usb");
     let alpha_lora = add_iface(&mut alpha, "lora_sx1262");
     alpha.set_interface_mode(alpha_serial, InterfaceMode::Gateway);
     // alpha_lora stays Full (default). Sanity-check the modelled modes.
-    assert_eq!(alpha_serial, 0);
+    assert_eq!(alpha_serial, ALPHA_SERIAL);
     assert_eq!(alpha_lora, ALPHA_LORA);
     assert!(
         alpha
@@ -253,7 +277,7 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
 
     // Round 0: inject the host request into alpha's serial interface.
     let out = alpha.handle_packet(InterfaceId(alpha_serial), &request);
-    for pkt in lora_bound(&out, alpha_lora) {
+    for pkt in bound_for(&out, alpha_lora) {
         if is_path_request_for(&pkt, &beta_probe) {
             alpha_reoriginated = true;
         }
@@ -271,7 +295,7 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
         let deliver_beta = core::mem::take(&mut to_beta);
         for pkt in deliver_beta {
             let out = beta.handle_packet(InterfaceId(beta_lora), &pkt);
-            for reply in lora_bound(&out, beta_lora) {
+            for reply in bound_for(&out, beta_lora) {
                 if is_announce_for(&reply, &beta_probe) {
                     beta_answered = true;
                 }
@@ -281,7 +305,7 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
         let deliver_alpha = core::mem::take(&mut to_alpha);
         for pkt in deliver_alpha {
             let out = alpha.handle_packet(InterfaceId(alpha_lora), &pkt);
-            for fwd in lora_bound(&out, alpha_lora) {
+            for fwd in bound_for(&out, alpha_lora) {
                 to_beta.push(fwd);
             }
         }
@@ -294,21 +318,21 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
         beta.transport().clock().set(b_now + STEP_MS);
 
         let out = beta.handle_timeout();
-        for reply in lora_bound(&out, beta_lora) {
+        for reply in bound_for(&out, beta_lora) {
             if is_announce_for(&reply, &beta_probe) {
                 beta_answered = true;
             }
             to_alpha.push(reply);
         }
         let out = alpha.handle_timeout();
-        for fwd in lora_bound(&out, alpha_lora) {
+        for fwd in bound_for(&out, alpha_lora) {
             to_beta.push(fwd);
         }
     }
 
     let alpha_hops = alpha.hops_to(&beta_probe);
-    (
-        Trace {
+    Resolved {
+        trace: Trace {
             resolved: alpha_hops.is_some(),
             rounds,
             alpha_reoriginated,
@@ -316,7 +340,8 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
             alpha_hops,
         },
         beta_probe,
-    )
+        alpha,
+    }
 }
 
 /// The host-side path-resolve round trip: alpha must learn beta's probe path.
@@ -326,7 +351,7 @@ fn run(beta_preannounce: bool) -> (Trace, crate::DestinationHash) {
 /// radio/timing-specific.
 #[test]
 fn lnode_pathresolve_alpha_learns_beta_probe() {
-    let (t, _beta_probe) = run(true);
+    let t = run(true).trace;
 
     assert!(
         t.resolved,
@@ -362,7 +387,7 @@ fn lnode_pathresolve_alpha_learns_beta_probe() {
 /// "schedule only with a cache" gating leaves the first request unanswered.
 #[test]
 fn lnode_pathresolve_cold_start_beta_answers_without_prior_announce() {
-    let (t, _beta_probe) = run(false);
+    let t = run(false).trace;
 
     assert!(
         t.resolved,
@@ -371,5 +396,92 @@ fn lnode_pathresolve_cold_start_beta_answers_without_prior_announce() {
          A false beta_answered here means beta, holding no cached announce, \
          did not answer the first path request as the destination owner.",
         t.rounds, t.alpha_reoriginated, t.beta_answered, t.alpha_hops
+    );
+}
+
+/// Codeberg #120: a SECOND host path request for the same destination is
+/// answered out of the LNode's own cache and never reaches the air.
+///
+/// This is what one `path_soak` iteration after the first one really measures.
+/// `rnpath drop` clears the HOST daemon's path table only; the LNode on the
+/// other end of the serial link keeps its path entry and its cached announce,
+/// so `handle_path_request` answers from cache (case 2b, "Transport node with
+/// cached announce") and returns without re-originating discovery on the radio.
+/// The host still times a resolve and still records `result=ok`, but the number
+/// it records is a serial round trip, not a LoRa discovery.
+///
+/// The contrast inside the test is the evidence: iteration 1 re-originates onto
+/// the LoRa link (`alpha_reoriginated`), iteration 2 puts nothing for beta's
+/// probe on it at all.
+///
+/// Medium under test is modelled, not radiated: both interfaces are
+/// `MockInterface`s driven by a `MockClock`, so there is no medium to switch
+/// off. A rig run asking the same question would have to run LoRa-only, with
+/// BLE off, or a BLE-carried answer would mask the silence on the radio.
+#[test]
+fn lnode_pathresolve_repeat_request_is_answered_from_cache_without_lora_tx() {
+    let mut r = run(true);
+    assert!(
+        r.trace.resolved,
+        "precondition: alpha must have learned beta's probe on the first request"
+    );
+    assert!(
+        r.trace.alpha_reoriginated,
+        "precondition: the FIRST request must have gone onto the lora link, \
+         otherwise this test proves nothing about the second"
+    );
+
+    // The host drops ITS cached path and asks again — one soak iteration. A
+    // fresh tag, because the real host generates one per request and a repeat
+    // of the old tag would be dropped as a duplicate before any of this.
+    let path_req_hash = *r.alpha.transport().path_request_hash();
+    let requester_id = [0x77u8; TRUNCATED_HASHBYTES];
+    let second = build_network_path_request(
+        &path_req_hash,
+        &r.beta_probe,
+        &requester_id,
+        &[0x44u8; TRUNCATED_HASHBYTES],
+    );
+
+    let mut on_air: Vec<Vec<u8>> = Vec::new();
+    let mut to_host: Vec<Vec<u8>> = Vec::new();
+    let out = r.alpha.handle_packet(InterfaceId(ALPHA_SERIAL), &second);
+    on_air.extend(bound_for(&out, ALPHA_LORA));
+    to_host.extend(bound_for(&out, ALPHA_SERIAL));
+
+    // The cached answer is grace-delayed (PATH_REQUEST_GRACE_MS), so let the
+    // clock run well past it and collect everything that falls out. Any
+    // re-origination would appear here too.
+    const STEP_MS: u64 = 1_000;
+    for _ in 0..4 {
+        let now = r.alpha.transport().clock().now_ms();
+        r.alpha.transport().clock().set(now + STEP_MS);
+        let out = r.alpha.handle_timeout();
+        on_air.extend(bound_for(&out, ALPHA_LORA));
+        to_host.extend(bound_for(&out, ALPHA_SERIAL));
+    }
+
+    assert!(
+        to_host.iter().any(|p| is_announce_for(p, &r.beta_probe)),
+        "alpha must have answered the host from its cache; it sent {} packets \
+         back over the serial link and none was an announce for beta's probe",
+        to_host.len()
+    );
+    assert!(
+        !on_air.iter().any(|p| is_path_request_for(p, &r.beta_probe)),
+        "alpha re-originated discovery for beta's probe on the second request — \
+         if this fires, #120's premise is wrong and the soak DOES re-exercise \
+         the radio per iteration"
+    );
+    // Measured: not merely "no discovery" but nothing at all. Alpha owns no
+    // destination of its own here, so it has nothing else to say either. Should
+    // this ever fire on a packet that is NOT a path request for beta's probe,
+    // that is a change in what alpha emits, not a #120 regression — the
+    // assertion above is the one that carries the finding.
+    assert!(
+        on_air.is_empty(),
+        "the second request put {} packet(s) on the lora link; the measured \
+         count is zero",
+        on_air.len()
     );
 }
