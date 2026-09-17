@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:4964`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5006`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -258,7 +258,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:2764`) is
+(`leviculum-std/src/driver/mod.rs:2784`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is

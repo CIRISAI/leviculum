@@ -11,6 +11,7 @@
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use leviculum_core::constants::MTU;
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
@@ -400,7 +401,106 @@ fn absent_daemon_error(source: io::Error, abstract_name: &str) -> io::Error {
     io::Error::new(source.kind(), message)
 }
 
-/// Connect to an existing shared instance daemon as a client.
+/// How long a shared-instance connection must hold before it counts as
+/// healthy, for the purpose of resetting the reconnect backoff.
+///
+/// A daemon that accepts and immediately drops (a crash loop under a
+/// supervisor, a half-configured instance) would otherwise reset the
+/// backoff on every accept and be dialled at the base interval forever.
+/// A connection that survives this long has done real work; one that does
+/// not keeps the outage's attempt count and keeps backing off.
+const LOCAL_STABLE_CONNECTION: Duration = Duration::from_secs(8);
+
+/// Delay before the first few reconnect attempts.
+///
+/// The common case this exists for is `systemctl restart lnsd`, which is
+/// over in well under a second. Python waits `RECONNECT_WAIT = 8` s before
+/// its FIRST retry (LocalInterface.py:63,167), so a Python client is off
+/// the mesh for at least 8 s after a restart that took 200 ms. Dialling a
+/// local socket is close to free, so the first attempts come quickly and
+/// the restart costs a fraction of a second.
+const LOCAL_RECONNECT_BASE: Duration = Duration::from_millis(250);
+
+/// Ceiling on the reconnect backoff — Python's `RECONNECT_WAIT`.
+///
+/// A daemon that is down for a package upgrade, or gone for good, is
+/// retried at most this often. Landing on Python's own steady-state
+/// cadence is deliberate: an operator running both stacks sees the same
+/// retry pressure and the same journal volume from either, while our first
+/// attempts still heal a restart far faster than Python's do. We never give
+/// up (no attempt limit): giving up is what the finding was about.
+const LOCAL_RECONNECT_MAX: Duration = Duration::from_secs(8);
+
+/// Configuration for a reconnecting shared-instance client interface.
+pub(crate) struct LocalClientConfig {
+    pub id: InterfaceId,
+    /// Instance name, without the `rns/` prefix.
+    pub instance_name: String,
+    pub buffer_size: usize,
+    /// Fired after every successful RE-connect (never after the first
+    /// connect), so the driver can re-announce this node's destinations on
+    /// the recovered interface — Python's
+    /// `Transport.shared_connection_reappeared` (Transport.py:3158-3162).
+    pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Fired the moment the daemon connection is lost, so the driver can
+    /// drop the routing state cached against this interface — Python's
+    /// `Transport.shared_connection_disappeared` (Transport.py:3143-3155).
+    pub disconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// Backoff base and ceiling. Production passes `None` and gets
+    /// [`LOCAL_RECONNECT_BASE`] / [`LOCAL_RECONNECT_MAX`]; tests shorten
+    /// them so a retry schedule can be observed in milliseconds.
+    pub backoff: Option<(Duration, Duration)>,
+}
+
+impl LocalClientConfig {
+    /// The production configuration: default backoff, no notifications.
+    pub(crate) fn new(id: InterfaceId, instance_name: &str, buffer_size: usize) -> Self {
+        Self {
+            id,
+            instance_name: instance_name.to_string(),
+            buffer_size,
+            reconnect_notify: None,
+            disconnect_notify: None,
+            backoff: None,
+        }
+    }
+}
+
+/// Bounded exponential backoff between reconnect attempts.
+///
+/// Attempts `1..=3` wait `base`, then the delay doubles each attempt and is
+/// clamped at `max`. Monotonically non-decreasing in `attempt` and never
+/// above `max`, so a daemon that never comes back is dialled at most once
+/// per `max` — it cannot spin. Same shape as the TCP client's
+/// [`backoff_delay`](super::tcp), kept separate because the two have
+/// different constants and different reasons for them.
+fn local_backoff_delay(attempt: u64, base: Duration, max: Duration) -> Duration {
+    if attempt <= 3 {
+        return base.min(max);
+    }
+    let doublings = attempt - 3;
+    let scaled = if doublings >= 128 {
+        u128::MAX
+    } else {
+        base.as_nanos().saturating_mul(1u128 << doublings)
+    };
+    let capped = scaled.min(max.as_nanos());
+    Duration::from_nanos(capped.min(u64::MAX as u128) as u64)
+}
+
+/// Whether a failed attempt gets a `warn!` rather than a `debug!`.
+///
+/// Every attempt is logged either way — the operator complaint behind this
+/// work was silence, not verbosity. What the level decides is how loud a
+/// daemon that stays down is on a default (INFO) journal: attempts 1..=3
+/// and each doubling after them, so the outage keeps announcing itself at
+/// a widening interval instead of once per capped retry forever.
+fn local_failure_is_loud(attempt: u64) -> bool {
+    attempt <= 3 || attempt.is_power_of_two()
+}
+
+/// Connect to an existing shared instance daemon as a client, and keep the
+/// connection up across restarts of that daemon.
 ///
 /// Connects to the abstract Unix socket `\0rns/{instance_name}` and returns
 /// an `InterfaceHandle`. The handle has `is_local_client = false` because
@@ -410,34 +510,56 @@ fn absent_daemon_error(source: io::Error, abstract_name: &str) -> io::Error {
 /// Calls `tokio::spawn` for the I/O task, must be called from a context
 /// where a tokio runtime is active (same as `spawn_local_server`).
 ///
-/// No reconnection, returns an error if the daemon is not running.
-pub(crate) fn spawn_local_client(
-    id: InterfaceId,
-    instance_name: &str,
-    buffer_size: usize,
-) -> Result<InterfaceHandle, io::Error> {
-    let abstract_name = format!("rns/{}", instance_name);
+/// **The first connect is synchronous and its failure is returned**: a
+/// client started against a daemon that is not there says so and exits,
+/// exactly as before. That is a different situation from losing a daemon
+/// that was there, and Python separates them the same way: a `connect`
+/// that raises out of the constructor (LocalInterface.py:112) takes
+/// Reticulum down, while a socket that closes later goes to `reconnect`
+/// (LocalInterface.py:312).
+///
+/// **Interface identity is preserved across a reconnect.** One handle, one
+/// interface index, one pair of channels, one mode, for the life of the
+/// process; the driver is never told the interface went away, so nothing
+/// re-registers it and nothing renumbers it. The consequences are
+/// deliberate and are the reason the notification channels exist: the
+/// transport's own cache against that index is dropped on the loss
+/// (`disconnect_notify`) because a restarted daemon has an empty path
+/// table, and this node's destinations are re-announced on the recovered
+/// interface (`reconnect_notify`) because the restarted daemon has never
+/// heard them. Packets the driver queues during the outage wait in the
+/// outgoing channel and go out on the new stream.
+pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceHandle, io::Error> {
+    let abstract_name = format!("rns/{}", config.instance_name);
 
-    let std_stream =
-        connect_local(&abstract_name).map_err(|e| absent_daemon_error(e, &abstract_name))?;
-    std_stream.set_nonblocking(true)?;
-    let stream = LocalStream::from_std(std_stream)?;
+    // The first connect, synchronous: an absent daemon at startup is an
+    // error for the caller, not something to wait for.
+    let stream = connect_local_stream(&abstract_name)?;
 
-    let (incoming_tx, incoming_rx) = mpsc::channel(buffer_size);
-    let (outgoing_tx, outgoing_rx) = mpsc::channel(buffer_size);
+    let (incoming_tx, incoming_rx) = mpsc::channel(config.buffer_size);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(config.buffer_size);
     let counters = Arc::new(InterfaceCounters::new());
 
-    let name = format!("LocalClient[{}]", instance_name);
-    let task_name = name.clone();
-    let task_counters = Arc::clone(&counters);
+    let name = format!("LocalClient[{}]", config.instance_name);
+    let (base, max) = config
+        .backoff
+        .unwrap_or((LOCAL_RECONNECT_BASE, LOCAL_RECONNECT_MAX));
+    let task = LocalClientTask {
+        id: config.id,
+        name: name.clone(),
+        abstract_name,
+        base,
+        max,
+        counters: Arc::clone(&counters),
+        reconnect_notify: config.reconnect_notify,
+        disconnect_notify: config.disconnect_notify,
+    };
 
-    tokio::spawn(async move {
-        local_interface_task(task_name, stream, incoming_tx, outgoing_rx, task_counters).await;
-    });
+    tokio::spawn(task.run(stream, incoming_tx, outgoing_rx));
 
     Ok(InterfaceHandle {
         info: InterfaceInfo {
-            id,
+            id: config.id,
             name,
             hw_mtu: Some(LOCAL_HW_MTU),
             is_local_client: false,
@@ -453,11 +575,145 @@ pub(crate) fn spawn_local_client(
         outgoing: outgoing_tx,
         counters,
         credit: None,
-        // Local IPC client connect already succeeded
-        // (`connect_local` above is synchronous), so the
-        // interface is ready immediately.
+        // The first connect above already succeeded, so the interface is
+        // ready immediately. The signal is idempotent and stays ready
+        // across reconnects, like the TCP client's.
         ready: super::ReadySignal::ready_immediate(),
     })
+}
+
+/// One connect attempt, wrapped in the error message that names the socket.
+fn connect_local_stream(abstract_name: &str) -> Result<LocalStream, io::Error> {
+    let std_stream =
+        connect_local(abstract_name).map_err(|e| absent_daemon_error(e, abstract_name))?;
+    std_stream.set_nonblocking(true)?;
+    LocalStream::from_std(std_stream)
+}
+
+/// The reconnect loop for a shared-instance client. Owns the channel
+/// endpoints across every connection the interface has in its life.
+struct LocalClientTask {
+    id: InterfaceId,
+    name: String,
+    abstract_name: String,
+    base: Duration,
+    max: Duration,
+    counters: Arc<InterfaceCounters>,
+    reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    disconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+}
+
+impl LocalClientTask {
+    /// Serve `stream`, then reconnect for as long as anyone is listening on
+    /// the incoming channel. Never returns while the driver is alive and
+    /// the daemon is merely absent.
+    async fn run(
+        self,
+        stream: LocalStream,
+        incoming_tx: mpsc::Sender<IncomingPacket>,
+        outgoing_rx: mpsc::Receiver<OutgoingPacket>,
+    ) {
+        let mut outgoing_rx = outgoing_rx;
+        let mut stream = stream;
+        // Carried across connections so a daemon that accepts and drops
+        // cannot reset the backoff by accepting (see
+        // [`LOCAL_STABLE_CONNECTION`]).
+        let mut carried_attempts = 0u64;
+        loop {
+            let connected_at = Instant::now();
+            outgoing_rx = local_interface_task(
+                self.name.clone(),
+                stream,
+                incoming_tx.clone(),
+                outgoing_rx,
+                Arc::clone(&self.counters),
+            )
+            .await;
+
+            // Whose end went away decides what this is. Either channel
+            // losing its far half means the driver dropped this interface —
+            // the node is shutting down or detaching it — and there is
+            // nobody left to reconnect for. Checked BEFORE the warning, so
+            // an orderly shutdown does not report a daemon outage that never
+            // happened.
+            if incoming_tx.is_closed() || outgoing_rx.is_closed() {
+                tracing::debug!("{}: event loop shut down, not reconnecting", self.name);
+                return;
+            }
+
+            // The carrier is down from here until a connect succeeds; say so
+            // where `rnstatus` reads it, and say it in the journal, because
+            // the whole point of this is that a cut-off client must not look
+            // like a healthy one.
+            self.counters.set_online(false);
+            tracing::warn!(
+                "{}: lost the shared instance on \"{}\", reconnecting",
+                self.name,
+                self.abstract_name
+            );
+            if let Some(ref notify) = self.disconnect_notify {
+                let _ = notify.try_send(self.id);
+            }
+
+            // A connection that never got going must not reset the backoff,
+            // or a daemon in a crash loop is dialled at the base interval
+            // forever.
+            let mut attempt = if connected_at.elapsed() >= LOCAL_STABLE_CONNECTION {
+                0
+            } else {
+                carried_attempts
+            };
+            let outage_start = Instant::now();
+            loop {
+                attempt += 1;
+                let delay = local_backoff_delay(attempt, self.base, self.max);
+                tokio::time::sleep(delay).await;
+                if incoming_tx.is_closed() {
+                    tracing::debug!("{}: event loop shut down, not reconnecting", self.name);
+                    return;
+                }
+                match connect_local_stream(&self.abstract_name) {
+                    Ok(s) => {
+                        self.counters.set_online(true);
+                        tracing::info!(
+                            "{}: reconnected to the shared instance on \"{}\" after {} attempt(s), {:.1?} offline",
+                            self.name,
+                            self.abstract_name,
+                            attempt,
+                            outage_start.elapsed()
+                        );
+                        if let Some(ref notify) = self.reconnect_notify {
+                            let _ = notify.try_send(self.id);
+                        }
+                        stream = s;
+                        carried_attempts = attempt;
+                        break;
+                    }
+                    Err(e) => {
+                        // Every attempt is logged; the level widens the
+                        // journal spacing for a daemon that stays away.
+                        if local_failure_is_loud(attempt) {
+                            tracing::warn!(
+                                "{}: reconnect attempt {} failed: {} ({:.1?} offline)",
+                                self.name,
+                                attempt,
+                                e,
+                                outage_start.elapsed()
+                            );
+                        } else {
+                            tracing::debug!(
+                                "{}: reconnect attempt {} failed: {} ({:.1?} offline)",
+                                self.name,
+                                attempt,
+                                e,
+                                outage_start.elapsed()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// I/O task owning the IPC stream.
@@ -470,14 +726,17 @@ async fn local_interface_task(
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
-) {
+) -> mpsc::Receiver<OutgoingPacket> {
     let (reader, mut writer) = stream.into_split();
 
     let mut deframer = Deframer::with_max_frame(LOCAL_HW_MTU as usize);
     let mut read_buf = vec![0u8; MTU * READ_BUFFER_MULTIPLIER];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
 
-    loop {
+    // Labelled so every exit leaves through one place: the caller (the
+    // reconnect loop) takes the outgoing receiver back and hands it to the
+    // next connection, so packets queued during an outage survive it.
+    'io: loop {
         tokio::select! {
             // Read path: wait for socket readability, then try_read + deframe
             result = reader.readable() => {
@@ -487,7 +746,7 @@ async fn local_interface_task(
                             match reader.try_read(&mut read_buf) {
                                 Ok(0) => {
                                     tracing::debug!("Local interface {} disconnected (EOF)", name);
-                                    return;
+                                    break 'io;
                                 }
                                 Ok(n) => {
                                     counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -501,7 +760,7 @@ async fn local_interface_task(
                                         }
                                         if let DeframeResult::Frame(data) = r {
                                             if incoming_tx.send(IncomingPacket { data }).await.is_err() {
-                                                return;
+                                                break 'io;
                                             }
                                         }
                                     }
@@ -511,14 +770,14 @@ async fn local_interface_task(
                                 }
                                 Err(e) => {
                                     tracing::debug!("Local interface {} read error: {}", name, e);
-                                    return;
+                                    break 'io;
                                 }
                             }
                         }
                     }
                     Err(e) => {
                         tracing::debug!("Local interface {} readability error: {}", name, e);
-                        return;
+                        break 'io;
                     }
                 }
             }
@@ -536,17 +795,19 @@ async fn local_interface_task(
                         counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
                         if let Err(e) = writer.write_all(&frame_buf).await {
                             tracing::debug!("Local interface {} write error: {}", name, e);
-                            return;
+                            break 'io;
                         }
                     }
                     None => {
                         tracing::debug!("Local interface {} outgoing channel closed", name);
-                        return;
+                        break 'io;
                     }
                 }
             }
         }
     }
+
+    outgoing_rx
 }
 
 #[cfg(all(test, unix))]
@@ -588,7 +849,9 @@ mod tests {
     async fn absent_daemon_error_names_the_socket_and_the_daemons() {
         let instance_name = format!("no_such_instance_{}", std::process::id());
         // InterfaceHandle is not Debug, so unwrap the Result by hand.
-        let Err(err) = spawn_local_client(InterfaceId(1), &instance_name, 16) else {
+        let Err(err) =
+            spawn_local_client(LocalClientConfig::new(InterfaceId(1), &instance_name, 16))
+        else {
             panic!("no daemon listens on this name, connecting must fail");
         };
 
@@ -782,8 +1045,8 @@ mod tests {
 
         // Connect via spawn_local_client
         let id = InterfaceId(42);
-        let mut client_handle =
-            spawn_local_client(id, &instance_name, 16).expect("client connect failed");
+        let mut client_handle = spawn_local_client(LocalClientConfig::new(id, &instance_name, 16))
+            .expect("client connect failed");
 
         // Verify client handle properties
         assert_eq!(client_handle.info.id, InterfaceId(42));
@@ -905,14 +1168,343 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_client_connect_failure() {
-        let result = spawn_local_client(
+        let result = spawn_local_client(LocalClientConfig::new(
             InterfaceId(99),
             "nonexistent_instance_that_does_not_exist",
             16,
-        );
+        ));
         assert!(
             result.is_err(),
             "connecting to nonexistent socket should fail"
+        );
+    }
+
+    /// Capture tracing output for the duration of the returned guard.
+    ///
+    /// Thread-local default subscriber on a current-thread runtime, so the
+    /// tasks spawned by the test log into this buffer and no other test's.
+    /// Same pattern as the serial interface's arming-line test.
+    #[derive(Clone)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock_recover().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+        fn make_writer(&'a self) -> LogSink {
+            self.clone()
+        }
+    }
+
+    fn capture_logs() -> (
+        Arc<std::sync::Mutex<Vec<u8>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogSink(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (buf, guard)
+    }
+
+    fn captured(buf: &Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+        String::from_utf8_lossy(&buf.lock_recover()).into_owned()
+    }
+
+    /// Bring a shared-instance server up on `instance_name`, retrying the
+    /// bind until the previous one's socket is released (dropping a listener
+    /// is asynchronous — the accept task has to be polled before the kernel
+    /// name is free).
+    async fn bind_server_when_free(
+        instance_name: &str,
+        next_id: Arc<AtomicUsize>,
+        tx: mpsc::Sender<InterfaceHandle>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match spawn_test_local_server(instance_name, Arc::clone(&next_id), tx.clone(), 16) {
+                Ok(()) => return,
+                Err(e) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let _ = e;
+                }
+                Err(e) => panic!("server never bound: {e}"),
+            }
+        }
+    }
+
+    /// The backoff schedule with the constants production actually runs:
+    /// never below the base, never above the ceiling, never decreasing, and
+    /// pinned at the ceiling long before an attempt count could overflow.
+    /// A retry loop with these properties cannot spin, whatever the daemon
+    /// does.
+    #[test]
+    fn reconnect_backoff_is_bounded_and_never_decreases() {
+        let base = LOCAL_RECONNECT_BASE;
+        let max = LOCAL_RECONNECT_MAX;
+
+        // The first three attempts are the base interval, so a daemon
+        // restart is healed in well under a second.
+        for attempt in 1..=3 {
+            assert_eq!(local_backoff_delay(attempt, base, max), base);
+        }
+
+        let mut previous = Duration::ZERO;
+        for attempt in 1..=10_000u64 {
+            let delay = local_backoff_delay(attempt, base, max);
+            assert!(delay >= previous, "attempt {attempt} went backwards");
+            assert!(delay <= max, "attempt {attempt} exceeded the ceiling");
+            assert!(delay >= base.min(max), "attempt {attempt} below the base");
+            previous = delay;
+        }
+        assert_eq!(
+            local_backoff_delay(u64::MAX, base, max),
+            max,
+            "an unbounded attempt count must pin at the ceiling, not overflow"
+        );
+
+        // Worst case over a full day of a daemon that never returns: the
+        // ceiling is what bounds the work, and it is Python's own cadence.
+        assert_eq!(max, Duration::from_secs(8));
+    }
+
+    /// The finding in one test: the daemon goes away under a connected
+    /// client, comes back, and the client is carrying traffic again —
+    /// having said each step out loud, because a cut-off client that looks
+    /// healthy is the actual complaint.
+    #[tokio::test]
+    async fn a_client_reattaches_to_a_restarted_daemon_and_says_so() {
+        let (logs, _log_guard) = capture_logs();
+
+        let next_id = Arc::new(AtomicUsize::new(700));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+        let instance_name = format!("test_reconn_{}", std::process::id());
+        bind_server_when_free(&instance_name, Arc::clone(&next_id), tx).await;
+
+        let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<InterfaceId>(4);
+        let (down_tx, mut down_rx) = mpsc::channel::<InterfaceId>(4);
+        let id = InterfaceId(77);
+        let mut client = spawn_local_client(LocalClientConfig {
+            reconnect_notify: Some(reconnect_tx),
+            disconnect_notify: Some(down_tx),
+            // Milliseconds rather than the production quarter-second, so the
+            // test observes the schedule instead of waiting for it.
+            backoff: Some((Duration::from_millis(20), Duration::from_millis(100))),
+            ..LocalClientConfig::new(id, &instance_name, 16)
+        })
+        .expect("first connect must succeed against a live daemon");
+        assert!(client.counters.is_online());
+
+        let server_handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        assert!(server_handle.info.name.contains("Local["));
+
+        // The daemon exits: dropping the receiver drops both the accepted
+        // connection's handle and the accept loop, exactly as a daemon
+        // shutdown does.
+        drop(server_handle);
+        drop(rx);
+
+        let dropped = tokio::time::timeout(Duration::from_secs(2), down_rx.recv())
+            .await
+            .expect("the client must report the loss")
+            .expect("channel closed");
+        assert_eq!(dropped, id, "the loss is reported for this interface");
+
+        // The daemon stays away for several retry intervals — a package
+        // upgrade, not an instant restart — so the retry lines this test
+        // asserts on are produced, and so the client is shown to keep trying
+        // rather than to have caught the socket on its first dial.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !client.counters.is_online(),
+            "a client whose daemon is gone must report itself offline"
+        );
+
+        // The daemon comes back.
+        let (tx2, mut rx2) = mpsc::channel::<InterfaceHandle>(4);
+        bind_server_when_free(&instance_name, next_id, tx2).await;
+
+        let back = tokio::time::timeout(Duration::from_secs(5), reconnect_rx.recv())
+            .await
+            .expect("the client must reconnect on its own")
+            .expect("channel closed");
+        assert_eq!(
+            back, id,
+            "the same interface index comes back, not a new one"
+        );
+        assert!(
+            client.counters.is_online(),
+            "a reconnected client must report itself online again"
+        );
+
+        // Traffic flows on the recovered connection, in both directions.
+        let mut server_handle = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        client
+            .outgoing
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"after-the-restart".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .expect("send on the recovered interface");
+        let pkt = tokio::time::timeout(Duration::from_secs(2), server_handle.incoming.recv())
+            .await
+            .expect("timeout waiting for the packet")
+            .expect("channel closed");
+        assert_eq!(pkt.data, b"after-the-restart");
+
+        server_handle
+            .outgoing
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"and-back".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .expect("daemon send");
+        let pkt = tokio::time::timeout(Duration::from_secs(2), client.incoming.recv())
+            .await
+            .expect("timeout waiting for the daemon's packet")
+            .expect("channel closed");
+        assert_eq!(pkt.data, b"and-back");
+
+        // The three lines an operator needs: the loss, the retrying, and the
+        // recovery. Asserted, because a silent recovery would be half a fix.
+        let text = captured(&logs);
+        assert!(
+            text.contains(&format!(
+                "LocalClient[{instance_name}]: lost the shared instance"
+            )),
+            "the disconnect must be logged; logs:\n{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "LocalClient[{instance_name}]: reconnect attempt 1 failed"
+            )),
+            "each retry must be logged; logs:\n{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "LocalClient[{instance_name}]: reconnected to the shared instance"
+            )),
+            "the recovery must be logged; logs:\n{text}"
+        );
+    }
+
+    /// A node shutting down is not a daemon outage. When the driver drops
+    /// the interface, both channels lose their far half; the client stops
+    /// without reporting a loss that never happened and without leaving a
+    /// task dialling a socket nobody is listening for.
+    #[tokio::test]
+    async fn an_orderly_shutdown_is_not_reported_as_an_outage() {
+        let (logs, _log_guard) = capture_logs();
+
+        let next_id = Arc::new(AtomicUsize::new(900));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+        let instance_name = format!("test_shutdown_{}", std::process::id());
+        bind_server_when_free(&instance_name, next_id, tx).await;
+
+        let (down_tx, mut down_rx) = mpsc::channel::<InterfaceId>(4);
+        let client = spawn_local_client(LocalClientConfig {
+            disconnect_notify: Some(down_tx),
+            backoff: Some((Duration::from_millis(10), Duration::from_millis(20))),
+            ..LocalClientConfig::new(InterfaceId(99), &instance_name, 16)
+        })
+        .expect("first connect");
+        let _server_handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+
+        // The driver drops the interface: the handle, and with it both
+        // channel ends it owned, go away while the daemon is still there.
+        drop(client);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let text = captured(&logs);
+        assert!(
+            !text.contains("lost the shared instance"),
+            "a dropped interface is not a daemon outage; logs:\n{text}"
+        );
+        assert!(
+            !text.contains("reconnect attempt"),
+            "a dropped interface must not go on dialling; logs:\n{text}"
+        );
+        assert!(
+            down_rx.try_recv().is_err(),
+            "no disconnect is reported for an interface the driver itself dropped"
+        );
+    }
+
+    /// A daemon that never comes back is retried forever, and that has to
+    /// cost nearly nothing. The observable is the per-attempt log line the
+    /// test above requires: over a window, a backed-off client emits a
+    /// handful, a spinning one would emit thousands.
+    #[tokio::test]
+    async fn a_daemon_that_stays_away_is_retried_without_spinning() {
+        let (logs, _log_guard) = capture_logs();
+
+        let next_id = Arc::new(AtomicUsize::new(800));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+        let instance_name = format!("test_noreturn_{}", std::process::id());
+        bind_server_when_free(&instance_name, next_id, tx).await;
+
+        let base = Duration::from_millis(20);
+        let max = Duration::from_millis(60);
+        let client = spawn_local_client(LocalClientConfig {
+            backoff: Some((base, max)),
+            ..LocalClientConfig::new(InterfaceId(88), &instance_name, 16)
+        })
+        .expect("first connect");
+        let server_handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+
+        // The daemon goes away for good.
+        drop(server_handle);
+        drop(rx);
+
+        let window = Duration::from_secs(1);
+        tokio::time::sleep(window).await;
+
+        let text = captured(&logs);
+        let attempts = text.matches("reconnect attempt").count();
+        // The schedule over this window is 20, 20, 20, 40, then 60 forever:
+        // about 19 attempts. The bound is generous because the point is the
+        // order of magnitude — a tight loop would be five figures.
+        let ceiling = (window.as_millis() / base.as_millis()) as usize;
+        assert!(
+            attempts >= 3 && attempts <= ceiling,
+            "expected a backed-off handful of attempts in {window:?}, got {attempts} \
+             (ceiling {ceiling}); logs:\n{text}"
+        );
+        assert!(
+            !client.counters.is_online(),
+            "a client with no daemon must not report itself online"
+        );
+        assert!(
+            text.contains("reconnect attempt 1 failed")
+                && text.contains("reconnect attempt 2 failed"),
+            "every attempt is logged, not just the first; logs:\n{text}"
         );
     }
 

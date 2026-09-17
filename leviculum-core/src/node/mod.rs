@@ -2696,6 +2696,65 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// Notify core that the shared instance this node is a CLIENT of went
+    /// away, while the interface that reaches it stays registered.
+    ///
+    /// The client's IPC interface keeps its index, its name and its mode
+    /// across a daemon restart (the reconnecting client in
+    /// `interfaces::local` reuses one handle and one pair of channels for
+    /// the life of the process), so this is deliberately NOT
+    /// [`handle_interface_down`](Self::handle_interface_down): that one
+    /// deregisters the interface — name, mode, kind, HW MTU, local-client
+    /// flag — and nothing would register it again for a handle that never
+    /// left.
+    ///
+    /// What must go is the routing state cached against that interface.
+    /// Every path a client knows was learned through the daemon, and a
+    /// restarted daemon starts with an empty path table; keeping the
+    /// entries would have the client hand packets to a daemon that cannot
+    /// place them, and answer "I have a path" while it does not. Python
+    /// clears exactly these tables on the same occasion
+    /// (`Transport.shared_connection_disappeared`, Transport.py:3143-3155).
+    ///
+    /// Links are not torn down here, matching what an interface going down
+    /// does in this stack: a link whose far end is gone dies on its own
+    /// keepalive timeout, and one whose far end survived the daemon restart
+    /// keeps working once the IPC is back.
+    pub fn handle_shared_instance_disconnected(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+    ) -> crate::transport::TickOutput {
+        let iface_idx = iface.0;
+
+        let lost_paths = self.transport.remove_paths_for_interface(iface_idx);
+        crate::tracing::debug!(
+            "Shared instance on {} disappeared, dropped {} path(s)",
+            self.transport.iface_name(iface_idx),
+            lost_paths.len()
+        );
+        for hash in &lost_paths {
+            self.events.push(NodeEvent::PathLost {
+                destination_hash: crate::destination::DestinationHash::new(*hash),
+            });
+        }
+
+        self.transport.remove_link_entries_for_interface(iface_idx);
+        self.transport
+            .remove_reverse_entries_for_interface(iface_idx);
+
+        // Path requests we were holding to answer over the IPC can no longer
+        // be answered on the connection they were recorded against.
+        self.transport
+            .remove_pending_local_path_requests_for_interface(iface_idx);
+
+        let next_deadline_ms = self.next_deadline();
+        crate::transport::TickOutput {
+            actions: Vec::new(),
+            events: core::mem::take(&mut self.events),
+            next_deadline_ms,
+        }
+    }
+
     /// Notify core that one peer link inside a multi-peer interface has
     /// died (sans-I/O, Codeberg #365).
     ///

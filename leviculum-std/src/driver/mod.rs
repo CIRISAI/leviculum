@@ -801,6 +801,10 @@ struct EventLoopChannels {
     action_dispatch_rx: mpsc::Receiver<TickOutput>,
     new_interface_rx: mpsc::Receiver<InterfaceHandle>,
     reconnect_rx: mpsc::Receiver<InterfaceId>,
+    /// Loss of the shared instance this node is a client of. The local client
+    /// fires its id here on every disconnect; the loop drops the routing state
+    /// cached against the interface, which stays registered across the outage.
+    shared_instance_down_rx: mpsc::Receiver<InterfaceId>,
     /// Tunnel-synthesize initiation signal (Codeberg #64). A tunnel-capable TCP
     /// client fires its id here on every connect; the loop initiates the
     /// synthesize handshake toward the peer.
@@ -1506,6 +1510,13 @@ impl ReticulumNode {
         // to re-announce destinations on the recovered link.
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<InterfaceId>(16);
 
+        // Channel for the loss of the shared instance this node is a CLIENT of.
+        // The reconnecting local client fires its InterfaceId here the moment
+        // the daemon's socket closes, so the event loop can drop the routing
+        // state cached against an interface that stays registered across the
+        // outage (Python `Transport.shared_connection_disappeared`).
+        let (shared_instance_down_tx, shared_instance_down_rx) = mpsc::channel::<InterfaceId>(16);
+
         // Channel for tunnel-synthesize initiation (Codeberg #64 initiator side).
         // A tunnel-capable TCP client fires its InterfaceId here on every
         // successful connect (initial AND reconnect); the event loop then calls
@@ -1544,6 +1555,7 @@ impl ReticulumNode {
             &next_id,
             &new_iface_tx,
             &reconnect_tx,
+            &shared_instance_down_tx,
             &tunnel_notify_tx,
             &peer_event_tx,
         ) {
@@ -1819,6 +1831,7 @@ impl ReticulumNode {
                     action_dispatch_rx,
                     new_interface_rx: new_iface_rx,
                     reconnect_rx,
+                    shared_instance_down_rx,
                     tunnel_notify_rx,
                     remove_iface_rx,
                     peer_event_rx,
@@ -1865,6 +1878,7 @@ impl ReticulumNode {
         next_id: &Arc<AtomicUsize>,
         new_iface_tx: &mpsc::Sender<InterfaceHandle>,
         reconnect_tx: &mpsc::Sender<InterfaceId>,
+        shared_instance_down_tx: &mpsc::Sender<InterfaceId>,
         tunnel_notify_tx: &mpsc::Sender<InterfaceId>,
         peer_event_tx: &mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
     ) -> Result<InterfaceRegistry, Error> {
@@ -1968,9 +1982,15 @@ impl ReticulumNode {
         if let Some(ref instance_name) = self.connect_instance_name {
             let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             let handle = crate::interfaces::local::spawn_local_client(
-                id,
-                instance_name,
-                crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
+                crate::interfaces::local::LocalClientConfig {
+                    reconnect_notify: Some(reconnect_tx.clone()),
+                    disconnect_notify: Some(shared_instance_down_tx.clone()),
+                    ..crate::interfaces::local::LocalClientConfig::new(
+                        id,
+                        instance_name,
+                        crate::interfaces::local::LOCAL_DEFAULT_BUFFER_SIZE,
+                    )
+                },
             )?;
             tracing::info!("Connected to shared instance '{}'", instance_name);
             // Mark this as the uplink to the shared instance so packets arriving
@@ -3891,6 +3911,7 @@ async fn run_event_loop(
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;
     let mut reconnect_rx = channels.reconnect_rx;
+    let mut shared_instance_down_rx = channels.shared_instance_down_rx;
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut remove_iface_rx = channels.remove_iface_rx;
     let mut peer_event_rx = channels.peer_event_rx;
@@ -4500,6 +4521,27 @@ async fn run_event_loop(
                 let output = {
                     let mut core = inner.lock_recover();
                     core.handle_interface_up(iface_id.0)
+                };
+                tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
+            }
+
+            // Branch 6b: the shared instance this node is a client of went
+            // away. The interface stays registered (one handle and one
+            // interface index for the life of the process, see
+            // `spawn_local_client`), so there is no Disconnected to key off;
+            // what has to go is the routing state cached against it, because
+            // the daemon that comes back starts with an empty path table.
+            // Python does the same on the same occasion
+            // (`Transport.shared_connection_disappeared`).
+            Some(iface_id) = shared_instance_down_rx.recv() => {
+                tracing::warn!(
+                    "Shared instance on interface {} ({}) disappeared, dropping its paths",
+                    iface_id,
+                    registry.name_of(iface_id)
+                );
+                let output = {
+                    let mut core = inner.lock_recover();
+                    core.handle_shared_instance_disconnected(iface_id)
                 };
                 tighten_next_poll(&mut next_poll, dispatch_output(output, &mut registry, event_sink.as_mut(), &inner, &mut retry_queues, &mut retry_queue_warned, &mut retry_queue_max_depth, &ifac_configs, remote_mgmt.as_ref(), discovery_storage.as_deref(), discovery_network_identity.as_deref(), &mut discovery_heard_ifac, &completions, core_processor.as_mut()));
             }
@@ -8611,6 +8653,7 @@ mod tests {
         let (action_tx, action_rx) = mpsc::channel(8);
         let (new_iface_tx, new_iface_rx) = mpsc::channel(1);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
+        let (_shared_down_tx, shared_instance_down_rx) = mpsc::channel(1);
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
         let (remove_tx, remove_rx) = mpsc::channel(1);
         let (_peer_event_tx, peer_event_rx) = mpsc::channel(1);
@@ -8624,6 +8667,7 @@ mod tests {
                 action_dispatch_rx: action_rx,
                 new_interface_rx: new_iface_rx,
                 reconnect_rx,
+                shared_instance_down_rx,
                 tunnel_notify_rx: tunnel_rx,
                 remove_iface_rx: remove_rx,
                 peer_event_rx,
