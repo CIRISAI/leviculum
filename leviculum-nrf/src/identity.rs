@@ -45,8 +45,15 @@ static PN_HASH: Mutex<CriticalSectionRawMutex, Cell<Option<[u8; 16]>>> =
 /// reader attached at any time — periculum's `lxmf_pn_board` above all —
 /// can resolve the board-hosted mailbox without catching the boot
 /// window.
+///
+/// Re-emits the banner: this runs after [`note_boot_identity`], whose
+/// line therefore said `lxmf_propagation=none` on a boot that does run
+/// the role. Without the second line the PN hash would reach the
+/// persistent tail only via a periodic banner, and a board that resets
+/// before the first one has nothing to replay (#234).
 pub fn note_propagation(hash: [u8; 16]) {
     PN_HASH.lock(|cell| cell.set(Some(hash)));
+    log_banner();
 }
 
 /// The `lxmf.propagation` destination this boot registered, or `None`

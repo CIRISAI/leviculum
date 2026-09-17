@@ -92,11 +92,11 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:1072`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1100`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1112`; the
+`leviculum-nrf/src/bin/t114.rs:1056`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1084`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1096`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:1049`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:1039`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:3982`). So the identity-shaped

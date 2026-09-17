@@ -888,3 +888,77 @@ fn the_firmware_still_emits_the_transmit_deferral_line() {
         );
     }
 }
+
+/// Nothing a prober needs to address the board is written on the gated path
+/// (Codeberg #234).
+///
+/// `log_fmt` returns before it touches either the ring or the persistent tail
+/// while `RUNTIME_DRAIN_OPEN` is unset (`leviculum-nrf/src/log.rs`), and the
+/// gate opens on the first DTR-assert or after 30 s — both far later than the
+/// boot sequence that registers the destinations. A one-shot `[IDENTITY]`
+/// line written there is not late, it is gone: it never reaches the buffer
+/// that survives the reset either, so the next boot's replay cannot bring it
+/// back. That cost an external tester a full round trip, and the board's
+/// `rnstransport.probe` hash is not obtainable any other way except by
+/// catching an announce.
+///
+/// Two halves, and both are load-bearing. The lines are on the critical path,
+/// so a reader attached inside the ring's memory still gets them; and the
+/// banner repeats one of them, so a reader that attaches after the ring has
+/// lapped gets it anyway. Either half alone leaves a window with no answer.
+#[test]
+fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
+    for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
+        let src = nrf_source(bin);
+        assert!(
+            !src.contains(r#"log_fmt("[IDENTITY] ""#),
+            "leviculum-nrf/src/{bin} writes an [IDENTITY] line through the \
+             runtime-gated log_fmt; pre-attach that line is dropped, not \
+             delayed, and nothing re-emits it"
+        );
+        // The boot marker carries the same five identity bytes the display
+        // shows, and it is the only line saying the node core came up at all;
+        // the provenance pair says whether the hash the banner then prints is
+        // the board's own or one made up this boot, which is what an operator
+        // is sent to the debug port to read after a flash
+        // (`docs/src/firmware/recovery.md`).
+        for line in [
+            "LNode started -- identity",
+            "Identity loaded from flash",
+            "No identity in flash",
+        ] {
+            let at = src
+                .find(line)
+                .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} no longer emits `{line}`"));
+            let head = &src[..at];
+            let critical = head.rfind("log_critical!");
+            for gated in ["info!(", "log_fmt("] {
+                assert!(
+                    head.rfind(gated) < critical,
+                    "leviculum-nrf/src/{bin} emits `{line}` through {gated}, which is \
+                     the runtime-gated path"
+                );
+            }
+        }
+        // The rescue for a reader that attaches after the 8 KiB ring has
+        // lapped: the periodic banner says it again.
+        assert!(
+            src.contains("leviculum_nrf::identity::log_banner()"),
+            "leviculum-nrf/src/{bin} no longer repeats the [IDENTITY] banner, so a \
+             late reader has only the boot window to catch it in"
+        );
+    }
+    let identity = nrf_source("identity.rs");
+    assert!(
+        identity.contains("crate::log_critical!"),
+        "leviculum-nrf/src/identity.rs no longer emits its banner on the \
+         boot-critical path"
+    );
+    // Every hash the banner publishes is on that one line, which is what
+    // makes the per-BSP duplicates removable rather than merely redundant.
+    assert!(
+        identity.contains("[IDENTITY] identity={} probe={} lxmf={} lxmf_propagation={}"),
+        "the [IDENTITY] banner lost a field; a hash that is no longer on it has \
+         no other gate-free path to a reader"
+    );
+}

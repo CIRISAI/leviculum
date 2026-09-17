@@ -117,8 +117,11 @@ board's `identity_flash_page`, e.g. `0xEC000` on the T114,
 `leviculum-nrf/src/boards/t114.rs:173`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
-log prints `Identity loaded from flash` and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:180-184`).
+log prints `Identity loaded from flash`
+(`leviculum-nrf/src/bin/t114.rs:208`) and an `[IDENTITY]` line with the
+full hash (`leviculum-nrf/src/bin/t114.rs:554`, and again on the 5 s
+banner). Both are on the boot-critical log path, so attaching after the
+board has come up still shows them (Codeberg #234).
 
 ## When USB stays dark
 

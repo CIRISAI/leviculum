@@ -85,23 +85,36 @@ picocom /dev/leviculum-debug -b 115200
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
 every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1259-1268`, for the
+(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1256-1265`, for the
 banner task.) Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
 
-> **The identity lines are not among them in practice.** The firmware
-> prints `LNode started -- identity: …`, `[IDENTITY] t114_node=…` and
-> `[IDENTITY] t114_probe=…` once during boot
-> (`leviculum-nrf/src/bin/t114.rs:181-199`), but all three go through
-> the runtime-gated log path: with no reader attached yet, `log_fmt`
-> counts the line and returns before it reaches either the ring buffer
-> or the persistent tail (`leviculum-nrf/src/log.rs:159-163`). A reader
-> that attaches after boot sees them replaced by the gate's own
-> summary, `[LOG_GATE] opened, dropped N runtime lines pre-attach`, and
-> nothing re-emits them later. Read the destination hash off the
-> network instead — see [Finding the node's destination
-> hash](#finding-the-nodes-destination-hash).
+The hashes a prober needs are among them, on one line:
+
+```
+[IDENTITY] identity=<32 hex> probe=<32 hex> lxmf=<32 hex> lxmf_propagation=<32 hex>
+```
+
+`probe=` is the `rnstransport.probe` destination — the address
+[`rnprobe`](#finding-the-nodes-destination-hash) wants — and a
+destination this boot did not register reads `none` rather than a
+string of zeroes. The line is emitted once the boot has registered its
+destinations and then again in the 5 s banner
+(`leviculum-nrf/src/identity.rs`, `log_banner`), so attaching late
+costs at most one banner period.
+
+> **It has to be on the critical log path, and it is.** Until 2026-09-17
+> the three older lines — `LNode started -- identity: …`,
+> `[IDENTITY] t114_node=…`, `[IDENTITY] t114_probe=…` — went through
+> `log_fmt`, which is runtime-gated: with no reader attached yet it
+> counts the line and returns *before* the ring buffer and before the
+> reset-surviving tail (`leviculum-nrf/src/log.rs`, `log_fmt`). The gate
+> opens on the first DTR-assert or after 30 s, both later than the lines
+> were written, so a reader saw only the gate's own summary,
+> `[LOG_GATE] opened, dropped N runtime lines pre-attach`, and nothing
+> re-emitted them (Codeberg #234). The per-board duplicates are gone; the
+> banner above says the same values on `log_critical!` and repeats them.
 
 ## Querying panic evidence over the debug port
 
@@ -236,8 +249,11 @@ A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
 2 hours (`leviculum-core/src/node/mod.rs:513-517`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:159`).
-The hash is carried in the announce itself, so the way to learn it is
-to receive one, not to read it off the debug port.
+The hash is carried in the announce itself, but it is also printed on
+the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated
+every 5 s (see [Reading the debug port](#reading-the-debug-port)). That
+is the quicker route when the board is cabled. Receiving an announce is
+the route that needs no cable, and the one below.
 
 With the interface configured and the daemon running, press the board's
 reset button and wait about 20 s. The daemon reopens the port by itself

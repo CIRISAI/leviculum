@@ -235,12 +235,16 @@ async fn main(spawner: Spawner) {
 
     let identity_loaded = {
         use leviculum_core::identity_store::IdentityStore;
+        // Critical for the same reason as the `[IDENTITY]` banner below
+        // (#234): this says whether the hash that banner prints was the
+        // board's own or made up this boot, and the recovery doc sends an
+        // operator to the debug port to read exactly that after a flash.
         if let Ok(Some(identity)) = id_store.load() {
-            info!("Identity loaded from flash");
+            log_critical!("Identity loaded from flash");
             builder = builder.identity(identity);
             true
         } else {
-            info!("No identity in flash, generating new");
+            log_critical!("No identity in flash, generating new");
             false
         }
     };
@@ -304,25 +308,24 @@ async fn main(spawner: Spawner) {
     node.set_interface_name(2, alloc::string::String::from("ble"));
     node.set_interface_hw_mtu(2, 564);
 
+    // #234: boot-critical, because `log_fmt` DROPS a line while the
+    // runtime-drain gate is shut — it returns before the ring buffer and
+    // before the reset-surviving tail — and the gate opens on the first
+    // DTR-assert or after 30 s, both long after this point. A one-shot
+    // line written there is not late, it is gone, and nothing re-emits it.
+    // The full hashes are no longer spelled out here at all: the
+    // `[IDENTITY]` banner below carries every one of them, on the critical
+    // path and repeated every 5 s, so a reader attached at any moment gets
+    // them instead of only one attached across the boot.
     let hash = node.identity().hash();
-    info!(
+    log_critical!(
         "LNode started -- identity: {:02X}{:02X}{:02X}{:02X}{:02X}",
-        hash[0], hash[1], hash[2], hash[3], hash[4]
+        hash[0],
+        hash[1],
+        hash[2],
+        hash[3],
+        hash[4]
     );
-    // Full identity hash for benchmark trace correlation
-    leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-        "rak_node={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
-        hash[8], hash[9], hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]
-    ));
-    if let Some(probe_hash) = node.probe_dest_hash() {
-        let ph = probe_hash.as_bytes();
-        leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "rak_probe={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
-            ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
-        ));
-    }
 
     // No QSPI on this module: `CONFIG.qspi_part` is `None`, the six pins
     // are never configured, and there is no `[STG] qspi-init` stage to
@@ -566,16 +569,10 @@ async fn main(spawner: Spawner) {
     // LXMF signature against, and it is useful on its own — a node that
     // announces it can be addressed by name instead of by hex string.
     let delivery_hash = leviculum_nrf::telemetry::register_delivery_destination(&mut node);
-    if let Some(hash) = delivery_hash.as_ref() {
-        let dh = hash.as_bytes();
-        leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "rak_lxmf_delivery={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            dh[0], dh[1], dh[2], dh[3], dh[4], dh[5], dh[6], dh[7],
-            dh[8], dh[9], dh[10], dh[11], dh[12], dh[13], dh[14], dh[15]
-        ));
-    }
-    // All three hashes a prober needs, on one boot-critical line (and
-    // from here on in the periodic banner and the identity query).
+    // Every hash a prober needs, on one boot-critical line (and from
+    // here on in the periodic banner and the identity query). This is
+    // the only place they are written: a per-BSP copy on the gated path
+    // was a line a late reader never saw (#234).
     leviculum_nrf::identity::note_boot_identity(
         *node.identity().hash(),
         node.probe_dest_hash().map(|h| *h.as_bytes()),
@@ -590,12 +587,6 @@ async fn main(spawner: Spawner) {
     let pn_config = leviculum_nrf::pn::load_config_at_boot(rak4631::CONFIG.telemetry_flash_page);
     let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
-        let ph = pn.destination_hash().as_bytes();
-        leviculum_nrf::log::log_fmt("[IDENTITY] ", format_args!(
-            "rak_lxmf_propagation={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7],
-            ph[8], ph[9], ph[10], ph[11], ph[12], ph[13], ph[14], ph[15]
-        ));
         leviculum_nrf::identity::note_propagation(*pn.destination_hash().as_bytes());
         spawner.must_spawn(leviculum_nrf::pn::miner_task());
     } else {
