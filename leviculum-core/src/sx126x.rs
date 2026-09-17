@@ -193,9 +193,17 @@ pub fn rx_extend_ms(
 ///
 /// `RxDone` or `Timeout` latched returns `None`, inherited from
 /// [`rx_extend_ms`]: the window is holding a reception that has already
-/// concluded, and there is nothing still arriving to wait for. Harvesting that
-/// completed frame instead of tearing it down would be a second behaviour and
-/// is deliberately not this one.
+/// concluded, and there is nothing still arriving to wait for.
+///
+/// **`None` is not "free to end the window".** It says only that no wait is
+/// owed, and the caller has to tell the two windows it covers apart: an empty
+/// channel costs nothing to stand down, a latched `RxDone` is a whole frame in
+/// the chip's buffer that a standby destroys. Reading this `None` as the
+/// former for both is what cost `bench_dual_pair_slow` a probe on
+/// 2026-09-17 — the frame was on the air, a third radio heard it whole, and
+/// `[SX_RX_TEARDOWN] site=select preamble=1 header=1 rxdone=1` is where it
+/// went. `leviculum_rx_arming::stand_down_for_tx` now harvests that case; this
+/// function is still the one that answers the wait, and only the wait.
 pub fn tx_defer_ms(
     flags: u16,
     bw_hz: u32,

@@ -66,6 +66,17 @@
 //! spent once per call and it ends early on the terminating IRQ, so a busy
 //! channel delays a transmit by that one bound and then keys up regardless.
 //!
+//! A reception that is no longer *arriving* — `RxDone` already latched, the
+//! frame whole in the chip's buffer — has nothing to wait for, and the first
+//! shape of that branch read "no wait owed" as "free to end the window" and
+//! destroyed it anyway. The rig found it in the full hardware run: one probe
+//! of seven lost on `bench_dual_pair_slow` (2026-09-17), the frame transmitted
+//! at 00:32:53.989Z, heard whole by a third radio 2.4 s later, and gone at the
+//! target under `[SX_RX_TEARDOWN] site=select preamble=1 header=1 rxdone=1
+//! armed_ms=10098`. Such a window is now harvested rather than stood down —
+//! the frame is taken and handed up by the same route every other reception
+//! takes — and the `[SX_RX_HARVEST]` line reports it.
+//!
 //! # What this crate deliberately does not do
 //!
 //! No spacing, no jitter, no periodic delay, and no continuous RX. The one
@@ -89,10 +100,19 @@
 //! carries the ratio the guard has to justify itself with: `outcome=frame`
 //! against `outcome=timeout`, per `reason=`.
 //!
+//! `[SX_RX_HARVEST]` is the fourth, and it reports a behaviour too: a
+//! completed reception taken out from under a transmit instead of stood down
+//! on top of. It renders `[SX_RX_TEARDOWN]`'s fields, in that order, so the
+//! saved and the lost half of one population are read by one parser and
+//! compared at the same `site=`. It is deliberately not folded into
+//! `[SX_TX_DEFER] outcome=frame`: a harvest waits for nothing, and counting it
+//! there would credit the deferral's ratio with frames the deferral had no
+//! part in.
+//!
 //! Every `[SX_RX_ADOPT]` carrying a latched preamble, header or `RxDone` is a
 //! frame the previous code destroyed — the counterfactual, measured rather
 //! than argued, and measurable only because the fix counts what it saves.
-//! Every `[SX_RX_TEARDOWN]` carrying one is a frame this still loses. Both
+//! Every `[SX_RX_TEARDOWN]` carrying one is a frame this still loses. All
 //! lines are emitted with the flags as read, including the all-zero case: a
 //! counter that only speaks when it has bad news gives a numerator with no
 //! denominator, and the question is a rate.
@@ -418,6 +438,41 @@ impl core::fmt::Display for RxTeardown {
     }
 }
 
+/// One standing window whose reception had already completed when a transmit
+/// asked for the window, taken instead of stood down.
+///
+/// [`Display`](core::fmt::Display) is the body of the `[SX_RX_HARVEST]` line,
+/// and it is deliberately `[SX_RX_TEARDOWN]`'s body field for field: the two
+/// are the saved and the lost half of one population, and a capture answers
+/// "how often does a transmit arrive on top of a finished frame, and how often
+/// does that frame survive it" only if one parser reads both.
+///
+/// Not folded into `[SX_TX_DEFER]`, which reports the *wait*: a harvest waits
+/// for nothing, and counting it as `outcome=frame` would inflate the ratio the
+/// deferral has to justify itself with by cases the deferral had no part in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RxHarvest {
+    /// The path that asked for the window — the teardown that did not happen.
+    pub site: &'static str,
+    /// What the chip had latched when the harvest read it. `rxdone` is set by
+    /// construction; the other two ride along because the line is read
+    /// against the teardown's.
+    pub latch: RxLatch,
+    /// How long the window had been standing, in milliseconds, measured from
+    /// its own arming.
+    pub armed_ms: u32,
+}
+
+impl core::fmt::Display for RxHarvest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "site={} {} armed_ms={}",
+            self.site, self.latch, self.armed_ms
+        )
+    }
+}
+
 /// What earned a transmit its deferral: the strongest evidence the standing
 /// window had latched when the transmit asked to have it stood down.
 ///
@@ -540,6 +595,12 @@ pub enum RxEvent<'a, E> {
     Adopted(&'a RxAdopt),
     /// A standing window was stood down.
     TornDown(&'a RxTeardown),
+    /// A standing window was holding a reception that had already completed
+    /// when a transmit asked for the window; the frame was taken and handed
+    /// up rather than destroyed. Emitted in the teardown's place, once, before
+    /// the hand-off — which yields — for the same reason [`RxEvent::Deferred`]
+    /// is.
+    Harvested(&'a RxHarvest),
     /// A transmit waited for a reception the standing window was holding
     /// instead of ending it. Emitted once per deferral, after the wait and
     /// before the frame (if there was one) is handed up, so the capture reads
@@ -885,6 +946,55 @@ where
     radio.disarm().await
 }
 
+/// Take a reception that had already completed, then stand the window down.
+///
+/// The deferral's sibling, and the case its bound has no answer for: there is
+/// nothing still arriving to wait for, so `defer_ms` says `None` — and the
+/// sequence that read that `None` as "free to end the window" threw the frame
+/// in the chip's buffer away with it. The frame is taken by the same
+/// [`RxPort::take_latched_frame`] an adopted window's is, and reaches the sink
+/// by the same route, so it is indistinguishable downstream from any other.
+///
+/// The `[SX_RX_HARVEST]` line is emitted only when a frame actually came out.
+/// A latched `RxDone` whose payload fails its CRC, or a readout that fails on
+/// the bus, yields nothing and is reported as what it is — a teardown of a
+/// window that was holding a reception — so the saved and the lost population
+/// at this site stay countable against each other rather than one of them
+/// claiming the other's samples.
+///
+/// The standby below is the same single one every other path spends: on a
+/// successful take the chip left RX at the reception and it is the no-op it
+/// always is, and on the two failures the window is still standing and this is
+/// the teardown.
+async fn harvest<R, S>(
+    radio: &mut R,
+    site: &'static str,
+    standing: StandingWindow<R::Window>,
+    latch: RxLatch,
+    buf: &mut [u8],
+    sink: &mut S,
+) -> Result<(), R::Error>
+where
+    R: RxWindowProbe,
+    S: FrameSink<Meta = R::Meta>,
+{
+    let Ok(Some((len, meta))) = radio.take_latched_frame(buf).await else {
+        return tear_down(radio, site, standing, latch).await;
+    };
+    let harvested = RxHarvest {
+        site,
+        latch,
+        armed_ms: standing.stood_ms,
+    };
+    // Before the hand-off, which yields, for the reason `stand_down_for_tx`
+    // gives for the deferral line: a line emitted after the sink had yielded
+    // would carry a `t=` from after the main task ran.
+    radio.report(RxEvent::Harvested(&harvested));
+    let n = (len as usize).min(buf.len());
+    sink.deliver(&buf[..n], &meta).await;
+    stand_down(radio, site).await
+}
+
 /// Stand a listening receiver down for a transmit — but if the window is
 /// holding a frame that is still arriving, wait for that frame first.
 ///
@@ -957,6 +1067,13 @@ where
         .defer_ms(&latch)
         .zip(TxDeferReason::from_latch(&latch))
     else {
+        // No bound answers for two windows that have nothing in common. One
+        // was listening to an empty channel and costs nothing to end; the
+        // other is holding a frame that already finished arriving, and ending
+        // *that* one destroys it. Only the first is free.
+        if latch.rxdone {
+            return harvest(radio, site, standing, latch, buf, sink).await;
+        }
         return tear_down(radio, site, standing, latch).await;
     };
 
@@ -1060,6 +1177,8 @@ mod tests {
         Adopt(String),
         /// A rendered `[SX_RX_TEARDOWN]` body.
         Teardown(String),
+        /// A rendered `[SX_RX_HARVEST]` body.
+        Harvest(String),
         /// A lost sample, with the site that would have been on the line.
         ProbeErr(String),
         /// The bounded wait for a reception in progress, carrying the bound it
@@ -1301,6 +1420,7 @@ mod tests {
             let op = match event {
                 RxEvent::Adopted(a) => Op::Adopt(format!("{a}")),
                 RxEvent::TornDown(t) => Op::Teardown(format!("{t}")),
+                RxEvent::Harvested(h) => Op::Harvest(format!("{h}")),
                 RxEvent::Deferred(d) => Op::Defer(format!("{d}")),
                 RxEvent::ProbeFailed { at, .. } => Op::ProbeErr(format!("at={at}")),
             };
@@ -2223,6 +2343,19 @@ mod tests {
         rxdone: false,
     };
 
+    /// A window whose reception has already completed: the frame is whole and
+    /// sitting in the chip's buffer, and the preamble and header bits that
+    /// preceded it are still latched. Exactly what the rig capture read at the
+    /// teardown that cost `bench_dual_pair_slow` its packet
+    /// (`[SX_RX_TEARDOWN] site=select preamble=1 header=1 rxdone=1
+    /// armed_ms=10098`, 2026-09-17T00:32:56.423Z).
+    const CONCLUDED: RxLatch = RxLatch {
+        raw: 0x0016,
+        preamble: true,
+        header: true,
+        rxdone: true,
+    };
+
     /// Set a fake up mid-reception: one window standing, holding `latch`, with
     /// the frame completing after `completes_after_ms` if it ever does.
     fn mid_reception<'a>(
@@ -2634,5 +2767,136 @@ mod tests {
             Some(TxDeferReason::Preamble)
         );
         assert_eq!(TxDeferReason::from_latch(&RxLatch::CLEAR), None);
+    }
+
+    // The harvest: a reception that concluded before the transmit asked.
+
+    /// The defect instance. A transmit that finds `RxDone` already latched
+    /// takes the completed frame instead of standing the window down on top
+    /// of it.
+    ///
+    /// There is nothing to wait for here — the frame is whole — so the
+    /// deferral does not apply and `defer_ms` correctly answers `None`. What
+    /// the sequence did with that answer was tear the window down, and the
+    /// frame in the buffer went with it. On the rig that was one probe reply
+    /// never delivered: `bench_dual_pair_slow` 2026-09-17, rnode_a ->
+    /// lnode_a.probe sent=7 received=6, the missing probe transmitted at
+    /// 00:32:53.989Z, heard whole by the third radio at 00:32:56.406Z, and
+    /// discarded at lnode_a by
+    /// `[SX_RX_TEARDOWN] site=select preamble=1 header=1 rxdone=1
+    /// armed_ms=10098` at 00:32:56.423Z — the only teardown in that boot
+    /// holding a completed reception, against the only probe lost.
+    #[test]
+    fn a_completed_reception_is_taken_rather_than_torn_down_for_a_transmit() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0xaa, 0xbb, 0xcc];
+        let mut port = mid_reception(&log, CONCLUDED, None, alloc::vec![Some(payload.clone())]);
+        port.now += 10_098;
+        let before = log.ops().len();
+
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 1,
+        };
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("stood down");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            0,
+            "a concluded reception is not waited for, after={after:?}"
+        );
+        let deliver = after
+            .iter()
+            .position(|op| *op == Op::Deliver(payload.clone()))
+            .expect("the completed reception must reach the sink");
+        let transmit = after
+            .iter()
+            .position(|op| *op == Op::Transmit)
+            .expect("the transmit must still happen");
+        assert!(
+            deliver < transmit,
+            "the transmit must follow the reception, after={after:?}"
+        );
+        // And it is not counted as a loss: the teardown line is the one the
+        // capture reads as "a frame this still loses", so a harvest that also
+        // emitted it would make that population unreadable.
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::Teardown(_)))
+                .count(),
+            0,
+            "a harvested frame is not a teardown, after={after:?}"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Harvest(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=select preamble=1 header=1 rxdone=1 armed_ms=10098"
+        );
+    }
+
+    /// Control: the harvest is conditional on a completed reception and on
+    /// nothing else. A clear window still runs the sequence `stand_down`
+    /// always ran, and the two live-but-unfinished latches still defer rather
+    /// than harvest — otherwise the branch would be a second, unbounded wait
+    /// wearing the harvest's name.
+    #[test]
+    fn only_a_concluded_window_is_harvested() {
+        for (name, latch, completes, inbox) in [
+            ("clear", RxLatch::CLEAR, None, Vec::new()),
+            ("preamble", LIVE_PREAMBLE, None, Vec::new()),
+            (
+                "header",
+                LIVE_HEADER,
+                Some(100),
+                alloc::vec![Some(alloc::vec![0x01])],
+            ),
+        ] {
+            let log = OpLog::default();
+            let mut port = mid_reception(&log, latch, completes, inbox);
+            let before = log.ops().len();
+            let mut buf = [0u8; 8];
+            let mut sink = FakeSink {
+                log: &log,
+                pends: 0,
+            };
+            block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("stood down");
+            let ops = log.ops();
+            let after = &ops[before..];
+            assert_eq!(
+                after
+                    .iter()
+                    .filter(|op| matches!(op, Op::Harvest(_)))
+                    .count(),
+                0,
+                "{name}: nothing to harvest, after={after:?}"
+            );
+        }
+    }
+
+    /// The harvest line renders in the grammar the host greps: the same
+    /// fields as `[SX_RX_TEARDOWN]`, in the same order, so the saved and the
+    /// lost population at a site are read by one parser and compared directly.
+    #[test]
+    fn the_harvest_line_renders_the_site_the_flags_and_the_age() {
+        assert_eq!(
+            format!(
+                "{}",
+                RxHarvest {
+                    site: "select",
+                    latch: CONCLUDED,
+                    armed_ms: 10_098,
+                }
+            ),
+            "site=select preamble=1 header=1 rxdone=1 armed_ms=10098"
+        );
     }
 }

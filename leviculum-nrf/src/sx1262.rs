@@ -1379,6 +1379,9 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
             leviculum_rx_arming::RxEvent::TornDown(teardown) => {
                 crate::log::log_fmt("[SX_RX_TEARDOWN] ", format_args!("{teardown}"));
             }
+            leviculum_rx_arming::RxEvent::Harvested(harvest) => {
+                crate::log::log_fmt("[SX_RX_HARVEST] ", format_args!("{harvest}"));
+            }
             leviculum_rx_arming::RxEvent::Deferred(defer) => {
                 crate::log::log_fmt("[SX_TX_DEFER] ", format_args!("{defer}"));
             }

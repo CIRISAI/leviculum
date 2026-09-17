@@ -11,6 +11,7 @@
 //! [SX_RX_ARM] site=<tag> timeout_ms=<u32> dark_ms=<u64|first>  (every SetRx)
 //! [SX_RX_ADOPT] latched=0xNNNN preamble=<0|1> header=<0|1> rxdone=<0|1> stood_ms=<u32>
 //! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
+//! [SX_RX_HARVEST] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32>
 //! [SX_TX_DEFER] waited_ms=<u64> reason=<preamble|header> outcome=<frame|timeout|abandoned>
 //! ```
 //!
@@ -20,6 +21,14 @@
 //! destroyed, and `site=` on the teardown says by which caller. Both are
 //! emitted with the flags as read, all-zero included; a line that appeared
 //! only when it had bad news would give a numerator with no denominator.
+//!
+//! `[SX_RX_HARVEST]` is the teardown's other half, at the same `site=` and in
+//! the same fields: a window whose reception had already completed when a
+//! transmit asked for it, taken rather than destroyed. Read as a fraction of
+//! the teardowns carrying `rxdone=1` at that site it is the rate at which that
+//! collision still costs a frame — which, after the fix that introduced the
+//! line, should be the readout failures and nothing else. The shared field
+//! order is why `parse_rx_latch` below takes the tag as an argument.
 //!
 //! `[SX_TX_DEFER]` is the third of that family and the one that reports a
 //! behaviour rather than an observation: a transmit that found a reception
@@ -671,6 +680,15 @@ fn the_adopt_and_teardown_lines_parse() {
         ),
         Some((true, false, false, 214))
     );
+    // The harvest renders the teardown's fields, so one parser reads both and
+    // the saved and the lost half of a site are directly comparable.
+    assert_eq!(
+        parse_rx_latch(
+            "SX_RX_HARVEST",
+            "[SX_RX_HARVEST] site=select preamble=1 header=1 rxdone=1 armed_ms=10098 t=266026"
+        ),
+        Some((true, true, true, 10098))
+    );
     // A replay of the previous boot's tail still parses.
     assert_eq!(
         parse_rx_latch(
@@ -720,7 +738,7 @@ fn the_adopt_and_teardown_lines_parse() {
 #[test]
 fn the_firmware_still_emits_both_halves_of_the_adoption_instrument() {
     let sx = nrf_source("sx1262.rs");
-    for tag in ["[SX_RX_ADOPT] ", "[SX_RX_TEARDOWN] "] {
+    for tag in ["[SX_RX_ADOPT] ", "[SX_RX_TEARDOWN] ", "[SX_RX_HARVEST] "] {
         // The quoted form: the tag as a string literal in the source, so a
         // mention in a comment does not satisfy the pin.
         assert!(
