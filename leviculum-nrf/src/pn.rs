@@ -41,6 +41,33 @@
 //! throttles during sequential validation
 //! (`reference/LXMF/LXMF/LXMRouter.py:2273`).
 //!
+//! That measurement is in: **3655-3667 ms**, four samples, one board,
+//! `ble_pn_board_upload` on 2026-09-16 (firmware `5349cecd`). The cost
+//! does not follow the announced stamp cost — the workblock is a fixed
+//! 1000 rounds (`leviculum_lxmf::constants::WORKBLOCK_EXPAND_ROUNDS_PN`)
+//! and only `min_accepted_cost() == 0` without value computation skips
+//! the walk entirely (see `Engine::validate` below). Peering stamps are
+//! unaffected: their workblock is 25 rounds, forty times cheaper, which
+//! is why board-to-board sync completes where a client upload does not.
+//!
+//! ## What those seconds cost on a fast carrier (leviculum#397)
+//!
+//! A client upload arrives as a plain link packet, and the uploader
+//! holds a packet receipt whose deadline is `max(rtt * 6, 5 ms)` —
+//! Python `reference/Reticulum/RNS/Packet.py:431`, ours
+//! `leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR`. We prove only
+//! after the record is durable, which is right and is the reference's
+//! own ordering (`reference/LXMF/LXMF/LXMRouter.py:2233-2255`), but it
+//! puts the whole validation inside the uploader's window. Below an RTT
+//! of roughly 610 ms the window is shorter than the walk and the proof
+//! is always late: the uploader's receipt fails, LXMF tears the link
+//! down (`reference/LXMF/LXMF/LXMessage.py:616-620`), our proof lands on
+//! a closed link, and the client retries the same message every ~16 s
+//! while we accept every copy (`PN_ACCEPT ... dup=1`). Over LoRa the
+//! window is seconds wide and nothing shows; over BLE (measured RTT
+//! 295-484 ms, so a 1.8-2.9 s window) no upload from a host has ever
+//! concluded.
+//!
 //! # Heap budget (#388)
 //!
 //! The boot line `HEAP_BUDGET links=<max> ble_links=<m> per_link=<b>
