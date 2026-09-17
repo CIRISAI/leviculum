@@ -40,7 +40,32 @@
 //! | `LOADTEST_CHURN_WORKERS` | 16  | connections repeatedly opened/closed |
 //! | `LOADTEST_CHURN_PKTS`    | 4   | packets per churn connection before close |
 //! | `LOADTEST_MAX_RSS_GROWTH_PCT` | 40 | max steady-phase RSS growth over warm-up |
+//! | `LOADTEST_SAMPLE_MS`     | 250 | RSS/fd/CPU sampler cadence (ms) |
 //! | `LOADTEST_LNSD_BIN`      | auto | path to the `lnsd` binary |
+//!
+//! ## The delivery record (Codeberg #208)
+//!
+//! Every run prints, and with `LEVICULUM_DELIVERY_LOG=<file>` also appends, one
+//! line — green runs and red runs alike, emitted before the assertions:
+//!
+//! ```text
+//! DELIVERY test=lnsd_soak sent=377285 recv=375570 pct=99.5454 ci95=99.5234-99.5665 //!   conns=128 pkt_ms=15 secs=20 churn_workers=16 churn_conns=42 cores=4 //!   hub_cpu_pct=82.4 gen_cpu_pct=210.5 host_busy_pct=96.1
+//! ```
+//!
+//! The assertion here is binary (100 % or bust); the line is the distribution
+//! behind it. #208 recorded one 99.5454 % run at 128 connections / 15 ms and
+//! could not say whether the hub or the four-core host it shared with the
+//! harness was the cause, because nobody had ever swept delivery against
+//! connection count and rate. So each line carries its cell coordinates — two
+//! runs at different `conns`/`pkt_ms` offered different volumes and cannot be
+//! pooled — and the CPU occupancy of the hub, of the harness driving it
+//! (generator plus sampler, the cost #208 could not account for), and of the
+//! machine. That is what makes a cell interpretable: delivery below 100 % while
+//! nothing is saturated is a defect in the hub, delivery below 100 % past
+//! saturation is a load ceiling the gate should name.
+//!
+//! `scripts/sweep-tcp-hub.sh` drives the sweep and reads the matrix back out of
+//! the log.
 //!
 //! ## Running
 //!
@@ -368,12 +393,115 @@ fn count_open_fds(pid: u32) -> Option<usize> {
     Some(std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?.count())
 }
 
+/// Clock ticks per second as `/proc` reports them. Both `/proc/<pid>/stat` and
+/// `/proc/stat` are exported in USER_HZ, which Linux fixes at 100 whatever
+/// CONFIG_HZ is, so ticks become seconds without a libc dependency.
+const USER_HZ: f64 = 100.0;
+
+/// `utime + stime` of `pid` in USER_HZ ticks, i.e. the CPU time that process
+/// has burned since it started.
+fn read_proc_cpu_ticks(pid: u32) -> Option<u64> {
+    proc_cpu_ticks_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Fields 14 (`utime`) and 15 (`stime`) of a `/proc/<pid>/stat` line.
+///
+/// Parsing starts after the LAST `)`, not at the second whitespace: field 2 is
+/// the parenthesised comm and a comm may itself contain spaces and parentheses
+/// (`(lnsd (hub))` is a legal name), which shifts every later field for a
+/// naive splitter. Past the last `)` the remainder starts at field 3, so
+/// `utime` is the 12th token there.
+fn proc_cpu_ticks_from_stat(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// Machine-wide `(busy, total)` CPU ticks from `/proc/stat`'s aggregate line.
+fn read_host_cpu_ticks() -> Option<(u64, u64)> {
+    host_cpu_ticks_from_stat(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
+/// `(busy, total)` from the `cpu ` aggregate line. Idle AND iowait count as
+/// not-busy: a hub waiting on a disk is not competing for a core.
+fn host_cpu_ticks_from_stat(stat: &str) -> Option<(u64, u64)> {
+    let line = stat.lines().next()?;
+    let mut it = line.split_whitespace();
+    if it.next()? != "cpu" {
+        return None;
+    }
+    // user nice system idle iowait irq softirq steal ...
+    let v: Vec<u64> = it.take(8).filter_map(|f| f.parse::<u64>().ok()).collect();
+    if v.len() < 5 {
+        return None;
+    }
+    let total: u64 = v.iter().sum();
+    let idle = v[3] + v[4];
+    Some((total.saturating_sub(idle), total))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     elapsed_ms: u128,
     phase: u8,
     rss_kb: u64,
     fds: usize,
+    /// Hub process CPU ticks (cumulative).
+    hub_cpu_ticks: u64,
+    /// This test process's CPU ticks (cumulative) — the load generator and the
+    /// sampler itself. #208's 99.5454 % run had the harness competing with the
+    /// hub for the same four cores, so the harness's own cost is measured here
+    /// rather than assumed small.
+    gen_cpu_ticks: u64,
+    /// Machine-wide busy / total CPU ticks (cumulative).
+    host_busy_ticks: u64,
+    host_total_ticks: u64,
+}
+
+/// CPU occupancy over the steady phase, the discriminator #208 asks for: a
+/// delivery shortfall while nothing is saturated is a hub defect, a shortfall
+/// past saturation is a load ceiling the gate should name.
+#[derive(Clone, Copy, Debug)]
+struct CpuLoad {
+    /// Hub CPU, in percent of ONE core (may exceed 100 on a threaded hub).
+    hub_pct: f64,
+    /// Generator + sampler CPU, same unit.
+    gen_pct: f64,
+    /// Machine-wide busy time, in percent of all cores (0..100).
+    host_busy_pct: f64,
+    /// Span the rates were computed over, and how many samples it spanned.
+    span_ms: u128,
+    samples: usize,
+}
+
+/// Differentiate the cumulative counters across the steady phase. Needs two
+/// steady samples at least a sampler interval apart; `None` when a run was too
+/// short to have any (a rate from one sample is a division by zero, not a
+/// small number).
+fn steady_cpu(samples: &[Sample]) -> Option<CpuLoad> {
+    let steady: Vec<&Sample> = samples.iter().filter(|s| s.phase == PHASE_STEADY).collect();
+    let (first, last) = (steady.first()?, steady.last()?);
+    let span_ms = last.elapsed_ms.checked_sub(first.elapsed_ms)?;
+    if span_ms == 0 {
+        return None;
+    }
+    let span_s = span_ms as f64 / 1000.0;
+    let per_core = |ticks: u64| 100.0 * (ticks as f64 / USER_HZ) / span_s;
+    let d_total = last.host_total_ticks.saturating_sub(first.host_total_ticks);
+    Some(CpuLoad {
+        hub_pct: per_core(last.hub_cpu_ticks.saturating_sub(first.hub_cpu_ticks)),
+        gen_pct: per_core(last.gen_cpu_ticks.saturating_sub(first.gen_cpu_ticks)),
+        host_busy_pct: if d_total == 0 {
+            0.0
+        } else {
+            100.0 * last.host_busy_ticks.saturating_sub(first.host_busy_ticks) as f64
+                / d_total as f64
+        },
+        span_ms,
+        samples: steady.len(),
+    })
 }
 
 // =========================================================================
@@ -515,6 +643,12 @@ struct LoadResult {
     baseline_fds: usize,
     peak_fds: usize,
     end_fds: usize,
+    /// Steady-phase CPU occupancy of hub, generator and machine; `None` when
+    /// the run was too short for two steady samples.
+    cpu: Option<CpuLoad>,
+    /// Cores the run had available, so a hub percentage can be read against the
+    /// machine it was measured on.
+    cores: usize,
 }
 
 impl LoadResult {
@@ -572,16 +706,26 @@ async fn run_load(
     let start = tokio::time::Instant::now();
     let sampler = tokio::spawn(async move {
         let mut samples = Vec::new();
+        let self_pid = std::process::id();
         loop {
             let rss = read_vmrss_kb(hub_pid);
             let fds = count_open_fds(hub_pid);
-            match (rss, fds) {
-                (Some(rss_kb), Some(fds)) => samples.push(Sample {
-                    elapsed_ms: start.elapsed().as_millis(),
-                    phase: sampler_phase.load(Ordering::Relaxed),
-                    rss_kb,
-                    fds,
-                }),
+            let hub_cpu = read_proc_cpu_ticks(hub_pid);
+            match (rss, fds, hub_cpu) {
+                (Some(rss_kb), Some(fds), Some(hub_cpu_ticks)) => {
+                    let (host_busy_ticks, host_total_ticks) =
+                        read_host_cpu_ticks().unwrap_or((0, 0));
+                    samples.push(Sample {
+                        elapsed_ms: start.elapsed().as_millis(),
+                        phase: sampler_phase.load(Ordering::Relaxed),
+                        rss_kb,
+                        fds,
+                        hub_cpu_ticks,
+                        gen_cpu_ticks: read_proc_cpu_ticks(self_pid).unwrap_or(0),
+                        host_busy_ticks,
+                        host_total_ticks,
+                    })
+                }
                 _ => break, // process gone
             }
             if sampler_phase.load(Ordering::Relaxed) == u8::MAX {
@@ -739,6 +883,7 @@ async fn run_load(
     let end_rss_kb = read_vmrss_kb(hub_pid).unwrap_or(baseline_rss_kb);
     let end_fds = count_open_fds(hub_pid).unwrap_or(baseline_fds);
 
+    let cpu = steady_cpu(&samples);
     LoadResult {
         conns: params.conns,
         churn_connections,
@@ -752,6 +897,10 @@ async fn run_load(
         baseline_fds,
         peak_fds,
         end_fds,
+        cpu,
+        cores: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
     }
 }
 
@@ -912,6 +1061,154 @@ async fn churn_worker(
 }
 
 // =========================================================================
+// Delivery record: one DELIVERY line per run, green and red (#208)
+// =========================================================================
+
+/// Two-sided 95% standard normal quantile, `Φ⁻¹(0.975)`.
+const Z_95: f64 = 1.959_963_984_540_053_6;
+
+/// 95% Wilson score interval for `recv` of `sent`, in percent.
+///
+/// Wilson (JASA 22(158), 1927), not the normal approximation, for the reason
+/// periculum's `ratio.rs` gives: at `recv == sent` the normal interval collapses
+/// to zero width and claims certainty, which is exactly where a 100 %-delivery
+/// run sits. `sent == 0` measured nothing and gets `[0, 100]`.
+fn wilson_95_pct(recv: u64, sent: u64) -> (f64, f64) {
+    if sent == 0 {
+        return (0.0, 100.0);
+    }
+    let n = sent as f64;
+    let p = recv.min(sent) as f64 / n;
+    let z2 = Z_95 * Z_95;
+    let denom = 1.0 + z2 / n;
+    let centre = (p + z2 / (2.0 * n)) / denom;
+    let half = (Z_95 / denom) * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    (
+        ((centre - half) * 100.0).clamp(0.0, 100.0),
+        ((centre + half) * 100.0).clamp(0.0, 100.0),
+    )
+}
+
+/// Drop decimals a number does not need: `99.5000` -> `99.5`, `100.0000` -> `100`.
+fn trim_zeros(text: &str) -> String {
+    if !text.contains('.') {
+        return text.to_string();
+    }
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The interval as `low-high` percentages without the `%`, each end rounded
+/// OUTWARD so the printed interval always contains the computed one.
+///
+/// Four decimals, not periculum's two significant digits: a hub run offers
+/// hundreds of thousands of packets, where `99.5-100` would erase the very
+/// shortfall this line exists to record (#208's run was 99.5454 %).
+fn ci95_text(recv: u64, sent: u64) -> String {
+    if sent == 0 {
+        return "n/a".to_string();
+    }
+    let (low, high) = wilson_95_pct(recv, sent);
+    let scale = 10_000.0;
+    format!(
+        "{}-{}",
+        trim_zeros(&format!("{:.4}", (low * scale).floor() / scale)),
+        trim_zeros(&format!("{:.4}", (high * scale).ceil() / scale))
+    )
+}
+
+/// The point estimate for the `pct=` field.
+///
+/// Four decimals normally, six when four would round a shortfall up onto a flat
+/// `100.0000`: a line that spells a lossy run as 100 % is worse than no line,
+/// and this log is read by grepping for what is not 100.
+fn pct_text(recv: u64, sent: u64) -> String {
+    if sent == 0 {
+        return "n/a".to_string();
+    }
+    let pct = 100.0 * recv.min(sent) as f64 / sent as f64;
+    let four = format!("{pct:.4}");
+    if recv < sent && four == "100.0000" {
+        return format!("{pct:.6}");
+    }
+    four
+}
+
+/// One `DELIVERY` line for a completed run.
+///
+/// Field names follow the project's `LEVICULUM_DELIVERY_LOG` convention
+/// (`test= sent= recv= pct= ci95=`, periculum's `executor.rs`) and add the cell
+/// coordinates and the CPU occupancy. The coordinates are not optional: the same
+/// rule that puts `interval_ms=` on a benchmark line applies here — two runs at
+/// different connection counts or pacings offered different volumes, so a line
+/// that does not name its cell cannot be pooled with another. The CPU fields are
+/// what makes the sweep interpretable at all: delivery below 100 % while nothing
+/// is saturated is a hub defect, below 100 % past saturation is a load ceiling.
+fn delivery_line(test: &str, res: &LoadResult, params: &LoadParams) -> String {
+    let sent = res.total_sent;
+    let recv = res.total_delivered;
+    let cpu = res
+        .cpu
+        .map(|c| {
+            format!(
+                "hub_cpu_pct={:.1} gen_cpu_pct={:.1} host_busy_pct={:.1}",
+                c.hub_pct, c.gen_pct, c.host_busy_pct
+            )
+        })
+        .unwrap_or_else(|| "hub_cpu_pct=n/a gen_cpu_pct=n/a host_busy_pct=n/a".to_string());
+    format!(
+        "DELIVERY test={test} sent={sent} recv={recv} pct={} ci95={} \
+         conns={} pkt_ms={} secs={} churn_workers={} churn_conns={} cores={} {cpu}",
+        pct_text(recv, sent),
+        ci95_text(recv, sent),
+        params.conns,
+        params.pkt_ms,
+        params.secs,
+        params.churn_workers,
+        res.churn_connections,
+        res.cores,
+    )
+}
+
+/// Append one line to the delivery log, creating it if absent.
+///
+/// Failures are reported and not fatal — a missing distribution must not turn a
+/// green run red — but they are LOUD, because a sweep that silently logs nothing
+/// looks exactly like a sweep that found nothing.
+fn append_delivery_line(path: &Path, line: &str) {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{line}") {
+                eprintln!(
+                    "WARNING: LEVICULUM_DELIVERY_LOG write to {} failed: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "WARNING: LEVICULUM_DELIVERY_LOG open {} failed: {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Print the run's `DELIVERY` line and, when `LEVICULUM_DELIVERY_LOG` names a
+/// file, append it there too — for red runs as well as green, which is the whole
+/// point: a sweep reads the distribution, and the cells that interest it are the
+/// ones that failed.
+fn record_delivery(test: &str, res: &LoadResult, params: &LoadParams) {
+    let line = delivery_line(test, res, params);
+    println!("{line}");
+    if let Ok(path) = std::env::var("LEVICULUM_DELIVERY_LOG") {
+        append_delivery_line(Path::new(&path), &line);
+    }
+}
+
+// =========================================================================
 // Assertions + reporting
 // =========================================================================
 
@@ -944,7 +1241,12 @@ fn report_and_assert(label: &str, res: &LoadResult, params: &LoadParams, log_fai
         "fds: baseline={} peak={} end={}",
         res.baseline_fds, res.peak_fds, res.end_fds
     );
+    print_cpu(res);
     print_rss_series(&res.samples);
+
+    // The delivery record goes out BEFORE the assertions, so a run that fails
+    // one of them still contributes its cell to the distribution (#208).
+    record_delivery(label, res, params);
 
     // --- 1. Delivery: exactly 100%, every client contiguous. ---
     assert!(
@@ -1040,6 +1342,31 @@ fn report_and_assert(label: &str, res: &LoadResult, params: &LoadParams, log_fai
     println!("PASS: {label}");
 }
 
+/// Steady-phase CPU occupancy: the hub, the harness driving it, and the machine.
+///
+/// The harness's own figure is on the line because #208's shortfall was measured
+/// with the harness competing for the same four cores; a reader of a sweep cell
+/// has to be able to see whether the generator, not the hub, ate the machine.
+fn print_cpu(res: &LoadResult) {
+    match res.cpu {
+        Some(c) => println!(
+            "cpu (steady, {} samples over {} ms, {} cores): hub={:.1}% of one core \
+             ({:.1}% of machine) generator+sampler={:.1}% of one core host_busy={:.1}%",
+            c.samples,
+            c.span_ms,
+            res.cores,
+            c.hub_pct,
+            c.hub_pct / res.cores as f64,
+            c.gen_pct,
+            c.host_busy_pct
+        ),
+        None => println!(
+            "cpu (steady): <not measurable: fewer than two steady samples; \
+             raise LOADTEST_SECS or lower LOADTEST_SAMPLE_MS>"
+        ),
+    }
+}
+
 /// Compact RSS/fd series: one line per phase transition + phase min/max.
 fn print_rss_series(samples: &[Sample]) {
     if samples.is_empty() {
@@ -1096,7 +1423,7 @@ async fn loadtest_tcp_hub_smoke() {
     // deletes the config tempdir holding the log).
     let log = read_log(&hub.log_path);
     let log_failures = scan_log_for_failures(&log);
-    report_and_assert("lnsd smoke", &res, &params, &log_failures);
+    report_and_assert("lnsd_smoke", &res, &params, &log_failures);
 }
 
 /// Heavy soak: env-tunable, defaults 200 conns / 60 s, real `lnsd` process.
@@ -1122,7 +1449,7 @@ async fn loadtest_tcp_hub_soak() {
 
     let log = read_log(&hub.log_path);
     let log_failures = scan_log_for_failures(&log);
-    report_and_assert("lnsd soak", &res, &params, &log_failures);
+    report_and_assert("lnsd_soak", &res, &params, &log_failures);
 }
 
 /// A/B: the SAME generator drives our `lnsd` and a real Python `rnsd`
@@ -1172,6 +1499,10 @@ async fn loadtest_tcp_hub_ab_vs_rnsd() {
     );
     let b_sink = TestDaemon::start().await.expect("start sink daemon (B)");
     let b_res = run_load(b_addr, b_pid, b_transport_id, &b_sink, &params, None).await;
+    // The reference arm is not asserted, so it records its own cell: an A/B pair
+    // in one distribution is exactly what the #198 measurement produced, and the
+    // reference's delivery under the same load is worth keeping beside ours.
+    record_delivery("rnsd_ab_arm", &b_res, &params);
 
     // ---- Report both, then assert lnsd >= rnsd. ----
     println!("\n########## A/B: lnsd vs rnsd ##########");
@@ -1225,5 +1556,218 @@ async fn loadtest_tcp_hub_ab_vs_rnsd() {
         b_res.delivery_pct()
     );
     // lnsd's own hard bar: exactly 100% delivery, bounded RSS/fds, clean logs.
-    report_and_assert("lnsd (A/B arm)", &a_res, &params, &a_failures);
+    report_and_assert("lnsd_ab_arm", &a_res, &params, &a_failures);
+}
+
+// =========================================================================
+// Unit tests for the delivery record and the /proc arithmetic (#208)
+//
+// Pure, so they run in the normal `cargo test -p leviculum-std --test
+// rnsd_interop` pass without an lnsd binary or a Python daemon. They exist
+// because the sweep the issue asks for is read off these lines: a `pct=` that
+// rounds a lossy run onto 100, or a cell that forgets its coordinates, turns a
+// measurement into a number nobody can interpret.
+// =========================================================================
+
+#[cfg(test)]
+mod delivery_record_tests {
+    use super::*;
+
+    /// The run #208 recorded: 1715 short of 377,285. `pct=` must spell it, and
+    /// the interval must exclude 100 %, which is the whole claim of the line.
+    #[test]
+    fn records_the_208_shortfall_at_full_precision() {
+        let (recv, sent) = (377_285u64 - 1715, 377_285u64);
+        assert_eq!(pct_text(recv, sent), "99.5454");
+        assert_eq!(ci95_text(recv, sent), "99.5234-99.5665");
+    }
+
+    /// A shortfall too small for four decimals must not be spelled `100.0000`:
+    /// this log is read by grepping for what is not 100.
+    #[test]
+    fn a_shortfall_never_renders_as_a_flat_hundred() {
+        assert_eq!(pct_text(9_999_999, 10_000_000), "99.999990");
+        assert_eq!(pct_text(10_000_000, 10_000_000), "100.0000");
+    }
+
+    /// A clean run gets 100 % as a point estimate and an interval that still has
+    /// a lower end — which is why Wilson and not the normal approximation, whose
+    /// interval here would be `[100, 100]`.
+    #[test]
+    fn a_clean_run_keeps_an_interval() {
+        assert_eq!(pct_text(1000, 1000), "100.0000");
+        assert_eq!(ci95_text(1000, 1000), "99.6173-100");
+    }
+
+    /// The textbook case from periculum's `ratio.rs`: 1 of 7 is consistent with
+    /// a hub delivering 2.5 % and with one delivering 51 %.
+    #[test]
+    fn wilson_matches_the_worked_example() {
+        assert_eq!(ci95_text(1, 7), "2.5679-51.3128");
+        let (low, high) = wilson_95_pct(1, 7);
+        assert!((low - 2.567_962).abs() < 1e-5, "low was {low}");
+        assert!((high - 51.312_783).abs() < 1e-5, "high was {high}");
+    }
+
+    /// Nothing offered is not 0 % delivery; it is no measurement.
+    #[test]
+    fn zero_trials_claim_nothing() {
+        assert_eq!(pct_text(0, 0), "n/a");
+        assert_eq!(ci95_text(0, 0), "n/a");
+        assert_eq!(wilson_95_pct(0, 0), (0.0, 100.0));
+    }
+
+    fn sample(elapsed_ms: u128, phase: u8, hub: u64, gen: u64, busy: u64, total: u64) -> Sample {
+        Sample {
+            elapsed_ms,
+            phase,
+            rss_kb: 1024,
+            fds: 10,
+            hub_cpu_ticks: hub,
+            gen_cpu_ticks: gen,
+            host_busy_ticks: busy,
+            host_total_ticks: total,
+        }
+    }
+
+    fn result_for(sent: u64, recv: u64, samples: Vec<Sample>) -> LoadResult {
+        let cpu = steady_cpu(&samples);
+        LoadResult {
+            conns: 128,
+            churn_connections: 42,
+            total_sent: sent,
+            total_delivered: recv,
+            losers: Vec::new(),
+            samples,
+            baseline_rss_kb: 1024,
+            peak_rss_kb: 2048,
+            end_rss_kb: 1024,
+            baseline_fds: 10,
+            peak_fds: 140,
+            end_fds: 11,
+            cpu,
+            cores: 4,
+        }
+    }
+
+    /// Cumulative tick counters become rates: 50 ticks of hub time over one
+    /// second is half a core; the warm-up and drain samples must not dilute it.
+    #[test]
+    fn steady_cpu_differentiates_only_the_steady_phase() {
+        let samples = vec![
+            sample(0, PHASE_WARMUP, 0, 0, 0, 0),
+            sample(1_000, PHASE_STEADY, 100, 400, 1_000, 1_000),
+            sample(2_000, PHASE_STEADY, 150, 600, 1_300, 1_400),
+            sample(3_000, PHASE_DRAIN, 999, 999, 9_999, 9_999),
+        ];
+        let cpu = steady_cpu(&samples).expect("two steady samples");
+        assert!((cpu.hub_pct - 50.0).abs() < 1e-6, "hub {}", cpu.hub_pct);
+        assert!((cpu.gen_pct - 200.0).abs() < 1e-6, "gen {}", cpu.gen_pct);
+        assert!(
+            (cpu.host_busy_pct - 75.0).abs() < 1e-6,
+            "host {}",
+            cpu.host_busy_pct
+        );
+        assert_eq!(cpu.span_ms, 1_000);
+        assert_eq!(cpu.samples, 2);
+    }
+
+    /// One steady sample is no rate. Reporting 0 % CPU for a run too short to
+    /// measure would read as an idle hub.
+    #[test]
+    fn a_single_steady_sample_yields_no_rate() {
+        let samples = vec![
+            sample(0, PHASE_WARMUP, 0, 0, 0, 0),
+            sample(1_000, PHASE_STEADY, 100, 400, 1_000, 1_000),
+        ];
+        assert!(steady_cpu(&samples).is_none());
+    }
+
+    /// Every field a sweep needs to place a cell, on one line.
+    #[test]
+    fn the_delivery_line_names_its_cell_and_its_cpu() {
+        let samples = vec![
+            sample(1_000, PHASE_STEADY, 100, 400, 1_000, 1_000),
+            sample(2_000, PHASE_STEADY, 150, 600, 1_300, 1_400),
+        ];
+        let res = result_for(377_285, 377_285 - 1715, samples);
+        let mut params = LoadParams::soak();
+        params.conns = 128;
+        params.pkt_ms = 15;
+        params.secs = 20;
+        params.churn_workers = 16;
+        let line = delivery_line("lnsd_soak", &res, &params);
+        assert_eq!(
+            line,
+            "DELIVERY test=lnsd_soak sent=377285 recv=375570 pct=99.5454 \
+             ci95=99.5234-99.5665 conns=128 pkt_ms=15 secs=20 churn_workers=16 \
+             churn_conns=42 cores=4 hub_cpu_pct=50.0 gen_cpu_pct=200.0 host_busy_pct=75.0"
+        );
+    }
+
+    /// A run whose CPU could not be measured says so on the line instead of
+    /// claiming zero occupancy.
+    #[test]
+    fn an_unmeasured_cell_says_so() {
+        let res = result_for(100, 100, Vec::new());
+        let line = delivery_line("lnsd_smoke", &res, &LoadParams::smoke());
+        assert!(
+            line.contains("hub_cpu_pct=n/a gen_cpu_pct=n/a host_busy_pct=n/a"),
+            "line was {line}"
+        );
+    }
+
+    /// A comm with spaces and parentheses shifts every field for a naive
+    /// splitter; parsing past the last `)` is what makes utime/stime right.
+    #[test]
+    fn proc_stat_parsing_survives_a_hostile_comm() {
+        let stat = "1234 (lnsd (hub)) S 1 1234 1234 0 -1 4194304 100 0 0 0 4321 1234 0 0 \
+                    20 0 8 0 100 0 0";
+        assert_eq!(proc_cpu_ticks_from_stat(stat), Some(4321 + 1234));
+    }
+
+    /// iowait counts as not-busy: a hub blocked on a disk is not eating a core.
+    #[test]
+    fn host_cpu_excludes_idle_and_iowait() {
+        let stat = "cpu  100 10 40 700 50 5 5 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\n";
+        let (busy, total) = host_cpu_ticks_from_stat(stat).expect("aggregate line");
+        // user + nice + system + idle + iowait + irq + softirq (+ steal, 0 here)
+        assert_eq!(total, 100 + 10 + 40 + 700 + 50 + 5 + 5);
+        assert_eq!(busy, total - 700 - 50);
+    }
+
+    /// Cells accumulate: a sweep of N runs must leave N lines in one file, in
+    /// order, which is what makes the log a distribution rather than a last
+    /// result. (The env var itself is not set here — mutating the process
+    /// environment while the other tests in this binary run in parallel threads
+    /// is not worth the coverage.)
+    #[test]
+    fn the_log_accumulates_one_line_per_run() {
+        let dir = tempfile::Builder::new()
+            .prefix("delivery_log_")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("delivery.log");
+        let params = LoadParams::smoke();
+        let first = delivery_line("lnsd_smoke", &result_for(10, 10, Vec::new()), &params);
+        let second = delivery_line("lnsd_smoke", &result_for(10, 9, Vec::new()), &params);
+
+        append_delivery_line(&path, &first);
+        append_delivery_line(&path, &second);
+
+        let logged = std::fs::read_to_string(&path).expect("delivery log written");
+        assert_eq!(
+            logged.lines().collect::<Vec<_>>(),
+            vec![first.as_str(), second.as_str()]
+        );
+    }
+
+    /// An unwritable path costs the distribution, not the run.
+    #[test]
+    fn an_unwritable_log_does_not_kill_the_run() {
+        append_delivery_line(
+            Path::new("/proc/definitely/not/writable"),
+            "DELIVERY test=x",
+        );
+    }
 }

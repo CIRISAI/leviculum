@@ -89,7 +89,58 @@ values; the smoke variant uses smaller ones):
 | `LOADTEST_MAX_RSS_GROWTH_PCT` | 40 | max steady-phase RSS growth |
 | `LOADTEST_MAX_RSS_ABS_MIB` | 300 | absolute RSS ceiling over baseline |
 | `LOADTEST_DRAIN_SECS` | 20 | post-load drain window for the fd check |
+| `LOADTEST_SAMPLE_MS` | 250 | RSS/fd/CPU sampler cadence |
 | `LOADTEST_LNSD_BIN` | auto | explicit path to the `lnsd` binary |
+| `LEVICULUM_DELIVERY_LOG` | unset | append one `DELIVERY` line per run to this file |
+
+### Sweeping delivery against load
+
+The assertion is binary — 100 % or the run is red — which is right for a gate and
+useless for the question "at what load does the hub start to drop?". Codeberg
+#208 recorded one 99.5454 % run at 128 connections / 15 ms during the #198 A/B
+measurement, on a four-core host that was simultaneously running the measurement
+harness, and could attribute it to neither the hub nor the machine: the gate runs
+at 24 connections / 50 ms, and nobody had ever swept delivery against connection
+count and rate.
+
+Every run therefore prints, and with `LEVICULUM_DELIVERY_LOG=<file>` also
+appends, one line — before the assertions, so red runs contribute too:
+
+```text
+DELIVERY test=lnsd_soak sent=377285 recv=375570 pct=99.5454 ci95=99.5234-99.5665 \
+  conns=128 pkt_ms=15 secs=20 churn_workers=16 churn_conns=42 cores=4 \
+  hub_cpu_pct=82.4 gen_cpu_pct=210.5 host_busy_pct=96.1
+```
+
+`ci95` is the Wilson 95 % interval for the counts on the same line (the project
+rule that a delivery ratio is never printed alone), at four decimals because a
+hub run's denominator is in the hundreds of thousands, where two significant
+digits would erase the very shortfall the line records. The cell coordinates are
+on the line because two runs at different `conns`/`pkt_ms` offered different
+volumes and cannot be pooled. The three CPU figures are what make a cell
+interpretable, and the middle one — the load generator and the sampler, i.e. the
+harness itself — is there because that is the cost #208 could not account for.
+
+`scripts/sweep-tcp-hub.sh` drives the grid and reads the matrix back out of the
+log:
+
+```sh
+bash scripts/sweep-tcp-hub.sh                      # 4x3 cells, 3 runs each
+SWEEP_CONNS="128 192" SWEEP_PKT_MS="15 10" bash scripts/sweep-tcp-hub.sh
+bash scripts/sweep-tcp-hub.sh --summarize <log>    # re-read an earlier sweep
+```
+
+It refuses to start above `SWEEP_MAX_LOAD1` (default 1.5), because the hub, the
+sink and the generator all run on the sweep host and any other workload there is
+indistinguishable from the hub being slow — the precise ambiguity #208 is about.
+A red cell does not stop the sweep; the distribution is the point. What the
+matrix is read for:
+
+- a cell below 100 % while nothing is saturated is a defect in the hub;
+- a cell below 100 % only at or past saturation is a load ceiling, and the
+  finding is that the gate should name where the cliff is.
+
+The sweep itself has not been run yet; #208 stays open until it has.
 
 ### Where it runs regularly
 
