@@ -499,15 +499,18 @@ fn spawn_latency_proxy(
     delay: Duration,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
+    // Bound before the thread is spawned: a client that connects while the new
+    // thread is still unscheduled gets ECONNREFUSED and then waits a full
+    // reconnect_interval (Codeberg #221, pinned by
+    // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
+    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
+        Ok(l) => l,
+        Err(e) => panic!("latency proxy bind {listen_port} failed: {e}"),
+    };
+    listener
+        .set_nonblocking(true)
+        .expect("set proxy nonblocking");
     thread::spawn(move || {
-        let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-            Ok(l) => l,
-            Err(e) => panic!("latency proxy bind {listen_port} failed: {e}"),
-        };
-        listener
-            .set_nonblocking(true)
-            .expect("set proxy nonblocking");
-
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -557,14 +560,18 @@ fn spawn_latency_proxy_sized(
     buf_size: usize,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
+    // Bound before the thread is spawned: a client that connects while the new
+    // thread is still unscheduled gets ECONNREFUSED and then waits a full
+    // reconnect_interval (Codeberg #221, pinned by
+    // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
+    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
+        Ok(l) => l,
+        Err(e) => panic!("sized latency proxy bind {listen_port} failed: {e}"),
+    };
+    listener
+        .set_nonblocking(true)
+        .expect("set proxy nonblocking");
     thread::spawn(move || {
-        let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-            Ok(l) => l,
-            Err(e) => panic!("sized latency proxy bind {listen_port} failed: {e}"),
-        };
-        listener
-            .set_nonblocking(true)
-            .expect("set proxy nonblocking");
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -806,14 +813,18 @@ fn spawn_latency_proxy_asymmetric(
     delay_u2c: Duration,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
+    // Bound before the thread is spawned: a client that connects while the new
+    // thread is still unscheduled gets ECONNREFUSED and then waits a full
+    // reconnect_interval (Codeberg #221, pinned by
+    // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
+    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
+        Ok(l) => l,
+        Err(e) => panic!("async latency proxy bind {listen_port} failed: {e}"),
+    };
+    listener
+        .set_nonblocking(true)
+        .expect("set proxy nonblocking");
     thread::spawn(move || {
-        let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-            Ok(l) => l,
-            Err(e) => panic!("async latency proxy bind {listen_port} failed: {e}"),
-        };
-        listener
-            .set_nonblocking(true)
-            .expect("set proxy nonblocking");
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -893,14 +904,18 @@ fn spawn_reorder_proxy(
     upstream_port: u16,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
+    // Bound before the thread is spawned: a client that connects while the new
+    // thread is still unscheduled gets ECONNREFUSED and then waits a full
+    // reconnect_interval (Codeberg #221, pinned by
+    // `link_failure_recovery_silent_resume::proxy_listener_is_bound_before_spawn_returns`).
+    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
+        Ok(l) => l,
+        Err(e) => panic!("reorder proxy bind {listen_port} failed: {e}"),
+    };
+    listener
+        .set_nonblocking(true)
+        .expect("set proxy nonblocking");
     thread::spawn(move || {
-        let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-            Ok(l) => l,
-            Err(e) => panic!("reorder proxy bind {listen_port} failed: {e}"),
-        };
-        listener
-            .set_nonblocking(true)
-            .expect("set proxy nonblocking");
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {

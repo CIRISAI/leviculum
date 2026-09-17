@@ -169,6 +169,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The mvr proxies bind their listener before spawning the thread that
+  serves it: the scenario starts its client node the moment the helper
+  returns, and a connect that arrives before the new thread has been
+  scheduled is refused. A refused first connect is not retried at once —
+  the TCP interface waits a full `reconnect_interval`, 5 s — so the
+  client peered at 5 s instead of 50 ms and the scenario's initial path
+  install spent 4024 ms of its 5000 ms budget. That is a rotating
+  single-victim failure by construction: the race is only lost when
+  co-tenants delay the thread, so it never appeared in an isolated run
+  and did appear under `cargo test --workspace` (#221).
+
 - An AutoInterface joins the multicast group the config asks for: the
   `multicast_address_type` key the reference has always read is read
   here too, so an `lnsd` node added to a group of `rnsd` peers running

@@ -112,14 +112,20 @@ fn spawn_blocking_proxy(
     upstream_port: u16,
     ctrl: Arc<ProxyCtrl>,
 ) -> thread::JoinHandle<()> {
+    // Bound by the caller, not inside the thread: the caller starts alice
+    // immediately after this returns, and her TCP client connects within
+    // microseconds. A bind that waits for the new thread to be scheduled loses
+    // that race under co-tenant load, and the refused connect costs a full
+    // reconnect_interval (Codeberg #221) — see
+    // `proxy_listener_is_bound_before_spawn_returns`.
+    let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
+        Ok(l) => l,
+        Err(e) => panic!("blocking proxy bind {listen_port} failed: {e}"),
+    };
+    listener
+        .set_nonblocking(true)
+        .expect("set proxy nonblocking");
     thread::spawn(move || {
-        let listener = match StdTcpListener::bind(("127.0.0.1", listen_port)) {
-            Ok(l) => l,
-            Err(e) => panic!("blocking proxy bind {listen_port} failed: {e}"),
-        };
-        listener
-            .set_nonblocking(true)
-            .expect("set proxy nonblocking");
         while !ctrl.stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((client, _addr)) => {
@@ -146,6 +152,43 @@ fn spawn_blocking_proxy(
             }
         }
     })
+}
+
+/// Mechanism pin for Codeberg #221: the proxy's listener must already accept
+/// connections when `spawn_blocking_proxy` returns.
+///
+/// While the bind lived *inside* the freshly spawned thread, the caller went on
+/// to start alice, whose TCP client connects to that port a few hundred
+/// microseconds later. If the proxy thread had not been scheduled yet the
+/// connect was refused, and a refused first connect is not retried at once: the
+/// TCP interface waits a full `reconnect_interval`, 5 s by default
+/// (`leviculum-std/src/driver/interface_build/tcp.rs`). Alice then peered at
+/// ~5 s instead of ~50 ms, and the initial path install consumed 4024 ms of its
+/// 5000 ms budget — measured in 4 of 22 suite runs with co-tenants, and in none
+/// of 20 isolated runs of this test nor of 12 isolated runs under the same CPU
+/// saturation, so the co-tenant *binaries* are what lose the race, not the load
+/// alone. One notch further and the scenario reports `MVR_SETUP_FAILED`, which
+/// is the 2026-08-09 sighting of this test.
+///
+/// The connect here is deliberately single-attempt: that is what the interface
+/// does, and a retry loop would hide the window instead of pinning it.
+#[test]
+fn proxy_listener_is_bound_before_spawn_returns() {
+    let ctrl = Arc::new(ProxyCtrl::new());
+    let proxy_port = next_port();
+    // Upstream is never contacted: this pins the listener's existence, not
+    // forwarding.
+    let _proxy = spawn_blocking_proxy(proxy_port, next_port(), Arc::clone(&ctrl));
+    let connected = TcpStream::connect(("127.0.0.1", proxy_port));
+    ctrl.stop.store(true, Ordering::Relaxed);
+    assert!(
+        connected.is_ok(),
+        "the proxy port must accept a connection the instant \
+         spawn_blocking_proxy returns; a refused first connect costs the client \
+         interface a full reconnect_interval (5 s) out of the scenario's 5 s \
+         install budget (Codeberg #221): {:?}",
+        connected.err(),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -492,9 +535,12 @@ async fn link_failure_recovery_silent_resume_with_forced_announce() {
         force_announce_after_restore: true,
     };
     let result = run_scenario(opts).await;
-    if !result.passed {
-        print_events("forced_announce", &result.events);
-    }
+    // Printed on every run, not only on failure: libtest captures a passing
+    // test's stdout and shows it only when the test fails, so this costs
+    // nothing in a normal run and makes `--nocapture` yield the timeline of a
+    // *green* run. A green run that took 4 s of its 5 s budget is the
+    // interesting one (Codeberg #221) and used to be invisible.
+    print_events("forced_announce", &result.events);
     assert!(
         result.passed,
         "H1 distinguishing experiment failed: with a forced announce after \
@@ -521,9 +567,7 @@ async fn link_failure_recovery_silent_resume_baseline() {
         force_announce_after_restore: false,
     };
     let result = run_scenario(opts).await;
-    if !result.passed {
-        print_events("baseline_unfixed", &result.events);
-    }
+    print_events("baseline_unfixed", &result.events);
     assert!(
         result.passed,
         "Bug #29 unfixed: alice received no fresh announce within {} s of \
