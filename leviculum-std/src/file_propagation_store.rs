@@ -6,7 +6,9 @@
 //! content is `lxmf_data || stamp` (`lxmf_propagation`,
 //! `reference/LXMF/LXMF/LXMRouter.py:2512-2515`; re-indexed at startup by
 //! `enable_propagation`, `:565-592`). Three local differences: the timestamp
-//! is integer seconds rather than a float, the stamp-value component is
+//! is written as integer seconds rather than a float (a float IS read back,
+//! which is what a store inherited from `lxmd` carries), the stamp-value
+//! component is
 //! always present (the reference omits it at value 0 and then *skips such
 //! files entirely* when re-indexing, `:568` requires three components — a
 //! quirk, not a behaviour worth importing), and a fourth component carries
@@ -191,7 +193,7 @@ impl FilePropagationStore {
 fn parse_name(name: &str) -> Option<(TransientId, u64, u8, Option<u64>)> {
     let mut parts = name.split('_');
     let id: TransientId = hex_decode(parts.next()?)?.try_into().ok()?;
-    let received_at: u64 = parts.next()?.parse().ok()?;
+    let received_at = parse_received(parts.next()?)?;
     let stamp_value: u8 = parts.next()?.parse().ok()?;
     let sequence = match parts.next() {
         // Part-1 layout: no sequence component yet.
@@ -209,6 +211,27 @@ fn parse_name(name: &str) -> Option<(TransientId, u64, u8, Option<u64>)> {
         return None;
     }
     Some((id, received_at, stamp_value, sequence))
+}
+
+/// The receive-time component of a store filename, as whole seconds.
+///
+/// Our own writer emits integer seconds. The reference writes Python's
+/// `time.time()` — a FLOAT, `1789656258.9376912`
+/// (`lxmf_propagation`, `reference/LXMF/LXMF/LXMRouter.py:2514`) — and an
+/// integer-only parse rejects every file in a store `lxmd` left behind,
+/// which is the whole store when a node is taken over. Truncating toward
+/// the second is the reference's own resolution for the value: it re-reads
+/// the component as a float and compares it against `> 0` and against
+/// message age in seconds (`enable_propagation`, `:568-571`).
+fn parse_received(raw: &str) -> Option<u64> {
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds);
+    }
+    let seconds = raw.parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 || seconds >= u64::MAX as f64 {
+        return None;
+    }
+    Some(seconds.trunc() as u64)
 }
 
 fn read_destination(path: &Path) -> Option<[u8; 16]> {
