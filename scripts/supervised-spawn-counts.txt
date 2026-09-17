@@ -44,6 +44,16 @@
 1    leviculum-std/tests/jl_jldiff_fixtures.rs
 1    leviculum-std/tests/jl_jldiff_workflow.rs
 
+# The same shape one crate over: `lndecode` is a filter that reads frames on
+# stdin, writes JSON on stdout and exits. The single `spawn()` is
+# `wait_with_output()`ed in the same expression, it runs in milliseconds, and it
+# holds no port, socket, lock or device. It stays bare rather than pulling
+# `leviculum-std` into `lndecode`'s dev-dependencies: that crate's whole point
+# is that it links none of our stack, and a dev-dependency on the daemon crate
+# to supervise a millisecond-long filter would buy the kernel link at the cost
+# of the property the crate exists for.
+1    lndecode/tests/cli.rs
+
 # Two `event-log-helper` children that emit three events each and exit; both are
 # `wait()`ed a few lines below the spawn. Sub-second, and the test's assertions
 # read the files they wrote, so a helper that failed to run is a red test rather

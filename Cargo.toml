@@ -14,6 +14,7 @@ members = [
     "lnflash",
     "lnmsg",
     "lnpnd",
+    "lndecode",
     "vectors-verify",
 ]
 
@@ -34,6 +35,7 @@ default-members = [
     "lnflash",
     "lnmsg",
     "lnpnd",
+    "lndecode",
     "vectors-verify",
 ]
 

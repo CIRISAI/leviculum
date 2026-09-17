@@ -217,6 +217,34 @@ answer test with the reference's own output (the name-hash and
 destination-hash KATs in the same audit tranche,
 `destination.rs:1902`).
 
+### The standing instrument: `lndecode`
+
+Recomposing independently once per test is the rule; `lndecode` is
+that rule built once and reusable. It parses a raw frame into JSON
+from offsets re-derived out of `reference/Reticulum` alone, and its
+library links no `leviculum-*` crate at all — the independence is in
+the dependency list (`lndecode/Cargo.toml`), not in a promise, so a
+future edit cannot quietly route it back through the writer's
+helpers. On an announce it recomputes the identity hash, the
+destination hash and the Ed25519 signature from the wire bytes, which
+is the #159 pin's method applied to any frame instead of one fixture.
+
+Two properties matter for the audit. It reports rather than refuses:
+a hop count above `PATHFINDER_M`, an emission timestamp holding
+uptime seconds (the #155 shape), a link request signalling an MTU of
+3 all decode completely and land in a `warnings` array — a decoder
+that rejected adversarial frames would be useless on exactly the
+traffic worth reading. And it answers the signature question twice,
+because the permissive Ed25519 verifier the mesh applies accepts an
+all-zero key and an all-zero signature for some messages:
+`signature_valid` is what a peer decides, `signature_strict_valid` is
+whether that decision means anything.
+
+Its own agreement with the writer is asserted in
+`lndecode/tests/agrees_with_the_writer.rs`, on packets `leviculum-core`
+produced rather than on hand-built bytes — an oracle nobody calibrates
+is just a second opinion.
+
 ## Deliberate non-behaviours get pins too
 
 When we *intentionally* do not do something — usually because the

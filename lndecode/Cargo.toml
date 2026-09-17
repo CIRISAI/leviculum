@@ -1,0 +1,33 @@
+[package]
+name = "lndecode"
+description = "Independent decoder from Reticulum wire bytes to structured JSON"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# Deliberately NO leviculum-* dependency outside dev-dependencies.
+#
+# docs/src/concepts/wire-field-semantics.md requires that a test recompose an
+# expected value independently, never through the writer's helper. A decoder
+# that calls `Packet::unpack` would agree with the writer by construction and
+# could not falsify it. The independence is enforced here, in the dependency
+# list, rather than promised in a comment: only sha2 and ed25519-dalek (third-
+# party primitives, not our field layout) are linked in.
+[dependencies]
+serde_json = "1"
+sha2.workspace = true
+ed25519-dalek.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+# The oracle is only useful if it is cross-checked against the writer at least
+# once. That check is a TEST — it may reach for leviculum-core — while the
+# library above may not.
+[dev-dependencies]
+leviculum-core = { path = "../leviculum-core" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[[bin]]
+name = "lndecode"
+path = "src/main.rs"
