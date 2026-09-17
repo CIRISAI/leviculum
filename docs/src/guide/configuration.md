@@ -165,10 +165,17 @@ is `InterfaceConfig` (`config.rs:228-505`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `listen_ip` | string | unset | Local bind address. (`listen_ip` (`ini_config.rs:399`)) |
+| `listen_ip` | string | `0.0.0.0` | Local bind address. (`listen_ip` (`ini_config.rs:399`)) |
 | `listen_port` | u16 | unset | Local bind port. (`listen_port` (`ini_config.rs:400`)) |
 | `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`forward_ip` (`ini_config.rs:410`); `InterfaceConfig::forward_ip` (`config.rs:319-329`)) |
 | `forward_port` | u16 | unset | Broadcast/forward port. (`forward_port` (`ini_config.rs:411`)) |
+| `port` | u16 | unset | Fills both `listen_port` and `forward_port`; either explicit key wins over it. (`port` (`ini_config.rs:419`)) |
+| `device` | string | unset | Kernel interface name; its IPv4 broadcast address fills both `listen_ip` and `forward_ip`. Either explicit key wins over it. (`device` (`ini_config.rs:404`)) |
+
+Bind and forward are independent, as in `rnsd`: an interface with only bind
+parameters receives without transmitting, one with only forward parameters
+transmits without listening, and only an interface that would do neither is a
+configuration error.
 
 ### AutoInterface (`AutoInterface`)
 

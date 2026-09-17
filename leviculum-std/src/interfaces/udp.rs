@@ -191,9 +191,13 @@ impl Default for UdpResolveOpts {
 /// * `name` - Human-readable name for logging
 /// * `listen_addr` - Local address to bind (receive datagrams)
 /// * `forward_targets` - Remote targets for outgoing datagrams; each
-///   outgoing datagram is sent to every one. Must be non-empty.
-///   Python's UDPInterface has exactly one forward address; more than
-///   one is a Rust-only extension with no wire difference per receiver.
+///   outgoing datagram is sent to every one. Python's UDPInterface has
+///   exactly one forward address; more than one is a Rust-only extension
+///   with no wire difference per receiver. An EMPTY list makes the
+///   interface receive-only: outgoing packets are dropped, matching a
+///   Python UDPInterface whose config carries bind but no forward
+///   parameters (UDPInterface.py:89 and :110 are independent `if`s, and
+///   `process_outgoing` swallows the resulting send failure).
 pub(crate) fn spawn_udp_interface(
     id: InterfaceId,
     name: String,
@@ -203,6 +207,47 @@ pub(crate) fn spawn_udp_interface(
     // Bind synchronously so errors propagate to the caller immediately.
     let std_socket = std::net::UdpSocket::bind(listen_addr)?;
     spawn_udp_interface_from_socket(id, name, std_socket, forward_targets)
+}
+
+/// Spawn a send-only UDP interface: no configured bind address, so nothing
+/// is received and everything handed to the interface goes to
+/// `forward_targets`.
+///
+/// This is the config form with forward parameters only
+/// (UDPInterface.py:110): Python never starts its `UDPServer`, leaves the
+/// interface `online == False`, and still transmits, because
+/// `process_outgoing` opens a fresh socket per datagram
+/// (UDPInterface.py:121-127) — `Transport.outbound` gates on `interface.OUT`
+/// alone (Transport.py:1183), never on `online`. We keep one socket for the
+/// interface's lifetime instead, bound to an ephemeral port on the wildcard
+/// address of the targets' family; whatever arrives on that port is
+/// discarded, so the interface stays receive-silent like the reference.
+pub(crate) fn spawn_udp_forward_only(
+    id: InterfaceId,
+    name: String,
+    forward_targets: Vec<ForwardTarget>,
+) -> io::Result<InterfaceHandle> {
+    // The bind family must match the targets' — `send_to` cannot cross it.
+    // Only a literal target states a family up front; a hostname is resolved
+    // later, and Python's UDP transmit socket is AF_INET, so v4 is the
+    // default.
+    let v6 = forward_targets
+        .iter()
+        .any(|t| matches!(t, ForwardTarget::Literal(addr) if addr.is_ipv6()));
+    let bind: SocketAddr = if v6 {
+        "[::]:0".parse().expect("static v6 wildcard address")
+    } else {
+        "0.0.0.0:0".parse().expect("static v4 wildcard address")
+    };
+    let std_socket = std::net::UdpSocket::bind(bind)?;
+    spawn_udp_interface_inner(
+        id,
+        name,
+        std_socket,
+        forward_targets,
+        false,
+        UdpResolveOpts::default(),
+    )
 }
 
 /// Like [`spawn_udp_interface`] but adopts an already-bound socket instead of
@@ -235,10 +280,23 @@ pub(crate) fn spawn_udp_interface_with_opts(
     forward_targets: Vec<ForwardTarget>,
     resolve_opts: UdpResolveOpts,
 ) -> io::Result<InterfaceHandle> {
-    if forward_targets.is_empty() {
+    spawn_udp_interface_inner(id, name, std_socket, forward_targets, true, resolve_opts)
+}
+
+/// Shared body of every spawn form. `receives` is false only for the
+/// send-only interface, whose socket exists solely to transmit from.
+fn spawn_udp_interface_inner(
+    id: InterfaceId,
+    name: String,
+    std_socket: std::net::UdpSocket,
+    forward_targets: Vec<ForwardTarget>,
+    receives: bool,
+    resolve_opts: UdpResolveOpts,
+) -> io::Result<InterfaceHandle> {
+    if forward_targets.is_empty() && !receives {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "UDP interface needs at least one forward address",
+            "UDP interface that does not receive needs at least one forward address",
         ));
     }
     std_socket.set_nonblocking(true)?;
@@ -258,7 +316,10 @@ pub(crate) fn spawn_udp_interface_with_opts(
         udp_io_task(
             task_name,
             socket,
-            forward_targets,
+            UdpDirections {
+                forward_targets,
+                receives,
+            },
             resolve_opts,
             incoming_tx,
             outgoing_rx,
@@ -289,6 +350,18 @@ pub(crate) fn spawn_udp_interface_with_opts(
         // immediate-ready.
         ready: super::ReadySignal::ready_immediate(),
     })
+}
+
+/// What the I/O task may do in each direction. Each side is independent,
+/// mirroring the reference's two separate config blocks (UDPInterface.py:89
+/// and :110).
+struct UdpDirections {
+    /// Remote targets for outgoing datagrams. Empty on a receive-only
+    /// interface, whose outgoing packets are dropped.
+    forward_targets: Vec<ForwardTarget>,
+    /// False on a send-only interface, whose socket exists only to transmit
+    /// from: whatever arrives on it is discarded.
+    receives: bool,
 }
 
 /// Runtime state of one forward target inside the I/O task.
@@ -434,12 +507,16 @@ fn keeping_note(st: &NamedState) -> String {
 async fn udp_io_task(
     name: String,
     socket: tokio::net::UdpSocket,
-    forward_targets: Vec<ForwardTarget>,
+    directions: UdpDirections,
     resolve_opts: UdpResolveOpts,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
 ) {
+    let UdpDirections {
+        forward_targets,
+        receives,
+    } = directions;
     let mut buf = [0u8; UDP_MTU];
     let local_is_v6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
 
@@ -475,13 +552,20 @@ async fn udp_io_task(
     // the log throttle and the anti-spin backoff below.
     let mut recv_error_streak: u64 = 0;
 
+    // Outgoing packets dropped for want of any forward destination.
+    let mut undeliverable: u64 = 0;
+
     loop {
         tokio::select! {
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, _src_addr)) => {
                         recv_error_streak = 0;
-                        if len > 0 && len <= UDP_MTU {
+                        // A send-only interface drains its ephemeral socket
+                        // but ingests nothing: the reference never starts a
+                        // server for this config form, so nothing may enter
+                        // the stack through it.
+                        if receives && len > 0 && len <= UDP_MTU {
                             counters.rx_bytes.fetch_add(len as u64, Ordering::Relaxed);
                             if incoming_tx
                                 .send(IncomingPacket {
@@ -534,6 +618,26 @@ async fn udp_io_task(
             msg = outgoing_rx.recv() => {
                 match msg {
                     Some(pkt) => {
+                        if targets.is_empty() {
+                            // Receive-only: the config named no forward
+                            // destination. Python reaches the same outcome
+                            // noisily — Transport still hands it the packet
+                            // (Transport.py:1183 gates on OUT only) and
+                            // `process_outgoing` logs the failing send
+                            // (UDPInterface.py:121-129) — so drop it, but
+                            // throttle the log instead of one line per
+                            // packet.
+                            undeliverable += 1;
+                            if undeliverable <= 3 || undeliverable.is_power_of_two() {
+                                tracing::warn!(
+                                    "UDP {} has no forward address; dropping outgoing \
+                                     packet (#{} so far)",
+                                    name,
+                                    undeliverable
+                                );
+                            }
+                            continue;
+                        }
                         for (idx, target) in targets.iter_mut().enumerate() {
                             let addr = match target {
                                 TargetState::Literal(addr) => *addr,
@@ -884,13 +988,108 @@ mod tests {
         assert!(!handle.outgoing.is_closed());
     }
 
+    /// A send-only interface has nowhere to send without a target, so an
+    /// empty forward list leaves it with no function at all.
     #[tokio::test]
-    async fn test_udp_empty_forward_list_rejected() {
-        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        match spawn_udp_interface(InterfaceId(0), "udp_empty".into(), listen, Vec::new()) {
+    async fn test_udp_forward_only_empty_forward_list_rejected() {
+        match spawn_udp_forward_only(InterfaceId(0), "udp_empty".into(), Vec::new()) {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
-            Ok(_) => panic!("empty forward address list must be rejected"),
+            Ok(_) => panic!("a send-only interface with no forward address must be rejected"),
         }
+    }
+
+    /// Receive-only (the reference's bind block without its forward block,
+    /// UDPInterface.py:89 vs :110, Codeberg #279): an empty forward list is a
+    /// working interface. It delivers inbound datagrams, and an outgoing
+    /// packet it cannot deliver is dropped without taking the interface down
+    /// — Python reaches the same outcome by letting `process_outgoing` fail
+    /// (UDPInterface.py:121-129).
+    #[tokio::test]
+    async fn receive_only_interface_receives_and_drops_outgoing() {
+        let std_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bound = std_sock.local_addr().unwrap();
+        let mut handle = spawn_udp_interface_from_socket(
+            InterfaceId(0),
+            "udp_rx_only".into(),
+            std_sock,
+            Vec::new(),
+        )
+        .expect("a receive-only UDP interface must spawn");
+
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        peer.send_to(b"inbound", bound).await.unwrap();
+        let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
+            .await
+            .expect("timeout — a receive-only interface must still receive")
+            .expect("channel closed");
+        assert_eq!(pkt.data, b"inbound");
+
+        handle
+            .outgoing
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"undeliverable".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .unwrap();
+
+        // Still alive afterwards: the next inbound datagram arrives.
+        peer.send_to(b"after", bound).await.unwrap();
+        let pkt = tokio::time::timeout(Duration::from_secs(2), handle.incoming.recv())
+            .await
+            .expect("timeout — an undeliverable packet must not kill the interface")
+            .expect("channel closed");
+        assert_eq!(pkt.data, b"after");
+    }
+
+    /// Send-only (the reference's forward block without its bind block): it
+    /// transmits, and nothing arriving on its transmit socket enters the
+    /// stack, because Python never starts a server for this config form.
+    ///
+    /// The silence assertion is a timeout, so it needs a positive control
+    /// that inbound delivery works at all on this path:
+    /// `receive_only_interface_receives_and_drops_outgoing` above is it —
+    /// same channel, same task, only `receives` differs.
+    #[tokio::test]
+    async fn send_only_interface_sends_and_ignores_inbound() {
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+
+        let mut handle = spawn_udp_forward_only(
+            InterfaceId(0),
+            "udp_tx_only".into(),
+            vec![listen_addr.into()],
+        )
+        .expect("a send-only UDP interface must spawn");
+
+        handle
+            .outgoing
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"outbound".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; UDP_MTU];
+        let (len, src) = tokio::time::timeout(Duration::from_secs(2), listener.recv_from(&mut buf))
+            .await
+            .expect("timeout — a send-only interface must transmit")
+            .expect("recv failed");
+        assert_eq!(&buf[..len], b"outbound");
+
+        // Its socket is reachable at `src`, but a datagram sent there must
+        // not enter the stack.
+        listener.send_to(b"reply", src).await.unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(500), handle.incoming.recv())
+            .await
+            .map(|pkt| pkt.map(|p| p.data.len()));
+        assert!(
+            quiet.is_err(),
+            "a send-only interface must not ingest datagrams, got {quiet:?} (payload length)"
+        );
     }
 
     #[test]
