@@ -112,13 +112,24 @@ just flash            # every attached T114
 just flash-rak4631    # every attached RAK4631
 ```
 
-For the RNode radios (LilyGO T-Beam, ESP32), extract Mark Qvist's signed
-firmware off a known-good RNode once, then flash any T-Beam. The ESP32 cannot
-be bricked, a failed flash is always recoverable by re-running flash-rnode:
+For the RNode radios (LilyGO T-Beam, Heltec, ESP32 family), extract Mark
+Qvist's signed firmware off a known-good RNode once, then flash. The ESP32
+cannot be bricked, a failed flash is always recoverable by re-running
+flash-rnode:
 
 ```sh
+just flash-rnode-setup                  # once per machine: a pinned esptool
 just flash-rnode-extract /dev/ttyACM6   # once, from a trusted RNode
 just flash-rnode /dev/ttyACM6
+```
+
+The chip and the flash offsets follow the board. The optional last argument
+names it (`tbeam`, `heltec-v4`, or a chip name); left out, the chip is read
+off the device. To back up or restore a whole board, image and all:
+
+```sh
+just flash-rnode-read-image /dev/ttyACM6 board.bin
+just flash-rnode-write-image /dev/ttyACM6 board.bin
 ```
 
 #### Cross-built .deb packages (optional)

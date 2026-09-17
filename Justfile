@@ -216,6 +216,19 @@ nrf-uf2-volumes:
 nrf-fw-readback:
     bash leviculum-nrf/tools/test-fw-readback.sh
 
+# The ESP32-side flashing recipes: chip and offsets follow the board, not a
+# constant (2026-09-17). `--chip esp32` and a bootloader at 0x1000 were
+# hardcoded into every flash-rnode-* recipe, which is right for the T-Beams
+# and wrong for the Heltec V4 — an ESP32-S3, bootloader at 0x0 — so the one
+# board that needed restoring was the one board the recipes could not touch.
+# Runs the recipes in dry-run and asserts the composed esptool command line;
+# no port is opened and nothing is written. ~0.5 s. Its --self-test puts the
+# S3 bootloader back at 0x1000 in a throwaway copy and requires the
+# assertions to go red.
+rnode-chip-offsets:
+    @bash scripts/check-rnode-chip-offsets.sh
+    @bash scripts/check-rnode-chip-offsets.sh --self-test
+
 # Static analysis for the flash-runner scripts (Codeberg #345). They have
 # carried `# shellcheck` directives since they were written, so somebody once
 # ran it — but nothing ever ran it again, and an SC2034 and an SC2015 sat in
@@ -243,7 +256,9 @@ nrf-shellcheck:
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
         scripts/check-plain-clone.sh \
-        scripts/publish-nightly.sh scripts/test-publish-nightly.sh
+        scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
+        scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
+        scripts/install-esptool.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -558,7 +573,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -1011,7 +1026,7 @@ flash-solarnode-one PORT:
 dfu-rak4631 PORT:
     meshtastic --port {{PORT}} --enter-dfu
 
-# RNode (LilyGO T-Beam, ESP32 + SX1276) flashing with Mark's firmware.
+# RNode (LilyGO T-Beam / Heltec, ESP32 family) flashing with Mark's firmware.
 # Run on the host the RNodes are attached to. The ESP32 has a mask-ROM
 # download bootloader and cannot be bricked: a failed flash is always
 # recoverable by re-running flash-rnode. This is unlike the nRF52 LNodes
@@ -1027,12 +1042,20 @@ dfu-rak4631 PORT:
 # only the firmware regions, not the NVS/EEPROM partition, so the device
 # signature and provisioning are preserved (verified: a T-Beam stayed
 # "Validated, Local signature" across a full reflash).
+#
+# BOARD argument: `auto` (default) reads the chip off the device; `tbeam`
+# and `heltec-v4` name it without one attached; a bare chip name
+# (`esp32`, `esp32s3`) goes straight through. Offsets follow the chip —
+# the S3 keeps its bootloader at 0x0 and the ESP32 at 0x1000, which is
+# why a single hardcoded `--chip esp32` could never restore a V4.
+# scripts/rnode-flash.sh holds the table and the evidence for each row.
 
 reference_reticulum := justfile_directory() / "reference" / "Reticulum"
 rnodeconf := "PYTHONPATH=" + reference_reticulum + " python3 " + reference_reticulum / "RNS" / "Utilities" / "rnodeconf.py"
 rnode_tools := env_var_or_default("LEVICULUM_RNODE_TOOLS", home_directory() / ".rnode-tools" / "venv")
 esptool := rnode_tools / "bin" / "esptool"
 rnode_fw := justfile_directory() / ".rnode-fw"
+rnode_flash := "ESPTOOL=" + esptool + " bash " + justfile_directory() / "scripts" / "rnode-flash.sh"
 
 # One-time setup: the esptool these recipes drive. Pinned, and the same one
 # scripts/install-ci.sh puts on a CI host, so a board is not flashed by
@@ -1045,6 +1068,12 @@ flash-rnode-setup:
 flash-rnode-info PORT:
     {{rnodeconf}} --info {{PORT}}
 
+# Which chip is on the far end of this port. Read-only, and the answer the
+# other recipes derive their offsets from when BOARD is left at auto.
+#   just flash-rnode-chip /dev/ttyACM6
+flash-rnode-chip PORT:
+    {{rnode_flash}} chip --port {{PORT}}
+
 # Back up an RNode EEPROM (board model, signature, provisioning) before any
 # flash. Writes ~/.config/rnodeconf/eeprom<timestamp>.eeprom.
 flash-rnode-backup PORT:
@@ -1054,17 +1083,29 @@ flash-rnode-backup PORT:
 # RNode into .rnode-fw/ (gitignored). Run ONCE against a trusted device; the
 # images then serve as the flash source for flash-rnode.
 #   just flash-rnode-extract /dev/ttyACM6
-flash-rnode-extract PORT:
-    mkdir -p {{rnode_fw}}
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x1000 0x4650 {{rnode_fw}}/bootloader.bin
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x8000 0xc00 {{rnode_fw}}/partitions.bin
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0xe000 0x2000 {{rnode_fw}}/boot_app0.bin
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x10000 0x200000 {{rnode_fw}}/app.bin
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 read_flash 0x210000 0x1f0000 {{rnode_fw}}/console.bin
+#   just flash-rnode-extract /dev/ttyACM6 heltec-v4
+flash-rnode-extract PORT BOARD="auto":
+    {{rnode_flash}} extract --port {{PORT}} --board {{BOARD}} --fw-dir {{rnode_fw}}
 
-# Flash a T-Beam RNode with the extracted Mark firmware. Deterministic and
+# Flash an RNode with the extracted Mark firmware. Deterministic and
 # non-interactive. Preserves the EEPROM provisioning. Requires
 # flash-rnode-extract to have populated .rnode-fw/ first.
 #   just flash-rnode /dev/ttyACM6
-flash-rnode PORT:
-    {{esptool}} --chip esp32 --port {{PORT}} --baud 921600 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_freq 80m --flash_size detect 0x1000 {{rnode_fw}}/bootloader.bin 0x8000 {{rnode_fw}}/partitions.bin 0xe000 {{rnode_fw}}/boot_app0.bin 0x10000 {{rnode_fw}}/app.bin 0x210000 {{rnode_fw}}/console.bin
+#   just flash-rnode /dev/ttyACM6 heltec-v4
+flash-rnode PORT BOARD="auto":
+    {{rnode_flash}} write --port {{PORT}} --board {{BOARD}} --fw-dir {{rnode_fw}}
+
+# The whole flash in one file. This is the restore path: a per-region set
+# presumes the partition table it was cut with, an image presumes nothing.
+# Measured on the V4: 16 MB read in 102.8 s (1306 kbit/s), no retries.
+#   just flash-rnode-read-image /dev/ttyACM6 .rnode-fw/v4-full-16mb.bin heltec-v4
+flash-rnode-read-image PORT IMAGE BOARD="auto":
+    {{rnode_flash}} read-image --port {{PORT}} --board {{BOARD}} --image {{IMAGE}}
+
+# Write a full-flash image back. Overwrites EVERYTHING, including the NVS
+# partition that carries the device signature and provisioning — which is
+# the point when restoring the board the image came off, and a mistake on
+# any other board. --flash-size keep: put back exactly what was read.
+#   just flash-rnode-write-image /dev/ttyACM6 .rnode-fw/v4-full-16mb.bin heltec-v4
+flash-rnode-write-image PORT IMAGE BOARD="auto":
+    {{rnode_flash}} write-image --port {{PORT}} --board {{BOARD}} --image {{IMAGE}}

@@ -21,7 +21,9 @@ leviculum-esp/target/
 # RNode firmware images extracted by `just flash-rnode-extract` (Mark's
 # signed binaries; pulled from a local device, not committed).
 /.rnode-fw/
-# Repo-local venv with a working esptool (just flash-rnode-setup).
+# Repo-local esptool venv. Nothing writes this since 2026-09-17 (the
+# recipes use the venv scripts/install-esptool.sh maintains, outside the
+# tree), but old checkouts still have one and it must stay uncommittable.
 /.rnode-tools/
 
 # Generated headers (cbindgen). The `*-ffi` glob also catches stray
