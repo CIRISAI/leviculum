@@ -35,19 +35,34 @@ pub fn resolve_instance_name(over: Option<&str>, config: Option<&Config>) -> Str
         .unwrap_or_else(|| "default".to_string())
 }
 
+/// The storage directory a client should use for a given config directory:
+/// the config's `storage_path` when it names one, else `<config_dir>/storage`.
+///
+/// Same resolution the daemon runs, so a client never opens a different
+/// directory than the daemon it is talking to (Codeberg #241). Without a
+/// readable config there is nothing to honour and the default stands.
+pub fn resolve_storage_path(config_dir: &Path, config: Option<&Config>) -> PathBuf {
+    match config {
+        Some(c) => c.reticulum.resolve_storage_path(config_dir),
+        None => config_dir.join("storage"),
+    }
+}
+
 /// Resolve the daemon's RPC authkey: `SHA256(storage/transport_identity)`.
 ///
-/// Tries `{config_dir}/storage/transport_identity` first (the path `lnsd`
-/// always uses unless `--storage` was given), then the config's
-/// `storage_path` if set. The 64-byte file is hashed and discarded — its
-/// bytes never leave this function.
+/// Tries the storage directory the config resolves to first — that is the one
+/// `lnsd` runs with — and falls back to `{config_dir}/storage` for a daemon
+/// started with a `--storage` flag the config does not mention. The 64-byte
+/// file is hashed and discarded — its bytes never leave this function.
 pub fn resolve_authkey(
     config_dir: &Path,
     config: Option<&Config>,
 ) -> Result<([u8; 32], PathBuf), String> {
-    let mut candidates: Vec<PathBuf> = vec![config_dir.join("storage").join("transport_identity")];
-    if let Some(sp) = config.and_then(|c| c.reticulum.storage_path.as_ref()) {
-        candidates.push(sp.join("transport_identity"));
+    let mut candidates: Vec<PathBuf> =
+        vec![resolve_storage_path(config_dir, config).join("transport_identity")];
+    let fallback = config_dir.join("storage").join("transport_identity");
+    if !candidates.contains(&fallback) {
+        candidates.push(fallback);
     }
     let mut errors = Vec::new();
     for path in &candidates {

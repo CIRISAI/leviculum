@@ -23,7 +23,12 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Storage directory path (default: <config_dir>/storage).
+    /// Storage directory path (default: the config's `storage_path`, else
+    /// <config_dir>/storage).
+    ///
+    /// Moves the daemon only: the client tools resolve storage from the
+    /// config, so a storage directory that has to be shared with them
+    /// belongs in the config file (Codeberg #241).
     ///
     /// Long-only: rnsd's `-s` means `--service`, so `-s` is reserved for that
     /// and storage keeps only its long spelling (a Leviculum extension).
@@ -79,7 +84,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Resolved before the subscriber so we can peek the config loglevel.
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
     let config_file = config_dir.join("config");
-    let storage_path = args.storage.unwrap_or_else(|| config_dir.join("storage"));
 
     // Log-level precedence (matches rnsd, CLI overrides config):
     //   RUST_LOG > CLI -v/-q (when non-zero) > config [logging] loglevel > info.
@@ -103,7 +107,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Config dir: {}", config_dir.display());
     info!("Config file: {}", config_file.display());
-    info!("Storage: {}", storage_path.display());
 
     // Load and configure Reticulum
     let mut config = if config_file.exists() {
@@ -111,6 +114,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Config::default()
     };
+
+    // Storage precedence: --storage > config `storage_path` > <config_dir>/storage.
+    // The resolved path is written back so the builder, the log line above and
+    // the client tools all name the same directory. Assigning the derived path
+    // unconditionally is what discarded the config's own value (Codeberg #241).
+    let storage_path = args
+        .storage
+        .unwrap_or_else(|| config.reticulum.resolve_storage_path(&config_dir));
+    info!("Storage: {}", storage_path.display());
     config.reticulum.storage_path = Some(storage_path);
 
     // Resource receive-window policy (Codeberg #85): env var, not a config

@@ -178,7 +178,8 @@ async fn run(args: Args) -> i32 {
         .ok()
         .map(|(key, _)| key);
 
-    let mut node = match build_client(&instance_name, &config_dir).await {
+    let storage_path = daemon_rpc::resolve_storage_path(&config_dir, config.as_ref());
+    let mut node = match build_client(&instance_name, &storage_path).await {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{e}");
@@ -211,14 +212,16 @@ async fn run(args: Args) -> i32 {
 
 async fn build_client(
     instance_name: &str,
-    config_dir: &std::path::Path,
+    storage_path: &std::path::Path,
 ) -> Result<ReticulumNode, String> {
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(instance_name)
         // Same sharing rationale as lncp: a transportless client writes no
-        // paths or announces to storage.
-        .storage_path(config_dir.join("storage"))
+        // paths or announces to storage. The directory is the daemon's,
+        // resolved from the config rather than derived from the config
+        // directory (Codeberg #241).
+        .storage_path(storage_path.to_path_buf())
         .build_sync()
         .map_err(|e| connect_error(instance_name, &e))?;
     node.start()

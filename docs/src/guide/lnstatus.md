@@ -162,7 +162,7 @@ Full field lists are in [lnstatus(1)](../man/lnstatus.1.md).
 
 `-R <hash>` queries a *remote* transport instance's status over a link,
 the way `rnstatus -R` does, and feeds the result to the same renderer,
-so remote and local output match (`run_remote` (`lnstatus.rs:422`)).
+so remote and local output match (`run_remote` (`lnstatus.rs:399`)).
 `<hash>` is the remote instance's transport identity hash (32 hex
 characters). `-i <file>` names the management identity and is
 mandatory; it is proven to the remote over the link, so the remote
@@ -179,7 +179,7 @@ lnstatus -R 76fe5751a56067d1e84eef3e88eab85b -i ~/.reticulum/identities/mgmt -w 
 
 `-d` lists the interfaces this daemon has discovered on the network, in
 the `rnstatus` discovered layout; `-D` renders the detailed layout with
-ready-to-paste config entries (`run_discovered` (`lnstatus.rs:331`)).
+ready-to-paste config entries (`run_discovered` (`lnstatus.rs:308`)).
 Both read the local daemon's discovered-interface registry over the
 shared-instance RPC and honour `FILTER` and `-j`:
 

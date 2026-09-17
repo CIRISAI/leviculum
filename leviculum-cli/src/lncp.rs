@@ -14,6 +14,10 @@ use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{Destination, DestinationType, Direction};
 
 mod cp;
+// Config-dir-derived daemon access (instance name, storage path). lncp uses
+// a subset, like the other client binaries.
+#[allow(dead_code)]
+mod daemon_rpc;
 
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -178,8 +182,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return print_identity(&config_dir, args.identity.as_deref());
     }
 
-    // Determine instance name from config
-    let instance_name = read_instance_name(&config_dir);
+    // Determine instance name and storage directory from config
+    let config = daemon_rpc::load_config(&config_dir);
+    let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
+    let storage_path = daemon_rpc::resolve_storage_path(&config_dir, config.as_ref());
 
     // Connect to daemon
     let mut node = ReticulumNodeBuilder::new()
@@ -192,7 +198,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // Safe to share storage path with lnsd: a client with
         // enable_transport(false) writes no paths, announces, or
         // packet hashes to storage. Identity is loaded separately.
-        .storage_path(config_dir.join("storage"))
+        // Sharing means the daemon's directory, which the config may move
+        // off the config directory entirely (Codeberg #241).
+        .storage_path(storage_path)
         .build_sync()
         .map_err(|e| daemon_connect_error(&instance_name, &e, args.verbose))?;
     node.start()
@@ -304,18 +312,6 @@ fn daemon_connect_error(instance_name: &str, error: &dyn std::fmt::Display, verb
             String::new()
         }
     )
-}
-
-fn read_instance_name(config_dir: &std::path::Path) -> String {
-    // Config has `instance_name` field (config.rs:39),
-    // INI parser handles it (ini_config.rs:152), default is "default".
-    let config_file = config_dir.join("config");
-    if config_file.exists() {
-        if let Ok(config) = Config::load(&config_file) {
-            return config.reticulum.instance_name;
-        }
-    }
-    "default".to_string()
 }
 
 fn parse_identity_hashes(allowed: &[String]) -> Result<Vec<[u8; 16]>, Box<dyn std::error::Error>> {

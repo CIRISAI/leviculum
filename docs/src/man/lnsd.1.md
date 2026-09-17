@@ -22,7 +22,7 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 :   Path to the Reticulum configuration directory, the way `rnsd --config` takes one. The config file is `<dir>/config`. Without this option the default lookup order applies; see FILES.
 
 **--storage** *dir*
-:   Storage directory path. Defaults to `<config_dir>/storage`. Long-only on purpose: in `rnsd`, `-s` means `--service`, so the short letter stays reserved for that and the storage override is a Leviculum extension.
+:   Storage directory path. Overrides the config file's `storage_path`, which in turn overrides the default `<config_dir>/storage`. It moves the daemon alone — the client tools read `storage_path` from the config — so a storage directory shared with `lnstatus`, `lncp`, `lnpath` or `lnprobe` belongs in the config file. Long-only on purpose: in `rnsd`, `-s` means `--service`, so the short letter stays reserved for that and the storage override is a Leviculum extension.
 
 **-s**, **--service**
 :   Declare that the daemon is running as a service, accepted for compatibility with `rnsd -s`. **lnsd** keeps logging to standard output, which journald captures; it does not redirect to a log file.

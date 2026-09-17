@@ -27,6 +27,11 @@ use leviculum_std::Identity;
 mod lnstatus_render;
 use lnstatus_render::StatusOptions;
 
+// Config-dir-derived daemon access (instance name, storage path, authkey).
+// lnstatus uses a subset, like the other client binaries.
+#[allow(dead_code)]
+mod daemon_rpc;
+
 /// Reticulum Network Stack Status (drop-in for rnstatus).
 #[derive(Parser, Debug)]
 #[command(
@@ -160,34 +165,6 @@ impl Args {
     }
 }
 
-/// Resolve the daemon's RPC authkey: `SHA256(storage/transport_identity)`.
-/// Mirrors the diag path (`leviculum-cli/src/diag.rs:303`).
-fn resolve_authkey(config_dir: &Path, config: Option<&Config>) -> Result<[u8; 32], String> {
-    let mut candidates: Vec<PathBuf> = vec![config_dir.join("storage").join("transport_identity")];
-    if let Some(sp) = config.and_then(|c| c.reticulum.storage_path.as_ref()) {
-        candidates.push(sp.join("transport_identity"));
-    }
-    let mut errors = Vec::new();
-    for path in &candidates {
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() == 64 => {
-                use sha2::Digest;
-                let digest = sha2::Sha256::digest(&bytes);
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&digest);
-                return Ok(key);
-            }
-            Ok(bytes) => errors.push(format!(
-                "{}: unexpected size {} (expected 64)",
-                path.display(),
-                bytes.len()
-            )),
-            Err(e) => errors.push(format!("{}: {e}", path.display())),
-        }
-    }
-    Err(errors.join("; "))
-}
-
 /// Fetch `interface_stats` (and `link_count` when `-l`) from the daemon.
 async fn fetch_status(
     instance_name: &str,
@@ -274,7 +251,7 @@ async fn main() {
 
     // --- Remote management (-R/-i/-w): query a remote transport instance. ---
     if args.remote.is_some() {
-        run_remote(&args, &config_dir, &instance_name).await;
+        run_remote(&args, &config_dir, loaded_config.as_ref(), &instance_name).await;
         return;
     }
 
@@ -285,8 +262,8 @@ async fn main() {
     }
 
     // --- Local mode: resolve authkey and drive the shared-instance RPC. ---
-    let authkey = match resolve_authkey(&config_dir, loaded_config.as_ref()) {
-        Ok(k) => k,
+    let authkey = match daemon_rpc::resolve_authkey(&config_dir, loaded_config.as_ref()) {
+        Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
@@ -334,8 +311,8 @@ async fn run_discovered(
     config: Option<&Config>,
     instance_name: &str,
 ) {
-    let authkey = match resolve_authkey(config_dir, config) {
-        Ok(k) => k,
+    let authkey = match daemon_rpc::resolve_authkey(config_dir, config) {
+        Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
@@ -382,8 +359,8 @@ async fn run_identities(
     config: Option<&Config>,
     instance_name: &str,
 ) {
-    let authkey = match resolve_authkey(config_dir, config) {
-        Ok(k) => k,
+    let authkey = match daemon_rpc::resolve_authkey(config_dir, config) {
+        Ok((k, _)) => k,
         Err(msg) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("(cannot derive RPC authkey: {msg})");
@@ -419,7 +396,7 @@ const DEFAULT_REMOTE_TIMEOUT_SECS: f64 = 15.0;
 /// Python `rnstatus -R` does. Connects to the local shared instance for
 /// transport (like `lncp`), then drives the remote flow in
 /// `leviculum_std::remote_status::fetch_remote_status`.
-async fn run_remote(args: &Args, config_dir: &Path, instance_name: &str) {
+async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, instance_name: &str) {
     // -R is required to reach this path; -i (management identity) is mandatory,
     // matching Python (rnstatus.py:313).
     let remote_hex = args.remote.as_deref().unwrap_or_default();
@@ -467,7 +444,9 @@ async fn run_remote(args: &Args, config_dir: &Path, instance_name: &str) {
     let mut node = match ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(instance_name)
-        .storage_path(config_dir.join("storage"))
+        // The daemon's storage directory, which the config may place off the
+        // config directory (Codeberg #241).
+        .storage_path(daemon_rpc::resolve_storage_path(config_dir, config))
         .build_sync()
     {
         Ok(n) => n,

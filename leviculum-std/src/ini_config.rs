@@ -324,6 +324,18 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
                 config.network_identity = Some(std::path::PathBuf::from(trimmed));
             }
         }
+        // Where the node keeps its identity, known destinations and packet
+        // hashlist. A Leviculum key: Python-RNS derives the storage directory
+        // from the config directory alone (Reticulum.py:246) and has no config
+        // key to name it, so there is no Python spelling to match here.
+        // Relative values are resolved against the config directory by
+        // [`ReticulumConfig::resolve_storage_path`] (Codeberg #241).
+        "storage_path" => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                config.storage_path = Some(std::path::PathBuf::from(trimmed));
+            }
+        }
         // Tolerate (accept without error) RNS 1.2.2..1.3.5 reticulum-level
         // keys we don't implement: blackhole_update_interval, default_ar_*,
         // egress_control, the ic_*/ic_pr_*/ec_pr_freq ingress/egress-control
@@ -2851,5 +2863,40 @@ loglevel = 4
         assert_eq!(fast.discovery_announce_interval_secs, Some(5));
         assert_eq!(crate::discovery::resolve_announce_interval_secs(fast), 5);
         assert!(crate::discovery::descriptor_from_config(fast).is_some());
+    }
+
+    #[test]
+    fn test_parse_storage_path() {
+        // Codeberg #241: `storage_path` is a Leviculum key (Python-RNS has no
+        // config key for it, Reticulum.py:246 always uses configdir+"/storage"),
+        // and it fell into the unknown-key catch-all — so it parsed from TOML
+        // and vanished from the INI configs every real deployment writes.
+        let config = parse_ini(
+            r#"
+[reticulum]
+  enable_transport = True
+  storage_path = /mnt/data/reticulum-storage
+
+[interfaces]
+  [[Backbone]]
+    type = TCPClientInterface
+    target_host = example.org
+    target_port = 4242
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.reticulum.storage_path,
+            Some(std::path::PathBuf::from("/mnt/data/reticulum-storage"))
+        );
+    }
+
+    #[test]
+    fn test_parse_storage_path_absent_stays_none() {
+        // Absent means "no opinion", which is what lets the config directory
+        // supply the default further up.
+        let config = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert_eq!(config.reticulum.storage_path, None);
     }
 }

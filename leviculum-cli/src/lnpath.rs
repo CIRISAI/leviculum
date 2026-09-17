@@ -149,7 +149,7 @@ async fn run(args: Args) -> i32 {
     }
     query_path(
         &instance_name,
-        &config_dir,
+        &daemon_rpc::resolve_storage_path(&config_dir, config.as_ref()),
         authkey.as_ref(),
         &dest_hash,
         args.timeout.unwrap_or(DEFAULT_TIMEOUT),
@@ -202,12 +202,12 @@ async fn drop_path(
 /// it leaves on.
 async fn query_path(
     instance_name: &str,
-    config_dir: &std::path::Path,
+    storage_path: &std::path::Path,
     authkey: Option<&[u8; 32]>,
     dest_hash: &DestinationHash,
     timeout: f64,
 ) -> i32 {
-    let mut node = match build_client(instance_name, config_dir).await {
+    let mut node = match build_client(instance_name, storage_path).await {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{e}");
@@ -282,14 +282,17 @@ async fn wait_and_report(
 
 async fn build_client(
     instance_name: &str,
-    config_dir: &std::path::Path,
+    storage_path: &std::path::Path,
 ) -> Result<ReticulumNode, String> {
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(instance_name)
         // Same sharing rationale as lncp and lnprobe: a transportless
-        // client writes no paths or announces to storage.
-        .storage_path(config_dir.join("storage"))
+        // client writes no paths or announces to storage. The path is the
+        // daemon's own, resolved from the config (Codeberg #241) — deriving
+        // it from the config directory here left a second identity beside a
+        // config that named an external disk.
+        .storage_path(storage_path.to_path_buf())
         .build_sync()
         .map_err(|e| connect_error(instance_name, &e))?;
     node.start()

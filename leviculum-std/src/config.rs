@@ -849,6 +849,30 @@ mod dirs {
     }
 }
 
+impl ReticulumConfig {
+    /// The storage directory this config asks for, resolved against the
+    /// config directory it was loaded from.
+    ///
+    /// The order is the one the whole stack has to agree on: the config's
+    /// `storage_path` when it names one, else `<config_dir>/storage` (what
+    /// Python-Reticulum always uses, `Reticulum.py:246`). A relative value
+    /// resolves against the config directory, which is what the field has
+    /// always documented.
+    ///
+    /// Daemon and client tools both go through here so that a config naming
+    /// an external disk does not end with `lnsd` reading one directory and
+    /// `lnstatus` another — that split generated a second identity and put a
+    /// production transport node on the mesh under a new address
+    /// (Codeberg #241).
+    pub fn resolve_storage_path(&self, config_dir: &Path) -> PathBuf {
+        match self.storage_path {
+            Some(ref path) if path.is_absolute() => path.clone(),
+            Some(ref path) => config_dir.join(path),
+            None => config_dir.join("storage"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,5 +1168,36 @@ mod tests {
     fn resolve_without_home_uses_current_dir_fallback() {
         let r = resolve_config_dir(Path::new("/etc/reticulum"), None, |_| false);
         assert_eq!(r, PathBuf::from("./.reticulum"));
+    }
+
+    #[test]
+    fn storage_path_resolution_order() {
+        // Codeberg #241. Absent: the Python default under the config dir.
+        let cfg = ReticulumConfig::default();
+        assert_eq!(
+            cfg.resolve_storage_path(Path::new("/etc/reticulum")),
+            PathBuf::from("/etc/reticulum/storage")
+        );
+
+        // Absolute: taken as it stands, which is the whole point of the key —
+        // the storage lives on a disk that is not below the config dir.
+        let cfg = ReticulumConfig {
+            storage_path: Some(PathBuf::from("/mnt/data/storage")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve_storage_path(Path::new("/etc/reticulum")),
+            PathBuf::from("/mnt/data/storage")
+        );
+
+        // Relative: against the config dir, as the field documents.
+        let cfg = ReticulumConfig {
+            storage_path: Some(PathBuf::from("state")),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.resolve_storage_path(Path::new("/etc/reticulum")),
+            PathBuf::from("/etc/reticulum/state")
+        );
     }
 }
