@@ -229,6 +229,16 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// One rejected upload, by reason and carrier.
+///
+/// `reason` is a fixed word rather than a message: the whole point of the
+/// event is that an analysis can count rejections per reason without
+/// parsing prose, and a free-text field is one refactor away from breaking
+/// that. The prose stays on the `EngineEvent::Rejected` the operator sees.
+pub(crate) fn log_reject(reason: &'static str, via: &'static str) {
+    tracing::debug!(event = "PN_REJECT", reason = reason, via = via);
+}
+
 fn short_hex(bytes: &[u8]) -> String {
     bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -560,6 +570,7 @@ impl<S: PropagationStore> Engine<S> {
                     out.merge(send);
                 }
                 out.merge(core.close_link(link_id));
+                log_reject("invalid_stamp", via);
                 self.emit(EngineEvent::Rejected {
                     detail: "invalid stamp".into(),
                 });
@@ -570,6 +581,7 @@ impl<S: PropagationStore> Engine<S> {
                 // happen, the reference tears the link down
                 // (reference/LXMF/LXMF/LXMRouter.py:2382-2385).
                 out.merge(core.close_link(link_id));
+                log_reject("peer_sync_form", via);
                 self.emit(EngineEvent::Rejected {
                     detail: "peer sync form without peering support".into(),
                 });
@@ -579,11 +591,13 @@ impl<S: PropagationStore> Engine<S> {
                 // The reference logs and ignores
                 // (reference/LXMF/LXMF/LXMRouter.py:2262-2264).
                 tracing::debug!("lnpnd: undecodable upload ignored: {error}");
+                log_reject("malformed", via);
                 false
             }
             UploadOutcome::StoreFailed(error) => {
                 // No proof leaves: the client keeps its retry, which is the
                 // honest outcome for a store that cannot hold the message.
+                log_reject("store_failed", via);
                 self.emit(EngineEvent::Rejected {
                     detail: format!("store failed: {error}"),
                 });
@@ -1329,6 +1343,17 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         if now_ms >= self.next_maintenance_at {
             let evicted = ready.node.tick(unix_secs());
             self.log_evictions(&evicted);
+            // The store's own line: how full it is against its limit, and
+            // -- because it fires on a fixed cadence whether or not any
+            // traffic arrived -- the log's liveness heartbeat. A quiet node
+            // and a dead one are otherwise the same absence of lines.
+            let store = ready.node.store();
+            tracing::debug!(
+                event = "PN_STORE",
+                used = store.capacity().saturating_sub(store.free_space()),
+                limit = store.capacity(),
+                count = store.count().unwrap_or(0),
+            );
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
 

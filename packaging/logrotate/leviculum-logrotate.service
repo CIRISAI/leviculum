@@ -1,0 +1,11 @@
+[Unit]
+Description=Rotate the Leviculum event logs
+Documentation=https://codeberg.org/Lew_Palm/leviculum
+
+[Service]
+Type=oneshot
+# A state file of its own, not /var/lib/logrotate/status: this unit runs
+# every 15 minutes and the distribution's daily logrotate runs from the
+# same status file. Two schedules sharing one state file make each one's
+# "when did I last rotate this" answer wrong.
+ExecStart=/usr/sbin/logrotate --state /var/lib/logrotate/leviculum.status /etc/logrotate.d/leviculum

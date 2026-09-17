@@ -116,7 +116,9 @@ The Debian package installs the config directory at */etc/lnpnd* and the data di
 
 ## EVENTS
 
-With `LEVICULUM_EVENT_LOG=<path>` set, the daemon appends one structured line per accepted upload (`PN_ACCEPT`), mailbox request (`PN_GET`), eviction (`PN_EVICT`), peer-table change (`PN_PEER`), offer round (`PN_OFFER`), sync round (`PN_SYNC`) and own-mailbox delivery (`PN_MAILBOX`).
+With `LEVICULUM_EVENT_LOG=<path>` set, the daemon appends one structured line per accepted upload (`PN_ACCEPT`), rejected upload (`PN_REJECT`, with a fixed `reason` word), mailbox request (`PN_GET`), eviction (`PN_EVICT`), peer-table change (`PN_PEER`), offer round (`PN_OFFER`), sync round (`PN_SYNC`) and own-mailbox delivery (`PN_MAILBOX`), plus a `PN_STORE` line every 8 minutes carrying store size against the limit. `PN_STORE` fires whether or not traffic arrived, so it is also the log's liveness heartbeat: a quiet node and a dead one are otherwise the same absence of lines.
+
+`scripts/analyze-lnpnd.py` summarises such a log in one streaming pass with constant memory, which matters because a public node's event log grows to tens of gigabytes. `packaging/logrotate/` caps it: a logrotate config, a oneshot and a 15-minute timer, with `packaging/logrotate/README.md` on why the rotation has to be `copytruncate` and what the ceiling comes to.
 
 ## SEE ALSO
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Rotate the Leviculum event logs every 15 minutes
+Documentation=https://codeberg.org/Lew_Palm/leviculum
+
+[Timer]
+# Every quarter hour. The interval is half of the ceiling argument in
+# /etc/logrotate.d/leviculum: `size` is only checked when logrotate runs,
+# so the live file can overshoot by one interval's worth of writing. A
+# node that once wrote 30 GB a day overshoots by ~310 MB here, and by
+# 30 GB under a daily schedule.
+OnCalendar=*:0/15
+# A machine that was off does not skip its rotation.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

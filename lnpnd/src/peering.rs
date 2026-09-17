@@ -684,8 +684,14 @@ impl PeeringRuntime {
                         local.push((transient_id, destination_hash));
                     }
                 }
-                UploadOutcome::InvalidStamp { .. } => invalid += 1,
-                UploadOutcome::Malformed(_) | UploadOutcome::PeerSyncForm => invalid += 1,
+                UploadOutcome::InvalidStamp { .. } => {
+                    crate::engine::log_reject("invalid_stamp", "sync");
+                    invalid += 1;
+                }
+                UploadOutcome::Malformed(_) | UploadOutcome::PeerSyncForm => {
+                    crate::engine::log_reject("malformed", "sync");
+                    invalid += 1;
+                }
                 UploadOutcome::StoreFailed(error) => {
                     // Eviction already ran inside accept; a message that
                     // still does not fit is dropped — the protocol's
@@ -693,6 +699,7 @@ impl PeeringRuntime {
                     // paper). Complete messages only: the store append is
                     // atomic at the verb boundary.
                     tracing::debug!("lnpnd: sync message dropped, store: {error}");
+                    crate::engine::log_reject("store_failed", "sync");
                 }
             }
         }

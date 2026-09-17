@@ -1,0 +1,72 @@
+# Rotation for the Leviculum structured event logs, with a hard ceiling.
+#
+# Why this file exists
+# --------------------
+# The event log of a public backbone node is the largest thing on the
+# machine. The miauhaus soak node reached 60 GB, at times ~30 GB a day; the
+# host leviculum.network runs on has about 29 GB free. Unrotated, the log
+# fills the disk, and a propagation node that cannot write its message store
+# loses mail. Rotation is not tidiness here, it is a correctness measure.
+#
+# Why copytruncate, and not the default
+# -------------------------------------
+# The writer opens the log ONCE per process and caches the handle for the
+# life of the daemon (`event_log_file`,
+# leviculum-std/src/event_log.rs:668-684: a `OnceLock<Option<Mutex<File>>>`
+# filled on first use). Nothing reopens it -- there is no SIGHUP handler and
+# no retry, by design, because a failing open(2) on the tracing hot path is
+# worse than a log that stopped.
+#
+# So under the logrotate default (rename the file aside, create a new one,
+# signal the daemon) the daemon would keep writing into the renamed inode
+# for ever: the new file stays empty, the old one keeps growing, and the
+# disk is never freed. That is the exact failure the rotation was installed
+# to prevent, arriving silently.
+#
+# `copytruncate` keeps the inode: copy the bytes aside, truncate in place.
+# The writer's cached handle is `O_APPEND`, so the next write goes to
+# offset 0 of the same file and an operator keeps seeing a live log. Both
+# halves are pinned by leviculum-std/tests/event_log_rotation.rs, including
+# the rename case as a positive control -- if the writer ever gains a reopen
+# path, that test goes red and this directive can be revisited.
+#
+# The window between the copy and the truncate is the known cost: events
+# emitted inside it are lost. At one 15-minute check per day's worth of
+# rotations that is a handful of lines against a log measured in gigabytes.
+#
+# The ceiling
+# -----------
+# `size 512M` + `rotate 8`: at most 9 files, so 4.6 GB even if nothing
+# compressed at all. Compression only makes the eight archived ones
+# smaller; the bound does not depend on a ratio. Against 29 GB free that
+# leaves the disk to the message store, which is what has to survive.
+#
+# `size` is checked when logrotate RUNS, so the cadence is part of the
+# ceiling: the companion timer fires every 15 minutes, which bounds the
+# overshoot at one quarter-hour of writing. Daily rotation on a node that
+# once wrote 30 GB a day would let the live file reach 30 GB between
+# checks, and the ceiling would be a decoration.
+
+/var/log/leviculum/*.log {
+    size 512M
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su leviculum leviculum
+    create 0640 leviculum leviculum
+}
+
+/var/log/lnpnd/*.log {
+    size 512M
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su lnpnd lnpnd
+    create 0640 lnpnd lnpnd
+}

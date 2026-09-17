@@ -44,10 +44,13 @@ use lnpnd::mailbox::MailboxConfig;
                   verbs --status, --peers, --sync and --break drive lnpnd and \
                   lxmd nodes alike.\n\n\
                   Set LEVICULUM_EVENT_LOG=<path> for one structured line per \
-                  accepted upload (PN_ACCEPT), mailbox request (PN_GET), \
-                  eviction (PN_EVICT), peering change (PN_PEER), offer round \
-                  (PN_OFFER), sync round (PN_SYNC) and own-mailbox delivery \
-                  (PN_MAILBOX)."
+                  accepted upload (PN_ACCEPT), rejected upload (PN_REJECT), \
+                  mailbox request (PN_GET), eviction (PN_EVICT), peering \
+                  change (PN_PEER), offer round (PN_OFFER), sync round \
+                  (PN_SYNC) and own-mailbox delivery (PN_MAILBOX), plus a \
+                  PN_STORE line every 8 minutes carrying store size against \
+                  the limit -- which is also the log's liveness heartbeat. \
+                  scripts/analyze-lnpnd.py summarises such a log."
 )]
 struct Args {
     /// Path to an alternative lnpnd config directory.
