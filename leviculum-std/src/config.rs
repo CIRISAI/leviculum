@@ -138,6 +138,22 @@ pub struct ReticulumConfig {
     /// already handle.
     #[serde(default)]
     pub max_links: Option<usize>,
+    /// Collect interface information other transport instances announce
+    /// (Python `discover_interfaces`, Reticulum.py:580-583). When false the
+    /// daemon keeps no discovered-interface registry, and
+    /// [`Self::autoconnect_discovered_interfaces`] has nothing to act on —
+    /// the same coupling Python has, where the autoconnect job only runs
+    /// inside the discovery handler this key creates.
+    ///
+    /// Default deviation, deliberate: Python defaults this to `false`
+    /// (Reticulum.py:260), we default to `true`. Collecting is locally
+    /// observable only — nothing extra goes on the air, and connecting is
+    /// still gated by `autoconnect_discovered_interfaces`, which defaults
+    /// to off in both stacks. Defaulting to `true` keeps `lnstatus -d`
+    /// useful on a node whose config never mentions the key, which is the
+    /// case for every node we run.
+    #[serde(default = "default_discover_interfaces")]
+    pub discover_interfaces: bool,
     /// Auto-connect discovered interfaces (Codeberg #32, sub-task b).
     ///
     /// A single integer that both gates and bounds runtime auto-connect,
@@ -168,6 +184,12 @@ pub const DEFAULT_DISCOVERY_JOB_INTERVAL_SECS: u64 = 60;
 
 fn default_discovery_job_interval_secs() -> u64 {
     DEFAULT_DISCOVERY_JOB_INTERVAL_SECS
+}
+
+/// Default for [`ReticulumConfig::discover_interfaces`]; see the field's
+/// documentation for why it differs from Python's.
+fn default_discover_interfaces() -> bool {
+    true
 }
 
 /// Default interval between periodic storage flushes (seconds)
@@ -227,6 +249,7 @@ impl Default for ReticulumConfig {
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
             max_links: None,
+            discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,
             network_identity: None,
             discovery_job_interval_secs: DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
@@ -274,6 +297,14 @@ pub struct InterfaceConfig {
     /// Advertise this interface via on-network discovery (Python `discoverable`).
     #[serde(default)]
     pub discoverable: bool,
+    /// Seed-only interface (Python `bootstrap_only`, Reticulum.py:824-825).
+    /// Parsed and reported, not yet acted on: Python's discovery job tears a
+    /// bootstrap-only interface down once the auto-connected count reaches
+    /// the target and re-creates it when that count falls to zero
+    /// (Discovery.py:553-570); lnsd keeps the connection for the life of the
+    /// daemon. `warn_unimplemented_keys` says so at start-up.
+    #[serde(default)]
+    pub bootstrap_only: bool,
     /// Human-readable name published in the discovery announce (Python
     /// `discovery_name`). The receiver falls back to `Discovered <type>`.
     #[serde(default)]
@@ -617,6 +648,7 @@ impl Default for InterfaceConfig {
             outgoing: true,
             bitrate: None,
             discoverable: false,
+            bootstrap_only: false,
             discovery_name: None,
             reachable_on: None,
             discovery_encrypt: false,

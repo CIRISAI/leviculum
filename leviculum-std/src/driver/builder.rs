@@ -68,6 +68,7 @@ pub struct ReticulumNodeBuilder {
     /// Explicit auto-connect cap override (takes priority over config value).
     /// `0` disables runtime auto-connect; `N > 0` enables it capped at `N`.
     autoconnect_discovered_interfaces_explicit: Option<usize>,
+    discover_interfaces_explicit: Option<bool>,
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
@@ -111,6 +112,7 @@ impl ReticulumNodeBuilder {
             link_keepalive_secs_explicit: None,
             max_links_explicit: None,
             autoconnect_discovered_interfaces_explicit: None,
+            discover_interfaces_explicit: None,
             connect_instance_name: None,
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
@@ -716,6 +718,15 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Override `[reticulum] discover_interfaces`: whether the node collects
+    /// the interface information other transport instances announce. `false`
+    /// also stops auto-connect, which has nothing to act on without the
+    /// registry.
+    pub fn discover_interfaces(mut self, enabled: bool) -> Self {
+        self.discover_interfaces_explicit = Some(enabled);
+        self
+    }
+
     /// Set the capacity of the lossless control-plane event channel
     /// (Codeberg #71).
     ///
@@ -973,6 +984,10 @@ impl ReticulumNodeBuilder {
         node.set_discovery_job_interval_secs(
             self.discovery_job_interval_secs_explicit
                 .unwrap_or(config.reticulum.discovery_job_interval_secs),
+        );
+        node.set_discover_interfaces(
+            self.discover_interfaces_explicit
+                .unwrap_or(config.reticulum.discover_interfaces),
         );
 
         Ok(node)

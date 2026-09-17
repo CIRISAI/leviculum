@@ -211,6 +211,11 @@ impl RawConfig {
         const INERT: &[(&str, &str, &str)] = &[
             (
                 "propagation",
+                "announce_at_start",
+                "lnpnd always announces the node shortly after start; see lnpnd(1)",
+            ),
+            (
+                "propagation",
                 "prioritise_destinations",
                 "eviction is size- and age-driven only; see lnpnd(1)",
             ),

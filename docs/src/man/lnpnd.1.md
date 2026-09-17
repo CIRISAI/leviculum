@@ -80,6 +80,9 @@ The config file is lxmd's format and keys (`lxmd --exampleconfig` and `lnpnd --e
 
 Keys accepted but not acted on, so a config file shared with lxmd parses cleanly (each is warned about at startup):
 
+`announce_at_start` (in `[propagation]`)
+:   lnpnd always announces the propagation node shortly after start, so `yes` is already the case and `no` has nothing to switch off. The `[lxmf]` key of the same name *is* honoured: it governs the daemon's own delivery destination.
+
 `prioritise_destinations`
 :   lnpnd's store eviction is size- and age-driven only. The reference uses this list to keep favoured destinations when the store overflows; lnpnd's store design (shared with the board-hosted node, where the list would not fit) does not carry per-destination priority.
 

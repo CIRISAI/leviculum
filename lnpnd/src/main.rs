@@ -863,6 +863,84 @@ fn full_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The `lxmd`-shaped config a public propagation node actually carries,
+    /// pinned key by key to the effective values it resolves to.
+    ///
+    /// This is the acceptance list for taking `leviculum.network`'s
+    /// propagation node over from Python `lxmd`. Every key here is one an
+    /// operator wrote on purpose; a value that silently resolves to
+    /// something else is mail that silently stops flowing.
+    const PUBLIC_NODE_CONFIG: &str = "\
+[propagation]\n\
+  enable_node = yes\n\
+  announce_interval = 360\n\
+  announce_at_start = yes\n\
+  autopeer = yes\n\
+  autopeer_maxdepth = 4\n\
+  propagation_transfer_max_accepted_size = 256\n\
+  message_storage_limit = 1000\n\
+  static_peers = e17f833c4ddf8890dd3a79a6fea8161d\n\
+  auth_required = no\n\
+\n\
+[lxmf]\n\
+  display_name = leviculum.network\n\
+  announce_at_start = no\n\
+\n\
+[logging]\n\
+  loglevel = 4\n";
+
+    #[test]
+    fn the_public_node_config_resolves_key_for_key() {
+        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("the live config shape parses");
+        let args = Args::parse_from(["lnpnd"]);
+        let effective = resolve(&args, &file).expect("resolves");
+
+        // Minutes in the file, seconds in the daemon (`as_int(...)*60`,
+        // `reference/LXMF/LXMF/Utilities/lxmd.py:154`).
+        assert_eq!(effective.announce_interval_secs, 360 * 60);
+        assert!(effective.autopeer);
+        assert_eq!(effective.autopeer_maxdepth, 4);
+        // Megabytes in the file, kilobytes in the daemon (`lxmd.py:158-159`).
+        assert_eq!(effective.store_limit_kb, 1_000_000);
+        // The older of the two spellings; kilobytes either way.
+        assert_eq!(effective.transfer_limit_kb, 256);
+        assert!(!effective.auth_required);
+        assert_eq!(effective.display_name, "leviculum.network");
+        assert!(
+            !effective.mailbox_announce_at_start,
+            "[lxmf] announce_at_start = no"
+        );
+        assert_eq!(effective.loglevel, 4);
+
+        // A static peer dropped on the floor is mail that stops flowing
+        // without anything saying so.
+        assert_eq!(
+            effective.static_peers,
+            vec![[
+                0xe1, 0x7f, 0x83, 0x3c, 0x4d, 0xdf, 0x88, 0x90, 0xdd, 0x3a, 0x79, 0xa6, 0xfe, 0xa8,
+                0x16, 0x1d
+            ]]
+        );
+    }
+
+    /// `[propagation] announce_at_start` is not acted on — lnpnd announces
+    /// the node shortly after start either way. It has to appear in the
+    /// start-up warning, or an operator who set it to `no` gets an announce
+    /// nobody told them about.
+    #[test]
+    fn propagation_announce_at_start_is_reported_as_inert() {
+        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("parses");
+        assert!(
+            file.inert_keys()
+                .iter()
+                .any(|(section, key, _)| *section == "propagation" && *key == "announce_at_start"),
+            "the key must be named in the start-up warning, not swallowed"
+        );
+        // The `[lxmf]` spelling IS acted on, and must not be warned about.
+        let mailbox_only = RawConfig::parse("[lxmf]\nannounce_at_start = no\n").expect("parses");
+        assert!(mailbox_only.inert_keys().is_empty());
+    }
+
     #[test]
     fn shell_words_splits_like_shlex() {
         assert_eq!(shell_words("rm"), vec!["rm"]);

@@ -1148,6 +1148,12 @@ pub struct ReticulumNode {
     /// overdue discoverable interface. Set by the builder from config; lowered
     /// by fast tests. Default 60.
     discovery_job_interval_secs: u64,
+    /// Whether to collect the interface information other transport instances
+    /// announce (Python `discover_interfaces`). `false` leaves the
+    /// discovered-interface registry unwritten, which also leaves auto-connect
+    /// with nothing to act on — the coupling Python has, where the autoconnect
+    /// job lives inside the discovery handler this key creates.
+    discover_interfaces: bool,
     /// Registered in-driver core processor (Codeberg #196). Installed by the
     /// builder — i.e. before `start()` creates the real `action_dispatch_tx` —
     /// and moved into the event loop by `start()`.
@@ -1271,6 +1277,7 @@ impl ReticulumNode {
             autoconnect_max: 0,
             discovery_network_identity: None,
             discovery_job_interval_secs: crate::config::DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
+            discover_interfaces: true,
             core_processor: Mutex::new(None),
             completions: CompletionRegistry::new(),
         }
@@ -1312,6 +1319,12 @@ impl ReticulumNode {
     /// builder, Codeberg #107). Python `InterfaceAnnouncer.JOB_INTERVAL`.
     pub(crate) fn set_discovery_job_interval_secs(&mut self, secs: u64) {
         self.discovery_job_interval_secs = secs;
+    }
+
+    /// Set whether discovered interface information is collected (called by
+    /// the builder from `[reticulum] discover_interfaces`).
+    pub(crate) fn set_discover_interfaces(&mut self, enabled: bool) {
+        self.discover_interfaces = enabled;
     }
 
     /// The storage root under which the discovered-interface registry lives
@@ -1748,8 +1761,18 @@ impl ReticulumNode {
 
         // Storage root for the discovered-interface registry: the event loop
         // persists validated discovery announces under
-        // `<storage>/discovery/interfaces` (Codeberg #32).
-        let discovery_storage = Some(self.discovery_storage_root());
+        // `<storage>/discovery/interfaces` (Codeberg #32). `None` when
+        // `discover_interfaces` is off, which also disables auto-connect
+        // below — the same coupling Python has.
+        let discovery_storage = if self.discover_interfaces {
+            Some(self.discovery_storage_root())
+        } else {
+            tracing::info!(
+                "discovery: discover_interfaces = no, not collecting interface information \
+                 announced by other transport instances"
+            );
+            None
+        };
 
         // Network identity for decrypting encrypted discovery announces on a
         // private discovery network (Codeberg #32, sub-task d). `None` keeps the
