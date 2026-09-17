@@ -3381,6 +3381,134 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 
+    /// A frame that jumps a wait already running serves that wait, and the
+    /// frame it jumped follows it onto the air at serial spacing (Codeberg
+    /// #347).
+    ///
+    /// This is the shape `lora_lncp_link_retry` was RED in on 2026-09-17
+    /// 02:50 (bench log `hw-vollauf4-0cfc8255.log`). alpha's announce
+    /// rebroadcast had armed a pre-TX wait; the third link request — the one
+    /// the cell's two proxy drops leave to carry the handshake — arrived
+    /// while that wait was still running, was priority-inserted at the head
+    /// of the queue, and left 511 ms later. The announce it had jumped
+    /// followed it to the modem 51 ms behind, so alpha keyed its radio a
+    /// second time in the window its peer's link proof was due in, and
+    /// neither frame survived: of 21 frames on the air in that cell, those
+    /// two were the only losses.
+    ///
+    /// Two properties are pinned, both of them load-bearing:
+    ///
+    /// * the jumper does NOT get a bypass. It rides out the wait that was
+    ///   already armed. Restoring a bypass here — "a link request should not
+    ///   wait for an announce's jitter" — is the type-awareness #347
+    ///   removed, and it puts the jumper on the air phase-locked to whatever
+    ///   the peer is about to send.
+    /// * the jumped frame follows at exactly [`rnode::MIN_SPACING_MS`].
+    ///   That is the serial-queue floor and nothing more: one acquisition
+    ///   can hand the modem a burst, which is why a burst is deaf to the
+    ///   answer to its own first frame, and why the size of the acquisition
+    ///   wait is the only thing separating our burst from the peer's reply.
+    ///
+    /// Paused time and the fixed seed, so both figures are equalities.
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_that_jumps_a_pending_wait_does_not_skip_it() {
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+
+        let mut oracle = ChannelAccess::new(TEST_ACCESS_SEED);
+        oracle.set_phy(125_000, 7, 5);
+        let wait = oracle.acquisition_jitter_ms();
+        assert!(
+            wait >= JITTER_DIFS_SLOTS * oracle.jitter_slot(),
+            "the bench PHY must owe at least DIFS, got {wait}ms"
+        );
+
+        let mut task_access = ChannelAccess::new(TEST_ACCESS_SEED);
+        task_access.set_phy(125_000, 7, 5);
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_jump".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                counters,
+                /* flow_control = */ false,
+                task_access,
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        // The announce acquires the idle channel and arms the wait.
+        let start = tokio::time::Instant::now();
+        outgoing_tx
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"announce".to_vec(),
+                high_priority: false,
+            })
+            .await
+            .expect("send to io task");
+
+        // The link request arrives partway through that wait — the run's
+        // ordering, where 1.4 s of a pending wait had elapsed when the
+        // handshake's frame came down from the core.
+        tokio::time::sleep(Duration::from_millis(wait / 2)).await;
+        outgoing_tx
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"linkrequest".to_vec(),
+                high_priority: true,
+            })
+            .await
+            .expect("send to io task");
+
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut at = Vec::new();
+        let mut payloads = Vec::new();
+        let mut buf = [0u8; 256];
+        while payloads.len() < 2 {
+            let n = tokio::time::timeout(Duration::from_secs(30), peer.read(&mut buf))
+                .await
+                .expect("the io task must drain the queue")
+                .expect("read from duplex");
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    if command == rnode::CMD_DATA {
+                        at.push(start.elapsed().as_millis() as u64);
+                        payloads.push(payload);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            payloads,
+            vec![b"linkrequest".to_vec(), b"announce".to_vec()],
+            "priority ordering still decides WHERE in the queue a frame sits"
+        );
+        assert_eq!(
+            at[0], wait,
+            "the frame that jumped the queue must serve the wait that was \
+             already running ({wait}ms), not key the radio on arrival because \
+             of what it carries"
+        );
+        assert_eq!(
+            at[1] - at[0],
+            rnode::MIN_SPACING_MS,
+            "the jumped frame follows inside the same acquisition, at the \
+             serial spacing and no wait of its own"
+        );
+
+        drop(outgoing_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
     /// Reproduce the flow-control startup deadlock without hardware.
     ///
     /// With `flow_control = true`, the io task historically initialised
