@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use leviculum_channel_access::{jitter_slot_ms, ChannelAccess, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS};
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
 use leviculum_core::transport::InterfaceId;
@@ -148,21 +149,28 @@ struct QueuedFrame {
     high_priority: bool,
 }
 
-/// Compute jitter ceiling from LoRa radio parameters.
+/// The ceiling of the randomised pre-TX wait this interface can impose, for
+/// the `LinkProfile` a diagnostic reads it out of (`tx_jitter_max`).
 ///
-/// The jitter window must exceed the maximum packet airtime so that two nodes
-/// transmitting simultaneously have a chance to desynchronize. Uses 2x the
-/// worst-case airtime (500-byte packet, CR=5), minimum 500ms for fast links.
-/// No upper cap, slow links (SF10+) need wide jitter to avoid collisions
-/// when airtime exceeds several seconds.
-fn compute_jitter_max_ms(sf: u8, bandwidth_hz: u32) -> u64 {
-    let bitrate = rnode::compute_bitrate(sf, 5, bandwidth_hz);
-    if bitrate == 0 {
-        return 500;
-    }
-    // 500 bytes * 8 bits = 4000 bits max Reticulum packet
-    let airtime_ms = 4000u64 * 1000 / bitrate as u64;
-    (airtime_ms * 2).max(500)
+/// Derived from the policy the TX loop actually runs — the widest value
+/// [`ChannelAccess::acquisition_jitter_ms`] can return on this modulation,
+/// DIFS plus the last slot of the contention window — so the figure a caller
+/// sizes a delivery window with and the wait the loop imposes cannot drift
+/// apart.
+fn compute_jitter_max_ms(sf: u8, cr: u8, bandwidth_hz: u32) -> u64 {
+    (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bandwidth_hz, sf, cr)
+}
+
+/// The channel-access policy one RNode transmit path runs: seeded from the
+/// host's entropy, told the modulation whose symbol time sizes its slots.
+///
+/// Built per connection. A reconnect is a new acquisition — the radio was off
+/// — so it starts owing a fresh wait, which is what a boot-fresh
+/// [`ChannelAccess`] already does.
+fn channel_access_for(bandwidth_hz: u32, sf: u8, cr: u8) -> ChannelAccess {
+    let mut access = ChannelAccess::new(rand_core::OsRng.next_u32());
+    access.set_phy(bandwidth_hz, sf, cr);
+    access
 }
 
 /// What an announce costs on this interface's carrier, as the bits per second
@@ -823,10 +831,13 @@ fn deregister_vport(
 /// Returns the `outgoing_rx` on disconnect so the reconnect wrapper can
 /// reuse the same channel (matching TCP interface pattern).
 ///
-/// Send-side jitter: packets are not sent immediately. The first packet after
-/// idle gets a random 0–500ms delay (desynchronizes rebroadcasts from multiple
-/// nodes). Subsequent queued packets use a fixed 50ms spacing to avoid serial
-/// buffer overrun. RNode firmware CSMA handles radio-level collision avoidance.
+/// Send-side channel access: packets are not sent immediately. A frame that
+/// acquires an idle channel first serves the randomised wait
+/// [`ChannelAccess`] draws for it (DIFS plus a contention window, the
+/// reference firmware's band-1 draw); every further frame of the same burst
+/// owes nothing and follows at the fixed [`rnode::MIN_SPACING_MS`] serial
+/// spacing. What a frame CONTAINS never enters into it — see the enqueue
+/// branch. RNode firmware CSMA handles radio-level collision avoidance on top.
 #[allow(clippy::too_many_arguments)]
 async fn rnode_io_task<S>(
     name: String,
@@ -835,7 +846,7 @@ async fn rnode_io_task<S>(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     flow_control: bool,
-    jitter_max_ms: u64,
+    mut access: ChannelAccess,
     bandwidth_hz: u32,
     sf: u8,
     cr: u8,
@@ -855,6 +866,11 @@ where
     let mut send_queue: VecDeque<QueuedFrame> = VecDeque::new();
     let mut send_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
     let mut timer_ready = false;
+    // What `send_timer` is currently spending, when it is spending an
+    // acquisition wait: the policy is told what was served once it elapses.
+    // Zero while the timer is the post-TX spacing, which is not a wait the
+    // acquisition owes.
+    let mut jitter_armed_ms: u64 = 0;
 
     // Gate 2 reopen state: CMD_READY is a query protocol, not a courtesy.
     // After every TX (flow_control on) the gate closes and we ask the
@@ -1159,31 +1175,44 @@ where
                         } else {
                             send_queue.push_back(queued);
                         }
-                        // High-priority packet at front of queue: bypass initial jitter
-                        // ONLY if no CSMA spacing timer is active. The jitter timer
-                        // desynchronizes announce rebroadcasts, directed traffic
-                        // (proofs, link requests, data) should not wait for that.
-                        // But the CSMA spacing timer (set after a TX) must NOT be
-                        // bypassed, it ensures the firmware queue stays at depth 1
-                        // so flush_queue() sends one frame per CSMA contest.
-                        if high_priority
-                            && send_queue.front().map(|f| f.high_priority).unwrap_or(false)
-                            && send_timer.is_none()
-                        {
-                            timer_ready = true;
-                            tracing::debug!(
-                                "{}: send queue: {} packets (priority bypass jitter)",
-                                name, send_queue.len()
-                            );
-                        } else if send_timer.is_none() && !timer_ready {
-                            let delay = rand_core::OsRng.next_u64() % jitter_max_ms;
-                            tracing::debug!(
-                                "{}: send queue: {} packets, jitter {}ms",
-                                name, send_queue.len(), delay
-                            );
-                            send_timer = Some(Box::pin(
-                                tokio::time::sleep(Duration::from_millis(delay))
-                            ));
+                        // Channel access asks the medium, never the packet.
+                        // `high_priority` decides WHERE in the queue a frame
+                        // sits — queue discipline, kept above — and nothing
+                        // about whether the interface may key the radio
+                        // early. The bypass that used to stand here let every
+                        // proof, link request and data packet skip the wait
+                        // outright, leaving announces as the only jittered
+                        // traffic; a packet is a packet, and two senders that
+                        // the same event released collide whatever their
+                        // frames mean (#347).
+                        //
+                        // A pending `send_timer` means a wait is already
+                        // running and this frame rides it out. Otherwise the
+                        // policy decides: an acquisition of a channel we have
+                        // handed back owes DIFS plus a randomised contention
+                        // window, and a continuation of the burst we are
+                        // already transmitting owes nothing, because the
+                        // frame before it served the wait.
+                        if send_timer.is_none() {
+                            let owed = access.acquisition_jitter_ms();
+                            if owed == 0 {
+                                timer_ready = true;
+                                tracing::debug!(
+                                    "{}: send queue: {} packets (burst continuation)",
+                                    name, send_queue.len()
+                                );
+                            } else {
+                                timer_ready = false;
+                                jitter_armed_ms = owed;
+                                tracing::debug!(
+                                    "{}: send queue: {} packets, acquisition jitter {}ms \
+                                     (slot {}ms)",
+                                    name, send_queue.len(), owed, access.jitter_slot()
+                                );
+                                send_timer = Some(Box::pin(
+                                    tokio::time::sleep(Duration::from_millis(owed))
+                                ));
+                            }
                         }
                     }
                     None => {
@@ -1202,6 +1231,15 @@ where
                 }
             }, if send_timer.is_some() => {
                 send_timer = None;
+                // A wait armed here is always served in full: nothing cancels
+                // the sleep, and an inbound frame does not cut it short the
+                // way the firmware's listening `rx_once` does. Report what
+                // was served, so the debt is discharged and the rest of this
+                // acquisition's burst is not asked to wait a second time.
+                if jitter_armed_ms > 0 {
+                    access.jitter_spent(jitter_armed_ms);
+                    jitter_armed_ms = 0;
+                }
                 timer_ready = true;
             }
 
@@ -1384,6 +1422,11 @@ where
                     ))));
                 }
             } else {
+                // Nothing left to send: the burst is over and the channel
+                // goes back. Whatever arrives next is a new acquisition and
+                // owes a fresh wait — the same rule the firmware applies
+                // after its post-TX listening window.
+                access.channel_released();
                 timer_ready = false;
             }
         }
@@ -1442,7 +1485,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
     let radio = &ctx.radio;
     let bitrate_bps = rnode::compute_bitrate(radio.sf, radio.cr, radio.bandwidth);
     tracing::debug!(
-        "{}: bitrate={} bps, min_spacing={}ms, jitter_max={}ms (airtime-based)",
+        "{}: bitrate={} bps, min_spacing={}ms, jitter_max={}ms (DIFS + contention window)",
         ctx.name,
         bitrate_bps,
         rnode::MIN_SPACING_MS,
@@ -1503,7 +1546,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     outgoing_rx,
                     Arc::clone(&counters),
                     ctx.flow_control,
-                    ctx.jitter_max_ms,
+                    channel_access_for(radio.bandwidth, radio.sf, radio.cr),
                     radio.bandwidth,
                     radio.sf,
                     radio.cr,
@@ -1771,7 +1814,7 @@ fn reconnect_ctx_from_radio(
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     test_drop_direct_ingress: bool,
 ) -> RNodeReconnectCtx {
-    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.bandwidth);
+    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.cr, radio.bandwidth);
     RNodeReconnectCtx {
         id,
         name,
@@ -2548,7 +2591,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 // carrier, so each takes its own share; capping only the
                 // section-index one would leave the rest uncapped.
                 announce_cap_bitrate: announce_cap_bitrate(sub.sf, sub.cr, sub.bandwidth),
-                tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.bandwidth)),
+                tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.cr, sub.bandwidth)),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Rnode,
@@ -3159,6 +3202,185 @@ mod tests {
         println!("Interface lifecycle test complete");
     }
 
+    /// The seed every io-task test's channel access is built from. Fixed, so
+    /// the acquisition wait is an exact number a test can predict by building
+    /// a second [`ChannelAccess`] from it, instead of a random tail that
+    /// turns a timing assertion into a coin flip.
+    const TEST_ACCESS_SEED: u32 = 0x5EED_0347;
+
+    /// The channel-access policy the wall-clock io-task tests hand the loop.
+    ///
+    /// The modulation is the fastest the reference's slot arithmetic allows
+    /// (bitrate above `JITTER_FAST_THRESHOLD_BPS`, so the 6 ms fast floor
+    /// binds): an acquisition then costs the test between 12 and 90 ms of
+    /// real time instead of the bench PHY's 48..360 ms. These tests are about
+    /// framing, gating and counters, not about the size of the wait — the
+    /// test that IS about the size of the wait runs on paused time at the
+    /// bench PHY.
+    fn test_channel_access() -> ChannelAccess {
+        let mut access = ChannelAccess::new(TEST_ACCESS_SEED);
+        access.set_phy(500_000, 5, 5);
+        access
+    }
+
+    /// A directed packet waits for the channel like any other, and a burst
+    /// behind it waits for nothing (Codeberg #347).
+    ///
+    /// The interface used to ask what a packet was: a `high_priority` frame
+    /// at the front of an idle queue — every proof, link request and data
+    /// packet — skipped the randomised pre-TX wait outright, and only
+    /// announces were ever jittered. That is type-awareness in
+    /// collision-avoidance logic, which the medium's own policy has no room
+    /// for: two senders released by the same event key up together whatever
+    /// their frames contain.
+    ///
+    /// What the wait must cost is asserted exactly, not bounded, because
+    /// both halves of the claim are numbers:
+    ///
+    /// * acquisition — the first directed frame leaves at exactly the draw
+    ///   [`ChannelAccess`] makes for this seed at the bench PHY;
+    /// * burst continuation — the two frames queued behind it leave one
+    ///   [`rnode::MIN_SPACING_MS`] apart, owing no second wait, which is why
+    ///   this costs far less than a wait per packet;
+    /// * release — a frame handed over after the queue drained is a new
+    ///   acquisition and owes a fresh draw again.
+    ///
+    /// Paused time, so the draw costs no wall clock and the assertions are
+    /// equalities rather than windows.
+    #[tokio::test(start_paused = true)]
+    async fn a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst() {
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, _incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+
+        // The oracle: the same policy, from the same seed, driven through the
+        // same calls the io task makes. Its draws are the io task's draws.
+        let mut oracle = ChannelAccess::new(TEST_ACCESS_SEED);
+        oracle.set_phy(125_000, 7, 5);
+        let first_wait = oracle.acquisition_jitter_ms();
+        assert!(
+            first_wait >= JITTER_DIFS_SLOTS * oracle.jitter_slot(),
+            "the bench PHY must owe at least DIFS, got {first_wait}ms"
+        );
+
+        let mut task_access = ChannelAccess::new(TEST_ACCESS_SEED);
+        task_access.set_phy(125_000, 7, 5);
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_acq".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                counters,
+                /* flow_control = */ false,
+                task_access,
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        // Three directed packets at once: a link request and the data behind
+        // it, the shape the bypass was written for.
+        let start = tokio::time::Instant::now();
+        for payload in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+            outgoing_tx
+                .send(OutgoingPacket {
+                    peer: None,
+                    data: payload.to_vec(),
+                    high_priority: true,
+                })
+                .await
+                .expect("send to io task");
+        }
+
+        let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+        let mut at = Vec::new();
+        let mut payloads = Vec::new();
+        let mut buf = [0u8; 256];
+        while payloads.len() < 3 {
+            let n = tokio::time::timeout(Duration::from_secs(30), peer.read(&mut buf))
+                .await
+                .expect("the io task must drain the queue")
+                .expect("read from duplex");
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    if command == rnode::CMD_DATA {
+                        at.push(start.elapsed().as_millis() as u64);
+                        payloads.push(payload);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            payloads,
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()],
+            "order must be untouched by the change"
+        );
+
+        assert_eq!(
+            at[0], first_wait,
+            "a directed frame acquiring an idle channel must serve the wait \
+             the policy drew ({first_wait}ms), not skip it because of what it \
+             carries"
+        );
+        assert_eq!(
+            at[1] - at[0],
+            rnode::MIN_SPACING_MS,
+            "the second frame of the burst owes no wait, only the serial spacing"
+        );
+        assert_eq!(
+            at[2] - at[1],
+            rnode::MIN_SPACING_MS,
+            "the third frame of the burst owes no wait either"
+        );
+
+        // The queue has drained: the spacing timer after the last frame finds
+        // nothing to send and hands the channel back. What comes after is a
+        // new acquisition, and the policy draws for it again — the oracle
+        // walks the same three calls the io task made.
+        oracle.jitter_spent(first_wait);
+        oracle.channel_released();
+        let second_wait = oracle.acquisition_jitter_ms();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let released = tokio::time::Instant::now();
+        outgoing_tx
+            .send(OutgoingPacket {
+                peer: None,
+                data: b"four".to_vec(),
+                high_priority: true,
+            })
+            .await
+            .expect("send to io task");
+        let mut fourth = None;
+        while fourth.is_none() {
+            let n = tokio::time::timeout(Duration::from_secs(30), peer.read(&mut buf))
+                .await
+                .expect("the io task must send the fourth frame")
+                .expect("read from duplex");
+            for f in deframer.process(&buf[..n]) {
+                if let KissDeframeResult::Frame { command, payload } = f {
+                    if command == rnode::CMD_DATA {
+                        fourth = Some((released.elapsed().as_millis() as u64, payload));
+                    }
+                }
+            }
+        }
+        let (fourth_at, fourth_payload) = fourth.expect("fourth frame");
+        assert_eq!(fourth_payload, b"four".to_vec());
+        assert_eq!(
+            fourth_at, second_wait,
+            "a frame arriving after the channel was released owes a fresh draw"
+        );
+
+        drop(outgoing_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
     /// Reproduce the flow-control startup deadlock without hardware.
     ///
     /// With `flow_control = true`, the io task historically initialised
@@ -3184,8 +3406,6 @@ mod tests {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
         let counters = Arc::new(InterfaceCounters::new());
 
-        // jitter_max_ms = 1 so the random pre-TX jitter is effectively zero
-        // and the test does not depend on a long tail.
         let task_counters = Arc::clone(&counters);
         let task = tokio::spawn(async move {
             rnode_io_task(
@@ -3195,7 +3415,7 @@ mod tests {
                 outgoing_rx,
                 task_counters,
                 /* flow_control = */ true,
-                /* jitter_max_ms = */ 1,
+                test_channel_access(),
                 125_000,
                 7,
                 5,
@@ -3295,7 +3515,7 @@ mod tests {
                     outgoing_rx,
                     task_counters,
                     /* flow_control = */ false,
-                    /* jitter_max_ms = */ 1,
+                    test_channel_access(),
                     125_000,
                     7,
                     5,
@@ -3375,7 +3595,7 @@ mod tests {
                     outgoing_rx,
                     counters,
                     /* flow_control = */ false,
-                    /* jitter_max_ms = */ 1,
+                    test_channel_access(),
                     125_000,
                     7,
                     5,
@@ -3429,7 +3649,7 @@ mod tests {
                 outgoing_rx,
                 counters,
                 /* flow_control = */ false,
-                /* jitter_max_ms = */ 1,
+                test_channel_access(),
                 125_000,
                 7,
                 5,
@@ -3511,7 +3731,7 @@ mod tests {
                 outgoing_rx,
                 task_counters,
                 /* flow_control = */ false,
-                /* jitter_max_ms = */ 1,
+                test_channel_access(),
                 125_000,
                 7,
                 5,
@@ -4284,7 +4504,7 @@ mod tests {
                 outgoing_rx,
                 task_counters,
                 /* flow_control = */ true,
-                /* jitter_max_ms = */ 1,
+                test_channel_access(),
                 125_000,
                 7,
                 5,
@@ -4515,7 +4735,7 @@ mod tests {
                 outgoing_rx,
                 task_counters,
                 flow_control,
-                /* jitter_max_ms = */ 1,
+                test_channel_access(),
                 125_000,
                 7,
                 5,

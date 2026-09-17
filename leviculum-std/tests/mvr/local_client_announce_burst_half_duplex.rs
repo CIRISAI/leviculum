@@ -12,11 +12,11 @@
 //! the radio as a burst?
 //!
 //! Not as a burst at the *serial* boundary, which is what this test
-//! measures. The RNode interface applies a randomised 0..`jitter_max`
-//! delay to the first frame after idle and a fixed `MIN_SPACING_MS`
-//! (50 ms) between queued frames
-//! (`leviculum-std/src/interfaces/rnode.rs:1376-1385`), so the frames
-//! reach the modem separated. The core's hold was a second, weaker copy
+//! measures. The RNode interface makes the frame that acquires an idle
+//! channel serve the randomised wait its `ChannelAccess` policy draws
+//! (DIFS plus a contention window, 48..360 ms at SF7/125 kHz) and spaces
+//! every further frame of the same burst by a fixed `MIN_SPACING_MS`
+//! (50 ms), so the frames reach the modem separated. The core's hold was a second, weaker copy
 //! of that one layer too low — and a 250 ms hold cannot separate N
 //! simultaneous registrations anyway, because it delays them all by the
 //! same 250 ms.
@@ -248,8 +248,8 @@ async fn a_registration_burst_reaches_a_half_duplex_radio_spaced_out() {
         hashes.push(hash);
     }
 
-    // Long enough for the first frame's jitter (0..500 ms at SF7) plus
-    // CLIENTS × 50 ms of spacing, with room to spare.
+    // Long enough for the first frame's acquisition wait (48..360 ms at
+    // SF7/125 kHz) plus CLIENTS × 50 ms of spacing, with room to spare.
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     // Take the timestamps and let the stub's lock go before anything else

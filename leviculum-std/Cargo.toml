@@ -66,6 +66,14 @@ thiserror.workspace = true
 # record and the LN-<hex8> name derivation. One implementation on both
 # sides of the rig, per the reuse rule in the #255 seam report.
 leviculum-ble-tx = { path = "../leviculum-nrf/ble-tx" }
+# The LoRa channel-access policy the firmware's transmit path runs
+# (`leviculum-nrf/channel-access`): the acquisition jitter, the burst
+# continuation that owes nothing, and the resume of a wait cut short. The
+# host RNode interface runs the same policy from the same crate rather than
+# a second copy of it — one policy, one set of tests, on both sides of the
+# rig (#347). Pure and dependency-free; it drags no firmware crate into the
+# host build.
+leviculum-channel-access = { path = "../leviculum-nrf/channel-access" }
 # The announce cadence and per-peer rate limit both stacks obey (#376):
 # host-tested once, next to the firmware that shares it, so the policy the
 # desk measures on a board is the policy the daemon runs.

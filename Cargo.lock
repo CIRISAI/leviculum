@@ -1953,6 +1953,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-channel-access"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-cli"
 version = "0.8.1"
 dependencies = [
@@ -2070,6 +2074,7 @@ dependencies = [
  "if-addrs",
  "leviculum-announce-policy",
  "leviculum-ble-tx",
+ "leviculum-channel-access",
  "leviculum-core",
  "leviculum-lxmf",
  "libc",
