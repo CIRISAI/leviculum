@@ -558,6 +558,9 @@ pub(crate) struct EventBridge {
     state: Mutex<BridgeState>,
     control_cap: usize,
     data_cap: usize,
+    /// Signalled whenever a data-plane event is popped, so the drain task can
+    /// wait for room instead of destroying a reliable delivery (Codeberg #280).
+    data_room: tokio::sync::Notify,
 }
 
 // SAFETY: `fd` is a plain integer used only via kernel-atomic eventfd syscalls,
@@ -645,6 +648,7 @@ impl EventBridge {
             }),
             control_cap,
             data_cap,
+            data_room: tokio::sync::Notify::new(),
         })
     }
 
@@ -666,8 +670,35 @@ impl EventBridge {
         fd_write(self.fd);
     }
 
+    /// Whether the data region is at its cap right now.
+    fn data_full(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.data_len >= self.data_cap
+    }
+
+    /// Wait until the data region has room (Codeberg #280).
+    ///
+    /// Called by the single producer ([`run_bridge`]) before it enqueues a
+    /// reliable channel delivery, which the wire layer already proofed to the
+    /// sender and which therefore must not be dropped. Stalling the drain task
+    /// lets the std driver's bounded data plane fill, which drives that node's
+    /// channel-delivery budget to zero, which stops the proofs — so the
+    /// backpressure reaches the peer instead of a message being destroyed.
+    /// Droppable data events do not go through here and keep flowing.
+    async fn await_data_room(&self) {
+        while self.data_full() {
+            // `notify_one` stores a permit when no waiter is parked, so a pop
+            // that races this check is never missed; the loop re-tests.
+            self.data_room.notified().await;
+        }
+    }
+
     /// Enqueue one projected event, applying the per-plane cap at enqueue so a
     /// dropped event is never counted and never writes the fd.
+    ///
+    /// The data cap drops what does not fit. `run_bridge` is the only producer
+    /// and waits for room before handing over a `LEV_EVENT_LINK_MESSAGE`, so
+    /// that cap never falls on a reliable delivery (#280).
     pub(crate) fn enqueue(&self, ev: Box<lev_event_t>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if ev.is_control {
@@ -704,6 +735,9 @@ impl EventBridge {
             } else {
                 debug_assert!(state.data_len > 0, "data_len underflow");
                 state.data_len = state.data_len.saturating_sub(1);
+                // Room for one more; wake a drain task holding a reliable
+                // delivery (#280).
+                self.data_room.notify_one();
             }
             fd_read(self.fd);
         }
@@ -723,12 +757,23 @@ impl Drop for EventBridge {
 }
 
 /// Drain task: project and enqueue every event until the channels close.
+///
+/// Codeberg #280: a reliable channel delivery is held here until the data
+/// region has room rather than being dropped at the cap. The stall is what
+/// carries the application's backpressure back down the stack — the std data
+/// plane fills, the core's channel-delivery budget hits zero, and the sender
+/// stops being proofed for messages this node cannot take. Every other data
+/// event still enqueues immediately and is still droppable.
 pub(crate) async fn run_bridge(
     mut rx: leviculum_std::EventReceiver,
     bridge: std::sync::Arc<EventBridge>,
 ) {
     while let Some(ev) = rx.recv().await {
-        bridge.enqueue(Box::new(project(ev)));
+        let projected = Box::new(project(ev));
+        if projected.ty == LEV_EVENT_LINK_MESSAGE {
+            bridge.await_data_room().await;
+        }
+        bridge.enqueue(projected);
     }
 }
 
@@ -1273,6 +1318,46 @@ mod tests {
         assert!(b.next().is_some());
         assert!(b.next().is_none()); // only two were ever queued
         assert!(!readable(b.fd()));
+    }
+
+    /// Codeberg #280: the data cap must not fall on a reliable channel
+    /// delivery, which the wire layer already proofed to the sender.
+    ///
+    /// `run_bridge` waits here instead of enqueuing over the cap; the wait is
+    /// what pushes the backpressure back down the stack, so the peer stops
+    /// being told messages arrived that this process cannot take. Popping a
+    /// data event must release it.
+    #[tokio::test]
+    async fn reliable_delivery_waits_for_data_room_instead_of_being_dropped() {
+        let b = std::sync::Arc::new(EventBridge::new(8, 1).unwrap());
+        b.enqueue(ev(LEV_EVENT_OTHER, false));
+        assert!(b.data_full(), "data region must be at its cap");
+
+        let waiter = {
+            let b = std::sync::Arc::clone(&b);
+            tokio::spawn(async move { b.await_data_room().await })
+        };
+        // Nothing has been popped: the producer must still be parked.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !waiter.is_finished(),
+            "producer must wait while the data region is full"
+        );
+
+        assert!(b.next().is_some(), "application drains one data event");
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("producer must be woken by the pop")
+            .expect("waiter task");
+
+        // With room back, the reliable delivery enqueues and is readable.
+        b.enqueue(ev(LEV_EVENT_LINK_MESSAGE, false));
+        assert!(readable(b.fd()));
+        assert_eq!(
+            b.next().map(|e| e.ty),
+            Some(LEV_EVENT_LINK_MESSAGE),
+            "the held reliable delivery reaches the application"
+        );
     }
 
     #[test]

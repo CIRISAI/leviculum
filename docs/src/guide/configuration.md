@@ -60,7 +60,7 @@ Core daemon settings. Every key below is parsed in
 | `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:333`)) |
 | `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:275-279`) |
 | `control_channel_capacity` | usize | `256` | Capacity of the lossless control-plane event channel (announces, paths, link/resource lifecycle). Raise on servers under heavy announce load. (`config.rs:74-82`, `150`) |
-| `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). (`config.rs:83-90`, `151`) |
+| `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). Reliable channel messages are exempt: the node stops proofing them to the sender instead of dropping them, so this value also bounds how far a slow reader lets a channel run ahead. (`config.rs:83-90`, `151`) |
 | `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:280-287`) |
 
 `control_channel_capacity` and `data_channel_capacity` are read from TOML

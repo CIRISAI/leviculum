@@ -368,6 +368,21 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     rx_ring_full_count: u64,
     /// Timestamp (ms) when last rx_ring full log was emitted
     rx_ring_full_last_log_ms: u64,
+    /// How many more reliable channel messages the host may be handed before
+    /// its event sink is full (Codeberg #280). `None` means "no limit" and is
+    /// the embedded/core-only default: a caller that reads `TickOutput::events`
+    /// synchronously can always take what it asked for.
+    ///
+    /// A host whose event delivery *can* drop (the std driver's bounded data
+    /// plane) sets this before every `handle_packet`. At zero, a channel packet
+    /// is refused untouched — no `MessageReceived`, no proof — so the sender
+    /// retransmits instead of being told a message arrived that the application
+    /// never saw.
+    channel_delivery_budget: Option<usize>,
+    /// Count of channel packets refused for a full host sink since last log
+    channel_backpressure_count: u64,
+    /// Timestamp (ms) when the last host-backpressure log was emitted
+    channel_backpressure_last_log_ms: u64,
     /// Registered destinations
     destinations: BTreeMap<DestinationHash, Destination>,
     /// Default proof strategy for new destinations
@@ -516,6 +531,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             receipt_tracker: link_management::ReceiptTracker::new(),
             rx_ring_full_count: 0,
             rx_ring_full_last_log_ms: 0,
+            channel_delivery_budget: None,
+            channel_backpressure_count: 0,
+            channel_backpressure_last_log_ms: 0,
             destinations: BTreeMap::new(),
             default_proof_strategy: proof_strategy,
             events: Vec::new(),
@@ -2435,6 +2453,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Whether ingress control is enabled for an interface (enabled when unset).
     pub fn interface_ingress_control(&self, id: usize) -> bool {
         self.transport.interface_ingress_control(id)
+    }
+
+    /// Declare how many more reliable channel messages the host can accept
+    /// (Codeberg #280).
+    ///
+    /// A reliable channel message is proofed to the sender at the moment the
+    /// core delivers it as a `NodeEvent::MessageReceived`; from then on the
+    /// sender's channel considers it delivered and stops retransmitting. A
+    /// host that then fails to hand the event to the application has destroyed
+    /// a message the protocol already confirmed, and no local counter can undo
+    /// the answer already given to the peer.
+    ///
+    /// So a host with a droppable event sink declares its remaining room here
+    /// before feeding a packet in. At `Some(0)` the core refuses channel
+    /// packets outright — the packet is left unconsumed, no proof goes out, and
+    /// the sender retransmits until the host has room or the channel's retry
+    /// budget runs out and the link fails loudly. `None` (the default) means
+    /// the host's delivery cannot drop, so no limit applies.
+    pub fn set_channel_delivery_budget(&mut self, budget: Option<usize>) {
+        self.channel_delivery_budget = budget;
     }
 
     /// Set whether the path-request egress limiter runs for an interface
@@ -6515,6 +6553,143 @@ mod tests {
         assert!(
             !output.actions.is_empty(),
             "in-order message after full should generate proof"
+        );
+    }
+
+    /// Codeberg #280 minimal reproduction: a reliable channel message must not
+    /// be proofed to the sender when the host has no room to deliver it.
+    ///
+    /// Before the fix the core delivered and proofed unconditionally; a host
+    /// whose event sink was full then discarded a message the sender had
+    /// already been told arrived. With the budget at zero the packet is refused
+    /// untouched, so the sender keeps it and retransmits — and the very same
+    /// bytes, replayed once the host has room, deliver normally.
+    #[test]
+    fn test_channel_proof_suppressed_when_host_sink_full() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+
+        let output = pair
+            .initiator
+            .send_on_link(&pair.initiator_link_id, b"reliable")
+            .unwrap();
+        let data = extract_broadcast_data(&output);
+
+        // Host declares it cannot take another reliable delivery.
+        pair.responder.set_channel_delivery_budget(Some(0));
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+
+        assert!(
+            output.actions.is_empty(),
+            "a message the host cannot take must not be proofed to the sender"
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::MessageReceived { .. })),
+            "no MessageReceived while the host sink is full"
+        );
+
+        // Host drains: the sender's retransmit (identical bytes) now lands.
+        pair.responder.set_channel_delivery_budget(Some(1));
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+
+        assert_eq!(
+            output.actions.len(),
+            1,
+            "retransmit must be proofed once the host has room"
+        );
+        let delivered = output
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        assert_eq!(
+            delivered,
+            alloc::vec![b"reliable".to_vec()],
+            "the message survives the backpressure window"
+        );
+    }
+
+    /// #280: the budget also caps the deferred drain of out-of-order messages,
+    /// which proofs every message it hands over.
+    #[test]
+    fn test_channel_drain_capped_by_delivery_budget() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+
+        let mut wire = alloc::vec::Vec::new();
+        for (i, body) in [b"m0".as_slice(), b"m1".as_slice(), b"m2".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let output = pair
+                .initiator
+                .send_on_link(&pair.initiator_link_id, body)
+                .unwrap();
+            wire.push(extract_broadcast_data(&output));
+            if i == 0 {
+                // The channel exists only after the first send; widen its window
+                // so all three messages can be in flight unproofed.
+                pair.initiator
+                    .link_mut(&pair.initiator_link_id)
+                    .unwrap()
+                    .channel_mut()
+                    .unwrap()
+                    .set_window_for_test(8);
+            }
+        }
+
+        // Deliver seq 1 and 2 first: both buffer out of order, neither proofs.
+        for data in &wire[1..] {
+            let output = pair.responder.handle_packet(InterfaceId(0), data);
+            assert!(output.actions.is_empty(), "buffered message must not proof");
+        }
+
+        // seq 0 arrives with room for exactly two deliveries.
+        pair.responder.set_channel_delivery_budget(Some(2));
+        let output = pair.responder.handle_packet(InterfaceId(0), &wire[0]);
+        let delivered: alloc::vec::Vec<alloc::vec::Vec<u8>> = output
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            alloc::vec![b"m0".to_vec(), b"m1".to_vec()],
+            "drain must stop at the host's remaining room"
+        );
+        assert_eq!(
+            output.actions.len(),
+            2,
+            "one proof per delivered message, none for what stayed buffered"
+        );
+
+        // The third stays buffered and is drained (and proofed) once there is
+        // room again — the sender's retransmit of seq 2 wakes the drain.
+        pair.responder.set_channel_delivery_budget(Some(4));
+        let output = pair.responder.handle_packet(InterfaceId(0), &wire[2]);
+        let delivered: alloc::vec::Vec<alloc::vec::Vec<u8>> = output
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            alloc::vec![b"m2".to_vec()],
+            "buffered message survives"
         );
     }
 

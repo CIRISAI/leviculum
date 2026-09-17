@@ -753,9 +753,22 @@ impl Channel {
     /// are now in sequence. Returns `(Envelope, proof_hash)` tuples so
     /// the caller can build deferred proofs for each delivered message.
     pub fn drain_received(&mut self) -> Vec<(Envelope, [u8; 32])> {
+        self.drain_received_limit(usize::MAX)
+    }
+
+    /// Drain at most `limit` ready messages, leaving the rest buffered.
+    ///
+    /// Codeberg #280: a drained message is proofed to the sender, so a caller
+    /// that can only hand `limit` messages to the application must not drain
+    /// more than that. What stays in the ring keeps its stored proof hash and
+    /// is drained (and proofed) on a later call.
+    pub fn drain_received_limit(&mut self, limit: usize) -> Vec<(Envelope, [u8; 32])> {
         let mut ready = Vec::new();
 
-        while let Some(front) = self.rx_ring.front() {
+        while ready.len() < limit {
+            let Some(front) = self.rx_ring.front() else {
+                break;
+            };
             match front {
                 Some((envelope, _hash)) if envelope.sequence == self.next_rx_sequence => {
                     if let Some(Some((env, hash))) = self.rx_ring.pop_front() {

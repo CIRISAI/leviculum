@@ -1431,6 +1431,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         link.record_inbound(now_secs);
 
+        // Codeberg #280: a reliable channel message is proofed to the sender
+        // the moment it is delivered below, so it must not be delivered into a
+        // host sink that will discard it. With no room left, refuse the packet
+        // untouched — no decrypt, no `Channel::receive` (which would consume
+        // the sequence number), no proof. The sender sees an unproofed message
+        // and retransmits; if the host never drains, the channel's retry budget
+        // runs out and the link fails loudly, which is the truth. Same shape as
+        // the rx-ring-full refusal below, one layer further out.
+        if self.channel_delivery_budget == Some(0) {
+            self.update_channel_backpressure(now_ms);
+            return;
+        }
+
         // 1. Decrypt the envelope data
         let encrypted_data = packet.data.as_slice();
         let max_plaintext_len = encrypted_data.len();
@@ -1476,6 +1489,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         sequence: envelope.sequence,
                         data: envelope.data,
                     });
+                    if let Some(budget) = &mut self.channel_delivery_budget {
+                        *budget = budget.saturating_sub(1);
+                    }
                     if let Some(p) =
                         Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
                     {
@@ -1505,11 +1521,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             };
 
-            // Drain consecutive buffered messages now ready for delivery
+            // Drain consecutive buffered messages now ready for delivery.
+            // Capped by what the host can still take (#280): draining proofs
+            // them, so anything beyond the budget stays buffered with its
+            // stored hash and is drained on a later packet.
+            let drain_limit = self.channel_delivery_budget.unwrap_or(usize::MAX);
             let drained: Vec<_> = link
                 .channel_mut()
-                .map(|ch| ch.drain_received())
+                .map(|ch| ch.drain_received_limit(drain_limit))
                 .unwrap_or_default();
+            if let Some(budget) = &mut self.channel_delivery_budget {
+                *budget = budget.saturating_sub(drained.len());
+            }
             for (envelope, stored_hash) in drained {
                 self.events.push(NodeEvent::MessageReceived {
                     link_id,
@@ -1570,6 +1593,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 "link_mgr: channel proof skipped — no signing key"
             );
             None
+        }
+    }
+
+    /// Update the host-backpressure counter with a rate-limited warning
+    /// (Codeberg #280). Unlike a drop counter this reports a *refusal*: the
+    /// message was not accepted and not proofed, so the sender still owns it.
+    fn update_channel_backpressure(&mut self, now_ms: u64) {
+        self.channel_backpressure_count += 1;
+        let elapsed = now_ms.saturating_sub(self.channel_backpressure_last_log_ms);
+        if self.channel_backpressure_last_log_ms == 0 || elapsed >= 5000 {
+            crate::tracing::warn!(
+                "link_mgr: channel packet refused — host sink full, {} refused in last {}s (sender will retransmit)",
+                self.channel_backpressure_count,
+                elapsed / 1000
+            );
+            self.channel_backpressure_count = 0;
+            self.channel_backpressure_last_log_ms = now_ms;
         }
     }
 

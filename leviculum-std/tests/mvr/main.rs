@@ -28,6 +28,7 @@ mod lncp_fetch_rust_responder;
 mod local_client_announce_burst_half_duplex;
 mod lxmf_opportunistic_fallback_threshold;
 mod ratchet_rotation_single_packet;
+mod reliable_channel_delivery_backpressure;
 mod resource_consecutive_push_window_policy;
 mod responder_close_delivery;
 mod rust_client_path_install_from_python;

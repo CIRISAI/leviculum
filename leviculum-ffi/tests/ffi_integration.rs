@@ -4,7 +4,7 @@
 mod support;
 
 use std::ptr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use leviculum::*;
 use support::{
@@ -102,12 +102,34 @@ fn establish_link(a: &Node, b: &Node, dest: &[u8; 16]) -> (Link, Link) {
 
 // A sustained channel stream must not stall: the flow-control window advances
 // as the receiver proves delivery, so the sender keeps sending past one window.
+//
+// The receiving application reads as the stream runs, and has to (#280): a
+// reliable channel message is proofed only once the receiving node can hand it
+// to its application, so a receiver that never reads is a receiver that stops
+// proving delivery, and the sender's window then closes for a correct reason.
+// Draining is what keeps the window moving, which is the property under test —
+// and it lets the test assert the stronger thing as well, that all 500 messages
+// arrive rather than being destroyed after the sender was told they had.
 #[test]
 fn channel_stream_of_many_messages_does_not_stall() {
+    const MESSAGES: u32 = 500;
     let p = setup_pair();
     let (lb, _la) = establish_link(&p.a, &p.b, &p.dest);
     let msg = [0x7Eu8; 256];
-    for i in 0..500u32 {
+
+    let mut received = 0u32;
+    let drain_a = |received: &mut u32| loop {
+        let mut ev: *mut lev_event_t = ptr::null_mut();
+        if unsafe { lev_next_event(p.a.0, &mut ev) } != LEV_OK || ev.is_null() {
+            return;
+        }
+        if unsafe { lev_event_type(ev) } == LEV_EVENT_LINK_MESSAGE {
+            *received += 1;
+        }
+        unsafe { lev_event_free(ev) };
+    };
+
+    for i in 0..MESSAGES {
         let rc = unsafe { lev_link_send(lb.0, msg.as_ptr(), msg.len(), 5000) };
         assert_eq!(
             rc,
@@ -115,7 +137,18 @@ fn channel_stream_of_many_messages_does_not_stall() {
             "send {i} failed (window stall): {}",
             last_error()
         );
+        drain_a(&mut received);
     }
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while received < MESSAGES && Instant::now() < deadline {
+        drain_a(&mut received);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        received, MESSAGES,
+        "every channel message the sender was proofed for must reach the application"
+    );
 }
 
 // The responder can send on its link once that link is active. Its link goes

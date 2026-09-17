@@ -188,6 +188,17 @@ const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 ///   lost.
 /// * **Data** plane — droppable. A full data channel drops silently; that is
 ///   the intended backpressure.
+///
+/// One data-plane event is exempt from that: [`NodeEvent::MessageReceived`]
+/// (Codeberg #280). A reliable channel message has already been proofed to the
+/// sender by the time it reaches this sink, so dropping it destroys a message
+/// the protocol confirmed. The flow control that keeps such an event from
+/// reaching a full sink at all lives in the core
+/// (`NodeCore::set_channel_delivery_budget`, fed from
+/// [`data_capacity`](EventSink::data_capacity) on the inbound path); this sink
+/// holds whatever still arrives rather than dropping it, so the slack between a
+/// capacity reading and the emits that follow it costs latency, never a
+/// message.
 struct EventSink {
     /// Lossless-by-default control plane.
     control_tx: mpsc::Sender<NodeEvent>,
@@ -199,7 +210,17 @@ struct EventSink {
     /// was delivered. Surfaced (and reset) by `flush_overflow` once the
     /// control channel has room.
     control_dropped: u64,
+    /// Reliable channel deliveries that found the data plane full, in arrival
+    /// order. Retried ahead of every later data event so a channel's sequence
+    /// order is preserved (#280).
+    reliable_pending: VecDeque<NodeEvent>,
 }
+
+/// How soon the event loop comes back when the sink still holds a reliable
+/// delivery the data plane had no room for (Codeberg #280). Short enough that
+/// an application draining its events sees the held message promptly, long
+/// enough not to spin while it is still busy.
+const RELIABLE_HOLD_RETRY: Duration = Duration::from_millis(20);
 
 impl EventSink {
     /// Route one event to the control or data plane by its class.
@@ -263,8 +284,46 @@ impl EventSink {
         }
     }
 
+    /// Room left on the data plane right now, minus anything already held.
+    ///
+    /// Read by the inbound path to tell the core how many more reliable
+    /// channel messages it may deliver — and therefore proof — before this
+    /// sink would have to hold them (Codeberg #280).
+    fn data_capacity(&self) -> usize {
+        self.data_tx
+            .capacity()
+            .saturating_sub(self.reliable_pending.len())
+    }
+
     /// Deliver a data-plane event, dropping silently when full (backpressure).
+    ///
+    /// Exception (#280): a reliable channel delivery is never dropped here.
+    /// The wire layer proofed it to the sender before it reached this sink, so
+    /// the sender's channel has already retired it; discarding it would leave
+    /// the message nowhere and the peer told it arrived. It is held instead and
+    /// retried on the next emit. The core's delivery budget is what keeps that
+    /// hold short — and bounded, because a sender that stops being proofed
+    /// stops sending.
     fn emit_data(&mut self, event: NodeEvent) {
+        self.flush_reliable();
+        if matches!(event, NodeEvent::MessageReceived { .. }) {
+            // Behind anything already waiting, so channel sequence order holds.
+            if !self.reliable_pending.is_empty() {
+                self.reliable_pending.push_back(event);
+                return;
+            }
+            match self.data_tx.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(ev)) => self.reliable_pending.push_back(ev),
+                Err(TrySendError::Closed(ev)) => {
+                    tracing::warn!(
+                        event = "EVENT_CHANNEL_CLOSED",
+                        dropped_event_type = ev.variant_name(),
+                    );
+                }
+            }
+            return;
+        }
         match self.data_tx.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
@@ -279,6 +338,30 @@ impl EventSink {
                     event = "EVENT_CHANNEL_CLOSED",
                     dropped_event_type = ev.variant_name(),
                 );
+            }
+        }
+    }
+
+    /// Push held reliable deliveries onto the data plane, oldest first, for as
+    /// long as there is room. Stops at the first one that does not fit, so the
+    /// order the sender sent them in is the order the application reads them.
+    fn flush_reliable(&mut self) {
+        while let Some(ev) = self.reliable_pending.pop_front() {
+            match self.data_tx.try_send(ev) {
+                Ok(()) => {}
+                Err(TrySendError::Full(ev)) => {
+                    self.reliable_pending.push_front(ev);
+                    return;
+                }
+                // Receiver gone: nothing can observe these any more.
+                Err(TrySendError::Closed(ev)) => {
+                    tracing::warn!(
+                        event = "EVENT_CHANNEL_CLOSED",
+                        dropped_event_type = ev.variant_name(),
+                    );
+                    self.reliable_pending.clear();
+                    return;
+                }
             }
         }
     }
@@ -1634,6 +1717,7 @@ impl ReticulumNode {
                 data_tx,
                 control_capacity: self.control_channel_capacity,
                 control_dropped: 0,
+                reliable_pending: VecDeque::new(),
             }),
             // `without_events()` leaves both senders None.
             _ => None,
@@ -3898,6 +3982,13 @@ async fn run_event_loop(
             }
             let (output, now_ms) = {
                 let mut core = inner.lock_recover();
+                // Codeberg #280: the core proofs a reliable channel message to
+                // the sender at the moment it delivers it, so it must not
+                // deliver more than this sink can actually hand on. Tell it how
+                // much room the data plane has left; at zero it refuses the
+                // packet unproofed and the sender retransmits. Daemon-mode
+                // nodes (`without_events()`) have no sink and no limit.
+                core.set_channel_delivery_budget(event_sink.as_ref().map(EventSink::data_capacity));
                 let output =
                     core.handle_packet_precomputed(prepared.iface, &prepared.data, prepared.pre);
                 let now_ms = core.now_ms();
@@ -5075,7 +5166,14 @@ fn dispatch_output(
     // When event_sink is None (daemon-mode, built via `without_events()`),
     // events are dropped here without forwarding — the events vector
     // simply falls out of scope at the end of this function.
+    let mut reliable_retry = None;
     if let Some(event_sink) = event_sink.as_deref_mut() {
+        // #280 — anything the data plane had no room for last time goes out
+        // first, before this dispatch's own events, so a channel's messages
+        // reach the application in the order the sender sent them. Done on
+        // every dispatch (not only when events are present) so a held message
+        // leaves on the next poll even if the link then goes quiet.
+        event_sink.flush_reliable();
         // #25 — the frames-destroyed signal rides the SAME sink as core's own
         // events, so a consumer learns of the loss on the stream it already
         // reads. Emitted first: the loss happened before anything core queued
@@ -5088,6 +5186,12 @@ fn dispatch_output(
                 tracing::debug!("Link established: {:?}", link_id);
             }
             event_sink.emit(event);
+        }
+        if !event_sink.reliable_pending.is_empty() {
+            // Still holding a proofed message the application has no room for.
+            // Ask for an early wake-up so it leaves as soon as it drains,
+            // rather than waiting for whatever else happens to run the loop.
+            reliable_retry = Some(RELIABLE_HOLD_RETRY);
         }
     }
 
@@ -5145,7 +5249,12 @@ fn dispatch_output(
         );
     }
 
-    processor_deadline
+    // #280: a held reliable delivery needs the loop back soon; take whichever
+    // deadline is nearer.
+    match (processor_deadline, reliable_retry) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Persist a discovery announce into the discovered-interface registry, if it
@@ -6465,6 +6574,7 @@ mod tests {
                 data_tx,
                 control_capacity: control_cap,
                 control_dropped: 0,
+                reliable_pending: VecDeque::new(),
             },
             EventReceiver {
                 control: control_rx,
@@ -6514,6 +6624,100 @@ mod tests {
                 other => panic!("expected PathFound #{i}, got {other:?}"),
             }
         }
+    }
+
+    /// Codeberg #280: a reliable channel delivery must never be dropped at the
+    /// data plane's cap.
+    ///
+    /// By the time a `MessageReceived` reaches this sink the wire layer has
+    /// proofed it to the sender, so the sender's channel has already retired
+    /// it. Dropping it here would destroy a message the protocol confirmed end
+    /// to end. The sink holds it instead and hands it over once there is room,
+    /// in the sender's order, while ordinary data events keep being droppable.
+    #[tokio::test]
+    async fn reliable_delivery_is_held_not_dropped_when_data_plane_is_full() {
+        let data_cap = 2;
+        let (mut sink, mut rx) = sink_and_receiver(16, data_cap);
+
+        // Fill the data plane with droppable traffic.
+        for i in 0..data_cap {
+            sink.emit(NodeEvent::PacketReceived {
+                destination: leviculum_core::DestinationHash::new([0x11; 16]),
+                data: vec![i as u8],
+                interface_index: i,
+            });
+        }
+        assert_eq!(sink.data_capacity(), 0, "data plane must be full");
+
+        // Three reliable messages arrive with no room at all.
+        for seq in 0..3u16 {
+            sink.emit(NodeEvent::MessageReceived {
+                link_id: LinkId::new([0x22; 16]),
+                msgtype: 7,
+                sequence: seq,
+                data: vec![seq as u8],
+            });
+        }
+        assert_eq!(
+            sink.reliable_pending.len(),
+            3,
+            "reliable deliveries must be held, not dropped"
+        );
+        assert_eq!(
+            sink.data_capacity(),
+            0,
+            "capacity reported to the core must account for what is held"
+        );
+
+        // The application drains; every held message comes out, in order.
+        let mut delivered = Vec::new();
+        for _ in 0..data_cap {
+            rx.try_recv().expect("buffered data event");
+        }
+        for _ in 0..3 {
+            sink.flush_reliable();
+            match rx.try_recv() {
+                Ok(NodeEvent::MessageReceived { sequence, .. }) => delivered.push(sequence),
+                other => panic!("expected a held MessageReceived, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![0, 1, 2],
+            "held messages must keep the sender's sequence order"
+        );
+        assert!(sink.reliable_pending.is_empty(), "nothing left held");
+    }
+
+    /// #280: a reliable delivery that arrives while earlier ones are still held
+    /// queues behind them even if the data plane has room again, so the
+    /// application never sees a channel's messages out of order.
+    #[tokio::test]
+    async fn held_reliable_deliveries_keep_their_order_ahead_of_new_ones() {
+        let (mut sink, mut rx) = sink_and_receiver(16, 1);
+
+        let msg = |seq: u16| NodeEvent::MessageReceived {
+            link_id: LinkId::new([0x22; 16]),
+            msgtype: 7,
+            sequence: seq,
+            data: vec![seq as u8],
+        };
+
+        sink.emit(msg(0)); // takes the single slot
+        sink.emit(msg(1)); // held
+        rx.try_recv().expect("seq 0");
+        // Room exists again, but seq 1 is still held: seq 2 must not overtake.
+        sink.emit(msg(2));
+
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            sink.flush_reliable();
+            match rx.try_recv() {
+                Ok(NodeEvent::MessageReceived { sequence, .. }) => seen.push(sequence),
+                other => panic!("expected MessageReceived, got {other:?}"),
+            }
+        }
+        assert_eq!(seen, vec![1, 2], "held message must precede the newer one");
     }
 
     /// The property emoore's unbounded channel broke: the DATA plane must stay
