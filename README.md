@@ -9,7 +9,7 @@ Reticulum is a networking stack for building resilient, encrypted mesh networks 
 
 ## What does Leviculum do?
 
-Leviculum provides the same functionality as Python Reticulum but compiled to native code. The `lnsd` daemon is a drop-in replacement for `rnsd`, `lncp` replaces `rncp`, `lnstatus` replaces `rnstatus`, and `lnprobe` replaces `rnprobe`. Python CLI tools like `rnstatus`, `rnpath`, and `rnprobe` also work against a running `lnsd` without modification.
+Leviculum provides the same functionality as Python Reticulum but compiled to native code. The `lnsd` daemon is a drop-in replacement for `rnsd`, `lncp` replaces `rncp`, `lnstatus` replaces `rnstatus`, `lnprobe` replaces `rnprobe`, and `lnpath` covers `rnpath`'s path query, wait and drop. Python CLI tools like `rnstatus`, `rnpath`, and `rnprobe` also work against a running `lnsd` without modification.
 
 The protocol core (`leviculum-core`) compiles as `no_std` with only `alloc`, so it runs on microcontrollers. The same code powers the Linux daemon, a future Android app, and embedded firmware.
 
@@ -38,7 +38,7 @@ sudo usermod -aG leviculum "$USER"
 # log out and back in for the group to apply
 ```
 
-That covers everything: the native Rust clients (`lnstatus`, `lnstest`, `lncp`, `lnprobe`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
+That covers everything: the native Rust clients (`lnstatus`, `lnstest`, `lncp`, `lnprobe`, `lnpath`) talk to lnsd via the shared-instance socket, and Python Reticulum tools (`rnstatus`, `rncp`, `rnpath`, `rnprobe`, Sideband, Nomadnet, …) auto-detect `/etc/reticulum` (per `RNS.Reticulum.__init__`'s standard lookup) and connect through the same socket. If you ever swap lnsd out for the Python `rnsd` daemon, the same configdir keeps working — `lnsd` and `rnsd` are wire- and config-compatible.
 
 The binaries are statically linked against musl, so the package installs on Debian ≥ 9 and Ubuntu ≥ 16.04 (amd64 + arm64) regardless of host glibc. SHA-256 checksums are published alongside every `.deb` with the suffix `.sha256`. The exact build is embedded in the binaries — `lnsd --version` prints e.g. `0.7.1-nightly.20260419-5a5df20`.
 
@@ -81,7 +81,7 @@ Then clone and build:
 git clone https://codeberg.org/Lew_Palm/leviculum.git
 cd leviculum
 git submodule update --init reference/Reticulum
-cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest --bin lnprobe
+cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest --bin lnprobe --bin lnpath
 ./target/x86_64-unknown-linux-musl/release/lnsd --version
 ```
 

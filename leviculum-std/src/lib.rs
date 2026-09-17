@@ -77,4 +77,4 @@ pub use file_propagation_store::FilePropagationStore;
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
 /// Used by `lnstest diag` to query a running `lnsd`/`rnsd`.
-pub use rpc::{rpc_query, rpc_query_hash_param};
+pub use rpc::{rpc_drop_path, rpc_query, rpc_query_hash_param};

@@ -50,4 +50,4 @@ Send 10 probes of 100 bytes, one second apart:
 
 ## SEE ALSO
 
-**lnsd**(1), **lnstest**(1), **lnstatus**(1), **lncp**(1)
+**lnsd**(1), **lnstest**(1), **lnstatus**(1), **lncp**(1), **lnpath**(1)

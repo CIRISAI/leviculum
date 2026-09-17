@@ -17,7 +17,7 @@ page extends the same property from the daemon to the clients.
 
 The reference stack ships a family of utilities under
 `reference/Reticulum/RNS/Utilities/`. The rule is one `ln*` counterpart
-per reference tool. The honest current state, as of 2026-08:
+per reference tool. The honest current state, as of 2026-09:
 
 | Reference tool | Counterpart | State |
 |---|---|---|
@@ -25,7 +25,7 @@ per reference tool. The honest current state, as of 2026-08:
 | `rnstatus` | `lnstatus` | Shipped. Local-mode output is byte-parity-pinned against the reference by the 2×2 matrix `status_parity_matrix_2x2` (`status_parity_tests.rs:1392`), the reported inventory by `status_inventory_parity_across_daemons` (`status_parity_tests.rs:2087`); Periculum wiring is Codeberg #174. |
 | `rncp` | `lncp` | Shipped (send, fetch, listen). |
 | `rnprobe` | `lnprobe` | Shipped. Same command line, output, and exit codes; proven against both `lnsd` and `rnsd` over the shared instance. |
-| `rnpath` | — | Missing; filed as Codeberg #173. |
+| `rnpath` | `lnpath` | Shipped for the path-query verb — query, wait, drop — with the reference arguments, output and exit codes for those three. The table and rate views, the blackhole verbs and remote management get no flag rather than a differing one; `lnstatus --tables` covers the first. Periculum wiring (manifest plus bridge parser) is still owed, as it is for `lnprobe` (Codeberg #173). |
 | `rnid` | — | Missing, not yet filed. |
 | `rnx` | — | Missing, not yet filed. |
 | `rnsh` | — | Missing, not yet filed. |

@@ -291,7 +291,7 @@ check_package() {
 echo "verify-deb-packaging: arch=${ARCH}"
 echo
 
-check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe
+check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
 contains "$CONFFILES" "/etc/reticulum/config" "registers /etc/reticulum/config as a conffile"
 contains "$CONTENTS" "lnsd.service" "ships the lnsd systemd unit"
 rm -rf "$CTRL_DIR"

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnpath`, the path-query half of the client vocabulary: query a path to
+  a destination, wait for it, and drop one the daemon holds. Until now
+  every path step in every scenario borrowed Python's `rnpath`, including
+  scenarios with no Python node in them, and an install without Python RNS
+  had no way to ask where a destination was at all.
+
+  The `-w` window is the caller's number and nothing else. Periculum #20
+  is the counter-example this is measured against — `rnprobe` steps there
+  give up after roughly ten seconds whatever timeout was configured, which
+  turns an unrelated scenario red — so the end-to-end test asserts it
+  differentially: the same query run with `-w 2` and `-w 8` must differ in
+  elapsed time by about six seconds, which a hardcoded window cannot do.
+
+  `-d` drops the path from the **daemon's** table over the shared-instance
+  RPC, the way Python's `Reticulum.drop_path` does. Dropping the copy
+  inside the client would print the same success line and change nothing:
+  the client exits a moment later and the table that routes is the
+  daemon's. The second drop of the same path is what proves the
+  difference, and the test makes it.
+
+  The reference tool's other roles — the path and rate views, the
+  blackhole verbs, remote management of another instance — get no flag
+  here rather than a flag that means something subtly different;
+  `lnstatus --tables` already prints the path table. Man page, client-
+  tools table row and packaging ride along (Codeberg #173).
+
 - Every board now reports its physical link — rssi, snr and Reticulum's
   own quality figure — in the telemetry it sends. The radio has measured
   all three on every reception since the driver existed and logged them;

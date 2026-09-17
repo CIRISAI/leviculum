@@ -366,6 +366,44 @@ pub async fn rpc_query_hash_param(
     Ok(pickle_value_to_json(&response))
 }
 
+/// Drop the daemon's path to `destination_hash` over the shared-instance
+/// RPC (`{"drop": "path", "destination_hash": <16 bytes>}`), exactly as
+/// Python's `Reticulum.drop_path` sends it (Reticulum.py:1561-1569).
+///
+/// Returns what the daemon answered: `true` when an entry was removed,
+/// `false` when there was none. The path table that matters lives in the
+/// daemon, so a client tool must ask it rather than drop its own copy —
+/// the copy dies with the process and the daemon keeps routing.
+///
+/// This is the one mutating op reachable from outside the crate.
+/// [`rpc_query`] and [`rpc_query_hash_param`] deliberately carry only
+/// `get` verbs; a drop changes the daemon's state and gets its own
+/// entry point rather than a string parameter that could be reached by
+/// a typo. Same authkey and transport caveats as those two.
+pub async fn rpc_drop_path(
+    instance_name: &str,
+    authkey: &[u8; 32],
+    destination_hash: &[u8],
+) -> Result<bool, crate::Error> {
+    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let request = pickle::pickle_dict(vec![
+        (pickle::pickle_str_key("drop"), pickle::pickle_str("path")),
+        (
+            pickle::pickle_str_key("destination_hash"),
+            pickle::pickle_bytes(destination_hash),
+        ),
+    ]);
+    let response = rpc_client_call(&abstract_name, authkey, &request)
+        .await
+        .map_err(|e| match e {
+            RpcError::Io(io) => crate::Error::Io(io),
+            other => crate::Error::Config(format!("shared-instance RPC error: {other}")),
+        })?;
+    // Python answers a plain bool; anything else is a daemon that did not
+    // understand the verb, which is not a dropped path.
+    Ok(matches!(response, serde_pickle::value::Value::Bool(true)))
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes

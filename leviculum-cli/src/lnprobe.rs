@@ -6,7 +6,7 @@
 //! sends probe packets and reports round-trip time and hop count from
 //! the delivery proofs the probed destination returns.
 
-use std::io::{IsTerminal, Write as _};
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -18,9 +18,13 @@ use leviculum_std::config::Config;
 use leviculum_std::driver::{EventReceiver, ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::{Destination, DestinationHash, DestinationType, Direction, NodeEvent};
 
-// Shared with lnstest; each binary uses its own subset of the module.
+// Shared with lnstest and lnpath; each binary uses its own subset.
+#[allow(dead_code)]
+mod client_fmt;
 #[allow(dead_code)]
 mod daemon_rpc;
+
+use client_fmt::{hex_decode, hex_encode, parse_destination_hash, prettyhexrep, Spinner};
 
 /// rnprobe.py:41
 const DEFAULT_PROBE_SIZE: usize = 16;
@@ -66,21 +70,6 @@ struct Args {
     destination_hash: Option<String>,
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
-/// Python `RNS.prettyhexrep`: `<hex>`.
-fn prettyhexrep(bytes: &[u8]) -> String {
-    format!("<{}>", hex_encode(bytes))
-}
-
 /// Python `str(round(v, ndigits))`: shortest decimal form of the rounded
 /// value, but always at least one digit after the point (`12.0`, `530.9`).
 fn py_round_str(v: f64, ndigits: usize) -> String {
@@ -114,33 +103,6 @@ fn log_filter(verbose: u8) -> &'static str {
         2 => "info",
         3 => "debug",
         _ => "trace",
-    }
-}
-
-/// The animated wait indicator (rnprobe.py:86). Only animated on a TTY so
-/// piped output stays clean; the surrounding text is unchanged.
-struct Spinner {
-    syms: Vec<char>,
-    i: usize,
-    tty: bool,
-}
-
-impl Spinner {
-    fn new() -> Self {
-        Self {
-            syms: "⢄⢂⢁⡁⡈⡐⡠".chars().collect(),
-            i: 0,
-            tty: std::io::stdout().is_terminal(),
-        }
-    }
-
-    fn tick(&mut self) {
-        if !self.tty {
-            return;
-        }
-        print!("\u{8}\u{8}{} ", self.syms[self.i]);
-        let _ = std::io::stdout().flush();
-        self.i = (self.i + 1) % self.syms.len();
     }
 }
 
@@ -247,20 +209,6 @@ async fn run(args: Args) -> i32 {
     code
 }
 
-fn parse_destination_hash(hex: &str) -> Result<DestinationHash, String> {
-    if hex.len() != 32 {
-        return Err(
-            "Destination length is invalid, must be 32 hexadecimal characters (16 bytes).".into(),
-        );
-    }
-    let mut bytes = [0u8; 16];
-    for (i, chunk) in bytes.iter_mut().enumerate() {
-        *chunk = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "Invalid destination entered. Check your input.".to_string())?;
-    }
-    Ok(DestinationHash::new(bytes))
-}
-
 async fn build_client(
     instance_name: &str,
     config_dir: &std::path::Path,
@@ -355,16 +303,6 @@ async fn via_suffix(
         }
     }
     more
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err("hex string has odd length".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -562,15 +500,6 @@ async fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn destination_hash_parsing_matches_rnprobe_rules() {
-        assert!(parse_destination_hash("a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8").is_ok());
-        // Wrong length
-        assert!(parse_destination_hash("a1b2").is_err());
-        // Right length, not hex
-        assert!(parse_destination_hash("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
-    }
 
     #[test]
     fn full_names_split_like_app_and_aspects_from_name() {
