@@ -1017,10 +1017,10 @@ dfu-rak4631 PORT:
 # recoverable by re-running flash-rnode. This is unlike the nRF52 LNodes
 # (T114, RAK4631), where a bad external image leaves the device USB-dark.
 #
-# Run flash-rnode-setup once first. It pip-installs esptool into a
-# gitignored repo-local venv (.rnode-tools/): the Debian esptool package is
-# dfsg-stripped of its flasher stubs and fails on large flash reads/writes,
-# so a real esptool is needed. rnodeconf is the repo's vendored copy.
+# Run flash-rnode-setup once first: the Debian esptool package is
+# dfsg-stripped of its flasher stubs and cannot talk to an ESP32-S3 at all
+# (scripts/install-esptool.sh says what that looks like and what replaces
+# it). rnodeconf is the repo's vendored copy.
 # Mark's autoinstall is interactive (product menu); instead we read Mark's
 # signed firmware images off a known-good RNode once (flash-rnode-extract,
 # into the gitignored .rnode-fw/), then write them back. The write covers
@@ -1030,14 +1030,15 @@ dfu-rak4631 PORT:
 
 reference_reticulum := justfile_directory() / "reference" / "Reticulum"
 rnodeconf := "PYTHONPATH=" + reference_reticulum + " python3 " + reference_reticulum / "RNS" / "Utilities" / "rnodeconf.py"
-esptool := justfile_directory() / ".rnode-tools" / "bin" / "esptool.py"
+rnode_tools := env_var_or_default("LEVICULUM_RNODE_TOOLS", home_directory() / ".rnode-tools" / "venv")
+esptool := rnode_tools / "bin" / "esptool"
 rnode_fw := justfile_directory() / ".rnode-fw"
 
-# One-time setup: a repo-local venv with a working esptool (the Debian
-# package cannot read/write large flash regions, its stubs are dfsg-stripped).
+# One-time setup: the esptool these recipes drive. Pinned, and the same one
+# scripts/install-ci.sh puts on a CI host, so a board is not flashed by
+# whichever esptool a given machine happens to have.
 flash-rnode-setup:
-    python3 -m venv {{justfile_directory()}}/.rnode-tools
-    {{justfile_directory()}}/.rnode-tools/bin/pip install --quiet 'esptool<5'
+    bash scripts/install-esptool.sh
 
 # Read-only device info: connectivity, firmware version, signature.
 #   just flash-rnode-info /dev/ttyACM6

@@ -267,6 +267,39 @@ cargo install --locked espflash --version 4.6.0
 echo "[install-ci] ESP32-S3 toolchain: espup 0.17.1 + Xtensa Rust 1.97.0.0 + espflash 4.6.0"
 echo "[install-ci]   xtensa builds need: . ~/export-esp.sh"
 
+# 6d. esptool, the one that can read and write an ESP32-S3 (2026-09-17).
+#     espflash above writes OUR firmware; this is the other direction —
+#     reading Mark's signed RNode images off a board and putting them back,
+#     which is what `just flash-rnode-extract` / `just flash-rnode` /
+#     `just flash-rnode-write-image` do.
+#
+#     It is installed here, and not left to the flashing recipe, because the
+#     recipe is reached for exactly when a board is already in trouble. On
+#     2026-09-17 a Heltec V4 needed restoring and the tooling did not fit:
+#     Debian's esptool 4.7.0 is dfsg-stripped of its flasher stubs (the
+#     Xtensa ones are prebuilt binaries, so esp32, esp32s2 and esp32s3 are
+#     all missing while the RISC-V set survives) and died with
+#
+#       FileNotFoundError: .../stub_flasher/stub_flasher_32s3.json
+#
+#     The `--no-stub` fallback reached 12 % of a 16 MB read before failing
+#     with `Failed to read flash block (result was 01090000: CRC or checksum
+#     was invalid)`. The pinned PyPI build read the same 16 MB in 102.8 s at
+#     1306 kbit/s with no retries (.rnode-fw/extract.log).
+#
+#     Pinned at 5.4.0 for the reason the pins above give, plus one specific
+#     to this tool: esptool 5 renamed every command and option to a
+#     hyphenated form and scripts/rnode-flash.sh composes that form, which
+#     a 4.x binary rejects outright.
+#
+#     Idempotent, and cheap when it has nothing to do: 0.06 s to confirm an
+#     existing install (measured), 3.1 s to build the venv from scratch.
+#     The script is also what `just flash-rnode-setup` runs, so a developer
+#     machine and a CI host end up with the same binary at the same path.
+#     Needs python3-venv, which is separate from python3 on Debian.
+bash scripts/install-esptool.sh
+echo "[install-ci] RNode flashing: esptool 5.4.0 (just flash-rnode-*)"
+
 # 7. Install systemd user units, patching the hardcoded
 #    %h/coding/libreticulum literal to point at the worktree this
 #    installer was actually run from.  Lets a `git worktree`-based
