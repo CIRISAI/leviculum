@@ -5,7 +5,16 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), probe tool (lnprobe), path tool (lnpath), and telemetry collector (lntd)"
+# This string is the .deb's `Description:` line: cargo-deb has no
+# description field of its own (3.7.0 rejects `description` under
+# [package.metadata.deb] as an unknown key), so every binary named here is a
+# promise to whoever installs the package. `lntd` is built by this crate but
+# deliberately not packaged yet — it still owes a manual page, and the .deb
+# requires one per shipped binary (Debian Policy 12.1) — so it is not named
+# here either. It returns to this line in the same change that adds it to
+# `[package.metadata.deb] assets`; scripts/verify-deb-packaging.sh holds the
+# two together.
+description = "Reticulum network stack daemon (lnsd), test tool (lnstest), file-transfer client (lncp), status tool (lnstatus), probe tool (lnprobe), and path tool (lnpath)"
 
 [[bin]]
 name = "lnsd"

@@ -116,6 +116,42 @@ check_package() {
     for bin in "${binaries[@]}"; do
         contains "$contents" " ./usr/bin/${bin}" "ships /usr/bin/${bin}"
     done
+
+    # Every binary the Description names must be in the package. cargo-deb
+    # has no description field of its own — 3.7.0 rejects `description` under
+    # [package.metadata.deb] as an unknown key — so the crate's `description`
+    # IS the .deb's Description line, and a name in it is a promise to
+    # whoever installs the package. On 2026-09-17 that line named lntd, which
+    # this package has never shipped, and nothing failed: the binary list
+    # below and the description are two lists, and only one of them was
+    # checked.
+    #
+    # The rule this puts on our own prose: a lone word in parentheses in a
+    # package description is a binary the package installs. Every other
+    # parenthesis in the four descriptions holds a phrase ("(drop-in for
+    # rncp)", "(selftest, diag, identity, connect)", "(rnstatus, rncp,
+    # Sideband, Nomadnet)"), so the rule costs nothing to keep, and a future
+    # "(optional)" fails here loudly instead of turning the field into a lie
+    # quietly. Prose that merely mentions another package's tool — lnomad and
+    # lblogd both name lnsd — says so without parentheses and is not a claim.
+    local claimed claim claims=0 unshipped=0
+    # `|| true`: a description with no parenthesised name at all (lnomad's,
+    # lnpnd's) makes grep exit 1, which under `set -e` would end the run.
+    claimed="$(dpkg-deb -f "$deb" Description \
+        | grep -oE '\([a-z][a-z0-9_-]*\)' | tr -d '()' | sort -u || true)"
+    for claim in $claimed; do
+        claims=$((claims + 1))
+        if ! printf '%s\n' "$contents" | grep -qE " \./usr/bin/${claim}\$"; then
+            fail "Description names ${claim}, which the package does not install"
+            unshipped=1
+        fi
+    done
+    if [ "$unshipped" -eq 0 ] && [ "$claims" -gt 0 ]; then
+        pass "Description names ${claims} binaries, all installed"
+    elif [ "$claims" -eq 0 ]; then
+        pass "Description names no binary of its own"
+    fi
+
     contains "$contents" "/usr/share/doc/${pkg}/README.md" "ships its README"
 
     # Codeberg #288: the binaries are musl-static, so every MIT- and
