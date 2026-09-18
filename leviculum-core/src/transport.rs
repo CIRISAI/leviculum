@@ -19608,6 +19608,94 @@ mod tests {
             );
         }
 
+        // Codeberg #166 item 4: what it would cost to persist the learned
+        // timebase across a reboot and restore it as an ordinary anchor.
+        // The issue asks a clockless LNode — a solar relay with neither
+        // GNSS nor a host — to carry its floor over a power cycle so it
+        // stops re-emitting uptime seconds after every boot. The stored
+        // value can only ever be a FLOOR: the node cannot know how long it
+        // was off, so it must still adopt upward from the first credible
+        // announce.
+        //
+        // Restored through the only seam that exists today it is an anchor
+        // like any other, and the unbounded-first-adoption branch keys on
+        // the anchor's VALUE (`current < EMISSION_PLAUSIBLE_MIN_SECS`), not
+        // on its provenance rank. A restored floor clears that bound by
+        // construction — the sanity window admitted it — so the node lands
+        // in the bounded branch and crawls back to real time at
+        // EMISSION_LEARN_MAX_ADVANCE_SECS per announce, where the same node
+        // without persistence recovers in one step.
+        //
+        // This measures the crawl instead of asserting it. It is the reason
+        // item 4 is not a firmware-only change: the rank-keyed predicate of
+        // docs/src/concepts/time-and-clocks.md ("Anchor provenance is
+        // first-class state") has to land with it, exactly as that section
+        // requires of the build floor, which has the same shape.
+        #[test]
+        fn test_restored_stale_floor_crawls_where_an_absent_floor_recovers() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            // The credible announce both arms hear, and how long the relay
+            // was powered off before it heard it.
+            const NOW_SECS: u64 = 1_800_000_000;
+            const OFF_SECS: u64 = 90 * 86_400;
+            let stored_floor = NOW_SECS - OFF_SECS;
+            assert!(
+                stored_floor > EMISSION_PLAUSIBLE_MIN_SECS,
+                "a floor worth persisting is plausible by construction: the \
+                 sanity window is what admitted it in the first place"
+            );
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "persisted"],
+            )
+            .unwrap();
+
+            // Arm A — today: nothing persisted, so the node boots at uptime
+            // seconds and one credible announce recovers it completely.
+            let mut fresh = make_transport_enabled();
+            let _fresh_if = fresh.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let a1 = make_announce_raw_for_dest(&dest, 1, NOW_SECS);
+            fresh.process_incoming(0, &a1).unwrap();
+            let now = fresh.clock.now_ms();
+            assert_eq!(
+                fresh.emission_secs(now),
+                NOW_SECS,
+                "without a floor the first adoption is unbounded"
+            );
+
+            // Arm B — with item 4 done naively: the stored floor is seated
+            // at boot, then the same announce arrives.
+            let mut restored = make_transport_enabled();
+            let _restored_if = restored.register_interface(Box::new(MockInterface::new("if0", 1)));
+            assert!(restored.set_wall_time_unix_secs(stored_floor, TimeSource::Host));
+            let a2 = make_announce_raw_for_dest(&dest, 1, NOW_SECS);
+            restored.process_incoming(0, &a2).unwrap();
+            let now = restored.clock.now_ms();
+            assert_eq!(
+                restored.emission_secs(now),
+                stored_floor + EMISSION_LEARN_MAX_ADVANCE_SECS,
+                "a restored floor is plausible, so the same announce advances \
+                 it by the per-announce cap instead of recovering it"
+            );
+
+            // The cost, stated as the number the rig scenario would count:
+            // announces to climb back, one day of advance each.
+            assert_eq!(
+                OFF_SECS / EMISSION_LEARN_MAX_ADVANCE_SECS,
+                90,
+                "one announce per day of downtime — at a 30 min LoRa cadence \
+                 the relay stamps behind real time for ~45 h after a season \
+                 off, against one announce interval with no persistence"
+            );
+        }
+
         // Codeberg #161 (review, uncovered point 1): `set_wall_time_unix_secs`
         // must refuse an implausibly LOW injection with the same bound. A
         // boot script racing NTP, or a controller with its own dead clock,
