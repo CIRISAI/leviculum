@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-18
+
 ### Added
 
 - `lnpath`, the path-query half of the client vocabulary: query a path to
@@ -105,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every path that enters it — direct, opportunistic and propagated — so a
   message is observable while it is in flight instead of only when it is
   answered. On the transition only.
+
 - lnmsg speaks to propagation nodes. `--via auto` (the new default)
   tries the direct delivery link first and, when none comes up inside
   the timeout, uploads the message to a propagation node instead — the
@@ -131,6 +134,331 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flashes — so until now nothing in the log said that a running node
   still hears its peers.
 
+- lnpnd grows to lxmd's full scope (#384 part 4). Remote management:
+  the node registers lxmd's `lxmf.propagation.control` destination with
+  the `/pn/get/stats`, `/pn/peer/sync` and `/pn/peer/unpeer` request
+  paths behind the same identity allow list (`control_allowed`), and
+  answers with the reference's stats map — `lxmd --status --peers
+  --sync --break --remote` drives an lnpnd node, and lnpnd carries the
+  same client verbs with output in lxmd's shape, driving stock lxmd
+  nodes in return (both directions in the conformance corpus, the
+  payload encodings pinned byte-exact against `umsgpack` in
+  `VEC-PN-CONTROL`). The daemon's own mailbox: an LXMF delivery
+  destination on the node identity, announced with `display_name` and
+  `stamp_cost`, each received message written in the reference's
+  packed-container file format and handed to the `on_inbound` hook;
+  propagated uploads addressed to the node's own mailbox deliver
+  locally instead of rotting in the store, the reference's own
+  short-circuit. Configuration: an lxmd-format config directory
+  (`config`, `identity`, `allowed`, `ignored`, `storage/`) with lxmd's
+  sections and key names, flags as overrides, `--exampleconfig`, and
+  `auth_required` gating `/get`; the keys lnpnd accepts but does not
+  act on are named in lnpnd(1) with reasons. Packaging: lnpnd joins
+  the `.deb` builds with a hardened systemd unit, a dedicated service
+  user, `--service` file logging and a manual page. Propagation-stamp
+  validation moved off the core lock onto a single worker thread
+  (arrival order preserved — the proof still leaves only after the
+  store append), so a cost-13 default no longer spends ~10 ms of the
+  core mutex per accepted message; the validated sync-peer
+  association is captured when the resource concludes, so a peer
+  that tears its link down before the verdicts drain — stock lxmd
+  does — cannot orphan the inbound batch.
+
+- Propagation-node peering (#384 part 2): lnpnd now peers with other
+  propagation nodes — including stock Python `lxmd` at its default
+  peering cost — and syncs its store both ways. The protocol half lives
+  in `leviculum-lxmf::peering` (`no_std + alloc`, board-ready behind a
+  `PeerStore` trait): a capped peer table fed by propagation announces
+  (autopeer within the configured hop depth, static list, deterministic
+  first-heard-wins policy at the cap, 14-day unreachability cull), the
+  `/offer` wire codec and inbound gate (peering-key validation at our
+  announced cost, throttling, `from_static_only`), and one append-order
+  cursor per peer instead of the reference's per-message peer sets —
+  everything at or below the cursor has been offered and concluded, a
+  stale cursor is a bounded full re-offer. Outbound rounds mine the
+  peer's peering key once on a worker thread, persist it, offer within
+  a 6144-byte bound, and advance the cursor only on the concluded
+  resource. Messages accepted at cost 0 get true stamp values computed
+  whenever any peer filters offers by value. New lnpnd flags use lxmd's
+  key names: `--max-peers`, `--static-peers`, `--autopeer`,
+  `--autopeer-maxdepth`, `--remote-peering-cost-max`,
+  `--max-inbound-syncs`, `--from-static-only`. Structured events:
+  `PN_PEER`, `PN_OFFER`, `PN_SYNC`. Verified end-to-end in an all-Rust
+  two-node loopback (autopeer, key mine, offer, sync, re-offer answered
+  "want none") and by new periculum conformance cells against genuine
+  stock `lxmd` peers, including a mixed-stack relay chain in both
+  directions, key reuse at stock cost 18, the peer cap, and store
+  overflow during an inbound sync.
+
+- lnpnd, an LXMF propagation node daemon (#384): the store-and-forward
+  mailbox role on a running Reticulum shared instance. It announces
+  `lxmf.propagation`, accepts client uploads (proving each packet only
+  after the message is durably stored), answers `/get` with the
+  list/fetch/confirm rounds of the reference protocol, and evicts by the
+  reference's age-times-size weight. Stamp and peering costs default to 0
+  and are settable (`--stamp-cost`, `--peering-cost`); announced limits
+  default to the small honest values the propagation-node concept page
+  derives (4 kB per transfer, 32 kB per sync). Verified byte-for-byte
+  against the Python reference's own handlers and end-to-end against
+  genuine Python LXMF clients.
+
+- The propagation-node role and its store boundary in `leviculum-lxmf`
+  (#384): `PropagationNode` (announce, upload accept, mailbox drain,
+  eviction) over a `PropagationStore` trait whose verbs mirror the
+  boards' record log one-for-one, so the on-board node of a later part is
+  an adapter rather than a redesign. Host stores: in-memory, and a
+  file-backed one that fsyncs before the upload proof leaves — a power
+  cut during an upload reopens with every completed message and no
+  partial one.
+
+- The `lxmf-node` test helper speaks the propagation protocol (#384):
+  `pn_enable` runs lnpnd's engine, and `set_pn` / `send_propagated` /
+  `sync` drive the router's propagation client, mirroring the same verbs
+  in periculum's Python helper so one driver tests either stack's node.
+
+- LNode boards keep a message store on their internal flash (#384): 64 KiB
+  behind the firmware image, mounted at boot and formatted once, not yet
+  used for messages. `lnflash --store-storm <count>[,<bytes>]` appends
+  synthetic records to it, which is the instrument for measuring what the
+  store's page erases cost Bluetooth throughput and LoRa airtime.
+
+- A board asks for a supervision timeout it can survive (#385). A link
+  a peripheral board holds is the one end that can do anything about
+  the parameters it was handed, and the two cases where those
+  parameters are bad or unknown are exactly the two where the board is
+  the peripheral: an lnsd central gives it BlueZ's 420 ms — nine
+  connection events at the 45 ms interval both stacks measured, and 36
+  link deaths in 16.2 hours on the bench — and a phone gives it
+  something nobody has measured yet. The board now compares the
+  timeout the link came up with against a 2000 ms floor and, only if
+  it falls short, asks the central for 4000 ms, the same value the
+  firmware's own central role already asks for. Conditional by design:
+  a central that negotiates something sane is left alone, because an
+  update request that fights a good value is a regression. Both the
+  decision and its outcome are logged as `BLE_CONN_PARAMS_REQ conn=<h>
+  timeout_ms=<n> result=sent|refused|skipped`, and because a central
+  may honour the request, ignore it, or answer with something else
+  entirely, a peripheral link re-reads its parameters at teardown and
+  repeats `BLE_CONN_PARAMS` marked `when=close`: a link that opened at
+  420 ms and closed at 4000 ms was granted what it asked for, one that
+  closed at 420 ms was not, and the request line alone says neither.
+  Board-to-board links are untouched — their central already asks for
+  4 s, so they only ever log `result=skipped`.
+
+- The boards say what their battery is doing (#380). Once at boot and
+  then every 30 s, both the Pocket V2 and the T114 log `BATTERY
+  mv=<n> min_mv=<n> max_mv=<n> pct=<n>|none cells=<n>S`. The pack is
+  sampled at 1 Hz and the line reports the extremes of the period as
+  well as the filtered value, so a sag under transmit load is visible
+  instead of averaged away. Before this the monitor fed the display and
+  said nothing else: a Pocket V2 that restarted twice during a 90
+  minute field walk on battery produced zero battery lines, so how
+  close the pack had been to the edge could not be asked afterwards.
+  This is a margin instrument, not a brownout detector — the sampler is
+  a second apart, the transient that resets a board is microseconds
+  wide, and the reset takes the log with it.
+
+- The T114 reads its own battery at all (#380). The monitor was typed
+  to the Pocket V2's ADC pin and had the Pocket's 1.73 divider baked
+  into its arithmetic; it now takes the pin, the divider multiplier and
+  the divider-enable pin from the board file, which was already
+  declaring all three. The T114's enable pin is held high only for the
+  duration of a sample, so its 490 kΩ divider does not sit across the
+  pack between them. The pack voltage also appears on the T114's status
+  panel, which used to render "(no feature)".
+
+- Every BLE link on a board says what it actually runs at (#385). At
+  the connection event, in both roles, the firmware logs
+  `BLE_CONN_PARAMS conn=<h> role=central|peripheral interval_ms=<n.nn>
+  latency=<n> timeout_ms=<n>` — the connection interval, slave latency
+  and supervision timeout the central chose, since neither stack
+  requests any of them. The supervision timeout is how long a
+  disturbance may last before the link dies, and until now the only way
+  to learn it was to read the peer's kernel: possible for a BlueZ
+  central on the bench (where a board and lnsd a metre apart lost their
+  link 36 times in 16.2 hours, every connection at a 45 ms interval
+  with a 420 ms supervision timeout), impossible for a phone. Both time
+  fields are converted from their two different raw scales (1.25 ms
+  steps for the interval, 10 ms for the timeout) so the line carries
+  milliseconds only. No parameter is requested or changed by this: it
+  is a measurement. lnsd has no counterpart, because BlueZ publishes
+  none of the three over D-Bus.
+
+- A board announces itself on a new BLE connection and on a timer, not
+  only before a telemetry report (#376). When a peer completes its
+  identity handshake the node announces its delivery destination to
+  that peer over that link alone, at most once per peer identity per 15
+  minutes; independently of telemetry it announces on every interface
+  every 30 minutes. Both are withheld while the board has no plausible
+  wall clock, because an announce stamped from uptime can never replace
+  a path at the receiver. A phone that connects between two reports now
+  sees the board at one hop straight away.
+
+- `lnflash --watch` records a board's debug log for field testing: it
+  opens the debug CDC with DTR and RTS raised, prefixes every line
+  with a wall-clock ISO-8601 timestamp, appends to `--out` flushed per
+  line, and reconnects with bounded backoff when the port vanishes
+  (reset, reflash, unplug), logging the gap as its own line. `lnflash
+  --summarize <file>` reads a watch file back and prints receptions
+  per class per hour (announce, data, path request) plus the last line
+  seen per class.
+
+- Every LoRa receive line says how strong the frame was, and what it
+  was (#364). lnsd's RNode RX line and its `LORA_RX` trace event carry
+  `rssi=`/`snr=` from the stat frames the RNode firmware indicates
+  before each data frame, paired the way Python's `RNodeInterface`
+  pairs them. The LNode firmware's `[LORA] RX` line adds `flags=` (the
+  packet's header flags byte) and `dst=` (first 8 hex of the
+  destination hash), so `lnflash --summarize` classifies announce,
+  data, path request and proof straight from a watch file.
+
+- An LNode now answers a Sideband telemetry request: an LXMF message
+  from the configured target carrying the `TELEMETRY_REQUEST` command
+  triggers an immediate report, rate-limited to one request-triggered
+  report per profile minimum interval. Requests from any other sender
+  are ignored and logged.
+
+- `lnstatus --identities` (`-N`) lists every identity the daemon has
+  learned from announces — identity hash, announced destination, name
+  (only for aspects the daemon registered itself), hops, via and last
+  seen — plus the `lxmf.delivery` and `rnstransport.probe` destinations
+  derived from each identity hash, ready to paste into `lnprobe`. Until
+  now that derivation had to be done by hand from `rnpath -t` output.
+  Served by a new additive `identities` RPC verb on the shared-instance
+  socket; a daemon without it (Python `rnsd`, older `lnsd`) closes the
+  connection and the tool reports the error.
+
+- `lnprobe`, a drop-in for Python's `rnprobe`: probes a destination
+  through a running `lnsd` **or** `rnsd` over the shared instance,
+  reporting round-trip time, hop count and packet loss from delivery
+  proofs — the same command line, output and exit codes as the
+  reference. The per-probe timeout asks the daemon for its first-hop
+  timeout like `rnprobe` does, so probes over slow media wait longer by
+  default.
+
+- A board says which hashes to probe: one `[IDENTITY]
+  identity=… probe=… lxmf=…` line on the boot-critical log path (both
+  BSPs), repeated in the periodic banner so a reader attached later
+  still sees it — and the same three hashes over a new control-envelope
+  identity query (frame `0x0E`), which `lnflash --set-name` prints in
+  its read-back, so no debug-port reader is needed.
+
+- lnsd joins the Columba BLE mesh: a new `BLEInterface` type
+  (`[[BLE Interface]]` config section) speaks the `ble-reticulum`
+  protocol v2.2 with the v0.3.0 capability record over BlueZ, in both
+  GATT roles at once — it advertises and serves the Columba GATT layout
+  under an `LN-<hex8>` name derived from the daemon identity like the
+  boards do, and it scans for and connects to peers under the same
+  connection-direction rule, so a PC participates in the same BLE mesh
+  as LNodes and phones. One interface is one broadcast domain across
+  all live BLE links; fragmentation and the connection decision reuse
+  the firmware's own host-tested code. Disabled unless configured.
+
+- A user can set a fixed position on an LNode — `lnflash --set-position
+  LAT,LON[,ALT]`, envelope frame `0x08` — which replaces the position
+  sensor in its telemetry reports until `--clear-position` returns it to
+  sensor reporting. Persisted beside the telemetry target, applied at
+  boot and at runtime, marked `possrc=fixed|gnss` in the report line,
+  and encoded in Sideband's own fixed-location shape (accuracy 0.01 m).
+
+- The gap the LoRa interface leaves between two packets on the air is
+  settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
+  frame `0x06`. The default imposes nothing (#345).
+
+- The transmit power is settable without a reflash — `lnflash
+  --set-tx-power <DBM>`, which reads the board's current radio settings
+  back (envelope frame `0x07`) and returns them with only the power
+  changed. Persisted (#349).
+
+- A board states the transmit power it programmed, and whether the
+  request was clamped, on its critical log path (#349).
+
+- The firmware logs every arming of the receiver as `[SX_RX_ARM] site=
+  timeout_ms= dark_ms=`, so a capture says how long the radio was not
+  listening between two windows instead of leaving it to be inferred (#344).
+
+- Standing the receiver down logs `[SX_RX_TEARDOWN] site= preamble=
+  header= rxdone= armed_ms=` from every caller, `site=` naming the caller,
+  so a capture says whether a frame was already arriving when the window
+  came down (#276).
+
+- A receive window that is kept instead of re-armed logs `[SX_RX_ADOPT]
+  latched= preamble= header= rxdone= stood_ms=`, which counts the
+  receptions the previous firmware destroyed.
+
+- A transmit that waits for an arriving frame logs `[SX_TX_DEFER]
+  waited_ms= reason= outcome=`, so the airtime the wait costs and what it
+  bought are one ratio in the capture (#276).
+
+- The firmware receives at boosted SX1262 gain and applies the errata-15.4
+  IQ correction, and prints both registers before and after it writes them
+  (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather
+  than taken on trust (#258).
+
+- The nRF firmware prints its transport counters every 30 s as
+  `[TRANSPORT] fwd= rx= tx= nopath= dup= overheard= maxhops= paths=`, so
+  a board that does not relay a packet says which decision discarded it
+  (#344).
+
+- A transport-id mismatch names both ids it compared, and a packet
+  dropped that way for a destination this node serves locally is
+  reported per packet instead of only counted (#344).
+
+- The lnflash bundle carries the RAK4631 as well as the T114, so a
+  WisMesh Pocket V2 can be flashed and configured from the tarball
+  (#261).
+
+- `just nrf-shellcheck` runs shellcheck over the flash-runner scripts and
+  is part of `just fast` (#345).
+
+- The Pocket V2 reports its position and battery over LXMF: an
+  announced `lxmf.delivery` destination, a target set by address alone
+  (the node resolves the key over the air and says `awaiting-key` until
+  it has), tracker and station cadence profiles, and one immediate
+  report when a target becomes usable (#236).
+
+- Every published artifact now carries `THIRD-PARTY-NOTICES`, generated
+  from the lockfiles, so the MIT- and BSD-licensed crates linked into
+  the binaries travel with their required notices (#288).
+
+- The GNSS wake ends with an explicit UBX-CFG-ANT step: antenna supply
+  on, every automatic power-down path off, so the init no longer
+  depends on what the factory clear left behind (#324).
+
+- The GNSS heartbeat reports satellites in view and best C/N0 (`sv=`,
+  `cno=`) from GSV, so a receiver that hears the sky but never fixes is
+  distinguishable from a deaf antenna (#324).
+
+- The Pocket V2 wakes its GNSS module at boot with a minimal UBX init
+  (factory clear, cold start, full power), so a persisted module
+  configuration from earlier firmware cannot suppress acquisition (#324).
+
+- One framed control envelope on the LNode USB channel (type, length,
+  named refusals, capability report); radio config and reset migrated,
+  legacy magics stay accepted for a transition window (#238).
+
+- `lnflash --set-time` teaches a running LNode wall time over the
+  envelope; the banner then reports `[TIME_SOURCE] source=host` (#166).
+
+- The Pocket V2 firmware seeds its calendar from the GNSS receiver's RMC
+  UTC, and every LNode states its time source (`[TIME_SOURCE]` beside
+  `[FW_BUILD]`) (#166).
+
+- Single-destination decrypt misses are now counted (`single-decrypt-fail`
+  in `PKT_DROP_SUMMARY`) and journey-logged instead of dropped silently.
+
+- `Destination::with_explicit_hash`: a Single destination indexed by a
+  caller-supplied 16-byte hash; never announced, reachable by direct link
+  only (#254).
+
+- Driver completion futures (`connect_awaited`, `send_resource_awaited`,
+  `send_request_awaited`) and a bounded multi-consumer event tap, replacing
+  consumer poll loops (#253).
+
+- `lnmsg`, a new LXMF messenger: `lnmsg send <address>` queues one message
+  through a running `lnsd`/`rnsd` shared instance and says nothing. Exit 0
+  means queued, never delivered.
+
 ### Changed
 
 - A board's announce cadence follows whether it moves, not a profile
@@ -146,6 +474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reachability. The board's own destination and the propagation role are
   decided together, because a board whose own announce is withheld is
   unreachable as a recipient while still usable as a mailbox.
+
 - A board's own announces may use at most a tenth of its lawful duty
   budget. Locally originated announces bypass the transit announce cap by
   design, matching the reference, so nothing governed them; the board now
@@ -154,6 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually used and the arithmetic that forced it. At a fast carrier this
   changes nothing; at the slowest, five minutes becomes roughly half an
   hour.
+
 - A shared-instance client's announce goes out at once, as the reference
   does. The core held the first announce of every local-client destination
   for 250 ms to batch a start-up burst; wire format and semantics were
@@ -166,6 +496,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on. A five-client simultaneous burst onto a half-duplex LoRa interface
   still reaches the radio complete and 51 ms apart, which is the
   interface's own spacing.
+
+- The T114 no longer drives six pins as a flash bus (#384). It fits no
+  QSPI part: Heltec's own board support package for HT-n5262 — the board
+  id our bootloader reports — has the QSPI pins commented out, the
+  sibling HT-n5262G variant gives two of them to the GPS reset and the
+  display backlight, all six nets are on the expansion header where a
+  user's own hardware sits, the two published pin maps disagree on
+  IO2/IO3, and on the rig every pin followed our drive while nothing
+  answered `9Fh`, `05h`, `90h` or a reset. The firmware now declares
+  `qspi_part: None` for the board, never configures those pins, and says
+  so once at boot instead of probing:
+  `[QSPI] NONE board=t114 reason=not-fitted-see-boards-t114-rs`. The
+  `[STG] qspi-init` stage marker is gone with the stage on that board.
+
+- Neither board probes a QSPI flash any more, because neither of them
+  carries one (#384): RAK's own board support package says "No onboard
+  flash" over the RAK4631's QSPI pins and marks them "occupied by
+  GPIO's", the `EXTERNAL_FLASH_DEVICES IS25LP080D` line under it being a
+  template default rather than a fitted part — the same artefact as
+  Heltec's, and the field Pocket answers `05h`, `9Fh`, `90h` and the
+  datasheet reset exactly as silently as both T114s. The Pocket now
+  declares `qspi_part: None` too, drops its aliases and its
+  `[STG] qspi-init` stage, and says
+  `[QSPI] NONE board=rak4631 reason=no-onboard-flash-see-boards-rak4631-rs`
+  once at boot.
+
+- A battery percentage that cannot be checked from far away is no longer
+  sent (#380). The cell count is decided from one reading at boot and
+  held for the boot, and every per-cell voltage after it is the pack
+  voltage divided by it — so a wrong count halves or doubles the
+  percentage, and the percentage carries neither a unit nor the count it
+  was divided by. Both boards now report a charge percentage only while
+  the measured pack voltage stays inside the band its classification
+  implies; outside it the `BATTERY` line reads `pct=none`, the telemetry
+  report carries no battery sensor at all, and the panel shows `--%`
+  beside the voltage. The state change is said once, on its own line,
+  `BATTERY_PCT reportable=0|1 pack_mv=<n> cells=<n>S band_lo_mv=<n>
+  band_hi_mv=<n>`, rather than once per sample. The band comes from the
+  OCV curve that already computes the percentage, so the guard and the
+  percentage cannot disagree about what a cell is: its ceiling is the
+  curve's 100 % point carried one step of its own top segment further
+  (4.33 V per cell), and its floor sits deliberately BELOW the curve's
+  floor, at the 2.5 V per cell protection cut-off — a pack between 2.5
+  and 3.0 V is nearly empty, which is a real state that must report 0 %
+  rather than go quiet exactly when the battery is about to give out.
+  The voltage itself is never withheld: it is a measurement, not a
+  derivation. Nor is the classification revised at runtime; this only
+  declines to build on it.
+
+- A second BLE connection from an identity a node already holds a link
+  to is decided by who opened it (#376, #382). An INCOMING duplicate
+  displaces the old link: a peer that opens a second connection has, by
+  its own one-link-per-identity rule, given up on the first, and it has
+  already built the replacement. An OUTGOING one — our own dial — is
+  refused unless the old link has delivered nothing at all, payload and
+  keepalives alike, for the link timeout (45 s); a node cannot recognise
+  its own peer before connecting, because an advertisement carries no
+  identity and phones rotate their address, so its fallback dial reaches
+  a peer it is already linked to. The two 2026-09-09 field failures were
+  the two directions: refusing an incoming duplicate cost a phone every
+  announce, displacing on an outgoing one cost it its working link every
+  ~95 seconds.
+
+  The intervening rule displaced any link that had received no frame
+  other than a keepalive for 30 seconds, and that fires on healthy
+  links: measured beside a Columba phone over 14.1 hours, the gaps
+  between received non-keepalive packets from a peer that was present
+  throughout had a median of 51 s, a 90th percentile of 182 s and a
+  maximum of 5590 s. Payload silence is what an idle phone looks like.
+  Keepalives are what a live peer sends regardless, so liveness is now
+  measured on every inbound frame, against the link timeout the
+  interfaces already expire links on — one clock instead of two, shared
+  by the firmware and lnsd. `BLE_LINK_DUP` says `action=refuse` or
+  `action=displace` with `origin=` and the old link's
+  `old_silence_ms`, on both stacks; `BLE_COUNTERS` carries `refused=`
+  and `displaced=`, and a refused address enters the dead-end table so
+  the scanner stops re-dialling it.
+
+- Every firmware debug line ends in `t=<uptime-ms>`, stamped on the board
+  when the line is formatted, so a capture measures the board and not the
+  USB drain loop (#344).
+
+- The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
+  binds first, instead of four packets; a refusal names which bound it hit
+  (#344).
+
+- The GNSS wake no longer forces a UBX-CFG-RST cold start on every boot,
+  so a reboot keeps the module's assistance data and refixes in seconds
+  instead of re-downloading the sky (#324).
 
 ### Fixed
 
@@ -281,325 +700,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floored at the reference's own check cadence
   (`RAW_RECEIPT_TIMEOUT_FLOOR_MS`, 1 s); LoRa-scale RTTs are unaffected.
 
-- lnpnd grows to lxmd's full scope (#384 part 4). Remote management:
-  the node registers lxmd's `lxmf.propagation.control` destination with
-  the `/pn/get/stats`, `/pn/peer/sync` and `/pn/peer/unpeer` request
-  paths behind the same identity allow list (`control_allowed`), and
-  answers with the reference's stats map — `lxmd --status --peers
-  --sync --break --remote` drives an lnpnd node, and lnpnd carries the
-  same client verbs with output in lxmd's shape, driving stock lxmd
-  nodes in return (both directions in the conformance corpus, the
-  payload encodings pinned byte-exact against `umsgpack` in
-  `VEC-PN-CONTROL`). The daemon's own mailbox: an LXMF delivery
-  destination on the node identity, announced with `display_name` and
-  `stamp_cost`, each received message written in the reference's
-  packed-container file format and handed to the `on_inbound` hook;
-  propagated uploads addressed to the node's own mailbox deliver
-  locally instead of rotting in the store, the reference's own
-  short-circuit. Configuration: an lxmd-format config directory
-  (`config`, `identity`, `allowed`, `ignored`, `storage/`) with lxmd's
-  sections and key names, flags as overrides, `--exampleconfig`, and
-  `auth_required` gating `/get`; the keys lnpnd accepts but does not
-  act on are named in lnpnd(1) with reasons. Packaging: lnpnd joins
-  the `.deb` builds with a hardened systemd unit, a dedicated service
-  user, `--service` file logging and a manual page. Propagation-stamp
-  validation moved off the core lock onto a single worker thread
-  (arrival order preserved — the proof still leaves only after the
-  store append), so a cost-13 default no longer spends ~10 ms of the
-  core mutex per accepted message; the validated sync-peer
-  association is captured when the resource concludes, so a peer
-  that tears its link down before the verdicts drain — stock lxmd
-  does — cannot orphan the inbound batch.
-
-- Propagation-node peering (#384 part 2): lnpnd now peers with other
-  propagation nodes — including stock Python `lxmd` at its default
-  peering cost — and syncs its store both ways. The protocol half lives
-  in `leviculum-lxmf::peering` (`no_std + alloc`, board-ready behind a
-  `PeerStore` trait): a capped peer table fed by propagation announces
-  (autopeer within the configured hop depth, static list, deterministic
-  first-heard-wins policy at the cap, 14-day unreachability cull), the
-  `/offer` wire codec and inbound gate (peering-key validation at our
-  announced cost, throttling, `from_static_only`), and one append-order
-  cursor per peer instead of the reference's per-message peer sets —
-  everything at or below the cursor has been offered and concluded, a
-  stale cursor is a bounded full re-offer. Outbound rounds mine the
-  peer's peering key once on a worker thread, persist it, offer within
-  a 6144-byte bound, and advance the cursor only on the concluded
-  resource. Messages accepted at cost 0 get true stamp values computed
-  whenever any peer filters offers by value. New lnpnd flags use lxmd's
-  key names: `--max-peers`, `--static-peers`, `--autopeer`,
-  `--autopeer-maxdepth`, `--remote-peering-cost-max`,
-  `--max-inbound-syncs`, `--from-static-only`. Structured events:
-  `PN_PEER`, `PN_OFFER`, `PN_SYNC`. Verified end-to-end in an all-Rust
-  two-node loopback (autopeer, key mine, offer, sync, re-offer answered
-  "want none") and by new periculum conformance cells against genuine
-  stock `lxmd` peers, including a mixed-stack relay chain in both
-  directions, key reuse at stock cost 18, the peer cap, and store
-  overflow during an inbound sync.
-
-- lnpnd, an LXMF propagation node daemon (#384): the store-and-forward
-  mailbox role on a running Reticulum shared instance. It announces
-  `lxmf.propagation`, accepts client uploads (proving each packet only
-  after the message is durably stored), answers `/get` with the
-  list/fetch/confirm rounds of the reference protocol, and evicts by the
-  reference's age-times-size weight. Stamp and peering costs default to 0
-  and are settable (`--stamp-cost`, `--peering-cost`); announced limits
-  default to the small honest values the propagation-node concept page
-  derives (4 kB per transfer, 32 kB per sync). Verified byte-for-byte
-  against the Python reference's own handlers and end-to-end against
-  genuine Python LXMF clients.
-
-- The propagation-node role and its store boundary in `leviculum-lxmf`
-  (#384): `PropagationNode` (announce, upload accept, mailbox drain,
-  eviction) over a `PropagationStore` trait whose verbs mirror the
-  boards' record log one-for-one, so the on-board node of a later part is
-  an adapter rather than a redesign. Host stores: in-memory, and a
-  file-backed one that fsyncs before the upload proof leaves — a power
-  cut during an upload reopens with every completed message and no
-  partial one.
-
-- The `lxmf-node` test helper speaks the propagation protocol (#384):
-  `pn_enable` runs lnpnd's engine, and `set_pn` / `send_propagated` /
-  `sync` drive the router's propagation client, mirroring the same verbs
-  in periculum's Python helper so one driver tests either stack's node.
-
-- LNode boards keep a message store on their internal flash (#384): 64 KiB
-  behind the firmware image, mounted at boot and formatted once, not yet
-  used for messages. `lnflash --store-storm <count>[,<bytes>]` appends
-  synthetic records to it, which is the instrument for measuring what the
-  store's page erases cost Bluetooth throughput and LoRa airtime.
-
-### Changed
-
-- The T114 no longer drives six pins as a flash bus (#384). It fits no
-  QSPI part: Heltec's own board support package for HT-n5262 — the board
-  id our bootloader reports — has the QSPI pins commented out, the
-  sibling HT-n5262G variant gives two of them to the GPS reset and the
-  display backlight, all six nets are on the expansion header where a
-  user's own hardware sits, the two published pin maps disagree on
-  IO2/IO3, and on the rig every pin followed our drive while nothing
-  answered `9Fh`, `05h`, `90h` or a reset. The firmware now declares
-  `qspi_part: None` for the board, never configures those pins, and says
-  so once at boot instead of probing:
-  `[QSPI] NONE board=t114 reason=not-fitted-see-boards-t114-rs`. The
-  `[STG] qspi-init` stage marker is gone with the stage on that board.
-
-- Neither board probes a QSPI flash any more, because neither of them
-  carries one (#384): RAK's own board support package says "No onboard
-  flash" over the RAK4631's QSPI pins and marks them "occupied by
-  GPIO's", the `EXTERNAL_FLASH_DEVICES IS25LP080D` line under it being a
-  template default rather than a fitted part — the same artefact as
-  Heltec's, and the field Pocket answers `05h`, `9Fh`, `90h` and the
-  datasheet reset exactly as silently as both T114s. The Pocket now
-  declares `qspi_part: None` too, drops its aliases and its
-  `[STG] qspi-init` stage, and says
-  `[QSPI] NONE board=rak4631 reason=no-onboard-flash-see-boards-rak4631-rs`
-  once at boot.
-
-- A battery percentage that cannot be checked from far away is no longer
-  sent (#380). The cell count is decided from one reading at boot and
-  held for the boot, and every per-cell voltage after it is the pack
-  voltage divided by it — so a wrong count halves or doubles the
-  percentage, and the percentage carries neither a unit nor the count it
-  was divided by. Both boards now report a charge percentage only while
-  the measured pack voltage stays inside the band its classification
-  implies; outside it the `BATTERY` line reads `pct=none`, the telemetry
-  report carries no battery sensor at all, and the panel shows `--%`
-  beside the voltage. The state change is said once, on its own line,
-  `BATTERY_PCT reportable=0|1 pack_mv=<n> cells=<n>S band_lo_mv=<n>
-  band_hi_mv=<n>`, rather than once per sample. The band comes from the
-  OCV curve that already computes the percentage, so the guard and the
-  percentage cannot disagree about what a cell is: its ceiling is the
-  curve's 100 % point carried one step of its own top segment further
-  (4.33 V per cell), and its floor sits deliberately BELOW the curve's
-  floor, at the 2.5 V per cell protection cut-off — a pack between 2.5
-  and 3.0 V is nearly empty, which is a real state that must report 0 %
-  rather than go quiet exactly when the battery is about to give out.
-  The voltage itself is never withheld: it is a measurement, not a
-  derivation. Nor is the classification revised at runtime; this only
-  declines to build on it.
-
-- A second BLE connection from an identity a node already holds a link
-  to is decided by who opened it (#376, #382). An INCOMING duplicate
-  displaces the old link: a peer that opens a second connection has, by
-  its own one-link-per-identity rule, given up on the first, and it has
-  already built the replacement. An OUTGOING one — our own dial — is
-  refused unless the old link has delivered nothing at all, payload and
-  keepalives alike, for the link timeout (45 s); a node cannot recognise
-  its own peer before connecting, because an advertisement carries no
-  identity and phones rotate their address, so its fallback dial reaches
-  a peer it is already linked to. The two 2026-09-09 field failures were
-  the two directions: refusing an incoming duplicate cost a phone every
-  announce, displacing on an outgoing one cost it its working link every
-  ~95 seconds.
-
-  The intervening rule displaced any link that had received no frame
-  other than a keepalive for 30 seconds, and that fires on healthy
-  links: measured beside a Columba phone over 14.1 hours, the gaps
-  between received non-keepalive packets from a peer that was present
-  throughout had a median of 51 s, a 90th percentile of 182 s and a
-  maximum of 5590 s. Payload silence is what an idle phone looks like.
-  Keepalives are what a live peer sends regardless, so liveness is now
-  measured on every inbound frame, against the link timeout the
-  interfaces already expire links on — one clock instead of two, shared
-  by the firmware and lnsd. `BLE_LINK_DUP` says `action=refuse` or
-  `action=displace` with `origin=` and the old link's
-  `old_silence_ms`, on both stacks; `BLE_COUNTERS` carries `refused=`
-  and `displaced=`, and a refused address enters the dead-end table so
-  the scanner stops re-dialling it.
-
-### Added
-
-- A board asks for a supervision timeout it can survive (#385). A link
-  a peripheral board holds is the one end that can do anything about
-  the parameters it was handed, and the two cases where those
-  parameters are bad or unknown are exactly the two where the board is
-  the peripheral: an lnsd central gives it BlueZ's 420 ms — nine
-  connection events at the 45 ms interval both stacks measured, and 36
-  link deaths in 16.2 hours on the bench — and a phone gives it
-  something nobody has measured yet. The board now compares the
-  timeout the link came up with against a 2000 ms floor and, only if
-  it falls short, asks the central for 4000 ms, the same value the
-  firmware's own central role already asks for. Conditional by design:
-  a central that negotiates something sane is left alone, because an
-  update request that fights a good value is a regression. Both the
-  decision and its outcome are logged as `BLE_CONN_PARAMS_REQ conn=<h>
-  timeout_ms=<n> result=sent|refused|skipped`, and because a central
-  may honour the request, ignore it, or answer with something else
-  entirely, a peripheral link re-reads its parameters at teardown and
-  repeats `BLE_CONN_PARAMS` marked `when=close`: a link that opened at
-  420 ms and closed at 4000 ms was granted what it asked for, one that
-  closed at 420 ms was not, and the request line alone says neither.
-  Board-to-board links are untouched — their central already asks for
-  4 s, so they only ever log `result=skipped`.
-
-- The boards say what their battery is doing (#380). Once at boot and
-  then every 30 s, both the Pocket V2 and the T114 log `BATTERY
-  mv=<n> min_mv=<n> max_mv=<n> pct=<n>|none cells=<n>S`. The pack is
-  sampled at 1 Hz and the line reports the extremes of the period as
-  well as the filtered value, so a sag under transmit load is visible
-  instead of averaged away. Before this the monitor fed the display and
-  said nothing else: a Pocket V2 that restarted twice during a 90
-  minute field walk on battery produced zero battery lines, so how
-  close the pack had been to the edge could not be asked afterwards.
-  This is a margin instrument, not a brownout detector — the sampler is
-  a second apart, the transient that resets a board is microseconds
-  wide, and the reset takes the log with it.
-
-- The T114 reads its own battery at all (#380). The monitor was typed
-  to the Pocket V2's ADC pin and had the Pocket's 1.73 divider baked
-  into its arithmetic; it now takes the pin, the divider multiplier and
-  the divider-enable pin from the board file, which was already
-  declaring all three. The T114's enable pin is held high only for the
-  duration of a sample, so its 490 kΩ divider does not sit across the
-  pack between them. The pack voltage also appears on the T114's status
-  panel, which used to render "(no feature)".
-
-- Every BLE link on a board says what it actually runs at (#385). At
-  the connection event, in both roles, the firmware logs
-  `BLE_CONN_PARAMS conn=<h> role=central|peripheral interval_ms=<n.nn>
-  latency=<n> timeout_ms=<n>` — the connection interval, slave latency
-  and supervision timeout the central chose, since neither stack
-  requests any of them. The supervision timeout is how long a
-  disturbance may last before the link dies, and until now the only way
-  to learn it was to read the peer's kernel: possible for a BlueZ
-  central on the bench (where a board and lnsd a metre apart lost their
-  link 36 times in 16.2 hours, every connection at a 45 ms interval
-  with a 420 ms supervision timeout), impossible for a phone. Both time
-  fields are converted from their two different raw scales (1.25 ms
-  steps for the interval, 10 ms for the timeout) so the line carries
-  milliseconds only. No parameter is requested or changed by this: it
-  is a measurement. lnsd has no counterpart, because BlueZ publishes
-  none of the three over D-Bus.
-
-- A board announces itself on a new BLE connection and on a timer, not
-  only before a telemetry report (#376). When a peer completes its
-  identity handshake the node announces its delivery destination to
-  that peer over that link alone, at most once per peer identity per 15
-  minutes; independently of telemetry it announces on every interface
-  every 30 minutes. Both are withheld while the board has no plausible
-  wall clock, because an announce stamped from uptime can never replace
-  a path at the receiver. A phone that connects between two reports now
-  sees the board at one hop straight away.
-
-- `lnflash --watch` records a board's debug log for field testing: it
-  opens the debug CDC with DTR and RTS raised, prefixes every line
-  with a wall-clock ISO-8601 timestamp, appends to `--out` flushed per
-  line, and reconnects with bounded backoff when the port vanishes
-  (reset, reflash, unplug), logging the gap as its own line. `lnflash
-  --summarize <file>` reads a watch file back and prints receptions
-  per class per hour (announce, data, path request) plus the last line
-  seen per class.
-
-- Every LoRa receive line says how strong the frame was, and what it
-  was (#364). lnsd's RNode RX line and its `LORA_RX` trace event carry
-  `rssi=`/`snr=` from the stat frames the RNode firmware indicates
-  before each data frame, paired the way Python's `RNodeInterface`
-  pairs them. The LNode firmware's `[LORA] RX` line adds `flags=` (the
-  packet's header flags byte) and `dst=` (first 8 hex of the
-  destination hash), so `lnflash --summarize` classifies announce,
-  data, path request and proof straight from a watch file.
-
-- An LNode now answers a Sideband telemetry request: an LXMF message
-  from the configured target carrying the `TELEMETRY_REQUEST` command
-  triggers an immediate report, rate-limited to one request-triggered
-  report per profile minimum interval. Requests from any other sender
-  are ignored and logged.
-
-- `lnstatus --identities` (`-N`) lists every identity the daemon has
-  learned from announces — identity hash, announced destination, name
-  (only for aspects the daemon registered itself), hops, via and last
-  seen — plus the `lxmf.delivery` and `rnstransport.probe` destinations
-  derived from each identity hash, ready to paste into `lnprobe`. Until
-  now that derivation had to be done by hand from `rnpath -t` output.
-  Served by a new additive `identities` RPC verb on the shared-instance
-  socket; a daemon without it (Python `rnsd`, older `lnsd`) closes the
-  connection and the tool reports the error.
-
-- `lnprobe`, a drop-in for Python's `rnprobe`: probes a destination
-  through a running `lnsd` **or** `rnsd` over the shared instance,
-  reporting round-trip time, hop count and packet loss from delivery
-  proofs — the same command line, output and exit codes as the
-  reference. The per-probe timeout asks the daemon for its first-hop
-  timeout like `rnprobe` does, so probes over slow media wait longer by
-  default.
-- A board says which hashes to probe: one `[IDENTITY]
-  identity=… probe=… lxmf=…` line on the boot-critical log path (both
-  BSPs), repeated in the periodic banner so a reader attached later
-  still sees it — and the same three hashes over a new control-envelope
-  identity query (frame `0x0E`), which `lnflash --set-name` prints in
-  its read-back, so no debug-port reader is needed.
-
-- lnsd joins the Columba BLE mesh: a new `BLEInterface` type
-  (`[[BLE Interface]]` config section) speaks the `ble-reticulum`
-  protocol v2.2 with the v0.3.0 capability record over BlueZ, in both
-  GATT roles at once — it advertises and serves the Columba GATT layout
-  under an `LN-<hex8>` name derived from the daemon identity like the
-  boards do, and it scans for and connects to peers under the same
-  connection-direction rule, so a PC participates in the same BLE mesh
-  as LNodes and phones. One interface is one broadcast domain across
-  all live BLE links; fragmentation and the connection decision reuse
-  the firmware's own host-tested code. Disabled unless configured.
-
-- A user can set a fixed position on an LNode — `lnflash --set-position
-  LAT,LON[,ALT]`, envelope frame `0x08` — which replaces the position
-  sensor in its telemetry reports until `--clear-position` returns it to
-  sensor reporting. Persisted beside the telemetry target, applied at
-  boot and at runtime, marked `possrc=fixed|gnss` in the report line,
-  and encoded in Sideband's own fixed-location shape (accuracy 0.01 m).
-
-- The gap the LoRa interface leaves between two packets on the air is
-  settable without a reflash — `lnflash --set-tx-spacing <MS>`, envelope
-  frame `0x06`. The default imposes nothing (#345).
-- The transmit power is settable without a reflash — `lnflash
-  --set-tx-power <DBM>`, which reads the board's current radio settings
-  back (envelope frame `0x07`) and returns them with only the power
-  changed. Persisted (#349).
-- A board states the transmit power it programmed, and whether the
-  request was clamped, on its critical log path (#349).
-
-### Fixed
-
 - A battery reading can no longer be rescaled by a change nobody
   notices (#380). The conversion divided by a full scale of 3600 mV,
   which was true only because `ChannelConfig::single_ended` happens to
@@ -689,137 +789,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The LNode radio is listening again before a received frame is handed to
   the stack, instead of after it has been processed.
+
 - The LoRa loop keeps a receive window that already has the parameters it
   wants instead of standing it down and arming an identical one, so a
   frame arriving 20 ms behind another is no longer ended mid-air by the
   loop's own next decision (#276).
+
 - A transmit that would end a receive window holding an arriving frame
   waits for that frame first, bounded by one maximum-size frame's airtime
   at the live modulation, and delivers it (#276).
+
 - A telemetry report whose dispatch was lost is retried no sooner than the
   policy's own `min_interval_ms`, instead of on the next main-loop tick
   (#344).
+
 - The applied radio settings and the lawful duty-cycle cap the firmware
   derived from its frequency now survive a boot nobody was watching: both
   are emitted on the log path that bypasses the debug port's runtime gate,
   at bring-up and on every reconfiguration.
+
 - A board states the airtime limits it is enforcing and who chose each of
   them on every boot, instead of only when it derived the cap itself — an
   explicit host `0` used to switch the cap off silently.
+
 - A board says when it could not transmit at the power it was given,
   naming the request and the power the PA was actually programmed with —
   a request below 14 dBm rounds up, and the line reporting it used to be
   dropped on a boot nobody was watching (#349).
+
 - The citation guard reads the `` (`ident`, `path:line`) `` spelling as
   naming its subject, so 130 citations that were existence-checked are
   drift-checked; 30 that had drifted are corrected.
-
-### Changed
-
-- Every firmware debug line ends in `t=<uptime-ms>`, stamped on the board
-  when the line is formatted, so a capture measures the board and not the
-  USB drain loop (#344).
-
-- The firmware's outbound LoRa queue holds 64 packets or 6 KiB, whichever
-  binds first, instead of four packets; a refusal names which bound it hit
-  (#344).
-
-### Added
-
-- The firmware logs every arming of the receiver as `[SX_RX_ARM] site=
-  timeout_ms= dark_ms=`, so a capture says how long the radio was not
-  listening between two windows instead of leaving it to be inferred (#344).
-
-- Standing the receiver down logs `[SX_RX_TEARDOWN] site= preamble=
-  header= rxdone= armed_ms=` from every caller, `site=` naming the caller,
-  so a capture says whether a frame was already arriving when the window
-  came down (#276).
-
-- A receive window that is kept instead of re-armed logs `[SX_RX_ADOPT]
-  latched= preamble= header= rxdone= stood_ms=`, which counts the
-  receptions the previous firmware destroyed.
-
-- A transmit that waits for an arriving frame logs `[SX_TX_DEFER]
-  waited_ms= reason= outcome=`, so the airtime the wait costs and what it
-  bought are one ratio in the capture (#276).
-
-- The firmware receives at boosted SX1262 gain and applies the errata-15.4
-  IQ correction, and prints both registers before and after it writes them
-  (`[SX_REG]`, `[SX_REG_IQ]`), so the change is visible in a capture rather
-  than taken on trust (#258).
-
-- The nRF firmware prints its transport counters every 30 s as
-  `[TRANSPORT] fwd= rx= tx= nopath= dup= overheard= maxhops= paths=`, so
-  a board that does not relay a packet says which decision discarded it
-  (#344).
-
-- A transport-id mismatch names both ids it compared, and a packet
-  dropped that way for a destination this node serves locally is
-  reported per packet instead of only counted (#344).
-
-- The lnflash bundle carries the RAK4631 as well as the T114, so a
-  WisMesh Pocket V2 can be flashed and configured from the tarball
-  (#261).
-
-- `just nrf-shellcheck` runs shellcheck over the flash-runner scripts and
-  is part of `just fast` (#345).
-
-- The Pocket V2 reports its position and battery over LXMF: an
-  announced `lxmf.delivery` destination, a target set by address alone
-  (the node resolves the key over the air and says `awaiting-key` until
-  it has), tracker and station cadence profiles, and one immediate
-  report when a target becomes usable (#236).
-
-- Every published artifact now carries `THIRD-PARTY-NOTICES`, generated
-  from the lockfiles, so the MIT- and BSD-licensed crates linked into
-  the binaries travel with their required notices (#288).
-
-- The GNSS wake ends with an explicit UBX-CFG-ANT step: antenna supply
-  on, every automatic power-down path off, so the init no longer
-  depends on what the factory clear left behind (#324).
-
-- The GNSS heartbeat reports satellites in view and best C/N0 (`sv=`,
-  `cno=`) from GSV, so a receiver that hears the sky but never fixes is
-  distinguishable from a deaf antenna (#324).
-
-- The Pocket V2 wakes its GNSS module at boot with a minimal UBX init
-  (factory clear, cold start, full power), so a persisted module
-  configuration from earlier firmware cannot suppress acquisition (#324).
-
-- One framed control envelope on the LNode USB channel (type, length,
-  named refusals, capability report); radio config and reset migrated,
-  legacy magics stay accepted for a transition window (#238).
-- `lnflash --set-time` teaches a running LNode wall time over the
-  envelope; the banner then reports `[TIME_SOURCE] source=host` (#166).
-- The Pocket V2 firmware seeds its calendar from the GNSS receiver's RMC
-  UTC, and every LNode states its time source (`[TIME_SOURCE]` beside
-  `[FW_BUILD]`) (#166).
-- Single-destination decrypt misses are now counted (`single-decrypt-fail`
-  in `PKT_DROP_SUMMARY`) and journey-logged instead of dropped silently.
-
-- `Destination::with_explicit_hash`: a Single destination indexed by a
-  caller-supplied 16-byte hash; never announced, reachable by direct link
-  only (#254).
-- Driver completion futures (`connect_awaited`, `send_resource_awaited`,
-  `send_request_awaited`) and a bounded multi-consumer event tap, replacing
-  consumer poll loops (#253).
-- `lnmsg`, a new LXMF messenger: `lnmsg send <address>` queues one message
-  through a running `lnsd`/`rnsd` shared instance and says nothing. Exit 0
-  means queued, never delivered.
-
-### Changed
-
-- The GNSS wake no longer forces a UBX-CFG-RST cold start on every boot,
-  so a reboot keeps the module's assistance data and refixes in seconds
-  instead of re-downloading the sky (#324).
-
-### Removed
-
-- The host-side airtime gate on the RNode interface (#121). Duty-cycle
-  enforcement is the firmware's; the host no longer holds packets back
-  when it sees the firmware's lock in `CMD_STAT_CHTM`.
-
-### Fixed
 
 - A frame the firmware could not hand to an interface is no longer lost
   in silence: `DispatchResult` is `#[must_use]`, every call site reports
@@ -830,6 +830,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A telemetry report the dispatch lost no longer counts as sent, so the
   next tick reports again instead of the node going quiet for a whole
   cadence interval (#344).
+
+### Removed
+
+- The host-side airtime gate on the RNode interface (#121). Duty-cycle
+  enforcement is the firmware's; the host no longer holds packets back
+  when it sees the firmware's lock in `CMD_STAT_CHTM`.
 
 ## [0.8.1] - 2026-08-16
 
