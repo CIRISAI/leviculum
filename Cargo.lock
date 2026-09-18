@@ -2053,6 +2053,7 @@ version = "0.10.0-dev"
 dependencies = [
  "clap",
  "leviculum-core",
+ "leviculum-std",
  "nix 0.29.0",
  "tokio",
  "tokio-serial",

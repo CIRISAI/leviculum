@@ -30,6 +30,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use leviculum_std::process::spawn_supervised;
 use lnpnd::identity::{load_or_create, Provenance, CREATED_EVENT};
 
 /// A `tracing` writer that keeps what was written, so a test can assert on
@@ -93,23 +94,47 @@ fn unreachable_instance() -> String {
     format!("lnpnd-first-start-{}-{nanos}", std::process::id())
 }
 
+/// The daemon child, reaped whichever way `run_daemon` leaves.
+///
+/// `std::process::Child` neither kills nor waits in its own `Drop`, so every
+/// `expect` between the spawn and the wait below was a path that unwound with
+/// the daemon still alive and holding the descriptors it inherited from this
+/// test binary — `stderr.take()`, and the `try_wait()` inside the poll loop.
+/// That is the shape that cost a lander five minutes on 2026-09-18: a
+/// panicking test left children behind, and a lock descriptor they had
+/// inherited outlived the run that took it.
+///
+/// This covers the unwinding half, where a destructor still runs;
+/// [`spawn_supervised`] covers the other half, where one does not — an abort
+/// or a `SIGKILL` of the harness, which the kernel answers with `PDEATHSIG`.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        // Both are no-ops once the poll loop below has reaped the child; std
+        // refuses to signal a `Child` it has already waited on, so this
+        // cannot reach a recycled pid.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Start the daemon against `config_dir` and give it back once it has
 /// exited, with everything it said on stderr.
 ///
 /// It is expected to fail: there is no shared instance by that name. The
 /// point is what it did *before* it found that out.
 fn run_daemon(config_dir: &Path) -> (std::process::ExitStatus, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lnpnd"))
-        .arg("--config")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lnpnd"));
+    cmd.arg("--config")
         .arg(config_dir)
         .arg("--instance")
         .arg(unreachable_instance())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the daemon binary runs");
+        .stderr(Stdio::piped());
+    let mut child = Reaped(spawn_supervised(cmd).expect("the daemon binary runs"));
 
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut stderr = child.0.stderr.take().expect("piped stderr");
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
         let _ = stderr.read_to_string(&mut text);
@@ -121,7 +146,7 @@ fn run_daemon(config_dir: &Path) -> (std::process::ExitStatus, String) {
     // the timeout kills and fails rather than retrying.
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
-        match child.try_wait().expect("the child is waitable") {
+        match child.0.try_wait().expect("the child is waitable") {
             Some(status) => break Some(status),
             None if Instant::now() >= deadline => break None,
             None => std::thread::sleep(Duration::from_millis(20)),
@@ -130,8 +155,11 @@ fn run_daemon(config_dir: &Path) -> (std::process::ExitStatus, String) {
     let status = match status {
         Some(status) => status,
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
+            // Killed here rather than left to `Drop`, because the reader
+            // thread joined below only finishes once the daemon's end of the
+            // stderr pipe is closed.
+            let _ = child.0.kill();
+            let _ = child.0.wait();
             let text = reader.join().expect("the stderr reader finishes");
             panic!("lnpnd did not exit within 30 s without a shared instance:\n{text}");
         }

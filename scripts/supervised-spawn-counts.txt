@@ -72,5 +72,9 @@
 # joins.
 2    leviculum-std/tests/manifest_tmp_race.rs
 
-# Floor, not a pin. See the header.
-28   supervised-call-sites-minimum
+# Floor, not a pin. See the header. Re-measured 2026-09-18, when it still said
+# 28 against a real 43: the floor had been left behind by fifteen supervised
+# spawns added since the baseline, so deleting any of them was invisible to the
+# gate. Raised to the measured count, which is what makes the floor mean
+# something again.
+43   supervised-call-sites-minimum

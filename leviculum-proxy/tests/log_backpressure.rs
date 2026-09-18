@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
+use leviculum_std::process::spawn_supervised;
 
 /// Frames to push through. Each one costs two `debug!` lines, so a few
 /// hundred already exceed a pipe; 1500 leaves no doubt.
@@ -55,21 +56,23 @@ fn undrained_stderr_does_not_stall_forwarding() {
     let pty_b = dir.join("b.pty");
 
     // Spawned exactly the way periculum spawns it: debug logging into a
-    // piped stderr that nobody reads while the proxy runs.
-    let child = Command::new(env!("CARGO_BIN_EXE_lora-proxy"))
-        .args([
-            "virtual",
-            "--pty-a",
-            &pty_a.display().to_string(),
-            "--pty-b",
-            &pty_b.display().to_string(),
-        ])
-        .env("RUST_LOG", "debug")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn lora-proxy");
-    let _child = ProxyChild(child);
+    // piped stderr that nobody reads while the proxy runs. Supervised,
+    // because this child outlives every statement below it and only the
+    // `ProxyChild` destructor ends it — and a destructor is not run by an
+    // abort or by a `SIGKILL` of the harness, which is where the orphans of
+    // 2026-08-07 came from.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lora-proxy"));
+    cmd.args([
+        "virtual",
+        "--pty-a",
+        &pty_a.display().to_string(),
+        "--pty-b",
+        &pty_b.display().to_string(),
+    ])
+    .env("RUST_LOG", "debug")
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    let _child = ProxyChild(spawn_supervised(cmd).expect("spawn lora-proxy"));
 
     let start = Instant::now();
     while !(pty_a.exists() && pty_b.exists()) {
