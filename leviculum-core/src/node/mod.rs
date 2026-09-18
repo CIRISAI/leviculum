@@ -114,6 +114,8 @@ mod mvr_overheard_direct_data;
 #[cfg(test)]
 mod mvr_path_response_hops;
 #[cfg(test)]
+mod mvr_path_response_no_clobber;
+#[cfg(test)]
 mod mvr_path_response_retries;
 #[cfg(test)]
 mod mvr_peer_link_reorigination;
