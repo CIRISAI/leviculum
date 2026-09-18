@@ -981,7 +981,7 @@ impl PeeringRuntime {
         let Some(peer) = self.table.get_mut(&peer_hash) else {
             return;
         };
-        peer.sync_backoff_secs = 0;
+        peer.note_link_established();
         let Some((key, _)) = peer.peering_key else {
             self.finish_round(&peer_hash, "no_key", 0, 0);
             out.merge(core.close_link(link_id));

@@ -189,6 +189,64 @@ fn next_due_walks_hash_order_and_honours_backoff_and_cursor() {
     assert_eq!(table.next_due(150, 5, None), None);
 }
 
+/// A round that reached an established link and then lost the medium is
+/// due again on the next sync pass, not a `SYNC_BACKOFF_STEP_SECS` later.
+///
+/// The minimal reproduction of the rig red on 2026-09-17
+/// (`lora_pn_board_sync`, run 04:37Z): the round books the deferral
+/// before it dials, the peer answers, the round then fails on a lost
+/// frame. Clearing `sync_backoff_secs` alone does not release the peer —
+/// the deferral is a second field, already written — so the board held a
+/// stored message for twelve minutes with the peer one hop away.
+#[test]
+fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), 0);
+    let now = 100;
+
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        // What `start_round` books before it dials (LXMPeer.py:321-322).
+        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
+        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        // Nothing is due while the round is in flight, whatever the
+        // booking says.
+        peer.state = SyncPhase::LinkEstablishing;
+    }
+    assert_eq!(table.next_due(now, 5, None), None);
+
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        // The peer answered, so the booking has been disproved.
+        peer.note_link_established();
+        // ... and the round then failed after that: `finish_round` only
+        // returns the peer to Idle.
+        peer.state = SyncPhase::Idle;
+        assert_eq!(peer.sync_backoff_secs, 0);
+    }
+    assert_eq!(
+        table.next_due(now + SYNC_INTERVAL_SECS, 5, None),
+        Some([1; 16]),
+        "a peer that answered our link must be due again on the next sync \
+         pass, not after SYNC_BACKOFF_STEP_SECS"
+    );
+
+    // Unchanged, and the reason the booking exists: a peer that never
+    // answers keeps accumulating 12, 24, 36 minutes, because a link that
+    // never comes up never reaches `note_link_established`.
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        peer.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
+        peer.next_sync_attempt = now + peer.sync_backoff_secs;
+        peer.state = SyncPhase::Idle;
+    }
+    assert_eq!(table.next_due(now + SYNC_INTERVAL_SECS, 5, None), None);
+    assert_eq!(
+        table.next_due(now + SYNC_BACKOFF_STEP_SECS, 5, None),
+        Some([1; 16])
+    );
+}
+
 #[test]
 fn max_peer_min_cost_drives_the_accept_time_value_policy() {
     let mut table = table();

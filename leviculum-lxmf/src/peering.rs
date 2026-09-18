@@ -269,6 +269,42 @@ impl Peer {
         }
     }
 
+    /// The sync link to this peer came up.
+    ///
+    /// The round that opened the link booked a deferral before dialling
+    /// — `sync_backoff_secs += SYNC_BACKOFF_STEP_SECS`, then
+    /// `next_sync_attempt = now + sync_backoff_secs`
+    /// (`reference/LXMF/LXMF/LXMPeer.py:321-322`). The moment the peer
+    /// answers, that booking has been disproved: the peer is reachable.
+    /// The reference clears the accumulator here (`:330`, `:541`) but
+    /// leaves the deferral it already wrote in place, so a round that
+    /// fails AFTER the link came up — a lost `/offer` response, an error
+    /// answer — still holds the peer for a full `SYNC_BACKOFF_STEP_SECS`
+    /// before it is due again.
+    ///
+    /// **Deviation from the reference, deliberate:** we clear the
+    /// booking too. Wire format untouched (this is our own scheduler),
+    /// semantics untouched (a Python peer sees at most an earlier
+    /// re-sync from us, which `sync_peers` handles by construction), and
+    /// Priority 1 improves: recovery from one lost frame mid-round drops
+    /// from at least `SYNC_BACKOFF_STEP_SECS` to the next sync pass.
+    /// Measured on the rig 2026-09-17 (`lora_pn_board_sync`, the run at
+    /// 04:37Z): two consecutive rounds each lost one LoRa frame — the
+    /// first the peer's `/offer` response into the offering board's own
+    /// announce transmission, the second the first half of the `/offer`
+    /// request — and the message then sat undelivered for twelve minutes
+    /// with a reachable peer one hop away.
+    ///
+    /// The unreachable-peer case the backoff exists for is untouched: a
+    /// peer whose link never comes up never reaches this call, so its
+    /// accumulator keeps growing 12, 24, 36 minutes. So is an explicit
+    /// throttle — `ResponseAction::Backoff` writes `next_sync_attempt`
+    /// at response time, after this.
+    pub fn note_link_established(&mut self) {
+        self.sync_backoff_secs = 0;
+        self.next_sync_attempt = 0;
+    }
+
     /// The minimum stamp value this peer accepts:
     /// `max(0, cost − flexibility)`, the filter the offering side applies
     /// (`reference/LXMF/LXMF/LXMPeer.py:331`, `:340`).
