@@ -647,7 +647,11 @@ fn active_list() -> &'static Arc<Mutex<Vec<ActiveHandle>>> {
 /// changes mid-run.
 fn node_name() -> &'static str {
     static NODE: OnceLock<String> = OnceLock::new();
-    NODE.get_or_init(|| std::env::var(NODE_ENV_VAR).unwrap_or_else(|_| "local".to_string()))
+    NODE.get_or_init(|| {
+        std::env::var(NODE_ENV_VAR)
+            .map(|name| sanitize_scalar(&name))
+            .unwrap_or_else(|_| "local".to_string())
+    })
 }
 
 /// Process-wide append-only event log file.  Returns `Some` only when
@@ -836,6 +840,10 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
         line.push_str(&event_name);
         line.push(' ');
         line.push_str("node=");
+        // The reserved prefix bypasses the visitor, so nothing else would
+        // ever rescue it: a `LEVICULUM_EVENT_NODE` with a space in it
+        // (an operator naming a node after the room it stands in) would
+        // split EVERY line this process writes.
         line.push_str(node_name());
         for (k, v) in &visitor.fields {
             // `node` from a tracing call would conflict with the
@@ -970,6 +978,32 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Display wrapper an EMISSION SITE uses for a value it knows can carry
+/// text a user chose: an interface name from the config file
+/// (`[[TCP Uplink]]`), a discovery-provided name
+/// (`autoconnect/Dark Doodad 23`), a filesystem path with a space in it.
+///
+/// `iface = %Scalar(&self.name)` renders the name as the single token the
+/// whitespace `key=value` parser needs, which is where that belongs: the
+/// site knows the value is a name, the sink can only guess from the field
+/// name (see [`is_name_field`], and note that a field like `next_hop`
+/// carries an interface name at one site and a hash at another, so the
+/// guess cannot be made complete).
+///
+/// Substitution, not quoting: every consumer of this format — `jl`,
+/// `jldiff`, the field-violation detector, and the `awk`/`grep` one-liners
+/// the format exists for — splits on whitespace, so a quoted value with a
+/// space would still be several tokens to all of them.  The mapping is the
+/// same one [`sanitize_scalar`] applies as the sink's last-resort rescue,
+/// so a value reads identically whichever produced it.
+pub struct Scalar<'a>(pub &'a str);
+
+impl std::fmt::Display for Scalar<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&sanitize_scalar(self.0))
+    }
 }
 
 /// Coerce a field value into a whitespace-free scalar so the canonical

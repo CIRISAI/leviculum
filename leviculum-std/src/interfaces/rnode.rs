@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::event_log::Scalar;
 use leviculum_channel_access::{jitter_slot_ms, ChannelAccess, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS};
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
@@ -738,7 +739,7 @@ fn abandon_send_queue(
         .fetch_add(abandoned_bytes, std::sync::atomic::Ordering::Relaxed);
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
-        iface = %name,
+        iface = %Scalar(name),
         frames = abandoned,
         depth = 0,
         reason = reason,
@@ -774,7 +775,7 @@ fn abandon_multi_send_queue(
     }
     tracing::warn!(
         event = "RNODE_TX_QUEUE_DROP",
-        iface = %name,
+        iface = %Scalar(name),
         frames = abandoned,
         depth = 0,
         reason = reason,
@@ -818,8 +819,8 @@ fn deregister_vport(
 
     tracing::warn!(
         event = "RNODE_VPORT_DEREGISTERED",
-        iface = %name,
-        vport_iface = %vports[subint].name,
+        iface = %Scalar(name),
+        vport_iface = %Scalar(&vports[subint].name),
         vport = vports[subint].vport,
         frames = abandoned,
         reason = "incoming_closed",
@@ -1149,7 +1150,7 @@ where
                                 );
                                 tracing::warn!(
                                     event = "RNODE_TX_QUEUE_DROP",
-                                    iface = %name,
+                                    iface = %Scalar(&name),
                                     len = dropped.payload_len,
                                     depth = send_queue.len(),
                                     reason = "queue_full",
@@ -1256,7 +1257,7 @@ where
                     .unwrap_or(0);
                 tracing::warn!(
                     event = "RNODE_TX_GATED",
-                    iface = %name,
+                    iface = %Scalar(&name),
                     held_ms = held_ms,
                     depth = send_queue.len(),
                 );
@@ -1327,7 +1328,7 @@ where
                 if gate_announced {
                     tracing::warn!(
                         event = "RNODE_TX_RELEASED",
-                        iface = %name,
+                        iface = %Scalar(&name),
                         held_ms = since.elapsed().as_millis() as u64,
                         depth = send_queue.len(),
                     );
@@ -2360,7 +2361,7 @@ async fn rnode_multi_io_task<S>(
                                 );
                                 tracing::warn!(
                                     event = "RNODE_TX_QUEUE_DROP",
-                                    iface = %name,
+                                    iface = %Scalar(name),
                                     len = shed.len(),
                                     depth = send_queue.len(),
                                     reason = "queue_full",

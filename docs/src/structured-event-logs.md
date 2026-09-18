@@ -394,6 +394,33 @@ need escaping — substitute `_` for spaces, drop `=` from value
 strings, etc.  The original event line is still emitted; the
 tester sees the violation alongside, treats it as a bug.
 
+### User-named values: render them at the emission site
+
+A value that can carry text a user chose — an interface name from
+the config file (`[[TCP Uplink]]`) or from discovery
+(`autoconnect/Dark Doodad 23`), a filesystem path, an instance
+name — is not a source bug when it contains a space: it is
+legitimate input that the EMISSION SITE has to render as a single
+token.  Wrap it in `leviculum_std::event_log::Scalar` (or, inside
+`leviculum-core`, `event_scalar::Scalar`; the interface-name
+formatters `IfaceName` / `IfaceNameOpt` already do it for every
+`iface = %…` field):
+
+```rust
+tracing::debug!(event = "BLE_LINK_UP", iface = %Scalar(&self.name), …);
+```
+
+The sink still rescues an unwrapped value (`sanitize_scalar`), and
+for the handful of fields it can recognise as names by key
+(`iface`, `iface_in`, `iface_out`, `in_iface`, `out_iface`) it does
+so without raising a violation.  That list cannot be completed
+from the sink side — `next_hop` carries an interface name at one
+site and a hash at another — so a name wrapped at the site is the
+only form that is correct at every field.  Substitution, not
+quoting: `jl`, `jldiff` and every `awk`/`grep` one-liner split on
+whitespace, so a quoted value with a space is still several tokens
+to all of them.
+
 ## Multi-process workflow
 
 Spawned subprocesses (e.g. an `lnsd` child of an integration

@@ -198,9 +198,15 @@ pub(crate) struct IfaceName<'a> {
 }
 
 impl core::fmt::Display for IfaceName<'_> {
+    /// Rendered as a single event-log token: an interface name is free text
+    /// from the config file or from discovery (`autoconnect/Dark Doodad 23`),
+    /// and every structured event that names a carrier funnels through here,
+    /// so the substitution belongs at this one emission site rather than at
+    /// each of the ~120 `iface = %…` call sites (see
+    /// [`crate::event_scalar`] for why substitution and not quoting).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if let Some(name) = self.names.get(&self.id) {
-            write!(f, "{}", name)
+            write!(f, "{}", crate::event_scalar::Scalar(name))
         } else {
             write!(f, "iface:{}", self.id)
         }

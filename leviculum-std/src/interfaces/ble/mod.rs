@@ -43,6 +43,7 @@ use super::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket, PeerEvent,
     ReadySignal,
 };
+use crate::event_log::Scalar;
 use leviculum_core::traits::{InterfaceKind, InterfaceMode};
 use leviculum_core::transport::InterfaceId;
 use links::{
@@ -512,7 +513,7 @@ impl BleTask {
                 if let Some(after_ms) = announce {
                     tracing::info!(
                         event = "BLE_SCAN_FALLBACK",
-                        iface = %self.name,
+                        iface = %Scalar(&self.name),
                         after_ms = after_ms,
                     );
                 }
@@ -681,7 +682,7 @@ impl BleTask {
             {
                 tracing::info!(
                     event = "BLE_SCAN_WINDOW",
-                    iface = %self.name,
+                    iface = %Scalar(&self.name),
                     seen = seen,
                     chosen = %hex12(&addr),
                     rule = decision.as_str(),
@@ -689,7 +690,7 @@ impl BleTask {
                 if let Some(queued) = dial_queue.enqueue(addr, decision, now) {
                     tracing::info!(
                         event = "BLE_DIAL_QUEUE",
-                        iface = %self.name,
+                        iface = %Scalar(&self.name),
                         depth = queued.depth,
                         wait_ms = queued.wait_ms,
                     );
@@ -761,7 +762,7 @@ impl BleTask {
                         *adv = Some(handle);
                         tracing::info!(
                             event = "BLE_ADV_GATE",
-                            iface = %self.name,
+                            iface = %Scalar(&self.name),
                             state = "on",
                         );
                     }
@@ -774,7 +775,7 @@ impl BleTask {
         } else if adv.take().is_some() {
             tracing::info!(
                 event = "BLE_ADV_GATE",
-                iface = %self.name,
+                iface = %Scalar(&self.name),
                 state = "off",
                 reason = "full",
             );
@@ -816,13 +817,13 @@ impl BleTask {
             // decision off the same capture as the pacing.
             links::TxRoute::Flood => tracing::info!(
                 event = "BLE_TX_FLOOD",
-                iface = %self.name,
+                iface = %Scalar(&self.name),
                 links = table.live_links(),
                 len = packet.len(),
             ),
             links::TxRoute::Routed { peer, role } => tracing::info!(
                 event = "BLE_TX_ROUTE",
-                iface = %self.name,
+                iface = %Scalar(&self.name),
                 peer = %hex8(&peer),
                 conn = %role.as_str(),
                 len = packet.len(),
@@ -834,7 +835,7 @@ impl BleTask {
                     .fetch_add(packet.len() as u64, Ordering::Relaxed);
                 tracing::warn!(
                     event = "BLE_TX_ROUTE_MISS",
-                    iface = %self.name,
+                    iface = %Scalar(&self.name),
                     peer = %hex8(&peer),
                     len = packet.len(),
                 );
@@ -849,7 +850,7 @@ impl BleTask {
             if wait > 0 {
                 tracing::info!(
                     event = "BLE_TX_GAP",
-                    iface = %self.name,
+                    iface = %Scalar(&self.name),
                     link = "notify",
                     waited_ms = wait,
                 );
@@ -886,7 +887,7 @@ impl BleTask {
                     .unwrap_or_default();
                 tracing::warn!(
                     event = "BLE_TX_FANOUT_DROP",
-                    iface = %self.name,
+                    iface = %Scalar(&self.name),
                     peer = %peer,
                     len = packet.len(),
                     depth = frag_count,
@@ -916,7 +917,7 @@ impl BleTask {
         }
         tracing::info!(
             event = "BLE_PEER_LOST",
-            iface = %self.name,
+            iface = %Scalar(&self.name),
             peer = %hex8(&identity),
         );
         let _ = self
@@ -937,7 +938,7 @@ impl BleTask {
     async fn report_peer_up(&self, identity: IdentityHash) {
         tracing::info!(
             event = "BLE_PEER_UP",
-            iface = %self.name,
+            iface = %Scalar(&self.name),
             peer = %hex8(&identity),
         );
         let _ = self
@@ -957,7 +958,7 @@ impl BleTask {
         for (identity, lost, total) in table.take_abandon_reports() {
             tracing::warn!(
                 event = "BLE_RX_ABANDON",
-                iface = %self.name,
+                iface = %Scalar(&self.name),
                 peer = %hex8(&identity),
                 lost = lost,
                 total = total,
@@ -968,7 +969,7 @@ impl BleTask {
     fn log_link_up(&self, identity: &IdentityHash, addr: &Addr, role: Role, mtu: usize) {
         tracing::info!(
             event = "BLE_LINK_UP",
-            iface = %self.name,
+            iface = %Scalar(&self.name),
             peer = %hex8(identity),
             addr = %hex12(addr),
             role = role.as_str(),
@@ -979,7 +980,7 @@ impl BleTask {
     fn log_link_down(&self, identity: &IdentityHash, role: Role, reason: &'static str) {
         tracing::info!(
             event = "BLE_LINK_DOWN",
-            iface = %self.name,
+            iface = %Scalar(&self.name),
             peer = %hex8(identity),
             role = role.as_str(),
             reason = reason,
@@ -997,7 +998,7 @@ impl BleTask {
     fn log_link_replaced(&self, identity: &IdentityHash, addr: &Addr, role: Role, old: &Displaced) {
         tracing::info!(
             event = "BLE_LINK_REPLACED",
-            iface = %self.name,
+            iface = %Scalar(&self.name),
             peer = %hex8(identity),
             addr = %hex12(addr),
             rule = old.rule.as_str(),
@@ -1025,7 +1026,7 @@ impl BleTask {
                 new_usable_mtu,
             } => tracing::info!(
                 event = "BLE_LINK_DUP",
-                iface = %self.name,
+                iface = %Scalar(&self.name),
                 peer = %hex8(identity),
                 addr = %hex12(addr),
                 action = "refuse",

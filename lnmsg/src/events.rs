@@ -23,16 +23,13 @@ use crate::address::to_hex;
 /// from a config file we do not control, while a display name is whatever an
 /// operator typed after `--from`. Substituting rather than dropping keeps the
 /// field present, which is what the schema check wants to see.
+///
+/// The mapping itself lives in `leviculum_std::event_log::Scalar`, next to
+/// the sink that would otherwise have to rescue the value: one definition,
+/// so the two cannot drift into rendering the same name differently. The
+/// tests below stay here because they state what THIS crate needs from it.
 fn scalar(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_ascii_graphic() && c != '=' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    leviculum_std::event_log::Scalar(text).to_string()
 }
 
 /// The name this run will announce itself under, and which resolution step

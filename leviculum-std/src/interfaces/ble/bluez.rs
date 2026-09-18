@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
+use crate::event_log::Scalar;
 use leviculum_ble_tx::{identity_hint, manufacturer_data_with_hint, COMPANY_ID};
 
 /// The Columba GATT service and its three characteristics
@@ -405,7 +406,7 @@ impl CentralTask {
                         if wait > 0 {
                             tracing::info!(
                                 event = "BLE_TX_GAP",
-                                iface = %self.iface,
+                                iface = %Scalar(&self.iface),
                                 addr = %self.addr,
                                 waited_ms = wait,
                             );

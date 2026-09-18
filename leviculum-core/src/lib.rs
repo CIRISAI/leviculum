@@ -108,6 +108,7 @@ pub(crate) mod destination;
 pub mod discovery;
 pub mod embedded_storage;
 pub mod envelope;
+mod event_scalar;
 pub mod fixed_position_store;
 pub mod framing;
 /// Fuzzing-only entry points exposing crate-internal parsers to the detached

@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use leviculum_core::Destination;
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
+use leviculum_std::event_log::Scalar;
 use leviculum_std::Identity;
 
 /// The structured event logged when a new node address comes into being.
@@ -131,7 +132,7 @@ fn report_created(path: &Path, identity: &Identity) {
     let propagation = hex(&propagation_hash(identity));
     tracing::warn!(
         event = CREATED_EVENT,
-        path = %path.display(),
+        path = %Scalar(&path.display().to_string()),
         propagation = %propagation,
     );
     eprintln!(
