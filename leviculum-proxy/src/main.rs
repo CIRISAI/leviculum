@@ -11,6 +11,7 @@ use tracing::{error, info};
 
 use lora_proxy::control::run_control_socket;
 use lora_proxy::forward::forward_kiss_frames;
+use lora_proxy::logsink::LogSink;
 use lora_proxy::pty::AsyncPty;
 use lora_proxy::rules::RuleEngine;
 
@@ -199,13 +200,18 @@ async fn run_virtual(
 #[tokio::main]
 async fn main() {
     // Diagnostics on stderr, stdout reserved for the data a caller pipes —
-    // the same split as `event_log::install_global_subscriber`.
+    // the same split as `event_log::install_global_subscriber`. The sink is
+    // deliberately not `std::io::stderr`: at debug level this process logs
+    // two lines per forwarded frame, callers hand it a pipe they only read
+    // after killing it, and a blocking write to a full pipe would stall the
+    // single task that forwards both directions. See `logsink`.
+    let log_sink = LogSink::spawn();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(log_sink.make_writer())
         .init();
 
     let cli = Cli::parse();
