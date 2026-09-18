@@ -267,3 +267,64 @@ steps:
       - apt-get update && apt-get install -y curl jq git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/publish-nightly.sh
+
+  # The second publish target: our own site. Every download link we hand out
+  # — README, lblogd/README.md, the miauhaus update procedure — points at the
+  # forge's rolling release, so a forge outage today breaks every install
+  # instruction we have written down, and the day the project leaves that
+  # forge it breaks them for good. The URL under leviculum.network is the one
+  # we can keep; this step is what puts a build behind it.
+  #
+  # ORDERING: last, after `publish`. The forge publish is the incumbent and
+  # keeps its position and its timing exactly — a step that runs after it
+  # cannot delay it, cannot consume its quota, and cannot leave it half done.
+  #
+  # `status: [success, failure]`: this step runs EVEN IF an earlier step
+  # failed, and that is the whole point of having a second target. A forge
+  # outage is precisely the night the site copy matters, and with the default
+  # success-only `when:` a 500 from the forge would take the independent
+  # target down with it. The reverse independence is bought by the ordering:
+  # by the time this runs, the forge publish has already happened.
+  #
+  # No `failure: ignore`: a failed site publish fails the pipeline. An
+  # ignored failure on a cron job nobody watches is a download URL that
+  # silently stops updating, which is the shape of bug this whole step exists
+  # to end (the rolling release stood still for five weeks in exactly that
+  # way). The cost of running after a failed build is one line, not a second
+  # red: scripts/publish-site.sh exits 0 saying "nothing was built" when
+  # there is no dist/ at all, because that is the earlier step's failure and
+  # not this one's. An empty dist/ IS this step's failure and is refused.
+  #
+  # Same inventory discipline as the two steps above. This script may use:
+  #   bash, coreutils (cat cp mktemp printf rm wc), tar
+  #                    — debian:bookworm-slim ships all of these
+  #   ssh              — apt-installed here (openssh-client)
+  #   ca-certificates  — NOT needed: this step speaks ssh, not HTTPS.
+  #   cargo, python3, curl, jq — NOT available and not used.
+  # `just site-publish-selftest` runs the real sender against the real
+  # receiver on every push, which is what notices when that list grows.
+  #
+  # The three secrets are the ssh target, the private key, and the receiving
+  # host's public key. The host key is PINNED: scripts/publish-site.sh runs
+  # with StrictHostKeyChecking=yes against a known_hosts file holding that
+  # one entry and nothing else. There is no accept-on-first-use — an
+  # unattended job cannot recognise a host it has never seen.
+  publish-site:
+    image: debian:bookworm-slim
+    when:
+      - event: cron
+        status: [success, failure]
+    environment:
+      SITE_SSH_TARGET:
+        from_secret: site_ssh_target
+      SITE_SSH_KEY:
+        from_secret: site_ssh_key
+      SITE_SSH_HOST_KEY:
+        from_secret: site_ssh_host_key
+    commands:
+      - apt-get update && apt-get install -y openssh-client
+      # No `export LEVICULUM_BUILD_ID=$(cat .build-id)` here: the script
+      # reads .build-id itself, so a run where the build never got that far
+      # reaches the script's own "nothing was built" line instead of dying in
+      # `cat` with a message about a missing file.
+      - bash scripts/publish-site.sh

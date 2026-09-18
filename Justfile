@@ -257,6 +257,8 @@ nrf-shellcheck:
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
         scripts/check-plain-clone.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
+        scripts/publish-site.sh scripts/test-site-publish.sh \
+        packaging/site/lev-receive-nightly \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
@@ -472,6 +474,25 @@ publish-selftest:
 package-selftest:
     @bash scripts/test-collect-nightly-debs.sh
 
+# The nightly's SECOND publish target: our own site (Codeberg #286's sibling).
+#
+# Every download link we publish points at the forge's rolling release, so a
+# forge outage breaks every install instruction in the tree, and leaving the
+# forge would break them for good. `packaging/site/lev-receive-nightly` is
+# what the build is uploaded into, and it is the one script in this tree that
+# runs unattended, as a forced command, on input from the network, writing
+# into a directory a web server publishes to strangers.
+#
+# So its refusals ARE the feature: a bad checksum, a `../` member, a symlink
+# member, an unpaired file, an empty upload, an unsafe build id. Each is made
+# to fire here against the real script, and each case asserts afterwards that
+# the previous `latest` still resolves — a half-published release under a
+# hardcoded download URL is exactly what this must never produce. The sender
+# is driven through its `--tar-only` hook, so the archive the receiver is
+# tested against is the real one. ~2 s, no network, no ssh, no build.
+site-publish-selftest:
+    @bash scripts/test-site-publish.sh
+
 # The version half of the same pipeline. deb-stamp.sh decides what every
 # package built between two releases is CALLED, and two of its decisions are
 # only correct if they are measured rather than believed: a semver
@@ -608,7 +629,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# Publish an uploaded nightly build into the static releases tree.
+#
+# Reads a tar stream on stdin — `dist/` flattened plus a `BUILD_ID` member —
+# and, if every check below passes, publishes it as
+#
+#   $RELEASES_ROOT/nightly/<build-id>/<filename>
+#   $RELEASES_ROOT/nightly/latest -> <build-id>
+#
+# so that https://<site>/releases/nightly/latest/leviculum-nightly-amd64.deb
+# is a stable download URL that does not depend on a forge.
+#
+# THIS SCRIPT IS THE TRUST BOUNDARY. It runs unattended, with whatever
+# arrives on a socket, and it writes into a directory a web server publishes
+# to strangers. So it trusts exactly two things: its own state (the releases
+# tree it already has) and the checks below. It trusts nothing about the
+# stream — not the member names, not the member types, not the checksums,
+# not the build id — and it verifies the WHOLE upload before a single byte
+# of it becomes reachable under a public URL.
+#
+# The refusals, all of which leave the tree exactly as it was:
+#
+#   * a member that is not a regular file (directory, symlink, hard link,
+#     device): a symlink member is how an archive reaches outside the
+#     directory it is extracted into,
+#   * a member name that is not a flat, safe name: anything with `/`, `..`,
+#     a leading `-` or `.`, whitespace or a control character,
+#   * a `*.sha256` whose digest does not match its file, or that names a
+#     different file than the one it sits beside,
+#   * a payload file with no `*.sha256`, or a `*.sha256` with no file,
+#   * an empty upload, or one with no payload file in it,
+#   * a missing, multi-line or unsafe `BUILD_ID`, `latest` among them — that
+#     is the name of the pointer symlink,
+#   * a build id that is already published.
+#
+# A refusal is one line on stderr and a non-zero exit. Partially-verified
+# files never leave the staging directory, which is removed on every exit
+# path, so a refused upload is indistinguishable from an upload that never
+# happened.
+#
+# The `latest` swap is upload-then-point, never point-then-upload: the new
+# build is complete on disk before the symlink moves, and the symlink moves
+# by rename(2) (`ln -s` to a temporary name, then `mv -T`), so a reader
+# never sees `latest` missing. The old build stays reachable until the
+# rename, and is removed only by the prune, which never removes what
+# `latest` points at.
+#
+# Environment (all optional; the defaults are the production ones):
+#   RELEASES_ROOT   where the tree lives (default /var/www/leviculum/releases)
+#   KEEP            how many builds to keep under nightly/ (default 14)
+#
+# Dependencies: bash, coreutils, tar. Nothing else — no find, no python, no
+# curl. The receiving host is a small VPS that builds nothing and should
+# need nothing installed for this.
+#
+# Usage:
+#   lev-receive-nightly < upload.tar
+# Normally as the forced command of an ssh key, so the client's command line
+# is not consulted at all.
+
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+umask 022
+shopt -s nullglob
+
+PROG="lev-receive-nightly"
+RELEASES_ROOT="${RELEASES_ROOT:-/var/www/leviculum/releases}"
+KEEP="${KEEP:-14}"
+
+# One line, on stderr, and nothing has changed.
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+say() { printf '[%s] %s\n' "$PROG" "$*"; }
+
+# What a member name and a build id may look like. Anchored, so it is the
+# whole name: one alphanumeric, then alphanumerics, dot, underscore, plus,
+# minus. That excludes every path construct (`/`, `..`, a leading `.`), a
+# leading `-` that a later command could read as an option, whitespace, and
+# the control characters tar renders as backslash escapes in a listing.
+SAFE_NAME='^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$'
+
+case "$KEEP" in
+'' | *[!0-9]*) die "KEEP must be a positive integer, got '${KEEP}'" ;;
+esac
+[ "$KEEP" -ge 1 ] || die "KEEP must be at least 1, got '${KEEP}'"
+
+[ -d "$RELEASES_ROOT" ] || die "releases root '${RELEASES_ROOT}' is not a directory"
+NIGHTLY="$RELEASES_ROOT/nightly"
+mkdir -p "$NIGHTLY"
+
+# Staging sits under RELEASES_ROOT so the publish is a rename within one
+# filesystem: rename(2) is atomic, a copy across a mount point is not, and a
+# half-copied .deb under a public URL is exactly what this script exists to
+# prevent. The leading dot keeps it out of an index listing while it exists.
+STAGE="$(mktemp -d "$RELEASES_ROOT/.incoming.XXXXXXXX")"
+LATEST_TMP=""
+cleanup() {
+    rm -rf -- "$STAGE"
+    [ -z "$LATEST_TMP" ] || rm -f -- "$LATEST_TMP"
+    return 0
+}
+trap cleanup EXIT
+
+UPLOAD="$STAGE/upload.tar"
+PAYLOAD="$STAGE/payload"
+mkdir "$PAYLOAD"
+
+# --- 1. Take the stream ---------------------------------------------------
+#
+# Spooled to a file rather than piped into tar, because the checks below
+# need to read the archive twice: once to decide whether to extract it at
+# all, and once to extract it. A stream can only be read once, and "extract
+# first, check afterwards" is not a trust boundary — by then the symlink
+# member has already been created.
+cat >"$UPLOAD"
+[ -s "$UPLOAD" ] || die "empty upload: nothing arrived on stdin"
+
+# --- 2. Judge the archive before extracting it ----------------------------
+tar -tf "$UPLOAD" >"$STAGE/names" 2>"$STAGE/tar-err" ||
+    die "unreadable tar stream: $(head -n1 "$STAGE/tar-err")"
+tar -tvf "$UPLOAD" >"$STAGE/types" 2>/dev/null ||
+    die "unreadable tar stream"
+[ -s "$STAGE/names" ] || die "empty archive: no members"
+
+# `tar -tv` prints the type as the first character of the mode column, the
+# same letters ls does: `-` regular, `d` directory, `l` symlink, `h` hard
+# link. Only `-` is allowed, so the refusal needs no list of what is not.
+while IFS= read -r line; do
+    case "$line" in
+    -*) ;;
+    *) die "archive holds a member that is not a regular file: ${line}" ;;
+    esac
+done <"$STAGE/types"
+
+while IFS= read -r name; do
+    case "$name" in
+    */*) die "archive member '${name}' contains a path separator" ;;
+    *..*) die "archive member '${name}' contains '..'" ;;
+    esac
+    [[ $name =~ $SAFE_NAME ]] ||
+        die "archive member '${name}' is not a plain safe filename"
+done <"$STAGE/names"
+
+# --- 3. Extract, then judge what actually landed --------------------------
+#
+# The listing above is what the archive CLAIMS. This is what the filesystem
+# ended up holding, which is the only thing the web server will serve: tar
+# escapes control characters in a listing (a newline in a member name prints
+# as a literal `\n`), so the two are not the same statement. Both are made.
+#
+# --no-same-owner and --no-same-permissions: the archive does not get to
+# choose who owns the published files or who may write them.
+tar -xf "$UPLOAD" -C "$PAYLOAD" --no-same-owner --no-same-permissions \
+    2>"$STAGE/tar-err" || die "extraction failed: $(head -n1 "$STAGE/tar-err")"
+
+entries=()
+shopt -s dotglob
+for path in "$PAYLOAD"/*; do
+    name="${path##*/}"
+    [ ! -L "$path" ] || die "extracted entry '${name}' is a symlink"
+    [ -f "$path" ] || die "extracted entry '${name}' is not a regular file"
+    [[ $name =~ $SAFE_NAME ]] ||
+        die "extracted entry '${name}' is not a plain safe filename"
+    entries+=("$name")
+done
+shopt -u dotglob
+[ "${#entries[@]}" -gt 0 ] || die "empty archive: nothing was extracted"
+
+# --- 4. The build id ------------------------------------------------------
+#
+# It names the directory this upload becomes, so it is checked exactly as
+# hard as a member name, plus one: `latest` is the name of the pointer
+# symlink, and a build directory called that would make the pointer
+# unrepresentable.
+[ -f "$PAYLOAD/BUILD_ID" ] || die "archive holds no BUILD_ID member"
+build_id=""
+IFS= read -r build_id <"$PAYLOAD/BUILD_ID" || true
+id_bytes="$(wc -c <"$PAYLOAD/BUILD_ID")"
+[ "$id_bytes" -le "$((${#build_id} + 1))" ] ||
+    die "BUILD_ID holds more than one line"
+[[ $build_id =~ $SAFE_NAME ]] ||
+    die "BUILD_ID '${build_id}' is not a plain safe name"
+[ "$build_id" != latest ] ||
+    die "BUILD_ID 'latest' is refused: that is the name of the pointer symlink"
+
+# --- 5. Every file, its checksum, and nothing unpaired --------------------
+#
+# `sha256sum -c` is deliberately not used: it reads the filename out of the
+# checksum file and checks THAT, so a hostile `*.sha256` naming a file it
+# does not sit beside would pass. The digest and the name it claims are both
+# read here and both asserted.
+payload_files=0
+for name in "${entries[@]}"; do
+    case "$name" in
+    BUILD_ID | *.sha256) continue ;;
+    esac
+    [ -f "$PAYLOAD/${name}.sha256" ] || die "no checksum file for '${name}'"
+    payload_files=$((payload_files + 1))
+done
+[ "$payload_files" -ge 1 ] || die "archive holds no payload files"
+
+for name in "${entries[@]}"; do
+    case "$name" in
+    *.sha256) ;;
+    *) continue ;;
+    esac
+    base="${name%.sha256}"
+    [ -f "$PAYLOAD/$base" ] || die "checksum file '${name}' has no file beside it"
+    [ "$(wc -l <"$PAYLOAD/$name")" -le 1 ] ||
+        die "checksum file '${name}' holds more than one line"
+    want=""
+    claimed=""
+    IFS=' ' read -r want claimed <"$PAYLOAD/$name" || true
+    # sha256sum writes `<digest>  <name>` in text mode and `<digest> *<name>`
+    # in binary mode; both are accepted, nothing else is.
+    claimed="${claimed#\*}"
+    [[ $want =~ ^[0-9a-f]{64}$ ]] ||
+        die "checksum file '${name}' does not hold a sha256 digest"
+    [ "$claimed" = "$base" ] ||
+        die "checksum file '${name}' names '${claimed}', not '${base}'"
+    got="$(sha256sum "$PAYLOAD/$base")"
+    got="${got%% *}"
+    [ "$got" = "$want" ] ||
+        die "checksum mismatch for '${base}': upload says ${want}, file is ${got}"
+done
+
+# --- 6. Publish -----------------------------------------------------------
+TARGET="$NIGHTLY/$build_id"
+[ ! -e "$TARGET" ] ||
+    die "build '${build_id}' is already published at ${TARGET}"
+
+# Readable by the web server's user, writable by nobody else. The archive's
+# own modes were discarded at extraction; this is the mode the tree has.
+chmod -R u=rwX,go=rX "$PAYLOAD"
+mv -T -- "$PAYLOAD" "$TARGET" || die "could not publish into ${TARGET}"
+
+# The pointer. `ln -s` to a temporary name and then `mv -T` over the old
+# link, because that is a rename(2): there is no instant in which `latest`
+# does not exist, and the old target is still there until it happens.
+LATEST_TMP="$NIGHTLY/.latest.$$"
+rm -f -- "$LATEST_TMP"
+ln -s -- "$build_id" "$LATEST_TMP"
+mv -T -- "$LATEST_TMP" "$NIGHTLY/latest" ||
+    die "could not point latest at ${build_id} (the build is published, the old latest still resolves)"
+LATEST_TMP=""
+
+say "published ${build_id} (${payload_files} file(s))"
+say "latest -> ${build_id}"
+
+# --- 7. Prune -------------------------------------------------------------
+#
+# Newest first by NAME, not by mtime: the build ids are
+# nightly.<UTCdate>-<sha7>[+<distance>], so a reverse name sort is
+# chronological, and it is the same answer on every run. Modification times
+# are not — they survive tar and mv, so they describe when a file was built
+# somewhere else, not when it was published here.
+#
+# Whatever `latest` points at is kept regardless of its rank. It is normally
+# the newest, so this costs nothing; when it is not, an operator pinned it
+# and the prune is not the place to overrule that.
+latest_target="$(readlink "$NIGHTLY/latest" || true)"
+builds=()
+for path in "$NIGHTLY"/*/; do
+    dir="${path%/}"
+    [ ! -L "$dir" ] || continue
+    builds+=("${dir##*/}")
+done
+
+rank=0
+for ((i = ${#builds[@]} - 1; i >= 0; i--)); do
+    dir="${builds[i]}"
+    rank=$((rank + 1))
+    [ "$rank" -gt "$KEEP" ] || continue
+    if [ "$dir" = "$latest_target" ]; then
+        say "keeping ${dir}: latest points at it"
+        continue
+    fi
+    # ${x:?} on both halves: this is the one line in the script that deletes
+    # a tree, and an empty expansion here would name the nightly root itself.
+    rm -rf -- "${NIGHTLY:?}/${dir:?}"
+    say "pruned ${dir}"
+done
+
+say "done"
