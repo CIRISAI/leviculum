@@ -145,6 +145,7 @@ use tokio::net::TcpStream;
 use leviculum_core::constants::{MTU, TRUNCATED_HASHBYTES};
 use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
+use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::process::spawn_supervised;
 
 use crate::common::{build_path_request_raw_with_tag, init_tracing, now_ms};
@@ -2740,4 +2741,108 @@ fn assert_full_stack_sane(stats: &Value) {
     assert_eq!(num(&listener, "rxb"), num(t, "rxb"));
     assert_eq!(num(&listener, "txb"), num(t, "txb"));
     assert_eq!(num(&listener, "clients"), 1.0, "one connected peer");
+}
+
+// =========================================================================
+// Served-program count: the observer footprint
+// =========================================================================
+
+/// The `Serving   : ...` line of a status render, trimmed.
+fn serving_line(out: &str) -> String {
+    out.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Serving"))
+        .unwrap_or_else(|| panic!("no Serving line in:\n{out}"))
+        .to_string()
+}
+
+/// Poll the daemon until its `Shared Instance[...]` row counts `want`
+/// clients. Used both to wait for the attached program to register and to
+/// wait for a status client's own footprint to disappear again, so every
+/// sample sees the same daemon state.
+async fn wait_for_served(daemon: &ParityDaemon, want: i64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = -1;
+    while Instant::now() < deadline {
+        let stats = daemon.stats().await;
+        let row = ifaces(&stats)
+            .into_iter()
+            .find(|i| {
+                i["name"]
+                    .as_str()
+                    .is_some_and(|n| n.starts_with("Shared Instance["))
+            })
+            .unwrap_or_else(|| panic!("{} lists no shared instance", daemon.stack.label()));
+        last = num(&row, "clients") as i64;
+        if last == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!(
+        "{} counts {last} shared-instance clients, expected {want}",
+        daemon.stack.label()
+    );
+}
+
+/// Both status tools must answer "how many programs is this daemon serving?"
+/// with the same number for the same daemon in the same state.
+///
+/// Production host, 2026-09-17: `lnstatus` said `0 programs` while `lblogd`
+/// was attached and carrying traffic; the `rnsd` it replaced had said
+/// `2 programs`. The daemon's count was right on both stacks — what differs
+/// is the observer. `rnstatus` is itself one of the counted clients
+/// (`RNS.Reticulum()` attaches as a `LocalClientInterface`,
+/// Reticulum.py:421-436, and the stats RPC is only reachable from there,
+/// Reticulum.py:1327), so it subtracts one for itself (rnstatus.py:432).
+/// `lnstatus` talks the RPC socket alone and has no footprint to subtract.
+///
+/// Run against both daemons with the SAME attached program and the SAME two
+/// tools, so the only thing that varies is the stack behind the socket.
+#[tokio::test]
+#[ignore = "spawns Python daemons and tooling; run via --include-ignored after the tier3"]
+async fn served_program_count_agrees_across_status_clients() {
+    init_tracing();
+
+    for stack in [Stack::Lnsd, Stack::Rnsd] {
+        let daemon = ParityDaemon::start(stack).await;
+
+        // One attached program, the `lblogd` of the field report — the same
+        // client code on both stacks, per the drop-in contract.
+        let storage = tempfile::tempdir().expect("program storage");
+        let mut program = ReticulumNodeBuilder::new()
+            .enable_transport(false)
+            .connect_to_shared_instance(&daemon.instance_name)
+            .storage_path(storage.path().to_path_buf())
+            .build()
+            .await
+            .unwrap_or_else(|e| panic!("build program on {}: {e}", stack.label()));
+        program
+            .start()
+            .await
+            .unwrap_or_else(|e| panic!("start program on {}: {e}", stack.label()));
+        wait_for_served(&daemon, 1).await;
+
+        let rnstatus_out = run_status(StatusClient::Rnstatus, &daemon, &[]).await;
+        // rnstatus attaches while it runs; wait until only the program is
+        // left before the next sample.
+        wait_for_served(&daemon, 1).await;
+        let lnstatus_out = run_status(StatusClient::Lnstatus, &daemon, &[]).await;
+
+        assert_eq!(
+            serving_line(&rnstatus_out),
+            "Serving   : 1 program",
+            "rnstatus on {}: one program is attached\n{rnstatus_out}",
+            stack.label()
+        );
+        assert_eq!(
+            serving_line(&lnstatus_out),
+            serving_line(&rnstatus_out),
+            "lnstatus on {} must count the same served programs as rnstatus\
+             \n--- rnstatus ---\n{rnstatus_out}\n--- lnstatus ---\n{lnstatus_out}",
+            stack.label()
+        );
+
+        program.stop().await.ok();
+    }
 }

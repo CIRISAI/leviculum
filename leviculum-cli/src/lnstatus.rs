@@ -161,6 +161,10 @@ impl Args {
             sort: self.sort.clone(),
             reverse: self.reverse,
             name_filter: self.filter.clone(),
+            // We reach the daemon over the RPC socket only and never attach
+            // as a shared-instance client, so none of the clients the daemon
+            // counts is us. See `StatusOptions::observer_clients`.
+            observer_clients: 0,
         }
     }
 }

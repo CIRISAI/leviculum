@@ -27,6 +27,13 @@ fn opts_from_json(o: &Value) -> StatusOptions {
         sort: o["sort"].as_str().map(String::from),
         reverse: o["reverse"].as_bool().unwrap(),
         name_filter: o["name_filter"].as_str().map(String::from),
+        // Every golden case is real rnstatus output for the dict rnstatus
+        // itself sampled, so the observer in those dicts is rnstatus: one of
+        // the shared instance's counted clients is the printing program. Only
+        // with that stated does `render_status` have to reproduce the
+        // reference byte-for-byte; `lnstatus` passes 0 because it never
+        // attaches. See `StatusOptions::observer_clients`.
+        observer_clients: 1,
     }
 }
 
@@ -666,5 +673,111 @@ fn render_identities_rows_and_placeholders() {
     assert!(
         empty.contains("No identities"),
         "empty listing says so: {empty}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shared instance: the observer footprint
+// ---------------------------------------------------------------------------
+
+/// A `Shared Instance[...]` row carrying `clients` attached programs, shaped
+/// like the daemon's `interface_stats` entry (LocalServerInterface).
+fn shared_instance(clients: i64) -> Value {
+    let mut i = iface("Shared Instance[rns/default]", 1_000_000_000, 0, 0);
+    i["type"] = Value::from("LocalInterface");
+    i["clients"] = Value::from(clients);
+    i
+}
+
+fn stats_with(iface: Value) -> Value {
+    serde_json::json!({
+        "interfaces": [iface],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    })
+}
+
+#[test]
+fn rpc_only_observer_serves_every_counted_client() {
+    // The daemon counts the programs attached to the shared instance
+    // (LocalInterface.py:384/463/355). lnstatus is not one of them — it talks
+    // the RPC socket only — so every counted client is a served program.
+    // Production host 2026-09-17: one attached lblogd printed "0 programs".
+    for (clients, expected) in [
+        (0, "Serving   : 0 programs"),
+        (1, "Serving   : 1 program"),
+        (2, "Serving   : 2 programs"),
+    ] {
+        let out = render_status(
+            &stats_with(shared_instance(clients)),
+            None,
+            &StatusOptions::default(),
+        );
+        assert!(
+            out.contains(expected),
+            "clients={clients} must render `{expected}`, got:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn attached_observer_discounts_itself() {
+    // What rnstatus does with the same dict (rnstatus.py:432), pinned here on
+    // its own so the golden suite is not the only place that states it.
+    for (clients, expected) in [
+        (0, "Serving   : 0 programs"),
+        (1, "Serving   : 0 programs"),
+        (2, "Serving   : 1 program"),
+        (3, "Serving   : 2 programs"),
+    ] {
+        let out = render_status(
+            &stats_with(shared_instance(clients)),
+            None,
+            &StatusOptions {
+                observer_clients: 1,
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.contains(expected),
+            "clients={clients} with an attached observer must render \
+             `{expected}`, got:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn announce_rate_discount_follows_the_observer_footprint() {
+    // rnstatus subtracts its own share of what the shared instance sent out
+    // ("Sub rnstatus own part", rnstatus.py:582/596) because part of that
+    // traffic went to rnstatus. Nothing was sent to an RPC-only observer, so
+    // its share is 0 and the measured rate stands.
+    let mut row = shared_instance(2);
+    row["outgoing_announce_frequency"] = Value::from(0.9);
+    row["outgoing_pr_frequency"] = Value::from(0.9);
+    let stats = stats_with(row);
+    let opts = StatusOptions {
+        astats: true,
+        pstats: true,
+        ..Default::default()
+    };
+
+    let rpc_only = render_status(&stats, None, &opts);
+    assert!(
+        rpc_only.contains("0.9 Hz"),
+        "an RPC-only observer prints the rate as measured, got:\n{rpc_only}"
+    );
+
+    let attached = render_status(
+        &stats,
+        None,
+        &StatusOptions {
+            observer_clients: 1,
+            ..opts
+        },
+    );
+    assert!(
+        !attached.contains("0.9 Hz"),
+        "an attached observer discounts its own share (0.9 - 0.9/2), \
+         got:\n{attached}"
     );
 }

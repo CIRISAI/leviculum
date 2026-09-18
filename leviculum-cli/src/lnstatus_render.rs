@@ -47,6 +47,31 @@ pub struct StatusOptions {
     pub reverse: bool,
     /// positional filter: only show interfaces whose name contains this.
     pub name_filter: Option<String>,
+    /// How many of a shared instance's counted clients are the observing
+    /// program itself — the footprint every Shared Instance figure has to be
+    /// discounted by. Not a flag; a property of how the observer reached the
+    /// daemon.
+    ///
+    /// `LocalServerInterface.clients` counts the programs currently attached
+    /// to the shared instance (LocalInterface.py:384 init, :463 on accept,
+    /// :355 on teardown), and our daemon reports the same number (the
+    /// per-listener client tally in `rpc/handlers.rs:734`). rnstatus is one of
+    /// those programs whenever it asks: `RNS.Reticulum()` in its own process
+    /// attaches as a `LocalClientInterface` (Reticulum.py:421-436) and the
+    /// stats RPC is reachable only from that attachment (Reticulum.py:1327).
+    /// So rnstatus subtracts itself wherever it prints a shared-instance
+    /// figure: from the served count (rnstatus.py:432) and from its share of
+    /// the outgoing announce and path-request rates (rnstatus.py:582/596).
+    ///
+    /// `lnstatus` reaches the daemon over the RPC socket alone
+    /// (`lnstatus.rs`, `rpc_query`) and never attaches, so it has no footprint
+    /// and the discount is 0. Measured 2026-09-18 against one daemon with one
+    /// attached program: rnstatus printed `Serving   : 1 program`, lnstatus
+    /// `Serving   : 0 programs` — the same daemon state, one program short.
+    ///
+    /// Set to 1 only to reproduce rnstatus's own output for a dict rnstatus
+    /// sampled (the golden suite).
+    pub observer_clients: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -824,7 +849,10 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         let c = ji(ifstat, "clients").unwrap_or(0);
         clients = Some(c);
         if name.starts_with("Shared Instance[") {
-            let cnum = (c - 1).max(0);
+            // rnstatus hardcodes a 1 here for itself (rnstatus.py:432); the
+            // subtrahend is the observer's footprint, which is 0 for an
+            // RPC-only client. See `StatusOptions::observer_clients`.
+            let cnum = (c - opts.observer_clients).max(0);
             let spec = if cnum == 1 { " program" } else { " programs" };
             clients_string = format!("Serving   : {cnum}{spec}");
         } else if name.starts_with("I2PInterface[") {
@@ -1151,8 +1179,11 @@ fn render_traffic_block(
         let mut oan = jf(ifstat, "outgoing_announce_frequency").unwrap_or(0.0);
         let ian = jf(ifstat, "incoming_announce_frequency").unwrap_or(0.0);
         if name.starts_with("Shared Instance[") && clients.is_some_and(|c| c > 0) {
+            // "Sub rnstatus own part" (rnstatus.py:582): the observer's share
+            // of what the shared instance sent out. An RPC-only observer was
+            // sent nothing, so its share is 0 and the rate stands as measured.
             let c = clients.unwrap() as f64;
-            oan -= oan / c;
+            oan -= oan * opts.observer_clients as f64 / c;
         }
         oaf = prettyfrequency_d1_lpf(oan);
         iaf = prettyfrequency_d1_lpf(ian);
@@ -1184,8 +1215,10 @@ fn render_traffic_block(
         let mut opn = jf(ifstat, "outgoing_pr_frequency").unwrap_or(0.0);
         let ipn = jf(ifstat, "incoming_pr_frequency").unwrap_or(0.0);
         if name.starts_with("Shared Instance[") && clients.is_some_and(|c| c > 0) {
+            // Same observer discount as the announce rate above
+            // (rnstatus.py:596).
             let c = clients.unwrap() as f64;
-            opn -= opn / c;
+            opn -= opn * opts.observer_clients as f64 / c;
         }
         if opts.astats {
             opf = format!("↑{}", prettyfrequency_d1_lpf(opn));
