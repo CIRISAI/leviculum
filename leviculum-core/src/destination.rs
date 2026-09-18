@@ -524,6 +524,49 @@ impl Destination {
         self.proof_strategy = strategy;
     }
 
+    /// The app data a bare `announce(None, ..)` emits for this destination.
+    ///
+    /// Mirrors Python `Destination.default_app_data` (Destination.py:192).
+    /// `None` means a bare announce carries empty application data.
+    pub fn default_app_data(&self) -> Option<&[u8]> {
+        self.default_app_data.as_deref()
+    }
+
+    /// Set the app data every announce of this destination carries unless the
+    /// caller passes explicit app data.
+    ///
+    /// Python `Destination.set_default_app_data` (Destination.py:667-675).
+    /// This is what makes internally generated announces — above all the path
+    /// response a peer's path request triggers (Transport.py:2938-2941 calls
+    /// `destination.announce(path_response=True)`) — carry application
+    /// metadata, without a prior explicit announce to seed it from.
+    ///
+    /// Runtime-only: the default lives in this struct and is never written to
+    /// Reticulum's persistent state — the only destination state that reaches
+    /// storage is the ratchet key file
+    /// ([`Self::serialize_ratchets_signed`]). A restarted process starts
+    /// without a default.
+    ///
+    /// The size of the resulting announce is not checked here — the budget
+    /// depends on whether a ratchet rides along, which is only known at
+    /// announce time. An over-budget default makes [`Self::announce`] return
+    /// [`AnnounceError::PacketTooLarge`]; no packet is emitted.
+    pub fn set_default_app_data(&mut self, app_data: &[u8]) {
+        self.default_app_data = Some(app_data.to_vec());
+    }
+
+    /// Drop the default app data, so a bare `announce(None, ..)` carries empty
+    /// application data again.
+    ///
+    /// Python `Destination.clear_default_app_data` (Destination.py:677-681).
+    /// Note the local deviation this interacts with: an announce made WITH
+    /// explicit app data becomes the new default (see the field's doc and
+    /// [`Self::announce`]), so clearing only holds until the next such
+    /// announce.
+    pub fn clear_default_app_data(&mut self) {
+        self.default_app_data = None;
+    }
+
     // GROUP symmetric key management
     /// Generate a new symmetric key for this GROUP destination.
     ///

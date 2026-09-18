@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Destination::set_default_app_data` / `clear_default_app_data`: app data an
+  application parks on a destination once, which every announce the stack
+  generates for it carries unless the caller passes explicit app data. The
+  path response a peer's path request triggers is generated exactly that way,
+  so a service that comes up and waits to be asked for can now answer with its
+  metadata without announcing first. Runtime-only, as in the reference: the
+  default is never written to persistent state.
+
 ## [0.9.0] - 2026-09-18
 
 ### Added
