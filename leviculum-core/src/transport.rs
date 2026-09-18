@@ -573,6 +573,11 @@ pub(crate) struct QueuedAnnounce {
     pub hops: u8,
     /// When this announce was queued (ms)
     pub queued_at_ms: u64,
+    /// Emission timebase of the queued announce, read from its random_hash.
+    /// A destination holds ONE slot; a re-announce only replaces the slot's
+    /// contents when it was emitted later than what is already waiting
+    /// (Python Transport.py:1264-1281).
+    pub emitted: u64,
 }
 
 /// Transport configuration
@@ -3477,8 +3482,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         for cap in self.interface_announce_caps.values() {
             n_queued += cap.queue.len();
             for qa in &cap.queue {
-                // QueuedAnnounce: raw(Vec payload) + hops(1) + queued_at_ms(8) = 9 + raw.len()
-                raw += (9 + qa.raw.len()) as u64;
+                // QueuedAnnounce: raw(Vec payload) + hops(1) + queued_at_ms(8)
+                // + emitted(8) = 17 + raw.len()
+                raw += (17 + qa.raw.len()) as u64;
             }
         }
         let est = raw; // VecDeque 1x
@@ -9515,6 +9521,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let mut ann_tx_ifaces: Vec<usize> = Vec::new();
         let mut ann_suppressed: Vec<(usize, &'static str)> = Vec::new();
 
+        // Emission timebase of this announce, used to decide whether it may
+        // replace a slot the same destination already holds in a cap queue.
+        // An unparseable payload never wins a slot it does not already own.
+        let emitted = ReceivedAnnounce::from_packet(packet)
+            .map(|a| emission_from_random_hash(a.random_hash()))
+            .unwrap_or(0);
+
         for iface_idx in &capped_ifaces {
             if mode_blocked.contains(iface_idx) {
                 ann_suppressed.push((*iface_idx, "interface_mode"));
@@ -9539,17 +9552,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let wait_ms = (tx_bits * 1000).checked_div(cap_bps).unwrap_or(0);
                 cap.allowed_at_ms = now + wait_ms;
                 ann_tx_ifaces.push(*iface_idx);
-            } else if cap.queue.len() < self.config.max_queued_announces {
+            } else if cap.queue.len() >= self.config.max_queued_announces {
+                // Queue full: the announce is dropped on this interface.
+                ann_suppressed.push((*iface_idx, "queue_full"));
+            } else if let Some(waiting) = cap
+                .queue
+                .iter_mut()
+                .find(|e| e.dst == packet.destination_hash)
+            {
+                // One slot per destination (Python Transport.py:1264-1281,
+                // `already_queued`). Our own PATHFINDER_G retransmit and a
+                // neighbour's rebroadcast both re-enter here for a destination
+                // that is already waiting; a second slot would spend a second
+                // holdoff of airtime on the same destination and push every
+                // announce behind it back by that holdoff. A later emission
+                // replaces what is waiting and takes the fresh queue time, an
+                // older or repeated one changes nothing.
+                if emitted > waiting.emitted {
+                    waiting.raw = raw.clone();
+                    waiting.hops = packet.hops;
+                    waiting.queued_at_ms = now;
+                    waiting.emitted = emitted;
+                }
+                ann_suppressed.push((*iface_idx, "airtime_cap"));
+            } else {
                 cap.queue.push_back(QueuedAnnounce {
                     raw: raw.clone(),
                     dst: packet.destination_hash,
                     hops: packet.hops,
                     queued_at_ms: now,
+                    emitted,
                 });
                 ann_suppressed.push((*iface_idx, "airtime_cap"));
-            } else {
-                // Queue full: the announce is dropped on this interface.
-                ann_suppressed.push((*iface_idx, "queue_full"));
             }
         }
 
@@ -15255,6 +15289,7 @@ mod tests {
                 dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 2,
                 queued_at_ms: transport.clock.now_ms(),
+                emitted: 0,
             });
 
             // Poll before holdoff expires, nothing should drain
@@ -15790,6 +15825,108 @@ mod tests {
             );
         }
 
+        // mvr for the lora_late_announce_10node red of 2026-09-17: hub_a's
+        // LoRa announce queue drained EVERY destination twice, 31s apart
+        // (ANN_TX d1e7e41f, d1e7e41f, 7c67ca68, 7c67ca68, ... 5935ca53,
+        // 5935ca53), because our own PATHFINDER_G retransmit queues a second
+        // slot for a destination already waiting in the queue. Each duplicate
+        // costs one full holdoff, so every announce behind it — including the
+        // cross-link announce the cell waits for — is delayed by the airtime
+        // of announces already on the air. Python keeps exactly one slot per
+        // destination (Transport.py:1264-1281, `already_queued`): a newer
+        // emission replaces the queued announce in place, an older or equal
+        // one is discarded.
+        #[test]
+        fn test_announce_queue_holds_one_slot_per_destination() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // if1 is the capped one: 1000 bps, 2% cap = 20 bps effective, so a
+            // single announce arms a holdoff of minutes.
+            transport.register_interface_bitrate(1, 1000);
+
+            let identity = Identity::generate(&mut OsRng);
+            let dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["queueslot"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+
+            // A neighbour's announce goes out first and arms the holdoff, the
+            // way the ten nodes' management announces keep hub_a's LoRa cap
+            // closed. Everything after this one has to queue.
+            let (filler, _) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &filler).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                transport.interface_announce_caps[&1].queue.len(),
+                0,
+                "the first announce goes out under an open cap and closes it"
+            );
+
+            // Now our destination announces. Both its first emission and the
+            // PATHFINDER_G retransmit find the cap closed.
+            let raw = make_announce_raw_for_dest(&dest, 1, transport.clock.now_ms());
+            transport.process_incoming(0, &raw).unwrap();
+            for _ in 0..2 {
+                transport
+                    .clock
+                    .advance(PATHFINDER_G_MS + transport.announce_jitter_max_ms() * 4 + 100);
+                transport.poll();
+                let _ = transport.drain_actions();
+                let _ = transport.drain_events();
+            }
+
+            let queue = &transport.interface_announce_caps[&1].queue;
+            assert_eq!(
+                queue.iter().filter(|e| e.dst == dest_hash).count(),
+                1,
+                "a destination already waiting in the announce queue must keep \
+                 its single slot instead of taking one per retransmit \
+                 (queue: {:?})",
+                queue.iter().map(|e| e.dst).collect::<Vec<_>>()
+            );
+            let waiting_emitted = queue
+                .iter()
+                .find(|e| e.dst == dest_hash)
+                .expect("the destination holds a slot")
+                .emitted;
+
+            // The slot is not a dead letter: a later announce from the same
+            // destination replaces what is waiting, so the queue drains the
+            // current announce rather than a stale one (Python
+            // Transport.py:1276-1281).
+            let newer = make_announce_raw_for_dest(&dest, 1, transport.clock.now_ms() + 600_000);
+            transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
+            transport.process_incoming(0, &newer).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() * 4 + 100);
+            transport.poll();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+
+            let queue = &transport.interface_announce_caps[&1].queue;
+            let slots: Vec<_> = queue.iter().filter(|e| e.dst == dest_hash).collect();
+            assert_eq!(slots.len(), 1, "still one slot after the re-announce");
+            assert!(
+                slots[0].emitted > waiting_emitted,
+                "the later announce replaces the queued one in place"
+            );
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;
@@ -15811,6 +15948,7 @@ mod tests {
                     dst: [0u8; TRUNCATED_HASHBYTES],
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms() + i as u64,
+                    emitted: 0,
                 });
             }
             assert_eq!(cap.queue.len(), max_queued);
@@ -15824,6 +15962,7 @@ mod tests {
                     dst: [0u8; TRUNCATED_HASHBYTES],
                     hops: 1,
                     queued_at_ms: transport.clock.now_ms(),
+                    emitted: 0,
                 });
             }
             assert_eq!(
@@ -15999,12 +16138,14 @@ mod tests {
                 dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 3,
                 queued_at_ms: now,
+                emitted: 0,
             });
             cap.queue.push_back(QueuedAnnounce {
                 raw: alloc::vec![0xBB; 50],
                 dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 1,
                 queued_at_ms: now + 1,
+                emitted: 0,
             });
             cap.allowed_at_ms = now; // Allow immediate drain
 
@@ -16085,6 +16226,7 @@ mod tests {
                 dst: [0u8; TRUNCATED_HASHBYTES],
                 hops: 1,
                 queued_at_ms: now,
+                emitted: 0,
             });
 
             let deadline = transport.next_deadline();
