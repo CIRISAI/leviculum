@@ -213,7 +213,7 @@ as antenna switch **and an external RX enable on `P0.05`**. That last pin
 is what this family adds to the shared code: DIO2 steers only the
 transmit side of the Wio-SX1262's switch, so the receive side is a host
 GPIO the driver asserts for a listening window and releases before every
-key-up (`rx_frontend`, `leviculum-nrf/src/sx1262.rs:338`;
+key-up (`rx_frontend`, `leviculum-nrf/src/sx1262.rs:354`;
 `LoRaRxEnable`, `leviculum-nrf/src/boards/solarnode.rs:63`).
 
 | Product | Level | Note |

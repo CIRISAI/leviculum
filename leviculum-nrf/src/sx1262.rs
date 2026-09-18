@@ -184,6 +184,22 @@ fn u24_be(val: u32) -> [u8; 3] {
     ]
 }
 
+/// What a window was holding, read off a status word the caller already has.
+///
+/// One decoding for both entries into the instrument — the read
+/// [`Sx1262::latched`] takes for [`leviculum_rx_arming::stand_down`] and the
+/// word [`Sx1262::finish_rx`] hands to
+/// [`leviculum_rx_arming::stand_down_with_latch`] — so the two cannot come to
+/// disagree about which bit means which field.
+fn latch_of(flags: u16) -> leviculum_rx_arming::RxLatch {
+    leviculum_rx_arming::RxLatch {
+        raw: flags,
+        preamble: flags & irq::IRQ_PREAMBLE_DETECTED != 0,
+        header: flags & irq::IRQ_HEADER_VALID != 0,
+        rxdone: flags & irq::IRQ_RX_DONE != 0,
+    }
+}
+
 /// Convert an SX1262 bandwidth register code back to bandwidth in Hz
 /// (inverse of the table in `RadioConfig::from_wire`, datasheet Table 14-47).
 /// Returns 0 for an unknown code so callers can treat it as "not configured".
@@ -888,6 +904,22 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         leviculum_rx_arming::stand_down(self, by.tag()).await
     }
 
+    /// [`disarm_rx`](Self::disarm_rx) reporting a latch the caller read
+    /// itself, for the one path whose own read is taken after the clear.
+    ///
+    /// See [`leviculum_rx_arming::stand_down_with_latch`] for why that read
+    /// cannot be believed and what the captures say about it. The only caller
+    /// is [`finish_rx`](Self::finish_rx)'s last branch, and the status word it
+    /// passes is the one it read after the RX extension — the last reading of
+    /// that window taken before `ClearIrqStatus`.
+    async fn disarm_rx_with_latch(
+        &mut self,
+        by: leviculum_core::sx126x::RxTeardownBy,
+        flags: u16,
+    ) -> Result<(), Error> {
+        leviculum_rx_arming::stand_down_with_latch(self, by.tag(), latch_of(flags)).await
+    }
+
     /// Stand the receiver down for a transmit, waiting first if the window is
     /// holding a frame that is still arriving.
     ///
@@ -1155,14 +1187,22 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             Err(Error::Timeout)
         } else {
             // Neither terminating IRQ: the software wait expired on a chip
-            // that may still be in RX. `disarm_rx` rather than a bare
+            // that may still be in RX. `disarm_rx*` rather than a bare
             // `set_standby_rc` so the state and the gap clock agree with the
             // command — the window is over exactly once, here — and so this
             // teardown lands in the same population as the others. It is one
             // that can genuinely destroy a reception: a preamble whose frame
             // outlasted even the extension is still on the air.
+            //
+            // `flags` is handed over rather than re-read, because the read
+            // `disarm_rx` would take here comes after the `ClearIrqStatus`
+            // above and can therefore only report an empty channel — which is
+            // how every one of this site's lines in the captures came to say
+            // so, including the 72 emitted directly behind an
+            // `[SX_RX_EXTEND]` that had just read `PreambleDetected` off the
+            // same window. This word is the last honest reading of it.
             let _ = self
-                .disarm_rx(leviculum_core::sx126x::RxTeardownBy::RxWait)
+                .disarm_rx_with_latch(leviculum_core::sx126x::RxTeardownBy::RxWait, flags)
                 .await;
             Err(Error::Timeout)
         }
@@ -1322,12 +1362,7 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
         // the pin — and on an adopted window a clear here would consume the
         // `RxDone` the awaiting half is about to take.
         let flags = self.get_irq_status().await?;
-        Ok(leviculum_rx_arming::RxLatch {
-            raw: flags,
-            preamble: flags & irq::IRQ_PREAMBLE_DETECTED != 0,
-            header: flags & irq::IRQ_HEADER_VALID != 0,
-            rxdone: flags & irq::IRQ_RX_DONE != 0,
-        })
+        Ok(latch_of(flags))
     }
 
     async fn take_latched_frame(

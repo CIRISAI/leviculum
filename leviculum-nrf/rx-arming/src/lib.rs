@@ -920,6 +920,48 @@ where
     radio.disarm().await
 }
 
+/// [`stand_down`] for a caller that has already read the latch, with the
+/// status read left out.
+///
+/// The one caller whose own read would be guaranteed to lie. The driver's
+/// `finish_rx` concludes a window the software wait ended by clearing the
+/// chip's IRQ status and *then* standing the window down, so the read
+/// [`stand_down`] takes a moment later can only come back empty — whatever the
+/// window was holding was cleared one command earlier.
+///
+/// Measured, not argued. Across the 236 board captures of the 2026-09-14..17
+/// rig runs, all 102 `[SX_RX_TEARDOWN] site=rxwait` lines report
+/// `preamble=0 header=0 rxdone=0`, while `site=select` and `site=cad` in the
+/// same files report 188 non-empty latches between them. 72 of those 102 sit
+/// directly behind an `[SX_RX_EXTEND] flags=0x00_4` line — the extension is
+/// granted *because* `PreambleDetected` is latched, and the teardown of that
+/// same window 416 ms later says the channel was empty. One capture cannot
+/// hold both readings; the second one is the clear talking.
+///
+/// This matters beyond tidiness. This crate's claim is that every
+/// `[SX_RX_TEARDOWN]` carrying a latch is a frame it still loses, and the rate
+/// is the question. At `site=rxwait` that numerator is zero by construction,
+/// so the one teardown the loop takes at an instant chosen by noise rather
+/// than by its own schedule is also the one it cannot count.
+///
+/// The latch belongs to the caller because only the caller still has it: the
+/// status word read after the RX extension is the last honest reading of that
+/// window. Everything else is [`stand_down`] — one report, one standby, and
+/// the same no-op when nothing is standing.
+pub async fn stand_down_with_latch<R>(
+    radio: &mut R,
+    site: &'static str,
+    latch: RxLatch,
+) -> Result<(), R::Error>
+where
+    R: RxWindowProbe,
+{
+    let Some(standing) = radio.standing_window() else {
+        return radio.disarm().await;
+    };
+    tear_down(radio, site, standing, latch).await
+}
+
 /// Report one teardown and spend its standby, from a latch that has already
 /// been read.
 ///
@@ -2173,6 +2215,132 @@ mod tests {
             .position(|op| *op == Op::Disarm)
             .expect("standby");
         assert!(probe < standby, "after={after:?}");
+    }
+
+    /// The latch a window was holding survives a clear that has already run.
+    ///
+    /// The shape the driver is in at `site=rxwait`: `finish_rx` read the
+    /// status after its RX extension, then issued `ClearIrqStatus`, and only
+    /// then stood the window down. The fake is set up the same way — the chip
+    /// reports an empty status, the caller still holds the word it read before
+    /// the clear — and the line carries the caller's reading.
+    #[test]
+    fn a_teardown_carries_the_latch_the_caller_read_before_the_clear() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(port.arm(CSMA)).expect("arm");
+        port.now += 1587;
+        // What the chip says now: the clear has run, so nothing is latched.
+        port.latch = RxLatch::CLEAR;
+
+        block_on(stand_down_with_latch(
+            &mut port,
+            "rxwait",
+            RxLatch {
+                raw: 0x0004,
+                preamble: true,
+                header: false,
+                rxdone: false,
+            },
+        ))
+        .expect("stood down");
+
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=rxwait preamble=1 header=0 rxdone=0 armed_ms=1587"
+        );
+        assert!(!port.state.standby_owed());
+    }
+
+    /// Control for the test above, and the defect it exists for: asked to read
+    /// the status itself, the same call on the same port reports the empty
+    /// channel the clear left behind. The two differ by the read and by
+    /// nothing else, so the assertion above is about the read rather than
+    /// about the fake.
+    #[test]
+    fn the_reading_form_reports_the_cleared_status_instead() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(port.arm(CSMA)).expect("arm");
+        port.now += 1587;
+        port.latch = RxLatch::CLEAR;
+
+        block_on(stand_down(&mut port, "rxwait")).expect("stood down");
+
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=rxwait preamble=0 header=0 rxdone=0 armed_ms=1587"
+        );
+        assert_eq!(
+            log.count(|op| *op == Op::ProbeIrq),
+            1,
+            "ops={:?}",
+            log.ops()
+        );
+    }
+
+    /// A latch handed in spends the same single standby every other teardown
+    /// spends, and costs no bus traffic to obtain.
+    #[test]
+    fn a_handed_latch_spends_one_standby_and_reads_nothing() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(port.arm(CSMA)).expect("arm");
+        let before = log.ops().len();
+
+        block_on(stand_down_with_latch(&mut port, "rxwait", RxLatch::CLEAR)).expect("stood down");
+
+        let ops = log.ops();
+        let after = &ops[before..];
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::Disarm).count(),
+            1,
+            "exactly one standby, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::ProbeIrq).count(),
+            0,
+            "the caller already read it, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::DisarmNoop).count(),
+            0,
+            "after={after:?}"
+        );
+    }
+
+    /// Control: no window standing is not a teardown on this path either. A
+    /// latch the caller happens to be holding must not invent a sample for a
+    /// window that is not there.
+    #[test]
+    fn standing_down_an_unarmed_radio_with_a_latch_is_not_a_sample() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        block_on(stand_down_with_latch(
+            &mut port,
+            "rxwait",
+            RxLatch {
+                raw: 0x0014,
+                preamble: true,
+                header: true,
+                rxdone: false,
+            },
+        ))
+        .expect("stood down");
+        let ops = log.ops();
+        assert_eq!(
+            log.count(|op| matches!(op, Op::Teardown(_))),
+            0,
+            "ops={ops:?}"
+        );
+        assert_eq!(log.count(|op| *op == Op::Disarm), 0, "ops={ops:?}");
+        assert_eq!(log.count(|op| *op == Op::DisarmNoop), 1, "ops={ops:?}");
     }
 
     /// Control: no window standing is not a teardown. The disarm is the same
