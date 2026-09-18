@@ -215,6 +215,11 @@ pub extern "C" fn lev_version_string() -> *const c_char {
 }
 
 /// Return the library version as `(major << 16) | (minor << 8) | patch`.
+///
+/// Three numbers and no room for a pre-release: a build from the development
+/// window between two releases reports the release it is working towards, so
+/// `0.10.0-dev` and `0.10.0` answer the same number here. Use
+/// `lev_version_string`, which carries the suffix, to tell them apart.
 #[no_mangle]
 pub extern "C" fn lev_version_number() -> u32 {
     guard(0, || {

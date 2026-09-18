@@ -640,7 +640,22 @@ mod tests {
     fn version_matches_crate() {
         let (major, minor, patch) = version();
         let s = format!("{major}.{minor}.{patch}");
-        assert_eq!(s, version_string());
+        let full = version_string();
+        // The triple is the RELEASE part of the version and nothing more —
+        // three numbers have no room for a pre-release, which is what the
+        // development window between two releases spells with `-dev`. So the
+        // numbers must match what precedes the suffix, and the string must
+        // still begin with them: a triple that drifted from the manifest
+        // fails here exactly as it did before.
+        let release = match full.find(['-', '+']) {
+            Some(i) => &full[..i],
+            None => full,
+        };
+        assert_eq!(s, release, "version() must be the release part of {full}");
+        assert!(
+            full.starts_with(&s),
+            "version_string() {full} does not begin with the triple {s}"
+        );
     }
 
     #[test]

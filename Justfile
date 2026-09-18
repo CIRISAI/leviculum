@@ -258,7 +258,7 @@ nrf-shellcheck:
         scripts/check-plain-clone.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
-        scripts/deb-stamp.sh scripts/build-deb.sh \
+        scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh
 
@@ -472,6 +472,21 @@ publish-selftest:
 package-selftest:
     @bash scripts/test-collect-nightly-debs.sh
 
+# The version half of the same pipeline. deb-stamp.sh decides what every
+# package built between two releases is CALLED, and two of its decisions are
+# only correct if they are measured rather than believed: a semver
+# pre-release has to change its `-` to a `~` or Debian sorts the development
+# window ABOVE the release it precedes, and the commit distance in the build
+# id comes from `git describe`, which answers nothing in a tagless clone.
+#
+# Both are checked against a fixture workspace, the wrong spelling included
+# so the guard has a positive control. ~2 s, no network, no build: four empty
+# crates and `cargo pkgid`. In `fast` for the same reason package-selftest is
+# — the pipeline step it covers runs only from cron, where a break is found
+# by nobody at 02:00 the next morning.
+deb-stamp-selftest:
+    @bash scripts/test-deb-stamp.sh
+
 # Codeberg #300: the tree must build from a clone without submodules, which is
 # what both forge pipelines and every contributor start from. An
 # `include_str!` into `reference/` is a compile-time dependency, so the crate
@@ -593,7 +608,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

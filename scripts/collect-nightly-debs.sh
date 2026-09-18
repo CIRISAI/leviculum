@@ -142,14 +142,21 @@ pack_bin_tarball() {
         cp CHANGELOG.md "$stage/doc/"
     fi
     # The package version comes from the stamp file the build wrote, so
-    # the tarball names the same version as the .deb beside it. Stripping
+    # the tarball names the same version as the .deb beside it. Dropping
     # the ~nightly suffix leaves the plain package version; the build id
-    # on the next line carries the date and commit.
+    # on the next line carries the date, the commit and the distance.
+    #
+    # Two steps, not one. A pre-release version is stamped in Debian's
+    # spelling (0.10.0~dev~nightly.<date>.<sha7>, see the note in
+    # scripts/deb-stamp.sh), so cutting at the FIRST `~` would leave
+    # "0.10.0" — a tarball claiming a release that has not been cut. The
+    # anchored suffix is removed first, then the one remaining `~` is put
+    # back as the semver `-` this file is read by humans in.
     local crate="$pkg"
     [ "$pkg" = leviculum ] && crate=leviculum-cli
     local version="unknown"
     if [ -r ".deb-version-${crate}" ]; then
-        version="$(sed 's/~.*//' ".deb-version-${crate}")"
+        version="$(sed -e 's/~nightly\..*$//' -e 's/~/-/' ".deb-version-${crate}")"
     fi
     cat >"$stage/VERSION" <<EOF
 ${pkg} nightly build

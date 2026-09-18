@@ -75,7 +75,13 @@ done
 VER_CLI="0.9.1"
 VER_LNOMAD="1.2.3"
 VER_LBLOGD="0.4.0"
-VER_LNPND="0.2.0"
+# lnpnd stands in for a package built inside a development window. Cargo
+# spells that version `0.2.0-dev`; deb-stamp stamps it in Debian's spelling
+# (`0.2.0~dev`, see the note there), and the tarball has to read it back as
+# the semver it came from. Against a strip that cuts at the first `~` this
+# comes out "0.2.0" — a tarball claiming a release that was never cut.
+VER_LNPND="0.2.0-dev"
+DEB_LNPND="0.2.0~dev"
 NIGHTLY_SUFFIX="~nightly.20260918.abc1234"
 LNFLASH_VERSION="7.7.7"
 
@@ -109,7 +115,7 @@ EOF
     echo "${VER_CLI}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-leviculum-cli"
     echo "${VER_LNOMAD}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnomad"
     echo "${VER_LBLOGD}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lblogd"
-    echo "${VER_LNPND}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnpnd"
+    echo "${DEB_LNPND}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnpnd"
     echo "nightly.20260918-abc1234" > "$TREE/.build-id"
     case "$stamp_mode" in
     ok | empty-target) echo "$EXT_TARGET" > "$TREE/.cargo-target-dir" ;;
@@ -237,6 +243,15 @@ grep -q "^version: ${VER_LNOMAD}\$" "$lno/VERSION" 2>/dev/null \
     || fail "lnomad VERSION does not name its own version ${VER_LNOMAD}"
 got="$(cat "$lno/doc/README.md" 2>/dev/null)"
 [ "$got" = "fixture lnomad README" ] || fail "lnomad tarball carries the wrong README: '${got}'"
+
+# lnpnd is the pre-release case: its stamp is Debian's `0.2.0~dev~nightly.…`
+# and the VERSION file must name the semver `0.2.0-dev` it was built from.
+rm -rf "$stage"; mkdir -p "$stage"
+tar -C "$stage" -xzf "$TREE/dist/lnpnd-nightly-amd64.tar.gz" 2>/dev/null \
+    || fail "lnpnd-nightly-amd64.tar.gz is not a readable gzip tarball"
+lpn="$stage/lnpnd-nightly-amd64"
+grep -q "^version: ${VER_LNPND}\$" "$lpn/VERSION" 2>/dev/null \
+    || fail "lnpnd VERSION says '$(sed -n 's/^version: //p' "$lpn/VERSION" 2>/dev/null)', not the pre-release ${VER_LNPND} it was built from"
 
 # The lnflash bundle is renamed, not rebuilt.
 got="$(cat "$TREE/dist/lnflash-nightly-amd64.tar.gz" 2>/dev/null)"
