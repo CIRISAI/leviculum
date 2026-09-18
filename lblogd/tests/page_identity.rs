@@ -38,6 +38,8 @@ fn full_meta() -> BlogMeta {
         email: None,
         lxmf: None,
         has_about: false,
+        has_landing: false,
+        nav: Vec::new(),
     }
 }
 

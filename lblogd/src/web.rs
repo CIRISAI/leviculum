@@ -40,8 +40,8 @@ use crate::content::SnapshotRx;
 use crate::counter::Counter;
 use crate::files;
 use crate::render::{
-    render_about_html, render_feed_atom, render_index_html, render_post_html, ABOUT_HTML_PATH,
-    FEED_PATH,
+    render_about_html, render_feed_atom, render_index_html, render_page_html, render_post_html,
+    ABOUT_HTML_PATH, BLOG_HTML_PATH, FEED_PATH,
 };
 
 /// Errors from starting or running the web server.
@@ -106,12 +106,21 @@ pub struct WebConfig {
     pub https_bind: SocketAddr,
 }
 
-/// Build the blog router: `/` is the post index, `/posts/{slug}` one post,
-/// `/files/{name}` a file from the file area, everything else a small HTML
-/// 404.
+/// Build the blog router: `/` is the post index — or the landing page, once
+/// `pages_dir` holds an `index.md`, which moves the post index to `/blog` —
+/// `/posts/{slug}` one post, `/files/{name}` a file from the file area,
+/// `/{name}` a static page or a redirect to a configured link, everything
+/// else a small HTML 404.
 ///
 /// The handlers read the snapshot per request, so a reload takes effect on
-/// the next request without touching the listener.
+/// the next request without touching the listener. That is also why `/{name}`
+/// is one route rather than one per page: the set of pages changes on reload
+/// and the router does not.
+///
+/// `/{name}` cannot shadow the fixed routes — axum matches a static segment
+/// before a parameter — so `/about` and `/feed.xml` keep their handlers even
+/// where a page of that name exists. The reserved-name check in
+/// [`crate::site`] is what stops such a page from being configured at all.
 pub fn build_router(content: SnapshotRx) -> Router {
     build_router_counting(content, Arc::new(Counter::disabled()))
 }
@@ -119,11 +128,13 @@ pub fn build_router(content: SnapshotRx) -> Router {
 /// [`build_router`], with every request counted into `counter`.
 pub fn build_router_counting(content: SnapshotRx, counter: Arc<Counter>) -> Router {
     Router::new()
-        .route("/", get(index_page))
+        .route("/", get(root_page))
+        .route(BLOG_HTML_PATH, get(blog_page))
         .route("/posts/{slug}", get(post_page))
         .route(ABOUT_HTML_PATH, get(about_page))
         .route(FEED_PATH, get(feed))
         .route(&format!("{}{{name}}", files::WEB_PREFIX), get(file_asset))
+        .route("/{name}", get(named_page))
         .fallback(fallback_page)
         .with_state(content)
         .layer(middleware::from_fn_with_state(counter, count_request))
@@ -214,15 +225,53 @@ async fn about_page(State(content): State<SnapshotRx>) -> Response {
     }
 }
 
-async fn index_page(State(content): State<SnapshotRx>) -> Html<String> {
+/// The site root: the landing page when there is one, the post index
+/// otherwise.
+async fn root_page(State(content): State<SnapshotRx>) -> Html<String> {
     // Clone the Arc out of the watch borrow immediately: the borrow holds a
     // read lock, and holding one across rendering would block reloads.
     let snapshot = content.borrow().clone();
-    Html(render_index_html(
-        &snapshot.meta,
-        &snapshot.css,
-        &snapshot.posts,
-    ))
+    match &snapshot.site.landing {
+        Some(landing) => Html(render_page_html(&snapshot.meta, &snapshot.css, landing)),
+        None => Html(render_index_html(
+            &snapshot.meta,
+            &snapshot.css,
+            &snapshot.posts,
+        )),
+    }
+}
+
+/// The post index at its own path, which only exists once a landing page has
+/// taken the root. Without one this is a 404, exactly as it was before there
+/// were landing pages: the index is at `/` and nowhere else.
+async fn blog_page(State(content): State<SnapshotRx>) -> Response {
+    let snapshot = content.borrow().clone();
+    match snapshot.site.has_landing() {
+        true => Html(render_index_html(
+            &snapshot.meta,
+            &snapshot.css,
+            &snapshot.posts,
+        ))
+        .into_response(),
+        false => not_found(),
+    }
+}
+
+/// A static page, or a redirect to a configured link.
+///
+/// 302, not 301: a link points at a forge, a forge moves hosts, and a browser
+/// that cached a 301 would keep going to the old one long after the config
+/// said otherwise. A name that is both a link and a page redirects here and
+/// shows its text on the mesh — the browser is better served by arriving.
+async fn named_page(State(content): State<SnapshotRx>, UrlPath(name): UrlPath<String>) -> Response {
+    let snapshot = content.borrow().clone();
+    if let Some(link) = snapshot.site.link(&name) {
+        return (StatusCode::FOUND, [(header::LOCATION, link.url.clone())]).into_response();
+    }
+    match snapshot.site.page(&name) {
+        Some(page) => Html(render_page_html(&snapshot.meta, &snapshot.css, page)).into_response(),
+        None => not_found(),
+    }
 }
 
 async fn post_page(State(content): State<SnapshotRx>, UrlPath(slug): UrlPath<String>) -> Response {

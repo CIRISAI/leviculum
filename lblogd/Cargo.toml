@@ -4,7 +4,7 @@ name = "lblogd"
 # release cadence and its own compatibility surface (config file, post
 # format, page layout), none of which move when the protocol core does.
 # The workspace version stays the stack's; this one is the product's.
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -116,6 +116,10 @@ thiserror.workspace = true
 leviculum-micron = { path = "../leviculum-micron" }
 lnomad = { path = "../lnomad" }
 hex = "0.4"
+# Already a dependency; here too so a test can unwrap a page's msgpack bin
+# value exactly as a NomadNet client does, rather than asserting on the
+# wrapper's bytes.
+rmpv.workspace = true
 tempfile = "3"
 # test-util is not part of tokio's "full"; the debounce tests need paused
 # time so they assert the collapsing rule without wall-clock waits.

@@ -22,15 +22,31 @@ use tokio::sync::watch;
 use crate::files::{load_files_dir, FileArea, FileEntry, FilesError};
 use crate::post::{load_posts_dir, parse_post, Post, PostDefaults, PostError};
 use crate::render::{
-    default_about_title, render_about_micron, render_index_micron, render_post_micron, BlogMeta,
-    DEFAULT_STYLE,
+    default_about_title, render_about_micron, render_index_micron, render_link_micron,
+    render_page_micron, render_post_micron, BlogMeta, NavEntry, DEFAULT_STYLE, INDEX_MICRON_TARGET,
 };
+use crate::site::{load_site, LinkSpec, Site, SiteError};
 
-/// The request path of the blog's index page.
+/// The request path of the site's root page: the post index, or the landing
+/// page once `pages_dir` holds an `index.md`.
 pub const INDEX_PATH: &str = "/page/index.mu";
+
+/// The request path the post index moves to once a landing page has taken
+/// [`INDEX_PATH`].
+pub const BLOG_PATH: &str = "/page/blog.mu";
 
 /// The request path of the blog's about page.
 pub const ABOUT_PATH: &str = "/page/about.mu";
+
+/// The request path a static page or a link is served under on the mesh.
+pub fn page_path(name: &str) -> String {
+    format!("/page/{name}.mu")
+}
+
+/// The micron request target a static page or a link is linked to.
+fn page_target(name: &str) -> String {
+    format!(":/page/{name}.mu")
+}
 
 /// Errors from building a snapshot.
 #[derive(Debug, Error)]
@@ -52,6 +68,10 @@ pub enum ContentError {
     /// The file area could not be read.
     #[error("{0}")]
     Files(#[from] FilesError),
+    /// The static pages or the links are not usable: a bad name, a bad URL,
+    /// or a name something else already answers under.
+    #[error("{0}")]
+    Site(#[from] SiteError),
 }
 
 /// Where a snapshot's content comes from.
@@ -69,6 +89,10 @@ pub struct Sources {
     pub about_path: Option<PathBuf>,
     /// The file area, if the blog has one.
     pub files: Option<FileArea>,
+    /// The directory of static pages, if the blog has one.
+    pub pages_dir: Option<PathBuf>,
+    /// The `[links]` entries, in the order the config lists them.
+    pub links: Vec<LinkSpec>,
 }
 
 impl Sources {
@@ -98,13 +122,26 @@ impl Sources {
         self
     }
 
+    /// Serve the static pages in this directory.
+    pub fn with_pages(mut self, pages_dir: Option<impl Into<PathBuf>>) -> Self {
+        self.pages_dir = pages_dir.map(Into::into);
+        self
+    }
+
+    /// Serve these links, in this order.
+    pub fn with_links(mut self, links: Vec<LinkSpec>) -> Self {
+        self.links = links;
+        self
+    }
+
     /// Every path a change should trigger a reload for: the post directory,
-    /// the file area, and the two single files.
+    /// the file area, the pages directory, and the two single files.
     pub fn watch_paths(&self) -> Vec<&Path> {
         let mut paths = vec![self.posts_dir.as_path()];
         if let Some(files) = &self.files {
             paths.push(files.dir.as_path());
         }
+        paths.extend(self.pages_dir.as_deref());
         paths.extend(self.css_path.as_deref());
         paths.extend(self.about_path.as_deref());
         paths
@@ -145,6 +182,8 @@ pub struct Snapshot {
     /// The file area the entries came from, carried so a handler can re-check
     /// the size ceiling when it reads.
     pub file_area: Option<FileArea>,
+    /// The static pages and links: what the site says besides the posts.
+    pub site: Site,
 }
 
 impl Snapshot {
@@ -181,7 +220,22 @@ pub fn load_snapshot(meta: &BlogMeta, sources: &Sources) -> Result<Snapshot, Con
         .as_deref()
         .map(|path| load_about(meta, path))
         .transpose()?;
-    let pages = build_pages(meta, &posts, about.as_ref())?;
+    // The collision check needs the posts, so the site is loaded after them
+    // and before anything is rendered: a name clash must be an error, not a
+    // page that quietly shadows a post.
+    let site = load_site(
+        &meta.title,
+        sources.pages_dir.as_deref(),
+        &sources.links,
+        &posts,
+        meta.has_about,
+    )?;
+    // The nav and the moved post index are facts about the loaded site, not
+    // about the config, so the meta the pages are rendered from is derived
+    // here rather than passed in. Both sides then render from one list and
+    // cannot disagree about where a page lives.
+    let meta = &with_site(meta, &site);
+    let pages = build_pages(meta, &posts, about.as_ref(), &site)?;
     let css = match sources.css_path.as_deref() {
         Some(path) => std::fs::read_to_string(path).map_err(|source| ContentError::Css {
             path: path.display().to_string(),
@@ -201,7 +255,62 @@ pub fn load_snapshot(meta: &BlogMeta, sources: &Sources) -> Result<Snapshot, Con
         about,
         files,
         file_area: sources.files.clone(),
+        site,
     })
+}
+
+/// The blog's metadata as the loaded site makes it: where the post index
+/// lives, and what the nav line offers.
+///
+/// The nav stays empty when the only thing to point at is the post index
+/// itself, which is the state of every blog that configures neither
+/// `pages_dir` nor `[links]`. An empty nav renders to nothing, so those blogs
+/// serve byte-for-byte what they served before any of this existed.
+fn with_site(meta: &BlogMeta, site: &Site) -> BlogMeta {
+    let mut meta = meta.clone();
+    meta.has_landing = site.has_landing();
+    meta.nav = match site.is_empty() {
+        true => Vec::new(),
+        false => build_nav(&meta, site),
+    };
+    meta
+}
+
+/// The nav line: the landing page, the blog, then the static pages by name
+/// and the links in config order.
+///
+/// Pages before links, because a directory has no order to honour and the
+/// config file does: sorting the pages and then following the file keeps the
+/// one order the operator actually wrote.
+fn build_nav(meta: &BlogMeta, site: &Site) -> Vec<NavEntry> {
+    let mut nav = Vec::new();
+    if let Some(landing) = &site.landing {
+        nav.push(NavEntry {
+            label: landing.title.clone(),
+            web: "/".to_string(),
+            micron: INDEX_MICRON_TARGET.to_string(),
+        });
+    }
+    nav.push(NavEntry {
+        label: "Blog".to_string(),
+        web: meta.index_html_path().to_string(),
+        micron: meta.index_micron_target().to_string(),
+    });
+    for page in &site.pages {
+        nav.push(NavEntry {
+            label: page.page.title.clone(),
+            web: format!("/{}", page.name),
+            micron: page_target(&page.name),
+        });
+    }
+    for link in &site.links {
+        nav.push(NavEntry {
+            label: link.label(),
+            web: format!("/{}", link.name),
+            micron: page_target(&link.name),
+        });
+    }
+    nav
 }
 
 /// Read the about text, which is a post file in every respect except that
@@ -278,12 +387,41 @@ fn build_pages(
     meta: &BlogMeta,
     posts: &[Post],
     about: Option<&Post>,
+    site: &Site,
 ) -> Result<HashMap<String, Vec<u8>>, ContentError> {
     let mut pages = HashMap::new();
+    // The post index keeps `/page/index.mu` unless a landing page has taken
+    // it, in which case it moves to `/page/blog.mu` and the landing page
+    // answers the root. Posts themselves never move: a feed entry is
+    // identified by its URL.
+    let index_path = match site.has_landing() {
+        true => BLOG_PATH,
+        false => INDEX_PATH,
+    };
     pages.insert(
-        INDEX_PATH.to_string(),
+        index_path.to_string(),
         msgpack_bin(render_index_micron(meta, posts).as_bytes())?,
     );
+    if let Some(landing) = &site.landing {
+        pages.insert(
+            INDEX_PATH.to_string(),
+            msgpack_bin(render_page_micron(meta, landing).as_bytes())?,
+        );
+    }
+    for page in &site.pages {
+        pages.insert(
+            page_path(&page.name),
+            msgpack_bin(render_page_micron(meta, &page.page).as_bytes())?,
+        );
+    }
+    for link in &site.links {
+        pages.insert(
+            page_path(&link.name),
+            msgpack_bin(
+                render_link_micron(meta, &link.label(), &link.url, link.page.as_ref()).as_bytes(),
+            )?,
+        );
+    }
     // The about page exists whenever there is anything to put on it, which
     // may be contact details alone with no text file.
     if meta.has_about {

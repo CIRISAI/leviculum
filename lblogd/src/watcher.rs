@@ -68,12 +68,14 @@ pub struct PostsWatcher {
 
 impl PostsWatcher {
     /// Establish the watch on everything a snapshot is built from: the posts
-    /// directory, the file area, the stylesheet and the about text.
+    /// directory, the file area, the pages directory, the stylesheet and the
+    /// about text.
     pub fn start_for(sources: &Sources) -> Result<PostsWatcher, WatchError> {
         let mut dirs: Vec<&Path> = vec![sources.posts_dir.as_path()];
         if let Some(files) = &sources.files {
             dirs.push(files.dir.as_path());
         }
+        dirs.extend(sources.pages_dir.as_deref());
         let single: Vec<&Path> = [sources.css_path.as_deref(), sources.about_path.as_deref()]
             .into_iter()
             .flatten()
@@ -84,9 +86,10 @@ impl PostsWatcher {
     /// Establish the watch on the content directories and files. Changes are
     /// recorded from here on.
     ///
-    /// `dirs` are directories every change inside counts (the posts directory
-    /// and the file area); `files` names individual files outside them that
-    /// also belong to the content: the stylesheet and the about text.
+    /// `dirs` are directories every change inside counts (the posts
+    /// directory, the file area and the pages directory); `files` names
+    /// individual files outside them that also belong to the content: the
+    /// stylesheet and the about text.
     ///
     /// The individual files are watched through their parent directory rather
     /// than directly: an inotify watch follows the inode, and editors that
@@ -174,8 +177,8 @@ impl PostsWatcher {
 /// What this watcher considers its own, used to discard events for unrelated
 /// neighbours of the stylesheet.
 struct Targets {
-    /// Directories every change inside counts: the posts directory and the
-    /// file area.
+    /// Directories every change inside counts: the posts directory, the file
+    /// area and the pages directory.
     dirs: Vec<PathBuf>,
     /// Individual files outside them: the stylesheet and the about text.
     files: Vec<PathBuf>,

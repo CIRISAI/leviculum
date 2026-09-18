@@ -92,6 +92,32 @@ pub struct BlogMeta {
     /// hash, or a text file. Without any of those a link would lead to an
     /// empty page, so the name stays plain text.
     pub has_about: bool,
+    /// Whether a landing page has taken the site root, which moves the post
+    /// index to `/blog` and `:/page/blog.mu`.
+    pub has_landing: bool,
+    /// The nav line, in order, or empty when there is nowhere to navigate to
+    /// besides the posts themselves.
+    ///
+    /// Empty is the state of every blog configured before pages and links
+    /// existed, and it renders to nothing at all — which is what keeps those
+    /// blogs' served bytes exactly what they were.
+    pub nav: Vec<NavEntry>,
+}
+
+/// One entry of the nav line: what it is called and where it points on each
+/// side.
+///
+/// Both paths are resolved once, when the snapshot is built, rather than at
+/// render time: the two sides must agree about where a page lives, and the
+/// surest way to make them agree is to give them one list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NavEntry {
+    /// What the link says.
+    pub label: String,
+    /// Its HTTP path.
+    pub web: String,
+    /// Its micron request target, including the leading `:`.
+    pub micron: String,
 }
 
 impl BlogMeta {
@@ -114,6 +140,24 @@ impl BlogMeta {
         }
     }
 
+    /// The post index's HTTP path: the site root, unless a landing page has
+    /// taken it.
+    pub fn index_html_path(&self) -> &'static str {
+        match self.has_landing {
+            true => BLOG_HTML_PATH,
+            false => "/",
+        }
+    }
+
+    /// The post index's micron request target, the mirror of
+    /// [`index_html_path`](Self::index_html_path).
+    pub fn index_micron_target(&self) -> &'static str {
+        match self.has_landing {
+            true => BLOG_MICRON_TARGET,
+            false => INDEX_MICRON_TARGET,
+        }
+    }
+
     /// The same for micron, linking to the local about page.
     fn author_micron(&self, name: &str) -> String {
         match self.has_about && Some(name) == self.author.as_deref() {
@@ -128,6 +172,17 @@ pub const ABOUT_HTML_PATH: &str = "/about";
 
 /// The micron request path of the about page.
 pub const ABOUT_MICRON_PATH: &str = ":/page/about.mu";
+
+/// The HTTP path the post index moves to once a landing page takes `/`.
+pub const BLOG_HTML_PATH: &str = "/blog";
+
+/// The micron request target of the post index once a landing page takes
+/// `:/page/index.mu`.
+pub const BLOG_MICRON_TARGET: &str = ":/page/blog.mu";
+
+/// The micron request target of the site root: the landing page when there is
+/// one, the post index otherwise.
+pub const INDEX_MICRON_TARGET: &str = ":/page/index.mu";
 
 /// The micron background colour used to set off inline code (12-bit form).
 const INLINE_CODE_BG: &str = "333";
@@ -360,14 +415,66 @@ fn html_document(meta: &BlogMeta, css: &str, title: &str, body: &str) -> String 
     format!(
         "<!doctype html>\n<html lang=\"{}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         {}{}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}\n</body>\n</html>\n",
+         {}{}<title>{}</title>\n<style>{}</style>\n</head>\n<body>\n{}{}\n</body>\n</html>\n",
         escape_html(&meta.language),
         description,
         feed,
         escape_html(title),
         css,
+        nav_html(meta),
         body
     )
+}
+
+/// The nav line as HTML, or nothing at all when there is nowhere to go.
+///
+/// Rendered inside [`html_document`], so every page that is a document has it
+/// and none can be forgotten. It needs no stylesheet of its own: the links
+/// inherit the built-in `a` rule, and `class="site-nav"` is there for an
+/// operator's stylesheet to take hold of. Adding a rule to
+/// [`DEFAULT_STYLE`] instead would change the bytes of every page on every
+/// existing blog, which is exactly what this feature must not do.
+fn nav_html(meta: &BlogMeta) -> String {
+    if meta.nav.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = meta
+        .nav
+        .iter()
+        .map(|entry| {
+            format!(
+                "<a href=\"{}\">{}</a>",
+                escape_html(&entry.web),
+                escape_html(&entry.label)
+            )
+        })
+        .collect();
+    format!(
+        "<nav class=\"site-nav\">\n{}\n</nav>\n",
+        links.join(" &middot; ")
+    )
+}
+
+/// The nav line as micron, or nothing at all when there is nowhere to go.
+///
+/// The mirror of [`nav_html`], but each micron renderer has to place it
+/// itself: micron has no document wrapper to hide it in.
+fn nav_micron(meta: &BlogMeta) -> String {
+    if meta.nav.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = meta
+        .nav
+        .iter()
+        .map(|entry| {
+            format!(
+                "`[{}`{}]",
+                sanitize_link_part(&entry.label),
+                sanitize_link_part(&entry.micron)
+            )
+        })
+        .collect();
+    format!("{}\n\n", links.join(" \u{b7} "))
 }
 
 /// The footer shown on every HTML page: where to find the blog on the mesh.
@@ -433,13 +540,16 @@ pub fn render_post_html(meta: &BlogMeta, css: &str, post: &Post) -> String {
         Some(author) => format!(" &middot; {}", meta.author_html(author)),
         None => String::new(),
     };
+    // Back to the list this post was found in, which moves with it once a
+    // landing page takes the root.
     let body = format!(
         "<article>\n<h1>{}</h1>\n<p class=\"date\">{}{}</p>\n{}</article>\n\
-         <p><a href=\"/\">&larr; {}</a></p>{}",
+         <p><a href=\"{}\">&larr; {}</a></p>{}",
         escape_html(&post.title),
         post.date,
         byline,
         markdown_to_html(&post.body_md),
+        meta.index_html_path(),
         escape_html(&meta.title),
         html_footer(meta)
     );
@@ -487,7 +597,8 @@ pub fn render_about_html(meta: &BlogMeta, css: &str, text: Option<&Post>) -> Str
 /// conversation with that address.
 pub fn render_about_micron(meta: &BlogMeta, text: Option<&Post>) -> String {
     let heading = about_heading(meta, text);
-    let mut out = format!(">{}\n\n", escape_micron_text(&heading));
+    let mut out = nav_micron(meta);
+    out.push_str(&format!(">{}\n\n", escape_micron_text(&heading)));
 
     if let Some(email) = &meta.email {
         out.push_str(&format!("Email: {}\n", escape_micron_text(email)));
@@ -540,6 +651,51 @@ pub fn default_about_title(author: Option<&str>) -> String {
         .filter(|a| !slugify(a).is_empty())
         .unwrap_or("About")
         .to_string()
+}
+
+/// Render a static page as a complete HTML document.
+///
+/// A page is a post in file format and nothing else: no date, no byline, no
+/// place in the index or the feed. The landing page is rendered by exactly
+/// this function, because a landing page is a static page that happens to be
+/// called `index`.
+pub fn render_page_html(meta: &BlogMeta, css: &str, page: &Post) -> String {
+    let mut body = format!("<h1>{}</h1>\n", escape_html(&page.title));
+    body.push_str(&markdown_to_html(&page.body_md));
+    body.push_str(&html_footer(meta));
+    html_document(meta, css, &page.title, &body)
+}
+
+/// Render a static page as a micron page.
+pub fn render_page_micron(meta: &BlogMeta, page: &Post) -> String {
+    let mut out = nav_micron(meta);
+    out.push_str(&format!(">{}\n\n", escape_micron_text(&page.title)));
+    out.push_str(&markdown_to_micron(&page.body_md));
+    out.push('\n');
+    out.push_str(&micron_footer(meta));
+    out
+}
+
+/// Render a link's mesh page: its own text, when `pages_dir` holds a page of
+/// the same name, and then the URL as plain text.
+///
+/// As text rather than as a micron link, because there is nothing a NomadNet
+/// client could do with it: micron's link targets are Reticulum paths, and a
+/// browser is not a thing the mesh side can reach for. What the reader gets
+/// is the address to type somewhere else, which is the honest answer. The web
+/// side never renders this — it answers the same name with a redirect.
+pub fn render_link_micron(meta: &BlogMeta, label: &str, url: &str, page: Option<&Post>) -> String {
+    let mut out = nav_micron(meta);
+    out.push_str(&format!(">{}\n\n", escape_micron_text(label)));
+    if let Some(page) = page {
+        out.push_str(&markdown_to_micron(&page.body_md));
+        out.push_str("\n\n-\n\n");
+    }
+    out.push_str("On the web:\n\n");
+    out.push_str(&escape_micron_text(url));
+    out.push('\n');
+    out.push_str(&micron_footer(meta));
+    out
 }
 
 /// The path the Atom feed is served under.
@@ -660,7 +816,8 @@ pub fn markdown_to_micron(md: &str) -> String {
 /// per post targeting the local page `:/page/<slug>.mu` (NomadNet's same-node
 /// link form, as resolved by lnomad and NomadNet).
 pub fn render_index_micron(meta: &BlogMeta, posts: &[Post]) -> String {
-    let mut out = format!(">{}\n\n", escape_micron_text(&meta.title));
+    let mut out = nav_micron(meta);
+    out.push_str(&format!(">{}\n\n", escape_micron_text(&meta.title)));
     if let Some(author) = &meta.author {
         out.push_str(&format!("by {}\n", meta.author_micron(author)));
     }
@@ -697,12 +854,14 @@ pub fn render_post_micron(meta: &BlogMeta, post: &Post) -> String {
         None => String::new(),
     };
     format!(
-        ">{}\n\n{}{}\n-\n\n{}\n\n`[\u{2190} {}`:/page/index.mu]\n{}",
+        "{}>{}\n\n{}{}\n-\n\n{}\n\n`[\u{2190} {}`{}]\n{}",
+        nav_micron(meta),
         escape_micron_text(&post.title),
         post.date,
         byline,
         markdown_to_micron(&post.body_md),
         sanitize_link_part(&meta.title),
+        meta.index_micron_target(),
         micron_footer(meta)
     )
 }

@@ -91,9 +91,14 @@ One TOML file drives everything:
 data_dir    = "/var/lib/lblogd"        # identity, node storage, ACME cache,
                                        # and the per-day counts file
 posts_dir   = "/var/lib/lblogd/posts"  # the *.md blog posts
+# pages_dir      = "/var/lib/lblogd/pages"  # static pages; see below
 # files_dir      = "/var/lib/lblogd/files"  # pictures; default: files/ beside posts_dir
 # max_file_bytes = 10485760                 # per-file ceiling, default 10 MiB
 watch_posts = false                    # optional, default false; see below
+
+# [links]                              # optional; names that point elsewhere
+# code   = "https://codeberg.org/Lew_Palm/leviculum"
+# issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
 
 [blog]                                 # optional, but see below
 title       = "leviculum.network"      # the heading of every page
@@ -172,10 +177,101 @@ publication date and no byline, and never appears in the index or the feed.
 Only the blog's own author is linked. A guest author named in a post's
 frontmatter stays plain text, since the about page is not theirs.
 
+It stays its own config key rather than becoming a `pages_dir/about.md`: the
+about page exists without any file at all when only `email` or `lxmf` is set,
+it renders those contact details, and it is the page the author's name links
+to. A static page has none of that. Where no about page is configured the name
+is free, so a blog that wants a plain one can simply write `pages_dir/about.md`
+and get `/about` that way.
+
 The address published here is separate from `web.acme_contact_email` on
 purpose: that one is an operator contact for certificate warnings and does
 not belong on a public page. Note that any address on a public page will be
 harvested.
+
+### Pages and links
+
+A domain usually has to say more than "here are my posts". `pages_dir` holds
+Markdown pages that are not entries, and `[links]` holds names that point at
+something off this server. Both are optional, and a blog that configures
+neither serves byte-for-byte what it served before either existed.
+
+Every `<name>.md` in `pages_dir` is a page. It is parsed in exactly the post
+format — frontmatter optional — and rendered like the about page: no date, no
+byline, never in the post index, never in the feed. It is served at `/<name>`
+on the web and `:/page/<name>.mu` on the mesh.
+
+`index.md` is the one special name. With it, the site gets a landing page:
+
+| what                    | without `index.md` | with `index.md`     |
+|-------------------------|--------------------|---------------------|
+| landing page, web       | —                  | `/`                 |
+| landing page, mesh      | —                  | `/page/index.mu`    |
+| post index, web         | `/`                | `/blog`             |
+| post index, mesh        | `/page/index.mu`   | `/page/blog.mu`     |
+| a page `<name>`, web    | `/<name>`          | `/<name>`           |
+| a page `<name>`, mesh   | `/page/<name>.mu`  | `/page/<name>.mu`   |
+| one post, web           | `/posts/<slug>`    | `/posts/<slug>`     |
+| one post, mesh          | `/page/<slug>.mu`  | `/page/<slug>.mu`   |
+| about page              | `/about`, `/page/about.mu` | unchanged   |
+| feed                    | `/feed.xml`        | unchanged           |
+| one file                | `/files/<name>`, `/file/<name>` | unchanged |
+
+Posts and the feed deliberately do not move: a feed entry is identified by its
+URL, so relocating posts would show every entry again as new in every reader.
+
+`[links]` is the other half:
+
+```toml
+[links]
+code   = "https://codeberg.org/Lew_Palm/leviculum"
+issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
+```
+
+Each entry becomes `/<name>` on the web and `/page/<name>.mu` on the mesh, but
+the two answer differently because they have to. The web answers **302**, not
+301: a forge changes host, and a browser that cached a 301 keeps going to the
+old one long after the config says otherwise. The mesh answers with a short
+page naming the URL as text, since a NomadNet client cannot follow a web link
+at all — the address to type somewhere else is the only honest answer. The URL
+must be an absolute `http://` or `https://` one; anything else is a config
+error naming the key.
+
+A name may be both. With `code` in `[links]` *and* a `code.md` in `pages_dir`,
+the mesh page shows that file's text above the URL — clone instructions, say —
+while the web still redirects. That asymmetry is the point: the mesh reader
+needs the text because they cannot follow the link, and the web reader is
+better served by arriving.
+
+Every page carries a small nav line on both sides: the landing page, the blog,
+then each page by name and each link in the order the config lists them. It
+appears as soon as there is somewhere to go; with neither pages nor links
+there is nothing to put in it and nothing is emitted.
+
+#### Names that are already taken
+
+The web's top level and the mesh's `/page/<name>.mu` are shared namespaces, so
+a page or a link can collide with something that already answers. All of it is
+checked in one place, at load time, against one list:
+
+* `blog`, `posts`, `files` and `feed.xml` — the server's own routes
+* `about`, but only when an about page is configured
+* every post's slug, which owns `/page/<slug>.mu` on the mesh
+* `index`, for a link only: as a page name it *is* the landing page
+
+A collision is a startup error naming both the offender and what already
+answers there. On a reload it is refused and the previous content keeps
+serving, exactly as a malformed post date is — startup has no good state to
+fall back on, a running server does.
+
+Page and link names follow the crate's slug rules: plain lowercase ASCII
+letters, digits and hyphens. `Über-Uns.md` is a config error naming the file,
+not a page at `/%C3%9Cber-Uns`.
+
+`pages_dir` is *not* optional by existence the way the file area is: the
+operator named it, so a directory that is not there is a startup error rather
+than a site that quietly lost its landing page. Pages reload with the posts on
+SIGHUP, and `watch_posts` watches `pages_dir` too.
 
 ### Feed
 

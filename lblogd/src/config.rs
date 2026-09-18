@@ -56,6 +56,7 @@ use crate::counter;
 use crate::files::{self, FileArea};
 use crate::node::BlogNodeConfig;
 use crate::render::BlogMeta;
+use crate::site::LinkSpec;
 use crate::web::{AcmeSettings, WebConfig};
 
 /// Errors from loading the config file.
@@ -122,6 +123,21 @@ pub struct Config {
     /// is what a development config wants.
     #[serde(default)]
     pub watch_posts: bool,
+    /// Directory of Markdown pages that are not entries: a landing page, a
+    /// page about the code. Optional; see [`crate::site`].
+    ///
+    /// Unlike `files_dir` this is not optional by existence: the operator
+    /// named it, so a directory that is not there is a config error rather
+    /// than a site that silently lost its landing page.
+    #[serde(default)]
+    pub pages_dir: Option<PathBuf>,
+    /// Names that point somewhere off this server: `code = "https://..."`.
+    ///
+    /// Each becomes a 302 on the web and a micron page naming the URL on the
+    /// mesh, because a NomadNet client cannot follow a web link. In the order
+    /// the file lists them, which is the order the nav line follows.
+    #[serde(default)]
+    pub links: Links,
     /// Blog identity: what a reader sees on every page, on both sides.
     #[serde(default)]
     pub blog: BlogSection,
@@ -244,6 +260,50 @@ impl Default for CounterSection {
             enabled: default_counter_enabled(),
             path: None,
         }
+    }
+}
+
+/// The `[links]` section: names that point somewhere else, in the order the
+/// file lists them.
+///
+/// A `BTreeMap` would be the obvious shape and is the wrong one: the nav line
+/// follows the config's order, and sorting by name would silently reorder
+/// what the operator wrote. Collecting the entries through [`serde::de::MapAccess`]
+/// keeps the document order the TOML parser hands over.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Links(Vec<LinkSpec>);
+
+impl Links {
+    /// The entries, in config order.
+    pub fn entries(&self) -> &[LinkSpec] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Links {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Links, D::Error> {
+        struct OrderedLinks;
+
+        impl<'de> serde::de::Visitor<'de> for OrderedLinks {
+            type Value = Links;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a table of name = \"url\" entries")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Links, A::Error> {
+                let mut entries = Vec::new();
+                while let Some((name, url)) = map.next_entry::<String, String>()? {
+                    entries.push(LinkSpec { name, url });
+                }
+                Ok(Links(entries))
+            }
+        }
+
+        deserializer.deserialize_map(OrderedLinks)
     }
 }
 
@@ -407,6 +467,11 @@ impl Config {
             email: self.blog.email.clone(),
             lxmf: self.blog.lxmf.clone(),
             has_about: self.has_about_page(),
+            // Both are facts about the loaded content rather than about the
+            // config: whether `pages_dir` holds an `index.md` is only known
+            // once it has been read. `content::load_snapshot` fills them in.
+            has_landing: false,
+            nav: Vec::new(),
         }
     }
 
@@ -438,6 +503,8 @@ impl Config {
                 dir,
                 max_bytes: self.max_file_bytes.unwrap_or(files::DEFAULT_MAX_FILE_BYTES),
             }))
+            .with_pages(self.pages_dir.clone())
+            .with_links(self.links.entries().to_vec())
     }
 
     /// The file the per-day counts are appended to, or `None` when counting
@@ -531,6 +598,54 @@ mod tests {
         let path = dir.path().join("lblogd.toml");
         std::fs::write(&path, text).unwrap();
         Config::load(&path)
+    }
+
+    #[test]
+    fn links_keep_the_files_order_not_the_alphabet() {
+        // The nav line follows this order, so losing it would silently
+        // reorder what the operator wrote. A BTreeMap here would sort
+        // "code" before "issues" and the test would catch it.
+        let config = load_from_str(&format!(
+            "{DEV_SAMPLE}\n[links]\nissues = \"https://example.org/i\"\n\
+             code = \"https://example.org/c\"\n"
+        ))
+        .expect("load");
+        let names: Vec<&str> = config
+            .links
+            .entries()
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(names, ["issues", "code"]);
+        assert_eq!(config.links.entries()[0].url, "https://example.org/i");
+    }
+
+    #[test]
+    fn pages_dir_and_links_are_optional() {
+        let config = load_from_str(DEV_SAMPLE).expect("load");
+        assert_eq!(config.pages_dir, None);
+        assert!(config.links.entries().is_empty());
+        let sources = config.content_sources();
+        assert_eq!(sources.pages_dir, None);
+        assert!(sources.links.is_empty());
+    }
+
+    #[test]
+    fn pages_dir_and_links_reach_the_content_sources() {
+        // A top-level key has to precede the first section header, or TOML
+        // reads it as a key of that section.
+        let config = load_from_str(&format!(
+            "pages_dir = \"/tmp/lblogd-dev/pages\"\n{DEV_SAMPLE}\n\
+             [links]\ncode = \"https://example.org/c\"\n"
+        ))
+        .expect("load");
+        let sources = config.content_sources();
+        assert_eq!(
+            sources.pages_dir,
+            Some(PathBuf::from("/tmp/lblogd-dev/pages"))
+        );
+        assert_eq!(sources.links.len(), 1);
+        assert_eq!(sources.links[0].name, "code");
     }
 
     #[test]

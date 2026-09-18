@@ -19,6 +19,20 @@ Images travel as files. Micron, the NomadNet page format, has no image construct
 
 The area is flat, and a requested name can carry no path separator, so no request can reach outside it. `max_file_bytes` bounds a single file, 10 MiB by default; anything larger is skipped with a line on standard error rather than served, because over a LoRa interface an unbounded transfer denies service to every other reader of the node for as long as it runs.
 
+A domain usually says more than "here are my posts". `pages_dir` holds Markdown pages that are not entries — a landing page, a page about the code — parsed in the post format and rendered like the about page: no date, no byline, never in the post index, never in the feed. Each is served at `/<name>` on the web and `/page/<name>.mu` on the mesh. The name `index` is special: with a `pages_dir/index.md` the site gets a landing page at `/` and `/page/index.mu`, and the post index moves down to `/blog` and `/page/blog.mu`. Without one nothing moves, so a configuration that names no `pages_dir` serves exactly what it served before any of this existed. Posts keep `/posts/<slug>` and the feed keeps `/feed.xml` on purpose: a feed entry is identified by its URL, so moving posts would show every entry again as new in every reader.
+
+The `[links]` section is the other half — names that point at something off this server:
+
+    [links]
+    code   = "https://codeberg.org/Lew_Palm/leviculum"
+    issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
+
+Each becomes `/<name>` on the web and `/page/<name>.mu` on the mesh, and the two answer differently because they must. The web answers **302**, not 301: a forge changes host, and a browser that cached a 301 would keep going to the old one long after the configuration said otherwise. The mesh answers with a short page naming the URL as text, because a NomadNet client cannot follow a web link at all. A name that is both a link and a page in `pages_dir` shows that page's text above the URL on the mesh, while the web still redirects. A link target must be an absolute `http://` or `https://` URL.
+
+Every page, on both sides, carries a small nav line: the landing page, the blog, then each page by name and each link in the order the configuration lists them. With neither pages nor links there is nothing to put in it and none is emitted.
+
+The web's top level and the mesh's `/page/<name>.mu` are shared namespaces, so page and link names are checked against one list: the routes `blog`, `posts`, `files` and `feed.xml`; `about`, when an about page is configured; every post's slug, which owns `/page/<slug>.mu`; and `index` for a link, since as a page name that *is* the landing page. A collision is a startup error naming both the offender and what already answers there; on a reload it is refused and the previous content keeps serving. Names follow the same slug rules as a post: plain lowercase ASCII letters, digits and hyphens. Unlike the file area, `pages_dir` is not optional by existence — the operator named it, so a directory that is not there is a startup error rather than a site that quietly lost its landing page.
+
 The web side either obtains its own certificate from Let's Encrypt, or runs plain behind a reverse proxy that terminates TLS. Note that the canonical page URL and the Atom feed are derived from the configured `domains` list even when certificate handling is switched off, so a deployment behind a proxy still has to set that list.
 
 ## COUNTING
@@ -41,7 +55,7 @@ The file is append-only and each record carries that day's whole running total, 
 :   Path to the TOML configuration file. Required.
 
 **--print-hash**
-:   Resolve the node's destination hash and the request paths it would serve — the pages first, then the files — print them, and exit without starting any server. Needs no running daemon, so it doubles as a dry run for publishing: the posts and the file area are read exactly as serve mode reads them, with the same errors.
+:   Resolve the node's destination hash and the request paths it would serve — the pages first, including the static pages and the links, then the files — print them, and exit without starting any server. Needs no running daemon, so it doubles as a dry run for publishing: the posts and the file area are read exactly as serve mode reads them, with the same errors.
 
 ## FILES
 
@@ -50,6 +64,9 @@ The file is append-only and each record carries that day's whole running total, 
 
 */var/lib/lblogd/posts/*
 :   Where the packaged service reads posts from: one Markdown file per post.
+
+*pages_dir*
+:   Static pages: one Markdown file per page, named by its file stem. Not configured by default. `index.md` in it becomes the landing page and moves the post index to `/blog`. Reloaded with the posts.
 
 */var/lib/lblogd/files/*
 :   The file area: pictures and other files a post references. Set with `files_dir`, which defaults to a `files` directory beside `posts_dir`. The directory need not exist; without it the blog simply serves no files. Reloaded with the posts.
@@ -63,7 +80,7 @@ The file is append-only and each record carries that day's whole running total, 
 ## SIGNALS
 
 **SIGHUP**
-:   Re-read the posts directory and the file area. The packaged service maps `systemctl reload lblogd` onto this.
+:   Re-read the posts directory, the static pages and the file area. The packaged service maps `systemctl reload lblogd` onto this.
 
 **SIGTERM**, **SIGINT**
 :   Stop. The open day's counts are written out first, so `systemctl stop` and `systemctl restart` do not lose the day so far.

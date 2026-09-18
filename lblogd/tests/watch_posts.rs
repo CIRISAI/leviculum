@@ -189,6 +189,38 @@ async fn a_picture_added_to_the_file_area_is_picked_up_without_a_signal() {
     .await;
 }
 
+#[tokio::test]
+async fn a_page_added_to_the_pages_directory_is_picked_up_without_a_signal() {
+    // The pages directory is watched like the posts directory and the file
+    // area: writing a page publishes it on both sides with no signal.
+    let posts_dir = tempfile::tempdir().expect("posts dir");
+    let pages_dir = tempfile::tempdir().expect("pages dir");
+    std::fs::write(posts_dir.path().join("erster.md"), "Erster Text.\n").expect("write post");
+
+    let sources = Sources::new(posts_dir.path()).with_pages(Some(pages_dir.path()));
+    let (reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial load");
+    let watcher = PostsWatcher::start_for(reloader.sources()).expect("establish watch");
+    tokio::spawn(watcher.run(Arc::new(reloader)));
+    assert!(!content
+        .borrow()
+        .served_paths()
+        .iter()
+        .any(|p| p == "/page/impressum.mu"));
+
+    std::fs::write(pages_dir.path().join("impressum.md"), "Angaben nach TMG.\n")
+        .expect("write page");
+    wait_until(&content, "the new page to appear", |paths| {
+        paths.iter().any(|p| p == "/page/impressum.mu")
+    })
+    .await;
+
+    std::fs::remove_file(pages_dir.path().join("impressum.md")).expect("remove page");
+    wait_until(&content, "the deleted page to disappear", |paths| {
+        !paths.iter().any(|p| p == "/page/impressum.mu")
+    })
+    .await;
+}
+
 /// Poll the snapshot itself until `want` holds. The sibling [`wait_until`]
 /// looks only at page paths, which is the wrong surface for the file area.
 async fn wait_for(

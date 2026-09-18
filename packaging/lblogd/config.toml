@@ -29,6 +29,20 @@ data_dir = "/var/lib/lblogd"
 # optional — a bare .md file is a valid post.
 posts_dir = "/var/lib/lblogd/posts"
 
+# Pages that are not blog entries: a landing page, an imprint, a page
+# about the code. One Markdown file per page, in the post format, named
+# by its file stem: `impressum.md` is served at /impressum on the web and
+# /page/impressum.mu on the mesh, with no date and no byline.
+#
+# `index.md` is the one special name. With it the site gets a landing
+# page at / and /page/index.mu, and the post index moves down to /blog
+# and /page/blog.mu. Without it nothing moves. Posts keep /posts/<slug>
+# either way, because a feed entry is identified by its URL.
+#
+# Unlike files_dir, a directory named here has to exist: a typo would
+# otherwise cost the landing page silently.
+# pages_dir = "/var/lib/lblogd/pages"
+
 # Files a post can reference: pictures, mostly. Served as /files/<name>
 # on the web and /file/<name> on the mesh, so `![Mast](mast.jpg)` in a
 # post works on both sides. The directory need not exist; without it the
@@ -44,7 +58,7 @@ posts_dir = "/var/lib/lblogd/posts"
 
 # Reload automatically whenever posts_dir changes, instead of only on
 # SIGHUP. Convenient while writing; a deployment that publishes
-# deliberately should leave it off. Covers files_dir too.
+# deliberately should leave it off. Covers files_dir and pages_dir too.
 watch_posts = false
 
 # What a reader sees. Everything here except the title is optional.
@@ -59,6 +73,17 @@ title = "A Leviculum blog"
 # about = "/etc/lblogd/about.md"
 # Replaces the built-in stylesheet.
 # css = "/etc/lblogd/style.css"
+
+# Names that point somewhere off this server. Each becomes a 302 on the
+# web and, on the mesh, a page naming the URL as text — a NomadNet client
+# cannot follow a web link, so the address to type elsewhere is the only
+# honest answer. 302 and not 301, because a forge changes host and a
+# browser caches a 301 for good. The order here is the order of the nav
+# line. A pages_dir file of the same name adds its text above the URL on
+# the mesh side, while the web still redirects.
+# [links]
+# code   = "https://codeberg.org/Lew_Palm/leviculum"
+# issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
 
 # How much was served, one line per day, appended to
 # /var/lib/lblogd/counts.log. On by default: it records request totals
