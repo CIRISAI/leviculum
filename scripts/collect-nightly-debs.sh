@@ -17,7 +17,14 @@
 # plus:
 #   git available on PATH
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
+#   .cargo-target-dir from scripts/deb-stamp.sh (where the artefacts are)
 #   .deb-version-<crate> files from scripts/deb-stamp.sh (ditto)
+#
+# Runs in debian:bookworm-slim in .woodpecker/nightly.yml, so it uses only
+# what that image has plus the git the step apt-installs: bash, coreutils
+# (cat/cp/head/ls/mkdir/rm/sha256sum), sed, tar, gzip, git. No cargo, no
+# python3, no curl, no jq. `scripts/test-collect-nightly-debs.sh` holds
+# that list by running this script with a PATH that has nothing else on it.
 #
 # Produces, for each of leviculum, lnomad, lblogd and lnpnd, and each of amd64
 # and arm64:
@@ -38,13 +45,26 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # cargo-deb and cargo both write below the cargo target directory, which is
-# only "$ROOT/target" while CARGO_TARGET_DIR is unset — ask instead of assume
-# (scripts/cargo-target-dir.sh). The lnflash bundle is NOT under it: that
-# tarball is the bundle script's own product and stays repo-relative.
-# shellcheck source-path=SCRIPTDIR/..
-# shellcheck source=scripts/cargo-target-dir.sh
-source "$ROOT/scripts/cargo-target-dir.sh"
-TARGET="$(cargo_target_dir "$ROOT")"
+# only "$ROOT/target" while CARGO_TARGET_DIR is unset. It is READ here, not
+# asked for: scripts/cargo-target-dir.sh answers by running `cargo metadata`,
+# and this script's only unattended run is the nightly's `package` step, which
+# is a debian:bookworm-slim container with no cargo in it. Asking there is what
+# broke every nightly from 2026-09-11 on ("cargo: command not found"). The
+# question is answered once, in the rust:bookworm step, by scripts/deb-stamp.sh
+# — the same write-it-forward that .build-id has always used.
+#
+# The lnflash bundle is NOT under the target directory: that tarball is the
+# bundle script's own product and stays repo-relative.
+[ -r .cargo-target-dir ] || {
+    echo "error: .cargo-target-dir missing — run scripts/deb-stamp.sh first" >&2
+    echo "       (it records where cargo writes, because this step has no cargo)" >&2
+    exit 1
+}
+TARGET="$(cat .cargo-target-dir)"
+if [ -z "$TARGET" ] || [ ! -d "$TARGET" ]; then
+    echo "error: .cargo-target-dir names '${TARGET}', which is not a directory" >&2
+    exit 1
+fi
 
 DIST="dist"
 rm -rf "$DIST"
@@ -58,8 +78,18 @@ collect_deb() {
     # cargo-deb emits one .deb per package and arch under
     # target/debian/. The filename embeds the full nightly version,
     # which changes each run — glob to the unique file.
+    #
+    # `|| true` because the failure branch below is otherwise unreachable:
+    # with `set -o pipefail` an unmatched glob makes `ls` exit 2, the
+    # assignment inherits it, and `set -e` kills the step there — status 2,
+    # not one word about which package was missing, in a log read the
+    # morning after. The check is what says so; it must be allowed to run.
     local src
-    src=$(ls -1 "$TARGET"/debian/"${pkg}"_*_"${arch_dash}".deb 2>/dev/null | head -n1)
+    # SC2012: the glob is the point — cargo-deb embeds the nightly version in
+    # the filename, and these are .deb names from our own build, not arbitrary
+    # user input. `find -print0` here would buy nothing and read worse.
+    # shellcheck disable=SC2012
+    src=$(ls -1 "$TARGET"/debian/"${pkg}"_*_"${arch_dash}".deb 2>/dev/null | head -n1 || true)
     if [ -z "${src:-}" ]; then
         echo "error: no ${pkg} .deb found for ${arch_dash} under $TARGET/debian/" >&2
         exit 1

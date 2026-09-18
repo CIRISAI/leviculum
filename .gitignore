@@ -4,8 +4,11 @@
 *.deb
 # Version stamp files written by scripts/deb-stamp.sh (build-deb* just
 # recipes and CI nightly). One build id per run, one Debian version per
-# package, since the packages are versioned independently.
+# package, since the packages are versioned independently, and one
+# cargo target directory, because the nightly's packaging step runs in an
+# image without a cargo to ask.
 /.build-id
+/.cargo-target-dir
 /.deb-version
 /.deb-version-*
 leviculum-nrf/target/

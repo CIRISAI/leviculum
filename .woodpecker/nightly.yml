@@ -214,13 +214,30 @@ steps:
   # the packages still build; letting it reach these two steps would let
   # any packaging commit replace the rolling release with a mid-day
   # build of whatever was just pushed.
+  #
+  # Being cron-only means NO GATE RUNS THEM. That is not a detail: the
+  # rolling release stood still from 2026-08-24 to 2026-09-18 while every
+  # push pipeline in those five weeks was green, because 03e2cb95 put a
+  # `cargo metadata` call on a path that runs down here, in an image with
+  # no cargo. What covers the two steps instead is a pair of fixture tests
+  # in `just fast` — `package-selftest` and `publish-selftest` — which run
+  # the real scripts against a fixture tree and a fake forge. A tool added
+  # to either script that this image does not have must be apt-installed on
+  # the step that uses it, and the fixture tests are what notice when it
+  # is not: their PATH is exactly the list below.
+  #
+  # What this step's script may use, and where each comes from:
+  #   bash, coreutils (cat cp head ls mkdir rm sha256sum), sed, tar, gzip
+  #                    — debian:bookworm-slim ships all of these
+  #   git              — apt-installed here, for `git archive HEAD`
+  #   cargo, python3   — NOT available and not used. Where cargo writes is
+  #                      read from .cargo-target-dir, which the rust:bookworm
+  #                      step above stamped, exactly as .build-id is.
   package:
     image: debian:bookworm-slim
     when:
       event: cron
     commands:
-      # git for the source tarball (`git archive HEAD`); coreutils for
-      # sha256sum is already in the slim image.
       - apt-get update && apt-get install -y git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/collect-nightly-debs.sh
@@ -233,9 +250,20 @@ steps:
       CODEBERG_TOKEN:
         from_secret: codeberg_token
     commands:
-      # git: publish-nightly.sh force-pushes the `nightly` tag to the
-      # built commit at the end — the API refresh path never moves the
-      # git ref, only release creation does.
+      # Same inventory discipline as `package` above. This script may use:
+      #   bash, coreutils (basename cat mktemp rm sha256sum), sed
+      #                    — debian:bookworm-slim ships all of these
+      #   curl, jq         — apt-installed here, for the forge API
+      #   git              — apt-installed here: publish-nightly.sh
+      #                      force-pushes the `nightly` tag to the built
+      #                      commit at the end, because the API refresh path
+      #                      never moves the git ref, only release creation
+      #                      does.
+      #   ca-certificates  — NOT in the slim image and never named here. It
+      #                      arrives as a Recommends of curl and of git, so
+      #                      an `--no-install-recommends` added to this line
+      #                      to save a few seconds would break every HTTPS
+      #                      request in the step.
       - apt-get update && apt-get install -y curl jq git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       - bash scripts/publish-nightly.sh

@@ -257,6 +257,8 @@ nrf-shellcheck:
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
         scripts/check-plain-clone.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
+        scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
+        scripts/deb-stamp.sh scripts/build-deb.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh
 
@@ -452,6 +454,24 @@ check-ci-pipeline:
 publish-selftest:
     @bash scripts/test-publish-nightly.sh
 
+# The nightly's OTHER cron-only step, driven against a fixture tree.
+#
+# `package` and `publish` both carry `when: event: cron`, so until this
+# recipe existed exactly half of that pair had coverage and the other half
+# had none. The rolling release stood still from 2026-08-24 to 2026-09-18
+# and every push pipeline over those five weeks was green: 03e2cb95 put a
+# `cargo metadata` call on the path of a step that runs in
+# debian:bookworm-slim, where there is no cargo, and nothing could say so
+# until 02:00 the next morning — where nobody read it.
+#
+# So the test's environment is its assertion: the real script runs with a
+# PATH holding only the tools that image ships plus the git the step
+# installs, no cargo and no python3 among them. ~0.5 s, no network, no
+# build. Red against the pre-fix script with exactly the pipeline's own
+# error ("cargo: command not found").
+package-selftest:
+    @bash scripts/test-collect-nightly-debs.sh
+
 # Codeberg #300: the tree must build from a clone without submodules, which is
 # what both forge pipelines and every contributor start from. An
 # `include_str!` into `reference/` is a compile-time dependency, so the crate
@@ -573,7 +593,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -10,6 +10,7 @@
 #
 # Produces, in the repo root:
 #   .build-id                    nightly.<UTCdate>-<sha7>
+#   .cargo-target-dir            absolute path cargo writes artefacts to
 #   .deb-version-<crate>         <crate version>~nightly.<UTCdate>.<sha7>
 #
 # and, under target/deb-changelog/:
@@ -38,6 +39,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# Where cargo writes. Asked here, once, and written forward exactly like
+# .build-id below, because the steps that CONSUME the artefacts cannot ask:
+# .woodpecker/nightly.yml runs `package` and `publish` in debian:bookworm-slim,
+# which has neither cargo nor the python3 that cargo-target-dir.sh parses the
+# metadata with. Asking there is what broke every nightly from 2026-09-11 on
+# ("cargo: command not found" in collect-nightly-debs.sh). This step runs in
+# rust:bookworm, so the question is answerable here and nowhere later.
+# shellcheck source-path=SCRIPTDIR/..
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$ROOT/scripts/cargo-target-dir.sh"
+CARGO_TARGET="$(cargo_target_dir "$ROOT")"
 
 # Every crate that ships a Debian package. Keyed by crate name, which is
 # what `cargo deb -p` and `cargo pkgid -p` both take; the resulting .deb
@@ -68,6 +81,7 @@ MAINTAINER="Lew Palm <lp@lew-palm.de>"
 CHANGELOG_DIR="target/deb-changelog"
 
 echo "nightly.${DATE}-${SHA7}" >.build-id
+echo "$CARGO_TARGET" >.cargo-target-dir
 
 for crate in "${CRATES[@]}"; do
     # `cargo pkgid` resolves the version through cargo itself rather than
@@ -94,6 +108,7 @@ EOF
 done
 
 echo "[deb-stamp] build-id=$(cat .build-id)"
+echo "[deb-stamp] cargo-target-dir=$(cat .cargo-target-dir)"
 for crate in "${CRATES[@]}"; do
     echo "[deb-stamp] ${crate}=$(cat ".deb-version-${crate}")"
 done
