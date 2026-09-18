@@ -3509,6 +3509,195 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 
+    /// Two peers released by the same event must not key their radios
+    /// together (Codeberg #347).
+    ///
+    /// This is the shape `lora_ratchet_basic` was RED in on 2026-09-17
+    /// 14:16 (bench log `hw-vollauf4-660b41b4.log`). The selftest's ratchet
+    /// phase hands one packet to each end of the pair and sleeps 200 ms, ten
+    /// times over, so both ends' frames reach their modems inside the same
+    /// millisecond. The interface then still held a bypass — a
+    /// `high_priority` frame at the head of an idle queue keyed the radio on
+    /// arrival — so neither end drew anything, and the two stayed locked for
+    /// all ten rounds:
+    ///
+    /// ```text
+    /// alpha 14:16:53.107046  beta 14:16:53.107050
+    /// alpha 14:16:53.308862  beta 14:16:53.308861
+    /// ...   ten pairs, median gap 0.12 ms, 20 frames handed to the radios
+    /// ```
+    ///
+    /// Of those 20 frames, 0 were received. The same cell nine hours
+    /// earlier had its frames parked behind an announce's pending wait,
+    /// left as two bursts 1.7 s apart at a median gap of 59.6 ms, and
+    /// delivered 20 of 20. Across the three ratchet cells of that run the
+    /// separation is the whole distribution: phase-locked 27 of 60
+    /// delivered, de-phased 59 of 60.
+    ///
+    /// What is pinned here is the property the bypass destroyed, and it is
+    /// a property of the PAIR, which no single-interface test can see:
+    ///
+    /// * each end serves its own policy's draw, so the two frames reach the
+    ///   radios at least one jitter slot apart;
+    /// * the draws are per-interface entropy, not a constant. A constant
+    ///   seed leaves every assertion above passing — both ends still "wait"
+    ///   — while putting every node in the mesh on the same draw, which is
+    ///   the 2026-09-17 air again by another route.
+    ///
+    /// The cell's own PHY and paused time, so the figures are equalities.
+    #[tokio::test(start_paused = true)]
+    async fn two_peers_released_by_the_same_event_do_not_key_together() {
+        // The ratchet cells' radio block: 12 symbol times at SF7/BW62.5k is
+        // a 24 ms slot, DIFS is two of them, the draw adds 0..=13 more.
+        const BW: u32 = 62_500;
+        const SF: u8 = 7;
+        const CR: u8 = 5;
+        let slot = jitter_slot_ms(BW, SF, CR);
+
+        // Two interfaces are two radios, and two radios are two seeds.
+        const SEED_A: u32 = 0x5EED_0347;
+        const SEED_B: u32 = 0x5EED_0408;
+        let mut oracle_a = ChannelAccess::new(SEED_A);
+        oracle_a.set_phy(BW, SF, CR);
+        let mut oracle_b = ChannelAccess::new(SEED_B);
+        oracle_b.set_phy(BW, SF, CR);
+        let wait_a = oracle_a.acquisition_jitter_ms();
+        let wait_b = oracle_b.acquisition_jitter_ms();
+        assert!(
+            wait_a >= JITTER_DIFS_SLOTS * slot && wait_b >= JITTER_DIFS_SLOTS * slot,
+            "both ends must owe at least DIFS on this PHY, got {wait_a}ms and {wait_b}ms"
+        );
+
+        let (port_a, mut peer_a) = tokio::io::duplex(8192);
+        let (port_b, mut peer_b) = tokio::io::duplex(8192);
+        let (incoming_tx_a, _incoming_rx_a) = mpsc::channel::<IncomingPacket>(16);
+        let (incoming_tx_b, _incoming_rx_b) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx_a, outgoing_rx_a) = mpsc::channel::<OutgoingPacket>(16);
+        let (outgoing_tx_b, outgoing_rx_b) = mpsc::channel::<OutgoingPacket>(16);
+
+        let mut access_a = ChannelAccess::new(SEED_A);
+        access_a.set_phy(BW, SF, CR);
+        let counters_a = Arc::new(InterfaceCounters::new());
+        let task_a = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_peer_a".to_string(),
+                port_a,
+                incoming_tx_a,
+                outgoing_rx_a,
+                counters_a,
+                /* flow_control = */ false,
+                access_a,
+                BW,
+                SF,
+                CR,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        let mut access_b = ChannelAccess::new(SEED_B);
+        access_b.set_phy(BW, SF, CR);
+        let counters_b = Arc::new(InterfaceCounters::new());
+        let task_b = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_peer_b".to_string(),
+                port_b,
+                incoming_tx_b,
+                outgoing_rx_b,
+                counters_b,
+                /* flow_control = */ false,
+                access_b,
+                BW,
+                SF,
+                CR,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        /// When the peer end of a modem's serial line sees its first data
+        /// frame, in ms since `start`.
+        async fn keyed_at<S>(peer: &mut S, start: tokio::time::Instant) -> u64
+        where
+            S: tokio::io::AsyncRead + Unpin,
+        {
+            let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
+            let mut buf = [0u8; 256];
+            loop {
+                let n = tokio::time::timeout(Duration::from_secs(30), peer.read(&mut buf))
+                    .await
+                    .expect("the io task must hand its frame to the modem")
+                    .expect("read from duplex");
+                for f in deframer.process(&buf[..n]) {
+                    if let KissDeframeResult::Frame { command, .. } = f {
+                        if command == rnode::CMD_DATA {
+                            return start.elapsed().as_millis() as u64;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The released-by-the-same-event moment: one directed packet down
+        // each end, nothing between them. On the air this was the selftest's
+        // `send_single_msg(ep_a)` / `send_single_msg(ep_b)` pair.
+        let start = tokio::time::Instant::now();
+        let directed = || OutgoingPacket {
+            peer: None,
+            data: b"ratchet".to_vec(),
+            high_priority: true,
+        };
+        outgoing_tx_a
+            .send(directed())
+            .await
+            .expect("send to peer a");
+        outgoing_tx_b
+            .send(directed())
+            .await
+            .expect("send to peer b");
+
+        let (at_a, at_b) = tokio::join!(keyed_at(&mut peer_a, start), keyed_at(&mut peer_b, start));
+
+        assert_eq!(
+            at_a, wait_a,
+            "peer a keyed at {at_a}ms, not the {wait_a}ms its own policy drew"
+        );
+        assert_eq!(
+            at_b, wait_b,
+            "peer b keyed at {at_b}ms, not the {wait_b}ms its own policy drew"
+        );
+        assert!(
+            at_a.abs_diff(at_b) >= slot,
+            "two peers released by the same event reached their radios \
+             {}ms apart, inside one {slot}ms slot — that is the phase lock \
+             the draw exists to break, and on 2026-09-17 it cost every \
+             frame of the exchange",
+            at_a.abs_diff(at_b)
+        );
+
+        // The separation above must be a property of production, not of two
+        // seeds chosen to differ: `channel_access_for` draws each
+        // interface's seed from the host's entropy. Thirty-two instances
+        // landing on one draw has probability 14^-31 — below anything this
+        // suite can observe — so a failure here means the seed stopped
+        // being entropy, not that the dice were unkind.
+        let draws: std::collections::BTreeSet<u64> = (0..32)
+            .map(|_| channel_access_for(BW, SF, CR).acquisition_jitter_ms())
+            .collect();
+        assert!(
+            draws.len() > 1,
+            "every interface on this host drew the same wait, {:?}ms: the \
+             per-interface seed is no longer entropy, so every node keys \
+             together again",
+            draws
+        );
+
+        drop(outgoing_tx_a);
+        drop(outgoing_tx_b);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task_a).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), task_b).await;
+    }
+
     /// Reproduce the flow-control startup deadlock without hardware.
     ///
     /// With `flow_control = true`, the io task historically initialised
