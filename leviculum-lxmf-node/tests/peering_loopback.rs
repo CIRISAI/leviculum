@@ -236,18 +236,41 @@ async fn two_nodes_autopeer_and_sync_a_stored_message() {
 /// takes the propagation role *after* a message was already stored still
 /// receives it (leviculum#211).
 ///
-/// This is a deliberate deviation from the reference, and it is what makes
-/// the periculum late-join cell's mixed pair asymmetric. `LXMRouter.peer`
-/// builds a fresh `LXMPeer` with an empty unhandled set
-/// (`reference/LXMF/LXMF/LXMRouter.py:2034`), and only
-/// `flush_peer_distribution_queue` (`:2472`) ever fills it — at *receive*
-/// time, for the peers that existed then. A Python node therefore never
-/// re-offers a backlog to a peer that appeared afterwards. Our peer holds a
-/// cursor into the store's append order instead, and a new peer starts at
+/// The timing this cell builds — the upload lands while A holds no peer at
+/// all — is one the reference agrees on, so the deviation is the paragraph
+/// after this one, not this one. `LXMRouter.lxmf_propagation` queues every
+/// message it stores for peer distribution unconditionally, by
+/// `enqueue_peer_distribution` (reference/LXMF/LXMF/LXMRouter.py:2519), and
+/// that queue's only drain, `flush_peer_distribution_queue` (`:2472`), is
+/// reached solely through
+/// `flush_queues` (reference/LXMF/LXMF/LXMRouter.py:924), which is gated on
+/// `if len(self.peers) > 0`. With zero peers at ingest the entry is
+/// therefore not mapped at receive time at all: it waits in
+/// `peer_distribution_queue` until a peer exists, and the first flush after
+/// that hands it to the new peer —
+/// `queue_unhandled_message` (reference/LXMF/LXMF/LXMRouter.py:2485).
+/// Measured against `reference/LXMF` at `795fdaa` on 2026-09-17, a Python
+/// node in this state does re-offer the backlog.
+///
+/// The deliberate deviation is the other timing, and it is what makes the
+/// periculum late-join pair asymmetric on the mapped side. A Python node
+/// hands a late peer only what is still sitting in `peer_distribution_queue`
+/// — the entries ingested while it had no peer at all; anything already
+/// mapped at an earlier flush is never re-offered. The flush pops that
+/// queue empty
+/// (`peer_distribution_queue`, reference/LXMF/LXMF/LXMRouter.py:2475),
+/// `LXMRouter.peer` builds a fresh
+/// `LXMPeer` (reference/LXMF/LXMF/LXMRouter.py:2034) with an empty unhandled
+/// set, and `LXMPeer.sync` offers exactly that set — its own
+/// `unhandled_messages` (reference/LXMF/LXMF/LXMPeer.py:310). Our peer holds
+/// a cursor into the store's append order instead, and a new peer starts at
 /// `cursor: 0` (`leviculum-lxmf/src/peering.rs`), so everything live is
-/// above it and the first round offers the lot. Wire-legal (the offer is
-/// answered out of store membership, `LXMRouter.py:2318`), self-limiting,
-/// and strictly more delivery — the deviation rule's three clauses.
+/// above it and the first round offers the lot, mapped or not.
+/// `lxmf_pn_late_join_mapped_control.toml` pins the reference on that side;
+/// `lxmf_pn_late_join_control.toml` pins the zero-peer side this cell uses,
+/// where the two stacks agree. Wire-legal (the offer is answered out of
+/// store membership, `LXMRouter.py:2318`), self-limiting, and strictly more
+/// delivery — the deviation rule's three clauses.
 #[tokio::test]
 async fn a_node_that_peers_late_is_offered_the_backlog_it_missed() {
     let mut node_a = Helper::start(Setup {
@@ -318,8 +341,9 @@ async fn a_node_that_peers_late_is_offered_the_backlog_it_missed() {
         helpers[0].events
     );
     // The premise of the cell: at upload time A had nobody to distribute
-    // to. A reference router would have had nothing to queue, and would
-    // never revisit this message for a peer that arrived later.
+    // to. A reference router queues the entry all the same and hands it to
+    // the peer that arrives later, so this timing is the agreeing one; what
+    // our cursor adds is the already-mapped case the doc comment names.
     helpers[0].command("pn_peers");
     let alone = pump4(&mut helpers, Duration::from_secs(10), |h| {
         last_peer_count(h[0]) == Some("0")
