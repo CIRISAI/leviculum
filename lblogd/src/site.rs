@@ -49,7 +49,7 @@ pub struct Reserved {
 /// Every unconditionally reserved name, in one place.
 ///
 /// Two more are reserved conditionally and are checked alongside these in
-/// [`taken_by`]: [`ABOUT_NAME`] when an about page is configured, and every
+/// `Reservations::taken_by`: [`ABOUT_NAME`] when an about page is configured, and every
 /// post's slug, which owns `/page/<slug>.mu` on the mesh. [`LANDING_NAME`] is
 /// reserved for links but not for pages, where it *is* the landing page.
 pub const RESERVED: &[Reserved] = &[

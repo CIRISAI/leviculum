@@ -988,7 +988,7 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
 /// `iface = %Scalar(&self.name)` renders the name as the single token the
 /// whitespace `key=value` parser needs, which is where that belongs: the
 /// site knows the value is a name, the sink can only guess from the field
-/// name (see [`is_name_field`], and note that a field like `next_hop`
+/// name (see `is_name_field`, and note that a field like `next_hop`
 /// carries an interface name at one site and a hash at another, so the
 /// guess cannot be made complete).
 ///
@@ -996,7 +996,7 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
 /// `jldiff`, the field-violation detector, and the `awk`/`grep` one-liners
 /// the format exists for — splits on whitespace, so a quoted value with a
 /// space would still be several tokens to all of them.  The mapping is the
-/// same one [`sanitize_scalar`] applies as the sink's last-resort rescue,
+/// same one `sanitize_scalar` applies as the sink's last-resort rescue,
 /// so a value reads identically whichever produced it.
 pub struct Scalar<'a>(pub &'a str);
 
