@@ -8001,17 +8001,51 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         hops: u8,
     ) -> bool {
         let queue = self.interface_held_announces.entry(iface).or_default();
-        if queue.contains_key(&dest_hash) || queue.len() < MAX_HELD_ANNOUNCES {
-            queue.insert(
-                dest_hash,
-                HeldAnnounce {
-                    raw: raw.to_vec(),
-                    hops,
-                },
-            );
-            true
-        } else {
-            false
+        match queue.get(&dest_hash) {
+            // Already held: keep the copy that names the SHORTER route.
+            //
+            // Python overwrites unconditionally (Interface.py:272-273), and on a
+            // multi-peer carrier that discards information the release pass is
+            // about to ask for: `process_held_announces` grades held announces by
+            // hop count, but only one copy per destination survives to be graded.
+            // A neighbour's announce reaches us directly AND round the mesh, and
+            // whichever lands last wins the slot — so a relayed copy arriving
+            // second installs the long route for a direct neighbour, and it stays
+            // installed until that destination announces again (ble_mesh_formation_solar,
+            // 2026-09-18: probe learned at 3 hops via the far board while the
+            // Solar Node sat on its own BLE link, one leg away).
+            //
+            // Deviation rule: nothing here touches the wire — the bytes we
+            // release are a copy we genuinely received — and the end state is the
+            // path any node would have learned had the burst never held it, so
+            // semantics are the ones a peer expects. It measurably improves
+            // Priority 1: the packets that follow take one carrier crossing
+            // instead of two and stop depending on a third node staying up.
+            //
+            // A tie takes the newest: at equal route quality the later announce
+            // is the fresher statement (newer ratchet, newer app data).
+            Some(existing) if hops > existing.hops => true,
+            Some(_) => {
+                queue.insert(
+                    dest_hash,
+                    HeldAnnounce {
+                        raw: raw.to_vec(),
+                        hops,
+                    },
+                );
+                true
+            }
+            None if queue.len() < MAX_HELD_ANNOUNCES => {
+                queue.insert(
+                    dest_hash,
+                    HeldAnnounce {
+                        raw: raw.to_vec(),
+                        hops,
+                    },
+                );
+                true
+            }
+            None => false,
         }
     }
 
@@ -26876,10 +26910,68 @@ mod tests {
         }
 
         #[test]
+        fn held_announce_keeps_the_lowest_hop_copy_of_a_destination() {
+            // The rig red of 2026-09-18 (ble_mesh_formation_solar, full hardware
+            // run): the host held the Solar Node's probe announce while the
+            // ingress burst was active. The DIRECT copy landed first — 2 hops
+            // over the host's own BLE link to that board, the only link it had
+            // up at 14:39:48.675 — and relayed copies at 3 hops landed after it.
+            // The queue kept the newest, so the release installed "3 hops via
+            // the T114" for a neighbour one BLE leg away, and the cell's
+            // `expect_hops = 2` went red on a path the mesh never had.
+            //
+            // The release pass already grades held announces by hop count
+            // (Python Interface.py:241-246); a per-destination slot that keeps
+            // the last arrival instead of the best one throws that grading away
+            // before it runs.
+            let mut transport = make_transport();
+            flood_incoming_announce(&mut transport, NET_IFACE, ANNOUNCE_FREQ_SAMPLES, 100);
+
+            // The direct copy arrives first and is held.
+            let (raw, dest) = make_announce_raw_hops(2);
+            let packet = Packet::unpack(&raw).unwrap();
+            transport
+                .handle_announce(packet, NET_IFACE, &raw, false, false)
+                .unwrap();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                1,
+                "the direct copy must be held, not dropped"
+            );
+
+            // The same announce comes back round through a relay, one hop longer.
+            transport.clock.advance(50);
+            let mut relayed = Packet::unpack(&raw).unwrap();
+            relayed.hops = 3;
+            transport
+                .handle_announce(relayed, NET_IFACE, &raw, false, false)
+                .unwrap();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                1,
+                "both copies name one destination, so one slot holds them"
+            );
+
+            // Release it. What lands in the path table must be the short route.
+            transport.clock.advance(IC_BURST_PENALTY_MS + 1000);
+            transport.poll();
+            assert_eq!(
+                held_count(&transport, NET_IFACE),
+                0,
+                "the held announce must be released once the burst calms"
+            );
+            assert_eq!(
+                transport.storage.get_path(&dest).map(|p| p.hops),
+                Some(2),
+                "the release must install the shortest copy the hold window saw"
+            );
+        }
+
+        #[test]
         fn hold_announce_caps_at_max_held_announces() {
             // At MAX_HELD_ANNOUNCES the queue rejects a NEW destination (Python
-            // Interface.py:231 falls through and drops it) but still overwrites an
-            // already-held destination with the newest packet (Interface.py:230).
+            // Interface.py:231 falls through and drops it) but still accepts an
+            // update for an already-held destination (Interface.py:230).
             let mut transport = make_transport();
             let mut dests = Vec::with_capacity(MAX_HELD_ANNOUNCES);
             for _ in 0..MAX_HELD_ANNOUNCES {
@@ -26904,16 +26996,23 @@ mod tests {
                 "the queue must not grow past the cap"
             );
 
-            // An already-held destination still overwrites (no growth).
+            // An already-held destination is still accepted at the cap and does
+            // not grow the queue. WHICH copy the slot keeps is the subject of
+            // held_announce_keeps_the_lowest_hop_copy_of_a_destination; all this
+            // one claims is that the cap does not reject the update.
             let (raw0, dest0) = &dests[0];
             assert!(
-                transport.hold_announce(NET_IFACE, *dest0, raw0, 3),
+                transport.hold_announce(NET_IFACE, *dest0, raw0, 1),
                 "an already-held destination must still be updatable at the cap"
+            );
+            assert!(
+                transport.hold_announce(NET_IFACE, *dest0, raw0, 3),
+                "a longer-route copy of a held destination is accepted, not rejected"
             );
             assert_eq!(
                 held_count(&transport, NET_IFACE),
                 MAX_HELD_ANNOUNCES,
-                "overwriting a held destination must not grow the queue"
+                "updating a held destination must not grow the queue"
             );
         }
     }
