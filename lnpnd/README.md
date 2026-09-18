@@ -87,6 +87,13 @@ mesh address, the same file format Python's RNS uses), the optional `allowed`
 and `ignored` hash lists, and `storage/` with the message store, peer table
 and the daemon's own received mail.
 
+A start that finds no `identity` creates one, logs `PN_IDENTITY_CREATED` with
+the new destination hash before it joins the shared instance, and never
+touches an identity that is already there. The Debian package therefore
+enables the service without starting it: copy an existing node's identity to
+`/etc/lnpnd/identity` first if this host is continuing that node, then
+`systemctl start lnpnd`.
+
 ## Documentation
 
 The manual page, lnpnd(1), is the complete reference: every option, the

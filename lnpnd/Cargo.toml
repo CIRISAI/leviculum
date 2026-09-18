@@ -33,8 +33,14 @@ and vice versa), and carries its own LXMF mailbox with an on_inbound
 hook.
 
 The package installs lnpnd as a systemd service under a dedicated
-'lnpnd' user. It attaches to a running Reticulum shared instance --
-lnsd from the 'leviculum' package, or the Python rnsd.
+'lnpnd' user. The unit is enabled but not started by the installation:
+a node's identity is its address on the mesh, and starting the daemon
+before the operator has placed one would mint a throwaway address and
+announce it. Put an existing identity at /etc/lnpnd/identity, or accept
+that the first start creates one, then start the service.
+
+lnpnd attaches to a running Reticulum shared instance -- lnsd from the
+'leviculum' package, or the Python rnsd.
 """
 section = "net"
 priority = "optional"
@@ -71,7 +77,23 @@ maintainer-scripts = "../packaging/lnpnd/"
 unit-name = "lnpnd"
 unit-scripts = "../packaging/lnpnd/"
 enable = true
-start = true
+# Enabled but NOT started by the installation, which is cargo-deb's
+# rendering of `dh_installsystemd --no-start`. On 2026-09-17 installing
+# this package started the daemon straight out of dpkg; with no identity
+# and no config in place yet it minted an address of its own and
+# announced it on the public network for 33 seconds. Nobody had had a
+# chance to put the node's real identity at /etc/lnpnd/identity, because
+# the package had not finished installing.
+#
+# `start = false` together with `restart-after-upgrade = true` is exactly
+# the pair of behaviours this needs (measured against cargo-deb 3.7.0, on
+# the generated postinst): a fresh install ($2 empty) only runs
+# `daemon-reload`, while an upgrade ($2 set) runs `try-restart`, which
+# brings a node that was running back and leaves a stopped one stopped.
+# Asserted on the built .deb in scripts/verify-deb-packaging.sh, and on
+# this file in lnpnd/tests/first_start_identity.rs, because the packaging
+# script is deliberately outside every test tier.
+start = false
 restart-after-upgrade = true
 
 [dependencies]

@@ -80,8 +80,13 @@ fn an_lxmd_identity_keeps_the_node_address() {
         "both daemons keep the identity at <configdir>/identity"
     );
 
-    let identity = lnpnd::identity::load_or_create(&identity_path)
+    let (identity, provenance) = lnpnd::identity::load_or_create(&identity_path)
         .expect("lnpnd loads an identity Python wrote");
+    assert_eq!(
+        provenance,
+        lnpnd::identity::Provenance::Loaded,
+        "a file that is already there is loaded, never re-minted"
+    );
 
     assert_eq!(
         hash_of(&identity, PROPAGATION_ASPECT),
@@ -97,8 +102,9 @@ fn an_lxmd_identity_keeps_the_node_address() {
     // load_or_create must not have rewritten the file it found: a re-mint
     // here would strand every client, and it is the one failure mode this
     // whole test exists to rule out.
-    let reloaded =
+    let (reloaded, provenance) =
         lnpnd::identity::load_or_create(&identity_path).expect("a second load is a load");
+    assert_eq!(provenance, lnpnd::identity::Provenance::Loaded);
     assert_eq!(
         hash_of(&reloaded, PROPAGATION_ASPECT),
         propagation_hex,

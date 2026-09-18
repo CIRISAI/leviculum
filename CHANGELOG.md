@@ -169,6 +169,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Installing the `lnpnd` package no longer puts a new node on the air.
+  `dpkg` used to start the unit as part of the installation, at a moment
+  when neither an identity nor a configuration could possibly be in
+  place: on the production host, 2026-09-17, the daemon minted an
+  identity of its own and announced that address on the public network
+  for 33 seconds. Worse than the announce is what it left behind — an
+  operator installing the package in order to take over an existing
+  node's identity now finds a foreign one already written, and missing
+  that costs every peer of the old node its address.
+
+  The unit is still enabled, so the node comes back after a reboot, but
+  only a start the operator issues themselves can reach the network
+  (cargo-deb's `systemd-units.start = false`, which is `dh_installsystemd
+  --no-start`). An upgrade over a running node still restarts it and
+  mints nothing.
+
+  The daemon keeps minting on a genuine first start — refusing would
+  strand the operator of a new node, since copying a file is deliberately
+  the only import path and there is no minting tool — but it can no
+  longer do so quietly: the mint logs `PN_IDENTITY_CREATED` with the
+  destination hash it just created, and it does that before the daemon
+  joins the shared instance, so no address can be announced without its
+  creation standing in the log.
+
 - The mvr proxies bind their listener before spawning the thread that
   serves it: the scenario starts its client node the moment the helper
   returns, and a connect that arrives before the new thread has been

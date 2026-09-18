@@ -317,6 +317,27 @@ echo
 
 check_package lnpnd lnpnd lnpnd
 contains "$CONTENTS" "lnpnd.service" "ships the lnpnd systemd unit"
+# Installing must not put a new node on the air. On 2026-09-17 it did:
+# dpkg started the daemon, which had neither identity nor config yet, so
+# it minted an address and announced it for 33 seconds. The unit stays
+# enabled — the operator wants it up after a reboot — but only a start
+# they issue themselves, after placing the node's identity, may reach the
+# network. cargo-deb renders `start = false` as dh's "restartnostart"
+# fragment, so the three assertions below are the three halves of that
+# one decision: no start on a fresh install, still enabled, and on an
+# upgrade a try-restart, which brings a running node back and leaves a
+# stopped one alone.
+LNPND_POSTINST="$(cat "$CTRL_DIR/postinst")"
+case "$LNPND_POSTINST" in
+*"_dh_action=start"* | *"deb-systemd-invoke start lnpnd.service"* | \
+    *"deb-systemd-invoke restart lnpnd.service"*)
+    fail "postinst starts lnpnd on install (systemd-units start must be false)" ;;
+*) pass "postinst does not start lnpnd on install" ;;
+esac
+contains "$LNPND_POSTINST" "deb-systemd-helper enable lnpnd.service" \
+    "postinst still enables the unit"
+contains "$LNPND_POSTINST" "deb-systemd-invoke try-restart lnpnd.service" \
+    "postinst try-restarts on upgrade, so a running node survives one"
 # No conffile on purpose: the package ships no /etc/lnpnd/config — the
 # daemon writes it on first start, exactly as lxmd does in its config
 # directory, and postinst only provisions the (daemon-owned) directory.

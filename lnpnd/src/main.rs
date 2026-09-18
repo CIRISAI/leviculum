@@ -269,8 +269,11 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
         eprintln!("Identity file not found in specified configuration directory, exiting now");
         return ExitCode::from(202);
     }
+    // The file was proved to exist above, so this is a load: the client
+    // verbs never mint. Querying with an address the remote has never
+    // allowed would fail with `access denied` and no hint why.
     let identity = match lnpnd::identity::load_or_create(&identity_path) {
-        Ok(identity) => identity,
+        Ok((identity, _)) => identity,
         Err(error) => {
             eprintln!("Could not load the Primary Identity from {error}");
             return ExitCode::from(4);
@@ -533,8 +536,11 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         tracing::warn!("lnpnd: config [{section}] {key} is accepted but not acted on: {why}");
     }
 
+    // Before the node is built, so before anything can reach the air: a
+    // first start that mints an address says so here, and a start that
+    // finds one leaves it exactly as it was (`lnpnd::identity`).
     let identity = match lnpnd::identity::load_or_create(&config_dir.join("identity")) {
-        Ok(identity) => identity,
+        Ok((identity, _)) => identity,
         Err(error) => return failure(error),
     };
     let store = match FilePropagationStore::open(

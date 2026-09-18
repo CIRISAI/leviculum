@@ -101,7 +101,7 @@ The config directory keeps lxmd's layout:
 :   The configuration file. Created from the example on first daemon start if missing.
 
 *identity*
-:   The node's identity -- its mesh address. Created on first start, never replaced automatically; the same file format Python's RNS uses, so an identity can move between daemons.
+:   The node's identity -- its mesh address. Never replaced automatically; the same file format Python's RNS uses, so an identity can move between daemons. A start that finds no identity here creates one and says so before it joins the shared instance, logging a `PN_IDENTITY_CREATED` line with the new propagation destination hash. That line is the only notice a new address exists, so a node that is meant to continue an existing one must have that node's identity file copied here *before* its first start.
 
 *allowed*
 :   With `auth_required = yes`: identity hashes (one hex hash per line) allowed to drain mailboxes from this node.
@@ -112,7 +112,7 @@ The config directory keeps lxmd's layout:
 *storage/*
 :   The data directory (unless **--data-dir** moves it): `messagestore/` (the propagation store), `peers/` (the peer table), `messages/` (the daemon's own received mail, one packed-container file per message, readable by the reference's `LXMessage.unpack_from_file`), and the node's client state.
 
-The Debian package installs the config directory at */etc/lnpnd* and the data directory at */var/lib/lnpnd*, both owned by the `lnpnd` service user.
+The Debian package installs the config directory at */etc/lnpnd* and the data directory at */var/lib/lnpnd*, both owned by the `lnpnd` service user. It enables the unit but does not start it: at install time neither an identity nor a configuration is in place, and a daemon started then would mint an address of its own and announce it. Place the identity, then `systemctl start lnpnd`. An upgrade over a running node restarts it and mints nothing; an upgrade over a stopped one leaves it stopped.
 
 ## EVENTS
 

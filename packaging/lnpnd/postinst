@@ -35,10 +35,26 @@ case "$1" in
         chown -R lnpnd:lnpnd "$CONF_DIR" "$DATA_DIR"
         chmod 0750 "$CONF_DIR" "$DATA_DIR"
 
+        # First install only. The unit is enabled but deliberately not
+        # started (see lnpnd/Cargo.toml, systemd-units.start = false), so
+        # this text is the whole of what the operator is told before
+        # anything of theirs goes on the air. The identity paragraph
+        # comes first for that reason: it is the only step that cannot be
+        # undone afterwards.
         if [ -z "$2" ]; then
             echo ""
-            echo "lnpnd: the propagation node needs a running Reticulum daemon"
-            echo "(lnsd from the 'leviculum' package, or the Python rnsd) using"
+            echo "lnpnd: the service is enabled but NOT started, because the"
+            echo "node's identity file decides its address on the mesh."
+            echo ""
+            echo "  * Continuing an existing node? Copy its identity first:"
+            echo "        install -o lnpnd -g lnpnd -m 600 <identity> /etc/lnpnd/identity"
+            echo "  * A brand-new node? Nothing to do — the first start"
+            echo "    creates an identity and logs the new destination hash."
+            echo ""
+            echo "Then:  sudo systemctl start lnpnd"
+            echo ""
+            echo "The propagation node needs a running Reticulum daemon (lnsd"
+            echo "from the 'leviculum' package, or the Python rnsd) using"
             echo "instance_name 'default'. Once both run, print the node's"
             echo "destination hash and status with:"
             echo "    sudo -u lnpnd lnpnd --status --config /etc/lnpnd"
