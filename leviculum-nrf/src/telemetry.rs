@@ -1892,6 +1892,16 @@ pub fn announce_app_data(identity: &Identity) -> Vec<u8> {
 /// `LxmfNode::delivery_destination_without_inbox`; the discard it leaves
 /// behind is named on a `[TELEMETRY] discarded` line rather than happening
 /// in silence.
+///
+/// The same constructor also switches `accepts_links` off, and that half
+/// matters more here: an inbound link to this destination used to be
+/// accepted and proved, and then served by nobody — `LinkDataReceived` is
+/// read only by the propagation role's own destination (`crate::pn`), a
+/// link's resource strategy is `AcceptNone`, and the link path never
+/// reaches the `[TELEMETRY] discarded` line above. A peer holds a link
+/// open and keeps writing into it, so that swallowed a conversation, not a
+/// packet. It is now refused, exactly as the link cap refuses one when the
+/// table is full.
 pub fn register_delivery_destination<R, C, S>(
     node: &mut NodeCore<R, C, S>,
 ) -> Option<DestinationHash>

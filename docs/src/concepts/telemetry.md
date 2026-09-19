@@ -490,9 +490,9 @@ their index stamps (there is no re-index).
   unverifiable and the pin, if it appears at all, is a hex string.
 - **No proof for a message it cannot keep.** That announce is read by
   every peer as the claim that messages sent to this hash will be
-  received, and a board cannot keep it: it has no inbox, no message
-  store and no links, and the only reader of what arrives is the
-  telemetry reporter, which keeps a request and discards the rest. So
+  received, and a board cannot keep it: it has no inbox and no message
+  store, and the only reader of what arrives is the telemetry
+  reporter, which keeps a request and discards the rest. So
   the board's delivery destination carries `ProofStrategy::None`
   (`LxmfNode::delivery_destination_without_inbox`, whose only caller is
   `register_delivery_destination` in `leviculum-nrf/src/telemetry.rs`)
@@ -502,6 +502,22 @@ their index stamps (there is no re-index).
   for every arrival, so a Python peer's LXMF marked a message DELIVERED
   and the bytes were dropped without a line. A discard is now always
   named (`[TELEMETRY] discarded ... reason=`).
+- **No link either.** The same destination used to ACCEPT an inbound
+  link — `accepts_links` is `true` on a fresh `Destination`, as
+  Python-RNS has it — and then serve nobody: `LinkDataReceived` is read
+  only by the propagation role's own destination
+  (`leviculum-nrf/src/pn.rs`), a link's resource strategy defaults to
+  `AcceptNone`, and the link path never reaches the `[TELEMETRY]
+  discarded` line above. A link is a session, so that swallowed a
+  conversation rather than a packet, on every nRF board — the three
+  binaries register this destination whether a telemetry target is
+  configured or not. `delivery_destination_without_inbox` now switches
+  `accepts_links` off as well: the peer gets no link proof, which is
+  the same thing the link cap (`max_links`) already sends it when the
+  table is full, and its establishment timeout handles it. Destinations
+  that DO serve links — `lntd` and every other caller of
+  `LxmfNode::register`, and the board's own propagation destination —
+  are untouched.
 - **The target's public key, before anything else.** Encrypting to a
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch

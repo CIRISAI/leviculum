@@ -438,19 +438,58 @@ impl LxmfNode {
     /// unconfirmed request that was answered is a far smaller harm than a
     /// confirmed message that was dropped.
     ///
+    /// # Why it also refuses links
+    ///
+    /// The single packet above is the smaller half. A peer that heard the
+    /// announce may instead open a LINK — the normal way LXMF delivers
+    /// anything that does not fit one packet — and until this the board
+    /// ACCEPTED it: `accepts_links` is `true` on a fresh
+    /// [`Destination`], so the request passed the gate in
+    /// `leviculum-core/src/node/link_management.rs`, a link proof went back
+    /// and a link-table entry appeared. Nothing then served it.
+    /// `NodeEvent::LinkDataReceived` has exactly one reader in the whole
+    /// firmware tree (`leviculum-nrf/src/pn.rs`, gated on the propagation
+    /// role's own destination) and a link's resource strategy defaults to
+    /// `AcceptNone`, so what the peer wrote reached no reader and left no
+    /// line — not even the `[TELEMETRY] discarded` one, which is written
+    /// from a `PacketReceived` the link path bypasses. And a link is a
+    /// session: the peer holds it open and keeps writing, so one accepted
+    /// request swallows a conversation rather than a packet.
+    ///
+    /// So `accepts_links` goes off here too. What the peer sees instead of
+    /// a proof is no answer at all, which is exactly what the link cap
+    /// (`max_links`, #388) already sends a peer when there is no room —
+    /// its establishment timeout and retry handle it, and it ends knowing
+    /// where it stands.
+    ///
+    /// This is a deviation from Python-RNS, whose `Destination` accepts
+    /// incoming links by default, and it satisfies all three clauses of the
+    /// deviation rule. Wire format: unchanged — withholding a link proof
+    /// puts no new bytes and no new packet type on the air, and a request
+    /// that draws no proof is a state every Python initiator already
+    /// implements. Semantics: improved — a peer that is refused learns the
+    /// board cannot serve it, a peer that is accepted and swallowed learns
+    /// nothing and keeps sending. Priority 1: measurably better on both
+    /// clauses — the delivery that was silently dropped is now not
+    /// promised, and the link-table entry the board spent on an unservable
+    /// session stays free for the propagation role and the BLE sessions
+    /// that the same cap has to afford.
+    ///
     /// Every caller that DOES have an inbox — `lntd`, `lnmsg`, `lnpnd` and
     /// everything else going through [`Self::register`] — keeps
-    /// [`Self::delivery_destination`] and its `ProofStrategy::All`.
-    /// `accepts_links` is untouched here: a board that cannot serve a link
-    /// still advertises one, which is a separate defect and not this one.
+    /// [`Self::delivery_destination`] with its `ProofStrategy::All` and its
+    /// `accepts_links`, and `register` sets both explicitly, so a node with
+    /// an inbox is unaffected no matter which constructor it came from.
     ///
-    /// Pinned by `leviculum-lxmf/tests/delivery_promise.rs`, at the sender,
-    /// where the harm is felt.
+    /// Pinned by `leviculum-lxmf/tests/delivery_promise.rs` (the packet) and
+    /// `leviculum-lxmf/tests/inbound_link_promise.rs` (the link), both with
+    /// a positive control on a node that does have an inbox.
     pub fn delivery_destination_without_inbox(
         identity: Identity,
     ) -> Result<Destination, DestinationError> {
         let mut destination = Self::delivery_destination(identity)?;
         destination.set_proof_strategy(ProofStrategy::None);
+        destination.set_accepts_links(false);
         Ok(destination)
     }
 
