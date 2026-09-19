@@ -5,8 +5,42 @@ A plan to give Leviculum and Periculum a second home on our own server,
 clearweb and the Reticulum network, running **permanently in parallel**
 with Codeberg rather than replacing it.
 
-This is a design record for later implementation, not a description of
-something already built. Nothing here is provisioned yet.
+This was written as a design record for later implementation. Part of it
+has since been built — the clearweb download path, in the nightly this
+project already runs. The server itself is not provisioned. The section
+below says exactly which part is in the tree, so that the rest of this
+record can go on being read as what it was: a plan.
+
+## What of this is already built
+
+Written 2026-08-17, when none of it existed. On 2026-09-18 the sending
+half of the clearweb download path landed (63140e56, fixed by 7a5b7940),
+under the nightly pipeline's own issues rather than this one, so these
+parts of the record are now in the tree:
+
+- `scripts/publish-site.sh` — the sender. It tars `dist/` plus the build
+  id and pipes it over ssh to the receiver. The host key is pinned and
+  there is no accept-on-first-use, because an unattended job cannot
+  recognise a host it has never seen. Unconfigured — none of
+  `SITE_SSH_TARGET`, `SITE_SSH_KEY`, `SITE_SSH_HOST_KEY` set — it prints
+  a banner naming what is standing still and exits 0; partly configured
+  is a mistake and fails.
+- `packaging/site/lev-receive-nightly` — the receiver, meant to run on
+  the server as the forced command of an ssh key. It verifies the whole
+  upload before a byte of it is reachable under a public URL, publishes
+  to `/var/www/leviculum/releases/nightly/<build-id>/`, and moves
+  `nightly/latest` by `rename(2)` once the new build is complete on
+  disk, keeping the last `KEEP` (default 14) builds.
+- `.woodpecker/nightly.yml` — the `publish-site` step that runs the two.
+  It runs last, after the forge publish, and with
+  `status: [success, failure]`, so a forge outage — the night the second
+  target matters most — does not take the independent target down with
+  it.
+
+Everything else here is unbuilt: the server, the bare git repo, `rngit`,
+`issues/`, `AGENTS.md`, `stagit`, the issue renderer and the sync job.
+The five open questions at the end are all still open, and the three ssh
+values are not configured, so the step that exists publishes nothing.
 
 ## Motivation
 
@@ -149,10 +183,26 @@ shipped from an untested/red tree — green is now a precondition),
 swap keeps history), and `PUB-0011` (no rollback — retained builds plus
 the `latest` symlink are exactly that).
 
+**Where this stands.** All three are delivered, but not by the shape
+above. The script-and-timer was written as if there were no nightly; what
+landed put the same three properties on the one this project already has,
+`.woodpecker/nightly.yml`. Its first step is the test gate and a non-zero
+exit there terminates the workflow, so build, package and publish are
+never reached with a red commit — `PUB-0016`. `PUB-0005` and `PUB-0011`
+are the receiver's: `packaging/site/lev-receive-nightly` points `latest`
+only after the new build is complete on disk, and keeps the previous
+builds. A standalone `nightly.sh` on the server buys none of the three
+any more. It would be needed only if the build itself ever has to leave
+the forge's runners, which is a separate decision and is not made here.
+
 ## Component 4 — Downloads over both networks
 
-- **Clearweb:** nginx serves `/srv/www/releases/` at stable URLs such as
-  `https://leviculum.network/releases/nightly/latest/leviculum-amd64.deb`.
+- **Clearweb:** nginx serves `/var/www/leviculum/releases` — the default
+  `RELEASES_ROOT` of `packaging/site/lev-receive-nightly` — at stable
+  URLs such as
+  `https://leviculum.network/releases/nightly/latest/leviculum-nightly-amd64.deb`.
+  The build side of this is done and runs every night; the nginx side is
+  not.
 - **NomadNet page:** `rngit serve_nomadnet = yes` already exposes a
   release list, file browser, commit history and refs to any NomadNet
   client; its Micron templates live in `~/.rngit/templates/`.
@@ -212,8 +262,12 @@ already knows.
 ## Rollout
 
 1. **Stand up (no announcement).** Provision workhorse.de: bare repo,
-   nginx, `rngit`, `nightly.sh` + timer, `AGENTS.md`, `stagit`, the issue
-   renderer. Maintainer instances add workhorse as a second push remote.
+   nginx, `rngit`, `AGENTS.md`, `stagit`, the issue renderer. Maintainer
+   instances add workhorse as a second push remote. The download target
+   needs no new software on the server — `lev-receive-nightly`, a
+   receiving user and a key with it as forced command — and then the
+   three Woodpecker secrets, created in the UI *before* the pipeline
+   names them, in the order `.woodpecker/nightly.yml` spells out.
 2. **Parallel run, indefinitely.** Both homes live; every push goes to
    both. Import the current Codeberg issues into `issues/` once, then run
    `sync.sh` on a timer. Exercise `rngit` clone/pull/release over real
