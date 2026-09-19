@@ -672,6 +672,22 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "discovery_interval" => iface.discovery_interval = value.parse().ok(),
         "enable_central" => iface.enable_central = Some(parse_bool(value)),
         "enable_peripheral" => iface.enable_peripheral = Some(parse_bool(value)),
+        // Comma-separated (ConfigObj `as_list`, the spelling
+        // `remote_management_allowed` and I2P `peers` already use).
+        // Stored verbatim; an entry is resolved to an address or an
+        // identity hint when the interface is built, where a bad one is
+        // a startup error rather than a silently shorter list. An empty
+        // value parses to an empty list, which allows every peer — the
+        // same as leaving the key out.
+        "initiate_only" => {
+            iface.initiate_only = Some(
+                value
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect(),
+            );
+        }
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
         // bind, id_callsign, modulation, ...) must never make lnsd reject an
@@ -968,6 +984,41 @@ mod tests {
         assert_eq!(ble.discovery_interval, None);
         assert_eq!(ble.enable_central, None);
         assert_eq!(ble.enable_peripheral, None);
+        assert_eq!(
+            ble.initiate_only, None,
+            "no key is no restriction, not an empty list"
+        );
+    }
+
+    /// `initiate_only` is a ConfigObj list: comma-separated, whitespace
+    /// around an entry is the author's formatting, and the entries reach
+    /// the builder verbatim — which spelling is legal is decided there,
+    /// where a bad one can be a startup error.
+    #[test]
+    fn test_ble_initiate_only_parses_as_a_list() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[BLE Interface]]
+    type = BLEInterface
+    initiate_only = b2a8bea1, AA:BB:CC:DD:EE:FF
+  [[Empty]]
+    type = BLEInterface
+    initiate_only =
+"#,
+        )
+        .unwrap();
+
+        let ble = config.interfaces.get("BLE Interface").expect("ble");
+        assert_eq!(
+            ble.initiate_only.as_deref(),
+            Some(["b2a8bea1".to_string(), "AA:BB:CC:DD:EE:FF".to_string()].as_slice())
+        );
+
+        // A key written with no value is an empty list, which allows
+        // every peer — the same as leaving it out.
+        let empty = config.interfaces.get("Empty").expect("empty");
+        assert_eq!(empty.initiate_only.as_deref(), Some([].as_slice()));
     }
 
     #[test]

@@ -87,6 +87,11 @@ pub(crate) struct BleOptions {
     pub enable_central: bool,
     /// Run the advertising + GATT-server half.
     pub enable_peripheral: bool,
+    /// Peers we may DIAL (`initiate_only`). Empty — the default — is
+    /// every peer, exactly as before the key existed. Consulted on the
+    /// scan path only: it never reaches admission, so a peer left off
+    /// it that dials us is served like any other.
+    pub initiate_only: links::InitiateAllowlist,
 }
 
 impl Default for BleOptions {
@@ -98,6 +103,7 @@ impl Default for BleOptions {
             discovery_interval: Duration::from_secs(5),
             enable_central: true,
             enable_peripheral: true,
+            initiate_only: links::InitiateAllowlist::default(),
         }
     }
 }
@@ -526,6 +532,15 @@ impl BleTask {
                 ) else {
                     return;
                 };
+                // Who we are WILLING to dial (`initiate_only`), as
+                // opposed to who the sort says dials whom. A pure
+                // function of the address and the advertised hint, both
+                // already part of the deduplicated decision below, so
+                // the verdict changes only when that line does.
+                let dial_allowed = self
+                    .opts
+                    .initiate_only
+                    .allows(&addr.0, decision.identity_hint);
                 if last_decision.insert(addr.0, decision) != Some(decision) {
                     tracing::info!(
                         event = "BLE_SCAN_DECISION",
@@ -540,6 +555,19 @@ impl BleTask {
                         initiate = u8::from(decision.decision.initiate()),
                         rule = decision.decision.as_str(),
                     );
+                    // Only when the allow-list is what stops the dial:
+                    // a peer the sort tells us to wait for is not one
+                    // we declined, and a line saying so would send a
+                    // scenario author after the wrong key.
+                    if decision.decision.initiate() && !dial_allowed {
+                        tracing::info!(
+                            event = "BLE_DIAL_NOT_ALLOWED",
+                            iface = %Scalar(&self.name),
+                            addr = %hex12(&addr.0),
+                            hint = %links::hint_str(decision.identity_hint),
+                            listed = self.opts.initiate_only.len(),
+                        );
+                    }
                 }
                 // `knows_identity_hint` is the address filter above it
                 // keyed by IDENTITY (#412): a peer that rotated its
@@ -547,7 +575,16 @@ impl BleTask {
                 // costs a connect, a discovery and an identity read
                 // before the duplicate is found. A peer that carried no
                 // hint matches nothing and is dialled exactly as before.
+                //
+                // The allow-list sits with the other reasons not to
+                // dial, and is checked here alone: the window's
+                // re-checks below re-ask what the WORLD may have
+                // changed (table full, backoff, an inbound link that
+                // landed meanwhile), and a policy does not change under
+                // them. Nothing enters the window that did not pass
+                // this line.
                 if !decision.decision.initiate()
+                    || !dial_allowed
                     || rssi < self.opts.min_rssi
                     || table.is_full()
                     || table.knows_addr(&addr.0)

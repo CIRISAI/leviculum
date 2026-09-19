@@ -12,25 +12,25 @@ config a current `rnsd` would load (`ini_config.rs:350-355`).
 
 Pass an explicit config directory with `--config DIR` (`lnsd.rs`,
 `-c/--config`). With no flag, `lnsd` resolves the directory using the
-same order as Python Reticulum (`config.rs:675-692`):
+same order as Python Reticulum (`config.rs:686-703`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists
 2. `$HOME/.config/reticulum` — if that directory's `config` exists
 3. `$HOME/.reticulum` — fallback, used even if absent
 
 The config *file* is always named `config` inside that directory
-(`config.rs:694-696`). The storage directory defaults to
+(`config.rs:705-707`). The storage directory defaults to
 `<config_dir>/storage` and can be overridden with `--storage`
 (`lnsd.rs`, `-s/--storage`).
 
 This order is why the Debian package can install a system-wide config
 under `/etc/reticulum` and have Python clients connect to the live
-daemon with no extra flags (`config.rs:681-685`).
+daemon with no extra flags (`config.rs:692-696`).
 
 ## INI vs TOML detection
 
 `lnsd` accepts both the Python INI format and native TOML. Detection is
-by content, not just extension (`config.rs:636-663`):
+by content, not just extension (`config.rs:647-674`):
 
 - An explicit `.toml` extension forces TOML.
 - A file containing `[[` (the ConfigObj subsection marker Python uses
@@ -40,7 +40,7 @@ by content, not just extension (`config.rs:636-663`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:763-774`).
+as `false` (`ini_config.rs:779-790`).
 
 ## The `[reticulum]` section
 
@@ -71,7 +71,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:899`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:911`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -108,7 +108,7 @@ supported-type filter (`interface_type` (`ini_config.rs:192-216`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:728-758`)). An interface of any other type is skipped
+(`ini_config.rs:744-774`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:206-214`)), not an
 error.
 
@@ -220,7 +220,8 @@ map onto this implementation:
 | `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:671`); `InterfaceConfig::min_rssi` (`config.rs:571-573`)) |
 | `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:672`); `InterfaceConfig::discovery_interval` (`config.rs:574-576`)) |
 | `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:673`); `InterfaceConfig::enable_central` (`config.rs:577-579`)) |
-| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:674`); `InterfaceConfig::enable_peripheral` (`config.rs:580-582`)) |
+| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:674`); `InterfaceConfig::enable_peripheral` (`config.rs:579-581`)) |
+| `initiate_only` | string (CSV) | unset (every peer) | Peers this interface may DIAL: BLE addresses (`AA:BB:CC:DD:EE:FF`, `-` or no separator) or peer identities in hex, 8 digits (the four bytes an advertiser publishes as its hint) or all 32 (a board's `[IDENTITY]` line, truncated to those four). Unset or empty dials whoever the connection-direction rule picks, the behaviour that predates the key. It narrows dialling and nothing else: a peer left off the list that connects to US is admitted and served exactly as before, and nothing on the wire changes — it sees a node that has not dialled it yet. The digit count decides which is which — 12 is an address, 8 or 32 an identity — so both spellings can be copied out of a log line (`BLE_SCAN_DECISION addr=`, a board's `BLE_CENTRAL_ADDR`, its `[IDENTITY]`). A malformed entry is a startup error, not a dropped line. (`initiate_only` (`ini_config.rs:682-691`); `InterfaceConfig::initiate_only` (`config.rs:582-591`); `InitiateAllowlist` (`interfaces/ble/links.rs:959`)) |
 
 ```ini
 [interfaces]
@@ -230,7 +231,15 @@ map onto this implementation:
     # device = hci0
     # max_connections = 4
     # min_rssi = -85
+    # Dial nothing but these two; still answer anyone who dials us.
+    # initiate_only = b2a8bea1, AA:BB:CC:DD:EE:FF
 ```
+
+A node that should be a leaf rather than a hub — one uplink out, still
+reachable from anybody near it — is `initiate_only` naming that uplink.
+A node that should be a leaf and invisible as well adds
+`enable_peripheral = no`, which is the stronger statement: it stops
+advertising, so no peer can dial it either.
 
 ### RNode and Serial (`RNodeInterface`, `SerialInterface`)
 

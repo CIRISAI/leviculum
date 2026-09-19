@@ -27,6 +27,14 @@ pub(super) fn build(
         }
         None => defaults.discovery_interval,
     };
+    // A bad entry is a startup error, not a dropped line: `initiate_only`
+    // exists so an unlisted peer is NOT dialled, and a typo that silently
+    // shortened the list would restore the free-for-all it was written to
+    // prevent — invisibly, and only at the one moment it matters.
+    let initiate_only = match config.initiate_only.as_deref() {
+        Some(entries) => links::InitiateAllowlist::parse(entries).map_err(Error::Config)?,
+        None => links::InitiateAllowlist::default(),
+    };
     let opts = BleOptions {
         adapter: config.device.clone(),
         max_connections: config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS),
@@ -34,6 +42,7 @@ pub(super) fn build(
         discovery_interval,
         enable_central: config.enable_central.unwrap_or(true),
         enable_peripheral: config.enable_peripheral.unwrap_or(true),
+        initiate_only,
     };
     if !opts.enable_central && !opts.enable_peripheral {
         return Err(Error::Config(
@@ -53,12 +62,21 @@ pub(super) fn build(
         ctx.peer_event_tx.clone(),
     );
     tracing::info!(
-        "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm)",
+        "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm, \
+         initiate_only={})",
         opts.adapter.as_deref().unwrap_or("default adapter"),
         opts.enable_central,
         opts.enable_peripheral,
         opts.max_connections,
         opts.min_rssi,
+        // "any" rather than 0: a node that dials whoever the sort picks
+        // is the default, and a count of zero reads like a node that
+        // dials nobody.
+        if opts.initiate_only.is_empty() {
+            "any".to_string()
+        } else {
+            format!("{} peer(s)", opts.initiate_only.len())
+        },
     );
     Ok(Built::Handles(vec![handle]))
 }
@@ -150,6 +168,53 @@ mod tests {
             .err()
             .expect("must not build");
         assert!(err.to_string().contains("at least one role"), "{err}");
+    }
+
+    /// A bad `initiate_only` entry stops the daemon instead of building
+    /// an interface that dials everybody. The key's whole value is that
+    /// an unlisted peer is not dialled; a silently dropped entry is that
+    /// value withdrawn at the one moment nobody is watching.
+    #[tokio::test]
+    async fn a_bad_initiate_only_entry_is_a_config_error() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            initiate_only: Some(vec![
+                "aa:bb:cc:dd:ee:ff".to_string(),
+                "nonsense".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let err = build(0, &config, &owner.ctx())
+            .err()
+            .expect("must not build");
+        assert!(err.to_string().contains("initiate_only"), "{err}");
+        assert!(err.to_string().contains("nonsense"), "{err}");
+    }
+
+    /// A good list builds, and an absent one is not an empty one that
+    /// happens to behave the same — it is the same value the interface
+    /// had before the key existed.
+    #[tokio::test]
+    async fn a_good_initiate_only_list_builds_and_an_absent_one_is_the_default() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            initiate_only: Some(vec![
+                "AA:BB:CC:DD:EE:FF".to_string(),
+                "b2a8bea1".to_string(),
+            ]),
+            ..Default::default()
+        };
+        build(0, &config, &owner.ctx()).expect("two well-formed entries build");
+
+        let bare = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            ..Default::default()
+        };
+        assert!(bare.initiate_only.is_none());
+        build(1, &bare, &owner.ctx()).expect("no key, no restriction");
+        assert!(BleOptions::default().initiate_only.is_empty());
     }
 
     /// A negative or non-finite discovery_interval is refused at build

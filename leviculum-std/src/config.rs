@@ -579,6 +579,16 @@ pub struct InterfaceConfig {
     /// Run the advertising + GATT-server peripheral role (reference
     /// `enable_peripheral`, default on).
     pub enable_peripheral: Option<bool>,
+    /// Peers this interface may DIAL, as a comma-separated list of BLE
+    /// addresses (`AA:BB:CC:DD:EE:FF`) or peer identities in hex (8 or
+    /// 32 digits). Absent or empty means every peer, which is the
+    /// behaviour that predates the key; a non-empty list narrows who we
+    /// open a connection to and nothing else — an unlisted peer that
+    /// dials US is served exactly as before. Entries are validated when
+    /// the interface is built (`InitiateAllowlist::parse`,
+    /// `leviculum-std/src/interfaces/ble/links.rs:984`). No reference
+    /// key: `ble-reticulum` has none, and this changes no wire byte.
+    pub initiate_only: Option<Vec<String>>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -717,6 +727,7 @@ impl Default for InterfaceConfig {
             discovery_interval: None,
             enable_central: None,
             enable_peripheral: None,
+            initiate_only: None,
         }
     }
 }
