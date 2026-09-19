@@ -25,10 +25,19 @@
 # package.
 #
 # The lnflash firmware bundle is not a package at all — it is the
-# stranger-unpacks-it tarball (one binary, the t114 UF2, Nordic's S140
-# SoftDevice and its licence), so it ships as a tarball only:
+# stranger-unpacks-it tarball (one binary, one UF2 per board in
+# scripts/lnflash-bundle.sh's BOARDS list, Nordic's S140 SoftDevice and
+# its licence), so it ships as a tarball only:
 #
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+#
+# It is also the ONLY published form of the embedded firmware, which makes
+# it the reader's path rather than a convenience. Codeberg #295: the README
+# advertised two supported boards and offered nothing but a source build,
+# while this bundle had carried an image for each of them since 24481f12,
+# and the release body went on naming only the T114 for four weeks after
+# the RAK image started shipping beside it. `just check-firmware-images`
+# now refuses a board list that only one of those three surfaces knows.
 #
 # amd64 only: the firmware and the SoftDevice in it are architecture-
 # independent, but the host binary is not, and the bundle's own

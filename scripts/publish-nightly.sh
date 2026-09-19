@@ -85,13 +85,22 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-arm64.t
 
 \`lnomad\` and \`lblogd\` carry their own version numbers, independent of the \`leviculum\` packages above.
 
-**lnflash — firmware flasher for LNode boards** (self-contained bundle: the flasher, the T114 firmware image, and Nordic's S140 SoftDevice with its licence):
+**lnflash — firmware flasher for LNode boards** (self-contained bundle: the flasher, one prebuilt firmware image per supported board, and Nordic's S140 SoftDevice with its licence for the board that can need it):
 
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/lnflash-nightly-amd64.tar.gz
 \`\`\`
 
-\`tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-* && sudo ./lnflash\` — nothing is downloaded and nothing is installed; everything it writes to the board is in the directory. The flasher binary is amd64; the firmware image and SoftDevice inside are not architecture-specific.
+This is the prebuilt embedded firmware — no checkout, no Rust toolchain, no build. One image per board:
+
+| board | hardware |
+| --- | --- |
+| \`t114\` | Heltec Mesh Node T114 |
+| \`rak4631\` | RAK4631 — the WisMesh Pocket V2 and the other carriers built around that module |
+
+\`tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-* && sudo ./lnflash\` — nothing is downloaded and nothing is installed; everything it writes to the board is in the directory. \`--dry-run\` says what is attached and changes nothing. The flasher binary is amd64; the firmware images and the SoftDevice inside are not architecture-specific.
+
+Flash with this rather than by dragging a bare \`.uf2\` onto the bootloader drive: our images sit above an S140 7.x SoftDevice and a factory T114 ships 6.1.1, on which the image boots into nothing and the board goes dark until RESET is double-tapped. \`lnflash\` reads the installed version off the board before writing — it repairs a T114 and refuses a board it carries no remedy for.
 
 **Source tarball** (tracked files at the same commit as the .debs above, no submodules):
 

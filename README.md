@@ -116,10 +116,46 @@ See the [installation guide](https://codeberg.org/Lew_Palm/leviculum/src/branch/
 
 #### Flashing LoRa hardware (optional)
 
-For the embedded LNode firmware (Heltec T114, RAK4631), install the embedded
+**The embedded LNode firmware ships prebuilt — you do not need this checkout
+to put it on a board.** The nightly release carries `lnflash`, a self-contained
+bundle holding the flasher, one firmware image per supported board, and
+Nordic's S140 SoftDevice with its licence for the board that can need it:
+
+```sh
+wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+tar xzf lnflash-nightly-amd64.tar.gz
+cd lnflash-*
+sudo ./lnflash            # add --dry-run first to see what it would do
+```
+
+Nothing is downloaded and nothing is installed; everything it writes to the
+board is in that directory. The flasher binary is amd64, the images inside it
+are not architecture-specific. The boards it carries an image for:
+
+| board | hardware | built from source by |
+| --- | --- | --- |
+| `t114` | Heltec Mesh Node T114 | `just flash` |
+| `rak4631` | RAK4631 — the WisMesh Pocket V2 and the other carriers built around that module | `just flash-rak4631` |
+
+`lnflash` and not a bare UF2 you drag onto the bootloader drive, because the
+images have a precondition that cannot be checked by dragging: our firmware
+places its application above an S140 7.x SoftDevice, and a factory T114 ships
+S140 6.1.1, which puts the boundary one page lower. Writing the image onto
+such a board produces a device that never reaches USB — no serial ports, no
+drive, nothing on the bus. It is recoverable with a double-tap of RESET, and
+it looks exactly like dead hardware while it lasts. `lnflash` reads the
+installed version off the board before it writes anything: on a T114 it
+installs the SoftDevice it ships beside the image, and on a RAK — for which it
+deliberately carries no SoftDevice, because every RAK we have met already runs
+a usable one — it stops and tells you what it found rather than flashing into
+a brick. The mechanism, and the board that spent weeks written off
+as bricked, are in
+[docs/src/concepts/lnode-flashing.md](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/concepts/lnode-flashing.md).
+
+To build the firmware from this checkout instead, install the embedded
 toolchain once — the target itself, `flip-link` (the firmware's linker), and
 `llvm-tools` (provides the `llvm-objcopy` the UF2 flasher uses) — then flash
-attached devices over USB:
+attached devices over USB with the recipes in the table above:
 
 ```sh
 rustup target add thumbv7em-none-eabihf

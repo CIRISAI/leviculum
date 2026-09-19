@@ -28,12 +28,21 @@ needs no toolchain, no Python, no network, and nothing installed: the
 point of the bundle is that a stranger can unpack it and run it.
 
 ```sh
-tar xzf lnflash-<version>.tar.gz
-cd lnflash-<version>
+wget https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+tar xzf lnflash-nightly-amd64.tar.gz
+cd lnflash-*
 sudo ./lnflash
 ```
 
 (`Justfile:50-51`)
+
+That URL is the whole answer to "how do I get your firmware onto my
+board" and it is the one this page previously left out: it described the
+bundle without saying where it comes from, so the only path a reader
+could follow was a build from source (Codeberg #295). The rolling nightly
+carries one image per board in the list at `scripts/lnflash-bundle.sh`,
+and `just check-firmware-images` keeps that list, the README's board
+table and the release body from disagreeing about it.
 
 **It works out what the board is, rather than being told.** That matters
 because a board arrives carrying whatever its last owner put on it:

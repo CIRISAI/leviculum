@@ -265,7 +265,8 @@ nrf-shellcheck:
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh \
-        scripts/run-fuzz.sh scripts/test-run-fuzz.sh
+        scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
+        scripts/check-firmware-images.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -540,6 +541,30 @@ publish-selftest:
 package-selftest:
     @bash scripts/test-collect-nightly-debs.sh
 
+# Codeberg #295: "supported" meant two different things on two surfaces. The
+# README named the T114 and the RAK4631 as the supported boards for the
+# embedded firmware and then offered nothing but a build from source, while
+# the nightly had been shipping a self-contained lnflash bundle with a
+# prebuilt image for each of them since 24481f12 — and the release body went
+# on describing that bundle as carrying "the T114 firmware image" for four
+# weeks after the RAK image started shipping inside it. A reader with a RAK
+# concluded from what was written that there was no image for their board.
+#
+# Nothing connected the three surfaces, so this compares them as sets and
+# requires them equal: the boards scripts/lnflash-bundle.sh builds an image
+# for, the boards the README's flashing table advertises, and the boards the
+# release body names. Both directions are the bug — an image nobody is told
+# about, and a board advertised with no image behind it — which is why it is
+# equality and not containment. It also checks every nightly download URL the
+# README hands out against the asset names collect-nightly-debs.sh stages.
+#
+# --selftest is the positive control, and it is not optional here: the first
+# run of it passed one injected bug it was supposed to catch. ~0.1 s, no
+# network, no build; it reads Markdown and two shell scripts.
+check-firmware-images:
+    @bash scripts/check-firmware-images.sh
+    @bash scripts/check-firmware-images.sh --selftest
+
 # The nightly's SECOND publish target: our own site (Codeberg #286's sibling).
 #
 # Every download link we publish points at the forge's rolling release, so a
@@ -695,7 +720,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
