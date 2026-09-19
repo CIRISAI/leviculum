@@ -62,7 +62,7 @@
 //!   reads worse than leaving all of them literal. They stay as written
 //!
 //! Syntax from the cheat sheet that the parser does not implement is added
-//! by [`extended_events`] on the event stream both renderers read, so the two
+//! by `extended_events` on the event stream both renderers read, so the two
 //! sides cannot drift apart: bare URLs and e-mail addresses become links,
 //! `==x==` becomes a highlight, and the cheat sheet's intra-word `H~2~O` /
 //! `X^2^` become sub/superscript (pulldown-cmark's own extension takes only
