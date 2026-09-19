@@ -873,13 +873,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Seed wall-clock unix time from a source that claims to know it
-    /// (Codeberg #155, #166): a host injection or a GNSS fix.
+    /// (Codeberg #155, #166): a host injection (rank 2) or a GNSS fix
+    /// (rank 1) — both above the platform clock in the spec's ranking
+    /// (`docs/src/concepts/time-and-clocks.md`, "The source ranking"),
+    /// which is the reverse of what this comment claimed until #247.
     ///
     /// On platforms whose [`crate::traits::Clock`] has no wall clock
-    /// (LNode: no RTC), this seeds the emission timebase that announce
+    /// (LNode: no RTC), this seeds the calendar anchor that announce
     /// emission timestamps are derived from. Platforms with a real wall
-    /// clock ignore it. Returns whether the value was accepted; `false`
-    /// means the plausibility window refused it and the caller should
+    /// clock read that clock instead and ignore the seeded anchor — a
+    /// deviation from the ranking with no behavioural effect while no
+    /// platform offers both. Returns whether the value was accepted;
+    /// `false` means the sanity window refused it and the caller should
     /// report that loudly (see `Transport::set_wall_time_unix_secs`).
     pub fn set_wall_time_unix_secs(
         &mut self,
@@ -3296,15 +3301,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// This is [`crate::transport::Transport::emission_secs`] — the single
     /// producer named in `docs/src/concepts/time-and-clocks.md`, "One value,
     /// one producer" — exposed so crates layered on `NodeCore` reach the same
-    /// source-priority chain (platform wall clock, learned announce timebase,
-    /// host injection, uptime) instead of taking a wall-clock parameter from
-    /// their caller. Never derive such a field from [`Self::now_ms`], which is
-    /// a timer and restarts at zero on every reboot.
+    /// source ranking (GNSS, host injection, platform clock, network-learned,
+    /// build floor) instead of taking a wall-clock parameter from their
+    /// caller. Never derive such a field from [`Self::now_ms`], which is a
+    /// timer and restarts at zero on every reboot.
     ///
     /// The value carries no plausibility guarantee: on a clockless node with
-    /// nothing learned yet it is uptime seconds. A caller that would produce a
-    /// field a peer silently discards should gate on
-    /// [`Self::has_plausible_wall_clock`] first.
+    /// nothing learned yet it is the build floor plus uptime, which clears
+    /// every value test and is still the birth anchor. A caller that would
+    /// produce a field a peer silently discards gates on
+    /// [`Self::has_plausible_wall_clock`], which keys on the anchor's rank
+    /// for exactly that reason.
     pub fn emission_secs(&self) -> u64 {
         self.transport.emission_secs(self.now_ms())
     }
@@ -3322,14 +3329,29 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.emission_micros(self.now_ms()) as f64 / 1_000_000.0
     }
 
-    /// Whether [`Self::emission_secs`] sits above the timebase plausibility
-    /// floor ([`crate::constants::EMISSION_PLAUSIBLE_MIN_SECS`]).
+    /// Whether the calendar rests on a source better than the birth anchor
+    /// — [`Self::anchor_rank`] above
+    /// [`crate::transport::BIRTH_ANCHOR_RANK`] (Codeberg #247).
     ///
-    /// False means the node has no wall clock and has learned no timebase, so
-    /// the value is uptime seconds: fine for a field only we compare, wrong
-    /// for one a peer evaluates against its own clock.
+    /// False means no source has seated an anchor: the value is the build
+    /// timestamp plus uptime, fine for a field only we compare, wrong for
+    /// one a peer evaluates against its own clock.
+    ///
+    /// The predicate is the rank and not the value on purpose. The build
+    /// floor sits AT the sanity window's lower bound by construction, so a
+    /// value test became vacuously true the moment the build timestamp was
+    /// plumbed, the ticket refusal would never fire again, and a
+    /// birth-anchored node would issue tickets whose expiry is already in
+    /// the past on every healed peer — the silently-discarded field the
+    /// refusal exists to prevent.
     pub fn has_plausible_wall_clock(&self) -> bool {
-        self.emission_secs() >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS
+        self.anchor_rank() < crate::transport::BIRTH_ANCHOR_RANK
+    }
+
+    /// The provenance rank of the calendar anchor, 1 (GNSS) to 5 (birth)
+    /// — [`crate::transport::Transport::anchor_rank`] (Codeberg #247).
+    pub fn anchor_rank(&self) -> u8 {
+        self.transport.anchor_rank()
     }
 
     /// Return all path table entries for RPC export.

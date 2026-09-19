@@ -626,14 +626,15 @@ pub const FW_BUILD_STAMP: &str = concat!(
 /// Current time source of the emission timebase (Codeberg #166 item 3),
 /// mirrored out of the main loop so the periodic banner task can state it
 /// beside `[FW_BUILD]` without owning the node. Encodes
-/// `leviculum_core::transport::TimeSource`; starts at uptime-only, the
-/// birth state of every boot.
-static TIME_SOURCE_STATE: AtomicU8 = AtomicU8::new(TIME_SOURCE_UPTIME_ONLY);
+/// `leviculum_core::transport::TimeSource`; starts at the build floor, the
+/// birth state of every boot (#247).
+static TIME_SOURCE_STATE: AtomicU8 = AtomicU8::new(TIME_SOURCE_BUILD_FLOOR);
 
 const TIME_SOURCE_GNSS: u8 = 0;
 const TIME_SOURCE_HOST: u8 = 1;
 const TIME_SOURCE_OVERHEARD: u8 = 2;
-const TIME_SOURCE_UPTIME_ONLY: u8 = 3;
+const TIME_SOURCE_BUILD_FLOOR: u8 = 3;
+const TIME_SOURCE_PLATFORM_CLOCK: u8 = 4;
 
 /// Record the seeded time source for the status banner. Called by the
 /// main loop at each seeding site.
@@ -643,7 +644,12 @@ pub fn set_time_source(source: leviculum_core::transport::TimeSource) {
         TimeSource::Gnss => TIME_SOURCE_GNSS,
         TimeSource::Host => TIME_SOURCE_HOST,
         TimeSource::Overheard => TIME_SOURCE_OVERHEARD,
-        TimeSource::UptimeOnly => TIME_SOURCE_UPTIME_ONLY,
+        TimeSource::BuildFloor => TIME_SOURCE_BUILD_FLOOR,
+        // No nRF board offers a platform wall clock (EmbassyClock keeps the
+        // trait default of None), so this arm is unreachable here; it is
+        // spelled out rather than wildcarded so a board that grows an RTC
+        // fails to compile until it decides what to report.
+        TimeSource::PlatformClock => TIME_SOURCE_PLATFORM_CLOCK,
     };
     TIME_SOURCE_STATE.store(v, Ordering::Relaxed);
 }
@@ -656,7 +662,8 @@ pub fn time_source_str() -> &'static str {
         TIME_SOURCE_GNSS => TimeSource::Gnss.as_str(),
         TIME_SOURCE_HOST => TimeSource::Host.as_str(),
         TIME_SOURCE_OVERHEARD => TimeSource::Overheard.as_str(),
-        _ => TimeSource::UptimeOnly.as_str(),
+        TIME_SOURCE_PLATFORM_CLOCK => TimeSource::PlatformClock.as_str(),
+        _ => TimeSource::BuildFloor.as_str(),
     }
 }
 

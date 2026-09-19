@@ -536,23 +536,73 @@ pub const EMISSION_TIMESTAMP_MAX_SECS: u64 = (1 << (8 * RANDOM_HASH_TIMESTAMP_SI
 /// point (~34,600 years of margin).
 pub const EMISSION_LEARN_CEILING_SECS: u64 = 7_258_118_400;
 
-/// Lower plausibility bound on emission timebases (Codeberg #161):
-/// 1_600_000_000 = 2020-09-13T12:26:40Z, kept a round number. It only has
-/// to separate two populations that sit orders of magnitude apart: real
-/// wall clocks in any deployment running this stack are past 2026 (and a
-/// battery-backed RTC set at device manufacture cannot predate the
-/// stack's existence), while uptime-derived values cannot reach it — 1.6e9
-/// seconds is ~50.7 years of continuous uptime. A learned floor BELOW this
-/// bound is treated as if none existed, so one credible announce recovers
-/// the node in a single unbounded step instead of the
-/// [`EMISSION_LEARN_MAX_ADVANCE_SECS`]-per-announce crawl (#161 §1: ~429
-/// days at a 30 min LoRa cadence); `set_wall_time_unix_secs` refuses
-/// injections below it for the same reason. Deriving this bound (and a
-/// tighter ceiling) from the firmware build timestamp would narrow the
-/// remaining first-adoption window considerably and stays future work
-/// (#161 §1); a constant needs no build plumbing and covers the routine
-/// trigger — adopting a rebooting peer's uptime seconds — today.
+/// Fallback lower plausibility bound on emission timebases (Codeberg
+/// #161): 1_600_000_000 = 2020-09-13T12:26:40Z, kept a round number. It
+/// only has to separate two populations that sit orders of magnitude
+/// apart: real wall clocks in any deployment running this stack are past
+/// 2026 (and a battery-backed RTC set at device manufacture cannot predate
+/// the stack's existence), while uptime-derived values cannot reach it —
+/// 1.6e9 seconds is ~50.7 years of continuous uptime.
+///
+/// This is no longer the bound the sanity window applies: [`BUILD_UNIX_SECS`]
+/// is (Codeberg #247), and it is always the later of the two on a build that
+/// has a build timestamp at all. The constant survives as the guard for the
+/// degenerate case — an override or a `SOURCE_DATE_EPOCH` that sets the
+/// stamp to something no firmware was ever built at — which is why
+/// [`EMISSION_SANITY_FLOOR_SECS`] takes the maximum of the two rather than
+/// the build stamp alone.
 pub const EMISSION_PLAUSIBLE_MIN_SECS: u64 = 1_600_000_000;
+
+/// Unix seconds at which this binary was built, from `build.rs` (Codeberg
+/// #247). The birth anchor of a node with no better time source, and the
+/// lower bound of the sanity window: real time is always after it, so a
+/// value claiming a moment before it — a 1999 RTC with a dead backup cell —
+/// is deterministically garbage rather than merely suspicious
+/// (`docs/src/concepts/time-and-clocks.md`, "The sanity window").
+///
+/// Precision is not a property this needs. The stamp may be stale by
+/// however long a target directory has been alive (see `build.rs` for why
+/// it is not re-embedded on every commit); a floor below real time widens
+/// the sanity window, it never admits a value real time is behind.
+pub const BUILD_UNIX_SECS: u64 = parse_u64(env!("LEVICULUM_BUILD_UNIX_SECS"));
+
+/// The sanity window's lower bound: [`BUILD_UNIX_SECS`], never below the
+/// [`EMISSION_PLAUSIBLE_MIN_SECS`] guard (Codeberg #247).
+///
+/// One filter, every source: a GNSS fix, a host injection, an RTC and a
+/// learned announce timestamp all pass exactly this bound, and no source
+/// bypasses it. The window bounds anchor *admission* only — whether an
+/// anchor may be seated at all. Every behavioural predicate downstream
+/// keys on the anchor's provenance rank instead
+/// (`crate::transport::TimeSource::rank`), because the build floor sits AT
+/// this bound by construction and a value test cannot tell a birth anchor
+/// from a healed one.
+pub const EMISSION_SANITY_FLOOR_SECS: u64 = if BUILD_UNIX_SECS > EMISSION_PLAUSIBLE_MIN_SECS {
+    BUILD_UNIX_SECS
+} else {
+    EMISSION_PLAUSIBLE_MIN_SECS
+};
+
+/// Parse the decimal `build.rs` stamp at compile time: `env!` hands over a
+/// `&str` and `u64::from_str` is not const. A non-digit fails the build
+/// rather than degrading to some default — the floor is a safety bound, and
+/// a silently wrong one is worse than a compile error nobody can miss.
+/// (Overflow is caught by const evaluation for the same reason.)
+const fn parse_u64(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let mut value = 0u64;
+    let mut i = 0;
+    while i < bytes.len() {
+        let digit = bytes[i];
+        assert!(
+            digit.is_ascii_digit(),
+            "LEVICULUM_BUILD_UNIX_SECS must be decimal unix seconds"
+        );
+        value = value * 10 + (digit - b'0') as u64;
+        i += 1;
+    }
+    value
+}
 
 /// Once a clockless node has an emission timebase, a single announce may
 /// advance it at most this far (Codeberg #160). Legitimate forward

@@ -488,7 +488,10 @@ fn request_wire_pins_reference_request_semantics() {
     );
 
     // Seed the #155 wall timebase (the MockClock itself is clockless).
-    const WALL_SECS: u64 = 1_700_000_000;
+    // Relative to the build floor, the sanity window's lower bound since
+    // #247: a fixed past literal stops being admissible the day the tree is
+    // built after it.
+    const WALL_SECS: u64 = crate::constants::BUILD_UNIX_SECS + 86_400;
     assert!(initiator
         .transport
         .set_wall_time_unix_secs(WALL_SECS, crate::transport::TimeSource::Host));
@@ -587,7 +590,10 @@ fn request_resource_timestamp_carries_epoch_seconds() {
         signing_key,
     );
 
-    const WALL_SECS: u64 = 1_700_000_000;
+    // Relative to the build floor, the sanity window's lower bound since
+    // #247: a fixed past literal stops being admissible the day the tree is
+    // built after it.
+    const WALL_SECS: u64 = crate::constants::BUILD_UNIX_SECS + 86_400;
     assert!(initiator
         .transport
         .set_wall_time_unix_secs(WALL_SECS, crate::transport::TimeSource::Host));

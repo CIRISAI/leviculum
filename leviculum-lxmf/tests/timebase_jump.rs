@@ -31,7 +31,7 @@ use leviculum_lxmf::{LxmfNode, LxmfNodeConfig};
 use rand_core::OsRng;
 
 /// Plausible, and reachable by no uptime this test runs long enough to produce.
-const INJECTED_UNIX: u64 = 1_777_123_456;
+const INJECTED_UNIX: u64 = leviculum_core::constants::BUILD_UNIX_SECS + 1_234_567;
 
 const BOOT_MS: u64 = 1_000;
 

@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 use crate::constants::{
     ANNOUNCE_RATE_LIMIT_MS, DEFAULT_ANNOUNCE_CAP_PERCENT, DISCOVERY_RETRY_INTERVAL_MS,
     DISCOVERY_TIMEOUT_MS, EMISSION_LEARN_CEILING_SECS, EMISSION_LEARN_MAX_ADVANCE_SECS,
-    EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
+    EMISSION_SANITY_FLOOR_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
     JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
     MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
     PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
@@ -1132,29 +1132,42 @@ pub struct LinkTableExport {
     pub interface_index: Option<usize>,
 }
 
-/// Where the emission timebase anchor came from (Codeberg #166 item 3).
+/// Which source seated the calendar anchor — its provenance **rank**
+/// (Codeberg #166 item 3, #247).
 ///
-/// Owned next to `emission_floor` because that is the state it describes:
-/// the seeded calendar anchor of a clockless platform. Platforms whose
-/// `Clock::wall_unix_secs` answers (std hosts) never consult the floor,
-/// and this value stays at its default there. The durable model behind
-/// the four states is `docs/src/concepts/time-and-clocks.md`
-/// ("Record the source").
+/// An anchor is a pair: the value it seated and the rank of the source that
+/// seated it (`docs/src/concepts/time-and-clocks.md`, "Anchor provenance is
+/// first-class state"). The sanity window bounds anchor *admission*, a
+/// question about the value; adoption, healing and ticket predicates key on
+/// the rank instead, because the build floor sits AT the plausibility floor
+/// by construction and no value test can tell a birth anchor from a healed
+/// one.
 ///
-/// All four variants exist from day one so the reporting shape never
-/// changes again; which sites update the value grows per batch: GNSS and
-/// the uptime-only default land with #166 items 1+3, host injection with
-/// the #238 control frame, overheard with the announce-learning path.
+/// The variants are the five arms of "The source ranking", ordered by how
+/// hard the source is to fool rather than by precision, and [`Self::rank`]
+/// is that order as a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeSource {
-    /// Seeded from a GNSS fix (NMEA RMC UTC).
+    /// Rank 1. Seeded from a GNSS fix (NMEA RMC UTC).
     Gnss,
-    /// Injected by an attached host over the control channel.
+    /// Rank 2. Injected by an attached host over the control channel.
     Host,
-    /// Learned from a validated announce's emission timestamp.
+    /// Rank 3. The platform's own wall clock (`Clock::wall_unix_secs`) —
+    /// an NTP-managed OS clock or a battery-backed RTC — reported only
+    /// while its value passes the sanity window: below the build floor it
+    /// is a dead cell, not a time source.
+    PlatformClock,
+    /// Rank 4. Learned from a validated announce's emission timestamp. The
+    /// calendar is then *anchored from traffic, unconfirmed*: the evidence
+    /// may itself be another unhealed node's birth clock.
     Overheard,
-    /// No anchor seated: stamps derive from uptime alone.
-    UptimeOnly,
+    /// Rank 5. The birth anchor of every instance with no better source:
+    /// [`crate::constants::BUILD_UNIX_SECS`] advanced by uptime. A valid
+    /// state, not a defect — the stamp is recognisably old but unique,
+    /// monotonic, and always in the past, so it cannot poison a peer's
+    /// cursor. It also never counts as a plausible wall clock, never
+    /// issues tickets, and never caps adoption.
+    BuildFloor,
 }
 
 impl TimeSource {
@@ -1164,11 +1177,35 @@ impl TimeSource {
         match self {
             TimeSource::Gnss => "gnss",
             TimeSource::Host => "host",
+            TimeSource::PlatformClock => "platform-clock",
             TimeSource::Overheard => "overheard",
-            TimeSource::UptimeOnly => "uptime-only",
+            TimeSource::BuildFloor => "build-floor",
+        }
+    }
+
+    /// Provenance rank, 1 (hardest to fool) to 5 (birth anchor).
+    ///
+    /// The model's predicates compare ranks, never anchor values: rank 5 is
+    /// the birth state where first adoption is unbounded and tickets are
+    /// refused, and ranks 1 to 3 are the arms that end the cold-start cost
+    /// outright.
+    pub fn rank(&self) -> u8 {
+        match self {
+            TimeSource::Gnss => 1,
+            TimeSource::Host => 2,
+            TimeSource::PlatformClock => 3,
+            TimeSource::Overheard => 4,
+            TimeSource::BuildFloor => 5,
         }
     }
 }
+
+/// The rank of the birth anchor: while the calendar sits here, first
+/// adoption is unbounded, tickets are refused, and the calendar is not a
+/// plausible wall clock — regardless of the anchor's value
+/// (`docs/src/concepts/time-and-clocks.md`, "Anchor provenance is
+/// first-class state").
+pub const BIRTH_ANCHOR_RANK: u8 = 5;
 
 /// Transport statistics
 #[derive(Debug, Default, Clone)]
@@ -1760,11 +1797,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// (Codeberg #155): `(unix_secs, at_now_ms)` anchoring the highest
     /// emission timestamp seen in a validated announce (or injected by the
     /// host) to the monotonic clock. Ignored whenever
-    /// `Clock::wall_unix_secs` provides real wall time.
+    /// `Clock::wall_unix_secs` provides real wall time. `None` is the birth
+    /// state, which is not sourceless: the calendar then anchors at
+    /// [`crate::constants::BUILD_UNIX_SECS`] advanced by uptime (#247).
     emission_floor: Option<(u64, u64)>,
 
-    /// Which source seated `emission_floor` (Codeberg #166 item 3).
-    /// Stays [`TimeSource::UptimeOnly`] while no anchor is seated.
+    /// Which source seated `emission_floor` — the anchor's provenance rank
+    /// (Codeberg #166 item 3, #247). Stays [`TimeSource::BuildFloor`],
+    /// rank 5, while no source has seated one.
     time_source: TimeSource,
 
     /// Whether the once-per-process operator warning about an implausible
@@ -2062,7 +2102,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             last_path_snapshot_ms: 0,
             last_path_entries_dump_ms: 0,
             emission_floor: None,
-            time_source: TimeSource::UptimeOnly,
+            time_source: TimeSource::BuildFloor,
             own_wall_clock_warned: false,
             path_request_hash,
             tunnel_synthesize_hash,
@@ -3617,22 +3657,33 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// process lifetimes (`announce_emitted > path_timebase`,
     /// Transport.py:1772/1809), so it must be comparable to the values our
     /// own earlier announces carried — never the process-relative
-    /// `Clock::now_ms`. Sources, in order:
+    /// `Clock::now_ms`.
     ///
-    /// 1. `Clock::wall_unix_secs` — real wall clock (std platforms).
-    /// 2. The learned emission timebase — highest emission timestamp seen
-    ///    in a validated announce (or injected via
-    ///    [`set_wall_time_unix_secs`](Self::set_wall_time_unix_secs)),
-    ///    advanced by the monotonic clock. This is how a clockless node
+    /// The spec ranks the sources GNSS, host injection, platform clock,
+    /// network-learned, build floor — by how hard each is to fool
+    /// (`docs/src/concepts/time-and-clocks.md`, "The source ranking"). What
+    /// this function reads is the anchor those arms seated, in two arms:
+    ///
+    /// 1. `Clock::wall_unix_secs` — the platform clock (rank 3), when the
+    ///    platform has one. It is consulted first rather than in rank
+    ///    order because no platform today offers both a platform clock and
+    ///    GNSS or host injection, so the difference has no behavioural
+    ///    effect; a port that has both follows the ranking.
+    /// 2. The seated anchor advanced by the monotonic clock — a GNSS fix
+    ///    or host injection through
+    ///    [`set_wall_time_unix_secs`](Self::set_wall_time_unix_secs)
+    ///    (ranks 1 and 2), or the highest emission timestamp seen in a
+    ///    validated announce (rank 4). This is how a clockless node
     ///    (LNode: no RTC) stays ordered: even its own pre-restart announce
     ///    echoing back re-seeds the timebase past the value that would
-    ///    otherwise poison its path entries.
-    /// 3. Monotonic uptime seconds — degenerate fallback until either of
-    ///    the above is available. Never beats a stored path entry on a
-    ///    peer, but is monotonic within one boot.
+    ///    otherwise poison its path entries. With no anchor seated the
+    ///    value is the birth anchor of rank 5 —
+    ///    [`BUILD_UNIX_SECS`](crate::constants::BUILD_UNIX_SECS) plus
+    ///    uptime, recognisably old, always in the past, never able to
+    ///    poison a peer's cursor.
     ///
-    /// The full source-priority chain (including GNSS) and the rules
-    /// every source obeys live in `docs/src/concepts/time-and-clocks.md`.
+    /// The value carries no plausibility guarantee and is not meant to:
+    /// every predicate that needs one keys on [`Self::anchor_rank`].
     pub fn emission_secs(&self, now_ms: u64) -> u64 {
         let secs = if let Some(wall) = self.clock.wall_unix_secs() {
             wall
@@ -3641,7 +3692,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Some((floor_secs, floor_at_ms)) => {
                     floor_secs.saturating_add(now_ms.saturating_sub(floor_at_ms) / 1000)
                 }
-                None => now_ms / 1000,
+                None => crate::constants::BUILD_UNIX_SECS.saturating_add(now_ms / 1000),
             }
         };
         // The wire field holds 8*RANDOM_HASH_TIMESTAMP_SIZE bits; a larger
@@ -3656,8 +3707,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// consumer whose wire field needs sub-second precision: the LXMF message
     /// timestamp (Codeberg #217).
     ///
-    /// Same sources in the same order — platform wall clock, learned emission
-    /// timebase advanced by the monotonic clock, monotonic uptime — and
+    /// Same sources in the same order — platform wall clock, the seated
+    /// anchor advanced by the monotonic clock, the build floor plus uptime — and
     /// `emission_micros(now) / 1_000_000 == emission_secs(now)` holds on every
     /// arm, so this is a refinement of the one producer rather than a second
     /// one. The announce emission field keeps using `emission_secs`: it is five
@@ -3687,7 +3738,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Some((floor_secs, floor_at_ms)) => floor_secs
                     .saturating_mul(1_000_000)
                     .saturating_add(now_ms.saturating_sub(floor_at_ms).saturating_mul(1_000)),
-                None => now_ms.saturating_mul(1_000),
+                None => crate::constants::BUILD_UNIX_SECS
+                    .saturating_mul(1_000_000)
+                    .saturating_add(now_ms.saturating_mul(1_000)),
             }
         };
         // The same bound as emission_secs, in the same units, so the two can
@@ -3709,7 +3762,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub fn announce_emission_secs(&mut self, now_ms: u64) -> u64 {
         if !self.own_wall_clock_warned {
             if let Some(wall) = self.clock.wall_unix_secs() {
-                if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&wall) {
+                if !(EMISSION_SANITY_FLOOR_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&wall) {
                     self.own_wall_clock_warned = true;
                     crate::tracing::warn!(
                         wall_unix_secs = wall,
@@ -3724,25 +3777,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Seed wall-clock unix time from a source that claims to know it
-    /// (Codeberg #155, #166): a host injection or a GNSS fix. On
-    /// platforms whose `Clock::wall_unix_secs` already returns real wall
-    /// time the seeded floor is never consulted.
+    /// (Codeberg #155, #166): a host injection (rank 2) or a GNSS fix
+    /// (rank 1). On platforms whose `Clock::wall_unix_secs` already
+    /// returns real wall time the seeded floor is never consulted.
     ///
-    /// Every source passes the same plausibility window — GNSS gets no
-    /// bypass (`docs/src/concepts/time-and-clocks.md`, "The sanity
-    /// window"). Returns whether the anchor was seated: `false` means
-    /// the value was refused, so the caller can surface the refusal
-    /// loudly instead of inheriting a silent no-op (#166 item 1).
+    /// The spec ranks GNSS above host injection above the platform clock,
+    /// and both arms above the network-learned anchor and the build floor
+    /// (`docs/src/concepts/time-and-clocks.md`, "The source ranking") —
+    /// note that this reverses what this comment claimed until #247, where
+    /// it read the platform clock as taking precedence over an injection.
+    ///
+    /// Every source passes the same sanity window — GNSS gets no bypass,
+    /// it is simply the highest-ranked source inside the same filter.
+    /// Returns whether the anchor was seated: `false` means the value was
+    /// refused, so the caller can surface the refusal loudly instead of
+    /// inheriting a silent no-op (#166 item 1).
     pub fn set_wall_time_unix_secs(&mut self, unix_secs: u64, source: TimeSource) -> bool {
-        // Same plausibility window as learned adoption (Codeberg #160,
-        // #161): above the ceiling no real clock can sit and the floor
-        // would wedge there; below the minimum (a boot script racing NTP,
-        // a controller with its own dead clock, a GNSS fix without a real
-        // date) the injection would seed the implausibly-low floor of
-        // #161 §1 through the front door — and unlike a learned announce,
-        // an injection CLAIMS to know wall time, so a value no real clock
-        // can hold is self-refuting.
-        if !(EMISSION_PLAUSIBLE_MIN_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
+        // The same window as learned adoption (Codeberg #160, #161, #247):
+        // above the ceiling no real clock can sit and the anchor would
+        // wedge there; below the build floor real time cannot be, so the
+        // value is deterministically garbage — a boot script racing NTP, a
+        // controller with its own dead clock, a GNSS fix without a real
+        // date. Unlike a learned announce, an injection CLAIMS to know wall
+        // time, so a value no real clock can hold is self-refuting.
+        if !(EMISSION_SANITY_FLOOR_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
             crate::tracing::warn!(unix_secs, "Refused implausible wall-time injection");
             return false;
         }
@@ -3751,10 +3809,42 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         true
     }
 
-    /// Which source seated the current emission timebase anchor
-    /// (Codeberg #166 item 3). [`TimeSource::UptimeOnly`] while none is.
+    /// Which source seated the current calendar anchor (Codeberg #166 item
+    /// 3, #247). [`TimeSource::BuildFloor`] while none has.
+    ///
+    /// A platform clock answers for itself: where `Clock::wall_unix_secs`
+    /// provides a value inside the sanity window,
+    /// [`emission_secs`](Self::emission_secs) reads that clock and no
+    /// seeded anchor, so the source is [`TimeSource::PlatformClock`]
+    /// whatever the seam last recorded. A platform clock whose value fails
+    /// the window is a dead cell, not a time source: it does not seat an
+    /// anchor and does not raise the rank.
     pub fn time_source(&self) -> TimeSource {
+        if let Some(wall) = self.clock.wall_unix_secs() {
+            if (EMISSION_SANITY_FLOOR_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&wall) {
+                return TimeSource::PlatformClock;
+            }
+            // A platform clock outside the window answers nothing; the
+            // calendar is at whatever rank its seated anchor has, which on
+            // such a node is the birth anchor unless a seam seeded one.
+        }
         self.time_source
+    }
+
+    /// The provenance rank of the current calendar anchor, 1 (GNSS) to 5
+    /// (birth) — [`TimeSource::rank`] of [`Self::time_source`] (Codeberg
+    /// #247).
+    ///
+    /// This is the predicate every behavioural rule keys on, never the
+    /// anchor's value: the build floor sits AT the sanity window's lower
+    /// bound by construction, so a birth anchor passes every value test
+    /// from the moment the build timestamp is plumbed. At rank
+    /// [`BIRTH_ANCHOR_RANK`] the first adoption is unbounded, tickets are
+    /// refused, and the calendar is not a plausible wall clock
+    /// (`docs/src/concepts/time-and-clocks.md`, "Anchor provenance is
+    /// first-class state").
+    pub fn anchor_rank(&self) -> u8 {
+        self.time_source().rank()
     }
 
     /// Learn the emission timebase from a validated announce's emission
@@ -3765,18 +3855,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// field is arbitrary input from anyone in radio range (Codeberg #160).
     /// Hardening, in order: values past [`EMISSION_LEARN_CEILING_SECS`]
     /// cannot come from a real clock and are refused outright; adoption is
-    /// unbounded while the current timebase sits below
-    /// [`EMISSION_PLAUSIBLE_MIN_SECS`], so a node booting at uptime
-    /// seconds — or one that adopted a rebooting peer's uptime seconds
-    /// (Codeberg #161 §1) — reaches real unix time in one step; once the
-    /// timebase is plausible, every adoption may advance it by at most
+    /// unbounded while the calendar is at [`BIRTH_ANCHOR_RANK`], so a node
+    /// starting at the build floor reaches real unix time in one step;
+    /// past rank 5 every adoption may advance the anchor by at most
     /// [`EMISSION_LEARN_MAX_ADVANCE_SECS`], so a peer with a badly wrong
     /// clock cannot capture it in one announce.
     ///
+    /// The unbounded branch keys on the anchor's RANK, not on its value
+    /// (Codeberg #247). A birth anchor's value clears the sanity floor by
+    /// construction — the build floor IS that floor — so a value test
+    /// would route a cold node into the bounded branch and reinstate the
+    /// #161 §1 crawl of one day per announce.
+    ///
     /// Unlike the persisted offset in microReticulum (which the #155
-    /// commit message overstated as the same pattern), the learned floor
-    /// is in-memory only: after a reboot a clockless node emits uptime
-    /// seconds again until the first validated announce re-seeds it.
+    /// commit message overstated as the same pattern), the learned anchor
+    /// is in-memory only: after a reboot a clockless node is back at its
+    /// build floor until the first validated announce re-seeds it.
     fn learn_emission_timebase(&mut self, emitted_secs: u64, now_ms: u64) {
         if self.clock.wall_unix_secs().is_some() {
             return;
@@ -3784,24 +3878,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if emitted_secs > EMISSION_LEARN_CEILING_SECS {
             return;
         }
+        // The window's lower bound, spelled out rather than left to the
+        // no-backwards guard below (Codeberg #247): an emission from before
+        // this binary was built cannot be real time, so it is refused as an
+        // anchor by the same filter every other source passes — a clockless
+        // peer's uptime seconds, a peer with a dead RTC. The guard below
+        // would reject it too while the anchor sits at the floor, but that
+        // is an ordering accident, not the filter.
+        if emitted_secs < EMISSION_SANITY_FLOOR_SECS {
+            return;
+        }
         let current = self.emission_secs(now_ms);
         if emitted_secs <= current {
             return;
         }
-        // Unbounded while implausible, bounded once plausible. "Implausible"
-        // covers both no-floor-yet (current = uptime seconds, #155) and a
-        // floor captured below any value a real clock can produce (#161 §1);
-        // in both cases one credible announce must recover the node in a
-        // single step. The `emitted_secs <= current` guard above keeps the
-        // floor from ever moving down, so the unbounded branch cannot be
-        // abused downwards — the only way to sit below the bound is never
-        // to have heard a credible timestamp.
-        let adopted = if current < EMISSION_PLAUSIBLE_MIN_SECS {
+        // Unbounded at the birth anchor, bounded past it. A birth-anchored
+        // node has nothing worth defending and must climb to real unix time
+        // in one step; once a source has seated an anchor, one announce may
+        // move it by the cap at most. The `emitted_secs <= current` guard
+        // above keeps the anchor from ever moving down, so the unbounded
+        // branch cannot be abused downwards.
+        let adopted = if self.anchor_rank() == BIRTH_ANCHOR_RANK {
             emitted_secs
         } else {
             emitted_secs.min(current.saturating_add(EMISSION_LEARN_MAX_ADVANCE_SECS))
         };
         self.emission_floor = Some((adopted, now_ms));
+        // Traffic healing is rank 4: better than birth, not yet known-good
+        // ("anchored from traffic, unconfirmed"). It records the transition
+        // out of the birth state and never overwrites the provenance of a
+        // higher-ranked source that is merely being advanced.
+        if self.time_source.rank() > TimeSource::Overheard.rank() {
+            self.time_source = TimeSource::Overheard;
+        }
     }
 
     /// Return all path table entries for RPC export.
@@ -11100,6 +11209,23 @@ mod tests {
                 ..TransportConfig::default()
             };
             Transport::new(config, clock, MemoryStorage::with_defaults(), identity)
+        }
+
+        /// A credible "real unix time" for the calendar tests, expressed
+        /// relative to the build floor (Codeberg #247).
+        ///
+        /// The build timestamp is both the birth anchor and the sanity
+        /// window's lower bound, so a hard-coded 2026 literal is a time
+        /// bomb: it stops being an admissible value the day the tree is
+        /// built after it. 120 days is far enough above the floor that the
+        /// unbounded first adoption and the one-day per-announce cap stay
+        /// distinguishable.
+        const REAL_UNIX_SECS: u64 = crate::constants::BUILD_UNIX_SECS + 120 * 86_400;
+
+        /// What a birth-anchored clockless node stamps at `now_ms`: the
+        /// build floor advanced by uptime.
+        fn birth_stamp(now_ms: u64) -> u64 {
+            crate::constants::BUILD_UNIX_SECS + now_ms / 1000
         }
 
         /// Check if actions contain a path request broadcast for the given destination.
@@ -19403,9 +19529,11 @@ mod tests {
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
 
-            // Degenerate fallback before anything is learned: uptime secs.
+            // The birth anchor: the build floor advanced by uptime, and
+            // rank 5 until a source seats something better (#247).
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), now / 1000);
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+            assert_eq!(transport.anchor_rank(), BIRTH_ANCHOR_RANK);
 
             let identity = Identity::generate(&mut OsRng);
             let dest = Destination::new(
@@ -19419,13 +19547,18 @@ mod tests {
 
             // A validated announce carrying a unix emission timestamp
             // seeds the timebase.
-            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            let a1 = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
             transport.process_incoming(0, &a1).unwrap();
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_800_000_000,
+                REAL_UNIX_SECS,
                 "validated announce emission must seed the timebase"
+            );
+            assert_eq!(
+                transport.time_source(),
+                TimeSource::Overheard,
+                "a calendar healed from traffic records rank 4, not the birth rank"
             );
 
             // The timebase advances with the monotonic clock.
@@ -19433,17 +19566,17 @@ mod tests {
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_800_000_005,
+                REAL_UNIX_SECS + 5,
                 "learned timebase must advance with the monotonic clock"
             );
 
             // An older emission never moves the timebase backwards.
             transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
-            let a2 = make_announce_raw_for_dest(&dest, 1, 1_700_000_000);
+            let a2 = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS - 30 * 86_400);
             transport.process_incoming(0, &a2).unwrap();
             let now = transport.clock.now_ms();
             assert!(
-                transport.emission_secs(now) >= 1_800_000_005,
+                transport.emission_secs(now) >= REAL_UNIX_SECS + 5,
                 "an older announce emission must not regress the timebase"
             );
 
@@ -19474,12 +19607,12 @@ mod tests {
         fn test_wall_time_injection_seeds_emission_timebase() {
             let mut transport = make_transport_enabled();
 
-            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
             transport.clock.advance(3_000);
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_790_000_003,
+                REAL_UNIX_SECS + 3,
                 "injected wall time must seed the timebase and advance monotonically"
             );
         }
@@ -19514,12 +19647,12 @@ mod tests {
             transport.register_destination(dest_hash);
 
             // Our pre-restart announce comes back from a neighbour.
-            let a = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            let a = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
             transport.process_incoming(0, &a).unwrap();
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_800_000_000,
+                REAL_UNIX_SECS,
                 "own-announce echo must re-seed the timebase (learning before echo drop)"
             );
             assert_eq!(
@@ -19552,12 +19685,14 @@ mod tests {
             )
             .unwrap();
 
-            // First adoption: real unix time.
-            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            // First adoption: real unix time. It leaves rank 5, which is
+            // what makes the next adoption bounded (#247).
+            let a1 = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
             transport.process_incoming(0, &a1).unwrap();
             let now = transport.clock.now_ms();
             let prev = transport.emission_secs(now);
-            assert_eq!(prev, 1_800_000_000);
+            assert_eq!(prev, REAL_UNIX_SECS);
+            assert!(transport.anchor_rank() < BIRTH_ANCHOR_RANK);
 
             // Year-2100 emission from a misconfigured peer.
             transport.clock.advance(ANNOUNCE_RATE_LIMIT_MS + 1);
@@ -19603,30 +19738,38 @@ mod tests {
 
             // The jump this pins is far beyond the bounded-advance cap.
             let now = transport.clock.now_ms();
-            assert!(1_800_000_000 - now / 1000 > EMISSION_LEARN_MAX_ADVANCE_SECS);
+            assert_eq!(transport.anchor_rank(), BIRTH_ANCHOR_RANK);
+            assert!(
+                REAL_UNIX_SECS - transport.emission_secs(now) > EMISSION_LEARN_MAX_ADVANCE_SECS
+            );
 
-            let a1 = make_announce_raw_for_dest(&dest, 1, 1_800_000_000);
+            let a1 = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
             transport.process_incoming(0, &a1).unwrap();
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_800_000_000,
-                "first adoption must be unbounded: uptime secs to real unix time in one step"
+                REAL_UNIX_SECS,
+                "first adoption must be unbounded: the birth anchor climbs to real \
+                 unix time in one step"
             );
         }
 
-        // Codeberg #161 §1: a clockless node whose floor sits at an
-        // implausibly LOW value (the realistic trigger: two LNodes reboot
-        // together, one adopts the other's post-reboot uptime-seconds
-        // announce) must climb to a credible unix timestamp in ONE
-        // adoption. Before the fix the bounded advance (#160) applied to
-        // any existing floor, so recovery crawled at one day per announce
-        // — 20602 announces / ~429 days at a 30 min LoRa cadence — a
-        // regression against the one-step self-correction that existed
-        // before a88d172.
+        // Codeberg #161 §1, tightened by #247: a clockless node must climb
+        // to a credible unix timestamp in ONE adoption. Before the #161 fix
+        // the bounded advance (#160) applied to any existing floor, so
+        // recovery crawled at one day per announce — 20602 announces /
+        // ~429 days at a 30 min LoRa cadence.
+        //
+        // The realistic #161 trigger — two LNodes reboot together and one
+        // adopts the other's post-reboot uptime-seconds announce — cannot
+        // happen any more: the build floor is the sanity window's lower
+        // bound, so a peer's uptime seconds are refused as an anchor
+        // instead of being adopted and then needing recovery. That refusal
+        // is the arm-4 negative cell of the window; the one-step recovery
+        // from the birth anchor is what still has to hold, and does.
         #[test]
         fn test_implausibly_low_floor_recovers_in_one_adoption() {
-            use crate::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+            use crate::constants::EMISSION_SANITY_FLOOR_SECS;
             use crate::destination::{Destination, DestinationType, Direction};
 
             let mut transport = make_transport_enabled();
@@ -19642,19 +19785,25 @@ mod tests {
             )
             .unwrap();
 
-            // Peer B is itself freshly rebooted and clockless: its announce
-            // carries its uptime seconds. We adopt it as our first floor —
-            // unbounded and with no reason for suspicion (#161 §1).
+            // Peer B is itself freshly rebooted and clockless on a build
+            // that predates the build floor: its announce carries uptime
+            // seconds. Real time cannot be before this binary was built, so
+            // the value is refused as an anchor and the calendar stays at
+            // its birth anchor, rank 5.
             let peer_uptime_secs = 5_000;
-            assert!(peer_uptime_secs < EMISSION_PLAUSIBLE_MIN_SECS);
+            assert!(peer_uptime_secs < EMISSION_SANITY_FLOOR_SECS);
             let a1 = make_announce_raw_for_dest(&dest_b, 1, peer_uptime_secs);
             transport.process_incoming(0, &a1).unwrap();
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                peer_uptime_secs,
-                "the implausible first adoption itself is still accepted (we cannot \
-                 distinguish it at adoption time; recoverability is the fix)"
+                birth_stamp(now),
+                "a below-build-floor emission must not seat an anchor (#247)"
+            );
+            assert_eq!(
+                transport.anchor_rank(),
+                BIRTH_ANCHOR_RANK,
+                "a refused value leaves the calendar at the birth anchor"
             );
 
             // A wall-clocked peer comes into range with a credible unix
@@ -19669,14 +19818,14 @@ mod tests {
                 &["timebase", "walled"],
             )
             .unwrap();
-            let a2 = make_announce_raw_for_dest(&dest_c, 1, 1_800_000_000);
+            let a2 = make_announce_raw_for_dest(&dest_c, 1, REAL_UNIX_SECS);
             transport.process_incoming(0, &a2).unwrap();
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                1_800_000_000,
-                "a floor below EMISSION_PLAUSIBLE_MIN_SECS must be treated as if \
-                 absent: one credible announce recovers the node in a single step"
+                REAL_UNIX_SECS,
+                "at the birth anchor the first adoption is unbounded: one credible \
+                 announce recovers the node in a single step"
             );
         }
 
@@ -19689,20 +19838,18 @@ mod tests {
         // was off, so it must still adopt upward from the first credible
         // announce.
         //
-        // Restored through the only seam that exists today it is an anchor
-        // like any other, and the unbounded-first-adoption branch keys on
-        // the anchor's VALUE (`current < EMISSION_PLAUSIBLE_MIN_SECS`), not
-        // on its provenance rank. A restored floor clears that bound by
-        // construction — the sanity window admitted it — so the node lands
-        // in the bounded branch and crawls back to real time at
-        // EMISSION_LEARN_MAX_ADVANCE_SECS per announce, where the same node
-        // without persistence recovers in one step.
+        // Restored through the only seam that exists today it arrives as a
+        // host injection, which is rank 2 — so the node is past the birth
+        // anchor the moment it boots, lands in the bounded branch, and
+        // crawls back to real time at EMISSION_LEARN_MAX_ADVANCE_SECS per
+        // announce, where the same node without persistence recovers in one
+        // step.
         //
-        // This measures the crawl instead of asserting it. It is the reason
-        // item 4 is not a firmware-only change: the rank-keyed predicate of
-        // docs/src/concepts/time-and-clocks.md ("Anchor provenance is
-        // first-class state") has to land with it, exactly as that section
-        // requires of the build floor, which has the same shape.
+        // This measures the crawl instead of asserting it. Since #247 the
+        // unbounded branch keys on the anchor's RANK, so item 4's remaining
+        // work is naming the rank a restored floor deserves — a persisted
+        // birth anchor is not a host's claim to know wall time — not
+        // loosening a value test.
         #[test]
         fn test_restored_stale_floor_crawls_where_an_absent_floor_recovers() {
             use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
@@ -19710,11 +19857,11 @@ mod tests {
 
             // The credible announce both arms hear, and how long the relay
             // was powered off before it heard it.
-            const NOW_SECS: u64 = 1_800_000_000;
             const OFF_SECS: u64 = 90 * 86_400;
-            let stored_floor = NOW_SECS - OFF_SECS;
+            let now_secs = REAL_UNIX_SECS;
+            let stored_floor = now_secs - OFF_SECS;
             assert!(
-                stored_floor > EMISSION_PLAUSIBLE_MIN_SECS,
+                stored_floor > crate::constants::EMISSION_SANITY_FLOOR_SECS,
                 "a floor worth persisting is plausible by construction: the \
                  sanity window is what admitted it in the first place"
             );
@@ -19733,13 +19880,13 @@ mod tests {
             // seconds and one credible announce recovers it completely.
             let mut fresh = make_transport_enabled();
             let _fresh_if = fresh.register_interface(Box::new(MockInterface::new("if0", 1)));
-            let a1 = make_announce_raw_for_dest(&dest, 1, NOW_SECS);
+            let a1 = make_announce_raw_for_dest(&dest, 1, now_secs);
             fresh.process_incoming(0, &a1).unwrap();
             let now = fresh.clock.now_ms();
             assert_eq!(
                 fresh.emission_secs(now),
-                NOW_SECS,
-                "without a floor the first adoption is unbounded"
+                now_secs,
+                "at the birth anchor the first adoption is unbounded"
             );
 
             // Arm B — with item 4 done naively: the stored floor is seated
@@ -19747,14 +19894,15 @@ mod tests {
             let mut restored = make_transport_enabled();
             let _restored_if = restored.register_interface(Box::new(MockInterface::new("if0", 1)));
             assert!(restored.set_wall_time_unix_secs(stored_floor, TimeSource::Host));
-            let a2 = make_announce_raw_for_dest(&dest, 1, NOW_SECS);
+            let a2 = make_announce_raw_for_dest(&dest, 1, now_secs);
             restored.process_incoming(0, &a2).unwrap();
             let now = restored.clock.now_ms();
             assert_eq!(
                 restored.emission_secs(now),
                 stored_floor + EMISSION_LEARN_MAX_ADVANCE_SECS,
-                "a restored floor is plausible, so the same announce advances \
-                 it by the per-announce cap instead of recovering it"
+                "a restored floor arrives through the host seam and takes its \
+                 rank, so the same announce advances it by the per-announce cap \
+                 instead of recovering it"
             );
 
             // The cost, stated as the number the rig scenario would count:
@@ -19783,34 +19931,45 @@ mod tests {
             let now = transport.clock.now_ms();
             assert_eq!(
                 transport.emission_secs(now),
-                now / 1000,
+                birth_stamp(now),
                 "an implausibly low wall-time injection must be ignored"
             );
 
             // Even a merely stale value below the bound (2017) is refused.
             assert!(!transport.set_wall_time_unix_secs(1_500_000_000, TimeSource::Host));
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), now / 1000);
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+
+            // And the bound that #247 tightened it to: one second before
+            // this binary was built is a moment real time cannot be in.
+            assert!(!transport.set_wall_time_unix_secs(
+                crate::constants::EMISSION_SANITY_FLOOR_SECS - 1,
+                TimeSource::Host
+            ));
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+            assert_eq!(transport.anchor_rank(), BIRTH_ANCHOR_RANK);
 
             // A sane injection afterwards still works.
-            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+            assert_eq!(transport.emission_secs(now), REAL_UNIX_SECS);
         }
 
         // Codeberg #166 item 3: the node states its time source. Before
-        // any anchor is seated the source is uptime-only; a GNSS seed
+        // any anchor is seated the source is the build floor; a GNSS seed
         // through the shared seam both anchors the timebase and records
         // gnss as the source.
         #[test]
         fn test_gnss_seed_anchors_timebase_and_records_source() {
             let mut transport = make_transport_enabled();
-            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
 
-            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Gnss));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Gnss));
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+            assert_eq!(transport.emission_secs(now), REAL_UNIX_SECS);
             assert_eq!(transport.time_source(), TimeSource::Gnss);
+            assert_eq!(transport.anchor_rank(), 1);
         }
 
         // Codeberg #166 item 1: a refused seed must be visible to the
@@ -19824,19 +19983,255 @@ mod tests {
         fn test_refused_gnss_seed_reports_false_and_keeps_source() {
             let mut transport = make_transport_enabled();
 
-            // Below the plausibility floor: a receiver emitting a
-            // default date instead of a real one.
+            // Below the build floor: a receiver emitting a default date
+            // instead of a real one — the 1999-RTC shape, from the arm the
+            // model trusts most.
             assert!(!transport.set_wall_time_unix_secs(1_000_000, TimeSource::Gnss));
-            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), now / 1000);
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+
+            // One second below the build floor is refused for the same
+            // reason, which is where GNSS would show a bypass if it had one.
+            assert!(!transport.set_wall_time_unix_secs(
+                crate::constants::EMISSION_SANITY_FLOOR_SECS - 1,
+                TimeSource::Gnss
+            ));
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
 
             // Above the learn ceiling: no real clock can sit there.
             assert!(!transport
                 .set_wall_time_unix_secs(EMISSION_LEARN_CEILING_SECS + 1, TimeSource::Gnss));
-            assert_eq!(transport.time_source(), TimeSource::UptimeOnly);
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), now / 1000);
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+
+            // The in-window value of the trio: accepted, like every other
+            // source's.
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Gnss));
+            assert_eq!(transport.time_source(), TimeSource::Gnss);
+        }
+
+        // Codeberg #247, the negative cell of the anchor-rank rule: the
+        // build floor sits AT the sanity window's lower bound by
+        // construction, so the birth anchor's VALUE passes every value test
+        // in the tree from the moment the build timestamp is plumbed. Any
+        // predicate still keyed on the value is therefore vacuously true at
+        // birth — which is the whole reason the model keys them on the rank.
+        // This test asserts the trap exists, so that a future value test
+        // cannot be written in the belief that it discriminates.
+        #[test]
+        fn test_birth_anchor_value_clears_the_window_but_not_the_rank() {
+            let mut transport = make_transport_enabled();
+            let now = transport.clock.now_ms();
+
+            let birth = transport.emission_secs(now);
+            assert_eq!(birth, birth_stamp(now));
+            assert!(
+                birth >= crate::constants::EMISSION_SANITY_FLOOR_SECS,
+                "the birth anchor clears the sanity window's lower bound: it IS \
+                 that bound plus uptime"
+            );
+            assert!(
+                birth >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS,
+                "and it clears the old fixed-date plausibility floor too, which \
+                 is exactly what makes a value test useless here"
+            );
+
+            // The rank says what the value cannot.
+            assert_eq!(transport.anchor_rank(), BIRTH_ANCHOR_RANK);
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
+
+            // Same value, seated by a source that claims to know wall time:
+            // admitted by the same window, and now at rank 2. The window
+            // answers "may this value seat an anchor", never "is this
+            // calendar trustworthy".
+            assert!(transport.set_wall_time_unix_secs(birth, TimeSource::Host));
+            assert_eq!(transport.anchor_rank(), TimeSource::Host.rank());
+        }
+
+        // Codeberg #247: the rank-5 half of the adoption pair. A birth
+        // anchor adopts a credible announce in ONE step even though its own
+        // value is plausible — the regression a value-keyed predicate
+        // reintroduces is the #161 §1 crawl of one day per announce, and
+        // this is the test that sees it: the jump here is 120 days, so a
+        // bounded first adoption lands 119 days short.
+        #[test]
+        fn test_birth_anchor_adoption_is_unbounded_despite_a_plausible_value() {
+            use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "rank5"],
+            )
+            .unwrap();
+
+            let now = transport.clock.now_ms();
+            let birth = transport.emission_secs(now);
+            assert!(birth >= crate::constants::EMISSION_PLAUSIBLE_MIN_SECS);
+            assert!(REAL_UNIX_SECS - birth > EMISSION_LEARN_MAX_ADVANCE_SECS);
+
+            let a = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                REAL_UNIX_SECS,
+                "a birth anchor heals in one step; a value-keyed predicate would \
+                 cap this at one day and crawl"
+            );
+            assert_eq!(
+                transport.anchor_rank(),
+                TimeSource::Overheard.rank(),
+                "healed from traffic: rank 4, anchored from traffic, unconfirmed"
+            );
+        }
+
+        // Codeberg #247, arm 3 of the sanity-window trio: a platform clock
+        // is a time source only while its value passes the same window
+        // every other arm passes. Below the build floor it is a dead cell —
+        // the node keeps stamping it verbatim (the deliberate non-behaviour
+        // of #161 §3), but it does not raise the anchor's rank, so tickets
+        // stay refused and the calendar still counts as birth-anchored.
+        #[test]
+        fn test_platform_clock_outside_the_window_is_not_a_time_source() {
+            struct FixedWallClock(u64);
+            impl Clock for FixedWallClock {
+                fn now_ms(&self) -> u64 {
+                    0
+                }
+                fn wall_unix_secs(&self) -> Option<u64> {
+                    Some(self.0)
+                }
+            }
+            let make = |wall: u64| {
+                Transport::new(
+                    TransportConfig::default(),
+                    FixedWallClock(wall),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            };
+
+            // In window: rank 3, and the source names itself.
+            let healthy = make(REAL_UNIX_SECS);
+            assert_eq!(healthy.time_source(), TimeSource::PlatformClock);
+            assert_eq!(healthy.anchor_rank(), 3);
+
+            // 2000-01-01, the classic dead-RTC reset value.
+            let dead = make(946_684_800);
+            assert_eq!(
+                dead.time_source(),
+                TimeSource::BuildFloor,
+                "a clock reading before this binary was built is a dead cell, \
+                 not a time source"
+            );
+            assert_eq!(dead.emission_secs(0), 946_684_800, "still stamped verbatim");
+
+            // One second below the build floor fails the same filter.
+            let stale = make(crate::constants::EMISSION_SANITY_FLOOR_SECS - 1);
+            assert_eq!(stale.anchor_rank(), BIRTH_ANCHOR_RANK);
+
+            // Above the ceiling, for the third cell of the trio.
+            let absurd = make(EMISSION_LEARN_CEILING_SECS + 1);
+            assert_eq!(absurd.anchor_rank(), BIRTH_ANCHOR_RANK);
+        }
+
+        // Codeberg #247, the stamping asymmetry (concept matrix row 4):
+        // across a scripted sequence of anchor changes — birth, traffic
+        // adoption, a host re-anchor, saturation at the wire maximum — the
+        // stamp we put on the wire is never AHEAD of our own estimate, and
+        // it never repeats while time moves. Stated at its real strength:
+        // this is not detection of a wrong source, it is the direction of
+        // the error. Every fallback anchor lies in the past, so an
+        // uncertain calendar errs backwards by construction.
+        #[test]
+        fn test_stamps_never_run_ahead_of_the_estimate_across_anchor_changes() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "testapp",
+                &["timebase", "stamping"],
+            )
+            .unwrap();
+
+            let mut last_stamp = 0u64;
+            let mut step = 0usize;
+            let observe = |transport: &mut Transport<MockClock, MemoryStorage>,
+                           step: usize,
+                           last: &mut u64| {
+                let now = transport.clock.now_ms();
+                let estimate = transport.emission_secs(now);
+                let stamp = transport.announce_emission_secs(now);
+                assert!(
+                    stamp <= estimate,
+                    "step {step}: the stamp ran ahead of the estimate ({stamp} > {estimate})"
+                );
+                assert_eq!(
+                    stamp, estimate,
+                    "step {step}: the stamp IS the estimate — we never withhold or \
+                     bound our own value on emission"
+                );
+                assert_eq!(
+                    transport.emission_micros(now) / 1_000_000,
+                    estimate,
+                    "step {step}: the sub-second producer describes the same instant"
+                );
+                assert!(
+                    stamp > *last,
+                    "step {step}: the stamp repeated or went backwards ({stamp} <= {last})"
+                );
+                *last = stamp;
+            };
+
+            // Step 0 — birth: exactly the build floor plus uptime.
+            let now = transport.clock.now_ms();
+            assert_eq!(transport.emission_secs(now), birth_stamp(now));
+            observe(&mut transport, step, &mut last_stamp);
+            assert!(
+                last_stamp <= REAL_UNIX_SECS,
+                "the birth stamp lies in the past"
+            );
+
+            // Step 1 — uptime alone moves it, with no anchor change at all.
+            step += 1;
+            transport.clock.advance(4_000);
+            observe(&mut transport, step, &mut last_stamp);
+
+            // Step 2 — healed from traffic, the unbounded first adoption.
+            step += 1;
+            let a = make_announce_raw_for_dest(&dest, 1, REAL_UNIX_SECS);
+            transport.process_incoming(0, &a).unwrap();
+            observe(&mut transport, step, &mut last_stamp);
+
+            // Step 3 — a host re-anchors it forward.
+            step += 1;
+            transport.clock.advance(1_000);
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS + 3_600, TimeSource::Host));
+            observe(&mut transport, step, &mut last_stamp);
+
+            // Step 4 — saturation: an anchor at the wire field maximum
+            // cannot make the stamp exceed it, so the estimate stops
+            // climbing and the stamp stops with it rather than overtaking.
+            step += 1;
+            transport.clock.advance(1_000);
+            assert!(
+                transport.set_wall_time_unix_secs(EMISSION_LEARN_CEILING_SECS, TimeSource::Host)
+            );
+            observe(&mut transport, step, &mut last_stamp);
+            let now = transport.clock.now_ms();
+            assert!(transport.emission_secs(now) <= crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
         }
 
         // Codeberg #161 review (B1): what the bounded advance (#160)
@@ -19875,7 +20270,7 @@ mod tests {
             };
 
             // Credible seed from the first peer.
-            let seed = 1_800_000_000;
+            let seed = REAL_UNIX_SECS;
             let d0 = make_dest("seed");
             let a = make_announce_raw_for_dest(&d0, 1, seed);
             transport.process_incoming(0, &a).unwrap();
@@ -19885,7 +20280,7 @@ mod tests {
             // Three more identities, all claiming a far-future emission,
             // all within the same instant (no rate-limit window elapses):
             // each advances the floor by the full cap.
-            let claim = 1_900_000_000;
+            let claim = REAL_UNIX_SECS + 3_000 * 86_400;
             for (k, label) in [(1u64, "id1"), (2, "id2"), (3, "id3")] {
                 let d = make_dest(label);
                 let a = make_announce_raw_for_dest(&d, 1, claim);
@@ -19948,9 +20343,10 @@ mod tests {
                 .unwrap()
             };
 
-            // First adoption just below the ceiling (unbounded first step —
-            // this is the remaining #161 §1 first-adoption window, which the
-            // future build-stamp bound would narrow).
+            // First adoption just below the ceiling: unbounded, because the
+            // calendar is still at the birth anchor. This is the remaining
+            // #161 §1 first-adoption window — the build floor (#247) closed
+            // its lower half, the ceiling bounds the upper one.
             let near = EMISSION_LEARN_CEILING_SECS - EMISSION_LEARN_MAX_ADVANCE_SECS / 2;
             let d0 = make_dest("near");
             let a = make_announce_raw_for_dest(&d0, 1, near);
@@ -19998,15 +20394,15 @@ mod tests {
             let e = transport.emission_secs(now);
             assert_eq!(
                 e,
-                now / 1000,
+                birth_stamp(now),
                 "an over-ceiling wall-time injection must be ignored"
             );
             assert!(e <= crate::constants::EMISSION_TIMESTAMP_MAX_SECS);
 
             // A sane injection afterwards still works.
-            assert!(transport.set_wall_time_unix_secs(1_790_000_000, TimeSource::Host));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
             let now = transport.clock.now_ms();
-            assert_eq!(transport.emission_secs(now), 1_790_000_000);
+            assert_eq!(transport.emission_secs(now), REAL_UNIX_SECS);
         }
 
         // Codeberg #160: even a platform wall clock past the 40-bit wire
@@ -20052,7 +20448,7 @@ mod tests {
         fn test_emission_micros_agrees_with_emission_secs_on_every_arm() {
             let mut transport = make_transport_enabled();
 
-            // Arm 3, the degenerate fallback: no wall clock, nothing learned.
+            // The birth anchor: no wall clock, nothing learned.
             transport.clock.advance(3_400);
             let now = transport.clock.now_ms();
             assert_eq!(
@@ -20064,7 +20460,7 @@ mod tests {
             // clock. The seconds arm truncates the elapsed time; the micros
             // arm keeps it to the millisecond the timer actually has, and they
             // still agree on the second.
-            assert!(transport.set_wall_time_unix_secs(1_800_000_000, TimeSource::Host));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
             for step in [0u64, 1, 499, 500, 999, 1_000, 1_001, 7_777] {
                 let now = transport.clock.now_ms() + step;
                 assert_eq!(
@@ -20074,7 +20470,7 @@ mod tests {
                 );
                 assert_eq!(
                     transport.emission_micros(now),
-                    1_800_000_000 * 1_000_000 + step * 1_000,
+                    REAL_UNIX_SECS * 1_000_000 + step * 1_000,
                     "the learned arm advances by monotonic milliseconds, scaled"
                 );
             }
@@ -20112,7 +20508,7 @@ mod tests {
         #[test]
         fn test_emission_micros_distinguishes_instants_inside_one_second() {
             let mut transport = make_transport_enabled();
-            assert!(transport.set_wall_time_unix_secs(1_800_000_000, TimeSource::Host));
+            assert!(transport.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
             let base = transport.clock.now_ms();
 
             let first = transport.emission_micros(base);
@@ -20269,12 +20665,12 @@ mod tests {
             );
 
             // A plausible wall clock never warns.
-            let mut t = make(Some(1_790_000_000));
-            assert_eq!(t.announce_emission_secs(0), 1_790_000_000);
+            let mut t = make(Some(REAL_UNIX_SECS));
+            assert_eq!(t.announce_emission_secs(0), REAL_UNIX_SECS);
             assert!(!t.own_wall_clock_warned);
 
-            // A clockless platform never warns: its uptime-seconds fallback
-            // is the documented #155 state, not an operator fault.
+            // A clockless platform never warns: its birth anchor is the
+            // documented #155 state, not an operator fault.
             let mut t = make(None);
             let _ = t.announce_emission_secs(0);
             assert!(!t.own_wall_clock_warned);

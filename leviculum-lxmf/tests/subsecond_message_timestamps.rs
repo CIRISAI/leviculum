@@ -40,7 +40,7 @@ use rand_core::OsRng;
 
 /// A plausible timebase (above `EMISSION_PLAUSIBLE_MIN_SECS`, below the learn
 /// ceiling) that no argument in this file passes to the router.
-const INJECTED_UNIX: u64 = 1_777_123_456;
+const INJECTED_UNIX: u64 = leviculum_core::constants::BUILD_UNIX_SECS + 1_234_567;
 
 const BOOT_MS: u64 = 1_000;
 

@@ -838,25 +838,41 @@ impl Engine {
         if node.has_plausible_wall_clock() || unix_secs == 0 {
             return;
         }
+        // The birth-era estimate, read before the jump: every liveness
+        // stamp at or below it was taken on the old calendar. Reading that
+        // boundary off the node instead of off a fixed date is what keeps
+        // the refresh below working now that the birth anchor is the build
+        // timestamp rather than uptime seconds (Codeberg #247).
+        let before = node.emission_secs();
         if node.set_wall_time_unix_secs(unix_secs, TimeSource::Overheard) {
             crate::set_time_source(TimeSource::Overheard);
             crate::log::log_fmt_critical(
                 "[INFO!] ",
                 format_args!("[TIME_SEED] source=overheard via={from} unix={unix_secs}"),
             );
-            self.on_clock_seeded(node.emission_secs());
+            // Both epoch guards take the same boundary: peer liveness
+            // stamps here, stored-message timestamps in the role.
+            self.role.note_calendar_jump(before);
+            self.on_clock_seeded(before, node.emission_secs());
         }
     }
 
-    /// The calendar just jumped from uptime seconds to real time: refresh
-    /// every uptime-era peer liveness stamp so the 14-day unreachability
-    /// cull does not read the jump as fourteen days of silence. "Heard
-    /// this boot" is the honest reading of those stamps.
-    fn on_clock_seeded(&mut self, now: u64) {
-        let floor = leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+    /// The calendar just jumped from the birth anchor to real time:
+    /// refresh every liveness stamp taken before the jump so the 14-day
+    /// unreachability cull does not read the jump as fourteen days of
+    /// silence. "Heard this boot" is the honest reading of those stamps.
+    ///
+    /// `before` is the estimate the old calendar gave at the moment of the
+    /// jump, so `last_heard <= before` is exactly "stamped on the old
+    /// calendar" — no fixed date can say that any more, because the birth
+    /// anchor is itself a plausible-looking value (Codeberg #247).
+    fn on_clock_seeded(&mut self, before: u64, now: u64) {
+        if now <= before {
+            return;
+        }
         let mut refreshed: Vec<[u8; 16]> = Vec::new();
         for peer in self.peers.iter_mut() {
-            if peer.last_heard < floor && now >= floor {
+            if peer.last_heard <= before {
                 peer.last_heard = now;
                 refreshed.push(peer.destination_hash);
             }

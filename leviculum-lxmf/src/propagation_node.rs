@@ -246,6 +246,11 @@ pub struct PropagationNode<S> {
     /// `reference/LXMF/LXMF/LXMPeer.py:340`, and the record tag is written
     /// once at accept, so the decision is per-message at accept time).
     compute_stamp_value: bool,
+    /// The calendar estimate this node last held before its calendar jumped
+    /// to real time, or 0 on a node whose calendar never was birth-anchored
+    /// (every host with a platform clock). Records stamped at or below it
+    /// were written under the old calendar; see [`Self::tick`].
+    calendar_jump_floor: u64,
 }
 
 impl<S: PropagationStore> PropagationNode<S> {
@@ -263,7 +268,23 @@ impl<S: PropagationStore> PropagationNode<S> {
             config,
             processed: alloc::collections::BTreeMap::new(),
             compute_stamp_value: false,
+            calendar_jump_floor: 0,
         }
+    }
+
+    /// The node's calendar just jumped from its birth anchor to real time;
+    /// `before` is the estimate the old calendar gave at the moment of the
+    /// jump (Codeberg #247). Every stored record stamped at or below it was
+    /// written under the old calendar, and [`Self::tick`] must not read the
+    /// jump as elapsed time.
+    ///
+    /// Told rather than inferred: since the birth anchor is the build
+    /// timestamp, a birth-era stamp is a perfectly plausible-looking value
+    /// and no fixed date can separate the two epochs any more. The owner of
+    /// the node — the firmware's propagation role, which seeds the clock —
+    /// is the one place that knows the boundary.
+    pub fn note_calendar_jump(&mut self, before: u64) {
+        self.calendar_jump_floor = self.calendar_jump_floor.max(before);
     }
 
     /// See the field: while set, the accept path asks `validate` for the
@@ -617,20 +638,24 @@ impl<S: PropagationStore> PropagationNode<S> {
     ///
     /// Expiry is epoch-guarded for the board's clockless bring-up (#384
     /// part 3, instruction item 6): a message stored while the node's
-    /// calendar was still uptime seconds carries an implausibly small
-    /// `received_at`, and the first real time seed would otherwise make
-    /// every such record "30 days old" in one jump and mass-expire a
-    /// store the node just proved it accepted. A record whose timestamp
-    /// sits below the plausibility floor while `now_secs` sits above it
-    /// is therefore never expired by age — its space is still reclaimed
-    /// by the store's own displacement (host) or page reclaim (board),
-    /// so the guard costs retention policy, never capacity.
+    /// calendar was still on its birth anchor carries a stamp from that
+    /// epoch, and the first real time seed would otherwise make every such
+    /// record "30 days old" in one jump and mass-expire a store the node
+    /// just proved it accepted. A record stamped at or below the boundary
+    /// [`Self::note_calendar_jump`] recorded is therefore never expired by
+    /// age — its space is still reclaimed by the store's own displacement
+    /// (host) or page reclaim (board), so the guard costs retention policy,
+    /// never capacity.
+    ///
+    /// The boundary is told, not inferred from a fixed date: since #247 the
+    /// birth anchor is the build timestamp, which no value test can tell
+    /// apart from real time.
     pub fn tick(&mut self, now_secs: u64) -> Vec<Eviction> {
         let expiry = self.config.message_expiry_secs;
-        let floor = leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS;
+        let floor = self.calendar_jump_floor;
         let mut expired = Vec::new();
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
-            if meta.received_at < floor && now_secs >= floor {
+            if floor > 0 && meta.received_at <= floor && now_secs > floor {
                 return;
             }
             if now_secs.saturating_sub(meta.received_at) > expiry {

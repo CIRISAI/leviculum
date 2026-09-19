@@ -654,9 +654,12 @@ impl LxmfRouter {
     /// no log naming us.
     ///
     /// Because of that silence this call REFUSES with [`RouterError::NoWallClock`]
-    /// when the node's timebase is below the plausibility floor
-    /// (`NodeCore::has_plausible_wall_clock`, i.e. uptime seconds on a
-    /// clockless node that has learned no announce timebase yet). Issuing
+    /// while the node's calendar is still on its birth anchor
+    /// (`NodeCore::has_plausible_wall_clock`, which since Codeberg #247 keys
+    /// on the anchor's provenance rank: a clockless node that has learned no
+    /// announce timebase yet stamps the build floor plus uptime, a value
+    /// that passes every plausibility test and is still not wall time).
+    /// Issuing
     /// anyway would produce a ticket every Python peer drops while two
     /// leviculum nodes accept each other's happily — self-consistent between
     /// our writer and our reader, wrong to a peer, which is Codeberg #155
@@ -2586,7 +2589,19 @@ mod persistence_tests {
     /// wall-clock field through `Transport::emission_secs` (Codeberg #182), so
     /// the injection point for LXMF time is the platform clock, not a
     /// parameter on the call.
-    const TEST_WALL_UNIX: u64 = 1_700_000_000;
+    /// Relative to the build floor, which is the sanity window's lower
+    /// bound since Codeberg #247: a platform clock reading 2023 on a binary
+    /// built in 2026 is a dead cell, not a time source, so a fixed past
+    /// literal stops being a wall clock the day the tree is built after it.
+    const TEST_WALL_UNIX: u64 = leviculum_core::constants::BUILD_UNIX_SECS + 86_400;
+
+    /// The test node's wall clock as fractional unix seconds, `offset`
+    /// seconds on. Every timestamp a test hands the router is of the same
+    /// era as the node's own calendar; a literal from another era reads as
+    /// long-expired the moment the build stamp moves past it.
+    fn wall(offset: f64) -> f64 {
+        TEST_WALL_UNIX as f64 + offset
+    }
 
     struct TestClock(Cell<u64>);
 
@@ -2667,7 +2682,7 @@ mod persistence_tests {
             [seed.wrapping_add(1); 16],
             [seed.wrapping_add(2); 16],
             &source,
-            1_700_000_000.25,
+            wall(0.25),
             b"persisted title".to_vec(),
             b"persisted content".to_vec(),
             Vec::new(),
@@ -2682,7 +2697,7 @@ mod persistence_tests {
             [seed.wrapping_add(1); 16],
             [seed.wrapping_add(2); 16],
             &source,
-            1_700_000_000.25,
+            wall(0.25),
             b"oversized opportunistic".to_vec(),
             vec![seed; 1_024],
             Vec::new(),
@@ -2758,7 +2773,7 @@ mod persistence_tests {
         let message_id = incoming.message_id;
         let mut events = Vec::new();
 
-        router.handle_inbound_message(incoming, 1_700_000_001.0, &mut events);
+        router.handle_inbound_message(incoming, wall(1.0), &mut events);
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2777,7 +2792,7 @@ mod persistence_tests {
         let message_id = incoming.message_id;
         let mut events = Vec::new();
 
-        router.handle_inbound_message(incoming, 1_700_000_001.0, &mut events);
+        router.handle_inbound_message(incoming, wall(1.0), &mut events);
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2801,22 +2816,22 @@ mod persistence_tests {
 
         router
             .outbound_stamp_costs
-            .insert([3; 16], (1_700_000_001.0, Some(9), true));
-        router.delivered_ids.insert([4; 32], 1_700_000_002.0);
-        router.processed_ids.insert([5; 32], 1_700_000_003.0);
+            .insert([3; 16], (wall(1.0), Some(9), true));
+        router.delivered_ids.insert([4; 32], wall(2.0));
+        router.processed_ids.insert([5; 32], wall(3.0));
 
         let issued = router
             .tickets
-            .issue([6; 16], 1_700_000_000.0, &mut OsRng)
+            .issue([6; 16], TEST_WALL_UNIX as f64, &mut OsRng)
             .expect("ticket");
-        router.tickets.mark_delivered([6; 16], 1_700_000_004.0);
+        router.tickets.mark_delivered([6; 16], wall(4.0));
         assert!(router.tickets.remember(
             [7; 16],
             Ticket {
                 expires_unix: issued.expires_unix + 1.0,
                 secret: [8; 16],
             },
-            1_700_000_000.0,
+            TEST_WALL_UNIX as f64,
         ));
 
         router.ignored.insert([22; 16]);
@@ -2887,7 +2902,7 @@ mod persistence_tests {
             .expect("ignore source");
         let mut events = Vec::new();
 
-        router.handle_inbound_message(incoming, 1_700_000_001.0, &mut events);
+        router.handle_inbound_message(incoming, wall(1.0), &mut events);
 
         assert!(!router.has_message(&message_id));
         assert!(!events
@@ -3138,7 +3153,7 @@ mod persistence_tests {
             destination_hash.into_bytes(),
             [74; 16],
             &source,
-            1_700_000_000.25,
+            wall(0.25),
             b"title".to_vec(),
             b"content".to_vec(),
             Vec::new(),
@@ -3163,9 +3178,9 @@ mod persistence_tests {
         assert_eq!(
             router.outbound_stamp_costs.insert(
                 destination_hash.into_bytes(),
-                (1_700_000_000.0, Some(254), true)
+                (TEST_WALL_UNIX as f64, Some(254), true)
             ),
-            Some((1_700_000_000.0, Some(255), true))
+            Some((TEST_WALL_UNIX as f64, Some(255), true))
         );
         assert_eq!(
             router.outbound_stamp_cost(&node, destination_hash.as_bytes()),
@@ -3378,7 +3393,7 @@ mod persistence_tests {
                 submission: crate::node::SubmissionId::Packet([0; 16]),
             },
             1_000,
-            1_700_000_001.0,
+            wall(1.0),
             &mut events,
         );
 
@@ -3465,7 +3480,7 @@ mod persistence_tests {
                 is_initiator: true,
             },
             1_250,
-            1_700_000_001.0,
+            wall(1.0),
             &mut events,
         );
 
@@ -3558,7 +3573,7 @@ mod persistence_tests {
                 reason: DeliveryFailure::DirectPacketTimeout,
             },
             node.now_ms(),
-            1_700_000_001.0,
+            wall(1.0),
             &mut failure_events,
         );
         let failure = router.finish_output(RouterOutput {
@@ -3581,7 +3596,7 @@ mod persistence_tests {
                 progress: 0.75,
             },
             5_000,
-            1_700_000_002.0,
+            wall(2.0),
             &mut progress_events,
         );
         let progress = router.finish_output(RouterOutput {
@@ -3609,7 +3624,7 @@ mod persistence_tests {
                 reason: DeliveryFailure::Resource(ResourceError::Cancelled),
             },
             5_000,
-            1_700_000_001.0,
+            wall(1.0),
             &mut events,
         );
 
@@ -3679,7 +3694,7 @@ mod persistence_tests {
             .any(|event| matches!(event, RouterEvent::MessageReceived(_))));
 
         // One second of monotonic time later, the timebase becomes real.
-        let jumped = 1_700_000_000.0;
+        let jumped = TEST_WALL_UNIX as f64;
         router.anchor_wall_clock(jumped, 6_000);
         router.clean(jumped);
 
@@ -3724,7 +3739,7 @@ mod persistence_tests {
     #[test]
     fn a_stamp_already_in_the_future_is_clamped_to_now() {
         let mut router = router(RouterConfig::default());
-        let restored = 1_700_000_000.0;
+        let restored = TEST_WALL_UNIX as f64;
         router.insert_bounded_id([0x22; 32], restored, true);
         router.anchor_wall_clock(5.0, 5_000);
 
@@ -3846,13 +3861,13 @@ mod persistence_tests {
         let queued = message(46);
         let message_id = queued.message_id;
         let destination = queued.destination_hash;
-        router.insert_bounded_stamp_cost(destination, (1_700_000_000.0, Some(8), false));
+        router.insert_bounded_stamp_cost(destination, (TEST_WALL_UNIX as f64, Some(8), false));
         let _ = router.enqueue(&node, queued).expect("queue message");
         let stale = router
             .outbound_stamp_request(&node, &message_id)
             .expect("detached request");
 
-        router.insert_bounded_stamp_cost(destination, (1_700_000_002.0, Some(9), false));
+        router.insert_bounded_stamp_cost(destination, (wall(2.0), Some(9), false));
         assert!(matches!(
             router.set_outbound_stamp_result(&node, &stale, vec![0x46; STAMP_SIZE]),
             Err(RouterError::StaleStampRequest)
@@ -3887,7 +3902,7 @@ mod persistence_tests {
             0,
             0.01,
             Some(OutboundPropagation {
-                timebase: 1_700_000_000.0,
+                timebase: TEST_WALL_UNIX as f64,
                 unstamped_lxmf,
                 transient_id,
                 target_cost: Some(8),
@@ -3933,7 +3948,7 @@ mod persistence_tests {
             router.node.delivery_destination_hash().into_bytes(),
             [0x48; 16],
             &remote,
-            1_700_000_000.0,
+            TEST_WALL_UNIX as f64,
             b"detached validation".to_vec(),
             Vec::new(),
             Vec::new(),
@@ -3945,7 +3960,7 @@ mod persistence_tests {
             .expect("attach candidate stamp");
         let message_id = incoming.message_id;
         let mut events = Vec::new();
-        router.handle_inbound_message(incoming, 1_700_000_001.0, &mut events);
+        router.handle_inbound_message(incoming, wall(1.0), &mut events);
         let request = events
             .iter()
             .find_map(|event| match event {
@@ -3993,7 +4008,7 @@ mod persistence_tests {
             router.node.delivery_destination_hash().into_bytes(),
             remote_hash,
             &remote,
-            1_700_000_001.0,
+            wall(1.0),
             b"ticket reply".to_vec(),
             b"no recipient PoW".to_vec(),
             Vec::new(),
@@ -4006,7 +4021,7 @@ mod persistence_tests {
         let message_id = incoming.message_id;
         let mut events = Vec::new();
 
-        router.handle_inbound_message(incoming, 1_700_000_001.0, &mut events);
+        router.handle_inbound_message(incoming, wall(1.0), &mut events);
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -4029,13 +4044,13 @@ mod persistence_tests {
         let mut outbound = message(91);
         outbound.method = DeliveryMethod::Propagated;
         let ticket = Ticket {
-            expires_unix: 1_700_100_000.0,
+            expires_unix: TEST_WALL_UNIX as f64 + 100_000.0,
             secret: [0x72; 16],
         };
         assert!(router.tickets.remember(
             outbound.destination_hash,
             ticket.clone(),
-            1_700_000_000.0,
+            TEST_WALL_UNIX as f64,
         ));
         let message_id = outbound.message_id;
 
@@ -4066,7 +4081,7 @@ mod persistence_tests {
         let mut unstamped_lxmf = outbound.destination_hash.to_vec();
         unstamped_lxmf.extend_from_slice(&[0x81; 128]);
         let propagation = OutboundPropagation {
-            timebase: 1_700_000_005.5,
+            timebase: wall(5.5),
             transient_id: full_hash(&unstamped_lxmf),
             unstamped_lxmf,
             target_cost: Some(11),
@@ -4161,7 +4176,7 @@ mod persistence_tests {
             .to_vec();
         unstamped_lxmf.extend_from_slice(&[0xa1; 128]);
         let prepared = OutboundPropagation {
-            timebase: 1_700_000_000.0,
+            timebase: TEST_WALL_UNIX as f64,
             transient_id: full_hash(&unstamped_lxmf),
             unstamped_lxmf,
             target_cost: Some(8),
@@ -4197,7 +4212,7 @@ mod persistence_tests {
             [0x21; 16],
             [0x22; 16],
             &source,
-            1_700_000_000.25,
+            wall(0.25),
             b"too big".to_vec(),
             alloc::vec![0x5a; 1_000_001],
             Vec::new(),

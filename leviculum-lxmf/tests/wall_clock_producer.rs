@@ -22,7 +22,7 @@
 
 use core::cell::Cell;
 
-use leviculum_core::transport::TimeSource;
+use leviculum_core::transport::{TimeSource, BIRTH_ANCHOR_RANK};
 use leviculum_core::{Clock, DestinationHash, Identity, MemoryStorage, NodeCore, NodeCoreBuilder};
 use leviculum_lxmf::constants::{FIELD_TICKET, TICKET_EXPIRY};
 use leviculum_lxmf::router::{LxmfRouter, PropagationClientConfig, RouterConfig, RouterError};
@@ -31,9 +31,13 @@ use leviculum_lxmf::{DeliveryMethod, LxmfNode, LxmfNodeConfig, PropagationTransp
 use rand_core::OsRng;
 
 /// A timebase no argument in this file passes and no uptime can reach.
-/// Plausible (above `EMISSION_PLAUSIBLE_MIN_SECS`, below the learn ceiling),
-/// and distinct from the 1_700_000_000 used by the rest of the suite.
-const INJECTED_UNIX: u64 = 1_777_123_456;
+/// Inside the sanity window by construction (above the build floor, below
+/// the learn ceiling) and offset by a prime number of seconds so it cannot
+/// be confused with a round build stamp. Relative to
+/// `BUILD_UNIX_SECS` rather than a fixed 2026 literal: since Codeberg #247
+/// the build timestamp IS the window's lower bound, so a past literal stops
+/// being admissible the day the tree is built after it.
+const INJECTED_UNIX: u64 = leviculum_core::constants::BUILD_UNIX_SECS + 1_234_567;
 
 const BOOT_MS: u64 = 1_000;
 
@@ -234,10 +238,17 @@ fn clockless_node_refuses_to_issue_a_ticket_a_peer_would_discard() {
     let (mut router, mut node) = clockless_router();
     let remote = [0x61; 16];
 
-    // Born clockless: emission_secs is uptime seconds, orders of magnitude
-    // below the plausibility floor.
+    // Born clockless: the calendar rests on the birth anchor — the build
+    // floor plus uptime (Codeberg #247). Its VALUE clears every
+    // plausibility test in the tree; the refusal below fires on the
+    // anchor's RANK, which is what keeps it firing at all.
     assert!(!node.has_plausible_wall_clock());
-    assert_eq!(node.emission_secs(), BOOT_MS / 1000);
+    assert_eq!(node.anchor_rank(), BIRTH_ANCHOR_RANK);
+    assert_eq!(
+        node.emission_secs(),
+        leviculum_core::constants::BUILD_UNIX_SECS + BOOT_MS / 1000
+    );
+    assert!(node.emission_secs() >= leviculum_core::constants::EMISSION_PLAUSIBLE_MIN_SECS);
     assert!(matches!(
         router.issue_ticket_field(&node, remote, &mut OsRng),
         Err(RouterError::NoWallClock)
@@ -295,8 +306,8 @@ fn issued_ticket_expiry_is_the_node_timebase_plus_the_reference_expiry() {
     // by emission_secs itself.
     assert_ne!(
         ticket.expires_unix,
-        (BOOT_MS / 1000) as f64 + TICKET_EXPIRY as f64,
-        "an uptime-derived expiry is exactly the #155 failure mode"
+        (leviculum_core::constants::BUILD_UNIX_SECS + BOOT_MS / 1000) as f64 + TICKET_EXPIRY as f64,
+        "a birth-anchored expiry is exactly the #155 failure mode"
     );
 }
 
@@ -313,8 +324,9 @@ fn issued_ticket_expiry_is_the_node_timebase_plus_the_reference_expiry() {
 fn created_message_timestamp_is_the_node_timebase_and_is_never_withheld() {
     let (router, mut node) = clockless_router();
 
-    // Clockless and unseeded: the message is still built, carrying uptime
-    // seconds, exactly as the reference would carry a wrong `time.time()`.
+    // Clockless and unseeded: the message is still built, carrying the
+    // birth anchor's recognisably old stamp, exactly as the reference would
+    // carry a wrong `time.time()`.
     let uptime_stamped = router
         .create_message(
             &node,
@@ -327,7 +339,7 @@ fn created_message_timestamp_is_the_node_timebase_and_is_never_withheld() {
         .expect("an implausible clock never withholds a message");
     assert_eq!(
         packed_timestamp(&uptime_stamped.pack()),
-        (BOOT_MS / 1000) as f64
+        (leviculum_core::constants::BUILD_UNIX_SECS + BOOT_MS / 1000) as f64
     );
 
     assert!(node.set_wall_time_unix_secs(INJECTED_UNIX, TimeSource::Host));
