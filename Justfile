@@ -257,6 +257,7 @@ nrf-shellcheck:
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
         scripts/check-ci-secrets.sh \
         scripts/check-plain-clone.sh \
+        scripts/check-changelog-links.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
         scripts/publish-site.sh scripts/test-site-publish.sh \
         packaging/site/lev-receive-nightly \
@@ -289,6 +290,18 @@ hw-witness:
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+# Codeberg #287: the changelog's version headings and its link definitions are
+# two lists of the same versions, and Markdown only renders a heading as a link
+# while both hold it. Nothing about writing `## [0.9.0]` produces the matching
+# definition, so they drift by default and they drift at the top of the file:
+# seven headings had none at 752baa4, the four newest releases among them, and
+# `## [0.1.0] - 2025-XX-XX` had shipped its placeholder date in every release
+# since. Also refuses a definition no heading uses and a date that is not a
+# real YYYY-MM-DD. ~20 ms, reads one file, no network, and self-tests each of
+# its five verdicts on fixtures first.
+changelog-links:
+    @bash scripts/check-changelog-links.sh
 
 # Tracing-shim gate (PR #57): leviculum-core must pass the SAME suite with
 # tracing OFF as with it on. The `tracing` feature is default-on; with it
@@ -646,7 +659,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The changelog's own version headings render as links again. A Keep a
+  Changelog heading is a reference link, so `## [0.8.1]` is only a link while
+  a matching definition exists at the foot of the file, and nothing about
+  writing the heading produces one. Eight headings had none — `Unreleased`
+  and the four newest releases among them — and showed the reader literal
+  bracket text at exactly the place a reader starts. `## [0.1.0]` also still
+  carried the placeholder date `2025-XX-XX`, which had shipped in every
+  release since; the real date is 2026-01-28. `just changelog-links` now
+  holds both lists to each other and refuses a date that is not a real one
+  (Codeberg #287).
+
 - An LXMF router no longer forgets everything it knows when its node's
   timebase becomes real. A board without an RTC stamps from uptime seconds
   until the first validated announce seats a real calendar, and the router
@@ -1438,12 +1449,21 @@ High-level Node API with NodeCore, NodeCoreBuilder, ReticulumNode, and Connectio
 
 Destination announce, link responder, LinkManager API, and event system.
 
-## [0.1.0] - 2025-XX-XX
+## [0.1.0] - 2026-01-28
 
 ### Added
 
 Initial release with cryptography, identity, packets, announce, link state machine, HDLC framing, TCP interface, and transport layer. Full interoperability with Python rnsd.
 
+<!-- 0.6.1 and 0.6.3 were released without a tag, so their ranges name the
+     release commits instead. Every other end here is a tag. -->
+[Unreleased]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.9.0...master
+[0.9.0]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.8.1...v0.9.0
+[0.8.1]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.8.0...v0.8.1
+[0.8.0]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.7.0...v0.8.0
+[0.7.0]: https://codeberg.org/Lew_Palm/leviculum/compare/5d2685e91e8f471f3248296bd645e9349068ec50...v0.7.0
+[0.6.3]: https://codeberg.org/Lew_Palm/leviculum/compare/b6ca33844e607bff7147da0b36ff9112ba041550...5d2685e91e8f471f3248296bd645e9349068ec50
+[0.6.1]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.6.0...b6ca33844e607bff7147da0b36ff9112ba041550
 [0.6.0]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.5.19...v0.6.0
 [0.5.19]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.5.18...v0.5.19
 [0.5.18]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.5.17...v0.5.18
@@ -1476,3 +1496,4 @@ Initial release with cryptography, identity, packets, announce, link state machi
 [0.2.5]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.2.3...v0.2.5
 [0.2.3]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.2.0...v0.2.3
 [0.2.0]: https://codeberg.org/Lew_Palm/leviculum/compare/v0.1.0...v0.2.0
+[0.1.0]: https://codeberg.org/Lew_Palm/leviculum/src/tag/v0.1.0
