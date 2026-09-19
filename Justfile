@@ -255,6 +255,7 @@ nrf-shellcheck:
         scripts/lnode-panic-query.sh scripts/lnode-stack-reset.sh \
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
+        scripts/check-ci-secrets.sh \
         scripts/check-plain-clone.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
         scripts/publish-site.sh scripts/test-site-publish.sh \
@@ -441,6 +442,22 @@ check-integ-bin-list:
 # renaming the pipeline is not a regression.
 check-ci-pipeline:
     @bash scripts/check-ci-pipeline.sh
+
+# Every `from_secret:` under .woodpecker/ must name a secret somebody has
+# actually created, written down in scripts/ci-secrets.txt.
+#
+# A missing secret is not a red step in Woodpecker, it is a compile error for
+# the whole pipeline: `status: error, workflows: 0`, nothing runs. Cron #434
+# ended that way on `secret "site_ssh_target" not found` and took the gate,
+# both builds and the FORGE publish down with it — three weeks of stale .debs
+# behind every download URL in the tree, caused by a step that runs last and
+# could not be configured. Nothing running locally can see that failure; it
+# happens before the first container starts. What can be checked locally is
+# that no pipeline names a secret nobody wrote down, which is where every
+# instance of this bug begins. ~20 ms of awk, self-tested on five fixtures
+# first, and red against HEAD~ of the commit that added it.
+check-ci-secrets:
+    @bash scripts/check-ci-secrets.sh
 
 # Codeberg #286: the nightly publish step, driven against a fake forge.
 #
@@ -629,7 +646,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
