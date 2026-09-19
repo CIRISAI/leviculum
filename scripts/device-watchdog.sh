@@ -92,6 +92,110 @@ watchdog_sysfs_count() {
     printf '%s\n' "$n"
 }
 
+# Where on the USB tree the devices with this vid:pid sit, one bus path per
+# line, sorted. A sysfs device directory IS the bus path (`3-2.1`, `1-3.3.4`),
+# so this needs no privilege and no libusb — the same reason the count above
+# survives an lsusb that cannot talk to /dev/bus/usb.
+#
+# #251: the 2026-08-12 vanish was two boards at once, and the only thing that
+# separated "both firmwares failed" from "one hub dropped out" was which hub
+# each board sat on. That was read off the machine by hand, hours later, from a
+# dmesg that no longer covered the run. Recording it at baseline is what makes
+# the per-hub question answerable the next time, without the rig being asked to
+# reproduce anything.
+watchdog_sysfs_paths() {
+    local id="$1" d
+    local vid="${id%%:*}" pid="${id##*:}"
+    for d in "$WATCHDOG_SYSFS_ROOT"/*/; do
+        if [ ! -r "$d/idVendor" ] || [ ! -r "$d/idProduct" ]; then continue; fi
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$vid" ] || continue
+        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$pid" ] || continue
+        printf '%s\n' "$(basename "$d")"
+    done | sort
+}
+
+# The hub a bus path hangs off: the path minus its last port component
+# (`1-3.3.4` -> `1-3.3`), or the bus root hub when the device sits directly on
+# it (`1-1` -> `usb1`). Two boards sharing this string shared a hub.
+watchdog_hub_of() {
+    local p="$1"
+    case "$p" in
+        "")  printf 'unknown\n' ;;
+        *.*) printf '%s\n' "${p%.*}" ;;
+        *-*) printf 'usb%s\n' "${p%%-*}" ;;
+        *)   printf 'unknown\n' ;;
+    esac
+}
+
+# One id's topology as two csv words: `<paths> <hubs>`. Both read `unknown`
+# when sysfs cannot place the device, because an absent answer must look
+# absent — a blank field reads as "no hub involved", which is a claim.
+watchdog_topology_csv() {
+    local id="$1" p paths="" hubs="" h
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        paths="$paths${paths:+,}$p"
+        h="$(watchdog_hub_of "$p")"
+        case ",$hubs," in *",$h,"*) ;; *) hubs="$hubs${hubs:+,}$h" ;; esac
+    done < <(watchdog_sysfs_paths "$id")
+    printf '%s %s\n' "${paths:-unknown}" "${hubs:-unknown}"
+}
+
+# The same thing as journal fields: `paths=<csv> hubs=<csv>`.
+watchdog_topology_fields() {
+    local tp th
+    read -r tp th < <(watchdog_topology_csv "$1")
+    printf 'paths=%s hubs=%s\n' "$tp" "$th"
+}
+
+# What the KERNEL said about these USB paths, most recent last, at most 5
+# lines. The kernel is the only witness that distinguishes the causes #251 is
+# actually between: `USB disconnect` alone says the device left, while
+# `disabled by hub (EMI?)`, `device descriptor read/64, error -71` or an
+# over-current report on the hub port say the hub or its power did it. The
+# board's own debug witness cannot see any of that — it was unpowered.
+#
+# Prints `unavailable reason=<why>` when dmesg cannot be read (kernel.dmesg_
+# restrict is the usual reason), and `none` when it works but said nothing
+# about these paths. Never invents a reason for silence.
+# Args: $1 = csv of bus paths
+watchdog_kernel_lines() {
+    local paths_csv="$1" out rc alt p hub esc
+    if [ -z "$paths_csv" ] || [ "$paths_csv" = "unknown" ]; then
+        printf 'unavailable reason=no_path_known\n'
+        return
+    fi
+    out="$(dmesg 2>/dev/null)"
+    rc=$?
+    if (( rc != 0 )); then printf 'unavailable reason=dmesg_rc_%s\n' "$rc"; return; fi
+    if [ -z "$out" ]; then printf 'unavailable reason=dmesg_empty\n'; return; fi
+    # Split on commas without touching IFS: a local IFS that survives an early
+    # return would go on splitting everything else this subshell reads.
+    alt=""
+    local -a plist
+    read -r -a plist <<<"${paths_csv//,/ }"
+    for p in "${plist[@]}"; do
+        [ -n "$p" ] || continue
+        hub="$(watchdog_hub_of "$p")"
+        for esc in "$p" "$hub"; do
+            [ "$esc" != "unknown" ] || continue
+            esc="${esc//./\\.}"
+            case "|$alt|" in *"|$esc|"*) ;; *) alt="$alt${alt:+|}$esc" ;; esac
+        done
+    done
+    [ -n "$alt" ] || { printf 'unavailable reason=no_path_known\n'; return; }
+    local hits
+    # `usb|hub` because an over-current or a port reset is reported by the hub
+    # driver, not the device (`hub 1-3.3:1.0: over-current condition on port 4`),
+    # and that line is the single most useful one #251 could ever get. The
+    # trailing class deliberately excludes `.`: a hub path must not swallow its
+    # grandchildren (`3-2` matching `usb 3-2.3.4.2:` buried the real lines under
+    # every enumeration on the tree).
+    hits="$(printf '%s\n' "$out" | grep -E "(usb|hub) ($alt)([-:]|\$)" | tail -5)"
+    if [ -z "$hits" ]; then printf 'none\n'; return; fi
+    printf '%s\n' "$hits"
+}
+
 # --- One poll of one id ---
 #
 # Prints the observed count and returns:
@@ -146,17 +250,24 @@ start_device_watchdog() {
     (
         set +e
         declare -A base gone
-        local id baseline_note="" polls=0 failed=0 global_failed=0
+        local id baseline_note="" polls=0 failed=0 global_failed=0 kline
         local global_streak=0
-        declare -A subbaseline vanishes
+        declare -A subbaseline vanishes tpaths thubs
         for id in "${RIG_USB_IDS[@]}"; do
             base[$id]=$(watchdog_lsusb_id "$id" | awk 'END{print NR}')
             gone[$id]=""
             subbaseline[$id]=0
             vanishes[$id]=0
+            read -r "tpaths[$id]" "thubs[$id]" < <(watchdog_topology_csv "$id")
             baseline_note="$baseline_note${baseline_note:+,}$id:${base[$id]}"
         done
         echo "watchdog_start at=$(date -Iseconds) baseline=$baseline_note" >> "$journal"
+        # Where every board sits BEFORE anything moves. Written once, at the
+        # only moment the whole rig is known to be present: after a vanish the
+        # device directory is gone and nothing can be read off it any more.
+        for id in "${RIG_USB_IDS[@]}"; do
+            echo "topology at=$(date -Iseconds) vid_pid=$id paths=${tpaths[$id]} hubs=${thubs[$id]}" >> "$journal"
+        done
         while [[ ! -e "$stop" ]]; do
             polls=$((polls + 1))
             # Is lsusb working at all this tick? If not, every per-id answer
@@ -202,12 +313,27 @@ start_device_watchdog() {
                     if [[ -z "${gone[$id]}" ]]; then
                         gone[$id]=$(date +%s)
                         vanishes[$id]=$(( vanishes[$id] + 1 ))
-                        echo "vanish at=$(date -Iseconds) vid_pid=$id baseline=${base[$id]} now=$cur" >> "$journal"
+                        echo "vanish at=$(date -Iseconds) vid_pid=$id baseline=${base[$id]} now=$cur last_paths=${tpaths[$id]} last_hubs=${thubs[$id]}" >> "$journal"
+                        # The kernel's account of the same event, taken NOW.
+                        # dmesg is a ring buffer: on 2026-08-12 it had rolled
+                        # over by the time anyone looked, and the question
+                        # "hub or firmware" was left unanswerable (#251).
+                        while IFS= read -r kline; do
+                            [[ -n "$kline" ]] || continue
+                            echo "kernel at=$(date -Iseconds) vid_pid=$id msg=${kline}" >> "$journal"
+                        done < <(watchdog_kernel_lines "${tpaths[$id]}")
                     fi
                 else
                     subbaseline[$id]=0
                     if [[ -n "${gone[$id]}" ]]; then
-                        echo "return at=$(date -Iseconds) vid_pid=$id count=$cur gone_s=$(( $(date +%s) - gone[$id] ))" >> "$journal"
+                        # A board that re-enumerates can land on a different
+                        # path (same hub, new device number), so the recorded
+                        # topology is refreshed here and nowhere else: a
+                        # per-tick sysfs walk for four ids is ~160 forks a
+                        # second for an answer that only changes across a
+                        # disconnect.
+                        read -r "tpaths[$id]" "thubs[$id]" < <(watchdog_topology_csv "$id")
+                        echo "return at=$(date -Iseconds) vid_pid=$id count=$cur gone_s=$(( $(date +%s) - gone[$id] )) paths=${tpaths[$id]} hubs=${thubs[$id]}" >> "$journal"
                         gone[$id]=""
                     fi
                 fi
@@ -297,6 +423,50 @@ watchdog_adjudicate() {
         printf '%s observed=%s commanded=%s verdict=%s\n' "$id" "$observed" "$commanded" "$verdict"
     done < <(grep -oE '^vanish .*vid_pid=[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' "$journal" 2>/dev/null \
              | grep -oE '[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$' | sort -u)
+}
+
+# --- Which hub lost which boards ---
+#
+# Prints one line per hub that lost at least one board, sorted:
+#   hub=<h> boards=<n> ids=<csv>
+#
+# This is the correlation #251 asks for and could not get: on 2026-08-12 two
+# LNodes vanished within four minutes and the third board survived, and the
+# only reason anyone could say the two victims shared hub 1-3.3.4 was that the
+# machine still happened to be in that state. `boards=2` or more on ONE hub is
+# the shape a hub or power event has; the same count spread over several hubs
+# is not. The line states the count and names the boards — it draws no
+# conclusion, because "two boards, one hub" is evidence for a hub fault, not
+# proof of one, and the kernel lines in the same journal are what decide it.
+#
+# A board whose last known topology lists more than one hub (an id with two
+# devices, like the two T-Beams sharing 1a86:55d4) is counted under each hub it
+# could have been on: which of them lost it is not knowable from a vid:pid
+# count, and silently picking one would invent the answer.
+# Args: $1 = journal
+watchdog_hub_correlation() {
+    local journal="$1"
+    [ -r "$journal" ] || return 0
+    awk '
+        /^vanish /{
+            id = ""; hubs = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^vid_pid=/)        { id = substr($i, 9) }
+                else if ($i ~ /^last_hubs=/) { hubs = substr($i, 11) }
+            }
+            if (id == "" || hubs == "" || hubs == "unknown") next
+            n = split(hubs, h, ",")
+            for (j = 1; j <= n; j++) {
+                key = h[j] SUBSEP id
+                if (key in seen) continue
+                seen[key] = 1
+                prev = ids[h[j]]
+                ids[h[j]] = (prev == "") ? id : prev "," id
+                cnt[h[j]]++
+            }
+        }
+        END { for (hb in cnt) printf "hub=%s boards=%d ids=%s\n", hb, cnt[hb], ids[hb] }
+    ' "$journal" | sort
 }
 
 # --- What the board says about why it left ---

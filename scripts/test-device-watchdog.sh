@@ -23,6 +23,13 @@
 #      it two vanishes against one commanded reset and asserts `unexplained`,
 #      so the detector keeps its teeth.
 #
+#   3. A VANISH THAT COULD NOT BE ATTRIBUTED AT ALL. On 2026-08-12 two LNodes
+#      left the bus four minutes apart and a third board ran on; whether one
+#      hub dropped out or two firmwares failed was never decidable, because
+#      the run recorded neither the boards' USB topology nor the kernel's own
+#      account, and dmesg had rolled over by morning (Codeberg #251). Cases 8
+#      and 9 are the positive controls for both halves of that evidence.
+#
 # Usage: bash scripts/test-device-watchdog.sh
 
 set -uo pipefail
@@ -44,6 +51,37 @@ make_sysfs() {
         printf '%s\n' "${id%%:*}" > "$root/dev$i/idVendor"
         printf '%s\n' "${id##*:}" > "$root/dev$i/idProduct"
     done
+}
+
+# Fixture sysfs with REAL bus-path directory names. The device directory name
+# is the bus path the watchdog records (`1-3.3.4.1`), so a fixture that calls
+# them dev1/dev2 cannot test topology at all. Args: <dir> <path>=<vid:pid>...
+make_sysfs_at() {
+    local root="$1"; shift
+    local spec path id
+    rm -rf "$root"; mkdir -p "$root"
+    for spec in "$@"; do
+        path="${spec%%=*}"; id="${spec##*=}"
+        mkdir -p "$root/$path"
+        printf '%s\n' "${id%%:*}" > "$root/$path/idVendor"
+        printf '%s\n' "${id##*:}" > "$root/$path/idProduct"
+    done
+}
+
+# Fixture dmesg. Prints the fixture kernel log, or fails the way a dmesg under
+# kernel.dmesg_restrict=1 fails: a message on stderr and a non-zero exit.
+make_dmesg() {
+    local bin="$1"
+    mkdir -p "$bin"
+    cat > "$bin/dmesg" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${FAKE_DMESG_RC:-}" ] && [ "$FAKE_DMESG_RC" != "0" ]; then
+    echo "dmesg: read kernel buffer failed: Operation not permitted" >&2
+    exit "$FAKE_DMESG_RC"
+fi
+cat "${FAKE_DMESG_FILE:-/dev/null}"
+EOF
+    chmod +x "$bin/dmesg"
 }
 
 # Fixture lsusb. FAKE_PRESENT lists the rig vid:pids it reports; FAKE_FAIL_AT,
@@ -72,6 +110,13 @@ if [ "${1:-}" = "-d" ]; then want="$2"; fi
 present="$FAKE_PRESENT"
 if [ -n "${FAKE_ABSENT_AFTER:-}" ] && [ "$n" -gt "$FAKE_ABSENT_AFTER" ]; then
     present=""
+    # A board that leaves the bus leaves sysfs too. Tearing the fixture tree
+    # down from HERE keeps it a function of the call counter, so the moment
+    # sysfs goes empty is as deterministic as the moment lsusb stops seeing
+    # the board — no sleep-and-hope from the test's own shell.
+    if [ -n "${FAKE_SYSFS_DIR:-}" ] && [ -d "$FAKE_SYSFS_DIR" ]; then
+        find "$FAKE_SYSFS_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    fi
 fi
 rc=1
 if [ -z "$want" ]; then
@@ -266,6 +311,91 @@ check_absent  "and is never called a firmware self-reset" "self-reset" "$OUT7A"
 check_contains "a real panic is named as a firmware fault" "firmware panic" "$OUT7B"
 check_contains "a witness that saw no boot admits it" "unknown" "$OUT7C"
 check_contains "a missing witness admits that too" "no witness file" "$OUT7D"
+
+echo "== Case 8: a vanish records WHERE the board sat and what the kernel said =="
+# The positive control for #251. On 2026-08-12 two LNodes vanished mid-run and
+# the question "one hub dropping out, or two firmwares failing" could not be
+# answered: nothing in the run recorded which hub each board hung off, and the
+# kernel ring buffer had rolled over before anyone looked. This case injects a
+# vanish whose kernel evidence is a hub over-current — the cause a board's own
+# debug witness can never see, because it was unpowered — and asserts both
+# facts land in the journal while the board is still gone.
+C8="$WORK/c8"
+mkdir -p "$C8/bin"
+make_sysfs_at "$C8/sysfs" "1-3.3.4.1=1209:0001"
+make_dmesg "$C8/bin"
+cat > "$C8/dmesg.txt" <<'EOF'
+[54321.100000] usb 9-9: unrelated device on another bus, must not be quoted
+[54330.200000] usb 1-3.3.4.1: USB disconnect, device number 66
+[54330.200500] hub 1-3.3.4:1.0: over-current condition on port 1
+EOF
+drive_watchdog "$C8" 6 \
+    FAKE_PRESENT="1209:0001" \
+    FAKE_ABSENT_AFTER=4 \
+    FAKE_SYSFS_DIR="$C8/sysfs" \
+    FAKE_DMESG_FILE="$C8/dmesg.txt" \
+    WATCHDOG_SYSFS_ROOT="$C8/sysfs"
+J8="$(cat "$C8/journal")"
+check_contains "the baseline records where the board sits" \
+    "topology at=" "$J8"
+check_contains "and names its bus path and its hub" \
+    "vid_pid=1209:0001 paths=1-3.3.4.1 hubs=1-3.3.4" "$J8"
+check_contains "the vanish carries the topology the device no longer has" \
+    "last_paths=1-3.3.4.1 last_hubs=1-3.3.4" "$J8"
+check_contains "and the kernel's account of the same event" \
+    "over-current condition on port 1" "$J8"
+check_contains "quoted as a kernel line, not as a watchdog claim" "kernel at=" "$J8"
+check_absent  "traffic about other buses is not quoted as evidence" \
+    "unrelated device" "$J8"
+
+echo "== Case 8b: a dmesg that cannot be read is ADMITTED, never passed over =="
+# kernel.dmesg_restrict=1 is the normal state on a hardened host. A missing
+# kernel account must read as missing: silence here would look exactly like
+# "the kernel saw nothing wrong", which is the opposite conclusion.
+C8B="$WORK/c8b"
+mkdir -p "$C8B/bin"
+make_sysfs_at "$C8B/sysfs" "1-3.3.4.1=1209:0001"
+make_dmesg "$C8B/bin"
+drive_watchdog "$C8B" 6 \
+    FAKE_PRESENT="1209:0001" \
+    FAKE_ABSENT_AFTER=4 \
+    FAKE_SYSFS_DIR="$C8B/sysfs" \
+    FAKE_DMESG_RC=1 \
+    WATCHDOG_SYSFS_ROOT="$C8B/sysfs"
+J8B="$(cat "$C8B/journal")"
+check_contains "an unreadable kernel buffer is named as unavailable" \
+    "msg=unavailable reason=dmesg_rc_1" "$J8B"
+
+echo "== Case 9: two boards on ONE hub is visible as such =="
+# The 2026-08-12 shape, from a journal: 1209:0001 and 1209:0002 both on
+# 1-3.3.4, a third board on another hub surviving. The function states the
+# count per hub and draws no conclusion from it.
+C9="$WORK/c9"; mkdir -p "$C9"
+cat > "$C9/journal" <<'EOF'
+topology at=2026-08-12T22:00:00+02:00 vid_pid=1209:0001 paths=1-3.3.4.1 hubs=1-3.3.4
+topology at=2026-08-12T22:00:00+02:00 vid_pid=1209:0002 paths=1-3.3.4.2 hubs=1-3.3.4
+vanish at=2026-08-12T22:42:43+02:00 vid_pid=1209:0001 baseline=1 now=0 last_paths=1-3.3.4.1 last_hubs=1-3.3.4
+vanish at=2026-08-12T22:46:44+02:00 vid_pid=1209:0002 baseline=1 now=0 last_paths=1-3.3.4.2 last_hubs=1-3.3.4
+vanish at=2026-08-12T22:50:00+02:00 vid_pid=1209:0001 baseline=1 now=0 last_paths=1-3.3.4.1 last_hubs=1-3.3.4
+EOF
+OUT9=$(bash -c '. "$1/device-watchdog.sh"; watchdog_hub_correlation "$2/journal"' _ "$SCRIPT_DIR" "$C9")
+check_eq "both victims are counted once each, under the hub they shared" \
+    "hub=1-3.3.4 boards=2 ids=1209:0001,1209:0002" "$OUT9"
+
+echo "== Case 9b: boards on DIFFERENT hubs never read as one hub event =="
+C9B="$WORK/c9b"; mkdir -p "$C9B"
+cat > "$C9B/journal" <<'EOF'
+vanish at=t1 vid_pid=1209:0001 baseline=1 now=0 last_paths=1-3.3.4.1 last_hubs=1-3.3.4
+vanish at=t2 vid_pid=1209:0002 baseline=1 now=0 last_paths=3-2.1 last_hubs=3-2
+vanish at=t3 vid_pid=303a:1001 baseline=1 now=0 last_paths=unknown last_hubs=unknown
+EOF
+OUT9B=$(bash -c '. "$1/device-watchdog.sh"; watchdog_hub_correlation "$2/journal"' _ "$SCRIPT_DIR" "$C9B")
+check_contains "each hub is named with its own single loss" "hub=1-3.3.4 boards=1" "$OUT9B"
+check_contains "and so is the other" "hub=3-2 boards=1" "$OUT9B"
+check_absent  "no hub is credited with a board it cannot be shown to have lost" \
+    "boards=2" "$OUT9B"
+check_absent  "a board sysfs could not place is left out, not guessed at" \
+    "303a:1001" "$OUT9B"
 
 echo
 if (( FAIL == 0 )); then

@@ -210,6 +210,45 @@ assert_contains "$OUT" "tier3 RED (expected_marginal=0 skipped=0 board_vanish=12
 assert_contains "$OUT" "firmware panic/hardfault" "the banner names what the board actually reported"
 rm -rf "$WITNESS_SURPLUS"
 
+echo "== Case 1f: two boards lost on ONE hub is named as such (#251) =="
+# The 2026-08-12 shape, end to end through the banner: two LNodes gone inside
+# one run, both on hub 1-3.3.4, and the run says so. That run could not: it
+# recorded only the two vid:pids, so "one hub dropped out" and "two firmwares
+# failed" looked identical in every artefact it left behind, and the hub
+# question was settled by hand on a machine whose dmesg had already rolled.
+# The banner states the count per hub; it draws no conclusion, because two
+# boards on one hub is evidence for a hub fault, not proof of one.
+WITNESS_HUB=$(mktemp -d)
+run_case \
+    LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)" \
+    LEVICULUM_SIMULATE_VANISH=1 \
+    LEVICULUM_SIMULATE_VANISH_VIDPID=1209:0001,1209:0002 \
+    LEVICULUM_SIMULATE_VANISH_HUB=1-3.3.4 \
+    LEVICULUM_WITNESS_DIR="$WITNESS_HUB"
+assert_rc "$RC" 1 "two unaccounted vanishes exit non-zero (RED)"
+assert_contains "$OUT" "board_vanish=1209:0001,1209:0002" "the verdict line names both boards"
+assert_contains "$OUT" "TOPOLOGY: which hub lost which board" "the banner reports the topology"
+assert_contains "$OUT" "hub=1-3.3.4 boards=2 ids=1209:0001,1209:0002" \
+    "and names the hub both boards hung off, counting each board once"
+assert_contains "$OUT" "hub or power event has" \
+    "a multi-board hub loss points at the hub before the firmware"
+assert_contains "$OUT" "no kernel line for this vanish" \
+    "and admits when the kernel said nothing about it"
+rm -rf "$WITNESS_HUB"
+
+echo "== Case 1g: boards lost on DIFFERENT hubs are not read as one hub event =="
+WITNESS_SPLIT=$(mktemp -d)
+run_case \
+    LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)" \
+    LEVICULUM_SIMULATE_VANISH=1 \
+    LEVICULUM_SIMULATE_VANISH_VIDPID=1209:0001 \
+    LEVICULUM_SIMULATE_VANISH_HUB=1-3.3.4 \
+    LEVICULUM_WITNESS_DIR="$WITNESS_SPLIT"
+assert_contains "$OUT" "hub=1-3.3.4 boards=1 ids=1209:0001" "a single loss is reported as a single loss"
+assert_absent  "$OUT" "hub or power event has" \
+    "one board on one hub is never dressed up as a hub event"
+rm -rf "$WITNESS_SPLIT"
+
 echo "== Case 2: clean run -> GREEN, no vanish tokens =="
 run_case LEVICULUM_SELFTEST_PERICULUM="$(stub 0 0 0)"
 assert_rc "$RC" 0 "clean run exits zero (GREEN)"

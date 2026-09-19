@@ -348,14 +348,40 @@ out of scope on purpose.
 
 ### Device-vanish watchdog
 
-`scripts/run-tier3-hw.sh` polls `lsusb` once a second for the whole run
-and latches the first drop below each USB id's baseline count. Under
-VFIO controller passthrough the host cannot inject a phantom VM-side
-disconnect, so a board that vanishes mid-run is always a real
-device/firmware failure (suspected self-reset under load, Codeberg
-#65), never an infra artefact. It forces RED with the board named
-(`board_vanish=<vid:pid> firmware_self_reset_suspected`), and every
-scenario verdict from the vanish onwards is untrusted.
+`scripts/run-tier3-hw.sh` polls `lsusb` once a second for the whole run,
+cross-checks every sub-baseline reading against sysfs, and records one
+journal line per event — every vanish and every return, not one latched
+line per board. Under VFIO controller passthrough the host cannot inject
+a phantom VM-side disconnect, so a board that leaves the bus really left
+it; what that means, though, is decided afterwards. A disconnect
+periculum's own `BOARD_RESET` lines say it commanded (it reboots every
+bound board per scenario) is *accounted* and never RED. An unaccounted
+one forces RED with the board named (`board_vanish=<vid:pid>
+cause=<what the witness supports>`), and every scenario verdict from the
+vanish onwards is untrusted. The cause token is read off the board's
+debug witness or reads `cause=unknown`; it is never asserted.
+
+The journal also records what the board's own witness cannot see,
+because a board that loses power writes nothing:
+
+* **where each board sat** — its USB bus path and the hub it hangs off,
+  snapshotted at baseline while the whole rig is still present, and
+  quoted back on the vanish line (`last_paths=`, `last_hubs=`). The RED
+  banner turns that into a per-hub count, and says so when more than one
+  board was lost on a single hub: that is the shape a hub or power event
+  has, and independent firmware failures do not have it.
+* **what the kernel said** — the `usb`/`hub` lines about those paths,
+  taken at the moment of the vanish (`kernel ... msg=`). `dmesg` is a
+  ring buffer that rolls over long before anyone reads a nightly, and
+  `USB disconnect` versus `disabled by hub` or an over-current report is
+  the whole difference between a board fault and a hub fault. An
+  unreadable buffer is recorded as `unavailable reason=...`, never as
+  silence.
+
+Both were added after the 2026-08-12 run (Codeberg #251) lost two LNodes
+four minutes apart while a third board on another hub ran on, and left
+no artefact able to say whether one hub had dropped out or two firmwares
+had failed.
 
 ## Troubleshooting
 

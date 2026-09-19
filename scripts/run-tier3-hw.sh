@@ -278,12 +278,23 @@ select_targets() {
 maybe_simulate_vanish() {
     local journal="$1"
     [[ -n "${LEVICULUM_SIMULATE_VANISH:-}" ]] || return 0
-    local vidpid="${LEVICULUM_SIMULATE_VANISH_VIDPID:-1a86:55d4}"
-    local count="${LEVICULUM_SIMULATE_VANISH_COUNT:-1}" i
-    for (( i = 0; i < count; i++ )); do
-        echo "vanish at=$(date -Iseconds) vid_pid=$vidpid baseline=1 now=0 simulated=LEVICULUM_SIMULATE_VANISH" >> "$journal"
+    local vidpids="${LEVICULUM_SIMULATE_VANISH_VIDPID:-1a86:55d4}"
+    local count="${LEVICULUM_SIMULATE_VANISH_COUNT:-1}" i vidpid n=0
+    # A csv of ids injects one vanish per id, which is the only way to build
+    # the 2026-08-12 shape without a rig: several DIFFERENT boards lost inside
+    # one run. LEVICULUM_SIMULATE_VANISH_HUB puts them on a common hub so the
+    # per-hub correlation has something to correlate (#251); left unset, the
+    # injected lines say `unknown` and the banner says so too.
+    local hub="${LEVICULUM_SIMULATE_VANISH_HUB:-unknown}" path
+    for vidpid in ${vidpids//,/ }; do
+        n=$(( n + 1 ))
+        path="unknown"
+        [[ "$hub" == "unknown" ]] || path="$hub.$n"
+        for (( i = 0; i < count; i++ )); do
+            echo "vanish at=$(date -Iseconds) vid_pid=$vidpid baseline=1 now=0 last_paths=$path last_hubs=$hub simulated=LEVICULUM_SIMULATE_VANISH" >> "$journal"
+        done
     done
-    log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (vid_pid=$vidpid count=$count)"
+    log "[CI_HW] WATCHDOG: simulated rig-board vanish injected (vid_pid=$vidpids count=$count hub=$hub)"
 }
 
 # --- Flash the LNodes from HEAD, then verify they really run it ---
@@ -529,6 +540,40 @@ if [[ -n "$BOARD_VANISH_IDS" ]]; then
             [[ -n "$VANISH_CAUSE_TOKEN" ]] || VANISH_CAUSE_TOKEN="cause=unknown"
         fi
     done
+    # The board's own story ends where its power does, and a hub that drops a
+    # port takes both with it. So say two more things the witness cannot: which
+    # hub each vanished board hung off, and what the kernel logged about those
+    # paths at the moment it happened (#251 — on 2026-08-12 two LNodes vanished
+    # four minutes apart on one hub while the board on the other hub ran on,
+    # and neither fact was in any artefact the run produced).
+    log "[CI_HW] TOPOLOGY: which hub lost which board ---"
+    HUB_CORRELATION="$(watchdog_hub_correlation "$WATCHDOG_JOURNAL")"
+    if [[ -n "$HUB_CORRELATION" ]]; then
+        while IFS= read -r corr_line; do
+            [[ -n "$corr_line" ]] || continue
+            log "[CI_HW]   $corr_line"
+        done <<<"$HUB_CORRELATION"
+        # The flag, not a bare `exit 0` in the main rule: that jumps to END,
+        # whose own exit then overrides it and the finding is lost.
+        if awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^boards=[2-9]/) found = 1 } END { exit(found ? 0 : 1) }' <<<"$HUB_CORRELATION"; then
+            log "[CI_HW]   More than one board lost on a single hub. That is the shape a"
+            log "[CI_HW]   hub or power event has, not the shape independent firmware"
+            log "[CI_HW]   failures have. Read the kernel lines below before suspecting"
+            log "[CI_HW]   firmware."
+        fi
+    else
+        log "[CI_HW]   no topology recorded (sysfs could not place the board at baseline)"
+    fi
+    KERNEL_LINES="$(grep '^kernel ' "$WATCHDOG_JOURNAL" 2>/dev/null || true)"
+    if [[ -n "$KERNEL_LINES" ]]; then
+        log "[CI_HW] KERNEL: what the bus said when the board left ---"
+        while IFS= read -r kernel_line; do
+            [[ -n "$kernel_line" ]] || continue
+            log "[CI_HW]   $kernel_line"
+        done <<<"$KERNEL_LINES"
+    else
+        log "[CI_HW] KERNEL: the journal carries no kernel line for this vanish"
+    fi
     log "[CI_HW] WATCHDOG JOURNAL: $WATCHDOG_JOURNAL"
     log "[CI_HW] ===================================================================="
 fi
