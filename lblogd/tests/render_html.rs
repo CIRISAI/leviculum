@@ -129,6 +129,134 @@ fn index_html_lists_posts_with_links() {
     assert!(html.contains("2026-07-12"));
 }
 
+#[test]
+fn a_footnote_keeps_its_definition() {
+    // The regression #197 opens with: without the extension, `[^1]: Kurz`
+    // parses as a link reference definition, which drops the definition line
+    // from the output and turns the reference into a link labelled `^1`.
+    let html = markdown_to_html("Satz.[^1]\n\n[^1]: Kurz\n");
+    assert!(html.contains("Kurz"), "definition lost: {html}");
+    assert!(html.contains("footnote-reference"), "{html}");
+    assert!(html.contains("footnote-definition"), "{html}");
+    assert!(
+        !html.contains("href=\"Kurz\""),
+        "definition read as a link: {html}"
+    );
+}
+
+#[test]
+fn a_footnote_whose_body_is_a_bare_url_keeps_it() {
+    // The common shape of a source citation, and the one that vanished: the
+    // URL used to survive only as the target of the mangled reference, which
+    // is why asserting on the URL alone is not enough.
+    let html = markdown_to_html("Satz.[^q]\n\n[^q]: https://example.com/a\n");
+    assert!(
+        html.contains("footnote-definition"),
+        "definition lost: {html}"
+    );
+    assert!(html.contains(">https://example.com/a</a>"), "{html}");
+    assert!(
+        !html.contains(">^q<"),
+        "reference read as a link label: {html}"
+    );
+}
+
+#[test]
+fn strikethrough() {
+    assert!(markdown_to_html("~~gone~~ here").contains("<del>gone</del>"));
+}
+
+#[test]
+fn task_list_items_become_checkboxes() {
+    let html = markdown_to_html("- [x] done\n- [ ] open\n");
+    assert!(html.contains("type=\"checkbox\" checked"), "{html}");
+    assert!(html.contains("type=\"checkbox\"/>"), "{html}");
+    assert!(!html.contains("[x]"), "marker left as text: {html}");
+}
+
+#[test]
+fn heading_identifiers_become_the_id_attribute() {
+    // Demoted like every other body heading, but the identifier survives it.
+    let html = markdown_to_html("## Text {#custom-id}\n");
+    assert!(html.contains("<h3 id=\"custom-id\">Text</h3>"), "{html}");
+}
+
+#[test]
+fn definition_list() {
+    let html = markdown_to_html("Term\n: first\n: second\n");
+    assert!(html.contains("<dt>Term</dt>"), "{html}");
+    assert!(html.contains("<dd>first</dd>"), "{html}");
+    assert!(html.contains("<dd>second</dd>"), "{html}");
+}
+
+#[test]
+fn highlight() {
+    assert!(markdown_to_html("==look== here").contains("<mark>look</mark>"));
+    // An unclosed marker is text, not a half-open element.
+    let html = markdown_to_html("2 == 2 is true");
+    assert!(!html.contains("<mark>"), "{html}");
+    assert!(html.contains("2 == 2 is true"), "{html}");
+}
+
+#[test]
+fn sub_and_superscript_in_both_cheat_sheet_and_flanked_form() {
+    // The intra-word forms are the cheat sheet's; pulldown-cmark's own
+    // extension rejects them and only takes the flanked one.
+    let html = markdown_to_html("H~2~O X^2^ E ~n~ x ^y^");
+    assert!(html.contains("H<sub>2</sub>O"), "{html}");
+    assert!(html.contains("X<sup>2</sup>"), "{html}");
+    assert!(html.contains("<sub>n</sub>"), "{html}");
+    assert!(html.contains("<sup>y</sup>"), "{html}");
+}
+
+#[test]
+fn an_approximation_is_not_a_subscript() {
+    // `~` is common prose. Only the intra-word pair is ours, and the parser
+    // leaves the flanked-but-unpaired form alone.
+    let html = markdown_to_html("about ~5 or ~10 kg in ~/tmp");
+    assert!(!html.contains("<sub>"), "{html}");
+    assert!(html.contains("about ~5 or ~10 kg in ~/tmp"), "{html}");
+}
+
+#[test]
+fn bare_urls_and_addresses_become_links() {
+    let html = markdown_to_html("see https://example.com/x, now");
+    assert!(
+        html.contains("<a href=\"https://example.com/x\">https://example.com/x</a>,"),
+        "the comma ends the sentence, not the URL: {html}"
+    );
+    let html = markdown_to_html("(and https://b.de/y) end");
+    assert!(
+        html.contains("<a href=\"https://b.de/y\">https://b.de/y</a>)"),
+        "the bracket the URL did not open is not part of it: {html}"
+    );
+    let html = markdown_to_html("write to lp@lew-palm.de please");
+    assert!(
+        html.contains("<a href=\"mailto:lp@lew-palm.de\">lp@lew-palm.de</a>"),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_bare_url_is_not_found_where_it_is_not_prose() {
+    // Code is quoted so that nothing rewrites it, and a URL in a link label
+    // would otherwise become a second link inside the first.
+    let html = markdown_to_html("`see https://example.com/x`");
+    assert!(!html.contains("<a href"), "{html}");
+    let html = markdown_to_html("```\nhttps://example.com/x\n```\n");
+    assert!(!html.contains("<a href"), "{html}");
+    let html = markdown_to_html("[https://label.de](https://real.de)");
+    assert_eq!(html.matches("<a href").count(), 1, "{html}");
+    assert!(html.contains("href=\"https://real.de\""), "{html}");
+}
+
+#[test]
+fn emoji_shortcodes_stay_as_written() {
+    // Declined, not forgotten: see the module docs for why a partial table
+    // would read worse than none.
+    assert!(markdown_to_html("joy :joy: here").contains(":joy:"));
+}
+
 /// Defaults for fixtures that always set title and date themselves.
 fn fixture_defaults() -> PostDefaults {
     PostDefaults {

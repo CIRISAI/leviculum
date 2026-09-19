@@ -21,6 +21,12 @@
 //! | `---` rule              | `-` divider line                              |
 //! | paragraph break         | blank line                                    |
 //! | hard break              | line break                                    |
+//! | `~~struck~~`            | `` `F777 `` dim foreground toggle             |
+//! | task list item          | `\u{2611}` / `\u{2610}` instead of the bullet      |
+//! | `==highlight==`         | `` `B550 `` background toggle                 |
+//! | `H~2~O`, `X^2^`         | Unicode `H\u{2082}O`, `X\u{b2}` where they exist       |
+//! | definition list         | bold term, definitions indented two spaces    |
+//! | footnote `[^1]`         | `[1]` marker, definitions at the end of page  |
 //!
 //! Degradations (micron has no equivalent; never panics):
 //!
@@ -34,23 +40,44 @@
 //!   row micron reads as the table's second line, then the data rows, cells
 //!   separated by `|` with any literal pipe escaped
 //! - blockquotes: two-space indented text per nesting level
-//! - raw HTML: emitted as escaped plain text
-//! - strikethrough/task lists/definition lists: extensions not enabled, so
-//!   their syntax passes through as plain text
-//! - footnotes: the extension is not enabled, and the syntax does NOT
-//!   reliably degrade to plain text. A reference `[^1]` stays literal, but a
-//!   definition line whose body is a bare URL or a single word (`[^1]: Kurz`)
-//!   parses as a CommonMark link-reference definition instead: the definition
-//!   line disappears from the output entirely and the reference in the body
-//!   turns into a link labelled `^1`. Until #197 closes the gap, footnotes are
-//!   lossy on both sides.
+//! - raw HTML: emitted as escaped plain text, except `<mark>`, `<del>`,
+//!   `<s>`, `<sub>` and `<sup>`, which have a micron mapping and take the
+//!   same one their Markdown spelling gets
+//! - strikethrough: micron has no struck text, so it is dimmed instead —
+//!   the one signal micron has for "this no longer applies"
+//! - footnotes: micron has neither anchors nor in-page links, so a reference
+//!   becomes the bare marker `[1]` and every definition is collected into a
+//!   block behind a divider at the end of the page, in source order. Nothing
+//!   is lost; only the jump between the two is
+//! - heading identifiers (`## Text {#id}`): the HTML side emits the `id`, the
+//!   micron side has nothing to attach it to and drops it — there is no
+//!   in-page anchor in micron to link to it with either
+//! - sub/superscript: micron has no baseline shift. A run of digits and
+//!   arithmetic signs has a complete Unicode equivalent and uses it
+//!   (`H\u{2082}O`, `X\u{b2}`); anything else keeps its `^`/`~` markers as plain
+//!   text, because Unicode's superscript alphabet has holes
+//! - emoji shortcodes (`:joy:`): declined. Rendering them faithfully needs
+//!   the full CLDR shortcode table as a new dependency, and a hand-picked
+//!   subset would render some shortcodes and leave the rest literal, which
+//!   reads worse than leaving all of them literal. They stay as written
+//!
+//! Syntax from the cheat sheet that the parser does not implement is added
+//! by [`extended_events`] on the event stream both renderers read, so the two
+//! sides cannot drift apart: bare URLs and e-mail addresses become links,
+//! `==x==` becomes a highlight, and the cheat sheet's intra-word `H~2~O` /
+//! `X^2^` become sub/superscript (pulldown-cmark's own extension takes only
+//! the flanked form `H ~2~ O`). Each is recognised within a single text run
+//! and never inside code or a link label; a pair split by other inline markup
+//! stays literal, which is plain text rather than a half-open construct.
 //!
 //! Plain text is escaped so it can never be misread as micron markup:
 //! backslashes and backticks are `\`-escaped inline, and a text line that
 //! would start with a line-level control character (`>`, `#`, `-`, `<`) gets
 //! a leading `\` line escape.
 
-use pulldown_cmark::{html, Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    html, Alignment, CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd,
+};
 
 use crate::files;
 use crate::post::{slugify, Date, Post};
@@ -187,20 +214,244 @@ pub const INDEX_MICRON_TARGET: &str = ":/page/index.mu";
 /// The micron background colour used to set off inline code (12-bit form).
 const INLINE_CODE_BG: &str = "333";
 
-/// The pulldown-cmark options used by both renderers. Tables are the only
-/// extension: everything else degrades better as plain text.
+/// The micron background colour of highlighted text: the closest micron has
+/// to a marker pen, dark enough that the default foreground still reads.
+const HIGHLIGHT_BG: &str = "550";
+
+/// The micron foreground colour of struck text. Micron has no strikethrough,
+/// and dimming is the one signal it has for "no longer applies".
+const STRIKE_FG: &str = "777";
+
+/// The pulldown-cmark options used by both renderers: every extension of the
+/// standard Markdown feature set the parser implements. What it does not
+/// implement is added by [`extended_events`].
+///
+/// Smart punctuation, math, wikilinks and metadata blocks stay off: none of
+/// them belongs to that feature set, and a metadata block would additionally
+/// swallow the `+++` front matter every post already carries.
 fn markdown_options() -> Options {
     Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_DEFINITION_LIST
+        | Options::ENABLE_SUPERSCRIPT
+        | Options::ENABLE_SUBSCRIPT
 }
 
 /// Render a Markdown fragment to an HTML fragment (no surrounding document).
 pub fn markdown_to_html(md: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options())
+    let events = extended_events(md)
+        .into_iter()
         .map(demote_heading)
         .map(resolve_file_ref);
     let mut out = String::new();
-    html::push_html(&mut out, parser);
+    html::push_html(&mut out, events);
     out
+}
+
+/// The parser's event stream with adjacent text runs joined and the cheat
+/// sheet syntax pulldown-cmark does not implement expanded into events both
+/// renderers already understand (see the module docs).
+///
+/// Joining the runs first is what makes the expansion see whole words: the
+/// parser hands out `X^2` and `^` as two events when it has rejected a
+/// superscript, and a pass looking at them one at a time would find no pair.
+///
+/// Text inside a code block, a link label or an image's alt text is left
+/// exactly as the parser produced it: a URL in a link label must not become a
+/// second link, and code is quoted precisely so nothing rewrites it.
+fn extended_events(md: &str) -> Vec<Event<'_>> {
+    let mut out = Vec::new();
+    let mut run = String::new();
+    let mut literal = 0usize;
+    for event in Parser::new_ext(md, markdown_options()) {
+        if let Event::Text(text) = &event {
+            run.push_str(text);
+            continue;
+        }
+        // Flushed before the depth moves, so the run is expanded (or not)
+        // under the rule that held where it stood.
+        push_run(&mut run, literal > 0, &mut out);
+        match &event {
+            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => literal += 1,
+            Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image) => {
+                literal = literal.saturating_sub(1)
+            }
+            _ => {}
+        }
+        out.push(event);
+    }
+    push_run(&mut run, literal > 0, &mut out);
+    out
+}
+
+/// Emit one collected text run, expanded unless it is quoted text.
+fn push_run<'a>(run: &mut String, literal: bool, out: &mut Vec<Event<'a>>) {
+    if run.is_empty() {
+        return;
+    }
+    let text = std::mem::take(run);
+    match literal {
+        true => out.push(Event::Text(text.into())),
+        false => expand_text(&text, out),
+    }
+}
+
+/// Expand one prose text run into events: `==highlight==`, the cheat sheet's
+/// intra-word `H~2~O` / `X^2^`, and bare URLs and e-mail addresses.
+///
+/// Sub- and superscript are emitted as the inline HTML the parser's own
+/// extension would have produced, and the micron writer maps those tags the
+/// same way it maps the parser's. One expansion, both sides.
+fn expand_text<'a>(text: &str, out: &mut Vec<Event<'a>>) {
+    let mut plain = String::new();
+    let mut i = 0;
+    while let Some(c) = text[i..].chars().next() {
+        let rest = &text[i..];
+        // `==highlight==`. The content is expanded in turn, so a formula or a
+        // URL inside a highlight is still one.
+        if let Some(inner) = rest
+            .strip_prefix("==")
+            .and_then(|r| delimited(r, "=="))
+            .filter(|inner| !inner.is_empty())
+        {
+            flush_plain(&mut plain, out);
+            out.push(Event::InlineHtml("<mark>".into()));
+            expand_text(inner, out);
+            out.push(Event::InlineHtml("</mark>".into()));
+            i += inner.len() + 4;
+            continue;
+        }
+        // `H~2~O` and `X^2^`. Only the intra-word form: everything else is
+        // the parser's, and taking it here would catch `~5 or ~10`.
+        if matches!(c, '~' | '^') && plain.chars().next_back().is_some_and(char::is_alphanumeric) {
+            let (delim, open, close) = match c {
+                '^' => ("^", "<sup>", "</sup>"),
+                _ => ("~", "<sub>", "</sub>"),
+            };
+            if let Some(inner) = delimited(&rest[1..], delim) {
+                if !inner.is_empty() && !inner.contains(char::is_whitespace) {
+                    flush_plain(&mut plain, out);
+                    out.push(Event::InlineHtml(open.into()));
+                    out.push(Event::Text(inner.to_string().into()));
+                    out.push(Event::InlineHtml(close.into()));
+                    i += inner.len() + 2;
+                    continue;
+                }
+            }
+        }
+        // A bare URL, at a word boundary so `xhttps://...` stays text.
+        if !plain.chars().next_back().is_some_and(char::is_alphanumeric) {
+            let url = bare_url(rest);
+            if !url.is_empty() {
+                flush_plain(&mut plain, out);
+                push_autolink(url, url, out);
+                i += url.len();
+                continue;
+            }
+        }
+        // A bare e-mail address, found at its `@` and completed backwards out
+        // of the text already collected.
+        if c == '@' {
+            if let Some((local_len, domain)) = bare_email(&plain, &rest[1..]) {
+                let local = plain.split_off(plain.len() - local_len);
+                let address = format!("{local}@{domain}");
+                flush_plain(&mut plain, out);
+                push_autolink(&format!("mailto:{address}"), &address, out);
+                i += domain.len() + 1;
+                continue;
+            }
+        }
+        plain.push(c);
+        i += c.len_utf8();
+    }
+    flush_plain(&mut plain, out);
+}
+
+/// The text up to the next `delim`, or `None` when the run does not close.
+fn delimited<'a>(s: &'a str, delim: &str) -> Option<&'a str> {
+    s.find(delim).map(|end| &s[..end])
+}
+
+/// Emit what has been collected as plain text, if anything.
+fn flush_plain<'a>(plain: &mut String, out: &mut Vec<Event<'a>>) {
+    if !plain.is_empty() {
+        out.push(Event::Text(std::mem::take(plain).into()));
+    }
+}
+
+/// Emit a link whose label is the address itself.
+fn push_autolink<'a>(dest: &str, label: &str, out: &mut Vec<Event<'a>>) {
+    out.push(Event::Start(Tag::Link {
+        link_type: LinkType::Autolink,
+        dest_url: dest.to_string().into(),
+        title: String::new().into(),
+        id: String::new().into(),
+    }));
+    out.push(Event::Text(label.to_string().into()));
+    out.push(Event::End(TagEnd::Link));
+}
+
+/// The bare `http(s)` URL starting at `s`, or `""` when there is none.
+///
+/// Sentence punctuation after a URL belongs to the sentence, and a closing
+/// bracket only belongs to the URL when the URL opened one: `(see
+/// https://example.com/a)` is the common case and its `)` is not part of the
+/// address.
+fn bare_url(s: &str) -> &str {
+    if !(s.starts_with("http://") || s.starts_with("https://")) {
+        return "";
+    }
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
+        .unwrap_or(s.len());
+    let mut url = &s[..end];
+    loop {
+        let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let trimmed = match trimmed.ends_with(')')
+            && trimmed.matches(')').count() > trimmed.matches('(').count()
+        {
+            true => &trimmed[..trimmed.len() - 1],
+            false => trimmed,
+        };
+        if trimmed.len() == url.len() {
+            // A scheme with nothing after it is not an address.
+            return match url.ends_with("//") {
+                true => "",
+                false => url,
+            };
+        }
+        url = trimmed;
+    }
+}
+
+/// The e-mail address around an `@`: how many bytes of `plain` its local part
+/// takes, and the domain that follows.
+///
+/// The domain has to end in a plausible TLD; without that rule every `@`
+/// followed by a word would become a link.
+fn bare_email<'a>(plain: &str, after: &'a str) -> Option<(usize, &'a str)> {
+    let local_len = plain.len() - plain.trim_end_matches(is_email_local).len();
+    let local = &plain[plain.len() - local_len..];
+    if local.is_empty() || local.starts_with('.') {
+        return None;
+    }
+    let end = after
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '.' | '-')))
+        .unwrap_or(after.len());
+    let domain = after[..end].trim_end_matches(['.', '-']);
+    let (_, tld) = domain.rsplit_once('.')?;
+    match tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()) {
+        true => Some((local_len, domain)),
+        false => None,
+    }
+}
+
+/// Whether `c` may appear in the local part of an e-mail address.
+fn is_email_local(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
 }
 
 /// Point an image or link at the file area's web route when it names a file
@@ -266,7 +517,8 @@ fn demote_heading(event: Event<'_>) -> Event<'_> {
 /// blog's root and `page` the post's own URL, which is what a document-
 /// relative reference resolves against.
 fn markdown_to_html_absolute(md: &str, base: &str, page: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options())
+    let events = extended_events(md)
+        .into_iter()
         .map(demote_heading)
         // File references resolve to the web route BEFORE absolutising, so a
         // feed entry's picture points at `<base>/files/x.jpg` rather than at
@@ -274,7 +526,7 @@ fn markdown_to_html_absolute(md: &str, base: &str, page: &str) -> String {
         .map(resolve_file_ref)
         .map(|event| absolutize(event, base, page));
     let mut out = String::new();
-    html::push_html(&mut out, parser);
+    html::push_html(&mut out, events);
     out
 }
 
@@ -381,6 +633,12 @@ h1,h2,h3{line-height:1.25}\
 code,pre{font-family:ui-monospace,monospace;background:#eee}\
 pre{padding:.75rem;overflow-x:auto}\
 a{color:#1a5fb4}\
+mark{background:#ffe066;color:#222}\
+dt{font-weight:600}\
+li:has(>input[type=checkbox]){list-style:none;margin-left:-1rem}\
+li>input[type=checkbox]{margin-right:.35rem}\
+.footnote-definition{font-size:.9rem;color:#444}\
+.footnote-definition p{display:inline}\
 .tagline{color:#444}\
 .byline,.date{color:#666;font-size:.9rem}\
 ul.posts{list-style:none;padding:0}\
@@ -804,9 +1062,8 @@ fn rfc3339(date: &Date) -> String {
 /// Convert a Markdown fragment to valid micron markup. See the module docs
 /// for the mapping and degradation table. Never panics.
 pub fn markdown_to_micron(md: &str) -> String {
-    let parser = Parser::new_ext(md, markdown_options());
     let mut writer = MicronWriter::default();
-    for event in parser {
+    for event in extended_events(md) {
         writer.event(event);
     }
     writer.finish()
@@ -950,6 +1207,61 @@ struct MicronWriter {
     /// not source text, so a link or a style toggle inside a cell survives;
     /// only plain text picks up the extra `|` escaping on the way in.
     cell: Option<String>,
+    /// Finished footnote-definition lines, held back until the end of the
+    /// page: micron has no anchor to put them next to their reference.
+    footnotes: Vec<String>,
+    /// Whether finished lines currently go to `footnotes` instead of `out`.
+    in_footnote: bool,
+    /// Sub/superscript text buffered until its closing event, because the
+    /// Unicode substitution is decided over the whole run.
+    script: Option<(Script, String)>,
+    /// Indent levels beyond the blockquote depth, two spaces each. Used by
+    /// definition lists, whose terms carry their definitions indented.
+    indent: usize,
+}
+
+/// Which way a buffered script run shifts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Script {
+    /// `~2~`, rendered with Unicode subscripts where they exist.
+    Sub,
+    /// `^2^`, rendered with Unicode superscripts where they exist.
+    Sup,
+}
+
+/// One character in `kind` position, or `None` when Unicode has none.
+///
+/// Digits and the arithmetic signs are complete in both positions; the
+/// alphabet is not, which is why a run is either fully substituted or left
+/// with its markers.
+fn script_char(kind: Script, c: char) -> Option<char> {
+    let digits = match kind {
+        Script::Sub => {
+            "\u{2080}\u{2081}\u{2082}\u{2083}\u{2084}\u{2085}\u{2086}\u{2087}\u{2088}\u{2089}"
+        }
+        Script::Sup => "\u{2070}\u{b9}\u{b2}\u{b3}\u{2074}\u{2075}\u{2076}\u{2077}\u{2078}\u{2079}",
+    };
+    if let Some(d) = c.to_digit(10) {
+        return digits.chars().nth(d as usize);
+    }
+    let signs = match kind {
+        Script::Sub => "\u{208a}\u{208b}\u{208c}\u{208d}\u{208e}",
+        Script::Sup => "\u{207a}\u{207b}\u{207c}\u{207d}\u{207e}",
+    };
+    "+-=()".find(c).and_then(|i| signs.chars().nth(i))
+}
+
+/// A whole script run: the Unicode form when every character has one, else
+/// the source text with its markers, which still reads as what it means.
+fn script_text(kind: Script, text: &str) -> String {
+    let unicode: Option<String> = text.chars().map(|c| script_char(kind, c)).collect();
+    match unicode {
+        Some(s) => s,
+        None => match kind {
+            Script::Sub => format!("~{text}~"),
+            Script::Sup => format!("^{text}^"),
+        },
+    }
 }
 
 impl MicronWriter {
@@ -959,7 +1271,8 @@ impl MicronWriter {
             Event::End(tag) => self.end(tag),
             Event::Text(t) => self.text(&t),
             Event::Code(t) => self.inline_code(&t),
-            Event::Html(t) | Event::InlineHtml(t) => self.text(&t),
+            Event::Html(t) => self.text(&t),
+            Event::InlineHtml(t) => self.inline_html(&t),
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => self.flush_line(),
             Event::Rule => {
@@ -967,11 +1280,11 @@ impl MicronWriter {
                 self.push_raw("-");
                 self.flush_line();
             }
-            // Extensions we do not enable; listed for totality, never emitted.
-            Event::FootnoteReference(_)
-            | Event::TaskListMarker(_)
-            | Event::InlineMath(_)
-            | Event::DisplayMath(_) => {}
+            Event::FootnoteReference(label) => self.footnote_reference(&label),
+            Event::TaskListMarker(done) => self.task_marker(done),
+            // Math is not part of the standard feature set and its extension
+            // stays off; listed for totality, never emitted.
+            Event::InlineMath(_) | Event::DisplayMath(_) => {}
         }
     }
 
@@ -997,7 +1310,7 @@ impl MicronWriter {
             }
             Tag::CodeBlock(CodeBlockKind::Fenced(_) | CodeBlockKind::Indented) => {
                 self.block_sep();
-                self.out.push("`=".to_string());
+                self.sink().push("`=".to_string());
                 self.in_code_block = true;
             }
             Tag::List(start) => {
@@ -1024,7 +1337,7 @@ impl MicronWriter {
             }
             Tag::Table(alignments) => {
                 self.block_sep();
-                self.out.push("`t".to_string());
+                self.sink().push("`t".to_string());
                 self.table = Some(OpenTable {
                     alignments,
                     cells: 0,
@@ -1051,6 +1364,19 @@ impl MicronWriter {
             }
             Tag::Emphasis => self.style_toggle("`*"),
             Tag::Strong => self.style_toggle("`!"),
+            Tag::Strikethrough => self.style_toggle(&format!("`F{STRIKE_FG}")),
+            Tag::Superscript => self.start_script(Script::Sup),
+            Tag::Subscript => self.start_script(Script::Sub),
+            Tag::FootnoteDefinition(label) => self.start_footnote(&label),
+            Tag::DefinitionList => self.block_sep(),
+            Tag::DefinitionListTitle => {
+                self.flush_line();
+                self.style_toggle("`!");
+            }
+            Tag::DefinitionListDefinition => {
+                self.flush_line();
+                self.indent += 1;
+            }
             Tag::Link { dest_url, .. } => {
                 self.link_url = Some(dest_url.to_string());
                 self.link_label.clear();
@@ -1062,12 +1388,8 @@ impl MicronWriter {
                 })
             }
             Tag::HtmlBlock => self.block_sep(),
-            // Extensions we do not enable (footnotes, definition lists,
-            // strikethrough, sub/superscript, metadata): their tags are never
-            // constructed, so what reaches us is whatever pulldown-cmark makes
-            // of the raw syntax. For most of them that is plain text; footnote
-            // definitions are the exception and can be swallowed as link
-            // reference definitions (see the module docs).
+            // Metadata blocks: the extension stays off, so the tag is never
+            // constructed and the front matter never reaches a renderer.
             _ => {}
         }
     }
@@ -1086,7 +1408,7 @@ impl MicronWriter {
                     self.flush_code_line();
                 }
                 self.in_code_block = false;
-                self.out.push("`=".to_string());
+                self.sink().push("`=".to_string());
             }
             TagEnd::List(_) => {
                 self.flush_line();
@@ -1114,16 +1436,31 @@ impl MicronWriter {
                         _ => "---",
                     })
                     .collect();
-                self.out.push(row.join(" | "));
+                self.sink().push(row.join(" | "));
             }
             TagEnd::TableRow => self.flush_line(),
             TagEnd::Table => {
                 self.flush_line();
-                self.out.push("`t".to_string());
+                self.sink().push("`t".to_string());
                 self.table = None;
             }
             TagEnd::Emphasis => self.style_toggle("`*"),
             TagEnd::Strong => self.style_toggle("`!"),
+            TagEnd::Strikethrough => self.style_toggle("`f"),
+            TagEnd::Superscript | TagEnd::Subscript => self.end_script(),
+            TagEnd::FootnoteDefinition => {
+                self.flush_line();
+                self.in_footnote = false;
+            }
+            TagEnd::DefinitionListTitle => {
+                self.style_toggle("`!");
+                self.flush_line();
+            }
+            TagEnd::DefinitionListDefinition => {
+                self.flush_line();
+                self.indent = self.indent.saturating_sub(1);
+            }
+            TagEnd::DefinitionList => self.flush_line(),
             TagEnd::Link => {
                 let url = sanitize_link_part(&self.link_url.take().unwrap_or_default());
                 let label = sanitize_link_part(self.link_label.trim());
@@ -1169,6 +1506,10 @@ impl MicronWriter {
             self.link_label.push_str(t);
             return;
         }
+        if let Some((_, buffered)) = self.script.as_mut() {
+            buffered.push_str(t);
+            return;
+        }
         for (i, segment) in t.split('\n').enumerate() {
             if i > 0 {
                 if self.in_code_block {
@@ -1199,6 +1540,83 @@ impl MicronWriter {
         self.push_raw(&format!("`B{INLINE_CODE_BG}"));
         self.push_text(code);
         self.push_raw("`b");
+    }
+
+    /// The inline HTML tags our own expansion emits, plus the same tags
+    /// written by hand: micron has a mapping for each, which is a better
+    /// reading than the escaped tag text every other raw HTML degrades to.
+    fn inline_html(&mut self, t: &str) {
+        match t {
+            "<mark>" => self.style_toggle(&format!("`B{HIGHLIGHT_BG}")),
+            "</mark>" => self.style_toggle("`b"),
+            "<del>" | "<s>" => self.style_toggle(&format!("`F{STRIKE_FG}")),
+            "</del>" | "</s>" => self.style_toggle("`f"),
+            "<sub>" => self.start_script(Script::Sub),
+            "<sup>" => self.start_script(Script::Sup),
+            "</sub>" | "</sup>" => self.end_script(),
+            other => self.text(other),
+        }
+    }
+
+    /// Start collecting a sub/superscript run, unless something else is
+    /// already collecting text.
+    fn start_script(&mut self, kind: Script) {
+        if self.image.is_none() && self.link_url.is_none() && self.script.is_none() {
+            self.script = Some((kind, String::new()));
+        }
+    }
+
+    /// Emit a collected sub/superscript run. Tolerates never having been
+    /// started, so a stray closing tag cannot lose the text after it.
+    fn end_script(&mut self) {
+        if let Some((kind, text)) = self.script.take() {
+            let rendered = script_text(kind, &text);
+            self.push_text(&rendered);
+        }
+    }
+
+    /// A footnote reference: the bare marker, since micron has nowhere to
+    /// jump to. The definition it names is emitted at the end of the page.
+    fn footnote_reference(&mut self, label: &str) {
+        let marker = format!("[{label}]");
+        if let Some(image) = self.image.as_mut() {
+            image.alt.push_str(&marker);
+        } else if self.link_url.is_some() {
+            self.link_label.push_str(&marker);
+        } else if let Some((_, buffered)) = self.script.as_mut() {
+            buffered.push_str(&marker);
+        } else {
+            self.push_text(&marker);
+        }
+    }
+
+    /// Divert output into the footnote block and open the definition with the
+    /// marker its references carry.
+    fn start_footnote(&mut self, label: &str) {
+        self.flush_line();
+        self.in_footnote = true;
+        if !self.footnotes.is_empty() {
+            self.footnotes.push(String::new());
+        }
+        // Written straight into the line, the way a list item's marker is, so
+        // the definition's first paragraph continues it instead of starting a
+        // block of its own.
+        self.line = format!("[{}] ", escape_micron_text(label));
+        self.line_is_text = false;
+    }
+
+    /// A task-list item's checkbox, which replaces the bullet rather than
+    /// joining it: the box is the item's marker.
+    fn task_marker(&mut self, done: bool) {
+        const BULLET: &str = "\u{2022} ";
+        if self.cell.is_none() && self.line.ends_with(BULLET) {
+            let keep = self.line.len() - BULLET.len();
+            self.line.truncate(keep);
+        }
+        match done {
+            true => self.push_raw("\u{2611} "),
+            false => self.push_raw("\u{2610} "),
+        }
     }
 
     /// Emit a style toggle unless a link/image is collecting text (labels run
@@ -1246,10 +1664,11 @@ impl MicronWriter {
         if self.line_is_text && line.starts_with(LINE_CONTROL_CHARS) {
             line.insert(0, '\\');
         }
-        if self.quote_depth > 0 {
-            line = format!("{}{line}", "  ".repeat(self.quote_depth));
+        let indent = self.quote_depth + self.indent;
+        if indent > 0 {
+            line = format!("{}{line}", "  ".repeat(indent));
         }
-        self.out.push(line);
+        self.sink().push(line);
     }
 
     /// Finish one verbatim literal-block line. Only the block toggle itself
@@ -1257,24 +1676,44 @@ impl MicronWriter {
     /// `` \`= `` (the parser unescapes it inside literal blocks).
     fn flush_code_line(&mut self) {
         let line = std::mem::take(&mut self.line);
-        if line == "`=" {
-            self.out.push("\\`=".to_string());
-        } else {
-            self.out.push(line);
+        match line == "`=" {
+            true => self.sink().push("\\`=".to_string()),
+            false => self.sink().push(line),
         }
     }
 
     /// Separate blocks with one blank line (never at the start of output).
     fn block_sep(&mut self) {
         self.flush_line();
-        if self.out.last().is_some_and(|l| !l.is_empty()) {
-            self.out.push(String::new());
+        if self.sink().last().is_some_and(|l| !l.is_empty()) {
+            self.sink().push(String::new());
+        }
+    }
+
+    /// Where finished lines go: the footnote block while a definition is
+    /// open, the page itself otherwise.
+    fn sink(&mut self) -> &mut Vec<String> {
+        match self.in_footnote {
+            true => &mut self.footnotes,
+            false => &mut self.out,
         }
     }
 
     /// Flush pending state and return the final micron source.
     fn finish(mut self) -> String {
+        // A script run left open by unbalanced raw HTML must not swallow the
+        // text it collected.
+        self.end_script();
         self.flush_line();
+        self.in_footnote = false;
+        if !self.footnotes.is_empty() {
+            if self.out.last().is_some_and(|l| !l.is_empty()) {
+                self.out.push(String::new());
+            }
+            self.out.push("-".to_string());
+            self.out.push(String::new());
+            self.out.append(&mut self.footnotes);
+        }
         let mut out = self.out.join("\n");
         if !out.is_empty() {
             out.push('\n');

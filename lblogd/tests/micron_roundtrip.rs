@@ -337,6 +337,149 @@ fn empty_input_renders_and_parses_cleanly() {
     let _ = roundtrip("");
 }
 
+#[test]
+fn footnote_definitions_are_collected_at_the_end_behind_a_divider() {
+    // #197: with the extension off, `[^1]: Kurz` parsed as a link reference
+    // definition and the definition line disappeared from the output.
+    // Micron has no anchors, so the reference keeps its marker and the
+    // definitions are gathered where a reader can still find them.
+    let doc = roundtrip("Satz.[^1] Mehr.[^2]\n\n[^1]: Kurz\n[^2]: https://example.com/a\n");
+    let blocks = content_blocks(&doc);
+    let [Block::Paragraph { line: body, .. }, Block::Divider { .. }, Block::Paragraph { line: first, .. }, Block::Paragraph { line: second, .. }] =
+        blocks[..]
+    else {
+        panic!("expected body, divider and two definitions, got {blocks:?}");
+    };
+    assert_eq!(line_text(body), "Satz.[1] Mehr.[2]");
+    assert_eq!(line_text(first), "[1] Kurz");
+    assert!(
+        line_text(second).starts_with("[2] "),
+        "{:?}",
+        line_text(second)
+    );
+    let link = second.spans.iter().find_map(|s| s.link.as_ref()).unwrap();
+    assert_eq!(link.target, "https://example.com/a");
+}
+
+#[test]
+fn strikethrough_degrades_to_dimmed_text() {
+    // Micron has no struck text; dimming is the one signal it has for
+    // "this no longer applies".
+    let doc = roundtrip("~~gone~~ text");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    assert_eq!(line_text(line), "gone text");
+    let struck = line.spans.iter().find(|s| s.text == "gone").unwrap();
+    assert_eq!(struck.style.fg, Some(Color::parse("777")));
+    let after = line.spans.iter().find(|s| s.text == " text").unwrap();
+    assert_eq!(after.style.fg, None);
+}
+
+#[test]
+fn task_list_items_carry_a_box_instead_of_a_bullet() {
+    let doc = roundtrip("- [x] done\n- [ ] open\n");
+    let texts: Vec<String> = content_blocks(&doc)
+        .iter()
+        .map(|b| match b {
+            Block::Paragraph { line, .. } => line_text(line),
+            other => panic!("expected paragraphs, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts, ["\u{2611} done", "\u{2610} open"]);
+}
+
+#[test]
+fn a_heading_identifier_is_dropped_rather_than_shown() {
+    // Micron has neither anchors nor in-page links, so there is nothing to
+    // attach the identifier to; what it must not do is leak into the text.
+    let doc = roundtrip("## Text {#custom-id}\n");
+    let [Block::Heading { depth: 3, line }] = content_blocks(&doc)[..] else {
+        panic!("expected one heading, got {:?}", doc.blocks);
+    };
+    assert_eq!(line_text(line), "Text");
+}
+
+#[test]
+fn definition_list_becomes_a_bold_term_with_indented_definitions() {
+    let doc = roundtrip("First Term\n: definition one\n: definition two\n");
+    let blocks = content_blocks(&doc);
+    let [Block::Paragraph { line: term, .. }, Block::Paragraph { line: one, .. }, Block::Paragraph { line: two, .. }] =
+        blocks[..]
+    else {
+        panic!("expected a term and two definitions, got {blocks:?}");
+    };
+    assert_eq!(line_text(term), "First Term");
+    assert!(term.spans.iter().all(|s| s.style.bold), "{term:?}");
+    assert_eq!(line_text(one), "  definition one");
+    assert_eq!(line_text(two), "  definition two");
+}
+
+#[test]
+fn highlight_becomes_a_background_toggle() {
+    let doc = roundtrip("==look== here");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    let marked = line.spans.iter().find(|s| s.text == "look").unwrap();
+    assert_eq!(marked.style.bg, Some(Color::parse("550")));
+    let after = line.spans.iter().find(|s| s.text == " here").unwrap();
+    assert_eq!(after.style.bg, None);
+}
+
+#[test]
+fn sub_and_superscript_use_unicode_where_it_is_complete() {
+    // Digits and the arithmetic signs exist in both positions; the alphabet
+    // does not, so a run Unicode cannot carry keeps its markers.
+    let doc = roundtrip("H~2~O and X^2^ and E ~n~ and a^bc^");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    assert_eq!(
+        line_text(line),
+        "H\u{2082}O and X\u{b2} and E ~n~ and a^bc^"
+    );
+}
+
+#[test]
+fn bare_urls_and_addresses_become_micron_links() {
+    let doc = roundtrip("see https://example.com/x, now and lp@lew-palm.de too");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    let links: Vec<_> = line.spans.iter().filter_map(|s| s.link.as_ref()).collect();
+    assert_eq!(links.len(), 2, "{line:?}");
+    assert_eq!(links[0].target, "https://example.com/x");
+    assert_eq!(links[0].label, "https://example.com/x");
+    assert_eq!(links[1].target, "mailto:lp@lew-palm.de");
+    assert_eq!(links[1].label, "lp@lew-palm.de");
+    assert!(
+        line_text(line).contains(", now and "),
+        "{:?}",
+        line_text(line)
+    );
+}
+
+#[test]
+fn a_url_inside_quoted_text_stays_text() {
+    let doc = roundtrip("```\nhttps://example.com/x\n```\n");
+    let [Block::LiteralBlock { lines }] = content_blocks(&doc)[..] else {
+        panic!("expected one literal block, got {:?}", doc.blocks);
+    };
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    assert_eq!(texts, ["https://example.com/x"]);
+}
+
+#[test]
+fn emoji_shortcodes_stay_as_written() {
+    // Declined rather than half-implemented; see the render module docs.
+    let doc = roundtrip("joy :joy: here");
+    let [Block::Paragraph { line, .. }] = content_blocks(&doc)[..] else {
+        panic!("expected one paragraph, got {:?}", doc.blocks);
+    };
+    assert_eq!(line_text(line), "joy :joy: here");
+}
+
 fn sample_post(title: &str, date: &str) -> lblogd::post::Post {
     let src = format!("+++\ntitle = \"{title}\"\ndate = \"{date}\"\n+++\n\nBody of {title}.\n");
     parse_post(&src, &fixture_defaults()).unwrap()
