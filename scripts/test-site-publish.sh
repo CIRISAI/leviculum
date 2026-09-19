@@ -25,6 +25,10 @@
 #   hostile-env        `env -i`, a broken PATH and a hostile IFS: still works
 #   sender-layout      the REAL sender's tar, published by the REAL receiver
 #   sender-no-dist     a run with nothing built says so and does not fail
+#   sender-unconfigured  no ssh settings at all: it says NOT CONFIGURED, exits
+#                        0, and opens no connection
+#   sender-part-config   some ssh settings and not others: it fails, names the
+#                        missing ones, and opens no connection
 #
 # Every refusal case additionally asserts that the previous `latest` still
 # resolves to the previous build's files, that no new build directory
@@ -516,6 +520,78 @@ grep -q 'nothing was built' "$WORK/send-out" ||
     fail "sender-no-dist: did not say why it published nothing: $(cat "$WORK/send-out")"
 [ ! -e "$WORK/never.tar" ] || fail "sender-no-dist: wrote a tar anyway"
 [ "$failures" -eq "$before" ] || { sed 's/^/    /' "$WORK/send-out" "$WORK/send-err"; }
+
+# --- Case: the target is not configured -----------------------------------
+#
+# The three ssh settings are deliberately NOT `from_secret:` entries in
+# .woodpecker/nightly.yml: a secret the repository does not have is a compile
+# error for the whole pipeline, and on cron #434 that error took the forge
+# publish — the target every download link we hand out points at — down with
+# a site publish that had never been configured. What replaces the hard
+# requirement is this: unset is a legal state, the step says so in words
+# somebody skimming a green log would see, it exits 0, and it makes no
+# connection at all.
+#
+# The "makes no connection" half is asserted rather than assumed, with an
+# `ssh` on PATH that records having been called. A script that prints the
+# banner and then tries to upload anyway would pass a grep-only test.
+echo "[case] sender-unconfigured"
+before=$failures
+TREE="$WORK/sender-unconfigured/tree"
+SHIM="$WORK/sender-unconfigured/bin"
+mkdir -p "$TREE/scripts" "$TREE/dist" "$SHIM"
+cp "$SENDER" "$TREE/scripts/publish-site.sh"
+cat >"$SHIM/ssh" <<EOF
+#!/bin/sh
+echo called >"$WORK/ssh-was-called"
+exit 0
+EOF
+chmod +x "$SHIM/ssh"
+rm -f "$WORK/ssh-was-called"
+echo "built leviculum-nightly-amd64.deb" >"$TREE/dist/leviculum-nightly-amd64.deb"
+(cd "$TREE/dist" && sha256sum leviculum-nightly-amd64.deb >leviculum-nightly-amd64.deb.sha256)
+printf '%s\n' "$ID1" >"$TREE/.build-id"
+(
+    cd "$TREE" &&
+        env -u SITE_SSH_TARGET -u SITE_SSH_KEY -u SITE_SSH_HOST_KEY \
+            PATH="$SHIM:$PATH" bash scripts/publish-site.sh
+) >"$WORK/unconf-out" 2>"$WORK/unconf-err"
+RC=$?
+[ "$RC" -eq 0 ] || fail "sender-unconfigured: exit $RC, expected 0"
+grep -q 'NOT CONFIGURED' "$WORK/unconf-out" ||
+    fail "sender-unconfigured: the log does not say it is unconfigured: $(cat "$WORK/unconf-out")"
+grep -q 'SITE_SSH_TARGET' "$WORK/unconf-out" ||
+    fail "sender-unconfigured: the log does not name what is missing"
+[ ! -e "$WORK/ssh-was-called" ] ||
+    fail "sender-unconfigured: it tried to upload anyway"
+[ "$failures" -eq "$before" ] || sed 's/^/    /' "$WORK/unconf-out" "$WORK/unconf-err"
+
+# --- Case: the target is half configured ----------------------------------
+#
+# A host with no key is not "nobody has wired this up yet", it is a mistake
+# somebody made, and the two must not produce the same line. This one fails,
+# names both halves, and still opens no connection — publishing with two of
+# three settings is not something to attempt and report on afterwards.
+echo "[case] sender-part-config"
+before=$failures
+rm -f "$WORK/ssh-was-called"
+(
+    cd "$TREE" &&
+        env -u SITE_SSH_KEY -u SITE_SSH_HOST_KEY \
+            SITE_SSH_TARGET="deploy@example.invalid" \
+            PATH="$SHIM:$PATH" bash scripts/publish-site.sh
+) >"$WORK/part-out" 2>"$WORK/part-err"
+RC=$?
+[ "$RC" -ne 0 ] || fail "sender-part-config: exit 0 with two settings missing"
+grep -q 'PARTLY configured' "$WORK/part-err" ||
+    fail "sender-part-config: the failure does not name the reason: $(cat "$WORK/part-err")"
+grep -q 'SITE_SSH_KEY' "$WORK/part-err" ||
+    fail "sender-part-config: the failure does not name the missing settings"
+grep -q 'NOT CONFIGURED' "$WORK/part-out" &&
+    fail "sender-part-config: it reported an unconfigured target instead of a broken one"
+[ ! -e "$WORK/ssh-was-called" ] ||
+    fail "sender-part-config: it tried to upload with an incomplete configuration"
+[ "$failures" -eq "$before" ] || sed 's/^/    /' "$WORK/part-out" "$WORK/part-err"
 
 echo
 if [ "$failures" -ne 0 ]; then

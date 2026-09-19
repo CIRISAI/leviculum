@@ -304,23 +304,54 @@ steps:
   # `just site-publish-selftest` runs the real sender against the real
   # receiver on every push, which is what notices when that list grows.
   #
-  # The three secrets are the ssh target, the private key, and the receiving
+  # The three inputs are the ssh target, the private key, and the receiving
   # host's public key. The host key is PINNED: scripts/publish-site.sh runs
   # with StrictHostKeyChecking=yes against a known_hosts file holding that
   # one entry and nothing else. There is no accept-on-first-use — an
   # unattended job cannot recognise a host it has never seen.
+  #
+  # NO `from_secret` HERE, AND THAT IS THE POINT. A `from_secret` naming a
+  # secret the repository does not have is not a step failure in Woodpecker;
+  # it is a compile error for the whole pipeline. Cron run #434, on d7979113,
+  # ended `status: error, workflows: 0, secret "site_ssh_target" not found` —
+  # the gate, both builds, the packaging step and the FORGE publish never
+  # started, because a step that was added last and runs last could not be
+  # configured. Three weeks of stale .debs behind every download link we hand
+  # out, bought by a second target that was supposed to make those links more
+  # reliable, not less.
+  #
+  # So this step reads plain environment variables that are allowed to be
+  # unset, and says so in its own log when they are (see the NOT CONFIGURED
+  # banner in scripts/publish-site.sh). An unset variable is not an error at
+  # any layer: not in Woodpecker's compiler, not in the runner, not in the
+  # script. That is a property no `when:` clause and no separate workflow file
+  # can buy, because a workflow is its own workspace — a site publish in a
+  # second file would have no dist/ to publish and would have to rebuild the
+  # whole nightly to get one, which is two different builds behind two URLs
+  # that are supposed to serve the same bytes.
+  #
+  # TO WIRE THE SITE UP, IN THIS ORDER:
+  #   1. create the repository secrets `site_ssh_target`, `site_ssh_key` and
+  #      `site_ssh_host_key` in the Woodpecker UI, and confirm they appear in
+  #      the repository's secret list;
+  #   2. add their names to scripts/ci-secrets.txt;
+  #   3. in the SAME commit, add the environment block back:
+  #
+  #        environment:
+  #          SITE_SSH_TARGET:
+  #            from_secret: site_ssh_target
+  #          SITE_SSH_KEY:
+  #            from_secret: site_ssh_key
+  #          SITE_SSH_HOST_KEY:
+  #            from_secret: site_ssh_host_key
+  #
+  # Step 1 before step 3 is the whole lesson of #434, and `just
+  # check-ci-secrets` is what refuses a push that does 3 without 2.
   publish-site:
     image: debian:bookworm-slim
     when:
       - event: cron
         status: [success, failure]
-    environment:
-      SITE_SSH_TARGET:
-        from_secret: site_ssh_target
-      SITE_SSH_KEY:
-        from_secret: site_ssh_key
-      SITE_SSH_HOST_KEY:
-        from_secret: site_ssh_host_key
     commands:
       - apt-get update && apt-get install -y openssh-client
       # No `export LEVICULUM_BUILD_ID=$(cat .build-id)` here: the script

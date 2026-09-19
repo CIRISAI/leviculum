@@ -22,10 +22,19 @@
 # accept-on-first-use anywhere: an unattended job cannot recognise a host it
 # has never seen, so a key it was not given is a failure, not a prompt.
 #
-# Required environment (Woodpecker secrets):
+# Environment (all three together, or none of them):
 #   SITE_SSH_TARGET     user@host of the receiving VPS
 #   SITE_SSH_KEY        private key, in full, for that user
 #   SITE_SSH_HOST_KEY   the host's public key as a known_hosts line
+#
+# NONE of them set means this target is not configured: the script says so,
+# loudly, and exits 0. It is deliberately not a `from_secret` in the pipeline
+# and therefore deliberately not a hard requirement here — a missing
+# Woodpecker secret is a compile error for the whole pipeline rather than a
+# failure of the step that names it, and that took the forge publish down
+# with it for three weeks (cron #434). SOME of them set is a
+# misconfiguration and does fail.
+#
 # Optional:
 #   SITE_SSH_PORT       default 22
 #   SITE_REMOTE_COMMAND default `lev-receive-nightly`; ignored by the far
@@ -65,6 +74,61 @@ die() { printf '[publish-site] %s\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
+
+# --- Is this target configured at all? ------------------------------------
+#
+# The site publish needs three values that come from outside; the forge
+# publish needs none of them. Until somebody supplies them this step has
+# nothing to publish with, and that state has to be LOUD and HARMLESS.
+#
+# Loud, because an unconfigured publish target that says nothing is exactly
+# how a dead publish goes unnoticed: nobody reads a green cron job's log, and
+# a step that does nothing quietly looks like a step that worked.
+#
+# Harmless, because this is the SECOND target. The forge publish has already
+# run by the time this step starts, every download link we have written down
+# still points there, and nothing points at the site yet. A nightly that is
+# red every night for a known, intended, half-finished handover is a nightly
+# whose red stops meaning anything — which is how a real break gets ignored.
+# The day a published link points at leviculum.network, this exit 0 becomes a
+# failure: from then on an unconfigured site publish IS a broken download URL.
+#
+# Partly configured is a different claim and fails now: a key with no host,
+# or a host with no key, is a mistake somebody made rather than a target
+# nobody has wired yet, and guessing the rest is not this script's business.
+#
+# `--tar-only` is the test hook — it opens no connection, so it needs none of
+# this and is exempt.
+SITE_VARS=(SITE_SSH_TARGET SITE_SSH_KEY SITE_SSH_HOST_KEY)
+site_set=()
+site_unset=()
+for _v in "${SITE_VARS[@]}"; do
+    if [ -n "${!_v:-}" ]; then site_set+=("$_v"); else site_unset+=("$_v"); fi
+done
+
+if [ -z "$TAR_ONLY" ] && [ "${#site_set[@]}" -eq 0 ]; then
+    say "=================================================================="
+    say "SITE PUBLISH IS NOT CONFIGURED - nothing was uploaded."
+    say ""
+    say "None of ${SITE_VARS[*]} is set"
+    say "in this step's environment."
+    say ""
+    say "The forge publish is unaffected and has already run; the download"
+    say "links in the README are current. The second target, the one under"
+    say "https://leviculum.network/releases/nightly/, is standing still and"
+    say "will go on standing still every night until it is wired up."
+    say ""
+    say "To wire it up: create the Woodpecker repository secrets FIRST,"
+    say "then pass them into the step. The publish-site step in"
+    say ".woodpecker/nightly.yml spells out the order, and why that order"
+    say "is not a matter of taste."
+    say "=================================================================="
+    exit 0
+fi
+
+if [ -z "$TAR_ONLY" ] && [ "${#site_unset[@]}" -gt 0 ]; then
+    die "site publish is PARTLY configured: ${site_set[*]} set, ${site_unset[*]} missing - refusing to guess the rest"
+fi
 
 # No dist/ at all means nothing was built in this run. The step is allowed to
 # run after a failed earlier step (see the `status:` note in
@@ -129,9 +193,9 @@ if [ -n "$TAR_ONLY" ]; then
     exit 0
 fi
 
-: "${SITE_SSH_TARGET:?SITE_SSH_TARGET not set}"
-: "${SITE_SSH_KEY:?SITE_SSH_KEY not set}"
-: "${SITE_SSH_HOST_KEY:?SITE_SSH_HOST_KEY not set}"
+# The three required values were checked at the top of the script, where an
+# unconfigured target is told apart from a misconfigured one; by here all
+# three are set. Only the two with defaults are read again.
 SITE_SSH_PORT="${SITE_SSH_PORT:-22}"
 SITE_REMOTE_COMMAND="${SITE_REMOTE_COMMAND:-lev-receive-nightly}"
 
