@@ -100,6 +100,9 @@ watch_posts = false                    # optional, default false; see below
 # code   = "https://codeberg.org/Lew_Palm/leviculum"
 # issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
 
+# [source]                             # optional; only a MODIFIED lblogd
+# url = "https://git.example.org/me/lblogd"   # needs it. See below.
+
 [blog]                                 # optional, but see below
 title       = "leviculum.network"      # the heading of every page
 author      = "Lew Palm"               # optional
@@ -154,6 +157,42 @@ give out.
 `acme_contact_email` is **not** used for any of this. It is the operator's
 contact for Let's Encrypt, and publishing it on the blog would expose an
 address that was given for certificate warnings.
+
+### Licence and source offer
+
+Every page lblogd serves carries a footer line naming the running version,
+the licence, and a link to the source:
+
+> Served by lblogd 0.1.2 (a1b2c3d…), free software under AGPL-3.0-or-later.
+> [Source code](https://codeberg.org/Lew_Palm/leviculum).
+
+The mesh side says the same thing with the URL as plain text, since a
+NomadNet client cannot follow a web link.
+
+This is not decoration and not a feature to switch on. lblogd is AGPL
+software whose entire purpose is to be reached over a network, so every
+reader of a served page is a user interacting with it remotely in the sense
+of AGPL section 13 — which obliges the operator to offer those users the
+Corresponding Source, prominently. An offer that has to be enabled is one
+most operators never make, so it is on for every configuration, including one
+that sets nothing, and there is no key to remove it.
+
+`[source] url` exists for the one case the built-in default gets wrong. The
+default points at this project's repository, which is the right answer for an
+unmodified build and the wrong one the moment you change the code: your
+readers are owed *your* tree, and a link to ours would be a false offer. If
+you run a modified lblogd, publish the source and set:
+
+```toml
+[source]
+url = "https://git.example.org/me/lblogd"
+```
+
+The version and the licence are not configurable. The version is a fact about
+the binary — it names the commit whose source corresponds to what is running
+— and a modification of AGPL software is AGPL too, so there is no other
+compliant value. An empty `url` is refused at startup rather than served as a
+footer that offers nothing.
 
 ### About page
 

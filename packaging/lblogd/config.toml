@@ -85,6 +85,19 @@ title = "A Leviculum blog"
 # code   = "https://codeberg.org/Lew_Palm/leviculum"
 # issues = "https://codeberg.org/Lew_Palm/leviculum/issues"
 
+# Every page this server hands out carries a footer naming the running
+# version, the licence, and a link to the source. That is the AGPL
+# section 13 offer: your readers interact with AGPL software over a
+# network, so they are owed the Corresponding Source, prominently. It is
+# on with no configuration and cannot be switched off.
+#
+# This section exists for the one case the default gets wrong. The URL
+# below defaults to the upstream repository, which is correct as long as
+# you run lblogd unmodified. If you CHANGED the code, your readers are
+# owed your tree and not ours: publish it and name it here.
+# [source]
+# url = "https://git.example.org/me/lblogd"
+
 # How much was served, one line per day, appended to
 # /var/lib/lblogd/counts.log. On by default: it records request totals
 # and no addresses, and costs about a hundred bytes a day.

@@ -4,7 +4,7 @@
 use lblogd::post::{parse_post, PostDefaults};
 use lblogd::render::{
     render_index_html, render_index_micron, render_post_html, render_post_micron, BlogMeta,
-    DEFAULT_STYLE,
+    SourceOffer, DEFAULT_STYLE,
 };
 use leviculum_micron::{parse, Block};
 
@@ -173,5 +173,6 @@ fn fixture_meta() -> BlogMeta {
         has_about: false,
         has_landing: false,
         nav: Vec::new(),
+        source: SourceOffer::default(),
     }
 }

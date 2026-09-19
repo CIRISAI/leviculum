@@ -2,7 +2,7 @@
 
 use lblogd::post::{parse_post, PostDefaults};
 use lblogd::render::{
-    markdown_to_html, render_index_html, render_post_html, BlogMeta, DEFAULT_STYLE,
+    markdown_to_html, render_index_html, render_post_html, BlogMeta, SourceOffer, DEFAULT_STYLE,
 };
 
 #[test]
@@ -279,5 +279,6 @@ fn fixture_meta() -> BlogMeta {
         has_about: false,
         has_landing: false,
         nav: Vec::new(),
+        source: SourceOffer::default(),
     }
 }

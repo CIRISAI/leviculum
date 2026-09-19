@@ -129,6 +129,81 @@ pub struct BlogMeta {
     /// existed, and it renders to nothing at all — which is what keeps those
     /// blogs' served bytes exactly what they were.
     pub nav: Vec<NavEntry>,
+    /// What every page tells a reader about the program serving it: its
+    /// version, its licence, and where its source is.
+    ///
+    /// Not an `Option`, because there is no configuration in which this is
+    /// absent — see [`SourceOffer`].
+    pub source: SourceOffer,
+}
+
+/// The source offer AGPL section 13 requires, carried by every page on both
+/// sides.
+///
+/// Section 13 obliges anyone who lets users interact with a modified AGPL
+/// program "remotely through a computer network" to offer those users the
+/// Corresponding Source, prominently. A blog server is that case in its
+/// purest form: every reader of a served page is such a user, on the web and
+/// on the mesh alike. An operator therefore has to publish the offer, and the
+/// software they publish it with is this one.
+///
+/// So the offer is not a feature to switch on. It has a [`Default`] that is
+/// the whole compliant answer for an unmodified build — this crate's version,
+/// its licence, its repository — and it is rendered unconditionally. What is
+/// configurable is only the URL, and it has to be: an operator running a
+/// *modified* lblogd owes their readers their own tree, and pointing them at
+/// ours would be a false offer rather than a compliant one.
+///
+/// There is deliberately no way to suppress it. An operator who needs the
+/// footer gone is one who has stopped meeting section 13, and a config key
+/// for that would be lblogd helping them do it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceOffer {
+    /// The running build, as `lblogd --version` reports it. Named so the
+    /// offer points at the source of *this* binary rather than at whatever
+    /// happens to be at the top of the repository.
+    pub version: String,
+    /// The licence the program is under, as an SPDX expression.
+    pub license: String,
+    /// Where the Corresponding Source is.
+    pub url: String,
+}
+
+/// The program name the footer uses. Its own constant rather than
+/// `CARGO_PKG_NAME` inline, so the two renderers cannot disagree.
+const PROGRAM_NAME: &str = env!("CARGO_PKG_NAME");
+
+impl Default for SourceOffer {
+    /// The offer an unmodified build makes: this crate's own metadata.
+    ///
+    /// Hand-written rather than derived because the derived default would be
+    /// three empty strings — a footer that names no licence and links
+    /// nowhere, which is worse than no footer at all. Every `BlogMeta` built
+    /// anywhere, including in tests, therefore carries a real offer.
+    fn default() -> SourceOffer {
+        SourceOffer {
+            // build.rs, not CARGO_PKG_VERSION: the shipped string carries the
+            // nightly build id and the git hash, so the offer names the exact
+            // commit whose source corresponds to the running binary.
+            version: env!("LEVICULUM_VERSION").to_string(),
+            license: env!("CARGO_PKG_LICENSE").to_string(),
+            url: env!("CARGO_PKG_REPOSITORY").to_string(),
+        }
+    }
+}
+
+impl SourceOffer {
+    /// The offer as one sentence of plain text, without markup.
+    ///
+    /// Both renderers build their line from this, so the web reader and the
+    /// mesh reader are told the same thing in the same words; only the link
+    /// differs, because only one of the two sides has links.
+    fn sentence(&self) -> String {
+        format!(
+            "Served by {PROGRAM_NAME} {}, free software under {}.",
+            self.version, self.license
+        )
+    }
 }
 
 /// One entry of the nav line: what it is called and where it points on each
@@ -645,6 +720,7 @@ ul.posts{list-style:none;padding:0}\
 ul.posts li{margin:.5rem 0}\
 footer{margin-top:3rem;border-top:1px solid #ddd;padding-top:1rem;\
 color:#666;font-size:.9rem}\
+footer p{margin:.25rem 0}\
 footer code{background:none}";
 
 /// Wrap `body` in a complete HTML document.
@@ -735,18 +811,27 @@ fn nav_micron(meta: &BlogMeta) -> String {
     format!("{}\n\n", links.join(" \u{b7} "))
 }
 
-/// The footer shown on every HTML page: where to find the blog on the mesh.
+/// The footer shown on every HTML page: where to find the blog on the mesh,
+/// and where to find the source of the program serving it.
 ///
 /// A reader on the clearnet side has no way to discover the NomadNet
 /// destination otherwise, and it is the more interesting half of this blog.
+/// The source line is the AGPL section 13 offer and is unconditional, which
+/// is why a blog that configures nothing still has a footer.
 fn html_footer(meta: &BlogMeta) -> String {
-    match &meta.nomadnet_address {
-        Some(address) => format!(
-            "\n<footer>\nAlso on NomadNet over Reticulum: <code>{}</code>\n</footer>",
+    let mut lines = Vec::new();
+    if let Some(address) = &meta.nomadnet_address {
+        lines.push(format!(
+            "<p>Also on NomadNet over Reticulum: <code>{}</code></p>",
             escape_html(address)
-        ),
-        None => String::new(),
+        ));
     }
+    lines.push(format!(
+        "<p class=\"source\">{} <a href=\"{}\">Source code</a>.</p>",
+        escape_html(&meta.source.sentence()),
+        escape_html(&meta.source.url)
+    ));
+    format!("\n<footer>\n{}\n</footer>", lines.join("\n"))
 }
 
 /// Render the post index as a complete HTML document: who this is, what it
@@ -1123,15 +1208,30 @@ pub fn render_post_micron(meta: &BlogMeta, post: &Post) -> String {
     )
 }
 
-/// The footer shown on every micron page: where to find the blog on the web.
+/// The footer shown on every micron page: where to find the blog on the web,
+/// and where to find the source of the node serving it.
 ///
 /// The mirror of [`html_footer`]; a mesh reader who wants to share the blog
-/// with someone off-mesh needs the clearnet URL.
+/// with someone off-mesh needs the clearnet URL. The source offer is here for
+/// the same reason it is there — a NomadNet reader interacts with the same
+/// program over the same kind of network, and section 13 does not distinguish
+/// between the two.
+///
+/// The URL is plain text rather than a `` `[label`target] `` link, as in
+/// [`render_link_micron`]: micron link targets are Reticulum paths, and a
+/// NomadNet client has nothing to do with a web address. What the reader gets
+/// is the address to type somewhere else.
 fn micron_footer(meta: &BlogMeta) -> String {
-    match &meta.web_url {
-        Some(url) => format!("\n-\n\nAlso on the web: {}\n", escape_micron_text(url)),
-        None => String::new(),
+    let mut lines = Vec::new();
+    if let Some(url) = &meta.web_url {
+        lines.push(format!("Also on the web: {}", escape_micron_text(url)));
     }
+    lines.push(format!(
+        "{} Source: {}",
+        escape_micron_text(&meta.source.sentence()),
+        escape_micron_text(&meta.source.url)
+    ));
+    format!("\n-\n\n{}\n", lines.join("\n"))
 }
 
 /// Escape plain text so micron's inline parser reads it verbatim: `\` and

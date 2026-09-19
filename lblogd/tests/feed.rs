@@ -2,7 +2,7 @@
 //! none to serve.
 
 use lblogd::post::{Date, Post};
-use lblogd::render::{render_feed_atom, render_index_html, BlogMeta, DEFAULT_STYLE};
+use lblogd::render::{render_feed_atom, render_index_html, BlogMeta, SourceOffer, DEFAULT_STYLE};
 
 fn post(title: &str, date: &str, body: &str, author: Option<&str>) -> Post {
     Post {
@@ -27,6 +27,7 @@ fn meta() -> BlogMeta {
         has_about: false,
         has_landing: false,
         nav: Vec::new(),
+        source: SourceOffer::default(),
     }
 }
 

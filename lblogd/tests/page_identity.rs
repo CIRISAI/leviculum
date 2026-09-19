@@ -8,7 +8,7 @@
 use lblogd::post::{Date, Post};
 use lblogd::render::{
     render_index_html, render_index_micron, render_post_html, render_post_micron, BlogMeta,
-    DEFAULT_STYLE,
+    SourceOffer, DEFAULT_STYLE,
 };
 use leviculum_micron::parse;
 
@@ -40,6 +40,7 @@ fn full_meta() -> BlogMeta {
         has_about: false,
         has_landing: false,
         nav: Vec::new(),
+        source: SourceOffer::default(),
     }
 }
 
@@ -152,14 +153,23 @@ fn absent_fields_are_omitted_rather_than_rendered_empty() {
     assert!(!html.contains("class=\"byline\""), "no author, no byline");
     assert!(!html.contains("class=\"tagline\""), "no tagline element");
     assert!(!html.contains("<meta name=\"description\""), "{html}");
-    assert!(!html.contains("<footer>"), "no address, no footer: {html}");
+    // The footer stays, because the source offer in it is not a configured
+    // field; what goes is the line about the other side.
     assert!(
-        !html.contains(" by "),
+        !html.contains("Also on NomadNet"),
+        "no address, no address line: {html}"
+    );
+    // Above the footer, because the footer's source line legitimately says
+    // "Served by lblogd".
+    let above_footer = html.split("<footer>").next().expect("a document");
+    assert!(
+        !above_footer.contains(" by "),
         "nothing dangling after 'by': {html}"
     );
 
     let micron = render_index_micron(&meta, &[post("First", None)]);
-    assert!(!micron.contains("by "), "{micron}");
+    let above_footer = micron.split("\n-\n").next().expect("a page");
+    assert!(!above_footer.contains("by "), "{micron}");
     assert!(!micron.contains("Also on the web"), "{micron}");
 }
 

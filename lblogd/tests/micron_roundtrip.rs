@@ -5,7 +5,9 @@
 //! and hence lnomad and NomadNet, accept.
 
 use lblogd::post::{parse_post, PostDefaults};
-use lblogd::render::{markdown_to_micron, render_index_micron, render_post_micron, BlogMeta};
+use lblogd::render::{
+    markdown_to_micron, render_index_micron, render_post_micron, BlogMeta, SourceOffer,
+};
 use leviculum_micron::{parse, Block, Color, Line, MicronDocument};
 
 /// Render Markdown to micron and parse it back.
@@ -559,5 +561,6 @@ fn fixture_meta() -> BlogMeta {
         has_about: false,
         has_landing: false,
         nav: Vec::new(),
+        source: SourceOffer::default(),
     }
 }

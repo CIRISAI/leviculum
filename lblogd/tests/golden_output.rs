@@ -2,6 +2,13 @@
 //! `pages_dir` nor `[links]` serves exactly the bytes it served before either
 //! existed.
 //!
+//! One thing is deliberately outside that contract and pinned here as part of
+//! the document: the footer carrying the AGPL section 13 source offer. It is
+//! on for every blog, including one that configured nothing, because an offer
+//! an operator has to switch on is one most operators never make. The bytes
+//! below therefore differ from what lblogd served before it existed, and that
+//! difference is the feature.
+//!
 //! Every other test asserts on a substring, which is the right shape for a
 //! feature but the wrong one for "nothing changed": a nav line, a moved back
 //! link or a stray newline all slip past a `contains`. These pin the whole
@@ -12,6 +19,7 @@ use lblogd::content::{load_snapshot, Sources, INDEX_PATH};
 use lblogd::post::{Date, Post};
 use lblogd::render::{
     render_index_html, render_index_micron, render_post_html, render_post_micron, BlogMeta,
+    SourceOffer,
 };
 
 /// A deliberately tiny stylesheet: the built-in one is long, and what these
@@ -22,7 +30,20 @@ fn meta() -> BlogMeta {
     BlogMeta {
         title: "Test Blog".to_string(),
         language: "en".to_string(),
+        // Pinned rather than the compiled-in default, which names the build's
+        // git hash: a golden document that changed with every commit would
+        // pin nothing at all.
+        source: offer(),
         ..BlogMeta::default()
+    }
+}
+
+/// The source offer these documents are pinned against.
+fn offer() -> SourceOffer {
+    SourceOffer {
+        version: "9.9.9".to_string(),
+        license: "AGPL-3.0-or-later".to_string(),
+        url: "https://example.invalid/src".to_string(),
     }
 }
 
@@ -54,6 +75,11 @@ fn the_html_index_is_unchanged() {
          <li><span class=\"date\">2026-07-01</span> \
          <a href=\"/posts/hallo\">Hallo Mesh</a></li>\n\
          </ul>\n\
+         <footer>\n\
+         <p class=\"source\">Served by lblogd 9.9.9, free software under \
+         AGPL-3.0-or-later. \
+         <a href=\"https://example.invalid/src\">Source code</a>.</p>\n\
+         </footer>\n\
          </body>\n\
          </html>\n"
     );
@@ -78,6 +104,11 @@ fn the_html_post_page_is_unchanged() {
          <p>Erster Text.</p>\n\
          </article>\n\
          <p><a href=\"/\">&larr; Test Blog</a></p>\n\
+         <footer>\n\
+         <p class=\"source\">Served by lblogd 9.9.9, free software under \
+         AGPL-3.0-or-later. \
+         <a href=\"https://example.invalid/src\">Source code</a>.</p>\n\
+         </footer>\n\
          </body>\n\
          </html>\n"
     );
@@ -87,7 +118,9 @@ fn the_html_post_page_is_unchanged() {
 fn the_micron_index_is_unchanged() {
     assert_eq!(
         render_index_micron(&meta(), &[post()]),
-        ">Test Blog\n\n`[2026-07-01 Hallo Mesh`:/page/hallo.mu]\n"
+        ">Test Blog\n\n`[2026-07-01 Hallo Mesh`:/page/hallo.mu]\n\n-\n\n\
+         Served by lblogd 9.9.9, free software under AGPL-3.0-or-later. \
+         Source: https://example.invalid/src\n"
     );
 }
 
@@ -95,7 +128,10 @@ fn the_micron_index_is_unchanged() {
 fn the_micron_post_page_is_unchanged() {
     assert_eq!(
         render_post_micron(&meta(), &post()),
-        ">Hallo Mesh\n\n2026-07-01\n-\n\nErster Text.\n\n\n`[\u{2190} Test Blog`:/page/index.mu]\n"
+        ">Hallo Mesh\n\n2026-07-01\n-\n\nErster Text.\n\n\n\
+         `[\u{2190} Test Blog`:/page/index.mu]\n\n-\n\n\
+         Served by lblogd 9.9.9, free software under AGPL-3.0-or-later. \
+         Source: https://example.invalid/src\n"
     );
 }
 

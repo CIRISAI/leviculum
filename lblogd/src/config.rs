@@ -30,6 +30,16 @@
 //! http_bind = "127.0.0.1:8080"
 //! ```
 //!
+//! Every page carries the AGPL section 13 source offer, and it needs no
+//! configuration either. `[source]` exists for the one case the compiled-in
+//! default gets wrong — a modified lblogd, whose readers are owed the
+//! operator's own tree rather than this repository:
+//!
+//! ```toml
+//! [source]
+//! url = "https://git.example.org/me/lblogd"
+//! ```
+//!
 //! The per-day request counter is on by default and needs no configuration.
 //! `[counter]` exists to move it or switch it off:
 //!
@@ -55,7 +65,7 @@ use crate::content::Sources;
 use crate::counter;
 use crate::files::{self, FileArea};
 use crate::node::BlogNodeConfig;
-use crate::render::BlogMeta;
+use crate::render::{BlogMeta, SourceOffer};
 use crate::site::LinkSpec;
 use crate::web::{AcmeSettings, WebConfig};
 
@@ -141,6 +151,10 @@ pub struct Config {
     /// Blog identity: what a reader sees on every page, on both sides.
     #[serde(default)]
     pub blog: BlogSection,
+    /// Where this instance's own source code is. Omitting the section is the
+    /// normal case and offers this repository.
+    #[serde(default)]
+    pub source: SourceSection,
     /// The per-day request counter. The whole section may be omitted, which
     /// is the default: counting on, into `<data_dir>/counts.log`.
     #[serde(default)]
@@ -222,6 +236,54 @@ impl Default for BlogSection {
             lxmf: None,
             about: None,
             css: None,
+        }
+    }
+}
+
+/// The `[source]` section: where the source of the running binary is.
+///
+/// One key, and no way to switch the offer off. lblogd is AGPL software that
+/// exists to be reached over a network, so every page it serves carries the
+/// section 13 offer whether or not this section is written (see
+/// [`SourceOffer`]). What the section exists for is the one case the default
+/// gets wrong: an operator running a *modified* lblogd owes their readers
+/// their own tree, and an offer pointing at ours would be no offer at all.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSection {
+    /// URL of the Corresponding Source for this binary. Defaults to this
+    /// project's repository, which is correct for every unmodified build.
+    #[serde(default = "default_source_url")]
+    pub url: String,
+}
+
+fn default_source_url() -> String {
+    SourceOffer::default().url
+}
+
+/// Hand-written for the same reason [`BlogSection`]'s is: an omitted section
+/// has to behave exactly like an empty one, and `#[derive(Default)]` would
+/// make the omitted case mean "offer nothing".
+impl Default for SourceSection {
+    fn default() -> SourceSection {
+        SourceSection {
+            url: default_source_url(),
+        }
+    }
+}
+
+impl SourceSection {
+    /// What the pages say about the program: the configured URL, with the
+    /// version and licence of the build that is running.
+    ///
+    /// Neither of the latter two is configurable. The version is a fact about
+    /// the binary, and the licence is a fact about the code — a downstream
+    /// modification of AGPL software is AGPL too, so there is no compliant
+    /// value other than the one compiled in.
+    fn offer(&self) -> SourceOffer {
+        SourceOffer {
+            url: self.url.clone(),
+            ..SourceOffer::default()
         }
     }
 }
@@ -410,6 +472,15 @@ impl Config {
                 )));
             }
         }
+        // The one way to configure a footer that claims an offer and makes
+        // none. Refused here rather than rendered, because a page saying
+        // "source code" over a dead link is worse than a startup failure.
+        if self.source.url.trim().is_empty() {
+            return Err(invalid(
+                "source.url must name where this instance's source code is; \
+                 remove the [source] section to offer the upstream repository",
+            ));
+        }
         if !self.web.acme {
             return Ok(());
         }
@@ -472,6 +543,7 @@ impl Config {
             // once it has been read. `content::load_snapshot` fills them in.
             has_landing: false,
             nav: Vec::new(),
+            source: self.source.offer(),
         }
     }
 

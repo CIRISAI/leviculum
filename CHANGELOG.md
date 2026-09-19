@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time. A crash exits 1 with the input kept, its hash and a hexdump; a run that
   could not happen exits 2 and never looks clean. `just fuzz-selftest` holds
   the runner to that on the push path.
+- lblogd serves the AGPL section 13 source offer on every page of both sides:
+  a footer naming the running version, the licence and a link to the source,
+  as plain text on the mesh where a NomadNet client cannot follow a web link.
+  It is on for every configuration and has no off switch — a reader of a
+  served page is a user interacting with AGPL software over a network, and an
+  offer an operator has to enable is one most operators never make, so lblogd
+  shipped a non-compliant site by default (Codeberg #294). The new `[source]
+  url` key exists for the one case the compiled-in default gets wrong: an
+  operator running a *modified* lblogd owes their readers their own tree, not
+  this repository. An empty value is refused at startup rather than served as
+  a footer that offers nothing. Visible to every existing deployment: pages
+  that had no footer now have one.
 - `SECURITY.md`: a private route for reporting a vulnerability, with the
   contact, a 7-day acknowledgement window, 90-day coordinated disclosure,
   and what is in scope. The repository had no such route, so a finder's
