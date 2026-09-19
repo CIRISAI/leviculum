@@ -934,7 +934,17 @@ against the same budget: during one sync (one at a time on the board,
 bounded at **6 144 B** (`OFFER_BYTES_LIMIT`) — 34 B per encoded id, so
 at most 179 ids per round, re-offering the rest next round. Against
 §2's worst observed free heap of 39 308 B, the same 8 KiB peering
-slice gives `104·N + 6 144 ≤ 8 192`, N ≤ 19. **Board cap: 16 peers**
+slice gives `104·N + 6 144 ≤ 8 192`, N ≤ 19. That 6 144 B is a RAM
+ceiling, never the budget on its own: **an offer is sized by the link
+it is handed to**, `offer_budget_for_mdu(link.mdu())`, because
+`NodeCore::send_request` refuses a body larger than the link MDU and
+that refusal is local, silent and permanent (the store only grows, so
+the next round is refused the same way). Over LoRa the MDU is 431 B
+and one request names ten ids; a link with a larger negotiated MTU
+uses more, up to the ceiling. Both engines therefore plan the offer
+when the link is up, not when the round is scheduled — until then
+there is no MDU to size against, and the plan made at scheduling time
+answers only "is anything above the cursor offerable at all". **Board cap: 16 peers**
 still holds, now with less margin; **host config default: 20**, the
 reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable as
 `max_peers`. The full-table policy is deterministic and documented on
@@ -985,16 +995,17 @@ Three cursor semantics the build pinned down, tested in
   the peer's per-message limit (`:370-373`) is stepped past for good —
   exactly the ids the reference marks handled without sending.
 - **Resumable stops do not.** The peer's per-sync limit and the
-  6 144 B offer bound end the round *without* advancing past what they
-  excluded; the walk is in append order, so nothing above the target
+  offer's byte budget (the link's MDU, under the 6 144 B ceiling) end
+  the round *without* advancing past what they excluded; the walk is in append order, so nothing above the target
   was withheld for a resumable reason. (The reference offers
   weight-sorted and keeps scanning past a sync-limit hit; ours stops
   there — a selection-order deviation with no wire effect, and the
   property that lets a single integer replace the sets.)
 - **A stale cursor is a bounded full re-offer.** A cursor naming a
   reclaimed page (board) or a reset store (host) orders below
-  everything live, so the next round re-offers everything — ≤ 6 KiB of
-  ids — and the peer answers "want none" for what it holds. The
+  everything live, so the next round re-offers everything — one link's
+  worth of ids per round, the rest in the rounds after it — and the
+  peer answers "want none" for what it holds. The
   conformance cells drive this path explicitly (`lxmf_pn_reoffer`).
 
 What a Python peer observes: offers that may include ids it already
