@@ -174,7 +174,7 @@ use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::{
     CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
-    PropagationNodeConfig, PropagationStore, UploadOutcome, MESSAGE_GET_PATH,
+    PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, MESSAGE_GET_PATH,
 };
 use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
 use leviculum_record_log::SECTOR_SIZE;
@@ -533,8 +533,18 @@ pub async fn miner_task() {
         let job = MINE_REQ.receive().await;
         let started = embassy_time::Instant::now();
         let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+        // No cancellation handle: the board mines one key per peer from its
+        // own table and has no way to withdraw the intent while it runs
+        // (Codeberg #185). The cost is capped at 18 here, so this grind is
+        // bounded by the cap rather than by the handle.
+        let never = StampCancel::new();
         let Ok(key) = stamper
-            .generate(&job.material, job.cost, WORKBLOCK_EXPAND_ROUNDS_PEERING)
+            .generate(
+                &job.material,
+                job.cost,
+                WORKBLOCK_EXPAND_ROUNDS_PEERING,
+                &never,
+            )
             .await
         else {
             // Only cost 255 is refused, and the table never admits it.

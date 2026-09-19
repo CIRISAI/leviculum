@@ -99,4 +99,6 @@ pub use router::{
     PropagationStampRequest,
 };
 #[cfg(feature = "pow")]
-pub use stamp::{CooperativeStamper, CooperativeYield, StampError, StampExecutor, Yield};
+pub use stamp::{
+    CooperativeStamper, CooperativeYield, StampCancel, StampError, StampExecutor, Yield,
+};

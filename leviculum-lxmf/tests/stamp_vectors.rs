@@ -6,7 +6,7 @@ use futures::executor::block_on;
 use leviculum_core::crypto::full_hash;
 use leviculum_lxmf::constants::{WORKBLOCK_EXPAND_ROUNDS, WORKBLOCK_EXPAND_ROUNDS_PN};
 use leviculum_lxmf::stamp::{
-    valid, value, CooperativeStamper, ReadyYield, StampError, StampExecutor,
+    valid, value, CooperativeStamper, ReadyYield, StampCancel, StampError, StampExecutor,
 };
 use leviculum_lxmf::{DeliveryStampRequest, PropagationStampRequest};
 use rand_core::OsRng;
@@ -25,10 +25,16 @@ impl StampExecutor for RecordingExecutor {
         material: &'a [u8],
         cost: u8,
         rounds: usize,
+        cancel: &'a StampCancel,
     ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>> {
         assert_eq!(material, self.material);
         assert_eq!(cost, self.cost);
         assert_eq!(rounds, self.rounds);
+        // Observing the caller's handle is what an executor owes; one that
+        // ignored it could not be called off (Codeberg #185).
+        if cancel.is_cancelled() {
+            return Box::pin(core::future::ready(Err(StampError::Cancelled)));
+        }
         Box::pin(core::future::ready(Ok(self.result)))
     }
 
@@ -123,7 +129,7 @@ fn detached_requests_select_delivery_and_propagation_workblocks() {
         result: [0x41; 32],
     };
     assert_eq!(
-        block_on(delivery.generate_with(&mut executor)).unwrap(),
+        block_on(delivery.generate_with(&mut executor, &StampCancel::new())).unwrap(),
         [0x41; 32]
     );
 
@@ -139,7 +145,16 @@ fn detached_requests_select_delivery_and_propagation_workblocks() {
         result: [0x42; 32],
     };
     assert_eq!(
-        block_on(propagation.generate_with(&mut executor)).unwrap(),
+        block_on(propagation.generate_with(&mut executor, &StampCancel::new())).unwrap(),
         [0x42; 32]
+    );
+
+    // The request forwards the caller's handle rather than minting its own,
+    // which is the only reason a host can call a grind off from outside.
+    let cancelled = StampCancel::new();
+    cancelled.cancel();
+    assert_eq!(
+        block_on(propagation.generate_with(&mut executor, &cancelled)),
+        Err(StampError::Cancelled)
     );
 }

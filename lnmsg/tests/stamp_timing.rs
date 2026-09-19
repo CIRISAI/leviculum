@@ -27,7 +27,12 @@ async fn measure_propagation_stamp_at_cost_13() {
         let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
         let started = std::time::Instant::now();
         let stamp = executor
-            .generate(&transient_id, COST, WORKBLOCK_EXPAND_ROUNDS_PN)
+            .generate(
+                &transient_id,
+                COST,
+                WORKBLOCK_EXPAND_ROUNDS_PN,
+                &leviculum_lxmf::StampCancel::new(),
+            )
             .await
             .expect("cost 13 is mineable");
         let elapsed = started.elapsed();

@@ -223,7 +223,7 @@ impl LxmfClient {
         while let Some(request) = self.stamp_requests.pop() {
             let mut stamper = CooperativeStamper::cooperative(OsRng);
             let stamp = request
-                .generate_with(&mut stamper)
+                .generate_with(&mut stamper, &leviculum_lxmf::StampCancel::new())
                 .await
                 .expect("stamp generation");
             let output = self

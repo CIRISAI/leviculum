@@ -34,8 +34,8 @@ use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::{
-    CooperativeStamper, PropagationNode, PropagationNodeAnnounce, PropagationStore, TransientId,
-    UploadOutcome,
+    CooperativeStamper, PropagationNode, PropagationNodeAnnounce, PropagationStore, StampCancel,
+    TransientId, UploadOutcome,
 };
 
 use crate::engine::EngineEvent;
@@ -867,10 +867,18 @@ impl PeeringRuntime {
             let (sender, receiver) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut stamper = CooperativeStamper::cooperative(rand_core::OsRng);
+                // No cancellation handle: a peering key is mined once per
+                // peer and the result is persisted, and nothing in this
+                // daemon can withdraw the intent to peer while it runs. The
+                // cost is still a peer's to announce, so this thread has the
+                // Codeberg #185 shape and would need a handle the day peering
+                // becomes withdrawable.
+                let never = StampCancel::new();
                 if let Ok(stamp) = futures::executor::block_on(stamper.generate(
                     &material,
                     cost,
                     WORKBLOCK_EXPAND_ROUNDS_PEERING,
+                    &never,
                 )) {
                     let value = futures::executor::block_on(stamper.measure_stamp(
                         &material,

@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata without announcing first. Runtime-only, as in the reference: the
   default is never written to persistent state.
 
+### Changed
+
+- Stamp generation is cancellable. `StampExecutor::generate`,
+  `CooperativeStamper::generate` and the `generate_with` helpers on
+  `DeliveryStampRequest` / `PropagationStampRequest` take a `StampCancel`
+  handle, and the search returns `StampError::Cancelled` within one yield
+  interval of it being fired.
+
+  Proof-of-work runs at a cost the *recipient* announces, and a cost of, say,
+  254 is inside the window the reference is willing to announce while being as
+  unfinishable as the 255 that was ruled out earlier. A tighter cost ceiling
+  cannot fix that without refusing costs a conforming peer may legitimately
+  use, so the work is made abandonable instead — as the reference does with
+  `LXStamper.cancel_work`. `lnmsg` fires the handle when a message is
+  cancelled: its mining thread is single-consumer, so an unfinishable grind
+  used to hold every stamp queued behind it for the rest of the run.
+
+  Breaking for anyone who implements `StampExecutor`: a call site with no
+  cancellation path passes a fresh `StampCancel::new()`.
+
 ## [0.9.0] - 2026-09-18
 
 ### Added

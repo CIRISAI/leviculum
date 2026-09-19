@@ -270,9 +270,15 @@ async fn run(args: Args) -> Result<(), String> {
         runtime.block_on(async move {
             while let Some(job) = stamps_rx.recv().await {
                 let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
+                // No cancellation handle: this helper's protocol has no
+                // cancel command, so nothing here can withdraw a stamp. The
+                // grind is still at a cost the peer announced, so this worker
+                // has the Codeberg #185 shape and would take the handle the
+                // day the protocol grows a cancel.
+                let cancel = leviculum_lxmf::StampCancel::new();
                 let input = match job {
                     StampJob::Delivery(request) => {
-                        match request.generate_with(&mut executor).await {
+                        match request.generate_with(&mut executor, &cancel).await {
                             Ok(stamp) => Input::StampReady { request, stamp },
                             Err(e) => Input::StampFailed {
                                 request,
@@ -281,7 +287,7 @@ async fn run(args: Args) -> Result<(), String> {
                         }
                     }
                     StampJob::Propagation(request) => {
-                        match request.generate_with(&mut executor).await {
+                        match request.generate_with(&mut executor, &cancel).await {
                             Ok(stamp) => Input::PropagationStampReady { request, stamp },
                             Err(e) => Input::PropagationStampFailed {
                                 request,

@@ -7,6 +7,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
 };
 use leviculum_core::crypto::truncated_hash;
@@ -33,6 +34,52 @@ impl core::fmt::Display for StampError {
         }
     }
 }
+/// A handle on stamp work in flight, so whoever queued it can take it back.
+///
+/// Proof-of-work at a peer-announced cost is unbounded by construction. The
+/// Codeberg #181 ceiling removed the one cost whose search cannot terminate at
+/// all, but every cost from roughly forty bits upwards is equally unfinishable
+/// in practice while still being a cost the reference is willing to announce,
+/// so a peer can park our stamp executor by misconfiguration or on purpose
+/// (Codeberg #185). A bound on the cost cannot fix that without refusing legal
+/// costs, which would be peer-observable; the work has to be abandonable
+/// instead.
+///
+/// That is also what the reference does: `LXStamper.cancel_work`
+/// (`reference/LXMF/LXMF/LXStamper.py:146-176`) sets a stop event the mining
+/// loop checks each round, fired from `LXMRouter.cancel_outbound`
+/// (`LXMRouter.py:1719-1725`) when the message it belongs to is cancelled.
+///
+/// Deliberately not an `Arc`: this crate is `no_std + alloc` and is built into
+/// firmware. The handle is a plain `Sync` flag; a host that has to share one
+/// between the thread that queues stamps and the thread that mines them wraps
+/// it in whatever shared pointer its platform offers. The in-flight registry
+/// lives with the host for the same reason it owns the worker: the router
+/// knows a stamp is *wanted*, only the host knows one is *running*.
+#[cfg(feature = "pow")]
+#[derive(Debug, Default)]
+pub struct StampCancel(AtomicBool);
+
+#[cfg(feature = "pow")]
+impl StampCancel {
+    /// A fresh, uncancelled handle. `const` so a call site with no
+    /// cancellation path can name one inline.
+    pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// Abandon the work this handle covers. Idempotent, and safe to call when
+    /// no work is running or the work has already finished.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the work this handle covers has been called off.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 #[cfg(feature = "pow")]
 pub trait Yield {
     type Fut<'a>: Future<Output = ()> + Send + 'a
@@ -84,11 +131,17 @@ pub trait StampExecutor {
     /// Mine a PoW stamp. The future is `Send` so a host can hand a
     /// peer-priced grind to a work-stealing runtime instead of pinning it to
     /// the thread that started it; that is also why [`Yield::Fut`] is `Send`.
+    ///
+    /// `cancel` is the caller's way back out of an unfinishable grind
+    /// (Codeberg #185). Every executor must observe it, or a host that
+    /// substitutes its own loses the only bound on this work; a call site with
+    /// no cancellation path says so by naming a fresh [`StampCancel`] inline.
     fn generate<'a>(
         &'a mut self,
         material: &'a [u8],
         cost: u8,
         rounds: usize,
+        cancel: &'a StampCancel,
     ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>>;
 
     /// Validate a PoW stamp without blocking the protocol event loop. Custom
@@ -158,12 +211,24 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
         }
         hasher
     }
+    /// Mine a stamp for `material` at `cost`, or give it back when `cancel`
+    /// fires.
+    ///
+    /// The cancellation is checked at the cooperative yield point, so it is
+    /// observed within one yield interval of being set. It is not checked
+    /// inside the workblock expansion: that is `rounds` HKDF blocks and
+    /// terminates on its own, while the search below is the part that need
+    /// not (Codeberg #185).
     pub async fn generate(
         &mut self,
         material: &[u8],
         cost: u8,
         rounds: usize,
+        cancel: &StampCancel,
     ) -> Result<[u8; 32], StampError> {
+        if cancel.is_cancelled() {
+            return Err(StampError::Cancelled);
+        }
         if cost == 0 {
             let mut stamp = [0u8; 32];
             self.rng.fill_bytes(&mut stamp);
@@ -190,6 +255,9 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
             }
             tries += 1;
             if tries.is_multiple_of(self.yield_every.max(1)) {
+                if cancel.is_cancelled() {
+                    return Err(StampError::Cancelled);
+                }
                 self.scheduler.yield_now().await
             }
         }
@@ -235,8 +303,9 @@ impl<R: CryptoRngCore + Send, Y: Yield + Send> StampExecutor for CooperativeStam
         m: &'a [u8],
         c: u8,
         r: usize,
+        cancel: &'a StampCancel,
     ) -> Pin<Box<dyn Future<Output = Result<[u8; 32], StampError>> + Send + 'a>> {
-        Box::pin(self.generate(m, c, r))
+        Box::pin(self.generate(m, c, r, cancel))
     }
 
     fn validate<'a>(
@@ -364,12 +433,12 @@ mod tests {
     #[cfg(feature = "pow")]
     #[test]
     fn generation_refuses_the_non_terminating_cost() {
-        use super::{CooperativeStamper, StampError};
+        use super::{CooperativeStamper, StampCancel, StampError};
         use rand_core::OsRng;
 
         let mut stamper = CooperativeStamper::cooperative(OsRng);
         assert_eq!(
-            futures::executor::block_on(stamper.generate(b"material", 255, 1)),
+            futures::executor::block_on(stamper.generate(b"material", 255, 1, &StampCancel::new())),
             Err(StampError::InvalidCost)
         );
         // Validation is a single hash at any cost and stays available, so an

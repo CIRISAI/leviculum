@@ -39,7 +39,7 @@
 
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
-use leviculum_lxmf::{DeliveryStampRequest, StampExecutor};
+use leviculum_lxmf::{DeliveryStampRequest, StampCancel, StampExecutor};
 use leviculum_std::driver::{CoreProcessor, StdNodeCore};
 
 struct Grinder<E> {
@@ -49,7 +49,10 @@ struct Grinder<E> {
 
 impl<E: StampExecutor + Send + 'static> CoreProcessor for Grinder<E> {
     fn on_event(&mut self, _core: &mut StdNodeCore, _event: &NodeEvent) -> TickOutput {
-        let _stamp = self.request.generate_with(&mut self.executor).await;
+        let _stamp = self
+            .request
+            .generate_with(&mut self.executor, &StampCancel::new())
+            .await;
         TickOutput::empty()
     }
 }

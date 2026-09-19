@@ -32,9 +32,10 @@
 //! the price of a write inside the core lock. The moment daemon mode or a
 //! resume path exists, this is where it goes.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use leviculum_core::identity::Identity;
@@ -49,7 +50,7 @@ use leviculum_lxmf::router::{
 };
 use leviculum_lxmf::{
     announce, CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
-    Verification,
+    StampCancel, StampError, Verification,
 };
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
 use leviculum_std::ReticulumNode;
@@ -80,19 +81,30 @@ const MAX_ABSORB_ROUNDS: usize = 8;
 const STAMP_PROGRESS_COST: u8 = 10;
 
 /// One proof-of-work job on its way to the mining thread.
+///
+/// Each job carries the handle that calls it off. The mining thread is
+/// single-consumer, so an unfinishable grind does not only park its own
+/// message, it parks every stamp queued behind it (Codeberg #185) — the
+/// handle is what gets the thread back.
 enum StampJob {
     /// A recipient delivery stamp, at the cost the recipient announced.
-    Delivery(DeliveryStampRequest),
+    Delivery(DeliveryStampRequest, Arc<StampCancel>),
     /// The independent propagation-node stamp over the transient ID, at the
     /// cost the selected node announced.
-    Propagation(PropagationStampRequest),
+    Propagation(PropagationStampRequest, Arc<StampCancel>),
 }
 
 impl StampJob {
     fn key(&self) -> (StampKind, [u8; 32]) {
         match self {
-            Self::Delivery(request) => (StampKind::Delivery, request.message_id),
-            Self::Propagation(request) => (StampKind::Propagation, request.message_id),
+            Self::Delivery(request, _) => (StampKind::Delivery, request.message_id),
+            Self::Propagation(request, _) => (StampKind::Propagation, request.message_id),
+        }
+    }
+
+    fn cancel(&self) -> Arc<StampCancel> {
+        match self {
+            Self::Delivery(_, cancel) | Self::Propagation(_, cancel) => Arc::clone(cancel),
         }
     }
 }
@@ -110,11 +122,11 @@ enum StampKind {
 enum StampAnswer {
     Delivery {
         request: DeliveryStampRequest,
-        result: Result<[u8; 32], String>,
+        result: Result<[u8; 32], StampError>,
     },
     Propagation {
         request: PropagationStampRequest,
-        result: Result<[u8; 32], String>,
+        result: Result<[u8; 32], StampError>,
     },
 }
 
@@ -160,7 +172,11 @@ pub struct Engine {
     /// Stamps being mined, so a re-offer does not queue a second mine for the
     /// same work behind the first. Keyed by kind as well as id: a propagated
     /// message can need a recipient stamp and a node stamp in one run.
-    mining: HashSet<(StampKind, [u8; 32])>,
+    ///
+    /// The value is the handle that calls that mine off (Codeberg #185). It
+    /// lives here rather than in the router because the router knows a stamp
+    /// is wanted, while only this side knows one is actually running.
+    mining: BTreeMap<(StampKind, [u8; 32]), Arc<StampCancel>>,
     /// Whether our own delivery announce has gone out. See [`Engine::announce`].
     announced: bool,
     /// The most recently announced propagation node this run has heard —
@@ -265,9 +281,11 @@ impl Engine {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
             }
-            RouterEvent::StampPending(request) => self.dispatch_stamp(StampJob::Delivery(request)),
+            RouterEvent::StampPending(request) => {
+                self.dispatch_stamp(StampJob::Delivery(request, Arc::default()));
+            }
             RouterEvent::PropagationStampPending(request) => {
-                self.dispatch_stamp(StampJob::Propagation(request));
+                self.dispatch_stamp(StampJob::Propagation(request, Arc::default()));
             }
             RouterEvent::MessageReceived(message) => {
                 let message = *message;
@@ -310,11 +328,16 @@ impl Engine {
     /// for the same answer.
     fn dispatch_stamp(&mut self, job: StampJob) {
         let key = job.key();
-        if self.mining.insert(key) && self.stamps.send(job).is_err() {
-            // The worker is gone, so the answer will never come; drop the
-            // marker so a later re-offer is dispatched normally.
-            self.mining.remove(&key);
+        if self.mining.contains_key(&key) {
+            return;
         }
+        let cancel = job.cancel();
+        if self.stamps.send(job).is_err() {
+            // The worker is gone, so the answer will never come; leave no
+            // marker, so a later re-offer is dispatched normally.
+            return;
+        }
+        self.mining.insert(key, cancel);
     }
 
     /// Notice messages the router has forgotten. A terminal state removes the
@@ -430,6 +453,18 @@ impl Engine {
         message_id: &[u8; 32],
         out: &mut TickOutput,
     ) {
+        // Call off any proof-of-work for this message first, and do it
+        // whatever the router says: at a cost a peer announced the search can
+        // be unfinishable in practice, so a mine left running would hold the
+        // single mining thread — and every stamp queued behind it — for the
+        // rest of the run (Codeberg #185). The handles are fired, not
+        // removed: the entry goes when the worker's answer comes back, which
+        // is what keeps a re-offer from queueing a second mine meanwhile.
+        for kind in [StampKind::Delivery, StampKind::Propagation] {
+            if let Some(cancel) = self.mining.get(&(kind, *message_id)) {
+                cancel.cancel();
+            }
+        }
         match ready.router.cancel(core, message_id) {
             Ok(output) => self.absorb(ready, core, output, out),
             Err(RouterError::NotFound) => {}
@@ -461,8 +496,11 @@ impl Engine {
                                 detail: format!("stamp rejected: {e:?}"),
                             }),
                         },
-                        Err(detail) => self.emit(OutboxEvent::Refused {
-                            detail: format!("proof-of-work failed: {detail}"),
+                        // The frontend asked for this one to stop, and the
+                        // cancel already reported the message's state.
+                        Err(StampError::Cancelled) => {}
+                        Err(e) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {e}"),
                         }),
                     }
                 }
@@ -483,8 +521,9 @@ impl Engine {
                                 }),
                             }
                         }
-                        Err(detail) => self.emit(OutboxEvent::Refused {
-                            detail: format!("proof-of-work failed: {detail}"),
+                        Err(StampError::Cancelled) => {}
+                        Err(e) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {e}"),
                         }),
                     }
                 }
@@ -895,7 +934,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
         state: State::Unregistered(Box::new(config.identity)),
         resolves: Vec::new(),
         tracked: BTreeMap::new(),
-        mining: HashSet::new(),
+        mining: BTreeMap::new(),
         announced: false,
         last_pn: None,
     };
@@ -935,19 +974,19 @@ fn run_stamp_worker(jobs: &Receiver<StampJob>, answers: &Sender<StampAnswer>) {
     };
     while let Ok(job) = jobs.recv() {
         let answer = match job {
-            StampJob::Delivery(request) => {
+            StampJob::Delivery(request, cancel) => {
                 let cost = request.target_cost;
                 let result = mine_with_progress(&runtime, cost, "delivery stamp", async {
                     let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-                    request.generate_with(&mut executor).await
+                    request.generate_with(&mut executor, &cancel).await
                 });
                 StampAnswer::Delivery { request, result }
             }
-            StampJob::Propagation(request) => {
+            StampJob::Propagation(request, cancel) => {
                 let cost = request.target_cost;
                 let result = mine_with_progress(&runtime, cost, "propagation stamp", async {
                     let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-                    request.generate_with(&mut executor).await
+                    request.generate_with(&mut executor, &cancel).await
                 });
                 StampAnswer::Propagation { request, result }
             }
@@ -970,12 +1009,11 @@ fn mine_with_progress<F>(
     cost: u8,
     what: &str,
     future: F,
-) -> Result<[u8; 32], String>
+) -> Result<[u8; 32], StampError>
 where
-    F: std::future::Future<Output = Result<[u8; 32], leviculum_lxmf::StampError>>,
+    F: std::future::Future<Output = Result<[u8; 32], StampError>>,
 {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
 
     let started = std::time::Instant::now();
     let ticker = if cost > STAMP_PROGRESS_COST {
@@ -997,12 +1035,18 @@ where
     } else {
         None
     };
-    let result = runtime.block_on(future).map_err(|e| format!("{e:?}"));
+    let result = runtime.block_on(future);
     if let Some((done, handle)) = ticker {
         done.store(true, Ordering::Relaxed);
         let _ = handle.join();
+        // A cancelled grind is a withdrawal, not an achievement: saying it
+        // was "mined" would be the one line an operator must not read here.
+        let outcome = match result {
+            Ok(_) => "mined",
+            Err(_) => "abandoned",
+        };
         eprintln!(
-            "lnmsg: {what} mined in {:.1}s",
+            "lnmsg: {what} {outcome} after {:.1}s",
             started.elapsed().as_secs_f32()
         );
     }
@@ -1034,7 +1078,7 @@ mod tests {
             state: State::Unregistered(Box::new(leviculum_std::generate_identity())),
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
-            mining: HashSet::new(),
+            mining: BTreeMap::new(),
             announced: false,
             last_pn: None,
         };
@@ -1069,6 +1113,78 @@ mod tests {
         assert!(
             out.next_deadline_ms.is_some(),
             "on_tick always asks the driver back for the command queue"
+        );
+    }
+
+    /// Cancelling a message calls off the proof-of-work already running for
+    /// it (Codeberg #185).
+    ///
+    /// The mining thread is single-consumer, so a grind at a cost the peer
+    /// announced does not only hold its own message: every stamp queued
+    /// behind it waits too. At a legal-but-large cost that search never ends
+    /// on its own (`leviculum-lxmf/tests/stamp_cancellation.rs`), so the
+    /// handle fired here is the only thing that gets the thread back.
+    ///
+    /// The job is read back off the channel the worker reads, so this asserts
+    /// the handle the *worker* would mine under, not a copy kept here.
+    #[test]
+    fn cancelling_a_message_calls_off_the_stamp_being_mined_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
+        let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
+        let (_answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
+        let mut engine = Engine {
+            display_name: b"lnmsg-test".to_vec(),
+            events: events_tx,
+            commands: commands_rx,
+            stamps: stamps_tx,
+            stamp_answers: answers_rx,
+            state: State::Unregistered(Box::new(leviculum_std::generate_identity())),
+            resolves: Vec::new(),
+            tracked: BTreeMap::new(),
+            mining: BTreeMap::new(),
+            announced: false,
+            last_pn: None,
+        };
+
+        let now_ms = core.now_ms();
+        // The tick's actions go nowhere: this test never puts a packet on an
+        // interface, it only needs the engine past registration.
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let message_id = [0x5au8; 32];
+        engine.dispatch_stamp(StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id,
+                // Inside the window the reference announces, and unfinishable.
+                target_cost: 254,
+            },
+            Arc::default(),
+        ));
+        let job = stamps_rx.try_recv().expect("the worker is handed the job");
+        assert!(
+            !job.cancel().is_cancelled(),
+            "a freshly dispatched job is not cancelled"
+        );
+
+        commands_tx
+            .send(Command::Cancel { message_id })
+            .expect("the engine holds the command receiver");
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        assert!(
+            job.cancel().is_cancelled(),
+            "the cancel must reach the grind the worker is running"
+        );
+        assert!(
+            engine
+                .mining
+                .contains_key(&(StampKind::Delivery, message_id)),
+            "the marker stays until the worker answers, so a re-offer does \
+             not queue a second mine at the same cost"
         );
     }
 

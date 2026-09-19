@@ -13,7 +13,7 @@ use super::{
 #[cfg(feature = "pow")]
 use crate::{
     constants::{WORKBLOCK_EXPAND_ROUNDS, WORKBLOCK_EXPAND_ROUNDS_PN},
-    stamp::{StampError, StampExecutor},
+    stamp::{StampCancel, StampError, StampExecutor},
 };
 
 #[cfg(feature = "pow")]
@@ -23,12 +23,22 @@ impl DeliveryStampRequest {
     /// Pass [`crate::CooperativeStamper::cooperative`] for the default
     /// single-threaded yielding behavior, or any custom [`StampExecutor`] for
     /// a worker pool, Rayon adapter, or hardware implementation.
+    ///
+    /// `cancel` is the handle the host fires when this message is cancelled,
+    /// dropped or flushed: at a legal-but-large announced cost the search does
+    /// not finish on its own (Codeberg #185).
     pub async fn generate_with<E: StampExecutor>(
         &self,
         executor: &mut E,
+        cancel: &StampCancel,
     ) -> Result<[u8; 32], StampError> {
         executor
-            .generate(&self.message_id, self.target_cost, WORKBLOCK_EXPAND_ROUNDS)
+            .generate(
+                &self.message_id,
+                self.target_cost,
+                WORKBLOCK_EXPAND_ROUNDS,
+                cancel,
+            )
             .await
     }
 }
@@ -39,12 +49,14 @@ impl PropagationStampRequest {
     pub async fn generate_with<E: StampExecutor>(
         &self,
         executor: &mut E,
+        cancel: &StampCancel,
     ) -> Result<[u8; 32], StampError> {
         executor
             .generate(
                 &self.transient_id,
                 self.target_cost,
                 WORKBLOCK_EXPAND_ROUNDS_PN,
+                cancel,
             )
             .await
     }
