@@ -1681,9 +1681,39 @@ impl Reporter {
             let verdict =
                 screen_telemetry_request(data, self.delivery_hash.into_bytes(), allowed, identity);
             let (source, accepted, reason) = match verdict {
-                // Ordinary inbound traffic — none of this feature's
-                // business, and not worth a line.
-                TelemetryRequestVerdict::NotARequest => continue,
+                // Bytes encrypted to OUR delivery destination that are no
+                // LXMF message. Nobody is named and nothing that could be
+                // called a message was lost, but a hash that only this
+                // feature reads is being spoken to, and a capture that
+                // showed nothing here could not tell that from silence.
+                TelemetryRequestVerdict::NotAMessage => {
+                    crate::log::log_fmt_critical(
+                        "[INFO!] ",
+                        format_args!(
+                            "[TELEMETRY] discarded len={} reason=not-a-message",
+                            data.len()
+                        ),
+                    );
+                    continue;
+                }
+                // A real LXMF message, addressed to us, decrypted, and
+                // there is nowhere to put it: this board has no inbox, no
+                // message store and no links. The board does not prove it
+                // either (see `register_delivery_destination`), so the
+                // sender learns the truth — but the operator only learns
+                // it from this line, and its absence is what kept the loss
+                // invisible.
+                TelemetryRequestVerdict::NoRequest { source } => {
+                    crate::log::log_fmt_critical(
+                        "[INFO!] ",
+                        format_args!(
+                            "[TELEMETRY] discarded from={:08x} len={} reason=no-inbox",
+                            u32::from_be_bytes([source[0], source[1], source[2], source[3]]),
+                            data.len()
+                        ),
+                    );
+                    continue;
+                }
                 TelemetryRequestVerdict::NotAllowed { source } => (source, false, "not-allowed"),
                 // No key for the target yet: the request cannot be
                 // authenticated, and the policy is awaiting-key anyway.
@@ -1835,11 +1865,33 @@ pub fn announce_app_data(identity: &Identity) -> Vec<u8> {
     .encode()
 }
 
-/// Build and register the node's `lxmf.delivery` destination.
+/// Build and register a BOARD's `lxmf.delivery` destination.
 ///
 /// Returns its hash, which is the source a receiver verifies against.
 /// Fails only if the identity cannot be cloned out of transport, which is
 /// the same failure mode the probe destination has.
+///
+/// # Why this board proves nothing
+///
+/// The destination comes from
+/// [`LxmfNode::delivery_destination_without_inbox`](leviculum_lxmf::LxmfNode::delivery_destination_without_inbox)
+/// and not from `delivery_destination`, and this is the only caller of it:
+/// a board announces this destination because that announce is the only
+/// way a receiver gets the key its reports are verified against, but it
+/// has no inbox, no message store and no links to keep what the announce
+/// invites. What arrives is read once, by
+/// [`Reporter::handle_inbound_events`], which arms a report on a Sideband
+/// telemetry request and discards the rest.
+///
+/// With the `ProofStrategy::All` that `delivery_destination` hands every
+/// caller with an inbox, `NodeCore` answered every arrival with a signed
+/// proof and a sender's LXMF marked the message DELIVERED — while the
+/// bytes went out of scope without a line. That is silent loss, confirmed
+/// to the other side. The rationale in full, and the reason the announce
+/// is the half that stays, is on
+/// `LxmfNode::delivery_destination_without_inbox`; the discard it leaves
+/// behind is named on a `[TELEMETRY] discarded` line rather than happening
+/// in silence.
 pub fn register_delivery_destination<R, C, S>(
     node: &mut NodeCore<R, C, S>,
 ) -> Option<DestinationHash>
@@ -1850,7 +1902,8 @@ where
 {
     let identity_bytes = node.identity().private_key_bytes().ok()?;
     let identity = Identity::from_private_key_bytes(&identity_bytes).ok()?;
-    let destination = leviculum_lxmf::LxmfNode::delivery_destination(identity).ok()?;
+    let destination =
+        leviculum_lxmf::LxmfNode::delivery_destination_without_inbox(identity).ok()?;
     let hash = *destination.hash();
     node.register_destination(destination);
     Some(hash)

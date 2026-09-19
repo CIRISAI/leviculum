@@ -404,6 +404,56 @@ impl LxmfNode {
         Ok(destination)
     }
 
+    /// The same delivery destination, for a node that has NO inbox: it is
+    /// announced, and it proves nothing.
+    ///
+    /// # Why a caller would want this
+    ///
+    /// A telemetry-reporting board
+    /// (`leviculum_nrf::telemetry::register_delivery_destination`, its only
+    /// caller) must ANNOUNCE an `lxmf.delivery` destination — that announce
+    /// is the only way a receiver gets the key its reports are verified
+    /// against — and every peer on the mesh reads the announce the way
+    /// Python-RNS reads it: messages sent to this hash will be received.
+    /// The board cannot keep that claim. It has no inbox, no message store
+    /// and no links; the one reader of what arrives there is the telemetry
+    /// reporter, which keeps a Sideband telemetry request and discards
+    /// everything else.
+    ///
+    /// With the `ProofStrategy::All` of [`Self::delivery_destination`] the
+    /// two disagreed, and did so silently: `NodeCore` answered EVERY
+    /// arrival with a signed proof, with no application involvement, and a
+    /// sender's LXMF marks a message DELIVERED on exactly that proof. A
+    /// Python peer was told its message had landed while the bytes went out
+    /// of scope — silent loss, confirmed to the other side, which is the
+    /// neighbour behaviour Priority 1's second clause forbids.
+    ///
+    /// Of the two honest directions the announce is the one that has to
+    /// stay, or the reports become unverifiable and the feature is gone. So
+    /// the proof gives way. Nothing on the wire changes: `PROVE_NONE` is
+    /// Reticulum's default for a destination, and withholding a proof
+    /// claims nothing — it only fails to confirm. The cost is that a
+    /// telemetry request from the configured target is no longer confirmed
+    /// either; the answer that peer gets is the report itself, and an
+    /// unconfirmed request that was answered is a far smaller harm than a
+    /// confirmed message that was dropped.
+    ///
+    /// Every caller that DOES have an inbox — `lntd`, `lnmsg`, `lnpnd` and
+    /// everything else going through [`Self::register`] — keeps
+    /// [`Self::delivery_destination`] and its `ProofStrategy::All`.
+    /// `accepts_links` is untouched here: a board that cannot serve a link
+    /// still advertises one, which is a separate defect and not this one.
+    ///
+    /// Pinned by `leviculum-lxmf/tests/delivery_promise.rs`, at the sender,
+    /// where the harm is felt.
+    pub fn delivery_destination_without_inbox(
+        identity: Identity,
+    ) -> Result<Destination, DestinationError> {
+        let mut destination = Self::delivery_destination(identity)?;
+        destination.set_proof_strategy(ProofStrategy::None);
+        Ok(destination)
+    }
+
     /// Validate, configure and register an LXMF delivery destination.
     pub fn register<R, C, S>(
         node: &mut NodeCore<R, C, S>,

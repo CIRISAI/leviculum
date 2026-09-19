@@ -739,9 +739,16 @@ fn timebase_secs(number: Number) -> i64 {
 /// telemetry-request feature is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetryRequestVerdict {
-    /// Not an LXMF message, or one without a telemetry request: none of
-    /// this feature's business, whoever sent it.
-    NotARequest,
+    /// Bytes that decrypted to the delivery destination and are no LXMF
+    /// message at all. Nothing a sender could name was lost, but somebody
+    /// is speaking to a hash that will not answer them.
+    NotAMessage,
+    /// A well-formed LXMF message carrying no telemetry request — an
+    /// ordinary message, whoever sent it. Separate from
+    /// [`Self::NotAMessage`] because the caller's options differ: a caller
+    /// with no inbox is losing something a human wrote, and can at least
+    /// say so.
+    NoRequest { source: [u8; 16] },
     /// A telemetry request from a sender that is not the allowed one.
     NotAllowed { source: [u8; 16] },
     /// A request naming the allowed sender, screened without that
@@ -777,12 +784,12 @@ pub fn screen_telemetry_request(
         allowed_identity,
         DeliveryMethod::Opportunistic,
     ) else {
-        return TelemetryRequestVerdict::NotARequest;
-    };
-    let Some(timebase) = telemetry_request_timebase(&message.fields) else {
-        return TelemetryRequestVerdict::NotARequest;
+        return TelemetryRequestVerdict::NotAMessage;
     };
     let source = message.source_hash;
+    let Some(timebase) = telemetry_request_timebase(&message.fields) else {
+        return TelemetryRequestVerdict::NoRequest { source };
+    };
     if allowed_source != Some(source) {
         return TelemetryRequestVerdict::NotAllowed { source };
     }

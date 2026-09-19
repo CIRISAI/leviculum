@@ -488,6 +488,20 @@ their index stamps (there is no re-index).
   an announce. A node that reports announces its delivery destination,
   with a display name in the announce data — otherwise the reading is
   unverifiable and the pin, if it appears at all, is a hex string.
+- **No proof for a message it cannot keep.** That announce is read by
+  every peer as the claim that messages sent to this hash will be
+  received, and a board cannot keep it: it has no inbox, no message
+  store and no links, and the only reader of what arrives is the
+  telemetry reporter, which keeps a request and discards the rest. So
+  the board's delivery destination carries `ProofStrategy::None`
+  (`LxmfNode::delivery_destination_without_inbox`, whose only caller is
+  `register_delivery_destination` in `leviculum-nrf/src/telemetry.rs`)
+  while `lntd`, which does have an inbox, keeps `delivery_destination`
+  and its `ProofStrategy::All`. Withholding a proof claims nothing; the
+  `ProofStrategy::All` a board used to inherit had `NodeCore` sign one
+  for every arrival, so a Python peer's LXMF marked a message DELIVERED
+  and the bytes were dropped without a line. A discard is now always
+  named (`[TELEMETRY] discarded ... reason=`).
 - **The target's public key, before anything else.** Encrypting to a
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch

@@ -273,9 +273,9 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    (`leviculum-lxmf/src/router.rs:1392-1396`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
-   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1180-1202`) or from
+   `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1230-1252`) or from
    `ResourceCompleted { is_sender: true }`
-   (`leviculum-lxmf/src/node.rs:1009-1020`). It proves the bytes arrived at
+   (`leviculum-lxmf/src/node.rs:1059-1070`). It proves the bytes arrived at
    the destination identity. It does not prove an LXMF client parsed them
    and it certainly does not prove a human read them. There is no
    read-receipt field in LXMF at all
@@ -404,7 +404,7 @@ restarts, and must not pretend to.
   (`leviculum-lxmf/src/attachments.rs:86`). Attachments are inline bytes in
   the message, so anything with a real attachment exceeds the packet MDU
   and forces link or Resource delivery (`representation`,
-  `leviculum-lxmf/src/node.rs:488-516`).
+  `leviculum-lxmf/src/node.rs:538-566`).
 - **Paper messages** (`leviculum-lxmf/src/paper.rs`): a message encrypted
   to a destination and rendered as an `lxm://` base64 URI (`to_uri`,
   `leviculum-lxmf/src/paper.rs:172`), capped at `PAPER_MDU = 2210` bytes
@@ -770,7 +770,7 @@ not a list of open work.
    user who starts a message to a high-cost peer and changes their mind has
    no way out.
 7. **No inbound Resource cancellation**, stated as deliberate pending core
-   support (`leviculum-lxmf/src/node.rs:429-430`). A user receiving a large
+   support (`leviculum-lxmf/src/node.rs:479-480`). A user receiving a large
    attachment they do not want can only watch.
 8. **Most error types are `Debug` only.** `RouterError`
    (`leviculum-lxmf/src/router.rs:359`), `LxmfNodeError`

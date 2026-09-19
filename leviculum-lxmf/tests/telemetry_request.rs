@@ -119,8 +119,12 @@ fn a_request_without_the_targets_key_is_unverifiable() {
     );
 }
 
+/// An ordinary message to the delivery destination. It is a MESSAGE, and
+/// the verdict says so and names its sender: a caller that has no inbox for
+/// it cannot keep it, but it can say what it threw away and who wrote it,
+/// which is the difference between a discard and a silence.
 #[test]
-fn a_message_without_commands_is_not_a_request() {
+fn a_message_without_commands_is_a_message_and_no_request() {
     let target = identity(0);
     let message = Message::create(
         DELIVERY_HASH,
@@ -140,15 +144,17 @@ fn a_message_without_commands_is_not_a_request() {
             Some(TARGET_HASH),
             Some(&target)
         ),
-        TelemetryRequestVerdict::NotARequest
+        TelemetryRequestVerdict::NoRequest {
+            source: TARGET_HASH
+        }
     );
 }
 
 #[test]
-fn bytes_that_are_no_lxmf_message_are_not_a_request() {
+fn bytes_that_are_no_lxmf_message_are_not_a_message() {
     assert_eq!(
         screen_telemetry_request(b"random noise", DELIVERY_HASH, Some(TARGET_HASH), None),
-        TelemetryRequestVerdict::NotARequest
+        TelemetryRequestVerdict::NotAMessage
     );
 }
 
