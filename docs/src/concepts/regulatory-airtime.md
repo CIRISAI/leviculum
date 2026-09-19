@@ -2,9 +2,10 @@
 
 Unlicensed LoRa bands are shared under duty-cycle rules. This page
 records where the limit is enforced, what a node does when nobody
-configured one, what it takes to switch the limit off, and one
-measurement pitfall. It is a durable rule for every radio firmware we
-write, present and future.
+configured one, why no radio setting is ever refused for a regulatory
+reason, what it takes to switch the limit off, and one measurement
+pitfall. It is a durable rule for every radio firmware we write,
+present and future.
 
 ## Enforcement belongs in the firmware, not the host
 
@@ -103,15 +104,65 @@ e.r.p. limit — 25 mW everywhere in the European SRD spectrum except
 explicit `txpower` wins even above the cap (the operator may hold a
 licence or know the jurisdiction); the excess is logged. The
 narrowband bands *between* the wideband sub-bands (868.6-868.7 MHz
-and its four siblings, alarms, ≤ 25 kHz channel spacing) refuse a
-LoRa carrier at interface build (`erp_band_gap`,
-`leviculum-core/src/rnode.rs:1307`) — a gap is a configuration error,
-not an unlimited band.
+and its four siblings, alarms, ≤ 25 kHz channel spacing) fit no LoRa
+bandwidth this stack configures, so a carrier that overlaps one is
+warned about by name at interface build (`erp_band_gap`,
+`leviculum-core/src/rnode.rs:1307`) — falling through to "no known
+limit, board maximum" without a word would be the most permissive
+outcome exactly where the operator most needs to be told. The
+carrier is then honoured; see [No radio configuration is
+refused](#no-radio-configuration-is-refused) below.
 
 Python-Reticulum does not do lawful-by-default; the cap only shapes
 local TX and is invisible to receivers, so this is a Priority-1
 enhancement under the
 [deviation rule](python-rns-compatibility.md#the-deviation-rule).
+
+## No radio configuration is refused
+
+**Every radio setting this stack is given is honoured. A setting that
+looks unlawful for a region is warned about, loudly, by name — and
+then applied.** That is project policy, decided 2026-08-16, and it
+supersedes the hard band-gap error this page used to describe.
+
+Two reasons, and the second is the stronger one:
+
+1. **The jurisdiction is not knowable from here.** The same carrier
+   is lawful under a licence, in another region, on an amateur
+   allocation, or in a shielded chamber with dummy loads. A check
+   that reads a frequency cannot tell those apart from an unlawful
+   deployment, so it would refuse the lawful cases too.
+2. **The operator is the responsible party.** In the EU it is the
+   operator, not the software author, who answers for compliant
+   operation. Software that refuses a setting takes on a
+   responsibility it does not hold, and hands the operator a daemon
+   that will not start instead of the information they need. Our job
+   is to make the consequence impossible to miss, not to make the
+   choice.
+
+The warning is emitted at WARN, never at debug: a decision narrated
+below the default log level is the silent substitution this policy
+exists to prevent.
+
+What stays a refusal is anything with no regulatory content in it —
+the SX1262's 150-960 MHz tuning range, the ten bandwidths the modem
+has a register code for, the 0..=37 dBm field of the RNode wire
+protocol, the SF and CR ranges shared with Python-RNS, and the
+SoftDevice version guard that keeps a flash from bricking a board.
+Those are arithmetic and device protection, not paternalism: they
+describe what the hardware can be asked for at all, and honouring
+them is not a judgement about anybody's licence.
+
+Prose alone has drifted twice here — the code once, this page once —
+so both halves are mechanical now. The code is pinned behaviourally
+by `no_radio_configuration_is_refused_for_a_regulatory_reason`
+(`leviculum-std/src/driver/interface_build/mod.rs:702`), which drives
+the known regulatory edge cases through the config-building entry
+point and asserts each one builds *and* warns at WARN, with a second
+half pinning the capability refusals so the first cannot be satisfied
+by deleting every check. This page is pinned by
+`the_book_describes_the_band_gap_as_a_warning_never_a_refusal`
+(`leviculum-std/tests/doc_radio_policy.rs:198`).
 
 ## Disabling is an operator act, not a test convenience
 

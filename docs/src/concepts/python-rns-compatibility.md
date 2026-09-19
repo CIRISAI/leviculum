@@ -188,10 +188,12 @@ e.r.p.); above that the operator has to set `txpower` down
 explicitly, and that residual is documentation, not a runtime
 warning: the stack does not know what antenna is attached, and a
 warning it cannot condition on anything is a warning operators learn
-to ignore. The narrowband alarm bands between the wideband sub-bands
-refuse a LoRa carrier at interface build outright
-(`rnode::erp_band_gap`): a 125 kHz signal cannot meet their ≤ 25 kHz
-channel spacing on any power.
+to ignore. A carrier overlapping one of the narrowband alarm bands
+between the wideband sub-bands is named in a warning at interface
+build (`rnode::erp_band_gap`) and then transmitted: a 125 kHz signal
+cannot meet their ≤ 25 kHz channel spacing on any power, but the
+judgement is the operator's, not ours — see [No radio configuration
+is refused](regulatory-airtime.md#no-radio-configuration-is-refused).
 
 ### Not a deviation: a class constant is not the value on the wire
 
