@@ -30,6 +30,25 @@ pub(crate) const PEER_JOB_INTERVAL_SECS: f64 = 4.0;
 /// Multicast echo timeout, carrier lost if no self-echo for this long
 pub(crate) const MCAST_ECHO_TIMEOUT_SECS: f64 = 6.5;
 
+/// How long the orchestrator waits before looking for a usable NIC again
+/// while it has none.
+///
+/// This is a load decision on every host that runs us, so it is priced: one
+/// round is a `getifaddrs(3)` netlink round trip plus the filtering in
+/// [`enumerate_nics`], measured at 58.5 µs per call (2000 calls, 6 interface
+/// entries, x86-64 laptop), i.e. 360 rounds and ~21 ms of CPU per hour of
+/// waiting - and only while waiting, the loop is left for good once a NIC
+/// binds. Ten seconds also caps how long a node stays deaf after its NIC
+/// appears at well under the 22 s peering timeout its neighbours use, while
+/// staying far enough apart to not become a timer wakeup source on a
+/// battery-powered board.
+pub(crate) const NIC_RETRY_INTERVAL_SECS: f64 = 10.0;
+
+/// Every Nth fruitless NIC re-check is logged at warn, the rest at debug.
+/// At [`NIC_RETRY_INTERVAL_SECS`] that is one line per 5 minutes, so a host
+/// that never gets a NIC keeps saying so without filling the log.
+pub(crate) const NIC_WAIT_WARN_EVERY: u64 = 30;
+
 /// Deduplication cache capacity (number of entries)
 pub(crate) const DEDUP_CACHE_SIZE: usize = 48;
 /// Deduplication cache TTL in seconds

@@ -55,7 +55,7 @@ const AUTO_MAX_CHANNEL_PAYLOAD: usize = AUTO_LINK_MDU - CHANNEL_OVERHEAD;
 ///
 /// AutoInterface derives the unicast discovery port as `discovery_port + 1`,
 /// matching Python —
-/// `unicast_discovery_port` (leviculum-std/src/interfaces/auto_interface/mod.rs:492)
+/// `unicast_discovery_port` (leviculum-std/src/interfaces/auto_interface/mod.rs:511)
 /// — so one test occupies two consecutive numbers, and the allocator has to
 /// hand out both or the successor goes to the next caller.
 fn free_discovery_port() -> u16 {

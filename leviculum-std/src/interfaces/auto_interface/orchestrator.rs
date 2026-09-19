@@ -18,8 +18,8 @@ use super::{
     derive_multicast_address, enumerate_nics, group_name_tag, make_discovery_token,
     parse_discovery_packet, recv_from_any, unicast_discovery_port, verify_discovery_token,
     AdoptedNic, AutoInterfaceConfig, DeduplicationCache, ANNOUNCE_INTERVAL_SECS, AUTO_HW_MTU,
-    DISCOVERY_PACKET_SIZE, MCAST_ECHO_TIMEOUT_SECS, NONCE_SIZE, PEERING_TIMEOUT_SECS,
-    PEER_JOB_INTERVAL_SECS,
+    DISCOVERY_PACKET_SIZE, MCAST_ECHO_TIMEOUT_SECS, NIC_RETRY_INTERVAL_SECS, NIC_WAIT_WARN_EVERY,
+    NONCE_SIZE, PEERING_TIMEOUT_SECS, PEER_JOB_INTERVAL_SECS,
 };
 use crate::interfaces::{
     IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket,
@@ -129,42 +129,65 @@ pub(crate) fn spawn_auto_interface(
     peer_count_rx
 }
 
-/// Main orchestrator loop.
+/// The sockets and per-NIC data that one successful bring-up round produced.
 ///
-/// Enumerates NICs, binds sockets, and runs the discovery + data loop.
-/// Each discovered peer becomes a separate InterfaceHandle registered
-/// via `new_iface_tx` into the main event loop.
-async fn run_auto_interface(
-    config: AutoInterfaceConfig,
-    next_id: Arc<AtomicUsize>,
-    new_iface_tx: mpsc::Sender<InterfaceHandle>,
-    peer_count_tx: watch::Sender<usize>,
-) -> io::Result<()> {
-    // Enumerate suitable NICs
-    let nics = enumerate_nics(&config);
-    if nics.is_empty() {
-        tracing::warn!("AutoInterface: no suitable network interfaces found");
-        return Ok(());
+/// The three socket vecs are parallel to `active_nics` and `our_tokens`:
+/// `recv_from_any` reports which socket received, and that index selects the
+/// NIC the packet arrived on.
+pub(crate) struct BoundNics {
+    mcast_sockets: Vec<UdpSocket>,
+    unicast_sockets: Vec<UdpSocket>,
+    data_sockets: Vec<Arc<UdpSocket>>,
+    active_nics: Vec<AdoptedNic>,
+    our_tokens: Vec<([u8; 32], String)>,
+}
+
+/// Log a failed per-NIC bind loudly the first time and quietly afterwards.
+///
+/// The first round is the one an operator reads after a failed start. Every
+/// round after it repeats the same reason every `NIC_RETRY_INTERVAL_SECS`
+/// until the condition clears, so it belongs at debug, otherwise a daemon
+/// whose data port is permanently taken writes a warn line forever.
+fn log_bind_failure(first_attempt: bool, nic: &str, socket_kind: &str, e: &io::Error) {
+    if first_attempt {
+        tracing::warn!(
+            "AutoInterface: failed to bind {} on {}: {}",
+            socket_kind,
+            nic,
+            e
+        );
+    } else {
+        tracing::debug!(
+            "AutoInterface: failed to bind {} on {} (re-check): {}",
+            socket_kind,
+            nic,
+            e
+        );
     }
+}
 
-    let mcast_addr = derive_multicast_address(
-        &config.group_id,
-        &config.discovery_scope,
-        config.multicast_address_type,
-    )?;
-    let unicast_port = unicast_discovery_port(config.discovery_port);
-    // Per-group tag appended to peer interface names so peers reachable in
-    // multiple groups do not collide in the registry / rnstatus. `None` for
-    // the default group keeps single-section naming unchanged.
-    let group_tag = group_name_tag(&config.group_id);
+/// One attempt to bring the interface up: enumerate NICs, then bind the three
+/// sockets each of them needs.
+///
+/// `None` means nothing usable came out of this round, either because no NIC
+/// passed enumeration or because none of them got a full socket set. Neither
+/// is a permanent verdict: a NIC that is absent at boot is present seconds
+/// later (USB Ethernet enumerating, WiFi associating, a bridge coming up),
+/// and a link-local address still tentative under duplicate address detection
+/// refuses a bind that succeeds on the next round. The caller treats `None`
+/// as "wait and look again".
+fn try_bind_nics(
+    config: &AutoInterfaceConfig,
+    mcast_addr: &Ipv6Addr,
+    unicast_port: u16,
+    attempt: u64,
+) -> Option<BoundNics> {
+    let first_attempt = attempt == 1;
 
-    tracing::info!(
-        "AutoInterface: {} NIC(s), multicast={}, discovery_port={}, data_port={}",
-        nics.len(),
-        mcast_addr,
-        config.discovery_port,
-        config.data_port
-    );
+    let nics = enumerate_nics(config);
+    if nics.is_empty() {
+        return None;
+    }
 
     // Bind sockets per NIC, tracking which succeeded
     let mut mcast_sockets = Vec::new();
@@ -174,7 +197,7 @@ async fn run_auto_interface(
     for nic in &nics {
         match bind_multicast_socket(
             nic,
-            &mcast_addr,
+            mcast_addr,
             config.discovery_port,
             &config.discovery_scope,
             config.multicast_loopback,
@@ -188,11 +211,7 @@ async fn run_auto_interface(
                 mcast_sockets.push(s);
             }
             Err(e) => {
-                tracing::warn!(
-                    "AutoInterface: failed to bind multicast on {}: {}",
-                    nic.name,
-                    e
-                );
+                log_bind_failure(first_attempt, &nic.name, "multicast", &e);
                 bind_results.push(false);
                 continue;
             }
@@ -201,11 +220,7 @@ async fn run_auto_interface(
         match bind_unicast_socket(nic, unicast_port) {
             Ok(s) => unicast_sockets.push(s),
             Err(e) => {
-                tracing::warn!(
-                    "AutoInterface: failed to bind unicast on {}: {}",
-                    nic.name,
-                    e
-                );
+                log_bind_failure(first_attempt, &nic.name, "unicast", &e);
                 // Remove the multicast socket we just pushed, can't function without unicast
                 mcast_sockets.pop();
                 bind_results.push(false);
@@ -218,7 +233,7 @@ async fn run_auto_interface(
                 data_sockets.push(Arc::new(s));
             }
             Err(e) => {
-                tracing::warn!("AutoInterface: failed to bind data on {}: {}", nic.name, e);
+                log_bind_failure(first_attempt, &nic.name, "data", &e);
                 mcast_sockets.pop();
                 unicast_sockets.pop();
                 bind_results.push(false);
@@ -229,9 +244,168 @@ async fn run_auto_interface(
     }
 
     if mcast_sockets.is_empty() {
-        tracing::warn!("AutoInterface: no sockets could be bound, exiting");
-        return Ok(());
+        return None;
     }
+
+    // Build active_nics (only NICs where all 3 sockets bound) and their tokens
+    let (active_nics, our_tokens) =
+        build_active_nics_and_tokens(&nics, &bind_results, &config.group_id);
+
+    tracing::info!(
+        "AutoInterface: {} NIC(s), multicast={}, discovery_port={}, data_port={}",
+        active_nics.len(),
+        mcast_addr,
+        config.discovery_port,
+        config.data_port
+    );
+
+    Some(BoundNics {
+        mcast_sockets,
+        unicast_sockets,
+        data_sockets,
+        active_nics,
+        our_tokens,
+    })
+}
+
+/// Retry `setup` every `retry_interval` until it yields a usable set of NICs,
+/// or the event loop shuts down.
+///
+/// An empty NIC list at startup is a waiting state, not an exit. The daemon
+/// routinely starts before the network does, and a task that returns here is
+/// a node that stays deaf on the LAN for the rest of its life with one warn
+/// line as the only trace. `setup` receives the 1-based attempt number so it
+/// can keep its own logging from repeating forever.
+///
+/// Returns `None` only when the event loop is gone, which is the one case
+/// where giving up is right, and the only one that says so in the log.
+async fn wait_for_usable_nics<F>(
+    mut setup: F,
+    retry_interval: Duration,
+    shutdown: &mpsc::Sender<InterfaceHandle>,
+) -> Option<BoundNics>
+where
+    F: FnMut(u64) -> Option<BoundNics>,
+{
+    let started = Instant::now();
+    let mut attempts: u64 = 0;
+
+    loop {
+        attempts += 1;
+        if let Some(bound) = setup(attempts) {
+            if attempts > 1 {
+                tracing::info!(
+                    "AutoInterface: a usable network interface appeared after {:.0}s \
+                     ({} checks), coming up now",
+                    started.elapsed().as_secs_f64(),
+                    attempts
+                );
+            }
+            return Some(bound);
+        }
+
+        // "Still looking" and "gave up" have to read differently: today an
+        // operator sees one warn line and cannot tell which one happened.
+        if attempts == 1 {
+            tracing::warn!(
+                "AutoInterface: no usable network interface yet, not giving up, \
+                 re-checking every {:.0}s until one appears",
+                retry_interval.as_secs_f64()
+            );
+        } else if attempts.is_multiple_of(NIC_WAIT_WARN_EVERY) {
+            tracing::warn!(
+                "AutoInterface: still no usable network interface after {:.0}s \
+                 ({} checks), still looking",
+                started.elapsed().as_secs_f64(),
+                attempts
+            );
+        } else {
+            tracing::debug!(
+                "AutoInterface: no usable network interface on check {}, still looking",
+                attempts
+            );
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(retry_interval) => {}
+            _ = shutdown.closed() => {
+                tracing::info!(
+                    "AutoInterface: event loop shut down while waiting for a network \
+                     interface, giving up"
+                );
+                return None;
+            }
+        }
+    }
+}
+
+/// Main orchestrator loop.
+///
+/// Waits for a usable NIC, binds sockets, and runs the discovery + data loop.
+/// Each discovered peer becomes a separate InterfaceHandle registered
+/// via `new_iface_tx` into the main event loop.
+async fn run_auto_interface(
+    config: AutoInterfaceConfig,
+    next_id: Arc<AtomicUsize>,
+    new_iface_tx: mpsc::Sender<InterfaceHandle>,
+    peer_count_tx: watch::Sender<usize>,
+) -> io::Result<()> {
+    let mcast_addr = derive_multicast_address(
+        &config.group_id,
+        &config.discovery_scope,
+        config.multicast_address_type,
+    )?;
+    let unicast_port = unicast_discovery_port(config.discovery_port);
+
+    let setup_config = config.clone();
+    let setup =
+        move |attempt: u64| try_bind_nics(&setup_config, &mcast_addr, unicast_port, attempt);
+
+    run_auto_interface_with(
+        config,
+        next_id,
+        new_iface_tx,
+        peer_count_tx,
+        mcast_addr,
+        setup,
+        Duration::from_secs_f64(NIC_RETRY_INTERVAL_SECS),
+    )
+    .await
+}
+
+/// The orchestrator with its bring-up step injected.
+///
+/// `setup` is the seam: everything that needs a real NIC (enumeration plus the
+/// three binds) lives behind it, so the wait-then-come-up behaviour is
+/// testable on a host that has no suitable NIC at all.
+async fn run_auto_interface_with<F>(
+    config: AutoInterfaceConfig,
+    next_id: Arc<AtomicUsize>,
+    new_iface_tx: mpsc::Sender<InterfaceHandle>,
+    peer_count_tx: watch::Sender<usize>,
+    mcast_addr: Ipv6Addr,
+    setup: F,
+    retry_interval: Duration,
+) -> io::Result<()>
+where
+    F: FnMut(u64) -> Option<BoundNics>,
+{
+    let unicast_port = unicast_discovery_port(config.discovery_port);
+    // Per-group tag appended to peer interface names so peers reachable in
+    // multiple groups do not collide in the registry / rnstatus. `None` for
+    // the default group keeps single-section naming unchanged.
+    let group_tag = group_name_tag(&config.group_id);
+
+    let Some(bound) = wait_for_usable_nics(setup, retry_interval, &new_iface_tx).await else {
+        return Ok(());
+    };
+    let BoundNics {
+        mcast_sockets,
+        unicast_sockets,
+        data_sockets,
+        active_nics,
+        our_tokens,
+    } = bound;
 
     // Per-peer state: keyed by peer's (IPv6 link-local, data_port).
     // Data receive does a two-tier lookup: try exact (ip, port) first,
@@ -241,8 +415,9 @@ async fn run_auto_interface(
     // Removal path: peers are removed on timeout in the peer_job_timer branch.
     let mut peers: HashMap<(Ipv6Addr, u16), PeerInfo> = HashMap::new();
 
-    // Per-NIC state for carrier detection
-    let mut nic_states: HashMap<String, NicState> = nics
+    // Per-NIC state for carrier detection. Only NICs that got a full socket
+    // set can echo, so the map is keyed off those and not the raw enumeration.
+    let mut nic_states: HashMap<String, NicState> = active_nics
         .iter()
         .map(|n| {
             (
@@ -267,10 +442,6 @@ async fn run_auto_interface(
 
     let mut announce_timer = tokio::time::interval(announce_interval);
     let mut peer_job_timer = tokio::time::interval(peer_job_interval);
-
-    // Build active_nics (only NICs where all 3 sockets bound) and their tokens
-    let (active_nics, our_tokens) =
-        build_active_nics_and_tokens(&nics, &bind_results, &config.group_id);
 
     // Generate per-instance nonce for self-echo detection.
     // Two nodes on the same machine share NIC addresses, so IP-based
@@ -1197,9 +1368,9 @@ mod tests {
 
     /// Two AutoInterface sections with distinct group_ids AND distinct ports
     /// must spawn without an `AddrInUse` panic. On a CI host without a suitable
-    /// link-local NIC each orchestrator exits cleanly after enumeration; on a
-    /// host with one they bind real (distinct) sockets. Either way the spawn
-    /// path must not panic and both peer-count channels start at 0.
+    /// link-local NIC each orchestrator sits in the NIC wait loop; on a host
+    /// with one they bind real (distinct) sockets. Either way the spawn path
+    /// must not panic and both peer-count channels start at 0.
     ///
     /// Real cross-group multicast isolation (a peer announced in group A must
     /// not appear in group B) needs an actual multi-NIC LAN and is not
@@ -1249,6 +1420,191 @@ mod tests {
             ctx.peers.len(),
             1,
             "32-byte packet from own IP should still create peer (never self-echo)"
+        );
+    }
+
+    /// Build a `BoundNics` out of ephemeral sockets, standing in for a NIC
+    /// that has just appeared.
+    ///
+    /// No real NIC is involved: past enumeration and binding, the discovery
+    /// loop only needs three bound sockets plus a parallel NIC entry, which
+    /// is exactly why the bring-up step is injected. Returns the port the
+    /// multicast socket listens on so the test can announce to it.
+    fn fake_bound_nics(name: &str, group_id: &[u8]) -> (BoundNics, u16) {
+        let mcast = bind_test_socket();
+        let port = match mcast.local_addr().unwrap() {
+            std::net::SocketAddr::V6(v6) => v6.port(),
+            _ => panic!("expected v6"),
+        };
+        let nic = AdoptedNic {
+            name: name.to_string(),
+            link_local: "fe80::1".parse().unwrap(),
+            index: 0,
+        };
+        let (active_nics, our_tokens) =
+            build_active_nics_and_tokens(std::slice::from_ref(&nic), &[true], group_id);
+        (
+            BoundNics {
+                mcast_sockets: vec![mcast],
+                unicast_sockets: vec![bind_test_socket()],
+                data_sockets: vec![Arc::new(bind_test_socket())],
+                active_nics,
+                our_tokens,
+            },
+            port,
+        )
+    }
+
+    /// The minimal test for the ordinary boot of a laptop or a small board:
+    /// the daemon starts before the network does, so the first rounds find no
+    /// suitable NIC. When one appears the interface has to come up by itself,
+    /// without a restart. Before the fix the orchestrator returned on the
+    /// first empty enumeration and the node stayed deaf on the LAN for the
+    /// rest of its life.
+    #[tokio::test]
+    async fn test_interface_comes_up_when_a_nic_appears_late() {
+        let config = AutoInterfaceConfig::default();
+        let mcast_addr = derive_multicast_address(
+            &config.group_id,
+            &config.discovery_scope,
+            config.multicast_address_type,
+        )
+        .unwrap();
+
+        let (new_iface_tx, mut new_iface_rx) = mpsc::channel(8);
+        let (peer_count_tx, peer_count_rx) = watch::channel(0usize);
+
+        let (bound, mcast_port) = fake_bound_nics("late0", &config.group_id);
+        let mut bound = Some(bound);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_seen = Arc::clone(&attempts);
+        let setup = move |attempt: u64| {
+            attempts_seen.store(attempt as usize, Ordering::Relaxed);
+            // No suitable NIC on the first two rounds, then one appears.
+            if attempt < 3 {
+                None
+            } else {
+                bound.take()
+            }
+        };
+
+        let run_config = config.clone();
+        let task = tokio::spawn(run_auto_interface_with(
+            run_config,
+            Arc::new(AtomicUsize::new(7)),
+            new_iface_tx,
+            peer_count_tx,
+            mcast_addr,
+            setup,
+            Duration::from_millis(20),
+        ));
+
+        // A peer announces itself on the NIC that just appeared. The datagram
+        // is queued by the kernel, so it does not matter whether the
+        // orchestrator is already reading when it is sent.
+        let peer_socket = bind_test_socket();
+        let token = make_discovery_token(&config.group_id, "::1");
+        let pkt = build_discovery_packet(&token, &[0x99u8; NONCE_SIZE], config.data_port);
+        let dest = SocketAddrV6::new("::1".parse().unwrap(), mcast_port, 0, 0);
+        peer_socket.send_to(&pkt, dest).await.unwrap();
+
+        let handle = tokio::time::timeout(Duration::from_secs(5), new_iface_rx.recv())
+            .await
+            .expect("interface must come up after the NIC appears, without a restart")
+            .expect("orchestrator must register the peer");
+
+        assert!(
+            handle.info.name.starts_with("auto/late0/"),
+            "peer must be registered on the late NIC, got {}",
+            handle.info.name
+        );
+        assert!(
+            attempts.load(Ordering::Relaxed) >= 3,
+            "orchestrator must re-check after an empty enumeration, checks={}",
+            attempts.load(Ordering::Relaxed)
+        );
+        assert_eq!(*peer_count_rx.borrow(), 1, "peer count must be mirrored");
+
+        task.abort();
+    }
+
+    /// A host that never gets a suitable NIC must keep looking rather than
+    /// end the task, and only a shutdown of the event loop ends the wait.
+    #[tokio::test]
+    async fn test_no_nic_keeps_waiting_and_exits_only_on_shutdown() {
+        let config = AutoInterfaceConfig::default();
+        let mcast_addr = derive_multicast_address(
+            &config.group_id,
+            &config.discovery_scope,
+            config.multicast_address_type,
+        )
+        .unwrap();
+
+        let (new_iface_tx, new_iface_rx) = mpsc::channel(8);
+        let (peer_count_tx, _peer_count_rx) = watch::channel(0usize);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_seen = Arc::clone(&attempts);
+        let setup = move |attempt: u64| {
+            attempts_seen.store(attempt as usize, Ordering::Relaxed);
+            None
+        };
+
+        let task = tokio::spawn(run_auto_interface_with(
+            config,
+            Arc::new(AtomicUsize::new(0)),
+            new_iface_tx,
+            peer_count_tx,
+            mcast_addr,
+            setup,
+            Duration::from_millis(10),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !task.is_finished(),
+            "an empty NIC list is a waiting state, not an exit"
+        );
+        assert!(
+            attempts.load(Ordering::Relaxed) >= 3,
+            "orchestrator must re-check on the retry interval, checks={}",
+            attempts.load(Ordering::Relaxed)
+        );
+
+        // The event loop going away is the one reason to give up.
+        drop(new_iface_rx);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("orchestrator must stop waiting once the event loop is gone")
+            .expect("task should not panic");
+        assert!(result.is_ok(), "shutdown while waiting is not an error");
+    }
+
+    /// The production bring-up step reports "nothing usable this round"
+    /// instead of failing, on a host where the device whitelist matches no
+    /// interface. Host-independent: the whitelist excludes everything.
+    #[test]
+    fn test_try_bind_nics_none_when_no_nic_matches() {
+        let config = AutoInterfaceConfig {
+            allowed_devices: Some("lev-no-such-nic".to_string()),
+            ..AutoInterfaceConfig::default()
+        };
+        let mcast_addr = derive_multicast_address(
+            &config.group_id,
+            &config.discovery_scope,
+            config.multicast_address_type,
+        )
+        .unwrap();
+
+        let result = try_bind_nics(
+            &config,
+            &mcast_addr,
+            unicast_discovery_port(config.discovery_port),
+            1,
+        );
+        assert!(
+            result.is_none(),
+            "no matching NIC must be a waiting state, not a bound interface"
         );
     }
 }
