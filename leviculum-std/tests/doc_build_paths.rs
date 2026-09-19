@@ -20,8 +20,9 @@
 //!
 //! 1. **Every documented invocation resolves.** A path of the shape
 //!    `target/[<triple>/]release/<binary>` naming one of this workspace's
-//!    host binaries must carry the configured triple. The old README's
-//!    `./target/release/lnsd -v` had no triple at all.
+//!    host binaries must carry the configured triple, or one of the host
+//!    overrides the same documents teach (`HOST_OVERRIDE_TRIPLES`). The
+//!    old README's `./target/release/lnsd -v` had no triple at all.
 //! 2. **Every source-build document names the real directory.** The old
 //!    installation guide said "The binaries are in `target/release/`" —
 //!    a bare directory with no binary after it, so check 1 cannot see it.
@@ -50,6 +51,13 @@ const HOST_BINS: &[&str] = &[
     "lnsd", "lnstest", "lncp", "lnstatus", "lnprobe", "lnpath", "lntd", "lnmsg", "lnomad", "lnpnd",
     "lblogd", "lndecode", "lnflash",
 ];
+
+/// Triples a document may name besides the pin, because we tell readers to
+/// build with them: the pin is unconditional and wrong on any host that is
+/// not x86_64, so the source-build documents carry an arm64 override
+/// (Codeberg #291, guarded by `build_target_host_arch.rs`). A path under
+/// one of these is a documented build, not stale text.
+const HOST_OVERRIDE_TRIPLES: &[&str] = &["aarch64-unknown-linux-musl"];
 
 /// Never walked: `docs/book` is generated output that would double every
 /// finding, `target` is build output, `reference` is a foreign submodule.
@@ -96,7 +104,12 @@ fn artefact_path_re() -> Regex {
 }
 
 /// Check 1 over one document's text. Returns one message per bad path.
-fn bad_artefact_paths(text: &str, want_triple: &str) -> Vec<String> {
+///
+/// `want` is the pinned triple first, then any triple a document may name
+/// because we document building with it. The pin leads because it is what
+/// the messages quote.
+fn bad_artefact_paths(text: &str, want: &[&str]) -> Vec<String> {
+    let want_triple = want.first().copied().unwrap_or_default();
     let re = artefact_path_re();
     let mut out = Vec::new();
     for (idx, line) in text.lines().enumerate() {
@@ -117,7 +130,7 @@ fn bad_artefact_paths(text: &str, want_triple: &str) -> Vec<String> {
                     want_triple,
                     bin,
                 )),
-                Some(triple) if triple.as_str() != want_triple => out.push(format!(
+                Some(triple) if !want.contains(&triple.as_str()) => out.push(format!(
                     "line {}: `{}` — names target `{}`, but `.cargo/config.toml` pins \
                      `{}`",
                     idx + 1,
@@ -175,6 +188,9 @@ fn pinned_triple(root: &Path) -> String {
 fn documented_binary_paths_use_the_pinned_target() {
     let root = repo_root();
     let triple = pinned_triple(&root);
+    let accepted: Vec<&str> = std::iter::once(triple.as_str())
+        .chain(HOST_OVERRIDE_TRIPLES.iter().copied())
+        .collect();
 
     let mut docs = Vec::new();
     walk_markdown(&root, &mut docs);
@@ -191,7 +207,7 @@ fn documented_binary_paths_use_the_pinned_target() {
             continue;
         };
         let rel = doc.strip_prefix(&root).unwrap_or(doc);
-        for msg in bad_artefact_paths(&text, &triple) {
+        for msg in bad_artefact_paths(&text, &accepted) {
             failures.push(format!("{}: {msg}", rel.display()));
         }
     }
@@ -236,7 +252,7 @@ fn the_original_text_is_caught() {
     // README.md at 752baa42: the verification command after the build.
     let old_readme = "cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest\n\
                       ./target/release/lnsd -v\n";
-    let found = bad_artefact_paths(old_readme, triple);
+    let found = bad_artefact_paths(old_readme, &[triple]);
     assert_eq!(
         found.len(),
         1,
@@ -248,7 +264,7 @@ fn the_original_text_is_caught() {
     // binary after the directory, which is why check 2 has to exist.
     let old_guide = "The binaries are in `target/release/`.\n";
     assert!(
-        bad_artefact_paths(old_guide, triple).is_empty(),
+        bad_artefact_paths(old_guide, &[triple]).is_empty(),
         "no binary is named, so check 1 cannot and should not fire here"
     );
     assert!(
@@ -259,7 +275,7 @@ fn the_original_text_is_caught() {
     // The corrected text passes both.
     let fixed = "so the binaries land under `target/x86_64-unknown-linux-musl/release/`, \
                  not `target/release/`.\n./target/x86_64-unknown-linux-musl/release/lnsd --version\n";
-    assert!(bad_artefact_paths(fixed, triple).is_empty());
+    assert!(bad_artefact_paths(fixed, &[triple]).is_empty());
     assert!(names_artefact_dir(fixed, triple));
 }
 
@@ -269,7 +285,7 @@ fn the_original_text_is_caught() {
 #[test]
 fn a_moved_pin_reports_the_stale_triple() {
     let current = "./target/x86_64-unknown-linux-musl/release/lnsd --version\n";
-    let found = bad_artefact_paths(current, "aarch64-unknown-linux-musl");
+    let found = bad_artefact_paths(current, &["aarch64-unknown-linux-musl"]);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("pins"), "{found:?}");
 }
@@ -280,15 +296,32 @@ fn foreign_target_directories_are_not_our_claim() {
     // Firmware: a different workspace and a different target.
     assert!(bad_artefact_paths(
         "sudo cp target/thumbv7em-none-eabihf/release/t114.uf2 /mnt/NEW.UF2\n",
-        triple
+        &[triple]
     )
     .is_empty());
     // periculum: a different repository entirely.
     assert!(bad_artefact_paths(
         "PERICULUM_BIN=\"$PERICULUM_ROOT/target/release/periculum\"\n",
-        triple
+        &[triple]
     )
     .is_empty());
+}
+
+/// A path under a documented host override is a build we tell people to
+/// run, not drift. A triple we document nowhere still is drift.
+#[test]
+fn a_documented_host_override_is_not_stale_text() {
+    let accepted = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
+    assert!(bad_artefact_paths(
+        "./target/aarch64-unknown-linux-musl/release/lnsd --version\n",
+        &accepted
+    )
+    .is_empty());
+    let found = bad_artefact_paths(
+        "./target/armv7-unknown-linux-musleabihf/release/lnsd --version\n",
+        &accepted,
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
 }
 
 #[test]

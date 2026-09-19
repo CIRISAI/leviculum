@@ -14,6 +14,23 @@
 # The "dropping unsupported crate type `cdylib`" warning during
 # workspace checks is therefore EXPECTED — leave it; Cargo has no
 # target-conditional crate-type to silence it properly.
+#
+# The pin below names an ARCHITECTURE, and cargo has no per-host
+# conditional in [build], so it is also the answer on hosts that are not
+# x86_64. On an arm64 machine — a Raspberry Pi, which is one of the more
+# natural places to run a Reticulum node — a fresh clone therefore builds
+# x86_64 binaries that link fine and then do not run (Codeberg #291).
+# Override it per host, which takes precedence over this file:
+#
+#   rustup target add aarch64-unknown-linux-musl            # once
+#   CARGO_BUILD_TARGET=aarch64-unknown-linux-musl cargo build --release …
+#
+# Moving the pin to arm64 would only mirror the problem, and dropping it
+# would give up musl-static for every developer build, so it stays and
+# the mismatch is reported instead: leviculum-cli/build.rs warns when a
+# build is producing the pinned target on a host of another architecture,
+# and `leviculum-std/tests/build_target_host_arch.rs` holds both that
+# detection and the two source-build documents to it.
 [build]
 target = "x86_64-unknown-linux-musl"
 
@@ -29,6 +46,22 @@ target = "x86_64-unknown-linux-musl"
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
 rustflags = ["-C", "link-self-contained=yes"]
+
+# The arm64 host override, linked by rust-lld for the same reason as
+# above: an arm64 host that sets CARGO_BUILD_TARGET then needs no musl
+# toolchain of its own, exactly as an x86_64 host needs none.
+#
+# No rustflags here, deliberately, although the x86_64 section carries
+# them. This triple is also what `scripts/build-deb.sh arm64` cross-
+# builds from an amd64 host through cargo-zigbuild, and zig is the C
+# compiler in that build: its CARGO_TARGET_*_LINKER overrides the line
+# below, but cargo uses only the first rustflags source it finds, so a
+# rustflags key here would either be ignored or feed self-contained crt
+# objects to a zig link that never asked for them. musl targets enable
+# link-self-contained by default anyway, so the key would buy nothing
+# and put the nightly's arm64 packages at risk for it.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
 
 [alias]
 # Development workflow

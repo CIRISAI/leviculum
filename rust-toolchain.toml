@@ -19,6 +19,11 @@ channel = "1.97.1"
 # so rustup auto-installs it on checkout. The linker (musl-gcc) is not
 # managed by rustup — developers need `sudo apt install musl-tools`
 # (or the equivalent on their distro).
+#
+# This list, like the pin it mirrors, cannot follow the host: an arm64
+# machine also auto-installs the x86_64 target and needs its own added
+# by hand (`rustup target add aarch64-unknown-linux-musl`), which is the
+# same override the build then asks it to pass — Codeberg #291.
 targets = ["x86_64-unknown-linux-musl"]
 # Embedded targets (nRF52840, RP2040) are not listed here to avoid
 # forcing downloads on every developer. Add them manually:

@@ -11,7 +11,14 @@
 // and refuses to run a binary whose hash does not match the repo HEAD,
 // catching a wrong-branch binary that mtime alone cannot (its mtime is
 // newer than the current commit). Falls back to "unknown" without git.
+// Shared with leviculum-std/tests/build_target_host_arch.rs, which is
+// where the detection below is tested: build scripts are not compiled as
+// test targets.
+include!("build/host_target.rs");
+
 fn main() {
+    warn_on_foreign_default_target();
+
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap();
     let build_id = std::env::var("LEVICULUM_BUILD_ID").unwrap_or_default();
     let base = if build_id.is_empty() {
@@ -29,6 +36,29 @@ fn main() {
     // and the workspace .git lives one level up.
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
+}
+
+/// Say so when this build is producing binaries the machine running it
+/// cannot execute, which is what the unconditional `[build] target` in
+/// `.cargo/config.toml` does on any host that is not x86_64 (Codeberg
+/// #291). The build succeeds either way — that is the point, the failure
+/// used to appear much later as a bare "cannot execute binary file" — so
+/// this is a warning, not an error, and it is silent for every target
+/// that was asked for explicitly.
+fn warn_on_foreign_default_target() {
+    // Set for build scripts by cargo, always, with no config fallback.
+    println!("cargo:rerun-if-env-changed=CARGO_BUILD_TARGET");
+    println!("cargo:rerun-if-changed=build/host_target.rs");
+    println!("cargo:rerun-if-changed=../.cargo/config.toml");
+    let (Ok(host), Ok(target)) = (std::env::var("HOST"), std::env::var("TARGET")) else {
+        return;
+    };
+    let pinned = std::fs::read_to_string("../.cargo/config.toml")
+        .ok()
+        .and_then(|config| configured_build_target(&config));
+    if let Some(message) = foreign_default_target(&host, &target, pinned.as_deref()) {
+        println!("cargo:warning={message}");
+    }
 }
 
 /// Resolve the current git HEAD commit hash, or "unknown" if git is

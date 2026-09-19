@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A source build on an arm64 host no longer produces x86_64 binaries in
+  silence. `.cargo/config.toml` pins `x86_64-unknown-linux-musl` for every
+  host and cargo has no per-host conditional there, so a Raspberry Pi — one
+  of the more natural places to run a Reticulum node, and an architecture
+  the `.deb` packaging already ships — built successfully and then failed at
+  execution with a message that says nothing about architecture. The pin
+  stays, because dropping it would give up musl-static for every developer
+  build and moving it would only mirror the problem; instead the build now
+  warns when it is producing the pinned target on a host of another
+  architecture, naming the `CARGO_BUILD_TARGET` override to pass, and both
+  source-build documents carry that override (Codeberg #291).
+
 - The changelog's own version headings render as links again. A Keep a
   Changelog heading is a reference link, so `## [0.8.1]` is only a link while
   a matching definition exists at the foot of the file, and nothing about

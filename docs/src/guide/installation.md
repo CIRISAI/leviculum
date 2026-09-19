@@ -43,6 +43,19 @@ The workspace pins `x86_64-unknown-linux-musl` as its build target (see the
 comments in `.cargo/config.toml` for why), so the binaries are in
 `target/x86_64-unknown-linux-musl/release/`, not `target/release/`.
 
+That pin names an architecture and cargo has no per-host conditional for
+it, so on an arm64 host (a Raspberry Pi, for instance) the build succeeds
+and produces x86_64 binaries that cannot run. Set your own target first —
+the build then warns no more, and the binaries are in
+`target/aarch64-unknown-linux-musl/release/` instead:
+
+```sh
+rustup target add aarch64-unknown-linux-musl
+export CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
+```
+
+The `.deb` packages are published for arm64 as well and need none of this.
+
 Verify the build; the output carries the version and the build commit:
 
 ```sh

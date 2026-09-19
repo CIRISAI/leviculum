@@ -88,7 +88,24 @@ cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest --bin l
 The workspace pins `x86_64-unknown-linux-musl` as its build target (see
 `.cargo/config.toml` for why), so the binaries land under
 `target/x86_64-unknown-linux-musl/release/`, not `target/release/`. No
-system C libraries are linked into the daemon. Run the test tiers:
+system C libraries are linked into the daemon.
+
+**On a non-x86_64 host** — a Raspberry Pi or any other arm64 board — that
+pin is the wrong architecture, and cargo has no way to make it follow the
+host. The build succeeds and the binaries then refuse to run. Name your
+own target instead, once per shell or in `~/.cargo/env`:
+
+```sh
+rustup target add aarch64-unknown-linux-musl
+export CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
+cargo build --release --bin lnsd --bin lnstatus --bin lncp --bin lnstest --bin lnprobe --bin lnpath
+```
+
+The binaries then land under `target/aarch64-unknown-linux-musl/release/`.
+Building without it prints a warning naming this override. The `.deb`
+packages above are already built for arm64 and need none of this.
+
+Run the test tiers:
 
 ```sh
 cargo test-core      # unit tests
