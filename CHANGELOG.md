@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a service that comes up and waits to be asked for can now answer with its
   metadata without announcing first. Runtime-only, as in the reference: the
   default is never written to persistent state.
+- `SECURITY.md`: a private route for reporting a vulnerability, with the
+  contact, a 7-day acknowledgement window, 90-day coordinated disclosure,
+  and what is in scope. The repository had no such route, so a finder's
+  only options were a public issue or silence (Codeberg #289).
 
 ### Changed
 

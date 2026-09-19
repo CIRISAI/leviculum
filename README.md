@@ -150,6 +150,11 @@ involved, attach the output of `lnstest diag` (see the
 [quickstart](docs/src/lnsd-quickstart.md) for the exact command). For
 patches, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+A suspected security vulnerability is the one thing that does not belong in
+the tracker: an issue is public from the moment it is filed, which hands the
+flaw to everyone who might use it. [SECURITY.md](SECURITY.md) names the
+private contact, the acknowledgement window, and what is in scope.
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.

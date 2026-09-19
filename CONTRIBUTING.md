@@ -88,6 +88,14 @@ in the same file rather than rewritten out of published history, and
 their count is checked the same way, so the baseline cannot be quietly
 moved forward.
 
+## Security reports
+
+A suspected vulnerability goes to the private contact in
+[SECURITY.md](SECURITY.md), not into an issue and not into a pull request.
+Both are public before a fix exists, and the fix is the point. That file
+also states the acknowledgement window and the disclosure terms, so you can
+decide whether to report before you do.
+
 ## Licensing
 
 Contributions are AGPL-3.0-or-later; see [LICENSE](LICENSE).
