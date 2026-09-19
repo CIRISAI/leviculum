@@ -81,7 +81,7 @@ A path learned from a path response therefore inherits the responder's STORED co
 measured one. Staleness propagates through this channel.
 
 leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops`). When a transport
-node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6264`)
+node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6296`)
 it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
 count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
 (`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:1746`
@@ -178,16 +178,16 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 | Receipt increment | `:1498` | `transport.rs:1714` | matches |
 | IPC exception, instance side | `:1523` | `transport.rs:1718` | matches |
 | IPC exception, client side | `:1525` | `transport.rs:1718` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
-| Announce rebroadcast | `:2050` | `transport.rs:6476` | matches |
+| Announce rebroadcast | `:2050` | `transport.rs:6508` | matches |
 | Path table store | `:1909`, `:2055` | `transport.rs:3287` | matches |
 | Path acceptance | `:1806`, `:2412` | `transport.rs:3229` (`should_update`) | matches |
-| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6264` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
+| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6296` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:3893`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:737` | `transport.rs:6929` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:6933` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:753` | `transport.rs:6940` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:6952` | matches |
+| Healing, no path | `:737` | `transport.rs:6961` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:6965` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:6972` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:6984` | matches |
 
 ### The deliberate deviation, and its cost
 

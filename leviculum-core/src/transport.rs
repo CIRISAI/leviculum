@@ -4886,7 +4886,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        // Determine whether to update the path table (hop count comparison).
+        // Determine whether to update the path table (hop count comparison),
+        // and WHICH acceptance branch let the announce through. The branch is
+        // the readout Codeberg #231 needs: the periculum #28 `pathchoice_*`
+        // corpus can only see the hop count alpha ends up with, and that is
+        // the sum of every acceptance path (first response wins on an empty
+        // table, a fresher emission wins on a populated one, and the
+        // same-emission clause below). A stack A/B on the installed hop count
+        // therefore cannot attribute a difference to any single branch; the
+        // emitted `reason` on PATH_ADD can be counted per arm and can.
+        //
         // Matches Python Transport.py:1620-1681 logic:
         // Equal or fewer hops: accept if emission timestamp is newer
         // More hops: accept only if path is expired, emission is newer,
@@ -4894,45 +4903,63 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         //
         // rate_limited announces still reach here so better-hop paths
         // can update the table. Only rebroadcasting is suppressed below.
-        let should_update = if let Some(existing) = self.storage.get_path(&dest_hash) {
+        let accept_reason: Option<&'static str> = if let Some(existing) =
+            self.storage.get_path(&dest_hash)
+        {
             let announce_emitted = emission_from_random_hash(&random_hash);
             let path_timebase = max_emission_from_blobs(&existing.random_blobs);
             if packet.hops <= existing.hops {
                 // Equal or fewer hops: accept if emission is newer, or if
                 // same emission but strictly fewer hops (same announce via
                 // a shorter path, e.g. direct vs relayed path response).
-                if announce_emitted > path_timebase
-                    || (announce_emitted == path_timebase && packet.hops < existing.hops)
-                {
+                //
+                // The second clause is a deliberate deviation: Python's
+                // equal-or-fewer-hops branch demands a strictly newer
+                // emission AND an unseen random blob
+                // (Transport.py:1772), so a second copy of an announce it
+                // has already heard can never displace the installed path,
+                // however few hops it took. The argument for deviating is
+                // that a shorter route costs fewer relays and less airtime;
+                // the counter-argument is that on a shared medium arrival
+                // order is the only quality signal there is, so a relayed
+                // copy that beat the direct one is evidence the direct link
+                // is the weaker of the two. Neither has been measured
+                // (Codeberg #231) — count `reason="same_emission_fewer_hops"`
+                // per stack arm before changing or keeping this.
+                if announce_emitted > path_timebase {
                     self.mark_path_unknown_state(&dest_hash);
-                    true
+                    Some("newer_emission")
+                } else if announce_emitted == path_timebase && packet.hops < existing.hops {
+                    self.mark_path_unknown_state(&dest_hash);
+                    Some("same_emission_fewer_hops")
                 } else {
-                    false
+                    None
                 }
             } else {
                 // More hops than current path
                 if now >= existing.expires_ms {
                     // Path expired: accept with new random blob
                     self.mark_path_unknown_state(&dest_hash);
-                    true
+                    Some("expired_path")
                 } else if announce_emitted > path_timebase {
                     // Newer emission: accept
                     self.mark_path_unknown_state(&dest_hash);
-                    true
+                    Some("newer_emission_worse_hops")
                 } else if announce_emitted == path_timebase && self.path_is_unresponsive(&dest_hash)
                 {
                     // Same emission but path is unresponsive: accept worse-hop
                     // announce as alternative route (Python Transport.py:1677-1679).
                     // do NOT call mark_path_unknown_state() here, state
                     // stays UNRESPONSIVE until a fresh announce resets it.
-                    true
+                    Some("unresponsive_same_emission")
                 } else {
-                    false
+                    None
                 }
             }
         } else {
-            true // New destination
+            Some("new_destination")
         };
+        let should_update = accept_reason.is_some();
 
         // Refresh local client tracking timestamp unconditionally.
         // Even when the path table isn't updated (same emission, same hops),
@@ -5014,6 +5041,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface = %self.iface_name(interface_index),
                 next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
                 source = "announce",
+                // Which acceptance branch let this announce in (Codeberg
+                // #231). Stable scalar, one value per branch, so a run's
+                // logs answer "how often did rule X install a path" by
+                // counting rather than by inference from hop counts.
+                reason = accept_reason.unwrap_or("unknown"),
                 ok = readback_ok,
                 table_len = table_len,
             );
@@ -20809,6 +20841,86 @@ mod tests {
                 0,
                 "Path should now point to interface 0 (direct)"
             );
+        }
+
+        /// The same-emission-fewer-hops clause is a deviation from Python
+        /// (Transport.py:1772 demands a strictly newer emission AND an
+        /// unseen random blob) whose Priority 1 benefit has never been
+        /// measured — Codeberg #231. The measurement periculum #28 was
+        /// meant to supply reads the hop count `alpha` ends up with, but
+        /// that number is the sum of every acceptance branch: on an empty
+        /// path table the first response to arrive wins whatever its hop
+        /// count, and on a populated one a fresher emission wins in BOTH
+        /// stacks. Only this clause differs between them.
+        ///
+        /// This pins the branch as separately countable, so a stack A/B can
+        /// attribute a direct-share difference instead of inferring one.
+        #[cfg(feature = "tracing")]
+        #[test]
+        fn test_path_add_names_the_acceptance_branch() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let identity = Identity::generate(&mut OsRng);
+            let mut dest = Destination::new(
+                Some(identity),
+                Direction::In,
+                DestinationType::Single,
+                "test",
+                &["reason"],
+            )
+            .unwrap();
+            let dest_hash = dest.hash().into_bytes();
+            let now = transport.clock.now_ms();
+            let announce_packet = dest.announce(None, &mut OsRng, now, now / 1000).unwrap();
+            let mut buf = [0u8; 500];
+            let len = announce_packet.pack(&mut buf).unwrap();
+
+            // Relayed copy first, onto an empty path table: whatever its hop
+            // count, it installs because there is nothing to compare against.
+            let mut relayed = Packet::unpack(&buf[..len]).unwrap();
+            relayed.hops = 2;
+            let mut relayed_buf = [0u8; 500];
+            let rlen = relayed.pack(&mut relayed_buf).unwrap();
+            let ((), first_logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.process_incoming(1, &relayed_buf[..rlen]).unwrap();
+            });
+            transport.drain_actions();
+            transport.drain_events();
+            assert_eq!(
+                path_add_reason(&first_logs),
+                Some("new_destination"),
+                "first announce onto an empty table is not a route decision"
+            );
+
+            // The direct copy of the SAME announce: same random blob, same
+            // emission, fewer hops. This is the branch Python does not have.
+            transport
+                .clock
+                .advance(transport.config().announce_rate_limit_ms + 1);
+            transport.storage_mut().clear_packet_hashes();
+            let ((), second_logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.process_incoming(0, &buf[..len]).unwrap();
+            });
+            assert_eq!(transport.hops_to(&dest_hash), Some(1));
+            assert_eq!(
+                path_add_reason(&second_logs),
+                Some("same_emission_fewer_hops"),
+                "the deviating clause must be countable on its own, not \
+                 inferred from the resulting hop count"
+            );
+        }
+
+        /// Pull the `reason` scalar off the single PATH_ADD line in a
+        /// captured log, or `None` if the announce installed no path.
+        #[cfg(feature = "tracing")]
+        fn path_add_reason(logs: &str) -> Option<&str> {
+            let line = logs.lines().find(|l| l.contains("event=\"PATH_ADD\""))?;
+            let rest = line.split("reason=\"").nth(1)?;
+            rest.split('"').next()
         }
 
         #[test]
