@@ -38,7 +38,7 @@
 1    -p leviculum-std --doc
 9    -p leviculum-std --test mvr
 
-# 20 in rnsd_interop, of which the three status_parity_tests::* are NOT
+# 20 in rnsd_interop, of which the status_parity_tests::* are NOT
 # unobserved: `just standard` runs them by name through
 # scripts/run-status-parity.sh (Codeberg #191a). They keep the #[ignore]
 # because they must run serially, apart from the parallel suite.
@@ -55,7 +55,13 @@
 # the other rather than a behaviour of ours alone. Run by hand with
 # `--ignored --nocapture` whenever local-client announce scheduling is
 # touched on either side; nothing in the release path re-measures it.
-21   -p leviculum-std --test rnsd_interop
+#
+# 21 -> 22 (2026-09-19): served_program_count_agrees_across_status_clients,
+# added by 898723d4 as the acceptance for the Serving-line fix. It is in the
+# observed group, not the unobserved one: run-status-parity.sh runs it by
+# name in `just standard`, and its EXPECTED moved to 4 in the same commit
+# as this line. 898723d4 moved neither pin.
+22   -p leviculum-std --test rnsd_interop
 
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means

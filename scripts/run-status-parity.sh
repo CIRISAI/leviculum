@@ -7,7 +7,7 @@
 # form of the drop-in-compatibility goal, and at ~196 s the cheapest
 # coverage per minute in the ignored bucket (Codeberg #189, #191).
 #
-# The #[ignore] stays on the three tests, and they are run by name here,
+# The #[ignore] stays on these tests, and they are run by name here,
 # for two reasons the ignore reason string does not state:
 #
 #   * they must run SERIALLY. The scenario paces announces at 25 Hz to
@@ -15,7 +15,7 @@
 #     every frequency has decayed to exactly 0. Sharing a machine with the
 #     rest of the parallel rnsd_interop suite puts CPU contention inside
 #     those windows. `just standard` runs that suite with default threads;
-#     lifting the ignore would drop these three into that pool.
+#     lifting the ignore would drop them into that pool.
 #   * they need the DEBUG lnsd and lnstatus binaries next to the test
 #     executable, and refuse a binary older than leviculum-cli's sources
 #     (the #53 stale-binary rule). No other tier builds those, so the
@@ -28,7 +28,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The three status_parity_tests::* tests. A cargo filter that matches
+# The status_parity_tests::* tests. A cargo filter that matches
 # nothing exits 0, so a green run here would otherwise be indistinguishable
 # from a run that measured nothing -- the exact failure mode
 # docs/src/concepts/evidence-and-honesty.md opens with. Pinned, and checked
@@ -38,7 +38,14 @@ cd "$(dirname "$0")/.."
 # gate, this one included: it records the names that ran and fails a run that
 # executed none. EXPECTED stays because it pins a NUMBER -- the manifest says
 # what ran, not how many were meant to.
-EXPECTED=3
+#
+# 3 -> 4 (2026-09-19): served_program_count_agrees_across_status_clients,
+# the acceptance 898723d4 owed the Serving-line fix. It belongs in this gate
+# for the same reason as the other three -- it drives lnstatus and rnstatus
+# against both daemons -- and 898723d4 added it without moving this pin, so
+# the gate has reported "expected 3 tests to run, 4 did" and failed
+# `just standard` at Justfile:729 on every sha since.
+EXPECTED=4
 
 cargo build -p leviculum-cli --bin lnsd --bin lnstatus
 
