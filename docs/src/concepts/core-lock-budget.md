@@ -166,7 +166,7 @@ That figure is consistent with the table above: eight times the
 
 `LxmfRouter` can hand the build out instead, under
 `RouterConfig::defer_resource_builds`
-(`leviculum-lxmf/src/router.rs:114`). What the tick then costs, for one
+(`leviculum-lxmf/src/router.rs:124`). What the tick then costs, for one
 due message, measured the same way:
 
 | payload | deferred tick | composed tick (incompressible) |

@@ -152,7 +152,7 @@ consequence spelled out, not a config-file default nobody reads.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:1941-1958`); replay via
+  `leviculum-lxmf/src/router.rs:2031-2048`); replay via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1317`).
 - Re-selection after restart.

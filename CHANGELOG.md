@@ -37,6 +37,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Breaking for anyone who implements `StampExecutor`: a call site with no
   cancellation path passes a fresh `StampCancel::new()`.
 
+### Fixed
+
+- An LXMF router no longer forgets everything it knows when its node's
+  timebase becomes real. A board without an RTC stamps from uptime seconds
+  until the first validated announce seats a real calendar, and the router
+  ages its stamp-cost cache and its delivered/processed ID windows on that
+  value — so the re-anchor, a step of about 1.7e9 seconds, expired every
+  entry in the next cleanup pass even though nothing had grown old.
+
+  The monotonic clock is what says how much time actually passed. The router
+  now keeps the `(emission_secs, now_ms)` pair of the last tick and shifts
+  every cached stamp by whatever the calendar advanced beyond the stopwatch,
+  so the ages those caches encode survive the step and real elapsed time
+  still expires entries. Ticket expiries are deliberately left alone: a
+  peer's `expires_unix` is an absolute instant it wrote from its own clock,
+  not an age measured here.
+
+  The window that was being lost is not cosmetic. A queued message whose
+  recipient stamp cost had just been forgotten goes out unstamped, and a peer
+  that demands a stamp drops it. The snapshot format is unchanged — the
+  anchor's monotonic half belongs to one process and is never persisted
+  (Codeberg #186).
+
 ## [0.9.0] - 2026-09-18
 
 ### Added

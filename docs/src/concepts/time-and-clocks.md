@@ -163,6 +163,41 @@ wall-clock microsecond, and nothing reads it as one. Platforms whose
 `secs * 1_000_000` — and keep working unchanged, with no precision to
 gain and none invented.
 
+### An age is not a timestamp, and the producer steps
+
+Everything above is about *instants* a peer compares. A second kind
+of consumer measures *ages* against the same value — how long ago did
+we see this ID, how long ago did this peer announce its stamp cost —
+and for that consumer the calendar clock has a property the instant
+consumers do not care about: it moves in jumps.
+
+A clockless node stamps from uptime seconds until its first
+re-anchor, so the step at that moment is the full distance from a few
+seconds to present-day unix time — about 1.7e9 seconds, at once. Any
+window aged by subtracting a stored calendar value from the current
+one expires in that single step, however short the window's real age.
+Nothing grew old; the ruler changed.
+
+The rule, therefore: **age on the stopwatch, stamp on the calendar.**
+A cache that must survive process restarts has to persist calendar
+values — the stopwatch epoch does not outlive the process — so it
+stores the calendar stamp and absorbs the step instead. The LXMF
+router does exactly that: it keeps the `(emission_secs, now_ms)` pair
+of the last tick and, when the calendar advances by more than the
+stopwatch says it should have, shifts every stored stamp by the
+difference (`LxmfRouter::anchor_wall_clock`,
+`leviculum-lxmf/src/router.rs:1889`, Codeberg #186). The ages the
+cache encodes are then preserved exactly across the re-anchor, and
+real elapsed time still expires entries.
+
+Two things are deliberately NOT absorbed. A stamp is never moved past
+the current calendar value, so a checkpoint restored from a life with
+a real clock onto a node still on uptime seconds cannot become
+unexpirable. And expiries a *peer* wrote from its own clock — an LXMF
+ticket's `expires_unix` — are absolute instants, not ages measured
+here: a node whose calendar has just become real should start
+honouring them, not carry them along.
+
 ### The one refusal left: a field the peer discards in silence
 
 Authorship is never refused — that is the headline rule of this page.
@@ -174,7 +209,7 @@ keeps a ticket only while `time.time() < expires` on its own machine
 does not. A backwards-biased expiry from an unhealed calendar is
 therefore already expired on arrival — issuing it is emitting a field
 the peer silently discards. `LxmfRouter::issue_ticket_field`
-(`leviculum-lxmf/src/router.rs:649`) returns
+(`leviculum-lxmf/src/router.rs:666`) returns
 `RouterError::NoWallClock` while the calendar is not a plausible wall
 clock, rather than issue one: a named error is a diagnosis; a
 discarded ticket is a mystery that surfaces months later as "replies

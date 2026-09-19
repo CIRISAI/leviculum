@@ -51,6 +51,16 @@ pub const PATH_REQUEST_WAIT_MS: u64 = 7_000;
 pub const MAX_PATHLESS_TRIES: u8 = 1;
 pub const MESSAGE_EXPIRY_SECS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 
+/// The wall-clock step between two ticks that is a timebase discontinuity
+/// rather than elapsed time (Codeberg #186).
+///
+/// The monotonic clock says how much time actually passed; whatever the wall
+/// clock reports beyond that is the clock itself moving. The threshold only
+/// has to sit above the jitter between two readings and below the smallest
+/// step worth calling a jump: NTP slews gradually and steps rarely, and the
+/// clockless case this exists for moves by about 1.7e9 seconds at once.
+const TIMEBASE_JUMP_SECS: f64 = 60.0;
+
 const ROUTER_STATE_KEY: &[u8] = b"lxmf/router-state";
 const SNAPSHOT_VERSION: u64 = 4;
 const SNAPSHOT_FIELDS: usize = 9;
@@ -476,6 +486,11 @@ pub struct LxmfRouter {
     outbound_stamp_costs: StampCostMap,
     delivered_ids: BTreeMap<[u8; 32], f64>,
     processed_ids: BTreeMap<[u8; 32], f64>,
+    /// `(emission_secs, now_ms)` as of the last tick, the pair a wall-clock
+    /// discontinuity is measured against (Codeberg #186). Deliberately not
+    /// persisted, for the reason `next_job_ms` is not restored: its monotonic
+    /// half belongs to this process's clock epoch.
+    timebase_anchor: Option<(f64, u64)>,
     tickets: TicketStore,
     ignored: BTreeSet<[u8; 16]>,
     /// Runtime-only markers for Python LXMF's pre-emptive first path request
@@ -523,10 +538,11 @@ struct RestoredRouterState {
 /// further right.
 ///
 /// One consequence worth knowing: the router's own caches (`clean`, the
-/// stamp-cost and delivered/processed ID windows) are aged on this value, so a
-/// clockless node whose timebase jumps from uptime seconds to real unix time
-/// expires them all in one pass, exactly as a Python node does across a large
-/// NTP step. The effect is a lost dedup window, not a wire-visible one.
+/// stamp-cost and delivered/processed ID windows) are aged on this value, and
+/// it is not continuous — a clockless node's timebase jumps from uptime
+/// seconds to real unix time the first time it overhears a validated announce.
+/// [`LxmfRouter::anchor_wall_clock`] absorbs that step so the ages those
+/// caches encode survive it (Codeberg #186).
 fn emission_secs<R, C, S>(node: &NodeCore<R, C, S>) -> f64
 where
     R: CryptoRngCore,
@@ -568,6 +584,7 @@ impl LxmfRouter {
             outbound_stamp_costs: BTreeMap::new(),
             delivered_ids: BTreeMap::new(),
             processed_ids: BTreeMap::new(),
+            timebase_anchor: None,
             tickets: TicketStore::default(),
             ignored: BTreeSet::new(),
             preemptive_path_requests: BTreeSet::new(),
@@ -1593,8 +1610,12 @@ impl LxmfRouter {
         C: Clock,
         S: Storage,
     {
-        let now_unix = emission_secs(node);
         let now_ms = node.now_ms();
+        // Resolved before anything in this tick reads an age: the due loop
+        // below consults the stamp-cost cache, and a message sent unstamped
+        // because a timebase jump made a known cost look expired is one the
+        // peer drops (Codeberg #186).
+        let now_unix = self.anchored_now_unix(node, now_ms);
         let mut output = RouterOutput::default();
         if let Some(mut propagation) = self.propagation.take() {
             let client_output = propagation.tick(self, node, now_unix);
@@ -1825,6 +1846,75 @@ impl LxmfRouter {
         self.clean(now_unix);
         self.apply_deadline(&mut output.core);
         Ok(self.finish_output(output))
+    }
+
+    /// Resolve the wall clock for a tick and keep the router's ageing windows
+    /// anchored across a timebase discontinuity (Codeberg #186).
+    fn anchored_now_unix<R, C, S>(&mut self, node: &NodeCore<R, C, S>, now_ms: u64) -> f64
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let now_unix = emission_secs(node);
+        self.anchor_wall_clock(now_unix, now_ms);
+        now_unix
+    }
+
+    /// Absorb a wall-clock discontinuity into the locally-anchored caches.
+    ///
+    /// The stamp-cost cache and the delivered/processed ID windows are aged on
+    /// [`emission_secs`]. On a clockless node that value is uptime seconds
+    /// until the first validated announce seats a real timebase, and then
+    /// steps by about 1.7e9 seconds at once; every entry would age out in the
+    /// next [`Self::clean`] even though nothing had grown old. The monotonic
+    /// clock is what says how much time passed, so whatever the wall clock
+    /// reports beyond the monotonic advance is the clock moving, and the
+    /// cached stamps move with it: the ages they encode are preserved exactly.
+    ///
+    /// This is not a Python divergence being introduced, it is one being
+    /// removed in the direction the deviation rule allows — nothing wire-
+    /// visible changes, and the node keeps a dedup window it had earned.
+    ///
+    /// A stamp is never moved past `now_unix`. A snapshot restored from a life
+    /// with a real clock onto a node still on uptime seconds carries stamps
+    /// that already sit in the future; shifting those forward again would make
+    /// them unexpirable. Treating them as seen now costs at most one window of
+    /// dedup memory, which is the direction this fix exists to err in.
+    ///
+    /// Ticket expiries are deliberately left alone. `Ticket::expires_unix` is
+    /// a wire value a peer wrote from its own clock — an absolute instant, not
+    /// an age measured here — so a node whose timebase has just become real
+    /// SHOULD start honouring it rather than carry it along.
+    fn anchor_wall_clock(&mut self, now_unix: f64, now_ms: u64) {
+        if let Some((anchor_unix, anchor_ms)) = self.timebase_anchor {
+            let monotonic = now_ms.saturating_sub(anchor_ms) as f64 / 1000.0;
+            let step = (now_unix - anchor_unix) - monotonic;
+            if step.abs() > TIMEBASE_JUMP_SECS {
+                self.rebase_ageing(step, now_unix);
+            }
+        }
+        self.timebase_anchor = Some((now_unix, now_ms));
+    }
+
+    fn rebase_ageing(&mut self, step: f64, now_unix: f64) {
+        let rebased = |seen: f64| (seen + step).min(now_unix);
+        for seen in self
+            .delivered_ids
+            .values_mut()
+            .chain(self.processed_ids.values_mut())
+        {
+            *seen = rebased(*seen);
+        }
+        for (seen, _, _) in self.outbound_stamp_costs.values_mut() {
+            *seen = rebased(*seen);
+        }
+        if !self.delivered_ids.is_empty()
+            || !self.processed_ids.is_empty()
+            || !self.outbound_stamp_costs.is_empty()
+        {
+            self.persistence_dirty = true;
+        }
     }
 
     fn clean(&mut self, now_unix: f64) {
@@ -3559,6 +3649,97 @@ mod persistence_tests {
         assert!(router.processed_ids.is_empty());
         assert!(router.tickets.outbound(&[4; 16], now_unix).is_none());
         assert_eq!(persistence_request_count(&output), 1);
+    }
+
+    /// Codeberg #186: the first validated announce a clockless node overhears
+    /// moves its timebase from uptime seconds to real unix time. Nothing grew
+    /// old in that step, so nothing may age out because of it.
+    ///
+    /// The wall-clock readings are supplied directly rather than through a
+    /// node, so the discontinuity is exactly the one under test and no clock
+    /// implementation can soften it. `emission_secs` is second-granular on the
+    /// learned-timebase arm, which is what makes the jump a step rather than a
+    /// ramp.
+    #[test]
+    fn a_timebase_jump_keeps_the_dedup_windows_and_the_stamp_cost_cache() {
+        let mut router = router(RouterConfig::default());
+        let uptime = 5.0;
+        router.anchor_wall_clock(uptime, 5_000);
+
+        router.insert_bounded_stamp_cost([0x11; 16], (uptime, Some(4), true));
+        router.insert_bounded_id([0x22; 32], uptime, false);
+        let mut inbound = message(2);
+        inbound.destination_hash = router.node.delivery_destination_hash().into_bytes();
+        inbound.verification = Verification::Unverified;
+        let message_id = inbound.message_id;
+        let mut events = Vec::new();
+        router.handle_inbound_message(inbound.clone(), uptime, &mut events);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RouterEvent::MessageReceived(_))));
+
+        // One second of monotonic time later, the timebase becomes real.
+        let jumped = 1_700_000_000.0;
+        router.anchor_wall_clock(jumped, 6_000);
+        router.clean(jumped);
+
+        assert_eq!(router.outbound_stamp_cost_at(&[0x11; 16], jumped), Some(4));
+        assert!(router.processed_ids.contains_key(&[0x22; 32]));
+        // The ages survive as ages, not merely as entries: one second passed.
+        assert_eq!(router.delivered_ids.get(&message_id), Some(&(jumped - 1.0)));
+
+        let mut events = Vec::new();
+        router.handle_inbound_message(inbound, jumped, &mut events);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RouterEvent::Duplicate(id) if *id == message_id)),
+            "the dedup window the jump would have wiped must still refuse the message",
+        );
+    }
+
+    /// The other half: a wall clock that advances with the monotonic clock is
+    /// elapsed time, and elapsed time still expires entries. Without this the
+    /// fix above could be a cache that never ages at all.
+    #[test]
+    fn elapsed_time_still_ages_the_router_caches() {
+        let mut router = router(RouterConfig::default());
+        router.anchor_wall_clock(0.0, 0);
+        router.insert_bounded_stamp_cost([0x11; 16], (0.0, Some(4), true));
+        router.insert_bounded_id([0x22; 32], 0.0, true);
+        router.insert_bounded_id([0x33; 32], 0.0, false);
+
+        let later = MESSAGE_EXPIRY_SECS * 7.0 + STAMP_COST_EXPIRY as f64 + 100.0;
+        router.anchor_wall_clock(later, (later * 1000.0) as u64);
+        router.clean(later);
+
+        assert!(router.outbound_stamp_costs.is_empty());
+        assert!(router.delivered_ids.is_empty());
+        assert!(router.processed_ids.is_empty());
+    }
+
+    /// A stamp restored from a life with a real clock, onto a node still on
+    /// uptime seconds, is already in the future. The rebase must not push it
+    /// further out, or it would never expire again.
+    #[test]
+    fn a_stamp_already_in_the_future_is_clamped_to_now() {
+        let mut router = router(RouterConfig::default());
+        let restored = 1_700_000_000.0;
+        router.insert_bounded_id([0x22; 32], restored, true);
+        router.anchor_wall_clock(5.0, 5_000);
+
+        let jumped = 1_700_000_100.0;
+        router.anchor_wall_clock(jumped, 6_000);
+        assert_eq!(router.delivered_ids.get(&[0x22; 32]), Some(&jumped));
+
+        // Both clocks advance together from here, so this is elapsed time.
+        let aged = jumped + MESSAGE_EXPIRY_SECS * 7.0;
+        router.anchor_wall_clock(aged, 6_000 + (MESSAGE_EXPIRY_SECS * 7_000.0) as u64);
+        router.clean(aged);
+        assert!(
+            router.delivered_ids.is_empty(),
+            "a clamped stamp still ages out on real elapsed time"
+        );
     }
 
     #[test]
