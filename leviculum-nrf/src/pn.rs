@@ -162,10 +162,10 @@ use leviculum_lxmf::constants::{
 };
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, peering_key_material, response_action, DeclineReason, DropReason,
-    InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer, PeerRecord, PeerStore,
-    PeerSyncEnvelope, PeerTable, PeeringConfig, ResponseAction, SyncPhase, OFFER_REQUEST_PATH,
-    SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
+    answer_offer, build_offer, offer_budget_for_mdu, peering_key_material, response_action,
+    DeclineReason, DropReason, InboundGate, OfferPlan, OfferResponse, PeerChange, PeerOffer,
+    PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeeringConfig, ResponseAction, SyncPhase,
+    OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_BACKOFF_STEP_SECS, SYNC_INTERVAL_SECS,
 };
 use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
@@ -1275,9 +1275,54 @@ impl Engine {
             out.merge(node.close_link(link_id));
             return;
         };
+        // The offer is planned HERE, against this link, because only now
+        // is the MDU known: `send_request` refuses a body over
+        // `link.mdu()`, which on LoRa is 431 B and admits ten ids. The
+        // plan the round was scheduled with only established that
+        // something above the cursor is offerable at all.
+        let Some(mdu) = node.link(link_id).map(|link| link.mdu()) else {
+            self.finish_round("link_gone", 0, 0);
+            out.merge(node.close_link(link_id));
+            return;
+        };
+        let Some(cursor) = self.peers.get(&peer_hash).map(|peer| peer.cursor) else {
+            return;
+        };
+        let mut entries: Vec<StoredMessage> = Vec::new();
+        if self
+            .role
+            .store()
+            .for_each(&mut |meta| {
+                if meta.sequence > cursor {
+                    entries.push(*meta);
+                }
+            })
+            .is_err()
+        {
+            self.finish_round("store_error", 0, 0);
+            out.merge(node.close_link(link_id));
+            return;
+        }
+        entries.sort_by_key(|meta| meta.sequence);
+        let Some(peer) = self.peers.get(&peer_hash) else {
+            return;
+        };
+        let planned = build_offer(peer, &entries, offer_budget_for_mdu(mdu));
+        let plan = match planned {
+            Some(plan) if !plan.ids.is_empty() => plan,
+            // Everything above the cursor was drained or became
+            // unofferable between scheduling and link-up: conclude the
+            // round so the cursor still steps past what is dead.
+            other => {
+                let target = other.map_or(cursor, |plan| plan.cursor_target);
+                self.conclude_round(node, &peer_hash, link_id, target, 0, 0, out);
+                return;
+            }
+        };
         let Some(sync) = self.outbound.as_mut() else {
             return;
         };
+        sync.plan = plan;
         let offer = PeerOffer {
             peering_key: key,
             transient_ids: sync.plan.ids.clone(),
@@ -2037,7 +2082,13 @@ impl Engine {
             return;
         }
         entries.sort_by_key(|meta| meta.sequence);
-        let Some(plan) = build_offer(peer, &entries) else {
+        // A probe, not the offer: there is no link yet, so no MDU to size
+        // against. One id is all this has to answer — "is anything above
+        // the cursor offerable?". The offer itself is built in
+        // `on_sync_link_up` against the link that will carry it. An empty
+        // id list still carries the full skip scan, so dead entries are
+        // stepped past here exactly as before.
+        let Some(plan) = build_offer(peer, &entries, OFFER_PROBE_BUDGET) else {
             return;
         };
         if plan.ids.is_empty() {

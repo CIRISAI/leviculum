@@ -1145,7 +1145,9 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 is_initiator: true,
                 ..
             } => {
-                ready.peering.on_link_established(core, link_id, &mut out);
+                ready
+                    .peering
+                    .on_link_established(core, &ready.node, link_id, &mut out);
             }
             // The peer's answer to our /offer.
             NodeEvent::ResponseReceived {

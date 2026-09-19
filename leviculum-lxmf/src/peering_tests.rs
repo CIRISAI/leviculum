@@ -405,7 +405,7 @@ fn the_inbound_gate_applies_the_reference_order_and_static_bypass() {
 fn build_offer_takes_everything_above_the_cursor_in_order() {
     let peer = peer_at(1);
     let entries = [entry(1, 300, 16), entry(2, 300, 16), entry(3, 300, 16)];
-    let plan = build_offer(&peer, &entries).unwrap();
+    let plan = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
     assert_eq!(
         plan.ids,
         vec![entries[1].transient_id, entries[2].transient_id]
@@ -424,7 +424,7 @@ fn low_value_and_oversize_entries_are_skipped_forever_via_the_cursor() {
         entry(3, 5000, 16), // above 4 kB transfer limit (LXMPeer.py:370)
         entry(4, 300, 16),  // offered
     ];
-    let plan = build_offer(&peer, &entries).unwrap();
+    let plan = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
     assert_eq!(
         plan.ids,
         vec![entries[1].transient_id, entries[3].transient_id]
@@ -440,7 +440,7 @@ fn the_sync_limit_stops_the_round_without_advancing_past_the_rest() {
     // admits 8 (each stays under the 4 kB per-message limit).
     let peer = peer_at(0);
     let entries: Vec<StoredMessage> = (1..=10).map(|n| entry(n, 3900, 16)).collect();
-    let plan = build_offer(&peer, &entries).unwrap();
+    let plan = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
     assert_eq!(plan.ids.len(), 8);
     // The cursor stops at the last offered entry: nothing resumable was
     // stepped past.
@@ -452,11 +452,104 @@ fn the_offer_byte_budget_bounds_one_round() {
     let mut peer = peer_at(0);
     peer.sync_limit_kb = 10_240; // out of the way (reference SYNC_LIMIT)
     let entries: Vec<StoredMessage> = (1..=300).map(|n| entry(n, 10, 16)).collect();
-    let plan = build_offer(&peer, &entries).unwrap();
-    // (6144 − 40) / 34 = 179 ids fit the §5 offer budget.
+    let plan = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
+    // (6144 − 38) / 34 = 179 ids fit the §5 RAM ceiling.
     assert_eq!(plan.ids.len(), 179);
     assert_eq!(plan.cursor_target, 179);
-    assert!(plan.ids.len() * 34 + 40 <= OFFER_BYTES_LIMIT);
+    assert!(offer_encoded_len(plan.ids.len()) <= OFFER_BYTES_LIMIT);
+}
+
+#[test]
+fn the_accounted_offer_size_is_what_the_encoder_produces() {
+    // The budget is only as good as its arithmetic: every id count that
+    // changes the msgpack array header, plus the §5 ceiling's own count.
+    for count in [0usize, 1, 15, 16, 179] {
+        let offer = PeerOffer {
+            peering_key: [3; 32],
+            transient_ids: (0..count).map(|n| [n as u8; 32]).collect(),
+        };
+        assert_eq!(
+            offer.encode().len(),
+            offer_encoded_len(count),
+            "accounted size differs from the encoder at {count} ids"
+        );
+    }
+}
+
+#[test]
+fn an_offer_is_bounded_by_the_link_it_will_be_handed_to() {
+    // The LoRa link MDU (`compute_link_mdu` at the default MTU of 500).
+    const LORA_MDU: usize = 431;
+    let mut peer = peer_at(0);
+    peer.sync_limit_kb = 10_240; // out of the way
+    let entries: Vec<StoredMessage> = (1..=50).map(|n| entry(n, 10, 16)).collect();
+
+    let budget = offer_budget_for_mdu(LORA_MDU);
+    let plan = build_offer(&peer, &entries, budget).unwrap();
+    assert_eq!(plan.ids.len(), 10);
+    // What `send_request` measures against the MDU is the body plus its
+    // request envelope; the round that died offered twelve.
+    assert!(REQUEST_ENVELOPE_BYTES + offer_encoded_len(plan.ids.len()) <= LORA_MDU);
+    assert!(REQUEST_ENVELOPE_BYTES + offer_encoded_len(plan.ids.len() + 1) > LORA_MDU);
+
+    // The cursor stops on the last id that actually goes out: the next
+    // round resumes at 11, nothing is stepped over unoffered.
+    assert_eq!(plan.cursor_target, 10);
+    let mut peer = peer_at(plan.cursor_target);
+    peer.sync_limit_kb = 10_240;
+    let second = build_offer(&peer, &entries, budget).unwrap();
+    assert_eq!(second.ids[0], entries[10].transient_id);
+    assert_eq!(second.ids.len(), 10);
+    assert_eq!(second.cursor_target, 20);
+}
+
+#[test]
+fn rounds_bounded_by_a_link_still_drain_the_whole_store() {
+    // The ratchet the defect produced: a store that outgrew one request
+    // never synced again. Bounded rounds must cover every id, in order,
+    // with no repeats and no gaps.
+    const LORA_MDU: usize = 431;
+    let budget = offer_budget_for_mdu(LORA_MDU);
+    let entries: Vec<StoredMessage> = (1..=50).map(|n| entry(n, 10, 16)).collect();
+    let mut peer = peer_at(0);
+    peer.sync_limit_kb = 10_240;
+
+    let mut offered: Vec<TransientId> = Vec::new();
+    let mut rounds = 0;
+    while let Some(plan) = build_offer(&peer, &entries, budget) {
+        rounds += 1;
+        assert!(rounds <= 50, "the drain did not terminate");
+        offered.extend_from_slice(&plan.ids);
+        // The cursor only moves over ids this round actually named.
+        peer.cursor = plan.cursor_target;
+    }
+    assert_eq!(rounds, 5);
+    let all: Vec<TransientId> = entries.iter().map(|entry| entry.transient_id).collect();
+    assert_eq!(offered, all);
+}
+
+#[test]
+fn a_budget_too_small_for_one_id_offers_nothing_rather_than_a_doomed_request() {
+    let peer = peer_at(0);
+    let entries = [entry(1, 10, 16)];
+    assert_eq!(build_offer(&peer, &entries, OFFER_KEY_BYTES + 1), None);
+    // One id's worth of room is the probe budget, and it offers one.
+    let plan = build_offer(&peer, &entries, OFFER_PROBE_BUDGET).unwrap();
+    assert_eq!(plan.ids.len(), 1);
+}
+
+#[test]
+fn the_probe_budget_still_steps_past_everything_dead() {
+    // What `start_round` relies on: planning with room for a single id
+    // reports "something is offerable" without changing how far a round
+    // with nothing offerable advances the cursor.
+    let peer = peer_at(0);
+    let entries = [entry(1, 300, 0), entry(2, 300, 0), entry(3, 300, 0)];
+    let probed = build_offer(&peer, &entries, OFFER_PROBE_BUDGET).unwrap();
+    let full = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
+    assert!(probed.ids.is_empty());
+    assert_eq!(probed.cursor_target, full.cursor_target);
+    assert_eq!(probed.skipped_low_value, full.skipped_low_value);
 }
 
 #[test]
@@ -465,7 +558,7 @@ fn a_stale_cursor_reads_as_older_than_everything_live() {
     // sequences begin far above it — the full bounded re-offer.
     let peer = peer_at(0);
     let entries = [entry(900, 300, 16), entry(901, 300, 16)];
-    let plan = build_offer(&peer, &entries).unwrap();
+    let plan = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
     assert_eq!(plan.ids.len(), 2);
     assert_eq!(plan.cursor_target, 901);
 }
@@ -473,10 +566,13 @@ fn a_stale_cursor_reads_as_older_than_everything_live() {
 #[test]
 fn nothing_to_offer_is_none_but_pure_skips_still_advance() {
     let peer = peer_at(5);
-    assert_eq!(build_offer(&peer, &[entry(5, 300, 16)]), None);
+    assert_eq!(
+        build_offer(&peer, &[entry(5, 300, 16)], OFFER_BYTES_LIMIT),
+        None
+    );
     // Only-skippable content still yields a plan whose empty offer moves
     // the cursor (otherwise the same dead entries scan forever).
-    let plan = build_offer(&peer, &[entry(6, 300, 0)]).unwrap();
+    let plan = build_offer(&peer, &[entry(6, 300, 0)], OFFER_BYTES_LIMIT).unwrap();
     assert!(plan.ids.is_empty());
     assert_eq!(plan.cursor_target, 6);
 }

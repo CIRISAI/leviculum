@@ -96,12 +96,68 @@ pub const SYNC_BACKOFF_STEP_SECS: u64 = 12 * 60;
 /// (`reference/LXMF/LXMF/LXMRouter.py:877`, `:31`, applied at `:908-910`).
 pub const SYNC_INTERVAL_SECS: u64 = 24;
 
-/// Upper bound on one encoded `/offer` request body, §5's 6 144 B budget:
+/// RAM ceiling on one encoded `/offer` request body, §5's 6 144 B budget:
 /// the bound that keeps the board's per-sync RAM inside its slice. Each id
 /// encodes to 34 B (bin8 header + 32), so this admits ~180 ids per round;
 /// what does not fit is offered next round, the cursor never jumps past
 /// it.
+///
+/// This is a ceiling, never the budget on its own: an offer also has to
+/// fit the link it is handed to, which on LoRa is an order of magnitude
+/// smaller. Callers size a round with [`offer_budget_for_mdu`] and pass
+/// the result to [`build_offer`].
 pub const OFFER_BYTES_LIMIT: usize = 6144;
+
+/// What `NodeCore::send_request` wraps a request body in before it meets
+/// the link MDU: `fixarray(3)` 1 B, the float64 timestamp 9 B, and the
+/// bin8 path hash 18 B (`leviculum-core/src/node/mod.rs`, "Build msgpack:
+/// fixarray(3) + float64(timestamp) + bin(path_hash) + data_or_nil"). The
+/// check that refuses an oversized request is `packed.len() > link.mdu()`
+/// right below it, and that refusal is what silently stopped every sync
+/// round whose store held more than about ten offerable records.
+pub const REQUEST_ENVELOPE_BYTES: usize = 28;
+
+/// The encoded `/offer` body before the first id: `fixarray(2)` 1 B plus
+/// the bin8 peering key 34 B ([`PeerOffer::encode`]).
+pub const OFFER_KEY_BYTES: usize = 35;
+
+/// One offered id on the wire: bin8 header 2 B plus the 32-byte id.
+pub const OFFER_ID_BYTES: usize = 34;
+
+/// The smallest budget that can still carry one id. A caller that only
+/// needs to know *whether* anything is offerable — before a link exists,
+/// so before an MDU is known — plans with this and re-plans against the
+/// link once it is up.
+pub const OFFER_PROBE_BUDGET: usize = OFFER_KEY_BYTES + 1 + OFFER_ID_BYTES;
+
+/// Bytes [`PeerOffer::encode`] produces for `id_count` ids: the key, the
+/// msgpack array header for the id list (1 B up to 15 entries, 3 B up to
+/// 65 535 — `rmp`'s `write_array_len`), and the ids.
+pub fn offer_encoded_len(id_count: usize) -> usize {
+    let header = if id_count <= 15 {
+        1
+    } else if id_count <= 65_535 {
+        3
+    } else {
+        5
+    };
+    OFFER_KEY_BYTES + header + id_count * OFFER_ID_BYTES
+}
+
+/// The `/offer` body budget one request on a link with this MDU can
+/// carry: what the link takes, less the request envelope around the body,
+/// and never above the §5 RAM ceiling.
+///
+/// The peer's answer is bounded by the same number without needing its
+/// own: the wanted list is a subset of the ids we named, it carries no
+/// peering key, and the response envelope (`fixarray(2)` + bin8 request
+/// id, 19 B) is smaller than the request's. An offer that fits the link
+/// therefore cannot provoke an answer that does not.
+pub fn offer_budget_for_mdu(link_mdu: usize) -> usize {
+    link_mdu
+        .saturating_sub(REQUEST_ENVELOPE_BYTES)
+        .min(OFFER_BYTES_LIMIT)
+}
 
 /// Per-message overhead and initial size the reference budgets when
 /// packing an offer against the peer's limits
@@ -1032,7 +1088,15 @@ pub struct OfferPlan {
 /// Build one offer from the store scan: every entry above the peer's
 /// cursor, in append order, filtered exactly as the offering reference
 /// filters (`sync`, `reference/LXMF/LXMF/LXMPeer.py:331-379`) and bounded
-/// by [`OFFER_BYTES_LIMIT`].
+/// by `offer_budget` bytes of encoded body.
+///
+/// `offer_budget` is the caller's, because only the caller knows the link
+/// the offer will be handed to: [`offer_budget_for_mdu`] turns that
+/// link's MDU into this number. Passing [`OFFER_BYTES_LIMIT`] blind is
+/// what made a round with more than about ten offerable records die at
+/// `send_request` with `PayloadTooLarge`, silently and for good — the
+/// store only grows between purges, so the next round refused the same
+/// way.
 ///
 /// The append-order walk is what makes the cursor sound: the plan stops —
 /// without advancing `cursor_target` further — at the first entry the
@@ -1046,7 +1110,11 @@ pub struct OfferPlan {
 ///
 /// `entries` must be sorted ascending by `sequence`. Returns `None` when
 /// nothing above the cursor is offerable and the cursor cannot advance.
-pub fn build_offer(peer: &Peer, entries: &[StoredMessage]) -> Option<OfferPlan> {
+pub fn build_offer(
+    peer: &Peer,
+    entries: &[StoredMessage],
+    offer_budget: usize,
+) -> Option<OfferPlan> {
     let mut plan = OfferPlan {
         ids: Vec::new(),
         cursor_target: peer.cursor,
@@ -1054,9 +1122,6 @@ pub fn build_offer(peer: &Peer, entries: &[StoredMessage]) -> Option<OfferPlan> 
         skipped_low_value: 0,
     };
     let mut cumulative = OFFER_BASE_SIZE;
-    // 2 B msgpack array/bin framing slack + 34 B per encoded id, kept
-    // under the §5 offer budget.
-    let mut encoded_bytes = 40usize;
     let min_value = peer.min_accepted_cost();
 
     for entry in entries {
@@ -1077,11 +1142,10 @@ pub fn build_offer(peer: &Peer, entries: &[StoredMessage]) -> Option<OfferPlan> 
         if cumulative + transfer_size >= peer.sync_limit_kb.saturating_mul(1000) {
             break;
         }
-        if encoded_bytes + 34 > OFFER_BYTES_LIMIT {
+        if offer_encoded_len(plan.ids.len() + 1) > offer_budget {
             break;
         }
         cumulative += transfer_size;
-        encoded_bytes += 34;
         plan.ids.push(entry.transient_id);
         plan.cursor_target = entry.sequence;
     }
