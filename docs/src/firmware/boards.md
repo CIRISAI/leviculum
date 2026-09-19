@@ -423,6 +423,25 @@ makes the control commands reach the board and nothing else; a bundle
 naming such a board fails to load. See
 [Building and flashing](flashing.md), "Which boards the bundle carries".
 
+The two are held together mechanically rather than by care, because the
+same board facts now sit in three files and Codeberg #262 records what
+that costs here: eleven `Justfile` citations in `flashing.md` had drifted
+by roughly 250 lines before anyone noticed. Every board the catalogue
+knows has to be named on this page, and every identifier a session rests
+on — the `Board-ID` a write matches, the USB IDs a bootloader and a
+running application answer on, the drive label a user is told to look
+for — has to appear somewhere in this book
+(`every_board_the_catalogue_knows_is_named_on_the_coverage_page`,
+`lnflash/tests/doc_board_catalogue.rs:171`;
+`every_identifier_a_session_rests_on_is_written_down_in_the_book`,
+`lnflash/tests/doc_board_catalogue.rs:196`). The check runs in the
+direction a board change travels: the catalogue leads and the prose
+follows, so adding a board to `lnflash` without writing it down here is
+red. It does not claim the sentence around an identifier is right — the
+book quotes identifiers on purpose that are not ours and must never be
+catalogue keys, Meshtastic's `2886:0059` and LILYGO's `TTGO_eink` among
+them (Codeberg #262).
+
 ## Build target
 
 All firmware builds target the hard-float Cortex-M4 triple:
