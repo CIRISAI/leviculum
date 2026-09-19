@@ -36,17 +36,30 @@ shift/accumulate arithmetic on attacker-controlled length, so it is the most
 arithmetic-heavy path and is fuzzed both via a `DESTINATION=` option and
 directly on the whole input.
 
-## Run a bounded smoke (catch shallow crashes)
+## Run it
 
 ```sh
-cd leviculum-std
-cargo +nightly fuzz run sam_parse --target x86_64-unknown-linux-gnu \
-    fuzz/seeds/sam_parse -- -max_total_time=30 -max_len=8192 -rss_limit_mb=2048
+just fuzz                # every target in both fuzz crates, 60 s each
+just fuzz sam_parse      # this one
 ```
 
-`fuzz/seeds/sam_parse/` holds a small hand-written seed corpus (committed). The
-generated working corpus lands in `fuzz/corpus/sam_parse/` (gitignored), and
-any crash is written to `fuzz/artifacts/sam_parse/`.
+`scripts/run-fuzz.sh` is what that recipe calls; see
+`leviculum-core/fuzz/README.md` for the exit-code contract. The working corpus
+and any crash input live OUTSIDE this checkout, under
+`~/.local/state/leviculum-fuzz/{corpus,findings}/leviculum-std/sam_parse/`, so
+coverage accumulates across runs (Codeberg #290). `fuzz/seeds/sam_parse/` holds
+the committed seed corpus and is fed in as read-only input.
+
+The raw invocation, for a one-off outside the runner:
+
+```sh
+cargo +nightly fuzz run sam_parse --fuzz-dir leviculum-std/fuzz \
+    --target x86_64-unknown-linux-gnu \
+    leviculum-std/fuzz/seeds/sam_parse -- -max_total_time=30 -max_len=8192
+```
+
+Note the ASan build of leviculum-std is the slow one: 95 s cold against ~2 s
+for a warm leviculum-core target (measured 2026-09-19).
 
 ## Reproduce a specific input
 
@@ -54,8 +67,8 @@ any crash is written to `fuzz/artifacts/sam_parse/`.
 cargo +nightly fuzz run sam_parse --target x86_64-unknown-linux-gnu <file>
 ```
 
-## CI / nightly follow-up
+## CI / nightly
 
-The 30 s smoke here catches shallow crashes only. Deep continuous fuzzing
-(hours per target, corpus persisted across runs) belongs in a nightly job, not
-`just standard`.
+Same as the core crate's: no tier runs the fuzzing itself, the push path runs
+`just fuzz-selftest` over the runner, and a scheduled run is
+`bash scripts/run-fuzz.sh --seconds <budget>`.

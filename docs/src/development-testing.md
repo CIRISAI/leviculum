@@ -305,29 +305,73 @@ There are two detached fuzz crates, one per library crate that owns a parser:
 crate-internal parsers through a `#[cfg(fuzzing)]`-gated `fuzz` module in each
 crate, so no fuzz-only surface leaks into the normal public API.
 
-This is NOT part of any tier (`just standard` never runs it). It needs nightly
-+ cargo-fuzz and the glibc host target (the workspace defaults to musl, which
-ASan does not want):
+### Running them
+
+`just fuzz` runs every target in both crates; `scripts/run-fuzz.sh` is what it
+calls. Until Codeberg #290 there was no recipe, no CI step and no schedule, so
+the targets were run by nobody — and three defects found by hand in September
+2026 sit exactly on top of three of them: unbounded msgpack recursion (#263)
+and a wrapping bin32 length (#267) in `resource_advertisement_unpack`, an
+uncapped HDLC accumulator (#271) in `hdlc_deframe`. A length field, a nesting
+depth and an unbounded accumulator are what a fuzzer finds in minutes.
 
 ```sh
-cd leviculum-core
-# 30 s smoke on one target (catches shallow crashes):
-cargo +nightly fuzz run resource_advertisement_unpack \
-    --target x86_64-unknown-linux-gnu \
-    seeds/resource_advertisement_unpack -- -max_total_time=30 -max_len=8192
-cargo +nightly fuzz list          # all targets
-
-cd ../leviculum-std              # the SAM target lives in its own crate
-cargo +nightly fuzz run sam_parse \
-    --target x86_64-unknown-linux-gnu \
-    fuzz/seeds/sam_parse -- -max_total_time=30 -max_len=8192
+just fuzz                    # every target, 60 s each
+just fuzz --seconds 900      # the budget a scheduled run wants
+just fuzz hdlc_deframe       # one target by name
+just fuzz --list             # what would run, without building
 ```
+
+Exit codes separate the three outcomes, because a run that could not happen
+must never look like a clean one: **0** every target ran its budget and found
+nothing, **1** a crash (the input is kept, with its hash and a hexdump), **2**
+it could not run — missing nightly toolchain, missing cargo-fuzz, or a
+`fuzz_targets/*.rs` that the crate manifest does not register as a `[[bin]]`
+and that therefore no run reaches.
+
+Still NOT part of any tier: it needs nightly + cargo-fuzz and the glibc host
+target (the workspace defaults to musl, which ASan does not want), and even a
+short run costs minutes — 345 s for all eight targets at 30 s each (measured
+2026-09-19, warm registry; 95 s of that is the leviculum-std ASan build).
+
+### The corpus persists outside the checkout
+
+The working corpus and any crash input live under
+`~/.local/state/leviculum-fuzz` (`LEVICULUM_FUZZ_STATE`), not in the fuzz
+crates:
+
+```
+~/.local/state/leviculum-fuzz/corpus/<crate>/<target>/    inputs libFuzzer kept
+~/.local/state/leviculum-fuzz/findings/<crate>/<target>/  crash inputs
+~/.local/state/leviculum-fuzz/logs/<timestamp>/           full per-target output
+```
+
+This is the difference between fuzzing and re-fuzzing. A corpus inside the tree
+would be thrown away by construction: the nightly runs on a fresh clone it
+deletes when green, so every scheduled run would restart from the checked-in
+seeds and re-explore the same shallow paths, and its value would plateau on
+night two. The first run above left 1837 inputs across the eight targets; the
+next run starts from them.
+
+The runner is a one-line hook for a scheduled job — `bash scripts/run-fuzz.sh
+--seconds <budget>`, exit 1 on a crash — and its `FUZZ_SUMMARY` line is
+deliberately not spelled `SUMMARY`, so a nightly that tallies scenario results
+out of `^SUMMARY` lines cannot silently fold fuzz counts into them.
+
+### Keeping the runner honest
+
+`just fuzz-selftest` (on the Tier 0 push path, ~15 s,
+`scripts/test-run-fuzz.sh`) injects the failures into a throwaway fuzz crate
+and asserts what the runner concluded: a target that crashes, a target that
+does not, a corpus that has to survive between runs, an unregistered target
+file, and a host without cargo-fuzz. The last one is the case that must never
+look green. It skips with a named reason where nightly or cargo-fuzz is absent,
+so the push path does not inherit the toolchain requirement.
 
 Any crash the fuzzer finds is fixed at the root AND pinned by a deterministic
 regression unit test in the normal suite, so it stays fixed without the fuzzer.
-Deep continuous fuzzing (hours per target) is a nightly/CI follow-up, not part
-of the 15-minute budget. See `leviculum-core/fuzz/README.md` and
-`leviculum-std/fuzz/README.md` for the target lists and exposure ranking.
+See `leviculum-core/fuzz/README.md` and `leviculum-std/fuzz/README.md` for the
+target lists and exposure ranking.
 
 ## Golden rules
 

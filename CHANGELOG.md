@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a service that comes up and waits to be asked for can now answer with its
   metadata without announcing first. Runtime-only, as in the reference: the
   default is never written to persistent state.
+- `just fuzz` runs the eight cargo-fuzz targets over the untrusted-bytes
+  parsers, which nothing had run since they were written: no recipe, no CI
+  step, no schedule (Codeberg #290). The corpus and any crash input persist
+  under `~/.local/state/leviculum-fuzz`, outside the checkout, so a scheduled
+  run accumulates coverage instead of restarting from the seed corpus every
+  time. A crash exits 1 with the input kept, its hash and a hexdump; a run that
+  could not happen exits 2 and never looks clean. `just fuzz-selftest` holds
+  the runner to that on the push path.
 - `SECURITY.md`: a private route for reporting a vulnerability, with the
   contact, a 7-day acknowledgement window, 90-day coordinated disclosure,
   and what is in scope. The repository had no such route, so a finder's

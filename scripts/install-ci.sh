@@ -64,6 +64,18 @@ for cmd in lintian; do
     fi
 done
 
+# Optional test dependency: cargo-fuzz plus the nightly toolchain run the
+# wire-parser fuzz targets (`just fuzz`, scripts/run-fuzz.sh, Codeberg #290).
+# No tier runs the fuzzing itself; `just fuzz-selftest` is on the push path but
+# skips with a named reason when these are absent, so warn rather than fail.
+for cmd in cargo-fuzz; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: optional test dependency '$cmd' not found"
+        echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
+        echo "[install-ci]       (needed for 'just fuzz'; 'just fuzz-selftest' skips without it)"
+    fi
+done
+
 # Optional test dependency: nomadnet drives the on-demand lnomad acceptance
 # (scripts/lnomad_nomadnet_acceptance.sh). Not part of any tier, so warn rather
 # than fail when it is absent.

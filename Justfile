@@ -264,7 +264,8 @@ nrf-shellcheck:
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
-        scripts/install-esptool.sh
+        scripts/install-esptool.sh \
+        scripts/run-fuzz.sh scripts/test-run-fuzz.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -286,6 +287,41 @@ hw-witness:
     bash scripts/test-debug-witness.sh
     bash scripts/test-device-watchdog.sh
     bash scripts/tier3-hw-selftest.sh
+
+# Run the checked-in cargo-fuzz targets over the parsers that eat untrusted
+# bytes (Codeberg #290). Eight targets with seed corpora had existed since #23
+# and #108 and were run by nobody: no recipe, no CI step, no schedule. Three
+# September 2026 defects sit on top of three of them -- unbounded msgpack
+# recursion (#263), a wrapping bin32 length (#267), an uncapped HDLC
+# accumulator (#271) -- and a length field, a nesting depth and an unbounded
+# accumulator are what a fuzzer finds in minutes.
+#
+# NOT in any tier: it needs the nightly toolchain and cargo-fuzz, and even a
+# short run costs minutes. `just fuzz` is 60 s per target plus its build (345 s
+# for all eight at 30 s each, measured 2026-09-19, warm registry; the
+# leviculum-std target's ASan build is 95 s of that). The corpus persists under
+# ~/.local/state/leviculum-fuzz, OUTSIDE the checkout, so a scheduled run
+# accumulates coverage instead of restarting from the seeds -- the nightly
+# builds a fresh clone and deletes it when green, so an in-tree corpus would be
+# thrown away by construction.
+#
+#   just fuzz                    every target, 60 s each
+#   just fuzz --seconds 900      the budget a scheduled run wants
+#   just fuzz hdlc_deframe       one target
+# Exit 1 = a crash, input kept under the state dir; exit 2 = it could not run.
+fuzz *args:
+    bash scripts/run-fuzz.sh {{args}}
+
+# Fixture test for that runner, on the push path because the runner's failure
+# mode is silence: a fuzz run whose finding is not preserved, or whose exit
+# code says clean when nothing ran, buys the confidence without doing the work.
+# Every case injects the failure into a throwaway fuzz crate -- a crashing
+# target, an unregistered target, a missing cargo-fuzz -- and asserts what the
+# runner concluded. ~15 s; skips with a named reason where nightly or
+# cargo-fuzz is absent, so it does not make the toolchain a push-path
+# dependency.
+fuzz-selftest:
+    bash scripts/test-run-fuzz.sh
 
 # Rustdoc gate: broken intra-doc links fail instead of warning.
 doc-gate:
@@ -659,7 +695,7 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
