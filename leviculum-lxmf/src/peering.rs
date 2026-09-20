@@ -577,6 +577,12 @@ pub enum DeclineReason {
     TooDeep,
     /// Announce field 2 false: not (or no longer) a propagation node.
     Disabled,
+    /// Already in the table, so the candidate path had nothing to do. Only
+    /// [`PeerTable::handle_inbound_sync`] reports this: the reference skips
+    /// its whole recall-and-peer block for a remote it already peers with
+    /// (`LXMRouter.py:2355-2357`), and the announce path has its own,
+    /// refreshing answer for a known peer.
+    AlreadyPeered,
 }
 
 /// The peer table: cap, static list, announce ingestion, culling.
@@ -716,6 +722,69 @@ impl PeerTable {
             }
         }
 
+        self.admit(destination_hash, announce, is_static, now)
+    }
+
+    /// Peer off a RECALLED announce because an inbound sync just landed
+    /// (`propagation_resource_concluded`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2350-2375`).
+    ///
+    /// The announce data here did not arrive with this event: it is what the
+    /// remote last said about itself, recalled from the known-destination
+    /// table, possibly hours old. That is the whole point — a propagation node
+    /// announces every six hours, so a neighbour that announced before we took
+    /// the role is invisible to [`Self::handle_announce`] until the next one,
+    /// while its sync proves it is there now.
+    ///
+    /// **Why this is not just `handle_announce`:** that function also DROPS —
+    /// a disabled flag, a raised cost or a depth violation breaks an existing
+    /// peering. Acting on stale data that way would let a recalled announce
+    /// unpeer a node whose live announce has since said otherwise, and the
+    /// reference never unpeers on this path: it reaches `peer()` through three
+    /// positive gates and has no `else` at all. So this refuses where
+    /// `handle_announce` would drop, and where it would add, it adds through
+    /// the very same [`Self::admit`] — which is what makes a peer discovered
+    /// by sync indistinguishable from one discovered by announce.
+    pub fn handle_inbound_sync(
+        &mut self,
+        destination_hash: [u8; DESTINATION_LENGTH],
+        announce: &PropagationNodeAnnounce,
+        hops: Option<u8>,
+        now: u64,
+    ) -> PeerChange {
+        if self.peers.contains_key(&destination_hash) {
+            return PeerChange::Declined(DeclineReason::AlreadyPeered);
+        }
+        if announce.peering_cost > self.config.remote_peering_cost_max as u64 {
+            return PeerChange::Declined(DeclineReason::CostTooHigh);
+        }
+        let is_static = self.config.static_peers.contains(&destination_hash);
+        if !is_static {
+            // `pn_config[2]`, `self.autopeer`, `hops_to <= autopeer_maxdepth`
+            // (`LXMRouter.py:2364`), in the reference's own order.
+            if !announce.enabled {
+                return PeerChange::Declined(DeclineReason::Disabled);
+            }
+            if !self.config.autopeer {
+                return PeerChange::Declined(DeclineReason::AutopeerOff);
+            }
+            if hops.unwrap_or(u8::MAX) > self.config.autopeer_maxdepth {
+                return PeerChange::Declined(DeclineReason::TooDeep);
+            }
+        }
+        self.admit(destination_hash, announce, is_static, now)
+    }
+
+    /// Insert or refresh the peer record itself, once some path has decided
+    /// the peering is allowed. The single place a [`Peer`] is built from
+    /// announce data, so every route into the table produces the same record.
+    fn admit(
+        &mut self,
+        destination_hash: [u8; DESTINATION_LENGTH],
+        announce: &PropagationNodeAnnounce,
+        is_static: bool,
+        now: u64,
+    ) -> PeerChange {
         if let Some(peer) = self.peers.get_mut(&destination_hash) {
             // Only a newer timebase updates (`LXMRouter.py:2016`).
             if announce.timebase > peer.peering_timebase {

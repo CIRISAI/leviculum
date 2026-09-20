@@ -153,6 +153,121 @@ fn out_of_depth_and_disabled_and_costly_announces_break_or_decline() {
     );
 }
 
+/// Codeberg #417, the positive half: a node whose announce we heard before we
+/// held the role — so [`PeerTable::handle_announce`] never saw it while it
+/// mattered — becomes a peer when its sync lands, off that recalled announce.
+#[test]
+fn an_inbound_sync_peers_the_sender_off_its_recalled_announce() {
+    let mut table = table();
+    assert_eq!(
+        table.handle_inbound_sync([1; 16], &announce(100), Some(1), 50),
+        PeerChange::Added
+    );
+    assert!(table.get(&[1; 16]).is_some());
+}
+
+/// §3 of the pass: the two doors into the table must produce the same peer,
+/// or the thinner one becomes the next bug. `admit` is the single builder, and
+/// this is the assertion that says so.
+#[test]
+fn a_peer_from_a_sync_and_a_peer_from_an_announce_are_the_same_record() {
+    let mut from_sync = table();
+    let mut from_announce = table();
+    assert_eq!(
+        from_sync.handle_inbound_sync([1; 16], &announce(100), Some(1), 50),
+        PeerChange::Added
+    );
+    assert_eq!(
+        from_announce.handle_announce([1; 16], &announce(100), Some(1), 50),
+        PeerChange::Added
+    );
+    assert_eq!(
+        from_sync.get(&[1; 16]),
+        from_announce.get(&[1; 16]),
+        "a peer discovered by sync must carry every field one discovered by \
+         announce carries"
+    );
+}
+
+/// Codeberg #417, the negative half, and the two regressions the conformance
+/// cell rides along with: a sender that is not a propagation node at all, and
+/// one beyond `autopeer_maxdepth`, must not be peered by a sync. The
+/// unreachable-hops case is the same gate read through `hops_to` answering
+/// `None`.
+#[test]
+fn an_inbound_sync_from_a_non_node_or_out_of_depth_sender_peers_nobody() {
+    let mut table = PeerTable::new(PeeringConfig {
+        autopeer_maxdepth: 1,
+        ..PeeringConfig::default()
+    });
+
+    let mut disabled = announce(100);
+    disabled.enabled = false;
+    assert_eq!(
+        table.handle_inbound_sync([1; 16], &disabled, Some(1), 50),
+        PeerChange::Declined(DeclineReason::Disabled)
+    );
+    assert_eq!(
+        table.handle_inbound_sync([2; 16], &announce(100), Some(2), 50),
+        PeerChange::Declined(DeclineReason::TooDeep)
+    );
+    assert_eq!(
+        table.handle_inbound_sync([3; 16], &announce(100), None, 50),
+        PeerChange::Declined(DeclineReason::TooDeep)
+    );
+    let mut costly = announce(100);
+    costly.peering_cost = 27;
+    assert_eq!(
+        table.handle_inbound_sync([4; 16], &costly, Some(1), 50),
+        PeerChange::Declined(DeclineReason::CostTooHigh)
+    );
+
+    let mut no_autopeer = PeerTable::new(PeeringConfig {
+        autopeer: false,
+        ..PeeringConfig::default()
+    });
+    assert_eq!(
+        no_autopeer.handle_inbound_sync([1; 16], &announce(100), Some(1), 50),
+        PeerChange::Declined(DeclineReason::AutopeerOff)
+    );
+
+    assert_eq!(table.len(), 0);
+    assert_eq!(no_autopeer.len(), 0);
+}
+
+/// A recalled announce is old by construction, so the sync path must never
+/// unpeer on it — the reference reaches `peer()` through three positive gates
+/// and has no unpeering arm there (`LXMRouter.py:2355-2375`). The announce
+/// path, which hears live data, keeps its drops.
+#[test]
+fn a_stale_recalled_announce_never_breaks_a_live_peering() {
+    let mut table = PeerTable::new(PeeringConfig {
+        autopeer_maxdepth: 1,
+        ..PeeringConfig::default()
+    });
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(100), Some(1), 50),
+        PeerChange::Added
+    );
+
+    let mut disabled = announce(200);
+    disabled.enabled = false;
+    assert_eq!(
+        table.handle_inbound_sync([1; 16], &disabled, Some(9), 60),
+        PeerChange::Declined(DeclineReason::AlreadyPeered),
+        "the sync path does not even look at the gates for a known peer"
+    );
+    assert!(
+        table.get(&[1; 16]).is_some(),
+        "a sync must never cost us a peering"
+    );
+    // The live announce path still drops on the same data.
+    assert_eq!(
+        table.handle_announce([1; 16], &disabled, Some(1), 61),
+        PeerChange::Dropped(DropReason::Disabled)
+    );
+}
+
 #[test]
 fn peering_key_readiness_follows_the_announced_cost() {
     let mut peer = peer_at(0);
