@@ -249,7 +249,10 @@ fn run_arm(blocking: bool) -> Arm {
     } else {
         cmd.env_remove("LEVICULUM_EVENT_LOG_SYNC");
     }
-    let mut child = cmd.spawn().expect("spawn probe");
+    // Supervised: the probe can sit for up to one `PAUSE` inside a blocking
+    // `write(2)` on the FIFO, so a test binary that dies mid-arm would leave it
+    // holding the pipe open with nothing left to drain it.
+    let mut child = leviculum_std::process::spawn_supervised(cmd).expect("spawn probe");
 
     let deadline = Instant::now() + ARM_TIMEOUT;
     loop {
