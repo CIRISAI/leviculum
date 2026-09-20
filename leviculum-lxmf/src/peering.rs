@@ -583,6 +583,13 @@ pub enum DeclineReason {
     /// (`LXMRouter.py:2355-2357`), and the announce path has its own,
     /// refreshing answer for a known peer.
     AlreadyPeered,
+    /// The announce arrived as a PATH_RESPONSE, so it is not evidence the
+    /// destination announced itself (`Handlers.py:80`). Neither peers nor
+    /// unpeers; the exception is a static peer never yet heard.
+    PathResponse,
+    /// A sync landed from a destination we can recall no propagation
+    /// announce for — a client, not a node (`LXMRouter.py:2356`).
+    NotANode,
 }
 
 /// The peer table: cap, static list, announce ingestion, culling.
@@ -664,20 +671,29 @@ impl PeerTable {
     /// `LXMRouter.py:2004-2058`). `hops` is the transport's current hop
     /// count to the announcer, `None` when no path is known.
     ///
-    /// One deviation, documented: the reference skips autopeering on
-    /// announces that arrive as path responses (`Handlers.py:81`) because
-    /// their timebase may be stale; our event surface does not expose the
-    /// flag. The timebase guard below (`:2016`) already ignores stale
-    /// *updates*; a stale *creation* is corrected by the next live
-    /// announce and costs one bounded re-offer at worst. No wire byte
-    /// differs.
+    /// `is_path_response` is the announce's own
+    /// [`ReceivedAnnounce::is_path_response`](leviculum_core::ReceivedAnnounce::is_path_response):
+    /// the announce came back as the answer to a path request, so it says
+    /// only that somebody — possibly this node itself, for a destination it
+    /// merely wanted to reach — asked where the destination is. The
+    /// reference gates its whole autopeer arm on it (`Handlers.py:80`), and
+    /// so neither peers nor unpeers here. It is a required argument rather
+    /// than a caller-side guard because a caller that does not know it has
+    /// to ask is exactly how this was wrong in both hosts (Codeberg #417):
+    /// the transport reports a path response as an `AnnounceReceived` like
+    /// any other, so a role that never asks peers every propagation node
+    /// whose path anyone looked up.
     pub fn handle_announce(
         &mut self,
         destination_hash: [u8; DESTINATION_LENGTH],
         announce: &PropagationNodeAnnounce,
         hops: Option<u8>,
         now: u64,
+        is_path_response: bool,
     ) -> PeerChange {
+        if is_path_response && !self.peers_on_path_response(&destination_hash) {
+            return PeerChange::Declined(DeclineReason::PathResponse);
+        }
         let is_static = self.config.static_peers.contains(&destination_hash);
         let known = self.peers.contains_key(&destination_hash);
 
@@ -723,6 +739,34 @@ impl PeerTable {
         }
 
         self.admit(destination_hash, announce, is_static, now)
+    }
+
+    /// [`Self::handle_inbound_sync`] for the caller that holds only what it
+    /// could RECALL about the sender — the raw `app_data` of that
+    /// destination's last announce, or nothing at all.
+    ///
+    /// This is the shape both hosts actually have at the moment a sync
+    /// concludes: `NodeCore::recall_app_data` answers with bytes or `None`,
+    /// and what those bytes mean is this crate's question, not the caller's.
+    /// Keeping the decode here is what stops the daemon and the board from
+    /// each inventing their own reading of "nothing recallable" — the
+    /// reference has exactly one, a failed guard on `recall_app_data`
+    /// returning `None` (`reference/LXMF/LXMF/LXMRouter.py:2356`), and
+    /// [`DeclineReason::NotANode`] is its name here.
+    pub fn handle_inbound_sync_recalled(
+        &mut self,
+        destination_hash: [u8; DESTINATION_LENGTH],
+        recalled_app_data: Option<&[u8]>,
+        hops: Option<u8>,
+        now: u64,
+    ) -> PeerChange {
+        let Some(app_data) = recalled_app_data else {
+            return PeerChange::Declined(DeclineReason::NotANode);
+        };
+        let Ok(announce) = PropagationNodeAnnounce::decode(app_data) else {
+            return PeerChange::Declined(DeclineReason::NotANode);
+        };
+        self.handle_inbound_sync(destination_hash, &announce, hops, now)
     }
 
     /// Peer off a RECALLED announce because an inbound sync just landed
@@ -773,6 +817,20 @@ impl PeerTable {
             }
         }
         self.admit(destination_hash, announce, is_static, now)
+    }
+
+    /// The one case the reference acts on a path response: a STATIC peer it
+    /// has never heard from (`not is_path_response or static_peer.last_heard
+    /// == 0`, `reference/LXMF/LXMF/Handlers.py:68-70`). A static peering is
+    /// configured rather than discovered, so the first path response is
+    /// allowed to fill in the announce facts the operator could not
+    /// configure; once the peer has been heard, a path response adds nothing.
+    fn peers_on_path_response(&self, destination_hash: &[u8; DESTINATION_LENGTH]) -> bool {
+        self.config.static_peers.contains(destination_hash)
+            && self
+                .peers
+                .get(destination_hash)
+                .is_none_or(|peer| peer.last_heard == 0)
     }
 
     /// Insert or refresh the peer record itself, once some path has decided

@@ -48,14 +48,14 @@ fn peer_at(cursor: u64) -> Peer {
 fn an_announce_inside_the_depth_creates_a_peer_and_a_newer_one_updates_it() {
     let mut table = table();
     assert_eq!(
-        table.handle_announce([1; 16], &announce(100), Some(2), 50),
+        table.handle_announce([1; 16], &announce(100), Some(2), 50, false),
         PeerChange::Added
     );
     // Same timebase: liveness only, no config update (LXMRouter.py:2016).
     let mut cheaper = announce(100);
     cheaper.peering_cost = 3;
     assert_eq!(
-        table.handle_announce([1; 16], &cheaper, Some(2), 60),
+        table.handle_announce([1; 16], &cheaper, Some(2), 60, false),
         PeerChange::Updated
     );
     assert_eq!(table.get(&[1; 16]).unwrap().peering_cost, 18);
@@ -63,7 +63,7 @@ fn an_announce_inside_the_depth_creates_a_peer_and_a_newer_one_updates_it() {
     let mut newer = announce(101);
     newer.peering_cost = 3;
     assert_eq!(
-        table.handle_announce([1; 16], &newer, Some(2), 70),
+        table.handle_announce([1; 16], &newer, Some(2), 70, false),
         PeerChange::Updated
     );
     assert_eq!(table.get(&[1; 16]).unwrap().peering_cost, 3);
@@ -77,15 +77,15 @@ fn the_cap_declines_new_peers_first_heard_wins() {
         ..PeeringConfig::default()
     });
     assert_eq!(
-        table.handle_announce([1; 16], &announce(1), Some(1), 0),
+        table.handle_announce([1; 16], &announce(1), Some(1), 0, false),
         PeerChange::Added
     );
     assert_eq!(
-        table.handle_announce([2; 16], &announce(1), Some(1), 0),
+        table.handle_announce([2; 16], &announce(1), Some(1), 0, false),
         PeerChange::Added
     );
     assert_eq!(
-        table.handle_announce([3; 16], &announce(1), Some(1), 0),
+        table.handle_announce([3; 16], &announce(1), Some(1), 0, false),
         PeerChange::Declined(DeclineReason::TableFull)
     );
     assert_eq!(table.len(), 2);
@@ -93,7 +93,7 @@ fn the_cap_declines_new_peers_first_heard_wins() {
     // free by cull/unpeer, not by announce-time eviction).
     assert!(table.remove(&[1; 16]));
     assert_eq!(
-        table.handle_announce([3; 16], &announce(2), Some(1), 5),
+        table.handle_announce([3; 16], &announce(2), Some(1), 5, false),
         PeerChange::Added
     );
 }
@@ -106,12 +106,12 @@ fn a_static_peer_bypasses_the_cap_and_the_depth_and_survives_the_cull() {
         ..PeeringConfig::default()
     });
     assert_eq!(
-        table.handle_announce([1; 16], &announce(1), Some(1), 0),
+        table.handle_announce([1; 16], &announce(1), Some(1), 0, false),
         PeerChange::Added
     );
     // Beyond depth and over the cap, still peered: static.
     assert_eq!(
-        table.handle_announce([9; 16], &announce(1), Some(9), 0),
+        table.handle_announce([9; 16], &announce(1), Some(9), 0, false),
         PeerChange::Added
     );
     let dropped = table.cull(MAX_UNREACHABLE_SECS + 10);
@@ -123,32 +123,32 @@ fn a_static_peer_bypasses_the_cap_and_the_depth_and_survives_the_cull() {
 fn out_of_depth_and_disabled_and_costly_announces_break_or_decline() {
     let mut table = table();
     assert_eq!(
-        table.handle_announce([1; 16], &announce(1), Some(5), 0),
+        table.handle_announce([1; 16], &announce(1), Some(5), 0, false),
         PeerChange::Declined(DeclineReason::TooDeep)
     );
-    table.handle_announce([1; 16], &announce(1), Some(4), 0);
+    table.handle_announce([1; 16], &announce(1), Some(4), 0, false);
     assert_eq!(
-        table.handle_announce([1; 16], &announce(2), Some(5), 1),
+        table.handle_announce([1; 16], &announce(2), Some(5), 1, false),
         PeerChange::Dropped(DropReason::OutOfDepth)
     );
 
     let mut disabled = announce(3);
     disabled.enabled = false;
-    table.handle_announce([2; 16], &announce(1), Some(1), 0);
+    table.handle_announce([2; 16], &announce(1), Some(1), 0, false);
     assert_eq!(
-        table.handle_announce([2; 16], &disabled, Some(1), 1),
+        table.handle_announce([2; 16], &disabled, Some(1), 1, false),
         PeerChange::Dropped(DropReason::Disabled)
     );
 
     let mut costly = announce(4);
     costly.peering_cost = 27;
     assert_eq!(
-        table.handle_announce([3; 16], &costly, Some(1), 0),
+        table.handle_announce([3; 16], &costly, Some(1), 0, false),
         PeerChange::Declined(DeclineReason::CostTooHigh)
     );
-    table.handle_announce([3; 16], &announce(4), Some(1), 0);
+    table.handle_announce([3; 16], &announce(4), Some(1), 0, false);
     assert_eq!(
-        table.handle_announce([3; 16], &costly, Some(1), 1),
+        table.handle_announce([3; 16], &costly, Some(1), 1, false),
         PeerChange::Dropped(DropReason::CostRaised)
     );
 }
@@ -178,7 +178,7 @@ fn a_peer_from_a_sync_and_a_peer_from_an_announce_are_the_same_record() {
         PeerChange::Added
     );
     assert_eq!(
-        from_announce.handle_announce([1; 16], &announce(100), Some(1), 50),
+        from_announce.handle_announce([1; 16], &announce(100), Some(1), 50, false),
         PeerChange::Added
     );
     assert_eq!(
@@ -246,7 +246,7 @@ fn a_stale_recalled_announce_never_breaks_a_live_peering() {
         ..PeeringConfig::default()
     });
     assert_eq!(
-        table.handle_announce([1; 16], &announce(100), Some(1), 50),
+        table.handle_announce([1; 16], &announce(100), Some(1), 50, false),
         PeerChange::Added
     );
 
@@ -263,9 +263,111 @@ fn a_stale_recalled_announce_never_breaks_a_live_peering() {
     );
     // The live announce path still drops on the same data.
     assert_eq!(
-        table.handle_announce([1; 16], &disabled, Some(1), 61),
+        table.handle_announce([1; 16], &disabled, Some(1), 61, false),
         PeerChange::Dropped(DropReason::Disabled)
     );
+}
+
+/// Codeberg #417 on the board, the too-eager half. The transport reports an
+/// announce that came back as the answer to somebody's PATH REQUEST exactly
+/// as it reports one the destination emitted, so a role that peers on every
+/// propagation announce peers every propagation node whose path anyone —
+/// possibly this node itself — merely looked up. The reference gates its
+/// whole autopeer arm on `not is_path_response`
+/// (`reference/LXMF/LXMF/Handlers.py:80-84`); the gate belongs in the table
+/// so that both the daemon and the board get it from one place.
+#[test]
+fn a_path_response_announce_creates_no_peer_while_the_same_announce_does() {
+    let mut table = table();
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(100), Some(1), 50, true),
+        PeerChange::Declined(DeclineReason::PathResponse),
+        "a path response says only that somebody asked where this node is"
+    );
+    assert_eq!(table.len(), 0, "a path response must peer nobody");
+
+    // The very same announce, delivered because the destination announced
+    // itself, is what a peering is made of.
+    assert_eq!(
+        table.handle_announce([1; 16], &announce(100), Some(1), 50, false),
+        PeerChange::Added
+    );
+    assert_eq!(table.len(), 1);
+
+    // And a path response can no more BREAK a peering than make one: the
+    // reference's gate sits above both arms, so the disabled flag on stale
+    // path-response data is never acted upon.
+    let mut disabled = announce(200);
+    disabled.enabled = false;
+    assert_eq!(
+        table.handle_announce([1; 16], &disabled, Some(1), 60, true),
+        PeerChange::Declined(DeclineReason::PathResponse)
+    );
+    assert!(table.get(&[1; 16]).is_some());
+}
+
+/// The one case the reference does act on a path response: a STATIC peer it
+/// has never heard from (`not is_path_response or static_peer.last_heard ==
+/// 0`, `reference/LXMF/LXMF/Handlers.py:68-70`). A static peering is
+/// configured rather than discovered, so the first path response may fill in
+/// the announce facts the operator could not configure; once the peer has
+/// been heard, a path response adds nothing.
+#[test]
+fn a_path_response_fills_in_a_static_peer_never_yet_heard() {
+    let mut table = PeerTable::new(PeeringConfig {
+        static_peers: vec![[9; 16]],
+        ..PeeringConfig::default()
+    });
+    assert_eq!(
+        table.handle_announce([9; 16], &announce(100), Some(1), 50, true),
+        PeerChange::Added,
+        "the operator configured this peering; the path response only fills \
+         in what it could not configure"
+    );
+    // Heard now, so the next path response is the ordinary no-op again.
+    assert_eq!(
+        table.handle_announce([9; 16], &announce(200), Some(1), 60, true),
+        PeerChange::Declined(DeclineReason::PathResponse)
+    );
+    // A non-static destination never gets the exception.
+    assert_eq!(
+        table.handle_announce([8; 16], &announce(100), Some(1), 50, true),
+        PeerChange::Declined(DeclineReason::PathResponse)
+    );
+}
+
+/// Codeberg #417 on the board, the too-reluctant half, as the caller that
+/// has only RECALLED BYTES sees it. A node whose propagation announce we can
+/// recall — it announced before we took the role, so the announce path never
+/// saw it — syncs its whole store to us; it must become a peer, or its mail
+/// arrives and nothing of ours ever flows back. A sender we can recall
+/// nothing about is a client, and the reference fails the same guard on a
+/// `None` from `recall_app_data` (`LXMRouter.py:2356`).
+#[test]
+fn an_inbound_sync_peers_a_sender_we_can_only_recall() {
+    let mut table = table();
+    let recalled = announce(100)
+        .encode()
+        .expect("encode the recalled announce");
+
+    assert_eq!(
+        table.handle_inbound_sync_recalled([1; 16], Some(&recalled), Some(1), 50),
+        PeerChange::Added,
+        "a node that synced its store to us, one hop out and with a \
+         recallable propagation announce, must be a peer"
+    );
+    assert_eq!(
+        table.handle_inbound_sync_recalled([2; 16], None, Some(1), 50),
+        PeerChange::Declined(DeclineReason::NotANode),
+        "nothing recalled: a client, which never announces a propagation \
+         destination"
+    );
+    assert_eq!(
+        table.handle_inbound_sync_recalled([3; 16], Some(b"not an announce"), Some(1), 50),
+        PeerChange::Declined(DeclineReason::NotANode),
+        "bytes that do not decode say no more than no bytes at all"
+    );
+    assert_eq!(table.len(), 1);
 }
 
 #[test]
@@ -289,9 +391,9 @@ fn peering_key_readiness_follows_the_announced_cost() {
 #[test]
 fn next_due_walks_hash_order_and_honours_backoff_and_cursor() {
     let mut table = table();
-    table.handle_announce([1; 16], &announce(1), Some(1), 0);
-    table.handle_announce([2; 16], &announce(1), Some(1), 0);
-    table.handle_announce([3; 16], &announce(1), Some(1), 0);
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
+    table.handle_announce([2; 16], &announce(1), Some(1), 0, false);
+    table.handle_announce([3; 16], &announce(1), Some(1), 0, false);
     table.get_mut(&[1; 16]).unwrap().cursor = 5; // caught up
     table.get_mut(&[2; 16]).unwrap().next_sync_attempt = 100; // backing off
 
@@ -316,7 +418,7 @@ fn next_due_walks_hash_order_and_honours_backoff_and_cursor() {
 #[test]
 fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
     let mut table = table();
-    table.handle_announce([1; 16], &announce(1), Some(1), 0);
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
     let now = 100;
 
     {
@@ -366,7 +468,7 @@ fn a_round_whose_link_came_up_is_not_held_for_a_whole_backoff_step() {
 fn max_peer_min_cost_drives_the_accept_time_value_policy() {
     let mut table = table();
     assert_eq!(table.max_peer_min_cost(), 0);
-    table.handle_announce([1; 16], &announce(1), Some(1), 0);
+    table.handle_announce([1; 16], &announce(1), Some(1), 0, false);
     // 16 − 3 (announce fixture) = 13.
     assert_eq!(table.max_peer_min_cost(), 13);
 }
@@ -785,7 +887,7 @@ fn peer_keys_survive_identity_cache_roll() {
         let dest = [n; 16];
         let identity = Identity::generate(&mut OsRng);
         storage.set_identity(dest, identity.clone());
-        peers.handle_announce(dest, &announce(1), Some(1), 0);
+        peers.handle_announce(dest, &announce(1), Some(1), 0, false);
         let cached = storage.get_identity(&dest).cloned().expect("just cached");
         peers
             .get_mut(&dest)

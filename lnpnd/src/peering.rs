@@ -428,26 +428,15 @@ impl PeeringRuntime {
                 }
             }
         }
-        // The reference gates its whole autopeer arm on `not
-        // is_path_response` (`reference/LXMF/LXMF/Handlers.py:80`), so a
-        // path response can neither create nor break a peering. Ours could
-        // do both: the transport emits `AnnounceReceived` for a path
-        // response exactly as for an announce
-        // (`leviculum-core/src/transport.rs`, the PathFound/AnnounceReceived
-        // pair), so every propagation node whose path anyone looked up
-        // became a peer (Codeberg #417 §6).
-        if is_path_response && !self.peers_on_path_response(&destination_hash) {
-            tracing::trace!(
-                "lnpnd: propagation announce for {} arrived as a path response; not peering",
-                short_hex(&destination_hash),
-            );
-            return;
-        }
+        // The path-response gate is the peer table's own
+        // (`PeerTable::handle_announce`, Codeberg #417): the board's role
+        // reads the same rule out of the same place, so neither host can
+        // have a version of it the other does not.
         let hops = core.hops_to(&DestinationHash::new(destination_hash));
         let now = unix_secs();
-        let change = self
-            .table
-            .handle_announce(destination_hash, &announce, hops, now);
+        let change =
+            self.table
+                .handle_announce(destination_hash, &announce, hops, now, is_path_response);
         // The identity arrived with the announce; keep its public keys
         // (and hash, for the peering-key material, `LXMPeer.py:258`) with
         // the peer itself (#388 pass 3), so recall does not depend on the
@@ -488,22 +477,14 @@ impl PeeringRuntime {
                 if reason == DeclineReason::TableFull {
                     self.log_peer("decline", &destination_hash, "table_full");
                 }
+                if reason == DeclineReason::PathResponse {
+                    tracing::trace!(
+                        "lnpnd: propagation announce for {} arrived as a path response; not peering",
+                        short_hex(&destination_hash),
+                    );
+                }
             }
         }
-    }
-
-    /// The one case the reference acts on a path response: a STATIC peer it
-    /// has never heard from (`not is_path_response or static_peer.last_heard
-    /// == 0`, `reference/LXMF/LXMF/Handlers.py:68-70`). A static peering is
-    /// configured rather than discovered, so the first path response is
-    /// allowed to fill in the announce facts the operator could not
-    /// configure; once the peer has been heard, a path response adds nothing.
-    fn peers_on_path_response(&self, destination_hash: &[u8; 16]) -> bool {
-        self.table.config().static_peers.contains(destination_hash)
-            && self
-                .table
-                .get(destination_hash)
-                .is_none_or(|peer| peer.last_heard == 0)
     }
 
     // ------------------------------------------------------------------
@@ -814,19 +795,15 @@ impl PeeringRuntime {
         now: u64,
     ) {
         let destination = DestinationHash::new(remote_hash);
-        let Some(app_data) = core.recall_app_data(&destination) else {
-            // Nothing recalled: a client, which never announces a
-            // propagation destination. The reference fails the same guard
-            // on a `None` from `recall_app_data` (`:2356`).
-            return;
-        };
-        let Ok(announce) = PropagationNodeAnnounce::decode(&app_data) else {
-            return;
-        };
+        // Nothing recalled, or bytes that do not decode: a client, which
+        // never announces a propagation destination. The table reads that
+        // as `DeclineReason::NotANode`, the reference's own failed guard on
+        // a `None` from `recall_app_data` (`:2356`).
+        let app_data = core.recall_app_data(&destination);
         let hops = core.hops_to(&destination);
         if self
             .table
-            .handle_inbound_sync(remote_hash, &announce, hops, now)
+            .handle_inbound_sync_recalled(remote_hash, app_data.as_deref(), hops, now)
             != PeerChange::Added
         {
             return;

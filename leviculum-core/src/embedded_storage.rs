@@ -1590,6 +1590,33 @@ mod tests {
         );
     }
 
+    /// Codeberg #417 §2: how long a BOARD can recall what a destination
+    /// last said about itself. `NodeCore::recall_app_data` reads this map,
+    /// and here it is RAM-only, 16 entries deep (the two tests above pin the
+    /// drop-oldest bound) and swept of every destination the path table no
+    /// longer holds. So the honest bound the propagation role may rely on is
+    /// "while a path to that node lives" — which covers a node syncing to us
+    /// over a link, because that node has a path by construction, and does
+    /// not cover a reboot in between: nothing here survives one.
+    #[test]
+    fn a_boards_recall_source_dies_with_the_path() {
+        let mut s = EmbeddedStorage::new();
+        s.set_announce_cache(key_th(1), alloc::vec![7u8; 4]);
+        s.set_announce_cache(key_th(2), alloc::vec![8u8; 4]);
+        s.set_path(key_th(1), mk_path(0));
+
+        s.clean_announce_cache(&BTreeSet::new());
+
+        assert!(
+            s.get_announce_cache(&key_th(1)).is_some(),
+            "a destination with a path stays recallable"
+        );
+        assert!(
+            s.get_announce_cache(&key_th(2)).is_none(),
+            "a destination with no path and no local claim is swept"
+        );
+    }
+
     // Map 5: announce_rate_table
     #[test]
     fn level1_announce_rate_table_overflow_correctness() {
