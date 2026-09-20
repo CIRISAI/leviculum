@@ -384,7 +384,7 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:4773`) | announce handling itself took ≥ 100 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:4806`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:3989`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:904`) | one batch write to the log file took ≥ 50 ms |
 
@@ -393,3 +393,41 @@ something other than announce handling; `EVENT_LOG_WRITE_SLOW`
 alongside it names the disk. The watchdog measures the *wait* for the
 core mutex, never the hold, which is exactly "how long the loop spent
 not polling" without an `Instant` in a dozen `select!` arms.
+
+### A diagnostic's volume is a cost too, and the cadence is the wrong lever
+
+The same log gave the other half of the lesson. Of those 397 023 881
+events, **214 594 631 — 54 % — are `PATH_TABLE_ENTRY`**, the per-path
+snapshot of the path table; in the last megabyte of the live tail it is
+77 %. The file is 61 GiB and grows ~2.6 GB a day.
+
+That share is what remains *after* a fix. The dump used to fire every
+10 s; `5ab938a4` (2026-07-13) moved it to every five minutes and cut
+its volume thirtyfold. It did not settle the problem, because a
+cadence is the wrong lever for this cost:
+
+> One snapshot costs one line **per path**. The miauhaus path table is
+> 22 362 entries — the number is in the heartbeat itself, `PATH_TABLE
+> node=miauhaus size=22362`. Five minutes apart, that is still ~6.4
+> million lines a day, and it grows with the mesh, not with anything
+> the code chose.
+
+Against that cost, nothing consumes the lines. The soak's `analyze.py`
+puts them on a count-only fast path and never reads `dst`, `hops`,
+`iface`, `next_hop` or `expires_in_ms`; periculum does not reference
+the event at all. And the one number counting them yields — how many
+paths there are — is already emitted every 10 s as `PATH_TABLE size=`.
+
+So the dump is now **off by default**
+(`TransportConfig::path_entries_dump`, config key `path_entries_dump`
+under `[reticulum]`), reachable for a debugging session that wants the
+per-path fields. Nothing else moved: the 10 s `PATH_TABLE` heartbeat
+still carries liveness and the count, and `PATH_ADD` still records
+every insertion, so the path table's history survives the silence.
+
+The rule, sibling to the one above:
+
+> **A diagnostic whose volume scales with mesh state, not with a rate
+> the code picks, is not a diagnostic you can leave on. Gate it, and
+> keep the cheap scalar that answers the question people actually ask
+> of it.**
