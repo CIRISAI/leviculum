@@ -400,11 +400,11 @@ pub struct EmbeddedStorage {
     /// receipts must outlive newer ones submitted just after them.
     ///
     /// **Insert paths:**
-    /// - `transport.rs:912`: `create_receipt`: fresh-key (truncated
+    /// - `transport.rs:940`: `create_receipt`: fresh-key (truncated
     ///   hash of the just-sent packet).
-    /// - `transport.rs:932`: `create_receipt_with_timeout`: fresh-key
+    /// - `transport.rs:960`: `create_receipt_with_timeout`: fresh-key
     ///   (same shape as `create_receipt`).
-    /// - `transport.rs:952`: `mark_receipt_delivered`: re-insert
+    /// - `transport.rs:980`: `mark_receipt_delivered`: re-insert
     ///   (read existing receipt, clone, mutate `status` to
     ///   `Delivered`, write back under same hash). This is the only
     ///   re-insert path; it benefits from the refresh because an

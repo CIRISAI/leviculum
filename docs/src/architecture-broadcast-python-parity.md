@@ -266,7 +266,7 @@ in `path_table` is routed to a single specific interface via
 `SendPacket`, not broadcast. This is what happens when a
 path-response is specifically addressed to the path-requester
 rather than broadcast. In our Rust code this corresponds to
-the `target_interface: Some(idx)` branch at `transport.rs:4206-4156`.
+the `target_interface: Some(idx)` branch at `transport.rs:4239-4189`.
 
 ### Held announces during path-response scheduling
 
@@ -443,22 +443,22 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 
 | Mechanism | Python reference | Rust today | Status | Notes |
 |---|---|---|---|---|
-| Self-announce one-shot | `Destination.py:322`, `Packet.py:294` | `transport.rs:1360-1333` schedules 3 retries beyond the initial | ✗ | **Fixed in B3** |
+| Self-announce one-shot | `Destination.py:322`, `Packet.py:294` | `transport.rs:1388-1361` schedules 3 retries beyond the initial | ✗ | **Fixed in B3** |
 | Self-announce on-wire count | 1 | 4 (1 + 3 retries) | ✗ | **B3 brings to 1** |
-| Self-announce fanout | all interfaces (MODE_FULL assumed) | `send_on_all_interfaces(exclude=None)` | ✓ | `transport.rs:1347-1307` |
+| Self-announce fanout | all interfaces (MODE_FULL assumed) | `send_on_all_interfaces(exclude=None)` | ✓ | `transport.rs:1375-1335` |
 | Received-announce rebroadcast count | 2 (non-local-client), 1 (local-client) | 4 at `retries=1` init + `PATHFINDER_RETRIES=3` | ✗ | **B2 brings to 2** |
 | Received-announce fanout | all interfaces; echo dedup'd on RX | `send_on_all_interfaces` (no exclude) | ✓ | Matches Python. B1 verified by `test_announces_forwarded_through_transport`. |
-| Packet-hash dedup on RX | `Transport.py:1227` | `transport.rs:1275` | ✓ | Identical semantics, rolling window |
+| Packet-hash dedup on RX | `Transport.py:1227` | `transport.rs:1303` | ✓ | Identical semantics, rolling window |
 | `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `constants.rs:117` |
 | `PATHFINDER_RW` jitter | 0.5 s | 500 ms (+ optional airtime factor) | ≈ | Option α permitted timing divergence |
-| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `constants.rs:133`; enforcement at `transport.rs:4096` |
+| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `constants.rs:133`; enforcement at `transport.rs:4129` |
 | `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `constants.rs:242`; impl at `transport.rs:290-299, 4125` |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `constants.rs:148`; `node/mod.rs:1014-1048` |
 | mgmt-announce initial 15 s trick | `Transport.py:247` | `node/mod.rs:75` + constant | ✓ | Verified by B4 audit |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2541-2587` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
-| Path-response targeted | `transport.rs:4206-4156` | same mechanism | ✓ | Preserved |
+| Path-response targeted | `transport.rs:4239-4189` | same mechanism | ✓ | Preserved |
 | Interface modes (FULL/ROAMING/…) | 5 modes | none (all = FULL) | ⚠ | Documented gap; separate task |
 | `block_rebroadcasts` | per-entry flag | `AnnounceEntry.block_rebroadcasts` | ✓ | Verified by B7 audit |
 
@@ -482,8 +482,8 @@ in the non-local-client path.
 announce. Achievable in two ways:
 
 - A. Set `PATHFINDER_RETRIES = 1` **and** change the entry-insert
-  at `transport.rs:2103-2039` from `retries: 1` to `retries: 0`.
-  Guards at `transport.rs:4095-4031` already read
+  at `transport.rs:2131-2067` from `retries: 1` to `retries: 0`.
+  Guards at `transport.rs:4128-4064` already read
   `retries > PATHFINDER_RETRIES` and `local_rebroadcasts >=
   LOCAL_REBROADCASTS_MAX`; both fire at the right count.
 - B. Set `PATHFINDER_RETRIES = 2` and leave insert at
@@ -499,9 +499,9 @@ readers see 1:1 constants.
 catch the self-echo, and does it play well with Python peers?
 
 **Resolution**: yes. Outgoing broadcasts go through
-`send_on_all_interfaces` at `transport.rs:1347-1307` which calls
+`send_on_all_interfaces` at `transport.rs:1375-1335` which calls
 `self.storage.add_packet_hash()` before emitting the
-`Action::Broadcast`. The dedup check at `transport.rs:1275`
+`Action::Broadcast`. The dedup check at `transport.rs:1303`
 in `process_incoming` reads that set. The only edge case is the
 dedup window rollover at `HASHLIST_MAXSIZE = 1 000 000` entries —
 a packet that is ~1M packets old could theoretically come back.

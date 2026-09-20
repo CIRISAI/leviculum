@@ -431,7 +431,7 @@ that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
 is (`leviculum-std/src/config.rs:95`, empty by default at
-`leviculum-std/src/config.rs:213`); on a firmware with no filesystem it
+`leviculum-std/src/config.rs:227`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 
@@ -522,12 +522,12 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:3083`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:3111`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:3188`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:3216`) fails without a path entry.
   The primitive for obtaining one is `request_path`
   (`leviculum-core/src/node/mod.rs:3149`); a node with the key but no
   path asks and waits rather than giving up.

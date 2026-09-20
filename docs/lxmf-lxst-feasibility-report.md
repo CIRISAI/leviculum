@@ -96,9 +96,9 @@ This section is the foundation; everything else is judged against it.
   - maintenance tick: `handle_timeout() -> TickOutput` (`node/mod.rs:1120`)
   - scheduling hint: `next_deadline() -> Option<u64>` (`node/mod.rs:1151`)
   - every send method returns `TickOutput` instead of doing I/O.
-- `TickOutput { actions: Vec<Action>, events: Vec<NodeEvent> }` (`transport.rs:138`);
+- `TickOutput { actions: Vec<Action>, events: Vec<NodeEvent> }` (`transport.rs:145`);
   `Action = SendPacket{iface,data} | Broadcast{data,exclude_iface}`
-  (`transport.rs:113`) — bytes already framed.
+  (`transport.rs:120`) — bytes already framed.
 - I/O injected via `Clock` (`traits.rs:162`) and `Storage` (`traits.rs:196`);
   RNG via `&mut impl CryptoRngCore`. Core ships `MemoryStorage` and
   `EmbeddedStorage`; `leviculum-std` ships `SystemClock`.

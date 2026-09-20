@@ -139,6 +139,20 @@ pub struct ReticulumConfig {
     /// already handle.
     #[serde(default)]
     pub max_links: Option<usize>,
+    /// Emit the per-path `PATH_TABLE_ENTRY` diagnostic dump into the
+    /// structured event log. Leviculum-only key (rnsd has none); default
+    /// `false`.
+    ///
+    /// The dump writes one line per path every five minutes, so its volume is
+    /// the size of the path table, not a fixed rate: on the miauhaus public-
+    /// mesh node (22 362 paths) it was 54 % of every event the node has ever
+    /// logged. Nothing reads its fields — the path count it is counted for is
+    /// already in the 10 s `PATH_TABLE size=` heartbeat — so it is off unless
+    /// a debugging session asks for the per-path `hops` / `iface` /
+    /// `next_hop` / `expires_in_ms`. Local diagnostics only; wire and
+    /// semantics are unaffected.
+    #[serde(default)]
+    pub path_entries_dump: bool,
     /// Collect interface information other transport instances announce
     /// (Python `discover_interfaces`, Reticulum.py:580-583). When false the
     /// daemon keeps no discovered-interface registry, and
@@ -250,6 +264,7 @@ impl Default for ReticulumConfig {
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
             max_links: None,
+            path_entries_dump: false,
             discover_interfaces: default_discover_interfaces(),
             autoconnect_discovered_interfaces: 0,
             network_identity: None,

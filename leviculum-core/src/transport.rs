@@ -91,11 +91,18 @@ const PR_FREQ_SAMPLES: usize = ANNOUNCE_FREQ_SAMPLES;
 const FREQ_DECAY_MS: u64 = 10_000;
 
 /// How often the diagnostic path-table snapshot dumps one PATH_TABLE_ENTRY line
-/// per path. The lightweight PATH_TABLE size heartbeat still fires every 10 s
-/// (liveness), but the full per-entry dump is expensive on a large public-mesh
-/// table: at 10 s it was ~98% of the miauhaus soak event log (#39). PATH_ADD
-/// already records every insertion, so a 5-minute full snapshot is ample for
-/// detailed inspection while cutting entry volume ~30x.
+/// per path, once `TransportConfig::path_entries_dump` has turned the dump on.
+/// The lightweight PATH_TABLE size heartbeat is independent of both and still
+/// fires every 10 s (liveness).
+///
+/// This interval was the first attempt to contain the dump (it ran every 10 s
+/// before) and it is not enough on its own, because the cost scales with the
+/// table rather than with the cadence: one snapshot is one line per path, and
+/// the public-mesh table on the miauhaus soak node measured 22 362 entries, so
+/// even at five minutes it writes ~6.4 million lines a day. Hence the dump is
+/// now off by default; see `TransportConfig::path_entries_dump` for why nothing
+/// needs it continuously, and `docs/src/concepts/core-lock-budget.md` for the
+/// measurement and the rule.
 const PATH_ENTRIES_DUMP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// Announce handling slower than this emits `ANN_SLOW` (Codeberg #418).
@@ -648,6 +655,24 @@ pub struct TransportConfig {
     /// and retry. Set by the boards, whose heap budget (#388) sums a
     /// fixed per-link cost.
     pub max_links: Option<usize>,
+    /// Emit the per-path `PATH_TABLE_ENTRY` diagnostic dump on the
+    /// `PATH_ENTRIES_DUMP_INTERVAL_MS` cadence. `false` (default) emits none.
+    ///
+    /// Off by default because the dump costs one log line per path every time
+    /// it fires, and nothing consumes those fields. On the miauhaus soak node
+    /// it was 54 % of all 397 023 881 events ever logged (77 % of the live
+    /// tail) out of a 61 GiB file, against a path table of 22 362 entries. The
+    /// one number any consumer derives from it — how many paths there are — is
+    /// already emitted every 10 s as `PATH_TABLE size=`, which this flag does
+    /// not touch; neither does it touch `PATH_ADD`, which records every
+    /// insertion. So the history and the count survive with the dump off, and
+    /// only per-path `hops` / `iface` / `next_hop` / `expires_in_ms` go away.
+    ///
+    /// Turn it on for a debugging session that wants exactly those, e.g. when
+    /// a path points at the wrong interface and PATH_ADD alone cannot say when
+    /// it stopped being right. Local diagnostics only: no wire or semantic
+    /// effect, so a node may be flipped either way mid-mesh.
+    pub path_entries_dump: bool,
 }
 
 impl Default for TransportConfig {
@@ -664,6 +689,9 @@ impl Default for TransportConfig {
             // drop); the strict reference check is opt-in only (#38).
             lrproof_rewrite_on_asymmetry: true,
             max_links: None,
+            // The per-entry dump is a debugging aid, not a running cost; the
+            // count and the insertion history stay on without it.
+            path_entries_dump: false,
         }
     }
 }
@@ -3358,11 +3386,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             self.last_path_snapshot_ms = now;
             crate::tracing::debug!(event = "PATH_TABLE", size = self.storage.path_count());
 
-            // Full per-entry dump only every PATH_ENTRIES_DUMP_INTERVAL_MS. On a
-            // large public-mesh table (~10k entries) a 10s full dump dominated
-            // the event log (#39); the size line above keeps 10s liveness and
-            // PATH_ADD already records every insertion.
-            if now.saturating_sub(self.last_path_entries_dump_ms) >= PATH_ENTRIES_DUMP_INTERVAL_MS {
+            // Full per-entry dump only when explicitly asked for, and then only
+            // every PATH_ENTRIES_DUMP_INTERVAL_MS. The cadence alone could not
+            // contain it — one line per path times 22k paths stayed the
+            // majority of the soak log — so the default is off and the size
+            // line above keeps the 10s liveness and the count, while PATH_ADD
+            // keeps the insertion history.
+            if self.config.path_entries_dump
+                && now.saturating_sub(self.last_path_entries_dump_ms)
+                    >= PATH_ENTRIES_DUMP_INTERVAL_MS
+            {
                 self.last_path_entries_dump_ms = now;
                 for (dst, entry) in &self.storage.path_entries() {
                     let age_ms = entry.expires_ms.saturating_sub(now);
@@ -8928,7 +8961,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1669`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1697`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -12729,6 +12762,78 @@ mod tests {
                 // Enumerated mechanically from `DropReason::ALL`; see
                 // `test_pkt_drop_summary_covers_every_drop_reason` for why.
                 assert_missing_summary_fields(&logs);
+            }
+
+            /// Build a transport-enabled node with the per-path dump forced on,
+            /// for the positive control of the off-by-default assertion below.
+            fn make_transport_dumping() -> Transport<MockClock, MemoryStorage> {
+                let config = TransportConfig {
+                    enable_transport: true,
+                    path_entries_dump: true,
+                    ..TransportConfig::default()
+                };
+                Transport::new(
+                    config,
+                    MockClock::new(TEST_TIME_MS),
+                    MemoryStorage::with_defaults(),
+                    Identity::generate(&mut OsRng),
+                )
+            }
+
+            /// The per-path `PATH_TABLE_ENTRY` dump is a debugging aid, not a
+            /// running cost. Cutting its cadence to five minutes was not enough
+            /// — one line per path times 22 362 paths kept it at 54 % of the
+            /// miauhaus soak log — so it is off unless asked for. What must
+            /// survive the silence is the count, and that is the `PATH_TABLE`
+            /// heartbeat, asserted here in the same breath.
+            #[test]
+            fn test_path_entries_dump_off_by_default() {
+                let mut transport = make_transport_enabled();
+                transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+                seed_path(&mut transport, dummy_dest(0x11), 0);
+
+                // Past the full-dump cadence, not merely the 10s heartbeat.
+                transport.clock.advance(PATH_ENTRIES_DUMP_INTERVAL_MS + 1);
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                assert!(
+                    !logs.contains("PATH_TABLE_ENTRY"),
+                    "the per-path dump must stay silent by default; logs:\n{logs}"
+                );
+                assert!(
+                    logs.contains("event=\"PATH_TABLE\"") && logs.contains("size=1"),
+                    "the size heartbeat is the count and must keep firing; logs:\n{logs}"
+                );
+            }
+
+            /// Positive control for the test above: with the flag on, the same
+            /// scenario does dump, and the fields a debugging session wants are
+            /// on the line. Without this, "no PATH_TABLE_ENTRY" would also pass
+            /// on a node that can no longer emit one at all.
+            #[test]
+            fn test_path_entries_dump_emits_when_enabled() {
+                let mut transport = make_transport_dumping();
+                let idx = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+                // `register_interface` does not name the interface; the driver
+                // calls `set_interface_name` separately, and without it the
+                // dump renders the `iface:<id>` fallback instead of a name.
+                transport.set_interface_name(idx, String::from("if0"));
+                seed_path(&mut transport, dummy_dest(0x11), idx);
+
+                transport.clock.advance(PATH_ENTRIES_DUMP_INTERVAL_MS + 1);
+                let ((), logs) = capture_core_logs(|| transport.poll());
+
+                let line = logs
+                    .lines()
+                    .find(|l| l.contains("PATH_TABLE_ENTRY"))
+                    .unwrap_or_else(|| panic!("no PATH_TABLE_ENTRY; logs:\n{logs}"));
+                assert!(
+                    line.contains("hops=2")
+                        && line.contains("iface=if0")
+                        && line.contains("next_hop=")
+                        && line.contains("expires_in_ms="),
+                    "the dump exists for its per-path fields; line: {line}"
+                );
             }
 
             /// The summary's field list is written out by hand inside a

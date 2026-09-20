@@ -196,9 +196,9 @@ Every router method that can produce work returns this. There is no
 callback and no channel. The library never drops an event, but it never
 retains one either: if the application drops a `RouterOutput`, those events
 are gone. `#[must_use]` on both `RouterOutput` and `TickOutput`
-(`leviculum-core/src/transport.rs:284`) is the only safety net, and
+(`leviculum-core/src/transport.rs:291`) is the only safety net, and
 `TickOutput`'s own doc says dropping it "silently loses outbound packets
-and application events" (`leviculum-core/src/transport.rs:265-267`).
+and application events" (`leviculum-core/src/transport.rs:272-274`).
 
 There is a re-entrancy obligation that is easy to miss and fatal to get
 wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed

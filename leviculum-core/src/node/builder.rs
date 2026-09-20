@@ -150,6 +150,18 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Emit the per-path `PATH_TABLE_ENTRY` diagnostic dump. `false`
+    /// (default) emits none: the 10 s `PATH_TABLE size=` heartbeat still
+    /// carries the count and `PATH_ADD` still records every insertion, while
+    /// the per-path fields cost one log line per path per dump — 54 % of the
+    /// miauhaus soak log. Turn it on for a debugging session that needs those
+    /// fields. See
+    /// [`TransportConfig::path_entries_dump`](crate::transport::TransportConfig::path_entries_dump).
+    pub fn path_entries_dump(mut self, enable: bool) -> Self {
+        self.transport_config.path_entries_dump = enable;
+        self
+    }
+
     /// Override the link keepalive interval (seconds) for every link this node
     /// creates. `None` (default) keeps the RTT-derived interval. Useful for
     /// slow links and for shrinking the stale-link timeout in tests.

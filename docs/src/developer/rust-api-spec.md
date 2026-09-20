@@ -56,7 +56,7 @@ returns `self`.
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:250` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:668` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:199` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:963` | Build the node (not yet running) |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:964` | Build the node (not yet running) |
 | `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:746` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
@@ -190,31 +190,31 @@ caller must dispatch.
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`
-(`node/builder.rs:215`) supplies the platform triple. Setters include
+(`node/builder.rs:227`) supplies the platform triple. Setters include
 `identity`, `proof_strategy`, and `enable_transport`.
 
 ### Core `TickOutput` and `Action`
 
 `TickOutput` is what every core method returns. Defined at
-`leviculum-core/src/transport.rs:141`. It is `#[must_use]` — dropping it silently
+`leviculum-core/src/transport.rs:148`. It is `#[must_use]` — dropping it silently
 loses outbound packets and events.
 
 | Field | Type | Source |
 |-------|------|--------|
-| `actions` | `Vec<Action>` — I/O for the driver to execute | `transport.rs:143` |
-| `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:145` |
-| `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:148` |
+| `actions` | `Vec<Action>` — I/O for the driver to execute | `transport.rs:150` |
+| `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:152` |
+| `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:155` |
 
-`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:116`:
+`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:123`:
 
 | Variant | Fields | Source |
 |---------|--------|--------|
-| `SendPacket` | `iface: InterfaceId, data: Vec<u8>, peer: Option<[u8; 16]>` | `transport.rs:118` |
-| `Broadcast` | `data: Vec<u8>, exclude_iface: Option<InterfaceId>` | `transport.rs:125` |
+| `SendPacket` | `iface: InterfaceId, data: Vec<u8>, peer: Option<[u8; 16]>` | `transport.rs:125` |
+| `Broadcast` | `data: Vec<u8>, exclude_iface: Option<InterfaceId>` | `transport.rs:132` |
 
 The helper `dispatch_actions(interfaces: &mut [&mut dyn Interface], actions:
 Vec<Action>, ifac_configs: &BTreeMap<usize, IfacConfig>) -> DispatchResult`
-(`transport.rs:214`) routes `Action`s to interfaces with broadcast-exclusion and
+(`transport.rs:221`) routes `Action`s to interfaces with broadcast-exclusion and
 IFAC wrapping handled in core, so every driver gets it for free.
 
 ### Value types

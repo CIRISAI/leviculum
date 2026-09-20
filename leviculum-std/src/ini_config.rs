@@ -377,6 +377,14 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         "max_links" => {
             config.max_links = value.trim().parse().ok().filter(|&n: &usize| n > 0);
         }
+        // Per-path PATH_TABLE_ENTRY diagnostic dump. Leviculum-only key,
+        // default off: its volume is one line per path per dump, which on a
+        // public-mesh table was the majority of the event log, and the only
+        // number anyone derived from it is in the PATH_TABLE heartbeat
+        // already. An operator turns it on for a debugging session.
+        "path_entries_dump" => {
+            config.path_entries_dump = parse_bool(value);
+        }
         // Whether to collect the interface information other transport
         // instances announce (Python `discover_interfaces`,
         // Reticulum.py:580-583). Before this the key fell into the tolerated-
@@ -2209,6 +2217,20 @@ mod tests {
         assert_eq!(garbage.reticulum.max_links, None);
         let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
         assert_eq!(absent.reticulum.max_links, None);
+    }
+
+    #[test]
+    fn test_path_entries_dump_defaults_off_and_is_opt_in() {
+        // The per-path PATH_TABLE_ENTRY dump was the majority of the miauhaus
+        // soak log, so a config that does not mention it gets none. An
+        // operator debugging a path table turns it on with the same ConfigObj
+        // truthy spellings every other boolean key takes.
+        let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
+        assert!(!absent.reticulum.path_entries_dump);
+        let on = parse_ini("[reticulum]\n  path_entries_dump = Yes\n").unwrap();
+        assert!(on.reticulum.path_entries_dump);
+        let off = parse_ini("[reticulum]\n  path_entries_dump = No\n").unwrap();
+        assert!(!off.reticulum.path_entries_dump);
     }
 
     #[test]
