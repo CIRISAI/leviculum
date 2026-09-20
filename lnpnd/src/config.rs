@@ -302,6 +302,11 @@ enable_node = yes
 # that are allowed to control and query status
 # for this propagation node.
 
+# The node's own identity is always allowed, so `lnpnd --status` on this
+# host needs no entry here. This key only adds OTHER people. Their hash
+# is what `lnpnd --status` prints for them, or the first 32 hex digits of
+# an identity file's hash; it is not a destination hash.
+
 # control_allowed = 7d7e542829b40f32364499b27438dba8, 437229f8e29598b2282b88bad5e44698
 
 # An optional name for this node, included

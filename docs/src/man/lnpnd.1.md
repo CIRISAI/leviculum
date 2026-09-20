@@ -55,7 +55,9 @@ Daemon settings can also be given as flags (`--stamp-cost`, `--peering-cost`, `-
 
 ## REMOTE MANAGEMENT
 
-The query verbs run as a client against a node's control destination, identifying with an identity the node has allowed (its own, or one listed under `control_allowed` in its config). Without **--remote** they query the local daemon using the config directory's identity; with **--remote** *hash* (a propagation destination hash) they query that node, with **--identity** *path* naming the identity file to identify with. The counterpart tool's verbs are interchangeable with these.
+The query verbs run as a client against a node's control destination, identifying with an identity the node has allowed. A node always allows its own identity, so the local verbs work on a fresh installation with nothing configured; `control_allowed` in the config adds other people's identity hashes. Without **--remote** they query the local daemon using the config directory's identity; with **--remote** *hash* (a propagation destination hash) they query that node, with **--identity** *path* naming the identity file to identify with. The counterpart tool's verbs are interchangeable with these.
+
+A node that refuses a query answers the refusal, and the verb exits 204. Python's lxmd registers its control paths behind `ALLOW_LIST`, which sends nothing at all to an identity it refuses; against such a node a refusal is indistinguishable from silence and exits 200, so lnpnd names the possibility on stderr rather than leaving "timed out" as the only account.
 
 **--status**
 :   Print the node's status: store utilisation, costs, peer counts, traffic counters.

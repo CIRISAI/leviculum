@@ -63,6 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- lnpnd tells a caller it refused their query instead of letting them time
+  out. Its three control paths (`--status`, `--sync`, `--break`) were
+  registered behind the core's `AllowList`, which drops a request from an
+  identity that is not allowed without a word — what
+  `RNS.Destination.ALLOW_LIST` does in the reference, and what makes the
+  reference's own `ERROR_NO_ACCESS` branch unreachable. The caller sat out its
+  whole timeout and printed `Getting lnpnd statistics timed out, exiting now`,
+  which claims nobody answered and sends the reader to the mesh, the instance
+  and the interfaces. The handler now decides and answers, with the
+  reference's own error value — so a Python client hears something it already
+  knows how to decode (exit 204) rather than silence. Nothing is newly
+  permitted: the handler checks the same list against the same remote identity
+  hash the core checked. Querying a node that does stay silent still exits
+  200, and the client now says on stderr what else that can mean.
+
 - A source build on an arm64 host no longer produces x86_64 binaries in
   silence. `.cargo/config.toml` pins `x86_64-unknown-linux-musl` for every
   host and cargo has no per-host conditional there, so a Raspberry Pi — one

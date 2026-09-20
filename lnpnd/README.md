@@ -61,8 +61,14 @@ lnpnd --break PEER [-r HASH]      # break the node's peering with PEER
 ```
 
 Without `--remote` they query the local daemon using the config directory's
-identity. Exit codes follow lxmd's: 200 timeout, 203 no identity / bad hash,
-204 access denied, 205 invalid data, 206 peer not found, 207 empty response.
+identity, which is the node's own — so the operator who installed a node can
+always ask it how it is, with no `control_allowed` entry.
+
+Exit codes follow lxmd's: 200 timeout, 203 no identity / bad hash, 204 access
+denied, 205 invalid data, 206 peer not found, 207 empty response. A node lnpnd
+refuses says so (204). Python's lxmd, and any node registering its control
+paths behind `ALLOW_LIST`, sends nothing at all when it refuses; that arrives
+as 200, and lnpnd prints what else it could mean.
 
 ## Configuration
 
