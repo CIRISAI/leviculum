@@ -94,7 +94,7 @@ pub const fn announce_app_data_budget(with_ratchet: bool) -> usize {
 
 use crate::crypto::truncated_hash;
 use crate::identity::{Identity, IdentityError};
-use crate::packet::{Packet, PacketType};
+use crate::packet::{Packet, PacketContext, PacketType};
 
 use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
@@ -388,6 +388,17 @@ pub struct ReceivedAnnounce {
     signature: [u8; ED25519_SIGNATURE_SIZE],
     /// Application-specific data
     app_data: Vec<u8>,
+    /// Whether the packet carrying this announce was a PATH_RESPONSE.
+    ///
+    /// Python hands this to every announce handler as `is_path_response`
+    /// (`Transport.py:1795-1802` -> `AnnounceHandler.received_announce`), and
+    /// handlers use it to tell "this destination announced itself" from "this
+    /// destination's path was merely looked up". The flag lives on the parsed
+    /// announce rather than on the event that carries it because every
+    /// consumer already holds the announce, and a new event field would ripple
+    /// through all of them for a fact that is a property of the announce's
+    /// packet (Codeberg #417).
+    is_path_response: bool,
 }
 
 impl ReceivedAnnounce {
@@ -447,6 +458,7 @@ impl ReceivedAnnounce {
             ratchet,
             signature,
             app_data: payload[app_data_offset..].to_vec(),
+            is_path_response: packet.context == PacketContext::PathResponse,
         })
     }
 
@@ -488,6 +500,17 @@ impl ReceivedAnnounce {
     /// Get the app_data
     pub fn app_data(&self) -> &[u8] {
         &self.app_data
+    }
+
+    /// Whether this announce arrived as a PATH_RESPONSE — an answer to a path
+    /// request rather than the destination announcing itself.
+    ///
+    /// Python's `is_path_response`. An application handler that treats hearing
+    /// an announce as evidence of a live, self-announcing destination has to
+    /// gate on this: a path response says only that somebody, possibly this
+    /// node itself, asked where the destination is.
+    pub fn is_path_response(&self) -> bool {
+        self.is_path_response
     }
 
     /// Get app_data as a string if valid UTF-8
@@ -662,6 +685,34 @@ mod tests {
         assert_eq!(announce.signature(), &[0x05; ED25519_SIGNATURE_SIZE]);
         assert_eq!(announce.app_data(), b"test.app");
         assert_eq!(announce.app_data_string(), Some("test.app"));
+    }
+
+    /// The packet's PATH_RESPONSE context reaches the parsed announce, so a
+    /// handler can tell "this destination announced itself" from "somebody
+    /// asked where it is" — Python's `is_path_response` (Codeberg #417).
+    #[test]
+    fn test_path_response_context_reaches_the_parsed_announce() {
+        let announce_with = |context| {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: [0xaa; TRUNCATED_HASHBYTES],
+                context,
+                data: PacketData::Owned(create_test_announce_payload(false)),
+            };
+            ReceivedAnnounce::from_packet(&packet).unwrap()
+        };
+
+        assert!(announce_with(PacketContext::PathResponse).is_path_response());
+        assert!(!announce_with(PacketContext::None).is_path_response());
     }
 
     #[test]

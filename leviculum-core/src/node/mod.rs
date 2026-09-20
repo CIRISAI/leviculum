@@ -3169,6 +3169,38 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.hops_to(dest_hash.as_bytes())
     }
 
+    /// The `app_data` of the last announce heard for `dest_hash`, whenever it
+    /// was heard — Python's `Identity.recall_app_data`
+    /// (`reference/Reticulum/RNS/Identity.py:162-172`).
+    ///
+    /// Our recall source is the announce cache, the same one
+    /// [`Transport::recall_identity_hash`](crate::transport) reads and the one
+    /// the known-destination ops act on; Python reads the persisted
+    /// `known_destinations` table, which is the same set of facts under
+    /// another name. A cached announce that no longer parses reads as `None`,
+    /// exactly as a `None` from Python's recall.
+    ///
+    /// This is deliberately independent of any live announce: a caller asking
+    /// "what did this destination last say about itself" — a propagation node
+    /// deciding whether a node syncing into it is a node at all (Codeberg
+    /// #417) — must be answered from history, not from the current session.
+    ///
+    /// **Known limit:** history here means this process's history. Python's
+    /// recall also survives a restart, because `known_destinations` persists
+    /// `app_data`; our `known_destinations` writer has no `app_data` to write
+    /// for a runtime-learned destination (`leviculum-std/src/storage.rs`,
+    /// `take_flush_snapshot`) and the announce cache is memory-only. Closing
+    /// that is a persistence change of its own, not a caller's problem.
+    pub fn recall_app_data(&self, dest_hash: &DestinationHash) -> Option<Vec<u8>> {
+        let cached_raw = self
+            .transport
+            .storage()
+            .get_announce_cache(dest_hash.as_bytes())?;
+        let packet = crate::packet::Packet::unpack(cached_raw).ok()?;
+        let announce = crate::announce::ReceivedAnnounce::from_packet(&packet).ok()?;
+        Some(announce.app_data().to_vec())
+    }
+
     /// The raw routing decision for `dest_hash`, for a sender's log line
     /// (Codeberg #365): `(interface index, next hop, interface online)`.
     /// `None` when the path table holds no entry at all — unlike
@@ -8903,6 +8935,52 @@ mod tests {
     /// via the #151 discovery tests: the discovery record travels in
     /// app_data, and a peer whose connection registered after the announce
     /// received an empty one that fails validation.
+    /// `recall_app_data` answers from the announce cache for a destination
+    /// that is known, and answers nothing for one that is not — Python's
+    /// `Identity.recall_app_data` over `known_destinations` (Codeberg #417,
+    /// where a propagation node has to decide whether the node syncing into
+    /// it ever announced itself as a node).
+    #[test]
+    fn test_recall_app_data_answers_from_the_announce_cache() {
+        let clock = MockClock::new(TEST_TIME_MS);
+        let mut node = NodeCoreBuilder::new().enable_transport(true).build(
+            OsRng,
+            clock,
+            MemoryStorage::with_defaults(),
+        );
+        node.transport
+            .register_interface(Box::new(MockInterface::new("if0", 1)));
+
+        let dest = Destination::new(
+            Some(Identity::generate(&mut OsRng)),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["recall"],
+        )
+        .unwrap();
+        let dest_hash = *dest.hash();
+        node.register_destination(dest);
+
+        assert_eq!(node.recall_app_data(&dest_hash), None, "never announced");
+
+        let app_data = b"the-node-said-this-about-itself";
+        let _ = node
+            .announce_destination(&dest_hash, Some(app_data))
+            .unwrap();
+
+        assert_eq!(
+            node.recall_app_data(&dest_hash).as_deref(),
+            Some(app_data.as_slice()),
+            "the recall must answer with what the announce carried"
+        );
+        assert_eq!(
+            node.recall_app_data(&DestinationHash::new([0x5a; TRUNCATED_HASHBYTES])),
+            None,
+            "an unknown destination recalls nothing"
+        );
+    }
+
     #[test]
     fn test_handle_interface_up_reannounce_keeps_app_data() {
         use crate::announce::ReceivedAnnounce;
