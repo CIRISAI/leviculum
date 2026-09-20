@@ -1119,6 +1119,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                     core,
                     *announce.destination_hash().as_bytes(),
                     announce.app_data(),
+                    announce.is_path_response(),
                 );
                 ready
                     .node
@@ -1447,6 +1448,33 @@ mod tests {
         }
     }
 
+    /// Make every `tracing` callsite in this binary dispatch-checked, once.
+    ///
+    /// `with_default` below redirects only the CALLING thread, but `tracing`
+    /// caches one `Interest` per callsite for the whole PROCESS. A thread
+    /// running under the default `NoSubscriber` that reaches a callsite
+    /// first caches `Interest::never`, after which the event is dropped at
+    /// the macro before any dispatcher is consulted — including the
+    /// capturing thread's. Installing a global subscriber that enables
+    /// DEBUG (to a sink; nothing is printed) makes every callsite cache
+    /// "ask the current dispatcher", and `set_global_default` rebuilds the
+    /// cache for callsites already registered.
+    ///
+    /// Without this, `a_peer_sync_and_a_client_upload_log_different_provenance`
+    /// loses its `PN_ACCEPT` lines whenever another test ingests a message
+    /// at the same moment — it failed 2 runs in 10 the moment this module
+    /// gained three more tests that ingest.
+    fn enable_log_dispatch() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(std::io::sink)
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
     /// A `tracing` writer that keeps what was written, so a test can
     /// assert on the log line itself rather than on a proxy for it.
     #[derive(Clone, Default)]
@@ -1735,6 +1763,7 @@ mod tests {
         }
         .encode();
 
+        enable_log_dispatch();
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -1778,5 +1807,259 @@ mod tests {
                 .any(|line| line.contains("PN_SYNC") && line.contains("dir=in")),
             "a one-message transfer from a peer is still a sync round:\n{log}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Codeberg #417: who peers back, and who does not
+    // ------------------------------------------------------------------
+
+    /// A remote propagation node as this node would learn of it: its
+    /// `lxmf.propagation` destination hash and the announce packet it puts
+    /// on the air, already carrying `wire_hops` hops. The receipt increment
+    /// makes the recorded path `wire_hops + 1`, which is what
+    /// `autopeer_maxdepth` is compared against.
+    fn propagation_announce(now_secs: u64, wire_hops: u8) -> ([u8; 16], Vec<u8>) {
+        let mut destination = Destination::new(
+            Some(leviculum_std::generate_identity()),
+            Direction::In,
+            DestinationType::Single,
+            APP_NAME,
+            &[PROPAGATION_ASPECT],
+        )
+        .expect("a propagation destination for the remote");
+        let hash = *destination.hash().as_bytes();
+        let app_data = leviculum_lxmf::PropagationNodeAnnounce {
+            legacy_support: false,
+            timebase: now_secs,
+            enabled: true,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 1024,
+            stamp_cost: 16,
+            stamp_cost_flexibility: 3,
+            peering_cost: 0,
+            metadata: Vec::new(),
+        }
+        .encode()
+        .expect("propagation announce app data");
+        let mut packet = destination
+            .announce(Some(&app_data), &mut rand_core::OsRng, 0, now_secs)
+            .expect("announce packet");
+        packet.hops = wire_hops;
+        let mut buf = vec![0u8; 600];
+        let len = packet.pack(&mut buf).expect("pack the announce");
+        buf.truncate(len);
+        (hash, buf)
+    }
+
+    /// One stamped LXMF message, the shape a sync envelope carries.
+    fn synced_message(seed: u8) -> Vec<u8> {
+        use leviculum_lxmf::constants::LXMF_OVERHEAD;
+        let mut message = vec![seed; LXMF_OVERHEAD + 40];
+        message.extend_from_slice(&[seed.wrapping_add(1); STAMP_SIZE]);
+        message
+    }
+
+    fn peering_engine(
+        peering: PeeringConfig,
+    ) -> (
+        Engine<MemoryPropagationStore>,
+        std::sync::mpsc::Receiver<EngineEvent>,
+    ) {
+        Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering,
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        })
+    }
+
+    fn peer_count(engine: &Engine<MemoryPropagationStore>) -> usize {
+        match &engine.state {
+            State::Ready(ready) => ready.peering.peer_count(),
+            _ => panic!("engine must be ready"),
+        }
+    }
+
+    /// Feed one raw packet to the core WITHOUT showing the resulting events
+    /// to the engine: the announce is heard by the stack, and the
+    /// propagation role never sees it. That is exactly a neighbour that
+    /// announced before this node took the role — and with a six-hour
+    /// re-announce cadence, that is the state it stays in all day.
+    fn hear_announce_off_the_role(core: &mut leviculum_std::driver::StdNodeCore, packet: &[u8]) {
+        let _ = core.handle_packet(leviculum_core::InterfaceId(0), packet);
+    }
+
+    /// leviculum#417: a node syncs its whole store to us and we still do not
+    /// know it. The sender's propagation announce is in our
+    /// known-destinations table but was never heard during the role, so the
+    /// announce path cannot peer it; the reference peers it off the
+    /// RECALLED announce when the sync resource lands
+    /// (`propagation_resource_concluded`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2350-2375`). Without that path the
+    /// exchange stays one-directional until the next announce, up to
+    /// `DEFAULT_ANNOUNCE_INTERVAL_SECS` away.
+    #[test]
+    fn a_sync_from_a_node_that_announced_before_the_role_peers_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = peering_engine(PeeringConfig {
+            autopeer_maxdepth: 1,
+            ..PeeringConfig::default()
+        });
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        let (remote, packet) = propagation_announce(core.emission_secs(), 0);
+        hear_announce_off_the_role(&mut core, &packet);
+        assert!(
+            core.recall_app_data(&DestinationHash::new(remote))
+                .is_some(),
+            "the announce must be recallable, or the test proves nothing"
+        );
+        assert_eq!(
+            peer_count(&engine),
+            0,
+            "an announce heard off the role peers nobody, which is the bug's premise"
+        );
+
+        let link_id = LinkId::new([0x42; 16]);
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, remote);
+        let envelope = leviculum_lxmf::PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![synced_message(0x01)],
+        }
+        .encode();
+        let mut out = TickOutput::empty();
+        engine.on_inbound_resource_completed(&mut ready, &mut core, &link_id, &envelope, &mut out);
+        engine.state = State::Ready(ready);
+
+        assert_eq!(
+            peer_count(&engine),
+            1,
+            "a node that synced its store to us, one hop out and with a \
+             recallable propagation announce, must be a peer"
+        );
+    }
+
+    /// The other two ways the same decision can go wrong, both of which the
+    /// conformance cell carries as standing negatives: a sender with no
+    /// propagation announce behind it at all (a client upload), and a real
+    /// propagation node beyond `autopeer_maxdepth`. Each one's sync lands —
+    /// the store assertion says so — and neither may become a peer.
+    #[test]
+    fn a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = peering_engine(PeeringConfig {
+            autopeer_maxdepth: 1,
+            ..PeeringConfig::default()
+        });
+        let start_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, start_ms);
+
+        // A client: nothing was ever announced on its propagation
+        // destination, so the recall answers nothing.
+        let client = [0x5a_u8; 16];
+        assert!(core
+            .recall_app_data(&DestinationHash::new(client))
+            .is_none());
+        // Two hops out against a depth of one, and a genuine node.
+        let (far, packet) = propagation_announce(core.emission_secs(), 1);
+        hear_announce_off_the_role(&mut core, &packet);
+        assert_eq!(
+            core.hops_to(&DestinationHash::new(far)),
+            Some(2),
+            "the far node must really be two hops out"
+        );
+
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let mut out = TickOutput::empty();
+        for (index, remote) in [client, far].into_iter().enumerate() {
+            let link_id = LinkId::new([0x60 + index as u8; 16]);
+            ready.peering.validate_link_for_tests(link_id, remote);
+            let envelope = leviculum_lxmf::PeerSyncEnvelope {
+                timestamp: 1.0,
+                messages: vec![synced_message(0x10 + index as u8)],
+            }
+            .encode();
+            engine.on_inbound_resource_completed(
+                &mut ready, &mut core, &link_id, &envelope, &mut out,
+            );
+        }
+        let stored = ready.node.store().count().unwrap_or(0);
+        engine.state = State::Ready(ready);
+
+        assert_eq!(
+            stored, 2,
+            "both syncs must have landed, or the negatives are vacuous"
+        );
+        assert_eq!(
+            peer_count(&engine),
+            0,
+            "neither a client nor a node outside autopeer_maxdepth may be peered by a sync"
+        );
+    }
+
+    /// The opposite error on the same rule: a path response is an answer to
+    /// somebody's path request, not a destination announcing itself, and the
+    /// reference refuses to peer on it (`self.lxmrouter.autopeer and not
+    /// is_path_response`, `reference/LXMF/LXMF/Handlers.py:80-84`). The same
+    /// announce delivered normally must peer.
+    #[test]
+    fn a_path_response_does_not_peer_while_the_same_announce_does() {
+        use leviculum_core::packet::PacketContext;
+
+        for (context, expected) in [
+            (PacketContext::PathResponse, 0usize),
+            (PacketContext::None, 1usize),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut core = core(dir.path());
+            let (mut engine, _events) = peering_engine(PeeringConfig {
+                autopeer_maxdepth: 1,
+                ..PeeringConfig::default()
+            });
+            let start_ms = core.now_ms();
+            let _ = engine.on_tick(&mut core, start_ms);
+
+            let (_remote, announce) = propagation_announce(core.emission_secs(), 0);
+            let mut packet = Packet::unpack(&announce).expect("unpack the announce");
+            packet.context = context;
+            let mut buf = vec![0u8; 600];
+            let len = packet.pack(&mut buf).expect("repack the announce");
+            let delivered = core.handle_packet(leviculum_core::InterfaceId(0), &buf[..len]);
+            assert!(
+                delivered
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, NodeEvent::AnnounceReceived { .. })),
+                "the stack must report the announce either way, {context:?}"
+            );
+            for event in &delivered.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+
+            assert_eq!(
+                peer_count(&engine),
+                expected,
+                "a propagation announce delivered as {context:?} must {} peer",
+                if expected == 0 { "not" } else { "" }
+            );
+        }
     }
 }

@@ -400,11 +400,18 @@ impl PeeringRuntime {
 
     /// Ingest one propagation announce
     /// (`LXMFPropagationAnnounceHandler`, `reference/LXMF/LXMF/Handlers.py:56-99`).
+    ///
+    /// `is_path_response` is the announce's own
+    /// [`ReceivedAnnounce::is_path_response`](leviculum_core::ReceivedAnnounce::is_path_response):
+    /// an announce that came back as the answer to a path request says only
+    /// that somebody asked where this destination is — possibly us, for a
+    /// destination we merely wanted to reach — not that it announced itself.
     pub(crate) fn on_announce(
         &mut self,
         core: &mut Core,
         destination_hash: [u8; 16],
         app_data: &[u8],
+        is_path_response: bool,
     ) {
         let Ok(announce) = PropagationNodeAnnounce::decode(app_data) else {
             return;
@@ -420,6 +427,21 @@ impl PeeringRuntime {
                     }
                 }
             }
+        }
+        // The reference gates its whole autopeer arm on `not
+        // is_path_response` (`reference/LXMF/LXMF/Handlers.py:80`), so a
+        // path response can neither create nor break a peering. Ours could
+        // do both: the transport emits `AnnounceReceived` for a path
+        // response exactly as for an announce
+        // (`leviculum-core/src/transport.rs`, the PathFound/AnnounceReceived
+        // pair), so every propagation node whose path anyone looked up
+        // became a peer (Codeberg #417 §6).
+        if is_path_response && !self.peers_on_path_response(&destination_hash) {
+            tracing::trace!(
+                "lnpnd: propagation announce for {} arrived as a path response; not peering",
+                short_hex(&destination_hash),
+            );
+            return;
         }
         let hops = core.hops_to(&DestinationHash::new(destination_hash));
         let now = unix_secs();
@@ -468,6 +490,20 @@ impl PeeringRuntime {
                 }
             }
         }
+    }
+
+    /// The one case the reference acts on a path response: a STATIC peer it
+    /// has never heard from (`not is_path_response or static_peer.last_heard
+    /// == 0`, `reference/LXMF/LXMF/Handlers.py:68-70`). A static peering is
+    /// configured rather than discovered, so the first path response is
+    /// allowed to fill in the announce facts the operator could not
+    /// configure; once the peer has been heard, a path response adds nothing.
+    fn peers_on_path_response(&self, destination_hash: &[u8; 16]) -> bool {
+        self.table.config().static_peers.contains(destination_hash)
+            && self
+                .table
+                .get(destination_hash)
+                .is_none_or(|peer| peer.last_heard == 0)
     }
 
     // ------------------------------------------------------------------
@@ -627,6 +663,26 @@ impl PeeringRuntime {
             return None;
         };
         self.inbound_transfers.remove(link_id);
+        let now = unix_secs();
+
+        // Peer off the RECALLED announce, before anything is routed by the
+        // peering key: the reference makes this decision for every remote
+        // with an identity, and only afterwards asks whether a key was
+        // presented (`propagation_resource_concluded`,
+        // `reference/LXMF/LXMF/LXMRouter.py:2350-2389`). A single-message
+        // upload from a real propagation node therefore peers it too, which
+        // is why this sits above the client-upload return below.
+        //
+        // `validated_peer` first, the live link second: with validation on
+        // the worker this may run after the peer already tore its link down
+        // (see the doc comment above), and the captured hash outlives that.
+        let link_identity = core.get_remote_identity(link_id).cloned();
+        let remote_of_link =
+            validated_peer.or_else(|| link_identity.as_ref().map(Self::propagation_hash_of));
+        if let Some(remote) = remote_of_link {
+            self.peer_from_recalled_announce(core, remote, link_identity.as_ref(), now);
+        }
+
         let Some(remote_hash) = validated_peer else {
             if envelope.messages.len() > 1 {
                 tracing::debug!(
@@ -641,7 +697,6 @@ impl PeeringRuntime {
             return None;
         };
 
-        let now = unix_secs();
         let mut accepted = 0usize;
         let mut duplicates = 0usize;
         let mut bytes = 0u64;
@@ -734,6 +789,66 @@ impl PeeringRuntime {
             out.merge(core.close_link(link_id));
         }
         Some(local)
+    }
+
+    /// A node just synced its store to us; peer it back if its last
+    /// announce — recalled, not heard now — says it is a propagation node
+    /// inside our depth (`reference/LXMF/LXMF/LXMRouter.py:2355-2375`).
+    ///
+    /// This is the half of the peering rule the announce path cannot carry.
+    /// A peer enters the table on a propagation announce heard WHILE we hold
+    /// the role, and the next announce is
+    /// [`DEFAULT_ANNOUNCE_INTERVAL_SECS`](crate::engine::DEFAULT_ANNOUNCE_INTERVAL_SECS)
+    /// away — six hours. A neighbour that announced before we took the role
+    /// is invisible to that path for the whole interval, while its syncs
+    /// keep arriving; the exchange stays one-directional and our store never
+    /// reaches it. The reference answers from `Identity.known_destinations`,
+    /// which survives both the role change and a restart; our equivalent is
+    /// [`NodeCore::recall_app_data`](leviculum_core::NodeCore::recall_app_data)
+    /// over the announce cache (Codeberg #417).
+    fn peer_from_recalled_announce(
+        &mut self,
+        core: &Core,
+        remote_hash: [u8; 16],
+        link_identity: Option<&Identity>,
+        now: u64,
+    ) {
+        let destination = DestinationHash::new(remote_hash);
+        let Some(app_data) = core.recall_app_data(&destination) else {
+            // Nothing recalled: a client, which never announces a
+            // propagation destination. The reference fails the same guard
+            // on a `None` from `recall_app_data` (`:2356`).
+            return;
+        };
+        let Ok(announce) = PropagationNodeAnnounce::decode(&app_data) else {
+            return;
+        };
+        let hops = core.hops_to(&destination);
+        if self
+            .table
+            .handle_inbound_sync(remote_hash, &announce, hops, now)
+            != PeerChange::Added
+        {
+            return;
+        }
+        // The keys, as the announce path captures them (#388 pass 3): from
+        // the link we are being synced over when it is still up, from the
+        // identity cache otherwise. Without them the peering-key material
+        // for our own sync round back cannot be derived.
+        if let Some(peer) = self.table.get_mut(&remote_hash) {
+            if let Some(identity) =
+                link_identity.or_else(|| core.storage().get_identity(&remote_hash))
+            {
+                peer.capture_identity(identity);
+            }
+        }
+        // §4: the reason names the EVENT that peered, not the mechanism —
+        // the reference's own "discovered via incoming sync" (`:2374`). A
+        // reader grepping `PN_PEER` sees how each peer got in, and
+        // `inbound_sync` is the vocabulary `PN_SYNC dir=in` already uses, so
+        // the cause and its trace share a word.
+        self.log_peer("add", &remote_hash, "inbound_sync");
+        self.persist_peer(&remote_hash);
     }
 
     // ------------------------------------------------------------------
