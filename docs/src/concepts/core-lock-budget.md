@@ -338,3 +338,58 @@ latency, not a per-announce or per-loop cost. The budget argument is
 unchanged; the number it is measured against is four to five times
 larger.
 
+## A diagnostic write is inside the budget too (#418)
+
+The budget above is about CPU: work whose cost scales with a payload.
+The miauhaus soak found the other half, and it is worse, because
+nothing about the call site looks expensive.
+
+Over 49 days and 397 023 881 events, the node's 10 s `PATH_TABLE`
+liveness heartbeat missed at least one beat **2 928 times** out of
+421 605 intervals, with a tail to 37.0 s. During each of those the
+daemon emitted nothing at all — no packet, no announce, not the
+heartbeat — on a node that otherwise logs 30 to 150 events a second.
+Both long stalls pulled out of the raw log have the same shape: the
+hole sits between the `ANN_RX` of one announce and the `PATH_ADD` of
+that same destination, a span in which nothing can take seconds.
+
+The emission can. Until #418 the event-log layer wrote each line with
+a blocking `write(2)`, flushed, under a process-global mutex, on the
+thread that emitted it — and the event loop emits while it holds the
+core mutex (`apply_inbound`,
+`leviculum-std/src/driver/mod.rs:4230`). A `write(2)` to a USB disk
+under writeback throttling blocks for seconds, so the loop stopped,
+and everything that wanted the core queued behind it. That is why the
+symptom was total silence rather than a missing log line.
+
+The rule that follows is the CPU rule's sibling:
+
+> **No caller holds the core lock across an I/O call whose latency
+> belongs to a device. A diagnostic that can stop the transport is a
+> worse bug than the missing diagnostic.**
+
+The event log now inverts the trade (`FileSink`,
+`leviculum-std/src/event_log.rs:810`): the emitting thread does a
+bounded enqueue and returns, one writer thread owns the file, and an
+overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
+blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
+behaviour for anyone who would rather block than lose a line, and it
+is what the mvr's positive-control arm runs.
+
+### What measures this
+
+Three events, all threshold-gated so a healthy node emits none of
+them, and deliberately at different altitudes so they disagree
+informatively:
+
+| event | where | says |
+| --- | --- | --- |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:4773`) | announce handling itself took ≥ 100 ms |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:3911`) | an outside thread waited ≥ 250 ms for the core lock |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:904`) | one batch write to the log file took ≥ 50 ms |
+
+`CORE_STALL` without `ANN_SLOW` means the loop was stopped by
+something other than announce handling; `EVENT_LOG_WRITE_SLOW`
+alongside it names the disk. The watchdog measures the *wait* for the
+core mutex, never the hold, which is exactly "how long the loop spent
+not polling" without an `Instant` in a dozen `select!` arms.

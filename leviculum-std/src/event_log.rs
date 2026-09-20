@@ -27,6 +27,39 @@
 //! ignored — the legacy printf-style `tracing::debug!("[FOO] ...")`
 //! sites stay compatible.
 //!
+//! # Architecture: the file sink does not run on your thread (#418)
+//!
+//! `LEVICULUM_EVENT_LOG` is written by ONE dedicated thread. The
+//! thread that emits an event formats its line, hands it to a bounded
+//! queue and returns; it never touches the file.
+//!
+//! This is not a throughput optimisation, it is a Priority 1 fix. The
+//! miauhaus soak node went completely silent — no packet, no announce,
+//! not even the 10 s `PATH_TABLE` heartbeat — 2 928 times in 49 days,
+//! with a tail to 37.0 s, because the layer used to `write(2)` on the
+//! emitting thread and the driver's event loop emits while holding the
+//! core mutex. See `docs/src/concepts/core-lock-budget.md` for the
+//! measurement and the rule it produced.
+//!
+//! Consequences a caller should know:
+//!
+//! - **Loss is possible and is never silent.** A full queue drops the
+//!   line and the writer reports the running count as
+//!   `EVENT_LOG_DROPPED node=… n=… t=…`.
+//! - **A slow disk is reported, not suffered.** A batch write taking
+//!   50 ms or more emits `EVENT_LOG_WRITE_SLOW node=… lines=… ms=…
+//!   t=…`, at most once a second.
+//! - **`t=` is the emission time, not the write time.** It always was;
+//!   it matters more now that the two can differ.
+//! - **A process that asserts on the file must flush first.**
+//!   [`flush_event_log`] is that point; `atexit` runs it for a normal
+//!   exit and for `std::process::exit`.
+//! - **`LEVICULUM_EVENT_LOG_SYNC=1`** restores the pre-#418 blocking
+//!   write for anyone who would rather block than lose a line.
+//!
+//! Neither synthetic line goes through `tracing`: a sink that reported
+//! on itself through itself would recurse.
+//!
 //! # Architecture: process-global layer + active-handles list
 //!
 //! A single [`EventLogLayer`] is registered once in the process (by
@@ -84,10 +117,12 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::sync_ext::MutexRecover;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -97,6 +132,9 @@ use tracing_subscriber::{fmt, EnvFilter, Registry};
 
 const NODE_ENV_VAR: &str = "LEVICULUM_EVENT_NODE";
 const LOG_FILE_ENV_VAR: &str = "LEVICULUM_EVENT_LOG";
+/// Opt back in to the pre-#418 blocking write on the emitting thread.
+/// Set to anything but `0`.
+const LOG_SYNC_ENV_VAR: &str = "LEVICULUM_EVENT_LOG_SYNC";
 
 /// Schema for one structured event.  Declares the keys that MUST be
 /// present on every emission of this event name.
@@ -654,7 +692,7 @@ fn node_name() -> &'static str {
     })
 }
 
-/// Process-wide append-only event log file.  Returns `Some` only when
+/// Process-wide append-only event log sink.  Returns `Some` only when
 /// `LEVICULUM_EVENT_LOG=<path>` is set in the environment at first
 /// access AND the file opens successfully.  Cached via OnceLock so
 /// the env-var lookup + file-open happens exactly once per process.
@@ -669,23 +707,298 @@ fn node_name() -> &'static str {
 /// failure modes (permissions, missing directory) do not self-heal,
 /// and a retry would put a failing `open(2)` on every event emission
 /// inside the tracing hot path.
-fn event_log_file() -> Option<&'static Mutex<File>> {
-    static FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
-    FILE.get_or_init(|| {
-        std::env::var(LOG_FILE_ENV_VAR).ok().and_then(|p| {
-            match OpenOptions::new().create(true).append(true).open(&p) {
-                Ok(f) => Some(Mutex::new(f)),
+///
+/// `init_time` is the layer's epoch, so the writer thread's own
+/// synthetic lines (`EVENT_LOG_DROPPED`, `EVENT_LOG_WRITE_SLOW`) carry
+/// `t=` on the same timebase as every other line in the file.
+fn file_sink(init_time: Instant) -> Option<&'static FileSink> {
+    FILE_SINK
+        .get_or_init(|| {
+            let path = std::env::var(LOG_FILE_ENV_VAR).ok()?;
+            let file = match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(f) => f,
                 Err(e) => {
                     eprintln!(
-                        "{LOG_FILE_ENV_VAR}={p}: cannot open event log: {e} — \
+                        "{LOG_FILE_ENV_VAR}={path}: cannot open event log: {e} — \
                          event logging disabled for this process"
                     );
-                    None
+                    return None;
+                }
+            };
+            Some(FileSink::new(file, init_time))
+        })
+        .as_ref()
+}
+
+static FILE_SINK: OnceLock<Option<FileSink>> = OnceLock::new();
+
+/// Bounded hand-off queue between the emitting threads and the writer
+/// thread, in lines.
+///
+/// Sized from the field measurement in Codeberg #418: the longest stall
+/// the miauhaus soak recorded in 49 days was 37.0 s, and the node emits
+/// 30–150 events/s.  8192 lines absorbs ~55 s at the top of that rate,
+/// so the stall distribution that motivated the queue fits inside it
+/// with margin; at ~80 bytes/line the worst case is ~650 KiB of
+/// buffered text, which is the price of not going deaf.
+const SINK_QUEUE_CAPACITY: usize = 8192;
+
+/// A batch write to the log file slower than this is reported as
+/// `EVENT_LOG_WRITE_SLOW`.
+///
+/// The threshold is a measurement decision, not a taste one.  Appending
+/// a few hundred bytes to a warm page cache is tens of microseconds;
+/// 50 ms is three orders of magnitude above that and two orders below
+/// the shortest stall the field saw (11 s), so it cannot miss a stall
+/// of the reported shape and it cannot fire on a healthy write.
+const SLOW_WRITE_MS: u128 = 50;
+
+/// Minimum spacing between `EVENT_LOG_WRITE_SLOW` lines.  A disk that
+/// is slow is slow for many consecutive writes; without this the
+/// instrumentation becomes the next volume problem it is meant to
+/// diagnose.  One line per second names the condition without
+/// describing every instance of it.
+const SLOW_REPORT_MIN_GAP_MS: u128 = 1_000;
+
+/// Shared counters between the emitting threads and the writer thread.
+struct SinkCounters {
+    /// Lines accepted into the queue.
+    enqueued: AtomicU64,
+    /// Lines the writer has handed to `write(2)`.
+    flushed: AtomicU64,
+    /// Lines refused because the queue was full.
+    dropped: AtomicU64,
+}
+
+/// How the sink gets a line into the file.
+enum SinkMode {
+    /// Pre-#418 behaviour: `write(2)` on the emitting thread, under a
+    /// process-global mutex.  Kept behind `LEVICULUM_EVENT_LOG_SYNC=1`
+    /// as the positive control for the mvr — a measurement that cannot
+    /// show the failure it claims to fix proves nothing — and as the
+    /// escape hatch for anyone who would rather block than lose a line.
+    Blocking(Mutex<File>),
+    /// Default: hand the line to the writer thread and return.
+    Queued {
+        tx: SyncSender<(u128, String)>,
+        counters: Arc<SinkCounters>,
+    },
+}
+
+/// The process-wide event-log file sink.
+///
+/// # Why the caller does not write the file (Codeberg #418)
+///
+/// The miauhaus soak node went silent — no packet, no announce, not even
+/// the 10 s `PATH_TABLE` heartbeat — 2 928 times in 49 days, with a tail
+/// to 37.0 s.  The hole always sat between two emission sites a few
+/// hundred lines apart in `handle_announce`, and nothing between them
+/// can take seconds.  What can is the emission itself: the driver's
+/// event loop calls `tracing::debug!` while it holds the core mutex
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4229`), the layer
+/// wrote the line with a blocking `write(2)` on that very thread, and a
+/// `write(2)` to a USB disk under writeback throttling blocks for
+/// seconds.  Every other task then queued behind the core mutex, so the
+/// daemon emitted nothing at all — which is exactly the shape the field
+/// reported.
+///
+/// A diagnostic write that can stop the transport is a worse bug than
+/// the missing diagnostics, so the default inverts the trade: the
+/// emitting thread does a bounded enqueue, a dedicated writer thread
+/// owns the file, and an overrun drops lines and says so
+/// (`EVENT_LOG_DROPPED`) instead of blocking the mesh.
+struct FileSink {
+    mode: SinkMode,
+}
+
+impl FileSink {
+    fn new(file: File, init_time: Instant) -> Self {
+        let sync = std::env::var(LOG_SYNC_ENV_VAR).is_ok_and(|v| v != "0");
+        if sync {
+            return FileSink {
+                mode: SinkMode::Blocking(Mutex::new(file)),
+            };
+        }
+        let (tx, rx) = sync_channel::<(u128, String)>(SINK_QUEUE_CAPACITY);
+        let counters = Arc::new(SinkCounters {
+            enqueued: AtomicU64::new(0),
+            flushed: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        });
+        let writer_counters = Arc::clone(&counters);
+        // A named thread so `top -H` / a stack dump can attribute the
+        // one thread in the process that is allowed to block on the log.
+        let spawned = std::thread::Builder::new()
+            .name("leviculum-eventlog".to_string())
+            .spawn(move || writer_loop(file, rx, writer_counters, init_time));
+        match spawned {
+            Ok(_) => {
+                // The queue is drained by a thread, so a process that
+                // exits while lines are still in flight would truncate
+                // its own log. `atexit` covers both a `main` return and
+                // `std::process::exit`; a signal death is not covered
+                // and cannot be, which is why the drain is bounded and
+                // the writer never buffers in user space.
+                unsafe { libc::atexit(flush_event_log_at_exit) };
+                FileSink {
+                    mode: SinkMode::Queued { tx, counters },
                 }
             }
-        })
-    })
-    .as_ref()
+            Err(e) => {
+                // No thread, no queue: fall back to the blocking write
+                // rather than silently logging nothing. Recovering the
+                // file out of the moved closure is not possible, so
+                // reopen it by path.
+                eprintln!(
+                    "{LOG_FILE_ENV_VAR}: cannot spawn event-log writer thread: {e} — \
+                     falling back to blocking writes"
+                );
+                let path = std::env::var(LOG_FILE_ENV_VAR).unwrap_or_default();
+                match OpenOptions::new().create(true).append(true).open(&path) {
+                    Ok(f) => FileSink {
+                        mode: SinkMode::Blocking(Mutex::new(f)),
+                    },
+                    Err(e) => {
+                        eprintln!("{LOG_FILE_ENV_VAR}={path}: reopen failed: {e}");
+                        FileSink {
+                            mode: SinkMode::Blocking(Mutex::new(
+                                File::open("/dev/null").expect("/dev/null"),
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hand one already-formatted line to the file.  Never blocks in
+    /// the default mode.
+    fn write(&self, t_ms: u128, line: String) {
+        match &self.mode {
+            SinkMode::Blocking(file) => {
+                if let Ok(mut f) = file.lock() {
+                    let _ = writeln!(f, "{line}");
+                    let _ = f.flush();
+                }
+            }
+            SinkMode::Queued { tx, counters } => match tx.try_send((t_ms, line)) {
+                Ok(()) => {
+                    counters.enqueued.fetch_add(1, Ordering::Release);
+                }
+                Err(TrySendError::Full(_)) => {
+                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    counters.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+        }
+    }
+}
+
+/// The one thread in the process allowed to block on the event log.
+///
+/// Batches whatever is queued into a single `write(2)`: under load that
+/// is both fewer syscalls than the old line-at-a-time path and the
+/// thing that lets the queue drain faster than it fills.
+fn writer_loop(
+    mut file: File,
+    rx: Receiver<(u128, String)>,
+    counters: Arc<SinkCounters>,
+    init_time: Instant,
+) {
+    let node = node_name();
+    let mut written: u64 = 0;
+    let mut reported_drops: u64 = 0;
+    let mut last_slow_report_ms: u128 = 0;
+    loop {
+        let first = match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let mut batch = Vec::with_capacity(64);
+        batch.push(first);
+        while batch.len() < SINK_QUEUE_CAPACITY {
+            match rx.try_recv() {
+                Ok(line) => batch.push(line),
+                Err(_) => break,
+            }
+        }
+
+        let mut buf = String::with_capacity(batch.len() * 96);
+        // A drop is only knowable here, and it is the loss the old code
+        // could not have: say so in the file, in the canonical format,
+        // before the lines that survived it.
+        let dropped = counters.dropped.load(Ordering::Relaxed);
+        if dropped > reported_drops {
+            let t = batch[0].0;
+            buf.push_str(&format!(
+                "EVENT_LOG_DROPPED node={node} n={dropped} t={t}\n"
+            ));
+            reported_drops = dropped;
+        }
+        for (_, line) in &batch {
+            buf.push_str(line);
+            buf.push('\n');
+        }
+
+        let started = Instant::now();
+        let _ = file.write_all(buf.as_bytes());
+        let took_ms = started.elapsed().as_millis();
+
+        written += batch.len() as u64;
+        counters.flushed.store(written, Ordering::Release);
+
+        // The measurement #418 asks for, from the only place that can
+        // take it: how long the disk actually held the write. Emitted
+        // straight into the file rather than through `tracing`, because
+        // a sink that reports on itself through itself recurses.
+        if took_ms >= SLOW_WRITE_MS {
+            let now_ms = init_time.elapsed().as_millis();
+            if now_ms.saturating_sub(last_slow_report_ms) >= SLOW_REPORT_MIN_GAP_MS {
+                last_slow_report_ms = now_ms;
+                let lines = batch.len();
+                let _ = file.write_all(
+                    format!(
+                        "EVENT_LOG_WRITE_SLOW node={node} lines={lines} ms={took_ms} t={now_ms}\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+    }
+}
+
+/// `atexit` shim: bounded drain so a normal exit does not truncate the
+/// log the process just wrote.
+extern "C" fn flush_event_log_at_exit() {
+    flush_event_log(Duration::from_secs(2));
+}
+
+/// Block until every line accepted by the sink has reached `write(2)`,
+/// or until `timeout` expires.
+///
+/// Public because a process that writes an event log and then asserts on
+/// the file (the multi-process event-log tests, `lnmsg`'s CLI tests)
+/// needs a point where "written" is a fact rather than a race.  A no-op
+/// when no event log is configured or when the blocking mode is in
+/// force, because in both cases the write already happened on the
+/// caller's thread.
+pub fn flush_event_log(timeout: Duration) {
+    let Some(Some(sink)) = FILE_SINK.get() else {
+        return;
+    };
+    let SinkMode::Queued { counters, .. } = &sink.mode else {
+        return;
+    };
+    let deadline = Instant::now() + timeout;
+    while counters.flushed.load(Ordering::Acquire) < counters.enqueued.load(Ordering::Acquire) {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Read every input file as text, parse the trailing `t=<n>` token of
@@ -874,19 +1187,6 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
             })
             .collect();
 
-        // Process-wide append-only file (when LEVICULUM_EVENT_LOG is
-        // set).  Production daemons + helper bin write here.  Schema
-        // violations are per-handle so they don't appear in the file.
-        if let Some(file) = event_log_file() {
-            if let Ok(mut f) = file.lock() {
-                let _ = writeln!(f, "{line}");
-                for v in &field_violation_lines {
-                    let _ = writeln!(f, "{v}");
-                }
-                let _ = f.flush();
-            }
-        }
-
         // Distribute to every active handle.  Per-handle:
         //   1. push the canonical line
         //   2. push one EVENT_FIELD_VIOLATION per offending field
@@ -942,6 +1242,22 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
                     buf.push(v);
                 }
             }
+        }
+        drop(active);
+
+        // Process-wide append-only file (when LEVICULUM_EVENT_LOG is
+        // set).  Production daemons + helper bin write here.  Schema
+        // violations are per-handle so they don't appear in the file.
+        //
+        // Last, and by value: the handles above need `line` alive to
+        // clone it, and a production daemon has no handles at all, so
+        // moving it here rather than copying it is the difference
+        // between one heap allocation per event and two.
+        if let Some(sink) = file_sink(self.init_time) {
+            for v in field_violation_lines {
+                sink.write(t_ms, v);
+            }
+            sink.write(t_ms, line);
         }
     }
 }
