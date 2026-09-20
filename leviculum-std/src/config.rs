@@ -103,11 +103,12 @@ pub struct ReticulumConfig {
     /// different interval. Default: 3600 (one hour).
     #[serde(default = "default_flush_interval_secs")]
     pub flush_interval_secs: u64,
-    /// Capacity of the lossless control-plane event channel (Codeberg #71).
+    /// Capacity of the control-plane event channel (Codeberg #71).
     ///
     /// Control events (announces, paths, link/resource lifecycle) are
-    /// delivered losslessly until this bounded channel fills, after which
-    /// drops are counted and surfaced via `NodeEvent::ControlPlaneOverflow`.
+    /// delivered in full for as long as the consumer drains them; once this
+    /// bounded channel fills they are dropped, counted, and reported to the
+    /// consumer via `NodeEvent::ControlPlaneOverflow`.
     /// The default is conservative for small std platforms; servers under
     /// heavy announce load should raise it. Library default, platform tunes.
     #[serde(default = "default_control_channel_capacity")]
@@ -195,7 +196,7 @@ fn default_discover_interfaces() -> bool {
 /// Default interval between periodic storage flushes (seconds)
 pub const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 3600;
 
-/// Default capacity of the lossless control-plane event channel.
+/// Default capacity of the control-plane event channel.
 ///
 /// Conservative figure safe for small std platforms. Matches the previously
 /// shipped single-channel capacity so existing control-plane headroom is

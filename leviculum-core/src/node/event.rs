@@ -418,13 +418,15 @@ pub enum NodeEvent {
     /// One or more control-plane events were dropped because the bounded
     /// control channel was full.
     ///
-    /// The std driver splits node events into a lossless-by-default control
-    /// plane and a droppable data plane. When the control channel overflows,
-    /// the lost events cannot be recovered, but the loss is never silent:
-    /// the driver counts the drops and emits this single marker as soon as
-    /// the control channel has room again. `dropped_count` is the number of
-    /// control events lost since the previous marker. The marker itself is
-    /// only enqueued when there is room, so it is never dropped.
+    /// The std driver splits node events into a priority control plane and a
+    /// droppable data plane. The control plane arrives complete for as long
+    /// as the consumer keeps up; past that its bounded channel fills and
+    /// events are lost, which no capacity can rule out. What is ruled out is
+    /// losing them *silently*: the driver counts the drops and the event
+    /// receiver mints this marker for the consumer. `dropped_count` is the
+    /// number of control events lost since the previous marker. It is
+    /// synthesised at the receiving end and needs no room in the channel it
+    /// reports on, so a plane that stays full still reports (Codeberg #419).
     ControlPlaneOverflow {
         /// Number of control-plane events dropped since the last marker.
         dropped_count: u64,
@@ -455,10 +457,11 @@ pub enum NodeEvent {
 /// Delivery plane a [`NodeEvent`] belongs to.
 ///
 /// The std driver (Codeberg #71) carries events on two independent bounded
-/// channels: a [`Control`](EventClass::Control) plane that is lossless until
-/// its channel overflows (and surfaces any overflow via
-/// [`NodeEvent::ControlPlaneOverflow`]), and a [`Data`](EventClass::Data)
-/// plane that drops silently under load as normal backpressure. Embedded
+/// channels: a [`Control`](EventClass::Control) plane that is delivered in
+/// full while the consumer keeps up and reports every event it could not
+/// take via [`NodeEvent::ControlPlaneOverflow`], and a
+/// [`Data`](EventClass::Data) plane that drops silently under load as normal
+/// backpressure. Embedded
 /// (core-only) builds never construct the channels; this classification is
 /// the single source of truth they share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

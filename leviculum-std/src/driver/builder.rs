@@ -200,6 +200,13 @@ impl ReticulumNodeBuilder {
     /// entirely on `output.actions`. Mirrors the `leviculum-nrf`
     /// daemon binaries, which never construct an event channel.
     ///
+    /// A node whose application logic is a
+    /// [`core_processor`](ReticulumNodeBuilder::core_processor) belongs here
+    /// too. The processor's tap reads the raw events ahead of the sink, so it
+    /// misses nothing; leaving the channel enabled only gives the node a
+    /// queue nobody drains, which fills to capacity and then drops every
+    /// control event for the rest of the process's life (Codeberg #419).
+    ///
     /// After `without_events()`, `take_event_receiver()` returns `None`.
     pub fn without_events(mut self) -> Self {
         self.events_enabled = false;
@@ -727,12 +734,12 @@ impl ReticulumNodeBuilder {
         self
     }
 
-    /// Set the capacity of the lossless control-plane event channel
-    /// (Codeberg #71).
+    /// Set the capacity of the control-plane event channel (Codeberg #71).
     ///
     /// Control events (announces, paths, link/resource lifecycle) are
-    /// delivered losslessly until this bounded channel fills; overflow is
-    /// then surfaced via `NodeEvent::ControlPlaneOverflow`. If not called,
+    /// delivered in full for as long as the consumer drains them; once this
+    /// bounded channel fills they are dropped, and every drop is reported to
+    /// the consumer via `NodeEvent::ControlPlaneOverflow`. If not called,
     /// the loaded config value is used (default:
     /// [`DEFAULT_CONTROL_CHANNEL_CAPACITY`](crate::config::DEFAULT_CONTROL_CHANNEL_CAPACITY)).
     /// Servers under heavy announce load should raise it.

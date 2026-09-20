@@ -73,10 +73,10 @@ use std::net::SocketAddr;
 use crate::sync_ext::MutexRecover;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{
     self,
@@ -175,17 +175,19 @@ const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 
 /// Sender half of the split control/data node-event channels (Codeberg #71).
 ///
-/// Lives in the event loop only (single owner, so `&mut self` is enough for
-/// the dropped-counter — no atomics needed). [`emit`](EventSink::emit)
+/// Lives in the event loop only (single owner). [`emit`](EventSink::emit)
 /// classifies each [`NodeEvent`] with [`NodeEvent::event_class`] and routes
 /// it:
 ///
-/// * **Control** plane — lossless by default. When the bounded control
-///   channel is full the event is dropped but counted, and the loss is made
-///   visible by delivering one [`NodeEvent::ControlPlaneOverflow`] as soon as
-///   the channel has room (see [`flush_overflow`](EventSink::flush_overflow)).
-///   The marker itself is only enqueued when there is room, so it is never
-///   lost.
+/// * **Control** plane — delivered in full for as long as the consumer keeps
+///   up, which a bounded channel can promise and no more. What it does
+///   promise unconditionally is that a loss is *reported*: an event the full
+///   channel cannot take is counted in `control_dropped`, and
+///   [`EventReceiver`] hands the consumer a
+///   [`NodeEvent::ControlPlaneOverflow`] carrying that count. The marker is
+///   synthesised on the receiving side and never occupies a channel slot, so
+///   a full plane cannot swallow the very notice that says it is full
+///   (Codeberg #419).
 /// * **Data** plane — droppable. A full data channel drops silently; that is
 ///   the intended backpressure.
 ///
@@ -200,16 +202,18 @@ const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 /// capacity reading and the emits that follow it costs latency, never a
 /// message.
 struct EventSink {
-    /// Lossless-by-default control plane.
+    /// Control plane: delivered while the consumer keeps up, every loss
+    /// reported.
     control_tx: mpsc::Sender<NodeEvent>,
     /// Droppable data plane (backpressure).
     data_tx: mpsc::Sender<NodeEvent>,
     /// Configured control-channel capacity, for the overflow warn log.
     control_capacity: usize,
     /// Control events dropped since the last `ControlPlaneOverflow` marker
-    /// was delivered. Surfaced (and reset) by `flush_overflow` once the
-    /// control channel has room.
-    control_dropped: u64,
+    /// was handed out. Shared with the [`EventReceiver`], which is where the
+    /// marker is minted — the only place that needs no room in a full
+    /// channel to do it (Codeberg #419).
+    control_dropped: Arc<AtomicU64>,
     /// Reliable channel deliveries that found the data plane full, in arrival
     /// order. Retried ahead of every later data event so a channel's sequence
     /// order is preserved (#280).
@@ -231,24 +235,28 @@ impl EventSink {
         }
     }
 
-    /// Deliver a control-plane event losslessly, or count it as dropped and
-    /// surface the loss via `ControlPlaneOverflow`.
+    /// Deliver a control-plane event, or count it as dropped so the receiver
+    /// can report the loss via `ControlPlaneOverflow`.
     ///
-    /// The real event is tried first so a freed slot is never starved by the
-    /// overflow marker; only when the event lands (proving the channel has
-    /// room) do we try to flush any pending overflow marker behind it.
+    /// Counting is all this side does. The marker used to be enqueued here,
+    /// behind the event that had just proved the channel had room — which
+    /// made it reachable only for a consumer that frees two slots at once.
+    /// A consumer that frees one slot at a time, or none at all, kept losing
+    /// control events with nothing on its stream to say so; lnpnd's first
+    /// field run dropped 466 announces that way and never surfaced a single
+    /// marker (Codeberg #419).
     fn emit_control(&mut self, event: NodeEvent) {
         match self.control_tx.try_send(event) {
-            Ok(()) => self.flush_overflow(),
+            Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
-                self.control_dropped += 1;
+                let pending = self.control_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                 // BUG-1 sibling: structured fields only, no trailing prose
                 // (the spaces would corrupt the canonical event-log line).
                 tracing::warn!(
                     event = "EVENT_CHANNEL_FULL",
                     queue_capacity = self.control_capacity,
                     dropped_event_type = ev.variant_name(),
-                    pending_dropped = self.control_dropped,
+                    pending_dropped = pending,
                 );
             }
             Err(TrySendError::Closed(ev)) => {
@@ -257,30 +265,6 @@ impl EventSink {
                     dropped_event_type = ev.variant_name(),
                 );
             }
-        }
-    }
-
-    /// If control events were previously dropped, try to deliver one
-    /// `ControlPlaneOverflow` marker reporting the count. It is only enqueued
-    /// when the channel has room, so the marker is never itself dropped; the
-    /// counter is reset only on a successful send.
-    fn flush_overflow(&mut self) {
-        if self.control_dropped == 0 {
-            return;
-        }
-        let dropped_count = self.control_dropped;
-        match self
-            .control_tx
-            .try_send(NodeEvent::ControlPlaneOverflow { dropped_count })
-        {
-            Ok(()) => {
-                tracing::warn!(event = "CONTROL_PLANE_OVERFLOW", dropped_count);
-                self.control_dropped = 0;
-            }
-            // Still full: keep the count and try again on the next emit.
-            Err(TrySendError::Full(_)) => {}
-            // Receiver gone: nothing can observe the marker anyway.
-            Err(TrySendError::Closed(_)) => self.control_dropped = 0,
         }
     }
 
@@ -367,27 +351,102 @@ impl EventSink {
     }
 }
 
+/// How rarely a saturated control plane repeats its overflow report
+/// (Codeberg #419).
+///
+/// The marker coalesces — it carries the number of events dropped since the
+/// last one — so suppressing it for a moment costs no information, only
+/// timeliness. Without the gate a plane that stays full would hand the
+/// consumer one marker per `recv()` and it would never reach the events
+/// underneath: the alarm would become the flood. The first marker after a
+/// quiet spell is never delayed, which is what an operator actually watches
+/// for.
+const OVERFLOW_MARKER_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Receiver half handed to the application by
 /// [`ReticulumNode::take_event_receiver`] (Codeberg #71).
 ///
 /// Merges the split control/data channels into a single stream, draining the
 /// control plane with strict priority over the data plane so a flood of data
 /// events can never starve discovery- or lifecycle-critical control events.
+///
+/// It also mints the [`NodeEvent::ControlPlaneOverflow`] marker for control
+/// events the sink had to drop (Codeberg #419). Minting it here rather than
+/// sending it through the channel is the whole point: the loss happens
+/// precisely when the channel has no room, so anything that needs room to
+/// report it cannot report it.
 pub struct EventReceiver {
-    /// Lossless-by-default control plane (drained first).
+    /// Control plane (drained first).
     control: mpsc::Receiver<NodeEvent>,
     /// Droppable data plane.
     data: mpsc::Receiver<NodeEvent>,
+    /// Control events the sink dropped and this receiver has not reported
+    /// yet. Shared with [`EventSink`], which is the only writer besides the
+    /// swap below.
+    control_dropped: Arc<AtomicU64>,
+    /// When the last overflow marker was handed out, for
+    /// `overflow_marker_interval`.
+    last_overflow_marker: Option<Instant>,
+    /// Minimum spacing between two overflow markers. A field rather than a
+    /// bare const so tests can drive the released-again path without
+    /// sleeping; production always uses [`OVERFLOW_MARKER_MIN_INTERVAL`].
+    overflow_marker_interval: Duration,
 }
 
 impl EventReceiver {
+    /// Take the pending control-plane loss as a marker event, if there is one
+    /// and the spacing gate allows it.
+    ///
+    /// `force` ignores the gate; it is used on the terminal path, where the
+    /// planes are closed and this is the last chance to report anything.
+    fn overflow_marker(&mut self, force: bool) -> Option<NodeEvent> {
+        if self.control_dropped.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        if !force {
+            if let Some(last) = self.last_overflow_marker {
+                if last.elapsed() < self.overflow_marker_interval {
+                    return None;
+                }
+            }
+        }
+        // Swap, so drops that race in after this point are reported by the
+        // next marker instead of being counted twice or lost.
+        let dropped_count = self.control_dropped.swap(0, Ordering::Relaxed);
+        if dropped_count == 0 {
+            return None;
+        }
+        self.last_overflow_marker = Some(Instant::now());
+        tracing::warn!(event = "CONTROL_PLANE_OVERFLOW", dropped_count);
+        Some(NodeEvent::ControlPlaneOverflow { dropped_count })
+    }
+
     /// Receive the next event, control plane first.
+    ///
+    /// A pending control-plane loss is reported ahead of the queued events:
+    /// the dropped events are newer than everything still buffered, but an
+    /// alarm that waits for a full queue to drain is an alarm a saturated
+    /// node never sees.
     ///
     /// Returns `None` only once both planes are closed and drained. Drop-safe
     /// for use in `tokio::select!`: a buffered control event is returned
     /// synchronously, otherwise both channels are awaited with the control
     /// plane biased, and `tokio::sync::mpsc::Receiver::recv` is cancel-safe.
     pub async fn recv(&mut self) -> Option<NodeEvent> {
+        if let Some(marker) = self.overflow_marker(false) {
+            return Some(marker);
+        }
+        match self.recv_events().await {
+            Some(ev) => Some(ev),
+            // Both planes closed: report a last counted loss before ending
+            // the stream. Nothing follows it, so the spacing gate has
+            // nothing left to protect.
+            None => self.overflow_marker(true),
+        }
+    }
+
+    /// The merged two-plane receive, without the overflow bookkeeping.
+    async fn recv_events(&mut self) -> Option<NodeEvent> {
         // Strict priority: return any already-buffered control event first.
         match self.control.try_recv() {
             Ok(ev) => return Some(ev),
@@ -411,13 +470,23 @@ impl EventReceiver {
     }
 
     /// Non-blocking receive, control plane first. Mirrors
-    /// [`tokio::sync::mpsc::Receiver::try_recv`].
+    /// [`tokio::sync::mpsc::Receiver::try_recv`], with the same
+    /// overflow-marker precedence as [`recv`](EventReceiver::recv).
     pub fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError> {
-        match self.control.try_recv() {
+        if let Some(marker) = self.overflow_marker(false) {
+            return Ok(marker);
+        }
+        let next = match self.control.try_recv() {
             Ok(ev) => Ok(ev),
             Err(TryRecvError::Empty) => self.data.try_recv(),
             // Control closed: fall back to whatever the data plane reports.
             Err(TryRecvError::Disconnected) => self.data.try_recv(),
+        };
+        match next {
+            Err(TryRecvError::Disconnected) => {
+                self.overflow_marker(true).ok_or(TryRecvError::Disconnected)
+            }
+            other => other,
         }
     }
 }
@@ -1052,6 +1121,10 @@ pub struct ReticulumNode {
     /// Capacity of the control channel, needed to build the runner's
     /// `EventSink` (used for the overflow warn log).
     control_channel_capacity: usize,
+    /// Counter of dropped control events, shared between the runner's
+    /// `EventSink` (which counts) and the `EventReceiver` (which reports).
+    /// Kept here so `start()` can hand the runner a clone (Codeberg #419).
+    control_dropped: Arc<AtomicU64>,
     /// Merged event receiver for consuming events. `None` either because the
     /// node was built with `without_events()`, or because
     /// `take_event_receiver()` already handed it out.
@@ -1228,9 +1301,10 @@ impl ReticulumNode {
         // `output.events` falls out of scope unread, mirroring the NRF
         // daemon binaries.
         //
-        // Codeberg #71: the single bounded channel is split into a lossless
+        // Codeberg #71: the single bounded channel is split into a priority
         // control plane and a droppable data plane, merged back for the
         // application by `EventReceiver`.
+        let control_dropped = Arc::new(AtomicU64::new(0));
         let (control_tx, data_tx, event_rx) = if events_enabled {
             let (control_tx, control_rx) = mpsc::channel(control_channel_capacity);
             let (data_tx, data_rx) = mpsc::channel(data_channel_capacity);
@@ -1240,6 +1314,9 @@ impl ReticulumNode {
                 Some(EventReceiver {
                     control: control_rx,
                     data: data_rx,
+                    control_dropped: Arc::clone(&control_dropped),
+                    last_overflow_marker: None,
+                    overflow_marker_interval: OVERFLOW_MARKER_MIN_INTERVAL,
                 }),
             )
         } else {
@@ -1255,6 +1332,7 @@ impl ReticulumNode {
             control_tx,
             data_tx,
             control_channel_capacity,
+            control_dropped,
             event_rx,
             shutdown_tx: None,
             runner_handle: None,
@@ -1741,7 +1819,7 @@ impl ReticulumNode {
                 control_tx,
                 data_tx,
                 control_capacity: self.control_channel_capacity,
-                control_dropped: 0,
+                control_dropped: Arc::clone(&self.control_dropped),
                 reliable_pending: VecDeque::new(),
             }),
             // `without_events()` leaves both senders None.
@@ -5316,8 +5394,9 @@ fn dispatch_output(
         .map(|deadline_ms| Duration::from_millis(deadline_ms.saturating_sub(drain_now_ms)));
 
     // Forward events to the application via the split-plane EventSink:
-    // control events lossless-by-default (overflow surfaced via
-    // ControlPlaneOverflow), data events droppable under load (Codeberg #71).
+    // control events with priority (anything the full channel cannot take is
+    // counted and reported to the consumer as ControlPlaneOverflow), data
+    // events droppable under load (Codeberg #71).
     // When event_sink is None (daemon-mode, built via `without_events()`),
     // events are dropped here without forwarding — the events vector
     // simply falls out of scope at the end of this function.
@@ -6769,17 +6848,21 @@ mod tests {
     fn sink_and_receiver(control_cap: usize, data_cap: usize) -> (EventSink, EventReceiver) {
         let (control_tx, control_rx) = mpsc::channel(control_cap);
         let (data_tx, data_rx) = mpsc::channel(data_cap);
+        let control_dropped = Arc::new(AtomicU64::new(0));
         (
             EventSink {
                 control_tx,
                 data_tx,
                 control_capacity: control_cap,
-                control_dropped: 0,
+                control_dropped: Arc::clone(&control_dropped),
                 reliable_pending: VecDeque::new(),
             },
             EventReceiver {
                 control: control_rx,
                 data: data_rx,
+                control_dropped,
+                last_overflow_marker: None,
+                overflow_marker_interval: OVERFLOW_MARKER_MIN_INTERVAL,
             },
         )
     }
@@ -6955,8 +7038,8 @@ mod tests {
 
     /// Overflowing the bounded control channel must be VISIBLE: the dropped
     /// events are counted and surfaced as a single
-    /// `ControlPlaneOverflow {{ dropped_count }}` once the channel has room.
-    /// The marker itself is never lost, and the counter resets after delivery.
+    /// `ControlPlaneOverflow {{ dropped_count }}`, ahead of the events still
+    /// queued, and the counter resets after delivery.
     #[tokio::test]
     async fn control_overflow_delivers_visible_marker() {
         let cap = 4;
@@ -6972,25 +7055,9 @@ mod tests {
             sink.emit(path_found(100 + i));
         }
 
-        // Drain everything currently buffered so the channel has headroom for
-        // both the next real event and the overflow marker behind it.
-        for _ in 0..cap {
-            assert!(matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })));
-        }
-
-        // One more control event lands AND carries the overflow marker behind
-        // it (emit_control flushes the marker once an event proves there's room).
-        sink.emit(path_found(200));
-        assert!(
-            matches!(
-                rx.try_recv(),
-                Ok(NodeEvent::PathFound {
-                    interface_index: 200,
-                    ..
-                })
-            ),
-            "the real event is delivered first"
-        );
+        // The loss is reported before the backlog: the dropped events are
+        // newer than everything queued, and an alarm behind a full queue is
+        // one a saturated node never reaches.
         match rx.try_recv() {
             Ok(NodeEvent::ControlPlaneOverflow { dropped_count }) => {
                 assert_eq!(
@@ -6999,6 +7066,16 @@ mod tests {
                 );
             }
             other => panic!("expected ControlPlaneOverflow {{{dropped}}}, got {other:?}"),
+        }
+
+        // The queued events are still all there, in order, behind the marker.
+        for i in 0..cap {
+            match rx.try_recv() {
+                Ok(NodeEvent::PathFound {
+                    interface_index, ..
+                }) => assert_eq!(interface_index, i, "queued events keep their order"),
+                other => panic!("expected the queued PathFound {i}, got {other:?}"),
+            }
         }
 
         // Counter reset: no spurious second marker.
@@ -7014,6 +7091,162 @@ mod tests {
             rx.try_recv().is_err(),
             "no second overflow marker after the count was reset"
         );
+    }
+
+    /// Codeberg #419, the field shape: a consumer that never drains at all.
+    ///
+    /// lnpnd built its node with events enabled, never took the receiver and
+    /// read its events off the core-processor tap instead. The control plane
+    /// filled to capacity and stayed there, so every further announce was
+    /// dropped — 466 of them in 26 minutes — and the old marker, which was
+    /// enqueued only behind an event that had just proved the channel had
+    /// room, could never be sent. The report must not depend on the channel
+    /// having room, because the report exists precisely when it has none.
+    #[tokio::test]
+    async fn a_never_draining_consumer_is_still_told_what_it_lost() {
+        let cap = 4;
+        let (mut sink, mut rx) = sink_and_receiver(cap, 4);
+
+        // Fill it, then keep pushing into a channel nobody has touched.
+        for i in 0..cap + 10 {
+            sink.emit(path_found(i));
+        }
+
+        match rx.try_recv() {
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count }) => assert_eq!(
+                dropped_count, 10,
+                "every event the full channel refused must be reported"
+            ),
+            other => panic!("expected ControlPlaneOverflow, got {other:?}"),
+        }
+    }
+
+    /// Codeberg #419, the other half of the same hole: a consumer that is
+    /// alive but slow, freeing one slot at a time.
+    ///
+    /// The old marker needed TWO free slots in a row — one for the event
+    /// that proved there was room, one for the marker behind it — so a
+    /// consumer draining at the rate events arrive kept losing them in
+    /// silence. One freed slot must be enough to learn of the loss.
+    #[tokio::test]
+    async fn a_consumer_that_frees_one_slot_at_a_time_learns_of_the_loss() {
+        let cap = 4;
+        let (mut sink, mut rx) = sink_and_receiver(cap, 4);
+        // Spacing is a separate rule, tested separately; this test is about
+        // whether one freed slot is enough for the report to exist at all.
+        rx.overflow_marker_interval = Duration::ZERO;
+
+        for i in 0..cap {
+            sink.emit(path_found(i));
+        }
+        for i in 0..3 {
+            sink.emit(path_found(100 + i));
+        }
+
+        // One slot freed, immediately taken by the next arrival: the channel
+        // is full again and has never had room for a marker.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(NodeEvent::ControlPlaneOverflow { .. })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })));
+        sink.emit(path_found(200));
+        for i in 0..2 {
+            sink.emit(path_found(300 + i));
+        }
+
+        match rx.try_recv() {
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count }) => assert_eq!(
+                dropped_count, 2,
+                "the second report covers exactly the drops since the first"
+            ),
+            other => panic!("expected a second ControlPlaneOverflow, got {other:?}"),
+        }
+    }
+
+    /// The report is spaced, not repeated per `recv`: a plane that stays full
+    /// must not bury its consumer in markers, or the alarm becomes the flood
+    /// and the events underneath never come out. Drops during the quiet
+    /// window are kept and reported by the next marker, so the count stays
+    /// exact.
+    #[tokio::test]
+    async fn the_overflow_report_is_spaced_and_loses_no_count() {
+        let cap = 2;
+        let (mut sink, mut rx) = sink_and_receiver(cap, 2);
+        // Production spacing for the first half of the test.
+        rx.overflow_marker_interval = Duration::from_secs(3600);
+
+        for i in 0..cap + 5 {
+            sink.emit(path_found(i));
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count: 5 })
+        ));
+
+        // More drops inside the window: no second marker, the queued events
+        // come out instead.
+        for i in 0..4 {
+            sink.emit(path_found(400 + i));
+        }
+        assert!(
+            matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })),
+            "inside the spacing window the consumer gets events, not markers"
+        );
+
+        // Window over: the marker returns, carrying every drop since.
+        rx.overflow_marker_interval = Duration::ZERO;
+        match rx.try_recv() {
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count }) => assert_eq!(
+                dropped_count, 4,
+                "drops suppressed by the spacing window are reported, not lost"
+            ),
+            other => panic!("expected the deferred ControlPlaneOverflow, got {other:?}"),
+        }
+    }
+
+    /// A loss counted just before the planes close is still reported: the
+    /// spacing window has nothing left to protect once the stream is ending,
+    /// so the terminal path hands out the marker regardless.
+    #[tokio::test]
+    async fn a_last_loss_is_reported_before_the_stream_ends() {
+        let cap = 2;
+        let (mut sink, mut rx) = sink_and_receiver(cap, 2);
+        rx.overflow_marker_interval = Duration::from_secs(3600);
+
+        for i in 0..cap + 3 {
+            sink.emit(path_found(i));
+        }
+        // First marker consumes the spacing window...
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(NodeEvent::ControlPlaneOverflow { dropped_count: 3 })
+        ));
+        for _ in 0..cap {
+            assert!(matches!(rx.try_recv(), Ok(NodeEvent::PathFound { .. })));
+        }
+        // ...and these drops fall inside it.
+        for i in 0..2 {
+            sink.emit(path_found(500 + i));
+        }
+        for i in 0..2 {
+            sink.emit(path_found(600 + i));
+        }
+        drop(sink);
+
+        // Drain whatever landed, then the stream ends — but not before the
+        // outstanding count is reported.
+        let mut last = None;
+        while let Some(ev) = rx.recv().await {
+            last = Some(ev);
+        }
+        match last {
+            Some(NodeEvent::ControlPlaneOverflow { dropped_count }) => assert_eq!(
+                dropped_count, 2,
+                "the closing marker reports the drops the window had held back"
+            ),
+            other => panic!("expected a closing ControlPlaneOverflow, got {other:?}"),
+        }
     }
 
     /// Strict priority: a backlog of data events must never delay a control

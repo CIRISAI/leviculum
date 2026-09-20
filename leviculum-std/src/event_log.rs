@@ -286,9 +286,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     // Drop observability for the NodeEvent application channels (Codeberg
     // #71). Emitted by `EventSink` in leviculum-std/src/driver/mod.rs.
-    // EVENT_CHANNEL_FULL now fires only for the lossless control plane (a
-    // dropped event that will be surfaced via ControlPlaneOverflow); data
-    // drops are silent backpressure. dropped_event_type carries
+    // EVENT_CHANNEL_FULL fires only for the control plane (a dropped event
+    // whose loss the EventReceiver reports to the consumer as
+    // ControlPlaneOverflow); data drops are silent backpressure. Note the
+    // asymmetry the field run of Codeberg #419 ran into: this line is
+    // written by the driver whether or not anyone reads the event stream,
+    // while the marker only reaches a consumer that does. dropped_event_type carries
     // NodeEvent::variant_name() so saturation is greppable per-event-type.
     EventSchema {
         name: "EVENT_CHANNEL_FULL",
