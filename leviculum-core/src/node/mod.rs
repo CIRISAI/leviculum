@@ -3174,8 +3174,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// (`reference/Reticulum/RNS/Identity.py:162-172`).
     ///
     /// Our recall source is the announce cache, the same one
-    /// [`Transport::recall_identity_hash`](crate::transport) reads and the one
-    /// the known-destination ops act on; Python reads the persisted
+    /// `Transport::recall_identity_hash` reads and the one the
+    /// known-destination ops act on; Python reads the persisted
     /// `known_destinations` table, which is the same set of facts under
     /// another name. A cached announce that no longer parses reads as `None`,
     /// exactly as a `None` from Python's recall.

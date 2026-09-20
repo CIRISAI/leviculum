@@ -787,7 +787,7 @@ impl PeerTable {
     /// reference never unpeers on this path: it reaches `peer()` through three
     /// positive gates and has no `else` at all. So this refuses where
     /// `handle_announce` would drop, and where it would add, it adds through
-    /// the very same [`Self::admit`] — which is what makes a peer discovered
+    /// the very same private `admit` — which is what makes a peer discovered
     /// by sync indistinguishable from one discovered by announce.
     pub fn handle_inbound_sync(
         &mut self,
