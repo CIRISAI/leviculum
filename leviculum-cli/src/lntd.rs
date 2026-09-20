@@ -600,6 +600,10 @@ async fn run(args: Args) -> Result<ExitCode, String> {
         .connect_to_shared_instance(&instance)
         .storage_path(home.join("storage"))
         .core_processor(collector)
+        // The collector consumes events on the processor tap; nothing here
+        // ever takes the driver's application receiver, so enabling it would
+        // only fill a queue with no reader (Codeberg #419).
+        .without_events()
         .build()
         .await
         .map_err(|error| no_daemon(&instance, error))?;

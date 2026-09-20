@@ -944,6 +944,10 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
         .connect_to_shared_instance(&config.instance)
         .storage_path(config.storage_dir)
         .core_processor(engine)
+        // The engine consumes events on the processor tap; nothing here ever
+        // takes the driver's application receiver, so enabling it would only
+        // fill a queue with no reader (Codeberg #419).
+        .without_events()
         .build()
         .await
         .map_err(|e| AttachError::NoDaemon {

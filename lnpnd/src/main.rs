@@ -18,7 +18,6 @@ use clap::Parser;
 use leviculum_lxmf::msgpack;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use leviculum_std::config::Config;
-use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::FilePropagationStore;
 use lnpnd::client::{ClientAction, ClientOptions};
 use lnpnd::config::{
@@ -619,11 +618,10 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         delivery_limit_kb: effective.delivery_limit_kb,
     });
 
-    let mut node = match ReticulumNodeBuilder::new()
-        .enable_transport(false)
+    // `node_builder` owns the driver configuration, including the reason
+    // this daemon has no application event channel (Codeberg #419).
+    let mut node = match lnpnd::node_builder(engine, data_dir.join("storage"))
         .connect_to_shared_instance(&instance)
-        .storage_path(data_dir.join("storage"))
-        .core_processor(engine)
         .build()
         .await
     {
