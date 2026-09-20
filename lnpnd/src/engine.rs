@@ -383,7 +383,7 @@ impl<S: PropagationStore> Engine<S> {
                 return;
             }
         };
-        Self::register_control_handlers(core, &control_hash, &allowed);
+        Self::register_control_handlers(core, &control_hash);
 
         // The daemon's own mailbox (deliverable 2), on the same identity.
         let mailbox = match mailbox {
@@ -426,24 +426,35 @@ impl<S: PropagationStore> Engine<S> {
         }));
     }
 
-    /// (Re-)register the three control request handlers behind the allow
-    /// list (`reference/LXMF/LXMF/LXMRouter.py:674-676`). Re-run whenever
-    /// the list changes: the policy is checked by the core before the
-    /// request reaches us, so a disallowed identity times out — exactly
-    /// what `RNS.Destination.ALLOW_LIST` does to it in the reference
-    /// (`reference/Reticulum/RNS/Link.py:867-874`: not allowed, no
-    /// response).
-    fn register_control_handlers(
-        core: &mut StdNodeCoreRef<'_>,
-        control_hash: &DestinationHash,
-        allowed: &[[u8; 16]],
-    ) {
+    /// Register the three control request handlers
+    /// (`reference/LXMF/LXMF/LXMRouter.py:674-676`).
+    ///
+    /// The core admits every request and `answer_control` decides — a
+    /// deliberate deviation from the reference's `ALLOW_LIST`
+    /// registration, and the only one here. `ALLOW_LIST` drops a
+    /// disallowed request without a word
+    /// (`reference/Reticulum/RNS/Link.py:867-874`), so the asker sits out
+    /// its whole timeout and reports "timed out" — which claims *nobody
+    /// answered* and sends the reader to the mesh, the instance and the
+    /// interfaces, when the truth was *you are not allowed to ask*. On a
+    /// node that was up, healthy and peering, that cost a field operator
+    /// an afternoon.
+    ///
+    /// Answering costs no compatibility. The refusal we send is the
+    /// reference's own `ERROR_NO_ACCESS`: its handlers already return it
+    /// (`LXMRouter.py:840`, dead code behind its own `ALLOW_LIST`) and its
+    /// client already decodes it, into exit code 204 (`lxmd.py:561-578`).
+    /// A Python peer therefore hears a value it was written to understand,
+    /// and hears it instead of silence. The permission itself is
+    /// unchanged: `answer_control` checks the same list against the same
+    /// remote identity hash the core would have checked
+    /// (`link_management.rs`, `RequestPolicy::AllowList`), which is why
+    /// this function no longer needs the list — and why the handler's
+    /// `ERROR_NO_IDENTITY` branch (`LXMRouter.py:839`) becomes reachable
+    /// too.
+    fn register_control_handlers(core: &mut StdNodeCoreRef<'_>, control_hash: &DestinationHash) {
         for path in [STATS_GET_PATH, SYNC_REQUEST_PATH, UNPEER_REQUEST_PATH] {
-            core.register_request_handler(
-                *control_hash,
-                path,
-                RequestPolicy::AllowList(allowed.to_vec()),
-            );
+            core.register_request_handler(*control_hash, path, RequestPolicy::AllowAll);
         }
     }
 
@@ -758,9 +769,12 @@ impl<S: PropagationStore> Engine<S> {
 
     /// Allow one more identity on the control destination at runtime (the
     /// conformance helper's verb; the config file's `control_allowed` is
-    /// applied at construction). Re-registers the handlers — the allow
-    /// list is checked by the core — and announces so the remote can
-    /// resolve the control destination.
+    /// applied at construction). Announces afterwards, so the remote can
+    /// resolve the control destination. The handlers are re-registered
+    /// because they used to carry the list; they no longer do
+    /// (`register_control_handlers`), and the re-registration is kept only
+    /// because it is idempotent and the verb is the natural place to
+    /// notice if that ever changes back.
     pub fn allow_control(
         &mut self,
         core: &mut StdNodeCoreRef<'_>,
@@ -773,7 +787,7 @@ impl<S: PropagationStore> Engine<S> {
         if !ready.control_allowed.contains(&identity_hash) {
             ready.control_allowed.push(identity_hash);
         }
-        Self::register_control_handlers(core, &ready.control_hash, &ready.control_allowed);
+        Self::register_control_handlers(core, &ready.control_hash);
         self.announce(&mut ready, core, out);
         self.state = State::Ready(ready);
         true
@@ -817,9 +831,13 @@ impl<S: PropagationStore> Engine<S> {
 
     /// Answer one control request (`stats_get_request` /
     /// `peer_sync_request` / `peer_unpeer_request`,
-    /// `reference/LXMF/LXMF/LXMRouter.py:838-865`). The core has already
-    /// enforced the allow list; the identity checks here are the
-    /// reference's own belt and braces.
+    /// `reference/LXMF/LXMF/LXMRouter.py:838-865`). These identity checks
+    /// are the reference's own, line for line — and here they are the
+    /// enforcement rather than belt and braces, because the core admits
+    /// the request so that a refusal can be spoken
+    /// (`register_control_handlers`). The list they check is the one the
+    /// core would have checked, compared against the same remote identity
+    /// hash, so nothing is permitted that was permitted before.
     fn answer_control(
         &mut self,
         ready: &mut Ready<S>,

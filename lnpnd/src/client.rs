@@ -190,7 +190,26 @@ async fn query(
     {
         Ok((_, future)) => match tokio::time::timeout(options.timeout, future).await {
             Ok(Ok(info)) => info.response_data,
-            _ => return fail(EXIT_TIMEOUT, &timeout_exit),
+            // The link stood and the identify went through, so the remote
+            // heard us and chose not to answer. On the wire that is
+            // indistinguishable from a node that died mid-request, and
+            // the client cannot tell the two apart — a refusal behind
+            // `RNS.Destination.ALLOW_LIST` is sent as silence
+            // (`reference/Reticulum/RNS/Link.py:867-874`). lnpnd answers
+            // its refusals (`lnpnd/src/engine.rs`,
+            // `register_control_handlers`); lxmd and lnpnd before 0.2.0 do
+            // not, so name the possibility instead of letting "timed out"
+            // send the reader to the mesh. stdout keeps lxmd's exact line
+            // for scripts; the hint goes to stderr.
+            _ => {
+                eprintln!(
+                    "lnpnd: the link was established and identified, so the node heard                      the request.
+  A node that refuses a query it is not configured to                      answer sends nothing back, which looks exactly like this.
+  Check                      that this identity ({}) is the node's own or is listed under                      control_allowed in its config.",
+                    prettyhexrep(options.identity.hash())
+                );
+                return fail(EXIT_TIMEOUT, &timeout_exit);
+            }
         },
         Err(error) => {
             eprintln!("lnpnd: request failed: {error:?}");

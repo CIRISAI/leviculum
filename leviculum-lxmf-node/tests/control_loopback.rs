@@ -6,10 +6,13 @@
 //!
 //! Positive and negative: the allowed identity gets the stats map and
 //! the sync trigger's honest NOT_FOUND for an unknown peer; an identity
-//! that was never allowed gets silence (the core's ALLOW_LIST drops the
-//! request unanswered, exactly what `RNS.Destination.ALLOW_LIST` does,
-//! `reference/Reticulum/RNS/Link.py:867-874`). The cross-stack versions
-//! of both directions are the conformance cell
+//! that was never allowed is refused in words, with the reference's
+//! `ERROR_NO_ACCESS` (`LXMRouter.py:840`). It used to get silence, which
+//! is what `RNS.Destination.ALLOW_LIST` does
+//! (`reference/Reticulum/RNS/Link.py:867-874`) and which reaches an
+//! operator as "timed out" — see `lnpnd/src/engine.rs`,
+//! `register_control_handlers`, for why we answer instead. The
+//! cross-stack versions of both directions are the conformance cell
 //! `lxmf_pn_remote_mgmt.toml`.
 
 mod common;
@@ -182,8 +185,9 @@ async fn an_allowed_identity_reads_stats_and_an_unknown_peer_is_not_found() {
         ControlResponse::Error(PeerError::NotFound)
     );
 
-    // Negative: an identity nobody allowed is dropped by the allow list —
-    // no response inside its own timeout, never an answer.
+    // Negative: an identity nobody allowed is refused, and told so. Not
+    // data, and not silence either — silence is indistinguishable from a
+    // dead node on the client side.
     let stranger = leviculum_std::generate_identity();
     let response = control_request(
         &node,
@@ -193,10 +197,12 @@ async fn an_allowed_identity_reads_stats_and_an_unknown_peer_is_not_found() {
         None,
         Duration::from_secs(6),
     )
-    .await;
-    assert!(
-        response.is_none(),
-        "an identity outside control_allowed must get silence, not data"
+    .await
+    .expect("a refusal must be answered, not sat out as a timeout");
+    assert_eq!(
+        ControlResponse::decode(&response).expect("decodable"),
+        ControlResponse::Error(PeerError::NoAccess),
+        "an identity outside control_allowed must be refused in words, never served"
     );
 
     node.stop().await.expect("client stops");
