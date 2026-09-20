@@ -63,11 +63,33 @@ pub struct MailboxConfig {
 /// `deferred_start_jobs` `:492-507`).
 pub const MAILBOX_ANNOUNCE_DELAY_SECS: u64 = 10;
 
+/// When the delivery destination announces next.
+///
+/// An `Option<u64>` cannot carry this: `None` would have to mean both
+/// "no announce booked yet" and "no announce will ever be booked", and
+/// reading the second as the first is exactly how a mailbox with
+/// `announce_at_start = yes` and no interval re-booked the 10 s start
+/// announce on every tick and stormed the mesh for ever. [`Never`] is
+/// terminal; nothing moves the schedule out of it.
+///
+/// [`Never`]: AnnounceSchedule::Never
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnounceSchedule {
+    /// Before the first tick: what is owed depends on a clock we have
+    /// not read yet.
+    Unscheduled,
+    /// Announce once the monotonic clock reaches this millisecond.
+    At(u64),
+    /// Nothing more is owed: no interval is configured, and the start
+    /// announce (if any) has been sent.
+    Never,
+}
+
 pub(crate) struct MailboxRuntime {
     router: LxmfRouter,
     pub(crate) delivery_hash: [u8; 16],
     config: MailboxConfig,
-    next_announce_at_ms: Option<u64>,
+    announce_schedule: AnnounceSchedule,
     events: std::sync::mpsc::Sender<EngineEvent>,
 }
 
@@ -104,7 +126,7 @@ impl MailboxRuntime {
             router,
             delivery_hash,
             config,
-            next_announce_at_ms: None,
+            announce_schedule: AnnounceSchedule::Unscheduled,
             events,
         })
     }
@@ -220,39 +242,140 @@ impl MailboxRuntime {
         }
     }
 
+    /// The interval announce after `now_ms`, or [`AnnounceSchedule::Never`]
+    /// when no interval is configured — the reference's unset
+    /// `peer_announce_interval`, which its `jobs` loop skips outright
+    /// (`reference/LXMF/LXMF/Utilities/lxmd.py:475-479`).
+    fn after_interval(&self, now_ms: u64) -> AnnounceSchedule {
+        match self.config.announce_interval_secs {
+            Some(secs) => AnnounceSchedule::At(now_ms + secs * 1000),
+            None => AnnounceSchedule::Never,
+        }
+    }
+
     pub(crate) fn on_tick(&mut self, core: &mut Core, now_ms: u64, out: &mut TickOutput) {
-        let due = match self.next_announce_at_ms {
-            None => {
-                // First pass: book the deferred start announce, or only the
-                // interval when announce-at-start is off.
-                let first = if self.config.announce_at_start {
-                    Some(now_ms + MAILBOX_ANNOUNCE_DELAY_SECS * 1000)
-                } else {
-                    self.config
-                        .announce_interval_secs
-                        .map(|secs| now_ms + secs * 1000)
-                };
-                self.next_announce_at_ms = first;
-                false
+        if self.announce_schedule == AnnounceSchedule::Unscheduled {
+            // First pass: book the deferred start announce, or only the
+            // interval when announce-at-start is off.
+            self.announce_schedule = if self.config.announce_at_start {
+                AnnounceSchedule::At(now_ms + MAILBOX_ANNOUNCE_DELAY_SECS * 1000)
+            } else {
+                self.after_interval(now_ms)
+            };
+        }
+        if let AnnounceSchedule::At(at) = self.announce_schedule {
+            if now_ms >= at {
+                self.announce(core, out);
+                // The start announce is spent here; only an interval can
+                // book another one.
+                self.announce_schedule = self.after_interval(now_ms);
             }
-            Some(at) => now_ms >= at,
-        };
-        if due {
-            self.announce(core, out);
-            self.next_announce_at_ms = self
-                .config
-                .announce_interval_secs
-                .map(|secs| now_ms + secs * 1000);
         }
         match self.router.tick(core) {
             Ok(output) => self.absorb(core, output, out),
             Err(e) => tracing::warn!("lnpnd: mailbox tick: {e:?}"),
         }
-        if let Some(at) = self.next_announce_at_ms {
+        if let AnnounceSchedule::At(at) = self.announce_schedule {
             out.next_deadline_ms = Some(match out.next_deadline_ms {
                 Some(existing) => existing.min(at),
                 None => at,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_std::driver::{StdClock, StdStorage};
+
+    fn core(dir: &std::path::Path) -> Core {
+        NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir).expect("storage under a fresh temp dir"),
+        )
+    }
+
+    fn config(announce_at_start: bool, announce_interval_secs: Option<u64>) -> MailboxConfig {
+        MailboxConfig {
+            display_name: b"an-operator".to_vec(),
+            stamp_cost: 7,
+            announce_at_start,
+            announce_interval_secs,
+            delivery_limit_kb: 1000,
+            ignored: Vec::new(),
+        }
+    }
+
+    /// Tick once a simulated second for `span_secs` and count the delivery
+    /// announces the mailbox emitted. One tick per second is denser than
+    /// the daemon's deadline-driven loop, which is the point: a schedule
+    /// that re-arms itself shows up as a count, not as a timing artefact.
+    fn announces_over(
+        announce_at_start: bool,
+        announce_interval_secs: Option<u64>,
+        span_secs: u64,
+    ) -> usize {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (events, received) = std::sync::mpsc::channel();
+        let identity = leviculum_std::generate_identity();
+        let mut mailbox = MailboxRuntime::register(
+            &mut core,
+            &identity,
+            config(announce_at_start, announce_interval_secs),
+            events,
+        )
+        .expect("the delivery destination registers");
+
+        let start = core.now_ms();
+        let mut out = TickOutput::empty();
+        for second in 0..=span_secs {
+            mailbox.on_tick(&mut core, start + second * 1000, &mut out);
+        }
+        std::iter::from_fn(|| received.try_recv().ok())
+            .filter(|event| matches!(event, EngineEvent::MailboxAnnounced))
+            .count()
+    }
+
+    /// The field regression (miauhaus, 2026-09-20): with the example
+    /// config's `[lxmf]` — `announce_at_start = yes` and no announce
+    /// interval, which is what anyone who does not set the undocumented
+    /// key runs — the daemon sent a delivery announce every 10 s to a
+    /// public mesh for as long as it ran. The start announce is owed
+    /// once; after it, nothing is.
+    #[test]
+    fn a_start_announce_without_an_interval_is_sent_exactly_once() {
+        assert_eq!(
+            announces_over(true, None, 120),
+            1,
+            "announce_at_start with no interval must announce once, then go quiet"
+        );
+    }
+
+    /// No start announce and no interval: the mailbox never announces at
+    /// all, like the reference whose `jobs` loop skips an unset
+    /// `peer_announce_interval` (`lxmd.py:475-479`).
+    #[test]
+    fn without_a_start_announce_or_an_interval_the_mailbox_stays_silent() {
+        assert_eq!(announces_over(false, None, 120), 0);
+    }
+
+    /// A configured interval paces the announces at that interval — not
+    /// at the 10 s start delay. Start announce at t=10 s, then every 60 s
+    /// from the tick that sent it: 10, 70, 130, 190.
+    #[test]
+    fn a_configured_interval_paces_the_announces_after_the_start_one() {
+        assert_eq!(announces_over(true, Some(60), 200), 4);
+    }
+
+    /// The interval alone, with no start announce: first announce one
+    /// interval in, then one per interval — 60, 120, 180.
+    #[test]
+    fn an_interval_without_a_start_announce_begins_one_interval_in() {
+        assert_eq!(announces_over(false, Some(60), 200), 3);
     }
 }
