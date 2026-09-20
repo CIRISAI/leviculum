@@ -196,25 +196,25 @@ A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 ### Core `TickOutput` and `Action`
 
 `TickOutput` is what every core method returns. Defined at
-`leviculum-core/src/transport.rs:137`. It is `#[must_use]` — dropping it silently
+`leviculum-core/src/transport.rs:141`. It is `#[must_use]` — dropping it silently
 loses outbound packets and events.
 
 | Field | Type | Source |
 |-------|------|--------|
-| `actions` | `Vec<Action>` — I/O for the driver to execute | `transport.rs:139` |
-| `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:141` |
-| `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:144` |
+| `actions` | `Vec<Action>` — I/O for the driver to execute | `transport.rs:143` |
+| `events` | `Vec<NodeEvent>` — application-visible events | `transport.rs:145` |
+| `next_deadline_ms` | `Option<u64>` — when to next call `handle_timeout` | `transport.rs:148` |
 
-`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:112`:
+`Action` is the I/O the driver performs, defined at `leviculum-core/src/transport.rs:116`:
 
 | Variant | Fields | Source |
 |---------|--------|--------|
-| `SendPacket` | `iface: InterfaceId, data: Vec<u8>, peer: Option<[u8; 16]>` | `transport.rs:114` |
-| `Broadcast` | `data: Vec<u8>, exclude_iface: Option<InterfaceId>` | `transport.rs:121` |
+| `SendPacket` | `iface: InterfaceId, data: Vec<u8>, peer: Option<[u8; 16]>` | `transport.rs:118` |
+| `Broadcast` | `data: Vec<u8>, exclude_iface: Option<InterfaceId>` | `transport.rs:125` |
 
 The helper `dispatch_actions(interfaces: &mut [&mut dyn Interface], actions:
 Vec<Action>, ifac_configs: &BTreeMap<usize, IfacConfig>) -> DispatchResult`
-(`transport.rs:210`) routes `Action`s to interfaces with broadcast-exclusion and
+(`transport.rs:214`) routes `Action`s to interfaces with broadcast-exclusion and
 IFAC wrapping handled in core, so every driver gets it for free.
 
 ### Value types

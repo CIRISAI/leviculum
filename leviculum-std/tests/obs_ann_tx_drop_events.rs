@@ -341,3 +341,112 @@ fn obs_events_are_well_formed_under_event_log_layer() {
 
     drop(evlog);
 }
+
+/// A clock that jumps `step` milliseconds forward on every reading.
+///
+/// Announce handling of one packet is microseconds, so a real clock cannot
+/// make the span under test long enough to assert on without making the test
+/// slow and timing-dependent. Stepping the clock instead moves the
+/// measurement, not the code: `handle_announce` reads the clock on entry and
+/// on exit, so a non-zero step is indistinguishable from a slow announce.
+#[derive(Clone)]
+struct SteppingClock {
+    now: Arc<AtomicU64>,
+    step: Arc<AtomicU64>,
+}
+
+impl Clock for SteppingClock {
+    fn now_ms(&self) -> u64 {
+        self.now
+            .fetch_add(self.step.load(Ordering::SeqCst), Ordering::SeqCst)
+    }
+}
+
+/// A transport whose announce interface carries `iface_name`.
+///
+/// The name is not decoration: the event-log layer is process-global, so a
+/// handle sees every event every test in this binary emits (the module
+/// documents this). Two tests that both assert on `ANN_SLOW` would otherwise
+/// read each other's lines — and the negative control would read the positive
+/// one's and fail. The interface name is what makes each test's own lines
+/// identifiable.
+fn stepping_transport(
+    step: &Arc<AtomicU64>,
+    iface_name: &str,
+) -> Transport<SteppingClock, leviculum_core::MemoryStorage> {
+    let clock = SteppingClock {
+        now: Arc::new(AtomicU64::new(100_000)),
+        step: Arc::clone(step),
+    };
+    let identity = Identity::generate(&mut OsRng);
+    let config = TransportConfig {
+        enable_transport: true,
+        ..TransportConfig::default()
+    };
+    let mut transport = Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+    transport.set_interface_name(0, iface_name.to_string());
+    // The burst limiter would hold the announce before it ever reaches the
+    // span being measured.
+    transport.set_interface_ingress_control(0, false);
+    transport
+}
+
+/// The `ANN_SLOW` lines this test emitted, told apart from every other
+/// test's by the interface they name.
+fn ann_slow_for<'a>(dump: &'a [String], iface_name: &str) -> Vec<&'a String> {
+    let marker = format!("iface={iface_name}");
+    lines_for(dump, "ANN_SLOW")
+        .into_iter()
+        .filter(|l| l.split_whitespace().any(|t| t == marker))
+        .collect()
+}
+
+/// Codeberg #418: announce handling that takes seconds says so.
+///
+/// This is the instrument that decides the issue's first hypothesis — "is the
+/// time inside announce handling?" — so a silent regression in it would
+/// silently answer that question "no" for ever.
+#[test]
+fn slow_announce_handling_reports_its_own_duration() {
+    let evlog = init_event_log();
+
+    let step = Arc::new(AtomicU64::new(250));
+    let mut transport = stepping_transport(&step, "annslow-pos");
+    let (announce, _dst) = make_announce_raw(1);
+    transport.process_incoming(0, &announce).unwrap();
+
+    let dump = evlog.dump();
+    let slow = ann_slow_for(&dump, "annslow-pos");
+    assert!(
+        !slow.is_empty(),
+        "announce handling advanced the clock by at least 250 ms and no \
+         ANN_SLOW was emitted; dump:\n{dump:#?}"
+    );
+    for l in &slow {
+        assert_well_formed(l);
+        let ms: u64 = l
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("ms="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("ANN_SLOW without a parseable ms=: {l}"));
+        assert!(ms >= 250, "ANN_SLOW reported {ms} ms, expected >= 250: {l}");
+    }
+}
+
+/// The negative control for the test above: a healthy announce is silent, so
+/// the event cannot become the next volume problem.
+#[test]
+fn fast_announce_handling_emits_nothing() {
+    let evlog = init_event_log();
+
+    let step = Arc::new(AtomicU64::new(0));
+    let mut transport = stepping_transport(&step, "annslow-neg");
+    let (announce, _dst) = make_announce_raw(1);
+    transport.process_incoming(0, &announce).unwrap();
+
+    let dump = evlog.dump();
+    assert!(
+        ann_slow_for(&dump, "annslow-neg").is_empty(),
+        "a microsecond announce emitted ANN_SLOW; dump:\n{dump:#?}"
+    );
+}

@@ -73,7 +73,7 @@ use std::net::SocketAddr;
 use crate::sync_ext::MutexRecover;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
@@ -3872,6 +3872,68 @@ fn precompute_single_dest(
 /// Run the internal event loop (sans-I/O architecture)
 ///
 /// The driver owns the interfaces and acts as the I/O bridge between the
+/// How often the core-stall watchdog asks for the core lock.
+const CORE_STALL_PROBE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// A wait for the core lock longer than this is reported as `CORE_STALL`
+/// (Codeberg #418).
+///
+/// 250 ms is above anything the lock budget permits inside the lock — the
+/// worst hold that document ever measured was 141 ms for a 1 MiB resource
+/// build, and that one was moved off the lock — and far below one 10 s
+/// `PATH_TABLE` heartbeat, so this sees the stalls that are too short to
+/// miss a beat as well as the ones that are not. At one probe per 50 ms a
+/// healthy node emits this never.
+const CORE_STALL_REPORT_MS: u128 = 250;
+
+/// Stops the watchdog thread when the event loop returns.
+struct CoreStallWatchdog(Arc<AtomicBool>);
+
+impl Drop for CoreStallWatchdog {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Measure how long the daemon is deaf, without touching a single
+/// `select!` arm.
+///
+/// The event loop holds the core mutex across everything it does with an
+/// inbound packet (`apply_inbound`), so the time a neutral observer waits
+/// for that mutex IS the time the loop spends not polling. Instrumenting
+/// the arms instead would mean an `Instant` in each of a dozen bodies and
+/// would still miss the time spent inside `dispatch_output`; one thread
+/// outside the loop measures the whole of it and cannot drift as arms are
+/// added.
+///
+/// The thread holds only a `Weak`, so it cannot keep a node alive, and it
+/// releases the lock immediately — it measures the wait, never the hold.
+fn spawn_core_stall_watchdog(inner: &Arc<Mutex<StdNodeCore>>) -> CoreStallWatchdog {
+    let stop = Arc::new(AtomicBool::new(false));
+    let weak = Arc::downgrade(inner);
+    let thread_stop = Arc::clone(&stop);
+    if let Err(e) = std::thread::Builder::new()
+        .name("leviculum-corewd".to_string())
+        .spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(CORE_STALL_PROBE_INTERVAL);
+                let Some(core) = weak.upgrade() else {
+                    return;
+                };
+                let asked = std::time::Instant::now();
+                drop(core.lock_recover());
+                let waited = asked.elapsed().as_millis();
+                if waited >= CORE_STALL_REPORT_MS {
+                    tracing::debug!(event = "CORE_STALL", ms = waited as u64);
+                }
+            }
+        })
+    {
+        tracing::warn!("core-stall watchdog thread could not start: {e}");
+    }
+    CoreStallWatchdog(stop)
+}
+
 /// pure state machine (`NodeCore`) and the actual network. Uses `select!`
 /// to wake immediately on socket readability, outgoing data, or timer expiry.
 #[allow(clippy::too_many_arguments)]
@@ -3907,6 +3969,10 @@ async fn run_event_loop(
         }
     }
     let _close_on_exit = CloseOnExit(Arc::clone(&completions));
+    // Codeberg #418: measure, from outside, the wall time this loop spends
+    // not polling. See `spawn_core_stall_watchdog` for why the core mutex is
+    // the right proxy for it.
+    let _core_stall_watchdog = spawn_core_stall_watchdog(&inner);
     let mut event_sink = channels.event_sink;
     let mut action_dispatch_rx = channels.action_dispatch_rx;
     let mut new_interface_rx = channels.new_interface_rx;

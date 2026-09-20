@@ -536,7 +536,7 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                 .into_owned()
         })
         .collect();
-    // Bare filenames like `transport.rs:207` resolve by suffix.
+    // Bare filenames like `transport.rs:211` resolve by suffix.
     let resolve = |cited: &str| -> Vec<&str> {
         let suffix = format!("/{cited}");
         rel_files

@@ -98,6 +98,10 @@ const FREQ_DECAY_MS: u64 = 10_000;
 /// detailed inspection while cutting entry volume ~30x.
 const PATH_ENTRIES_DUMP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
+/// Announce handling slower than this emits `ANN_SLOW` (Codeberg #418).
+/// The reasoning for the value is on `handle_announce`.
+const ANNOUNCE_SLOW_MS: u64 = 100;
+
 /// Ingress-control burst thresholds (Codeberg #87; Python Interface.py:75-84).
 /// Interfaces younger than this window use the stricter "new" frequency
 /// thresholds (Python IC_NEW_TIME = 2 hours).
@@ -4180,7 +4184,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2794. A destination with no cached
+    /// link-request path uses at transport.rs:2798. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -4750,7 +4754,46 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     // Internal: Packet Handlers
+    /// Timing wrapper around announce handling (Codeberg #418).
+    ///
+    /// The field measurement that opened #418 bounded a 27.6 s hole between
+    /// the `ANN_RX` and the `PATH_ADD` of one announce, so the first question
+    /// any fix has to answer is whether that time is spent *inside* announce
+    /// handling. This is the answer, taken in production rather than argued
+    /// from a reading of the code: one extra clock read per announce, and a
+    /// line only when the span is pathological.
+    ///
+    /// `ANNOUNCE_SLOW_MS` is the discriminator's resolution. Announce handling
+    /// is in-memory table work measured in microseconds; 100 ms is three orders
+    /// of magnitude above that (so a healthy node never emits this) and two
+    /// orders below the shortest stall the soak recorded, 11 s (so no stall of
+    /// the reported shape can hide under it). It is deliberately lower than the
+    /// driver's `CORE_STALL` threshold: when the two disagree — loop stalled,
+    /// announce fast — the time is not in this function.
     fn handle_announce(
+        &mut self,
+        packet: Packet,
+        interface_index: usize,
+        raw: &[u8],
+        from_held: bool,
+        sig_preverified: bool,
+    ) -> Result<(), TransportError> {
+        let started_ms = self.clock.now_ms();
+        let result =
+            self.handle_announce_inner(packet, interface_index, raw, from_held, sig_preverified);
+        let took_ms = self.clock.now_ms().saturating_sub(started_ms);
+        if took_ms >= ANNOUNCE_SLOW_MS {
+            crate::tracing::debug!(
+                event = "ANN_SLOW",
+                ms = took_ms,
+                iface = %self.iface_name(interface_index),
+                from_held = from_held,
+            );
+        }
+        result
+    }
+
+    fn handle_announce_inner(
         &mut self,
         packet: Packet,
         interface_index: usize,
@@ -4899,7 +4942,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1102 ran in the
+        // Gate on the already-incremented hops (transport.rs:1106 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -8885,7 +8928,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1665`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1669`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -13818,7 +13861,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // transport.rs:3960-3946, a deliberate anti-replay extension — so
+            // transport.rs:3964-3950, a deliberate anti-replay extension — so
             // the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -19404,7 +19447,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1102) before
+        // The inbound path increments hops once (transport.rs:1106) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
