@@ -865,7 +865,7 @@ and an unattributed jump is indistinguishable from a bug. The core
 answers the first half: `Transport::time_source`
 (`leviculum-core/src/transport.rs:3822`) names the arm — including
 the platform clock, which answers for itself — and
-`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3353`) is
+`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3387`) is
 the number the predicates use. The rest — which neighbour, when, and
 the cohort behind a median re-anchor — is still only the
 once-per-process implausible-own-clock warning
