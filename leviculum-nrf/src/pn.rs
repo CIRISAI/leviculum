@@ -389,6 +389,15 @@ const ACTIVE_GAP_MS: u64 = 1_000;
 /// How soon the loop should call back while work is queued.
 const WORK_POLL_MS: u64 = 25;
 
+/// The `lxmf.propagation` destination hash a remote identity owns — who a
+/// link's peer IS in the peer table. The same derivation the peer's own
+/// announce carries, so a remote recognised over a link and a remote heard
+/// on the air are one entry (`LXMRouter.py:2352`).
+fn propagation_hash_of(identity: &Identity) -> [u8; 16] {
+    let name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
+    *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes()
+}
+
 // ---------------------------------------------------------------------------
 // Region plumbing
 // ---------------------------------------------------------------------------
@@ -922,7 +931,12 @@ impl Engine {
                     && announce.destination_hash() != &self.dest_hash =>
             {
                 let destination = *announce.destination_hash().as_bytes();
-                self.on_pn_announce(node, destination, announce.app_data());
+                self.on_pn_announce(
+                    node,
+                    destination,
+                    announce.app_data(),
+                    announce.is_path_response(),
+                );
             }
             NodeEvent::AnnounceReceived { announce, .. } => {
                 self.trigger_active(node, announce.destination_hash().as_bytes(), out);
@@ -1153,11 +1167,21 @@ impl Engine {
             .is_some_and(|link| link.destination_hash() == &self.dest_hash)
     }
 
+    /// `is_path_response` is the announce's own
+    /// [`ReceivedAnnounce::is_path_response`](leviculum_core::ReceivedAnnounce::is_path_response),
+    /// and it is handed straight to the peer table, which owns the rule
+    /// (Codeberg #417). The clock seed above it is deliberate and not
+    /// gated: a path response carries the destination's own cached
+    /// announce, so its timebase is a real past timestamp, and a board
+    /// with no plausible wall clock is better off with it than with the
+    /// birth anchor. Peering is the decision that must not be made on
+    /// "somebody asked where this node is".
     fn on_pn_announce<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
         destination_hash: [u8; 16],
         app_data: &[u8],
+        is_path_response: bool,
     ) where
         R: CryptoRngCore,
         C: Clock,
@@ -1172,9 +1196,9 @@ impl Engine {
         self.seed_clock(node, announce.timebase, "pn-announce");
         let hops = node.hops_to(&DestinationHash::new(destination_hash));
         let now = node.emission_secs();
-        let change = self
-            .peers
-            .handle_announce(destination_hash, &announce, hops, now);
+        let change =
+            self.peers
+                .handle_announce(destination_hash, &announce, hops, now, is_path_response);
         // Capture the announcer's keys with the peer (#388 pass 3): the
         // announce that created or refreshed this peer also put the
         // identity into `known_identities`, but that cache is a rolling
@@ -1588,6 +1612,24 @@ impl Engine {
             .as_ref()
             .is_some_and(|envelope| envelope.messages.len() > 1);
         let peer = self.validated_links.get(link_id).copied();
+
+        // Peer off the RECALLED announce, before anything is routed by the
+        // peering key: the reference makes this decision for every remote
+        // with an identity and only afterwards asks whether a key was
+        // presented (`propagation_resource_concluded`,
+        // `reference/LXMF/LXMF/LXMRouter.py:2350-2389`). A single-message
+        // upload from a real propagation node therefore peers it too,
+        // which is why this sits above the client-upload return below.
+        //
+        // The validated peering hash first, the live link second: the
+        // validated hash was computed from the identity when the `/offer`
+        // was answered and needs no live link at all.
+        let link_identity = node.get_remote_identity(link_id).cloned();
+        let remote_of_link = peer.or_else(|| link_identity.as_ref().map(propagation_hash_of));
+        if let Some(remote) = remote_of_link {
+            self.peer_from_recalled_announce(node, remote, link_identity.as_ref());
+        }
+
         let (Some(remote), Some(envelope)) = (peer, envelope) else {
             if multi {
                 // Multi-message without a validated peering key: torn down
@@ -1623,6 +1665,84 @@ impl Engine {
             bytes: 0,
             invalid: 0,
         });
+    }
+
+    /// A node just synced its store to us; peer it back if its last
+    /// announce — RECALLED, not heard now — says it is a propagation node
+    /// inside our depth (`reference/LXMF/LXMF/LXMRouter.py:2355-2375`).
+    ///
+    /// This is the half of the peering rule [`Self::on_pn_announce`] cannot
+    /// carry. A peer enters the table on a propagation announce heard WHILE
+    /// the role is running, and the next announce is a whole cadence
+    /// interval away ([`crate::announce`]). A neighbour that announced before
+    /// the board took the role — or before its last reset, which on a board
+    /// is an ordinary event — is invisible to that path for the whole
+    /// interval while its syncs keep arriving: its mail lands here and
+    /// nothing of ours ever flows back (Codeberg #417).
+    ///
+    /// **What a board can recall, and for how long.** The recall source is
+    /// [`NodeCore::recall_app_data`] over the announce cache, which on this
+    /// stack is [`EmbeddedStorage`](leviculum_core::EmbeddedStorage)'s
+    /// 16-entry map: RAM only, drop-oldest, and swept of every entry whose
+    /// destination has no path (`clean_announce_cache`). So the honest
+    /// bound is *while a path to that node lives, and not across a reset* —
+    /// the reference recalls from a persisted `known_destinations` and does
+    /// survive one. It covers the case this path is for, because a node
+    /// syncing to us over a link has a path by construction; what it does
+    /// not cover is a reboot between hearing the announce and the sync.
+    /// Closing that needs `app_data` persisted with the destination — a
+    /// store change of its own, not a caller's problem.
+    fn peer_from_recalled_announce<R, C, S>(
+        &mut self,
+        node: &NodeCore<R, C, S>,
+        remote_hash: [u8; 16],
+        link_identity: Option<&Identity>,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        if self.peers.get(&remote_hash).is_some() {
+            // Already peered, so the table would answer `AlreadyPeered`
+            // anyway. Returning here spares the board the recall, a packet
+            // unpack and an announce parse on every single sync round a
+            // known peer sends — the common case by far.
+            return;
+        }
+        let destination = DestinationHash::new(remote_hash);
+        let recalled = node.recall_app_data(&destination);
+        let hops = node.hops_to(&destination);
+        let now = node.emission_secs();
+        if self
+            .peers
+            .handle_inbound_sync_recalled(remote_hash, recalled.as_deref(), hops, now)
+            != PeerChange::Added
+        {
+            return;
+        }
+        // The keys, as the announce path captures them (#388 pass 3): from
+        // the link we are being synced over when it is still up, from the
+        // identity cache otherwise. Without them the peering-key material
+        // for our own sync round back cannot be derived.
+        if let Some(peer) = self.peers.get_mut(&remote_hash) {
+            if let Some(identity) =
+                link_identity.or_else(|| node.storage().get_identity(&remote_hash))
+            {
+                peer.capture_identity(identity);
+            }
+        }
+        // The reason names the EVENT that peered, not the mechanism that
+        // recalled — the reference's own "discovered via incoming sync"
+        // (`:2374`), and the word `PN_SYNC dir=in` already uses, so one
+        // grep of `PN_PEER` answers how each peer got in on either stack.
+        self.log_peer("add", &remote_hash, "inbound_sync");
+        self.persist_peer(&remote_hash);
+        // A peering formed on a contact window that is open right now:
+        // schedule the sync pass instead of waiting out the interval,
+        // exactly as the announce path's `Added` arm does.
+        self.next_sync_at_ms = 0;
+        self.role
+            .set_compute_stamp_value(self.peers.max_peer_min_cost() > 0);
     }
 
     fn conclude_sync_batch(&mut self) {
@@ -2370,9 +2490,7 @@ impl Engine {
             return OfferResponse::Error(PeerError::NoIdentity).encode();
         };
         let remote_identity_hash = *identity.hash();
-        let name_hash = Destination::compute_name_hash(APP_NAME, &[PROPAGATION_ASPECT]);
-        let remote_hash =
-            *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes();
+        let remote_hash = propagation_hash_of(&identity);
 
         if let Err(error) = self.gate.admit(
             self.peers.config(),
