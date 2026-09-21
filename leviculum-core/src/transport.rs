@@ -4504,12 +4504,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
             };
 
+        // BUG-1: structured fields only, no trailing free-text message. A
+        // prose message renders under the `message` field, whose spaces split
+        // the line for every token-based parser (jl/jldiff) and trip the
+        // field-value validator. `tunnel`, `iface` and `paths` already say
+        // everything the sentence said.
         crate::tracing::debug!(
             event = "TUNNEL_REAPPEARED",
             tunnel = %HexShort(&tunnel_id[..]),
             iface = %self.iface_name(interface_index),
             paths = restore_paths.len(),
-            "Tunnel endpoint reappeared, restoring paths"
         );
 
         let mut deprecated: Vec<[u8; TRUNCATED_HASHBYTES]> = Vec::new();
@@ -4527,6 +4531,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     },
                 );
                 self.mark_path_unknown_state(&dest_hash);
+                // BUG-1: structured fields only (see TUNNEL_REAPPEARED above);
+                // `source = "tunnel"` is the sentence the message used to be.
                 crate::tracing::debug!(
                     event = "PATH_RESTORED",
                     dst = %HexShort(&dest_hash),
@@ -4534,7 +4540,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     iface = %self.iface_name(interface_index),
                     next_hop = ?path.next_hop.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
                     source = "tunnel",
-                    "Restored path from tunnel"
                 );
             } else {
                 deprecated.push(dest_hash);
@@ -4606,11 +4611,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 },
             );
             tunnel.expires_ms = now.saturating_add(TUNNEL_TIMEOUT_MS);
+            // BUG-1: structured fields only (see TUNNEL_REAPPEARED above).
+            // The miauhaus soak of 2026-09-20 logged this exact line as
+            // `EVENT_FIELD_VIOLATION event=TUNNEL_PATH_ASSOCIATED field=message
+            // value_problem=whitespace`; `dst` and `tunnel` are the whole event.
             crate::tracing::debug!(
                 event = "TUNNEL_PATH_ASSOCIATED",
                 dst = %HexShort(&dest_hash),
                 tunnel = %HexShort(&tunnel_id[..]),
-                "Path associated with tunnel"
             );
         } else {
             // Reverse map referenced a tunnel that no longer exists; drop the

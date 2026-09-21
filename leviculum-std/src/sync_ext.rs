@@ -111,11 +111,18 @@ fn push_held(addr: usize) -> Result<bool, ReentrantLock> {
             // Report once per thread, then carry on untracked. Losing the
             // tripwire is worth saying out loud; losing the daemon is not.
             if !held.overflowed.replace(true) {
+                // Structured fields only: an `event =` site with a trailing
+                // free-text message renders that message under the `message`
+                // field, whose spaces split the line for the token-based
+                // parsers and trip the field-value validator. What the
+                // sentence said -- this thread holds more than
+                // MAX_TRACKED_DEPTH mutexes at once and the self-deadlock
+                // tripwire is off on it from here on -- is `max_depth` plus
+                // `tripwire = "inactive"`.
                 tracing::error!(
                     event = "LOCK_DEPTH_OVERFLOW",
                     max_depth = MAX_TRACKED_DEPTH,
-                    "this thread holds more than {MAX_TRACKED_DEPTH} mutexes at once; \
-                     the self-deadlock tripwire is INACTIVE on this thread from here on"
+                    tripwire = "inactive",
                 );
             }
             return Ok(false);
