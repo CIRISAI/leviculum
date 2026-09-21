@@ -134,6 +134,8 @@ mod mvr_probe_announce_phase;
 #[cfg(test)]
 mod mvr_proof_activity;
 #[cfg(test)]
+mod mvr_random_blob_window;
+#[cfg(test)]
 mod mvr_raw_single_packet;
 #[cfg(test)]
 mod mvr_reboot_relay_nopath_solicit;

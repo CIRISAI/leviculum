@@ -246,3 +246,96 @@ impl PacketReceipt {
         self.timeout_ms.saturating_sub(elapsed)
     }
 }
+
+impl PathEntry {
+    /// The destination's random-blob window with `new` appended, capped at
+    /// `max` newest, allocated to exactly the size it ends up holding.
+    ///
+    /// The obvious spelling — clone the old window, push, drain the excess
+    /// — leaves a saturated window holding twice the heap it needs: the
+    /// clone allocates for `len`, the push finds it full and doubles, and
+    /// the drain lowers the length without giving the capacity back. At
+    /// `MAX_RANDOM_BLOBS` = 64 that is 1280 bytes per saturated path where
+    /// 640 would do, on a table that has one entry per destination the node
+    /// can reach. Sizing the allocation up front costs the same single
+    /// allocation and leaves nothing to give back.
+    pub fn appended_random_blobs(
+        existing: &[[u8; crate::constants::RANDOM_HASHBYTES]],
+        new: [u8; crate::constants::RANDOM_HASHBYTES],
+        max: usize,
+    ) -> Vec<[u8; crate::constants::RANDOM_HASHBYTES]> {
+        if max == 0 {
+            return Vec::new();
+        }
+        // Keep the newest `max - 1` of the old window, so the appended blob
+        // brings it to `max` exactly.
+        let start = (existing.len() + 1).saturating_sub(max);
+        let kept = &existing[start..];
+        let mut blobs = Vec::with_capacity(kept.len() + 1);
+        blobs.extend_from_slice(kept);
+        blobs.push(new);
+        blobs
+    }
+}
+
+#[cfg(test)]
+mod random_blob_window_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::PathEntry;
+    use crate::constants::{MAX_RANDOM_BLOBS, RANDOM_HASHBYTES};
+
+    fn blob(n: u8) -> [u8; RANDOM_HASHBYTES] {
+        [n; RANDOM_HASHBYTES]
+    }
+
+    /// THE pin: a saturated window holds the heap it uses and not a byte
+    /// more. Asserting capacity, not length — the length was always right.
+    #[test]
+    fn a_saturated_window_never_holds_twice_the_heap_it_needs() {
+        let mut window: Vec<[u8; RANDOM_HASHBYTES]> = Vec::new();
+        for n in 0..=(MAX_RANDOM_BLOBS as u8 + 40) {
+            window = PathEntry::appended_random_blobs(&window, blob(n), MAX_RANDOM_BLOBS);
+            assert!(
+                window.len() <= MAX_RANDOM_BLOBS,
+                "the window is capped at {MAX_RANDOM_BLOBS}"
+            );
+            assert_eq!(
+                window.capacity(),
+                window.len(),
+                "after {} appends the window holds {} blobs in room for {}",
+                n as usize + 1,
+                window.len(),
+                window.capacity(),
+            );
+        }
+        assert_eq!(window.len(), MAX_RANDOM_BLOBS, "the window saturates");
+    }
+
+    /// The cap drops the oldest, so replay detection keeps the blobs a
+    /// re-announce is actually likely to repeat.
+    #[test]
+    fn the_cap_drops_the_oldest_blob_not_the_newest() {
+        let existing: Vec<[u8; RANDOM_HASHBYTES]> = (0..4u8).map(blob).collect();
+        let out = PathEntry::appended_random_blobs(&existing, blob(9), 3);
+        assert_eq!(out, vec![blob(2), blob(3), blob(9)]);
+    }
+
+    /// An unsaturated window grows by one and is still exactly sized.
+    #[test]
+    fn an_unsaturated_window_grows_by_one() {
+        let existing = vec![blob(1), blob(2)];
+        let out = PathEntry::appended_random_blobs(&existing, blob(3), MAX_RANDOM_BLOBS);
+        assert_eq!(out, vec![blob(1), blob(2), blob(3)]);
+        assert_eq!(out.capacity(), 3, "no slack on the way up either");
+    }
+
+    /// A zero cap keeps nothing — the config field is a usize and nothing
+    /// forbids it.
+    #[test]
+    fn a_zero_cap_keeps_nothing() {
+        let existing = vec![blob(1), blob(2)];
+        assert!(PathEntry::appended_random_blobs(&existing, blob(3), 0).is_empty());
+    }
+}

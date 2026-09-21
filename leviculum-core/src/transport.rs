@@ -5175,20 +5175,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         if should_update {
-            // Preserve existing random_blobs and add the new one
-            let mut random_blobs = self
-                .storage
-                .get_path(&dest_hash)
-                .map(|p| p.random_blobs.clone())
-                .unwrap_or_default();
-            random_blobs.push(random_hash);
-
-            // Cap random_blobs to prevent unbounded growth
-            let max_blobs = self.config.max_random_blobs;
-            if random_blobs.len() > max_blobs {
-                let excess = random_blobs.len() - max_blobs;
-                random_blobs.drain(..excess);
-            }
+            // Preserve existing random_blobs and add the new one, capped to
+            // prevent unbounded growth. Sized to what it ends up holding:
+            // clone-push-drain left a saturated window with twice the
+            // capacity of its length and never gave it back
+            // (`PathEntry::appended_random_blobs` says why).
+            let random_blobs = PathEntry::appended_random_blobs(
+                self.storage
+                    .get_path(&dest_hash)
+                    .map(|p| p.random_blobs.as_slice())
+                    .unwrap_or(&[]),
+                random_hash,
+                self.config.max_random_blobs,
+            );
 
             self.storage.set_path(
                 dest_hash,
