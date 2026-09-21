@@ -89,6 +89,53 @@ struct MiningJob {
 /// The concrete core type, same alias the engine uses.
 type Core = leviculum_std::driver::StdNodeCore;
 
+/// One validated peer's inbound sync, part-way through its messages.
+///
+/// A batch is persisted a slice at a time rather than in one call, because
+/// each message costs a durable store append and the whole loop used to run
+/// under the core lock — see [`PeeringRuntime::advance_sync_resource`] for
+/// the measurement and the rule. The per-envelope counters live here so the
+/// round's `PN_SYNC` line still reports the batch, not the slice.
+pub(crate) struct InboundSync {
+    link_id: LinkId,
+    remote_hash: [u8; 16],
+    /// Receive time, read once when the batch arrived: every message in one
+    /// envelope carries the same store timestamp whichever hook stores it.
+    now: u64,
+    messages: Vec<Vec<u8>>,
+    /// Index of the first message not yet offered to the store.
+    next: usize,
+    accepted: usize,
+    duplicates: usize,
+    bytes: u64,
+    invalid: usize,
+}
+
+impl InboundSync {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.next >= self.messages.len()
+    }
+
+    /// Messages still to be stored — what the caller budgets against.
+    pub(crate) fn remaining(&self) -> usize {
+        self.messages.len().saturating_sub(self.next)
+    }
+}
+
+/// What a completed inbound resource turned out to be
+/// ([`PeeringRuntime::begin_sync_resource`]).
+pub(crate) enum InboundSyncStart {
+    /// Not a peer sync: one message from a sender that never presented a
+    /// peering key, or bytes that are not an envelope at all. The engine's
+    /// client-upload path owns it.
+    ClientUpload,
+    /// Dealt with here, nothing reaches the store: the multi-message form
+    /// without a validated key, which tears the link down.
+    Handled,
+    /// A validated peer's batch, to be stored in slices.
+    Batch(InboundSync),
+}
+
 /// Per-peer traffic counters for the control stats — runtime state, not
 /// persisted, exactly like the reference's own counters, which reset with
 /// the sync state on restore (`LXMPeer.from_bytes` rebuilds them from the
@@ -599,14 +646,22 @@ impl PeeringRuntime {
         self.validated_links.insert(link_id, peer);
     }
 
-    /// Handle a completed inbound resource when it came from a validated
-    /// sync peer. Returns `Some(accepted)` when handled here — the
-    /// non-duplicate `(transient_id, destination_hash)` pairs, so the
-    /// caller can deliver the ones addressed to its own mailbox, which the
-    /// reference does for a peer's messages exactly as for a client's
-    /// (`lxmf_propagation` checks `delivery_destinations` before the store,
-    /// whatever `from_peer` says, `LXMRouter.py:2501-2509`). `None` hands
-    /// the transfer back to the engine's client-upload path.
+    /// Classify a completed inbound resource and, when it is a validated
+    /// peer's sync, hand back the batch as a resumable job.
+    ///
+    /// This is the first half of what used to be one call. The second half
+    /// is [`Self::advance_sync_resource`], and the split exists because the
+    /// batch is persisted one durable append at a time under the core lock:
+    /// see that method for the measurement. Everything here is per-envelope
+    /// and cheap — decode, the peering decision, the unvalidated-sender
+    /// gate — so it runs once, before the first message is stored.
+    ///
+    /// The accepted `(transient_id, destination_hash)` pairs the caller
+    /// needs for its own mailbox — the reference delivers a peer's messages
+    /// exactly as a client's (`lxmf_propagation` checks
+    /// `delivery_destinations` before the store, whatever `from_peer` says,
+    /// `LXMRouter.py:2501-2509`) — come out of `advance_sync_resource`,
+    /// slice by slice.
     ///
     /// Routing follows the SENDER, not the message count: the reference
     /// ingests a peer's transfer through this branch at any cardinality
@@ -629,19 +684,16 @@ impl PeeringRuntime {
     /// worker, the drain may run after a `LinkClosed` already cleared the
     /// map (the reference peer tears its link down as soon as the transfer
     /// concludes), and a late lookup here would drop the whole batch.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn on_sync_resource<S: PropagationStore>(
+    pub(crate) fn begin_sync_resource(
         &mut self,
         core: &mut Core,
-        node: &mut PropagationNode<S>,
         link_id: &LinkId,
         validated_peer: Option<[u8; 16]>,
         data: &[u8],
-        validate: &mut dyn FnMut(&TransientId, &[u8; 32]) -> Option<u16>,
         out: &mut TickOutput,
-    ) -> Option<Vec<(TransientId, [u8; 16])>> {
+    ) -> InboundSyncStart {
         let Ok(envelope) = PeerSyncEnvelope::decode(data) else {
-            return None;
+            return InboundSyncStart::ClientUpload;
         };
         self.inbound_transfers.remove(link_id);
         let now = unix_secs();
@@ -671,19 +723,69 @@ impl PeeringRuntime {
                 );
                 out.merge(core.close_link(link_id));
                 // Handled: the link is gone, nothing reaches the store.
-                return Some(Vec::new());
+                return InboundSyncStart::Handled;
             }
             // One message from someone who never presented a peering key:
             // a client upload, the engine's path.
-            return None;
+            return InboundSyncStart::ClientUpload;
         };
 
-        let mut accepted = 0usize;
-        let mut duplicates = 0usize;
-        let mut bytes = 0u64;
-        let mut invalid = 0usize;
+        InboundSyncStart::Batch(InboundSync {
+            link_id: *link_id,
+            remote_hash,
+            now,
+            messages: envelope.messages,
+            next: 0,
+            accepted: 0,
+            duplicates: 0,
+            bytes: 0,
+            invalid: 0,
+        })
+    }
+
+    /// Persist up to `limit` more of a peer batch's messages, and finish
+    /// the round when the last one is stored.
+    ///
+    /// Returns the non-duplicate `(transient_id, destination_hash)` pairs
+    /// of THIS slice, for the caller's own-mailbox delivery.
+    ///
+    /// # Why a slice and not the batch
+    ///
+    /// Every accepted message is one [`PropagationStore::append`], and on
+    /// the host store that is a write, an `fsync`, a rename and a second
+    /// `fsync` — latency that belongs to the disk
+    /// (`leviculum-std/src/file_propagation_store.rs`, "Power-cut safety").
+    /// Measured on the coder host's ext4 over five runs
+    /// (`append_cost`, `leviculum-std/src/file_propagation_store.rs`):
+    /// 105 messages of 288 bytes cost **127-189 ms**, 1.1-1.5 ms each,
+    /// worst 6.4 ms for a single one — against 124 µs for the same 105
+    /// appends into a memory store.
+    /// The whole batch used to run inside one `CoreProcessor` hook, which holds
+    /// the core lock, so a 105-message inbound sync stopped the node for a
+    /// quarter of a second — miauhaus, 2026-09-21, `CORE_PROCESSOR_OVER_BUDGET
+    /// hook="on_tick" elapsed_us=239016 budget_us=5000 events=0`, the tick
+    /// after `sync in peer 535d9c5db65bfcd4 transferred 105 (30240 B): ok`.
+    ///
+    /// The store is not the layer that can fix that: it cannot make a
+    /// durable write cheap, and dropping the fsyncs would trade a message
+    /// for a millisecond. The caller's hook is, by doing less per call —
+    /// `docs/src/concepts/core-lock-budget.md`, "No caller holds the core
+    /// lock across an I/O call whose latency belongs to a device."
+    pub(crate) fn advance_sync_resource<S: PropagationStore>(
+        &mut self,
+        core: &mut Core,
+        node: &mut PropagationNode<S>,
+        job: &mut InboundSync,
+        limit: usize,
+        validate: &mut dyn FnMut(&TransientId, &[u8; 32]) -> Option<u16>,
+        out: &mut TickOutput,
+    ) -> Vec<(TransientId, [u8; 16])> {
+        let remote_hash = job.remote_hash;
+        let now = job.now;
+        let link_id = job.link_id;
+        let until = job.messages.len().min(job.next + limit);
         let mut local: Vec<(TransientId, [u8; 16])> = Vec::new();
-        for message in &envelope.messages {
+        for message in &job.messages[job.next..until] {
             let outcome = node.accept_stamped(message, now, &mut *validate);
             match outcome {
                 UploadOutcome::Accepted {
@@ -713,20 +815,20 @@ impl PeeringRuntime {
                         via = "sync",
                     );
                     if duplicate {
-                        duplicates += 1;
+                        job.duplicates += 1;
                     } else {
-                        accepted += 1;
-                        bytes += size as u64;
+                        job.accepted += 1;
+                        job.bytes += size as u64;
                         local.push((transient_id, destination_hash));
                     }
                 }
                 UploadOutcome::InvalidStamp { .. } => {
                     crate::engine::log_reject("invalid_stamp", "sync");
-                    invalid += 1;
+                    job.invalid += 1;
                 }
                 UploadOutcome::Malformed(_) | UploadOutcome::PeerSyncForm => {
                     crate::engine::log_reject("malformed", "sync");
-                    invalid += 1;
+                    job.invalid += 1;
                 }
                 UploadOutcome::StoreFailed(error) => {
                     // Eviction already ran inside accept; a message that
@@ -739,6 +841,14 @@ impl PeeringRuntime {
                 }
             }
         }
+        job.next = until;
+        if !job.is_finished() {
+            return local;
+        }
+
+        // The round's accounting is per envelope, so it waits for the last
+        // message of it — the counters above accumulate across the slices.
+        let (accepted, bytes, invalid) = (job.accepted, job.bytes, job.invalid);
         if self.table.get(&remote_hash).is_some() {
             let traffic = self.traffic_mut(&remote_hash);
             traffic.incoming += accepted as u64;
@@ -764,12 +874,12 @@ impl PeeringRuntime {
             bytes,
             result: if invalid == 0 { "ok" } else { "invalid_stamps" },
         });
-        let _ = duplicates;
+        let _ = job.duplicates;
         if invalid > 0 {
             self.gate.throttle(remote_hash, now);
-            out.merge(core.close_link(link_id));
+            out.merge(core.close_link(&link_id));
         }
-        Some(local)
+        local
     }
 
     /// A node just synced its store to us; peer it back if its last

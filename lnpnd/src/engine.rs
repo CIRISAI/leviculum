@@ -48,7 +48,7 @@ use leviculum_lxmf::{
 };
 
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
-use crate::peering::PeeringRuntime;
+use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime};
 use crate::validation::{
     validate_stamp_value, Carrier, ValidationDone, ValidationJob, ValidationWorker,
 };
@@ -71,6 +71,26 @@ const STORE_MAINTENANCE_SECS: u64 = 480;
 /// How soon the engine asks the driver back when nothing else is due; the
 /// value lnmsg's engine settled on for the same job.
 const POLL_INTERVAL_MS: u64 = 200;
+
+/// How many messages one hook invocation may persist before it hands the
+/// core back.
+///
+/// A [`CoreProcessor`](leviculum_std::driver::CoreProcessor) hook runs with
+/// the core mutex held, under a 5 ms budget
+/// (`PROCESSOR_TICK_BUDGET`, `leviculum-std/src/driver/processor.rs`), and
+/// storing one message is one durable append: write, `fsync`, rename,
+/// `fsync` the directory. Measured on the coder host's ext4 with the host
+/// store, 288-byte bodies (`append_cost`,
+/// `leviculum-std/src/file_propagation_store.rs`): **1.1-1.5 ms per
+/// message, worst case 6.4 ms**, so the budget pays for one message and
+/// not two. The whole inbound batch used to be stored in a single hook —
+/// 105 messages, 239 ms of core lock, miauhaus 2026-09-21 — and that is
+/// what this bounds.
+///
+/// One append can still overrun the budget on a slow device; nothing this
+/// side of the lock can prevent that, because the latency is the disk's.
+/// What this removes is the multiplier.
+const PERSIST_PER_HOOK: usize = 1;
 
 /// What the engine needs before the node exists (a processor is installed
 /// on the builder, before the node it runs inside).
@@ -219,6 +239,96 @@ pub struct Engine<S> {
     /// Stamp validation off the core lock (deliverable 5): the hook
     /// queues, the worker grinds, the drain applies.
     validation: ValidationWorker,
+    /// Validated payloads waiting to be stored, in arrival order.
+    ///
+    /// The store is the slow part and the hook holds the core lock while it
+    /// runs, so a hook takes [`PERSIST_PER_HOOK`] messages off this queue
+    /// and asks the driver to come straight back for the rest. FIFO, one
+    /// queue for every link, so the per-link order of
+    /// validate → append → prove the proof correlation relies on (module
+    /// docs) is the order the payloads arrived in.
+    pending: VecDeque<Pending>,
+}
+
+/// One validated payload waiting for the store.
+enum Pending {
+    /// A client upload that arrived as a link packet: one append, then the
+    /// proof that says it is stored.
+    Packet {
+        link_id: LinkId,
+        data: Vec<u8>,
+        /// The queued proof hash for the packet, if one was requested.
+        proof: Option<[u8; 32]>,
+        verdicts: Verdicts,
+    },
+    /// A completed inbound resource, not yet classified: peer sync or
+    /// single-message client upload is [`PeeringRuntime::begin_sync_resource`]'s
+    /// decision, and it is made when the payload reaches the head of the
+    /// queue.
+    Resource {
+        link_id: LinkId,
+        data: Vec<u8>,
+        /// The link's validated sync peer as of the moment the resource
+        /// concluded; see [`ValidationJob::sync_peer`].
+        sync_peer: Option<[u8; 16]>,
+        verdicts: Verdicts,
+    },
+    /// A validated peer's batch, part-way through its messages.
+    Sync {
+        job: InboundSync,
+        verdicts: Verdicts,
+    },
+}
+
+/// How a queued payload's stamps are judged when it reaches the store.
+enum Verdicts {
+    /// Ground by the validation worker before the payload was queued.
+    Ground(HashMap<TransientId, Option<u16>>),
+    /// Cheap enough to run here: [`ValidationWorker::worth_deferring`] said
+    /// no, which means no cost gate and no value to measure, so this is a
+    /// constant rather than a hash grind.
+    Inline { min_cost: u8, compute_value: bool },
+}
+
+impl Verdicts {
+    fn value(&self, transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]) -> Option<u16> {
+        match self {
+            Verdicts::Ground(verdicts) => verdicts.get(transient_id).copied().flatten(),
+            Verdicts::Inline {
+                min_cost,
+                compute_value,
+            } => validate_stamp_value(transient_id, stamp, *min_cost, *compute_value),
+        }
+    }
+}
+
+impl Pending {
+    /// A finished validation, ready for the store.
+    fn from_validated(done: ValidationDone) -> Self {
+        let ValidationDone {
+            link_id,
+            carrier,
+            data,
+            proof,
+            sync_peer,
+            verdicts,
+        } = done;
+        let verdicts = Verdicts::Ground(verdicts);
+        match carrier {
+            Carrier::Packet => Pending::Packet {
+                link_id,
+                data,
+                proof,
+                verdicts,
+            },
+            Carrier::Resource => Pending::Resource {
+                link_id,
+                data,
+                sync_peer,
+                verdicts,
+            },
+        }
+    }
 }
 
 /// Unix seconds, the timestamp domain of the store and the announce.
@@ -262,6 +372,7 @@ impl<S: PropagationStore> Engine<S> {
                 announce_delay_secs,
                 next_maintenance_at: 0,
                 validation: ValidationWorker::spawn(),
+                pending: VecDeque::new(),
             },
             receiver,
         )
@@ -952,84 +1063,112 @@ impl<S: PropagationStore> Engine<S> {
         }
     }
 
-    /// Apply one finished validation: re-enter the path the event would
-    /// have taken, with the worker's verdicts as the validator.
-    fn apply_validation(
+    /// Store one queued payload's worth of work: at most [`PERSIST_PER_HOOK`]
+    /// messages, re-entering the path the event would have taken with the
+    /// verdicts the payload was queued with.
+    ///
+    /// Returns how much of the budget it spent, in messages offered to the
+    /// store. A classification that stores nothing — a torn-down batch, an
+    /// envelope that turned out to be a client upload — costs nothing and
+    /// lets the caller go on to the payload behind it.
+    fn store_one(
         &mut self,
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
-        done: ValidationDone,
+        pending: Pending,
+        budget: usize,
         out: &mut TickOutput,
-    ) {
-        let ValidationDone {
-            link_id,
-            carrier,
-            data,
-            proof,
-            sync_peer,
-            verdicts,
-        } = done;
-        let mut validate = |transient_id: &TransientId, _stamp: &[u8; STAMP_SIZE]| {
-            verdicts.get(transient_id).copied().flatten()
-        };
-        match carrier {
-            Carrier::Packet => {
+    ) -> usize {
+        match pending {
+            Pending::Packet {
+                link_id,
+                data,
+                proof,
+                verdicts,
+            } => {
+                let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                    verdicts.value(transient_id, stamp)
+                };
                 let accepted =
                     self.ingest(ready, core, &link_id, &data, "packet", &mut validate, out);
                 if accepted {
                     if let Some(packet_hash) = proof {
+                        // Prove only now that the append returned: the proof
+                        // is the "stored" statement (persist before you
+                        // prove; packet.prove after storing,
+                        // reference/LXMF/LXMF/LXMRouter.py:2255).
                         match core.send_data_proof(&link_id, &packet_hash) {
                             Ok(send) => out.merge(send),
                             Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
                         }
                     }
                 }
+                1
             }
-            Carrier::Resource => {
-                let synced = ready.peering.on_sync_resource(
-                    core,
-                    &mut ready.node,
-                    &link_id,
-                    sync_peer,
-                    &data,
-                    &mut validate,
-                    out,
-                );
-                match synced {
-                    Some(accepted) => {
-                        for (transient_id, destination_hash) in accepted {
-                            self.deliver_own_mailbox(
-                                ready,
-                                core,
-                                &transient_id,
-                                &destination_hash,
-                                out,
-                            );
-                        }
-                    }
-                    None => {
-                        let _ = self.ingest(
-                            ready,
-                            core,
-                            &link_id,
-                            &data,
-                            "resource",
-                            &mut validate,
-                            out,
-                        );
-                    }
+            Pending::Resource {
+                link_id,
+                data,
+                sync_peer,
+                verdicts,
+            } => match ready
+                .peering
+                .begin_sync_resource(core, &link_id, sync_peer, &data, out)
+            {
+                InboundSyncStart::Batch(job) => {
+                    // Classification stores nothing; the batch goes back to
+                    // the head of the queue and is stored a slice at a time.
+                    self.pending.push_front(Pending::Sync { job, verdicts });
+                    0
                 }
+                InboundSyncStart::ClientUpload => {
+                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                        verdicts.value(transient_id, stamp)
+                    };
+                    let _ =
+                        self.ingest(ready, core, &link_id, &data, "resource", &mut validate, out);
+                    1
+                }
+                InboundSyncStart::Handled => 0,
+            },
+            Pending::Sync { mut job, verdicts } => {
+                let before = job.remaining();
+                let accepted = {
+                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
+                        verdicts.value(transient_id, stamp)
+                    };
+                    ready.peering.advance_sync_resource(
+                        core,
+                        &mut ready.node,
+                        &mut job,
+                        budget,
+                        &mut validate,
+                        out,
+                    )
+                };
+                let spent = before.saturating_sub(job.remaining());
+                if !job.is_finished() {
+                    self.pending.push_front(Pending::Sync { job, verdicts });
+                }
+                for (transient_id, destination_hash) in accepted {
+                    self.deliver_own_mailbox(ready, core, &transient_id, &destination_hash, out);
+                }
+                spent
             }
         }
     }
 
     /// A completed inbound resource on one of the role's links: a
     /// validated sync peer's transfer is the peering half's at any
-    /// message count (`Peering::on_sync_resource`), everything else is the
-    /// client upload path — and the multi-message form from a sender
-    /// without a validated key is torn down there
+    /// message count (`PeeringRuntime::begin_sync_resource`), everything
+    /// else is the client upload path — and the multi-message form from a
+    /// sender without a validated key is torn down there
     /// (LXMRouter.py:2381-2389). The resource protocol has its own
     /// acknowledgement; no packet proof exists to send here.
+    ///
+    /// Nothing is stored in this call. The payload joins the store queue
+    /// and is persisted from the drain, [`PERSIST_PER_HOOK`] messages per
+    /// hook, because a peer's batch is as many durable appends as it has
+    /// messages and they may not all run under one core lock.
     ///
     /// The validated sync peer is captured NOW, not at the drain: the
     /// reference peer tears its link down as soon as its transfer
@@ -1038,10 +1177,8 @@ impl<S: PropagationStore> Engine<S> {
     fn on_inbound_resource_completed(
         &mut self,
         ready: &mut Ready<S>,
-        core: &mut StdNodeCoreRef<'_>,
         link_id: &LinkId,
         data: &[u8],
-        out: &mut TickOutput,
     ) {
         let min_cost = ready.min_cost;
         let compute_value = ready.node.compute_stamp_value();
@@ -1057,47 +1194,50 @@ impl<S: PropagationStore> Engine<S> {
                 compute_value,
             });
         } else {
-            let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
-                validate_stamp_value(transient_id, stamp, min_cost, compute_value)
-            };
-            let synced = ready.peering.on_sync_resource(
-                core,
-                &mut ready.node,
-                link_id,
+            self.pending.push_back(Pending::Resource {
+                link_id: *link_id,
+                data: data.to_vec(),
                 sync_peer,
-                data,
-                &mut validate,
-                out,
-            );
-            match synced {
-                Some(accepted) => {
-                    for (transient_id, destination_hash) in accepted {
-                        self.deliver_own_mailbox(
-                            ready,
-                            core,
-                            &transient_id,
-                            &destination_hash,
-                            out,
-                        );
-                    }
-                }
-                None => {
-                    let _ = self.ingest(ready, core, link_id, data, "resource", &mut validate, out);
-                }
-            }
+                verdicts: Verdicts::Inline {
+                    min_cost,
+                    compute_value,
+                },
+            });
         }
     }
 
-    /// Drain the worker's finished validations, in completion order (which
-    /// is submission order — one worker).
-    fn drain_validation(
+    /// Take the worker's finished validations onto the store queue, in
+    /// completion order (which is submission order — one worker), then
+    /// store as much of the queue as this hook's budget allows.
+    ///
+    /// Queueing is cheap; storing is not, which is why only the second half
+    /// is bounded. Whatever is left asks the driver to come straight back:
+    /// the deadline is now, and the driver clamps that to its next
+    /// millisecond (`leviculum-std/src/driver/mod.rs`, "Advance next_poll").
+    fn drain_pending(
         &mut self,
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
         out: &mut TickOutput,
     ) {
         while let Some(done) = self.validation.try_recv() {
-            self.apply_validation(ready, core, done, out);
+            self.pending.push_back(Pending::from_validated(done));
+        }
+        let mut budget = PERSIST_PER_HOOK;
+        while budget > 0 {
+            let Some(pending) = self.pending.pop_front() else {
+                break;
+            };
+            budget -= self
+                .store_one(ready, core, pending, budget, out)
+                .min(budget);
+        }
+        if !self.pending.is_empty() {
+            let now_ms = core.now_ms();
+            out.next_deadline_ms = Some(match out.next_deadline_ms {
+                Some(existing) => existing.min(now_ms),
+                None => now_ms,
+            });
         }
     }
 }
@@ -1117,7 +1257,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         };
         // Finished validations first: they are older traffic than this
         // event, and applying them here keeps the per-link order.
-        self.drain_validation(&mut ready, core, &mut out);
+        self.drain_pending(&mut ready, core, &mut out);
         // The mailbox router sees every event and filters for its own
         // links, exactly as lnmsg's engine feeds it.
         if let Some(mut mailbox) = ready.mailbox.take() {
@@ -1224,30 +1364,19 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                         compute_value,
                     });
                 } else {
-                    let mut validate = |transient_id: &TransientId, stamp: &[u8; STAMP_SIZE]| {
-                        validate_stamp_value(transient_id, stamp, min_cost, compute_value)
-                    };
-                    let accepted = self.ingest(
-                        &mut ready,
-                        core,
-                        link_id,
-                        data,
-                        "packet",
-                        &mut validate,
-                        &mut out,
-                    );
-                    if accepted {
-                        if let Some(packet_hash) = proof {
-                            // Prove only now that the append returned: the proof
-                            // is the "stored" statement (persist before you
-                            // prove; packet.prove after storing,
-                            // reference/LXMF/LXMF/LXMRouter.py:2255).
-                            match core.send_data_proof(link_id, &packet_hash) {
-                                Ok(send) => out.merge(send),
-                                Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
-                            }
-                        }
-                    }
+                    // Nothing to grind, but the append and the proof are
+                    // still the drain's: one dispatch can carry several
+                    // uploads, and storing them all here is the same
+                    // unbounded hold a batch is.
+                    self.pending.push_back(Pending::Packet {
+                        link_id: *link_id,
+                        data: data.clone(),
+                        proof,
+                        verdicts: Verdicts::Inline {
+                            min_cost,
+                            compute_value,
+                        },
+                    });
                 }
             }
             // An upload too big for one link packet arrives as a resource;
@@ -1274,7 +1403,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 is_sender: false,
                 ..
             } if Self::owns_link(core, &ready, link_id) => {
-                self.on_inbound_resource_completed(&mut ready, core, link_id, data, &mut out);
+                self.on_inbound_resource_completed(&mut ready, link_id, data);
             }
             // Our outbound sync resource concluded (or failed).
             NodeEvent::ResourceCompleted {
@@ -1378,7 +1507,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
 
-        self.drain_validation(&mut ready, core, &mut out);
+        self.drain_pending(&mut ready, core, &mut out);
 
         if let Some(mut mailbox) = ready.mailbox.take() {
             mailbox.on_tick(core, now_ms, &mut out);
@@ -1710,14 +1839,7 @@ mod tests {
             timestamp: 1.0,
             messages: vec![stamped(0x01), stamped(0x02)],
         };
-        let mut out = TickOutput::empty();
-        engine.on_inbound_resource_completed(
-            &mut ready,
-            &mut core,
-            &link_id,
-            &envelope.encode(),
-            &mut out,
-        );
+        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope.encode());
         // The close lands before any drain could run — the deterministic
         // stand-in for the LinkClosed event the engine routes here.
         ready.peering.on_link_closed(&link_id);
@@ -1790,16 +1912,10 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let mut out = TickOutput::empty();
-            engine.on_inbound_resource_completed(
-                &mut ready,
-                &mut core,
-                &client_link,
-                &envelope,
-                &mut out,
-            );
-            engine.on_inbound_resource_completed(
-                &mut ready, &mut core, &peer_link, &envelope, &mut out,
-            );
+            engine.on_inbound_resource_completed(&mut ready, &client_link, &envelope);
+            absorb(&mut engine, &mut ready, &mut core, &mut out);
+            engine.on_inbound_resource_completed(&mut ready, &peer_link, &envelope);
+            absorb(&mut engine, &mut ready, &mut core, &mut out);
         });
         engine.state = State::Ready(ready);
 
@@ -1899,6 +2015,24 @@ mod tests {
         })
     }
 
+    /// Store everything the engine has queued, the way the driver would:
+    /// hook after hook until the queue is empty. Bounded, because a queue
+    /// that will not drain is a bug to fail on rather than hang on.
+    fn absorb(
+        engine: &mut Engine<MemoryPropagationStore>,
+        ready: &mut Ready<MemoryPropagationStore>,
+        core: &mut leviculum_std::driver::StdNodeCore,
+        out: &mut TickOutput,
+    ) {
+        for _ in 0..10_000 {
+            let Some(pending) = engine.pending.pop_front() else {
+                return;
+            };
+            engine.store_one(ready, core, pending, PERSIST_PER_HOOK, out);
+        }
+        panic!("the store queue did not drain");
+    }
+
     fn peer_count(engine: &Engine<MemoryPropagationStore>) -> usize {
         match &engine.state {
             State::Ready(ready) => ready.peering.peer_count(),
@@ -1960,7 +2094,8 @@ mod tests {
         }
         .encode();
         let mut out = TickOutput::empty();
-        engine.on_inbound_resource_completed(&mut ready, &mut core, &link_id, &envelope, &mut out);
+        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        absorb(&mut engine, &mut ready, &mut core, &mut out);
         engine.state = State::Ready(ready);
 
         assert_eq!(
@@ -2015,9 +2150,8 @@ mod tests {
                 messages: vec![synced_message(0x10 + index as u8)],
             }
             .encode();
-            engine.on_inbound_resource_completed(
-                &mut ready, &mut core, &link_id, &envelope, &mut out,
-            );
+            engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+            absorb(&mut engine, &mut ready, &mut core, &mut out);
         }
         let stored = ready.node.store().count().unwrap_or(0);
         engine.state = State::Ready(ready);
@@ -2079,5 +2213,214 @@ mod tests {
                 if expected == 0 { "not" } else { "" }
             );
         }
+    }
+}
+
+/// mvr: a peer's inbound sync must not be stored inside one hook.
+///
+/// **The named failure mode:** `lnpnd` stored every message of an inbound
+/// peer sync in the same [`CoreProcessor`](leviculum_std::driver::CoreProcessor)
+/// hook that classified it. Each message is one durable store append —
+/// write, `fsync`, rename, `fsync` the directory — so the hold scaled with
+/// the batch, and the hook holds the core mutex: nothing on the node moved
+/// while it ran. miauhaus, 2026-09-21, in the public mesh:
+///
+/// ```text
+/// 10:25:12 lnpnd: sync in peer 535d9c5db65bfcd4 transferred 105 (30240 B): ok
+/// 10:25:12 CORE_PROCESSOR_OVER_BUDGET hook="on_tick" elapsed_us=239016 budget_us=5000 events=0
+/// ```
+///
+/// A quarter of a second of silence, doing `events=0` worth of event work.
+///
+/// The store is modelled rather than used: a real [`FilePropagationStore`]
+/// would make the test a measurement of this host's disk, and a memory
+/// store would make it a measurement of nothing. Charging each append a
+/// fixed latency is what a durable write is, from the hook's side.
+///
+/// [`FilePropagationStore`]: leviculum_std::FilePropagationStore
+#[cfg(test)]
+mod inbound_sync_slices {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_core::LinkId;
+    use leviculum_lxmf::constants::{LXMF_OVERHEAD, STAMP_SIZE};
+    use leviculum_lxmf::propagation_store::StoredMessage;
+    use leviculum_lxmf::storage::StorageError;
+    use leviculum_lxmf::{
+        MemoryPeerStore, MemoryPropagationStore, PeerSyncEnvelope, PropagationNodeConfig,
+        PropagationStore, TransientId,
+    };
+    use leviculum_std::driver::{CoreProcessor as _, StdClock, StdStorage, PROCESSOR_TICK_BUDGET};
+
+    use super::{Engine, EngineConfig, EngineEvent, State, PERSIST_PER_HOOK};
+
+    /// The batch from the field report.
+    const BATCH: usize = 105;
+
+    /// What one durable append costs, modelled. The coder host's ext4
+    /// measured 1.1-1.5 ms per 288-byte body and a worst case of 6.4 ms
+    /// (`append_cost`, `leviculum-std/src/file_propagation_store.rs`);
+    /// this is well under all of them, so the test is a floor on
+    /// the failure and not an exaggeration of it. At this latency the old
+    /// behaviour holds the core for 52 ms — ten times the budget — and one
+    /// slice costs 0.5 ms.
+    const APPEND_LATENCY: Duration = Duration::from_micros(500);
+
+    /// A store that counts its appends and charges each one what a durable
+    /// write costs.
+    struct ModelledStore {
+        inner: MemoryPropagationStore,
+        appends: Arc<AtomicUsize>,
+    }
+
+    impl PropagationStore for ModelledStore {
+        fn append(
+            &mut self,
+            transient_id: &TransientId,
+            received_at: u64,
+            stamp_value: u8,
+            body: &[u8],
+        ) -> Result<(), StorageError> {
+            self.appends.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(APPEND_LATENCY);
+            self.inner
+                .append(transient_id, received_at, stamp_value, body)
+        }
+
+        fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+            self.inner.for_each(visit)
+        }
+
+        fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.read_body(transient_id)
+        }
+
+        fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.inner.purge(transient_id)
+        }
+
+        fn free_space(&self) -> u64 {
+            self.inner.free_space()
+        }
+
+        fn capacity(&self) -> u64 {
+            self.inner.capacity()
+        }
+
+        fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+            self.inner.contains(transient_id)
+        }
+    }
+
+    fn stamped(seed: u16) -> Vec<u8> {
+        let mut message = vec![0x11u8; LXMF_OVERHEAD + 40];
+        message[16..18].copy_from_slice(&seed.to_be_bytes());
+        message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+        message
+    }
+
+    #[test]
+    fn a_peers_inbound_sync_is_stored_a_slice_at_a_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path()).expect("storage under a fresh temp dir"),
+        );
+        let appends = Arc::new(AtomicUsize::new(0));
+        let (mut engine, events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: PropagationNodeConfig::default(),
+            store: ModelledStore {
+                inner: MemoryPropagationStore::new(10_000_000),
+                appends: Arc::clone(&appends),
+            },
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            peering: leviculum_lxmf::PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 10_000_000,
+            delivery_limit_kb: 1000,
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let link_id = LinkId::new([0x42; 16]);
+        let peer = [0x24u8; 16];
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, peer);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: (0..BATCH as u16).map(stamped).collect(),
+        }
+        .encode();
+        // The event arm's call, with the batch already transferred: what
+        // follows is only the storing of it.
+        engine.on_inbound_resource_completed(&mut ready, &link_id, &envelope);
+        engine.state = State::Ready(ready);
+
+        let mut worst_hold = Duration::ZERO;
+        let mut worst_slice = 0usize;
+        let mut stored = 0usize;
+        // Twice the batch plus slack: every hook stores at most a slice,
+        // and a hook that stores nothing is one the classification took.
+        for _ in 0..(BATCH * 2 + 16) {
+            let before = appends.load(Ordering::Relaxed);
+            let now_ms = core.now_ms();
+            let started = Instant::now();
+            let _ = engine.on_tick(&mut core, now_ms);
+            worst_hold = worst_hold.max(started.elapsed());
+            worst_slice = worst_slice.max(appends.load(Ordering::Relaxed) - before);
+            stored = match &engine.state {
+                State::Ready(ready) => ready.node.store().count().unwrap_or(0),
+                _ => panic!("engine must stay ready"),
+            };
+            if stored == BATCH {
+                break;
+            }
+        }
+
+        assert_eq!(stored, BATCH, "every message of the batch must be stored");
+        assert!(
+            worst_slice < BATCH,
+            "one hook stored {worst_slice} of the {BATCH}-message batch: the \
+             batch is the hold"
+        );
+        assert!(
+            worst_slice <= PERSIST_PER_HOOK,
+            "one hook stored {worst_slice} messages; the budget pays for \
+             {PERSIST_PER_HOOK}"
+        );
+        assert!(
+            worst_hold < PROCESSOR_TICK_BUDGET,
+            "the worst hook held the core for {worst_hold:?}, past the \
+             {PROCESSOR_TICK_BUDGET:?} budget"
+        );
+
+        // The round is still reported as a round: the slices are an
+        // implementation of the hook's budget, not a change to what the
+        // peer's sync was.
+        let sync_done: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                EngineEvent::SyncDone {
+                    dir, transferred, ..
+                } => Some((dir, transferred)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sync_done,
+            vec![("in", BATCH)],
+            "one inbound round, reporting the whole batch"
+        );
     }
 }

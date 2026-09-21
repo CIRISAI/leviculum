@@ -27,6 +27,14 @@
 //! accept path); the store append and the proof stay under the lock,
 //! because "persist before you prove" is anchored to the store and the
 //! link, both of which live there.
+//!
+//! Staying under the lock is not the same as running all at once under it.
+//! A durable append is 1.1 to 1.5 ms of disk on the host store, so the
+//! engine takes the drained results one message at a time
+//! (`PERSIST_PER_HOOK`, `lnpnd/src/engine.rs`) — a 105-message batch
+//! applied in a single hook held the core for 239 ms
+//! (`docs/src/concepts/core-lock-budget.md`, "A durable store append is
+//! inside the budget too").
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
