@@ -412,9 +412,18 @@ impl MemoryStorage {
             n, raw, est
         );
 
-        // known_identities: BTreeMap<[u8; 16], Identity>, 3x
+        // known_identities: BTreeMap<[u8; 16], Identity>, 3x.
+        //
+        // `Identity` is priced by `size_of`, not by a number written down
+        // here. It used to be 128 and the type is four times that -- an
+        // expanded ed25519 `VerifyingKey` alone is 192 bytes -- so on the
+        // miauhaus soak node, sitting on the 50 000-entry identity cap,
+        // the dump under-reported its single largest table by ~58 MB and
+        // the resident-set gap it was being used to explain was
+        // correspondingly overstated (2026-09-21). Every key is stored
+        // inline, so `size_of` is the whole cost and cannot drift again.
         let n = self.known_identities.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 128)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -1989,6 +1998,33 @@ mod tests {
         assert!(dump.contains("known_identities: 0 entries"));
         assert!(dump.contains("known_ratchets: 0 entries"));
         assert_eq!(total, 0);
+    }
+
+    /// The identity row is priced from the type, not from a number
+    /// somebody typed.
+    ///
+    /// The literal this replaced said 128 where `Identity` is four times
+    /// that, and the error was invisible until the table filled: at the
+    /// 50 000-entry cap the dump was ~58 MB short on its own largest
+    /// row, and that shortfall was being read as memory the allocator
+    /// had lost. A wrong estimate is worse than no estimate, because it
+    /// is believed.
+    #[test]
+    fn identity_rows_are_priced_from_size_of() {
+        use rand_core::OsRng;
+
+        let mut s = MemoryStorage::with_defaults();
+        s.set_identity([0x11; TRUNCATED_HASHBYTES], Identity::generate(&mut OsRng));
+
+        let expected = TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>();
+        let (dump, _) = s.diagnostic_dump();
+        assert!(
+            dump.contains(&alloc::format!(
+                "known_identities: 1 entries, raw {expected} bytes"
+            )),
+            "identity row not priced at size_of::<Identity>() = {}: {dump}",
+            core::mem::size_of::<Identity>(),
+        );
     }
 
     #[test]
