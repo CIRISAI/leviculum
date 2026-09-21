@@ -183,7 +183,7 @@ arguments and you get `rnstatus`'s behaviour.
 
 ### The shape an additive dump takes
 
-`--tables` is the worked example, and three of its decisions generalise
+`--tables` is the worked example, and four of its decisions generalise
 to the next one.
 
 **Additive key, not an envelope.** The tables go into the `-j` object
@@ -224,6 +224,19 @@ for an unknown command and falls through to `conn.close()`
 (Reticulum.py:1213-1260), so the absence surfaces as a fast transport error
 rather than a hang; that is pinned against a real `rnsd` in
 `reverse_rpc_interop_tests`.
+
+**The expensive half is opt-in, and absence covers it too.** Sizes and rows
+are different questions with costs three orders of magnitude apart: a size is
+a `len()`, a row makes the daemon build a dictionary with a string key per
+field, and a field node holds 43 000 of them in one table. The dump therefore
+always answers the cheap question and answers the expensive one only when a
+request names the table (`--table-rows`, Codeberg #028) — so the common poll,
+"how full is it", stops moving the daemon's resident set by tens of megabytes.
+This is where the rule above earns its second use: a table whose rows were not
+asked for is absent, because the one thing it must not be is present and
+empty, which already means something else. The response says in `rows_for`
+which tables it carries rows for, so the reader never has to infer it from
+which keys turned up.
 
 One honesty note, because it is easy to get wrong in the other
 direction: `-j/--json`, `-m/--monitor` and the announce/path-request/

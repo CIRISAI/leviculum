@@ -55,13 +55,23 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 :   Output in JSON format.
 
 **--tables**
-:   Add the transport's internal tables, and the entry count of every
-    collection its storage holds, to the JSON output as a `transport_tables`
-    object. Requires **-j**; not available with **-R** or
+:   Add the size of every table the transport maintains, and the entry count
+    of every collection its storage holds, to the JSON output as a
+    `transport_tables` object. Sizes only; the rows are asked for with
+    **--table-rows**. Requires **-j**; not available with **-R** or
     **-d**/**-D**. Leviculum extension — `rnstatus` has no counterpart, and a
     daemon that does not implement it (a Python `rnsd`, or an older `lnsd`)
     causes the key to be omitted, with a note on stderr and exit status 0.
     See **TRANSPORT TABLES** below.
+
+**--table-rows** *TABLE*[,*TABLE*...]
+:   Also include the ROWS of the named tables: `path_table`, `reverse_table`,
+    `link_table`, `announce_table`, `announce_cache`, `tunnels`,
+    `local_links`, or `all` for every one. Repeatable, and accepts a
+    comma-separated list. Requires **--tables**. A table not named here is
+    absent from the response rather than present and empty; its size is in
+    `table_sizes` either way. Rows are the expensive half of this query — see
+    **WHAT THE QUERY COSTS** below.
 
 **-N**, **--identities**
 :   List every identity the daemon has learned from announces, one row per
@@ -136,9 +146,13 @@ Emit machine-readable JSON:
 
     lnstatus -j
 
-Emit JSON with the transport's tables included:
+Emit JSON with the size of every transport table and storage collection:
 
     lnstatus -j --tables
+
+Emit JSON with the path table's rows as well:
+
+    lnstatus -j --tables --table-rows path_table
 
 List the identities heard from announces, with derived destinations ready to
 paste into **lnprobe**:
@@ -172,8 +186,18 @@ With **--tables**, the **-j** object gains one additional key,
 `transport_tables`. Nothing else about the output changes, so anything that
 parses `lnstatus -j` today keeps working.
 
-The object holds one key per table, each a list of rows, plus
-`collections`:
+The object always holds `table_sizes`, `rows_for` and `collections`, plus one
+list of rows per table named in **--table-rows**:
+
+`table_sizes`
+:   How many rows each of the seven tables below has, as one `{name, entries}`
+    row per table, whether or not this response carries that table's rows.
+    Every entry is a `len()`.
+
+`rows_for`
+:   The tables whose rows this response carries — what **--table-rows** asked
+    for. Empty by default. A table not listed here has no key in the object;
+    a table listed here with an empty list is empty.
 
 `collections`
 :   How large every collection the daemon's storage holds currently is — not
@@ -250,6 +274,20 @@ set or they do not — the difference is what separates a design that costs too
 much from a leak. Before this existed, seven tables of the twenty collections
 were visible, and the largest structure in the daemon, the dedup cache, was
 not among them.
+
+### What the query costs
+
+A size is a `len()`. A row is not: the daemon builds one dictionary per row,
+with a string key per field, before it can serialise anything, and the whole
+structure is live at once. Measured on a node with 11 000 paths and 43 000
+reverse entries, asking for those two tables' rows peaks at **83 MB** of
+daemon memory for one call; asking for sizes alone peaks at **35 KB**, and
+that figure does not move with the size of the tables.
+
+This is why the rows are named rather than included. An operator polling a
+node for how full its tables are — the common case, and the one that gets
+polled in a loop — was moving the daemon's resident set by tens of megabytes
+per call. If you want rows, ask for the table you want and not for `all`.
 
 ### Absent is not empty
 

@@ -80,11 +80,16 @@ struct Args {
     #[arg(short = 'j', long = "json", default_value_t = false)]
     json: bool,
 
-    /// add the transport's internal tables and collection sizes to the JSON output (requires -j)
+    /// add the transport's table sizes and collection census to the JSON output (requires -j)
     ///
     /// Additive Leviculum extension (Codeberg #174): `rnstatus` has no
     /// counterpart, so the flag is gated on `-j` rather than changing what any
     /// reference flag does. See `lnstatus_render::merge_transport_tables`.
+    ///
+    /// Sizes only. The rows are asked for by name with `--table-rows`,
+    /// because they are what the query costs (Codeberg #028): the daemon
+    /// builds one dict per row while it answers, so a node with 43 000
+    /// reverse entries pays tens of megabytes for a dump nobody reads.
     #[arg(
         long = "tables",
         default_value_t = false,
@@ -92,6 +97,22 @@ struct Args {
         conflicts_with_all = ["remote", "discovered", "discovered_details"]
     )]
     tables: bool,
+
+    /// include the rows of these tables in --tables (repeatable; `all` for every table)
+    ///
+    /// Names: path_table, reverse_table, link_table, announce_table,
+    /// announce_cache, tunnels, local_links — plus `all`. A table not named
+    /// here is ABSENT from the output rather than present and empty, so a
+    /// reader never mistakes "not asked for" for "empty"; its size is in
+    /// `table_sizes` either way.
+    #[arg(
+        long = "table-rows",
+        value_name = "TABLE",
+        value_delimiter = ',',
+        requires = "tables",
+        value_parser = table_rows_value_parser(),
+    )]
+    table_rows: Vec<String>,
 
     /// list identities learned from announces, with their derived destinations
     ///
@@ -193,6 +214,33 @@ async fn fetch_status(
     Ok((stats, link_count))
 }
 
+/// `all` as a `--table-rows` value: every table, i.e. the full dump.
+///
+/// Spelled as a value rather than as a second flag so the one place that
+/// decides how much the query costs is the one flag the operator typed.
+const TABLE_ROWS_ALL: &str = "all";
+
+/// The values `--table-rows` accepts: the daemon's own table vocabulary plus
+/// `all`.
+///
+/// Taken from [`leviculum_std::TRANSPORT_TABLE_NAMES`] rather than spelled
+/// again here, so the client cannot offer a name the daemon would refuse —
+/// which would reach the user as "the daemon did not answer", the message
+/// that means something entirely different.
+fn table_rows_value_parser() -> clap::builder::PossibleValuesParser {
+    let mut values: Vec<&'static str> = leviculum_std::TRANSPORT_TABLE_NAMES.to_vec();
+    values.push(TABLE_ROWS_ALL);
+    clap::builder::PossibleValuesParser::new(values)
+}
+
+/// Expand what `--table-rows` was given into the names sent to the daemon.
+fn requested_table_rows(values: &[String]) -> Vec<&str> {
+    if values.iter().any(|v| v == TABLE_ROWS_ALL) {
+        return leviculum_std::TRANSPORT_TABLE_NAMES.to_vec();
+    }
+    values.iter().map(|v| v.as_str()).collect()
+}
+
 /// Fetch the `transport_tables` snapshot for `--tables` (Codeberg #174).
 ///
 /// Returns `None` when the daemon does not answer the command — a Python
@@ -206,8 +254,9 @@ async fn fetch_status(
 async fn fetch_transport_tables(
     instance_name: &str,
     authkey: &[u8; 32],
+    rows: &[&str],
 ) -> Option<serde_json::Value> {
-    match leviculum_std::rpc_query(instance_name, authkey, "transport_tables").await {
+    match leviculum_std::rpc_query_transport_tables(instance_name, authkey, rows).await {
         Ok(v) => Some(v),
         Err(e) => {
             eprintln!(
@@ -286,7 +335,8 @@ async fn main() {
         Ok((mut stats, link_count)) => {
             if args.json {
                 if args.tables {
-                    let tables = fetch_transport_tables(&instance_name, &authkey).await;
+                    let rows = requested_table_rows(&args.table_rows);
+                    let tables = fetch_transport_tables(&instance_name, &authkey, &rows).await;
                     lnstatus_render::merge_transport_tables(&mut stats, tables);
                 }
                 println!("{}", lnstatus_render::render_json(&stats));
@@ -542,7 +592,8 @@ async fn run_monitor(instance_name: &str, authkey: &[u8; 32], args: &Args, opts:
             Ok((mut stats, link_count)) => {
                 if args.json {
                     if args.tables {
-                        let tables = fetch_transport_tables(instance_name, authkey).await;
+                        let rows = requested_table_rows(&args.table_rows);
+                        let tables = fetch_transport_tables(instance_name, authkey, &rows).await;
                         lnstatus_render::merge_transport_tables(&mut stats, tables);
                     }
                     lnstatus_render::render_json(&stats) + "\n"

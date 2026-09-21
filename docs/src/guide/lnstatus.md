@@ -131,16 +131,37 @@ lnstatus -j
 
 ### The transport's tables
 
-`--tables` adds one key, `transport_tables`, to that JSON object. It carries
-the tables the transport maintains and the size of everything the storage
-holds — `path_table`, `reverse_table`,
-`link_table` (relayed links), `announce_table`, `announce_cache`, `tunnels`,
-and `local_links` (links this node terminates) — so a test can assert on the
-route a packet will take instead of inferring it from log lines:
+`--tables` adds one key, `transport_tables`, to that JSON object. It answers
+how big every table the transport maintains is — `path_table`,
+`reverse_table`, `link_table` (relayed links), `announce_table`,
+`announce_cache`, `tunnels`, and `local_links` (links this node terminates) —
+as a `table_sizes` list of `{name, entries}`:
 
 ```sh
 lnstatus -j --tables
 ```
+
+The rows themselves are a separate ask, `--table-rows`, which names the
+tables you want them from (`all` for every one):
+
+```sh
+lnstatus -j --tables --table-rows path_table
+lnstatus -j --tables --table-rows all
+```
+
+The split is about what the query costs the daemon. Answering a size is a
+`len()`; answering with rows makes the daemon build one dictionary per row
+before it can send anything, which on a node with 11 000 paths and 43 000
+reverse entries was measured at 83 MB of daemon memory for a single call. A
+status poll that only wanted to know how full the tables were was moving the
+daemon's resident set by tens of megabytes, repeatedly. Asking for sizes now
+costs about 35 KB regardless of how large the tables are; the rows cost what
+they cost, to whoever actually wants them.
+
+A table you did not ask rows for is **absent** from the response, not present
+as an empty list, because an empty list is how this key says "the table is
+empty". `rows_for` names the tables whose rows the response does carry, so a
+reader never has to infer it. `--table-rows` requires `--tables`.
 
 Beside the tables it carries `collections`: one row per collection the
 daemon's storage holds, with `name`, `entries` and `capacity` (`null` where
@@ -152,8 +173,8 @@ rotation frees one generation whole and a sum does not move when it happens.
 That is how a resident set that steps up and falls back gets attributed to a
 structure instead of guessed at.
 
-`rnstatus` has no counterpart, so the flag requires `-j` and never changes what
-a reference flag prints. `lnstatus -j` on its own is exactly what it was.
+`rnstatus` has no counterpart, so both flags require `-j` and never change
+what a reference flag prints. `lnstatus -j` on its own is exactly what it was.
 
 Two timestamps in there answer different questions. `timestamp` is *our*
 clock — when this node learned the row. `announce_emitted` is the *announcing*
@@ -164,8 +185,9 @@ A daemon that does not implement the query — a Python `rnsd`, or an `lnsd`
 older than this flag — makes `lnstatus` omit the key, print why on stderr, and
 exit 0; the status you asked for is still printed. So an **absent**
 `transport_tables` key means "this daemon cannot answer", while a **present**
-key with empty lists means "the tables really are empty". Check for the key
-before reading it, and do not treat its absence as an empty table.
+key means it can — and inside it, a table named in `rows_for` whose list is
+empty really is empty. Check for the key before reading it, and do not treat
+its absence as an empty table.
 
 Full field lists are in [lnstatus(1)](../man/lnstatus.1.md).
 
@@ -173,7 +195,7 @@ Full field lists are in [lnstatus(1)](../man/lnstatus.1.md).
 
 `-R <hash>` queries a *remote* transport instance's status over a link,
 the way `rnstatus -R` does, and feeds the result to the same renderer,
-so remote and local output match (`run_remote` (`lnstatus.rs:399`)).
+so remote and local output match (`run_remote` (`lnstatus.rs:453`)).
 `<hash>` is the remote instance's transport identity hash (32 hex
 characters). `-i <file>` names the management identity and is
 mandatory; it is proven to the remote over the link, so the remote
@@ -190,7 +212,7 @@ lnstatus -R 76fe5751a56067d1e84eef3e88eab85b -i ~/.reticulum/identities/mgmt -w 
 
 `-d` lists the interfaces this daemon has discovered on the network, in
 the `rnstatus` discovered layout; `-D` renders the detailed layout with
-ready-to-paste config entries (`run_discovered` (`lnstatus.rs:308`)).
+ready-to-paste config entries (`run_discovered` (`lnstatus.rs:362`)).
 Both read the local daemon's discovered-interface registry over the
 shared-instance RPC and honour `FILTER` and `-j`:
 

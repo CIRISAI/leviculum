@@ -39,6 +39,68 @@ fn detect_codec(data: &[u8]) -> Codec {
     }
 }
 
+/// The tables `transport_tables` can be asked for the ROWS of, and the only
+/// spellings the `rows` parameter accepts.
+///
+/// This is the dump's own vocabulary, not the storage's: five of these names
+/// are also collection field names, `tunnels` and `local_links` are not
+/// collections at all (they live on the transport and on the node), and the
+/// storage holds thirteen further collections that have no rows in the dump.
+/// `build_transport_tables` reports a size for every name here, always, and
+/// rows only for the ones a request names.
+///
+/// Order is the order the `table_sizes` rows appear in — the order the dump
+/// has listed its tables in since Codeberg #174, which groups the transport's
+/// own tables before the node's. The response dict itself is a `BTreeMap` and
+/// therefore sorted, so this order is visible in that list and nowhere else.
+pub const TRANSPORT_TABLE_NAMES: [&str; 7] = [
+    "path_table",
+    "reverse_table",
+    "link_table",
+    "announce_table",
+    "announce_cache",
+    "tunnels",
+    "local_links",
+];
+
+/// Parse the optional `rows` parameter of a `transport_tables` request.
+///
+/// Absent means "sizes only" — the cheap answer, and the one an operator
+/// polling a node gets by default (Codeberg #028). A name that is not in
+/// [`TRANSPORT_TABLE_NAMES`] is an error rather than a silently skipped
+/// entry: the caller would otherwise read a response with the key missing
+/// and could not tell a typo from a table the daemon does not have.
+///
+/// The returned names are the `'static` entries of the vocabulary, not the
+/// caller's strings, so everything downstream compares pointers-worth of
+/// known-good data and no request string outlives the parse.
+fn requested_table_rows(
+    dict: &BTreeMap<HashableValue, Value>,
+) -> Result<Vec<&'static str>, RpcError> {
+    let Some(Value::List(items)) = dict.get(&HashableValue::String("rows".into())) else {
+        // A `rows` key of the wrong type is treated as absent for the same
+        // reason `max_hops` treats a non-int as absent: the request still
+        // names a verb we can answer, and the cheap answer is a safe one.
+        return Ok(Vec::new());
+    };
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let Value::String(name) = item else {
+            return Err(RpcError::InvalidFormat(
+                "transport_tables rows must be strings".into(),
+            ));
+        };
+        let known = TRANSPORT_TABLE_NAMES
+            .iter()
+            .find(|known| *known == name)
+            .ok_or_else(|| RpcError::InvalidFormat(format!("unknown transport table: {}", name)))?;
+        if !rows.contains(known) {
+            rows.push(*known);
+        }
+    }
+    Ok(rows)
+}
+
 /// Parsed RPC request.
 ///
 /// Fields are parsed from pickle dicts and logged via `Debug`.
@@ -70,7 +132,16 @@ pub(crate) enum RpcRequest {
     /// reply (Reticulum.py:1213-1260), so a client asking an `rnsd` sees a
     /// transport error, never a hang. Response shape: see
     /// `build_transport_tables`.
-    GetTransportTables,
+    ///
+    /// `rows` names the tables whose ROWS the caller wants, from
+    /// [`TRANSPORT_TABLE_NAMES`]; it is empty when the request carries no
+    /// `rows` key, and then the answer is sizes only. The distinction is the
+    /// memory fix of Codeberg #028: a row list costs one dict per row and a
+    /// field node's `reverse_table` has 43 000 of them, while every size in
+    /// the answer is a `len()`.
+    GetTransportTables {
+        rows: Vec<&'static str>,
+    },
     /// Identity listing (`lnstatus --identities`) — a Leviculum-only extension
     /// with no Python `rnsd` precedent: every identity the daemon has learned
     /// from announces, with the announced destination and the live path toward
@@ -197,7 +268,9 @@ fn request_from_value(value: Value) -> Result<RpcRequest, RpcError> {
                 let max_hops = dict_get_int(&dict, "max_hops");
                 Ok(RpcRequest::GetPathTable { max_hops })
             }
-            "transport_tables" => Ok(RpcRequest::GetTransportTables),
+            "transport_tables" => Ok(RpcRequest::GetTransportTables {
+                rows: requested_table_rows(&dict)?,
+            }),
             "identities" => Ok(RpcRequest::GetIdentityTable),
             "discovered_interfaces" => Ok(RpcRequest::GetDiscoveredInterfaces),
             "rate_table" => Ok(RpcRequest::GetRateTable),

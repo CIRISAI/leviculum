@@ -90,7 +90,7 @@ pub(super) fn handle_request(
         // (`Reticulum.get_rpc_client`), so the closed connection cannot poison
         // the `interface_stats` read two lines later. Serving a fabricated
         // shape would be a worse answer than not knowing the question.
-        RpcRequest::GetTransportTables => build_transport_tables(core, start_time),
+        RpcRequest::GetTransportTables { rows } => build_transport_tables(core, start_time, rows),
         RpcRequest::GetIdentityTable => build_identity_table(core, start_time),
         RpcRequest::GetDiscoveredInterfaces => build_discovered_interfaces(discovery_storage),
         RpcRequest::GetPathTable { max_hops } => build_path_table(core, start_time, *max_hops),
@@ -1062,7 +1062,39 @@ fn build_link_table(core: &StdNodeCore) -> Value {
 // `tx_jitter_max` is (Codeberg #190): every Python consumer of an RPC
 // response reads it by name and none enumerates it, so an unknown key is
 // simply never read.
-fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) -> Value {
+//
+// # What the answer costs, and why the rows are opt-in (Codeberg #028)
+//
+// Until 2026-09-21 this call always built every row of every table. A row is
+// a `BTreeMap` with one `String` key per field and a `Vec` per byte value, so
+// a row costs several hundred bytes of tree to describe the ~50 bytes it
+// carries, and the whole tree is live at once before a byte is serialised. On
+// the soak node — 11 511 paths, 43 000 reverse entries — that was measured at
+// tens of megabytes per call, which is why polling `lnstatus -j --tables` for
+// two minutes moved the daemon's resident set by 60 MB. The daemon was being
+// charged for the question, not for the traffic.
+//
+// So the rows are now asked for by name and the sizes always come free:
+//
+//   * `table_sizes` — one `{name, entries}` row per name in
+//     `TRANSPORT_TABLE_NAMES`, always present. Every entry is a `len()`.
+//   * `collections` — the storage-wide census (Codeberg #421), also `len()`
+//     throughout, over the thirteen collections that have no rows here too.
+//   * `rows_for` — the table names whose rows ARE in this response, i.e. what
+//     the request asked for. A reader never has to infer it from which keys
+//     turned up.
+//   * one key per name in `rows_for`, with the rows, unchanged in shape.
+//
+// A table not named in `rows_for` is ABSENT from the response rather than
+// present as an empty list. That is forced by the rule #174 set up and
+// `merge_transport_tables` relies on: an empty list means the table is empty.
+// Answering an unasked table with `[]` would report a 43 000-row table as
+// empty, which is worse than any cost this saves.
+fn build_transport_tables(
+    core: &StdNodeCore,
+    start_time: std::time::Instant,
+    rows: &[&str],
+) -> Value {
     let epoch_base = epoch_base_secs(start_time);
     let now_mono_ms = core.now_ms();
     let to_epoch = |mono_ms: u64| pickle_float(mono_ms_to_epoch(epoch_base, now_mono_ms, mono_ms));
@@ -1073,190 +1105,262 @@ fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) ->
         None => pickle_none(),
     };
 
-    let path_table = core
-        .path_table_entries()
-        .iter()
-        .map(|e| {
-            pickle_dict(vec![
-                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
-                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
-                (
-                    pickle_str_key("via"),
-                    // Direct: Python uses the destination hash as received_from
-                    // (Transport.py:1600), never None.
-                    pickle_bytes(e.next_hop.as_ref().unwrap_or(&e.hash)),
-                ),
-                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
-                (pickle_str_key("expires"), to_epoch(e.expires_ms)),
-                (pickle_str_key("interface"), iface(e.interface_index)),
-                (
-                    pickle_str_key("announce_emitted"),
-                    pickle_int(e.announce_emitted_secs as i64),
-                ),
-            ])
-        })
-        .collect();
-
-    let reverse_table = core
-        .reverse_table_entries()
-        .iter()
-        .map(|e| {
-            pickle_dict(vec![
-                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
-                (
-                    pickle_str_key("receiving_interface"),
-                    iface(e.receiving_interface_index),
-                ),
-                (
-                    pickle_str_key("outbound_interface"),
-                    iface(e.outbound_interface_index),
-                ),
-                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
-            ])
-        })
-        .collect();
-
-    let link_table = core
-        .transport_link_table_entries()
-        .iter()
-        .map(|e| {
-            pickle_dict(vec![
-                (pickle_str_key("link_id"), pickle_bytes(&e.link_id)),
-                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
-                (
-                    pickle_str_key("next_hop_interface"),
-                    iface(e.next_hop_interface_index),
-                ),
-                (
-                    pickle_str_key("remaining_hops"),
-                    pickle_int(e.remaining_hops as i64),
-                ),
-                (
-                    pickle_str_key("receiving_interface"),
-                    iface(e.received_interface_index),
-                ),
-                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
-                (
-                    pickle_str_key("destination_hash"),
-                    pickle_bytes(&e.destination_hash),
-                ),
-                (pickle_str_key("validated"), pickle_bool(e.validated)),
-                (
-                    pickle_str_key("proof_timeout"),
-                    to_epoch(e.proof_timeout_ms),
-                ),
-            ])
-        })
-        .collect();
-
-    let announce_table = core
-        .announce_table_entries()
-        .iter()
-        .map(|e| {
-            pickle_dict(vec![
-                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
-                (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
-                (
-                    pickle_str_key("retransmit_timeout"),
-                    e.retransmit_at_ms.map(to_epoch).unwrap_or_else(pickle_none),
-                ),
-                (pickle_str_key("retries"), pickle_int(e.retries as i64)),
-                (
-                    pickle_str_key("receiving_interface"),
-                    iface(e.receiving_interface_index),
-                ),
-                (pickle_str_key("hops"), pickle_int(e.hops as i64)),
-                (
-                    pickle_str_key("packet_length"),
-                    pickle_int(e.packet_length as i64),
-                ),
-                (
-                    pickle_str_key("local_rebroadcasts"),
-                    pickle_int(e.local_rebroadcasts as i64),
-                ),
-                (
-                    pickle_str_key("block_rebroadcasts"),
-                    pickle_bool(e.block_rebroadcasts),
-                ),
-                (
-                    pickle_str_key("attached_interface"),
-                    opt_iface(e.target_interface_index),
-                ),
-            ])
-        })
-        .collect();
-
-    let announce_cache = core
-        .announce_cache_entries()
-        .iter()
-        .map(|e| {
-            pickle_dict(vec![
-                (pickle_str_key("hash"), pickle_bytes(&e.hash)),
-                (
-                    pickle_str_key("packet_length"),
-                    pickle_int(e.packet_length as i64),
-                ),
-                (pickle_str_key("retained"), pickle_bool(e.retained)),
-                (
-                    pickle_str_key("last_used"),
-                    e.last_used_ms.map(to_epoch).unwrap_or_else(pickle_none),
-                ),
-            ])
-        })
-        .collect();
-
-    let tunnels = core
-        .tunnel_table_entries()
-        .iter()
-        .map(|t| {
-            let paths = t
-                .paths
-                .iter()
-                .map(|p| {
-                    pickle_dict(vec![
-                        (pickle_str_key("hash"), pickle_bytes(&p.hash)),
-                        (pickle_str_key("hops"), pickle_int(p.hops as i64)),
-                        (
-                            pickle_str_key("via"),
-                            pickle_bytes(p.next_hop.as_ref().unwrap_or(&p.hash)),
-                        ),
-                        (pickle_str_key("expires"), to_epoch(p.expires_ms)),
-                        (pickle_str_key("timestamp"), to_epoch(p.timestamp_ms)),
-                        (
-                            pickle_str_key("announce_emitted"),
-                            pickle_int(p.announce_emitted_secs as i64),
-                        ),
-                    ])
-                })
-                .collect();
-            pickle_dict(vec![
-                (pickle_str_key("tunnel_id"), pickle_bytes(&t.tunnel_id)),
-                (pickle_str_key("interface"), opt_iface(t.interface_index)),
-                (pickle_str_key("expires"), to_epoch(t.expires_ms)),
-                (pickle_str_key("paths"), pickle_list(paths)),
-            ])
-        })
-        .collect();
-
-    pickle_dict(vec![
+    // Always: what every table costs, and what this response carries. Both
+    // are len()-only, so an operator asking "how full is it" pays nothing.
+    let mut entries = vec![
         (
             pickle_str_key("collections"),
             pickle_list(build_collection_counts(core)),
         ),
-        (pickle_str_key("path_table"), pickle_list(path_table)),
-        (pickle_str_key("reverse_table"), pickle_list(reverse_table)),
-        (pickle_str_key("link_table"), pickle_list(link_table)),
         (
-            pickle_str_key("announce_table"),
-            pickle_list(announce_table),
+            pickle_str_key("table_sizes"),
+            pickle_list(build_table_sizes(core)),
         ),
         (
-            pickle_str_key("announce_cache"),
-            pickle_list(announce_cache),
+            pickle_str_key("rows_for"),
+            pickle_list(rows.iter().map(|n| pickle_str(n)).collect()),
         ),
-        (pickle_str_key("tunnels"), pickle_list(tunnels)),
-        (pickle_str_key("local_links"), build_link_table(core)),
-    ])
+    ];
+
+    if rows.contains(&"path_table") {
+        let table = core
+            .path_table_entries()
+            .iter()
+            .map(|e| {
+                pickle_dict(vec![
+                    (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                    (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                    (
+                        pickle_str_key("via"),
+                        // Direct: Python uses the destination hash as received_from
+                        // (Transport.py:1600), never None.
+                        pickle_bytes(e.next_hop.as_ref().unwrap_or(&e.hash)),
+                    ),
+                    (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                    (pickle_str_key("expires"), to_epoch(e.expires_ms)),
+                    (pickle_str_key("interface"), iface(e.interface_index)),
+                    (
+                        pickle_str_key("announce_emitted"),
+                        pickle_int(e.announce_emitted_secs as i64),
+                    ),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("path_table"), pickle_list(table)));
+    }
+
+    if rows.contains(&"reverse_table") {
+        let table = core
+            .reverse_table_entries()
+            .iter()
+            .map(|e| {
+                pickle_dict(vec![
+                    (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                    (
+                        pickle_str_key("receiving_interface"),
+                        iface(e.receiving_interface_index),
+                    ),
+                    (
+                        pickle_str_key("outbound_interface"),
+                        iface(e.outbound_interface_index),
+                    ),
+                    (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("reverse_table"), pickle_list(table)));
+    }
+
+    if rows.contains(&"link_table") {
+        let table = core
+            .transport_link_table_entries()
+            .iter()
+            .map(|e| {
+                pickle_dict(vec![
+                    (pickle_str_key("link_id"), pickle_bytes(&e.link_id)),
+                    (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                    (
+                        pickle_str_key("next_hop_interface"),
+                        iface(e.next_hop_interface_index),
+                    ),
+                    (
+                        pickle_str_key("remaining_hops"),
+                        pickle_int(e.remaining_hops as i64),
+                    ),
+                    (
+                        pickle_str_key("receiving_interface"),
+                        iface(e.received_interface_index),
+                    ),
+                    (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                    (
+                        pickle_str_key("destination_hash"),
+                        pickle_bytes(&e.destination_hash),
+                    ),
+                    (pickle_str_key("validated"), pickle_bool(e.validated)),
+                    (
+                        pickle_str_key("proof_timeout"),
+                        to_epoch(e.proof_timeout_ms),
+                    ),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("link_table"), pickle_list(table)));
+    }
+
+    if rows.contains(&"announce_table") {
+        let table = core
+            .announce_table_entries()
+            .iter()
+            .map(|e| {
+                pickle_dict(vec![
+                    (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                    (pickle_str_key("timestamp"), to_epoch(e.timestamp_ms)),
+                    (
+                        pickle_str_key("retransmit_timeout"),
+                        e.retransmit_at_ms.map(to_epoch).unwrap_or_else(pickle_none),
+                    ),
+                    (pickle_str_key("retries"), pickle_int(e.retries as i64)),
+                    (
+                        pickle_str_key("receiving_interface"),
+                        iface(e.receiving_interface_index),
+                    ),
+                    (pickle_str_key("hops"), pickle_int(e.hops as i64)),
+                    (
+                        pickle_str_key("packet_length"),
+                        pickle_int(e.packet_length as i64),
+                    ),
+                    (
+                        pickle_str_key("local_rebroadcasts"),
+                        pickle_int(e.local_rebroadcasts as i64),
+                    ),
+                    (
+                        pickle_str_key("block_rebroadcasts"),
+                        pickle_bool(e.block_rebroadcasts),
+                    ),
+                    (
+                        pickle_str_key("attached_interface"),
+                        opt_iface(e.target_interface_index),
+                    ),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("announce_table"), pickle_list(table)));
+    }
+
+    if rows.contains(&"announce_cache") {
+        let table = core
+            .announce_cache_entries()
+            .iter()
+            .map(|e| {
+                pickle_dict(vec![
+                    (pickle_str_key("hash"), pickle_bytes(&e.hash)),
+                    (
+                        pickle_str_key("packet_length"),
+                        pickle_int(e.packet_length as i64),
+                    ),
+                    (pickle_str_key("retained"), pickle_bool(e.retained)),
+                    (
+                        pickle_str_key("last_used"),
+                        e.last_used_ms.map(to_epoch).unwrap_or_else(pickle_none),
+                    ),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("announce_cache"), pickle_list(table)));
+    }
+
+    if rows.contains(&"tunnels") {
+        let table = core
+            .tunnel_table_entries()
+            .iter()
+            .map(|t| {
+                let paths = t
+                    .paths
+                    .iter()
+                    .map(|p| {
+                        pickle_dict(vec![
+                            (pickle_str_key("hash"), pickle_bytes(&p.hash)),
+                            (pickle_str_key("hops"), pickle_int(p.hops as i64)),
+                            (
+                                pickle_str_key("via"),
+                                pickle_bytes(p.next_hop.as_ref().unwrap_or(&p.hash)),
+                            ),
+                            (pickle_str_key("expires"), to_epoch(p.expires_ms)),
+                            (pickle_str_key("timestamp"), to_epoch(p.timestamp_ms)),
+                            (
+                                pickle_str_key("announce_emitted"),
+                                pickle_int(p.announce_emitted_secs as i64),
+                            ),
+                        ])
+                    })
+                    .collect();
+                pickle_dict(vec![
+                    (pickle_str_key("tunnel_id"), pickle_bytes(&t.tunnel_id)),
+                    (pickle_str_key("interface"), opt_iface(t.interface_index)),
+                    (pickle_str_key("expires"), to_epoch(t.expires_ms)),
+                    (pickle_str_key("paths"), pickle_list(paths)),
+                ])
+            })
+            .collect();
+        entries.push((pickle_str_key("tunnels"), pickle_list(table)));
+    }
+
+    if rows.contains(&"local_links") {
+        entries.push((pickle_str_key("local_links"), build_link_table(core)));
+    }
+
+    pickle_dict(entries)
+}
+
+// How many rows each of the seven dumpable tables has, whether or not this
+// response carries them (Codeberg #028).
+//
+// This is the answer to the question an operator polling a node actually
+// asks. It is not the same question `collections` answers, and the two
+// deliberately overlap rather than one replacing the other:
+//
+//   * `collections` is the STORAGE census — one row per collection field,
+//     with the ceiling that field is held to. Five of the seven names here
+//     are also collection fields; the other thirteen collections it reports
+//     have no rows in this dump at all.
+//   * `tunnels` lives on the transport and `local_links` on the node, so the
+//     storage census cannot see either. Without them here, two of the seven
+//     tables could only be sized by fetching their rows — which is the cost
+//     this exists to avoid.
+//
+// Cost: `len()` for all seven. The five storage-backed sizes are read out of
+// the census that was computed anyway rather than counted a second time, so
+// the two numbers for one table cannot disagree
+// (`table_sizes_agree_with_the_collection_census`).
+fn build_table_sizes(core: &StdNodeCore) -> Vec<Value> {
+    use leviculum_core::traits::Storage as _;
+    let census = core.storage().collection_counts();
+    let from_census = |name: &str| {
+        census
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.entries)
+            // Unreachable while the census names these five fields, which
+            // `collection_counts_names_every_collection_field` pins. A
+            // missing size is reported as absent rather than as 0: an
+            // invented zero would read as an empty table.
+            .map(|n| pickle_int(n as i64))
+            .unwrap_or_else(pickle_none)
+    };
+    TRANSPORT_TABLE_NAMES
+        .iter()
+        .map(|name| {
+            let entries = match *name {
+                "tunnels" => pickle_int(core.tunnel_count() as i64),
+                "local_links" => pickle_int(core.link_count() as i64),
+                storage_field => from_census(storage_field),
+            };
+            pickle_dict(vec![
+                (pickle_str_key("name"), pickle_str(name)),
+                (pickle_str_key("entries"), entries),
+            ])
+        })
+        .collect()
 }
 
 // The size of every collection the storage holds, not just the seven whose
@@ -3272,7 +3376,8 @@ mod tests {
         );
         core.storage_mut().set_announce_cache(dest, vec![0xCD; 42]);
 
-        let value = build_transport_tables(&core, std::time::Instant::now());
+        let value =
+            build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES);
         let Value::Dict(top) = &value else {
             panic!("transport_tables must be a dict")
         };
@@ -3281,10 +3386,15 @@ mod tests {
             other => panic!("{k} must be a list, got {other:?}"),
         };
 
-        // Every table is named, including the ones that are empty here. An
-        // absent key must never be the way a reader learns a table is empty.
+        // Every table ASKED FOR is named, including the ones that are empty
+        // here. An absent key must never be the way a reader learns that a
+        // table it asked for is empty. (A table it did NOT ask for is absent,
+        // and that is the other half of the same rule — pinned in
+        // `transport_tables_without_a_rows_ask_carries_sizes_and_no_rows`.)
         for key in [
             "collections",
+            "table_sizes",
+            "rows_for",
             "path_table",
             "reverse_table",
             "link_table",
@@ -3387,7 +3497,8 @@ mod tests {
         assert_eq!(field(&c, "retained"), Value::Bool(false));
         core.storage_mut().retain_known_dest(&dest);
         let c = row(
-            &match build_transport_tables(&core, std::time::Instant::now()) {
+            &match build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES)
+            {
                 Value::Dict(d) => match d.get(&HashableValue::String("announce_cache".into())) {
                     Some(Value::List(rows)) => rows.clone(),
                     other => panic!("announce_cache must be a list, got {other:?}"),
@@ -3433,7 +3544,8 @@ mod tests {
             core.storage_mut().add_packet_hash([i; 32]);
         }
 
-        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now()) else {
+        // No rows asked for: the census is what a plain status call gets.
+        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now(), &[]) else {
             panic!("transport_tables must be a dict")
         };
         let Some(Value::List(rows)) = top.get(&HashableValue::String("collections".into())) else {
@@ -3580,6 +3692,396 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // Codeberg #028: the sizes-only answer, and the rule that makes it safe.
+    //
+    // Two halves, and the second is the one that keeps this honest. A table
+    // whose rows were not asked for is ABSENT — never present as an empty
+    // list, which is how #174 spells "this table is empty" and how
+    // `merge_transport_tables` reads it. Answering an unasked 43 000-row
+    // table with `[]` would be a lie the reader has no way to detect.
+    #[test]
+    fn transport_tables_without_a_rows_ask_carries_sizes_and_no_rows() {
+        use crate::clock::SystemClock;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::{PathEntry, ReverseEntry};
+        use leviculum_core::traits::Storage as _;
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-sizes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let now = core.now_ms();
+        for i in 0..7u8 {
+            core.storage_mut().set_path(
+                [i; 16],
+                PathEntry {
+                    hops: 1,
+                    expires_ms: now + 60_000,
+                    interface_index: 0,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                    via_peer: None,
+                },
+            );
+        }
+        for i in 0..3u8 {
+            core.storage_mut().set_reverse(
+                [0x80 + i; 16],
+                ReverseEntry {
+                    timestamp_ms: now,
+                    receiving_interface_index: 0,
+                    outbound_interface_index: 0,
+                },
+            );
+        }
+
+        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now(), &[]) else {
+            panic!("transport_tables must be a dict")
+        };
+        for name in TRANSPORT_TABLE_NAMES {
+            assert!(
+                !top.contains_key(&HashableValue::String(name.into())),
+                "{name} was not asked for, so its key must be absent rather than empty"
+            );
+        }
+        assert_eq!(
+            top.get(&HashableValue::String("rows_for".into())),
+            Some(&Value::List(vec![])),
+            "rows_for states what the response carries, and it carries no rows"
+        );
+
+        // Sizes are there for every table, asked for or not — the whole point
+        // of making the rows optional.
+        let sizes = table_size_map(&top);
+        assert_eq!(sizes.get("path_table"), Some(&7));
+        assert_eq!(sizes.get("reverse_table"), Some(&3));
+        for name in TRANSPORT_TABLE_NAMES {
+            assert!(
+                sizes.contains_key(name),
+                "table_sizes must name {name}, got {sizes:?}"
+            );
+        }
+
+        // And asking by name brings that table's rows back, without bringing
+        // any other table's.
+        let Value::Dict(top) =
+            build_transport_tables(&core, std::time::Instant::now(), &["reverse_table"])
+        else {
+            panic!("transport_tables must be a dict")
+        };
+        assert!(matches!(
+            top.get(&HashableValue::String("reverse_table".into())),
+            Some(Value::List(rows)) if rows.len() == 3
+        ));
+        assert!(
+            !top.contains_key(&HashableValue::String("path_table".into())),
+            "only the named table's rows are served"
+        );
+        assert_eq!(
+            top.get(&HashableValue::String("rows_for".into())),
+            Some(&Value::List(vec![pickle_str("reverse_table")]))
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Codeberg #028: the size a caller reads and the rows it would have got
+    // are the same number.
+    //
+    // This is what makes the cheap answer a real answer. `table_sizes` is
+    // read out of the storage census for five tables and off the transport
+    // and the node for the other two, i.e. from different places than the row
+    // builders walk — so "43 000" being the count of what a `rows` ask would
+    // return is a property to pin, not an implementation detail.
+    #[test]
+    fn table_sizes_agree_with_the_rows_they_stand_in_for() {
+        use crate::clock::SystemClock;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::{AnnounceEntry, LinkEntry, PathEntry, ReverseEntry};
+        use leviculum_core::traits::Storage as _;
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-agree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let now = core.now_ms();
+        // Different counts per table, so a size read off the wrong table is
+        // a failure and not a coincidence.
+        for i in 0..5u8 {
+            core.storage_mut().set_path(
+                [i; 16],
+                PathEntry {
+                    hops: 1,
+                    expires_ms: now + 60_000,
+                    interface_index: 0,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                    via_peer: None,
+                },
+            );
+        }
+        for i in 0..11u8 {
+            core.storage_mut().set_reverse(
+                [0x20 + i; 16],
+                ReverseEntry {
+                    timestamp_ms: now,
+                    receiving_interface_index: 0,
+                    outbound_interface_index: 0,
+                },
+            );
+        }
+        for i in 0..3u8 {
+            core.storage_mut().set_link_entry(
+                [0x40 + i; 16],
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 0,
+                    remaining_hops: 1,
+                    received_interface_index: 0,
+                    hops: 1,
+                    validated: true,
+                    proof_timeout_ms: now + 5_000,
+                    destination_hash: [0x01; 16],
+                    peer_signing_key: None,
+                },
+            );
+        }
+        for i in 0..2u8 {
+            core.storage_mut().set_announce(
+                [0x60 + i; 16],
+                AnnounceEntry {
+                    timestamp_ms: now,
+                    hops: 1,
+                    retries: 0,
+                    retransmit_at_ms: None,
+                    raw_packet: vec![0xAB; 20],
+                    receiving_interface_index: 0,
+                    target_interface: None,
+                    local_rebroadcasts: 0,
+                    block_rebroadcasts: false,
+                },
+            );
+        }
+        for i in 0..4u8 {
+            core.storage_mut()
+                .set_announce_cache([0x90 + i; 16], vec![0xCD; 8]);
+        }
+
+        let sizes = match build_transport_tables(&core, std::time::Instant::now(), &[]) {
+            Value::Dict(top) => table_size_map(&top),
+            other => panic!("expected dict, got {other:?}"),
+        };
+        let Value::Dict(full) =
+            build_transport_tables(&core, std::time::Instant::now(), &TRANSPORT_TABLE_NAMES)
+        else {
+            panic!("transport_tables must be a dict")
+        };
+        for name in TRANSPORT_TABLE_NAMES {
+            let rows = match full.get(&HashableValue::String(name.into())) {
+                Some(Value::List(rows)) => rows.len(),
+                other => panic!("{name} must be a list when asked for, got {other:?}"),
+            };
+            assert_eq!(
+                sizes.get(name),
+                Some(&(rows as i64)),
+                "{name}: the size the cheap answer reports must be the number \
+                 of rows the expensive one returns"
+            );
+        }
+
+        // The five storage-backed sizes must also match the census, which is
+        // the other number in the same response claiming to describe them.
+        let Some(Value::List(census)) = full.get(&HashableValue::String("collections".into()))
+        else {
+            panic!("collections must be a list")
+        };
+        for row in census {
+            let Value::Dict(row) = row else {
+                panic!("every census row is a dict")
+            };
+            let (Some(Value::String(name)), Some(Value::I64(entries))) = (
+                row.get(&HashableValue::String("name".into())),
+                row.get(&HashableValue::String("entries".into())),
+            ) else {
+                panic!("every census row has a name and an entry count")
+            };
+            if let Some(size) = sizes.get(name.as_str()) {
+                assert_eq!(
+                    size, entries,
+                    "{name}: census and table_sizes disagree about one table"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Codeberg #028, the measurement this batch exists for: a status call on
+    // a field-sized node must not allocate in proportion to the tables it
+    // describes.
+    //
+    // The node here is the soak node that produced the finding — 11 000
+    // paths, 43 000 reverse entries — and the figure asserted on is the peak
+    // live bytes of the WHOLE server-side call, dispatch through msgpack
+    // serialisation, over and above the memory the tables themselves occupy
+    // (see `test_alloc` for why an allocator and not a cheaper seam).
+    //
+    // The third measurement is a positive control and is not decoration: it
+    // asks for two tables' rows on the same node and requires the cost to
+    // appear. Without it, a bug that made `build_transport_tables` return an
+    // empty dict would pass the first two assertions and the test would be
+    // measuring nothing.
+    #[test]
+    fn a_sizes_only_status_call_does_not_allocate_per_table_row() {
+        use crate::clock::SystemClock;
+        use crate::rpc::connection::alloc_probe::measure_live_peak;
+        use crate::rpc::pickle::Codec;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::storage_types::{PathEntry, ReverseEntry};
+        use leviculum_core::traits::Storage as _;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        // The soak node's tables on 2026-09-21.
+        const PATHS: u32 = 11_000;
+        const REVERSE: u32 = 43_000;
+        // Room for the census rows and the msgpack buffer, and nothing that
+        // could hide a per-row cost: one reverse row alone is ~300 bytes of
+        // tree, so 43 000 of them cannot fit under this by any margin.
+        const CHEAP_CEILING: usize = 256 * 1024;
+
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        let start = std::time::Instant::now();
+        let call = |core: &mut StdNodeCore, rows: Vec<&'static str>| {
+            handle_request(
+                &RpcRequest::GetTransportTables { rows },
+                core,
+                start,
+                &stats,
+                &inventory,
+                0,
+                None,
+                Codec::Msgpack,
+            )
+            .expect("transport_tables must serialize")
+        };
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-alloc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        core.set_interface_name(0, "TCPInterface[peer]".into());
+
+        // An empty node first: the constant part of the answer.
+        let (_, empty_peak) = measure_live_peak(|| call(&mut core, Vec::new()));
+
+        let now = core.now_ms();
+        for i in 0..PATHS {
+            let mut hash = [0u8; 16];
+            hash[..4].copy_from_slice(&i.to_be_bytes());
+            core.storage_mut().set_path(
+                hash,
+                PathEntry {
+                    hops: 2,
+                    expires_ms: now + 600_000,
+                    interface_index: 0,
+                    random_blobs: Vec::new(),
+                    next_hop: None,
+                    via_peer: None,
+                },
+            );
+        }
+        for i in 0..REVERSE {
+            let mut hash = [0xFFu8; 16];
+            hash[..4].copy_from_slice(&i.to_be_bytes());
+            core.storage_mut().set_reverse(
+                hash,
+                ReverseEntry {
+                    timestamp_ms: now,
+                    receiving_interface_index: 0,
+                    outbound_interface_index: 0,
+                },
+            );
+        }
+
+        let (response, full_peak) = measure_live_peak(|| call(&mut core, Vec::new()));
+        assert!(
+            full_peak < CHEAP_CEILING,
+            "a status call on a node with {PATHS} paths and {REVERSE} reverse \
+             entries peaked at {full_peak} bytes, over the {CHEAP_CEILING} \
+             byte ceiling; response is {} bytes",
+            response.len()
+        );
+        // The proportionality itself, independent of where the ceiling sits:
+        // 54 000 rows of table must not move the cost of describing them.
+        let growth = full_peak.saturating_sub(empty_peak);
+        assert!(
+            growth < 64 * 1024,
+            "the same call cost {empty_peak} bytes on an empty node and \
+             {full_peak} on a full one: {growth} bytes of growth for \
+             {} rows is a per-row cost",
+            PATHS + REVERSE
+        );
+
+        // The three figures this test exists to produce, in the record where
+        // a later reader can find them (`cargo test -- --nocapture`).
+        println!(
+            "TABLES_ALLOC paths={PATHS} reverse={REVERSE} \
+             sizes_only_peak={full_peak} empty_node_peak={empty_peak} \
+             response_bytes={}",
+            response.len()
+        );
+
+        // Positive control: the rows, when asked for, do cost. If this ever
+        // stops being true the two assertions above have stopped measuring
+        // the thing they name.
+        let (_, rows_peak) =
+            measure_live_peak(|| call(&mut core, vec!["path_table", "reverse_table"]));
+        println!("TABLES_ALLOC rows_peak={rows_peak}");
+        assert!(
+            rows_peak > 4 * 1024 * 1024,
+            "asking for {} rows peaked at {rows_peak} bytes, which is too \
+             little to be those rows — the measurement is broken, not the fix",
+            PATHS + REVERSE
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `table_sizes` as a name -> entries map, for the tests that read it.
+    fn table_size_map(
+        top: &std::collections::BTreeMap<HashableValue, Value>,
+    ) -> std::collections::BTreeMap<String, i64> {
+        let Some(Value::List(rows)) = top.get(&HashableValue::String("table_sizes".into())) else {
+            panic!("table_sizes must be a list")
+        };
+        rows.iter()
+            .map(|row| match row {
+                Value::Dict(d) => match (
+                    d.get(&HashableValue::String("name".into())),
+                    d.get(&HashableValue::String("entries".into())),
+                ) {
+                    (Some(Value::String(n)), Some(Value::I64(e))) => (n.clone(), *e),
+                    other => panic!("a size row is a name and a count, got {other:?}"),
+                },
+                other => panic!("every size row is a dict, got {other:?}"),
+            })
+            .collect()
+    }
+
     // Codeberg #174: the dump survives both codecs. `transport_tables` is a
     // nested dict-of-lists-of-dicts, deeper than any pre-existing response, so
     // the msgpack transcode is worth pinning rather than assuming.
@@ -3603,7 +4105,9 @@ mod tests {
 
         for codec in [Codec::Pickle, Codec::Msgpack] {
             let bytes = handle_request(
-                &RpcRequest::GetTransportTables,
+                &RpcRequest::GetTransportTables {
+                    rows: TRANSPORT_TABLE_NAMES.to_vec(),
+                },
                 &mut core,
                 std::time::Instant::now(),
                 &stats,

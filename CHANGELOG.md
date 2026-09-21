@@ -61,6 +61,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `lnstatus -j --tables` answers with table SIZES and no rows. The rows are
+  asked for by name with the new `--table-rows` flag (`path_table`,
+  `reverse_table`, `link_table`, `announce_table`, `announce_cache`,
+  `tunnels`, `local_links`, or `all`), which requires `--tables`.
+
+  A status call was costing the daemon tens of megabytes. The answer was
+  built as a complete value tree before a byte was serialised — one dictionary
+  per row, with a string key per field, all live at once — so a node with
+  11 000 paths and 43 000 reverse entries paid 83 MB to describe tables that
+  serialise to about 7 MB. Polling such a node for two minutes moved its
+  resident set by 60 MB, and the hour spent explaining that sawtooth as a
+  defect in the node was spent on the measuring instrument instead.
+
+  Sizes cost a `len()` each, so the new default peaks at about 35 KB on that
+  same node, and the figure does not move with the size of the tables. The
+  per-collection census added in this release (`collections`) already answered
+  "how big" without materialising anything; `table_sizes` extends it to
+  `tunnels` and `local_links`, which live outside the storage and so could
+  previously only be sized by fetching their rows.
+
+  A table whose rows were not asked for is ABSENT from the response, not
+  present as an empty list: an empty list is how this key says "the table is
+  empty", and answering an unasked 43 000-row table with `[]` would be a lie
+  the reader cannot detect. `rows_for` names the tables whose rows the
+  response carries.
+
+  Anything reading the rows today must now ask for them: `lnstatus -j
+  --tables --table-rows all` reproduces the old output plus the two new keys.
+  The RPC verb is a Leviculum extension with no Python counterpart
+  (`rnstatus` has no `--tables`), so no reference client is affected
+  (Codeberg #028, #174).
+
 - Stamp generation is cancellable. `StampExecutor::generate`,
   `CooperativeStamper::generate` and the `generate_with` helpers on
   `DeliveryStampRequest` / `PropagationStampRequest` take a `StampCancel`

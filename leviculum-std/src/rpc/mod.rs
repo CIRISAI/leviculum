@@ -14,6 +14,8 @@ mod error;
 pub(crate) mod handlers;
 pub(crate) mod pickle;
 
+pub use pickle::TRANSPORT_TABLE_NAMES;
+
 use std::sync::{Arc, Mutex};
 
 use crate::sync_ext::MutexRecover;
@@ -324,6 +326,50 @@ pub async fn rpc_query(
         entries.push((
             pickle::pickle_str_key("max_hops"),
             serde_pickle::value::Value::None,
+        ));
+    }
+    let request = pickle::pickle_dict(entries);
+    let response = rpc_client_call(&abstract_name, authkey, &request)
+        .await
+        .map_err(|e| match e {
+            RpcError::Io(io) => crate::Error::Io(io),
+            other => crate::Error::Config(format!("shared-instance RPC error: {other}")),
+        })?;
+    Ok(pickle_value_to_json(&response))
+}
+
+/// Ask a daemon for its transport tables (Codeberg #174), naming the tables
+/// whose ROWS are wanted.
+///
+/// `rows` is the explicit ask of Codeberg #028: empty means sizes only —
+/// the `table_sizes` and `collections` censuses, every entry a `len()` — and
+/// each name in it adds that table's rows to the answer. A row costs the
+/// daemon a dict per entry, so on a node with 43 000 reverse entries the
+/// difference between the two asks is tens of megabytes of daemon memory,
+/// paid while the response is built. Ask for rows when you want rows.
+///
+/// Names must come from `TRANSPORT_TABLE_NAMES` (`path_table`,
+/// `reverse_table`, `link_table`, `announce_table`, `announce_cache`,
+/// `tunnels`, `local_links`); the daemon refuses an unknown one rather than
+/// omitting it silently, which surfaces here as a transport error. Same
+/// authkey, codec, JSON decoding and unanswered-verb caveat as [`rpc_query`].
+pub async fn rpc_query_transport_tables(
+    instance_name: &str,
+    authkey: &[u8; 32],
+    rows: &[&str],
+) -> Result<serde_json::Value, crate::Error> {
+    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let mut entries = vec![(
+        pickle::pickle_str_key("get"),
+        pickle::pickle_str("transport_tables"),
+    )];
+    // Sent only when non-empty: an `lnsd` from before this change ignores
+    // unknown keys, so the sizes-only ask stays byte-identical to the request
+    // those daemons have always answered.
+    if !rows.is_empty() {
+        entries.push((
+            pickle::pickle_str_key("rows"),
+            pickle::pickle_list(rows.iter().map(|r| pickle::pickle_str(r)).collect()),
         ));
     }
     let request = pickle::pickle_dict(entries);
@@ -1277,12 +1323,39 @@ mod tests {
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let json = rpc_query(&instance_name, &authkey, "transport_tables")
+        // The default ask: sizes, no rows (Codeberg #028). Every table is
+        // sized even when empty, so this answer alone tells an empty table
+        // from a daemon that cannot answer — and it carries no row lists,
+        // which is what makes it cheap on a node whose tables are full.
+        let sizes_only = rpc_query_transport_tables(&instance_name, &authkey, &[])
+            .await
+            .expect("an lnsd must answer transport_tables");
+        let sizes = sizes_only["table_sizes"].as_array().unwrap();
+        for name in TRANSPORT_TABLE_NAMES {
+            assert!(
+                sizes.iter().any(|s| s["name"] == serde_json::json!(name)),
+                "{name} must be sized: {sizes_only}"
+            );
+            assert!(
+                sizes_only.get(name).is_none(),
+                "{name} rows were not asked for and must be absent: {sizes_only}"
+            );
+        }
+        assert_eq!(
+            sizes
+                .iter()
+                .find(|s| s["name"] == serde_json::json!("path_table"))
+                .unwrap()["entries"],
+            serde_json::json!(1),
+            "the seeded path is counted without its row being built"
+        );
+
+        let json = rpc_query_transport_tables(&instance_name, &authkey, &TRANSPORT_TABLE_NAMES)
             .await
             .expect("an lnsd must answer transport_tables");
 
-        // Every table is named even when empty, so a reader can tell an empty
-        // table from a daemon that cannot answer.
+        // Every table asked for is named even when empty, so a reader can
+        // tell an empty table from a daemon that cannot answer.
         for key in [
             "collections",
             "path_table",

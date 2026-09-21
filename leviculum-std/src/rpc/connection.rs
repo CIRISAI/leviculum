@@ -268,15 +268,33 @@ pub(crate) async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
 use rand_core::RngCore;
 
-/// Test-only allocator seam: records the largest single allocation made on a
-/// thread while it is armed.
+/// Test-only allocator seam: the one global allocator this crate's unit-test
+/// binary installs, and the two questions it answers.
 ///
 /// The defect this file fixes is an allocation, not a read — the length prefix
 /// alone made us allocate, whether or not the payload ever arrived. Asserting
 /// only that the connection is refused would leave that untested, so the
-/// refusal test measures the allocation directly.
+/// refusal test measures the allocation directly. That is
+/// [`alloc_probe::measure`]: the largest SINGLE allocation, which is what a
+/// `vec![0u8; len]` from an attacker-supplied length looks like.
+///
+/// [`alloc_probe::measure_live_peak`] answers the other shape of the same
+/// class of question (Codeberg #028): how much a code path has live AT ONCE.
+/// A response tree built from a 43 000-row table is tens of megabytes in
+/// hundreds of thousands of small allocations, so the largest single one says
+/// nothing about it; the high-water of live bytes says everything.
+///
+/// Both live here because a process may install exactly one global allocator,
+/// and both obey the standing rule for this investigation: this is a shim in
+/// FRONT of `System`, forwarding every call with the layout it arrived with,
+/// so the code under test runs the same allocator through the same paths.
+///
+/// Why the counters are per-thread: the harness runs tests in parallel in one
+/// process, and process-global counters would fold every other test's
+/// allocations into the measurement — which is how a memory assertion becomes
+/// flaky. Each test gets its own thread and the measured code spawns none.
 #[cfg(test)]
-mod alloc_probe {
+pub(crate) mod alloc_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
 
@@ -289,6 +307,13 @@ mod alloc_probe {
         /// needs lazy initialisation or a destructor would allocate from
         /// inside the allocator.
         static PEAK: Cell<Option<usize>> = const { Cell::new(None) };
+        /// Bytes this thread has been handed and not yet returned. Always
+        /// tracked, unlike [`PEAK`]: a live figure that only started counting
+        /// when a measurement was armed would be decremented by frees of
+        /// memory it never counted.
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        /// High-water mark of [`LIVE`] since the last `measure_live_peak`.
+        static LIVE_PEAK: Cell<usize> = const { Cell::new(0) };
     }
 
     struct PeakProbe;
@@ -301,10 +326,23 @@ mod alloc_probe {
                 }
             }
         });
+        let _ = LIVE.try_with(|live| {
+            let now = live.get().saturating_add(size);
+            live.set(now);
+            let _ = LIVE_PEAK.try_with(|peak| {
+                if now > peak.get() {
+                    peak.set(now);
+                }
+            });
+        });
     }
 
-    // SAFETY: every method forwards to `System` unchanged; `record` only
-    // touches a `Cell<Option<usize>>` that never allocates.
+    fn release(size: usize) {
+        let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(size)));
+    }
+
+    // SAFETY: every method forwards to `System` unchanged; `record` and
+    // `release` only touch `Cell`s that never allocate.
     unsafe impl GlobalAlloc for PeakProbe {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             record(layout.size());
@@ -318,10 +356,12 @@ mod alloc_probe {
 
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             record(new_size);
+            release(layout.size());
             unsafe { System.realloc(ptr, layout, new_size) }
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            release(layout.size());
             unsafe { System.dealloc(ptr, layout) }
         }
     }
@@ -336,6 +376,27 @@ mod alloc_probe {
         let out = f();
         let peak = PEAK.with(|peak| peak.replace(None)).unwrap_or(0);
         (out, peak)
+    }
+
+    /// Run `f` and report the most bytes it had live at once, over and above
+    /// what this thread already held when it started.
+    ///
+    /// The baseline subtraction is what makes the number readable: the caller
+    /// has usually built the state under test first (a node with 43 000 table
+    /// rows is 43 000 rows of live memory), and that is not what the call
+    /// costs. What comes back is the call's own peak — the figure a fix has
+    /// to move.
+    ///
+    /// A cross-thread free inside `f` (memory allocated elsewhere, released
+    /// here) would make the figure read low. Nothing measured this way does
+    /// that, and every subtraction saturates, so the failure mode is a
+    /// number that is too small — never a panic.
+    pub(crate) fn measure_live_peak<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let base = LIVE.with(|live| live.get());
+        LIVE_PEAK.with(|peak| peak.set(base));
+        let out = f();
+        let peak = LIVE_PEAK.with(|peak| peak.get());
+        (out, peak.saturating_sub(base))
     }
 }
 
