@@ -4365,7 +4365,12 @@ async fn run_event_loop(
                         // sink, so the registered processor's tap sees it. A
                         // processor is a sender like any other, and this is the
                         // one loss signal it cannot learn any other way.
-                        if let Some(purged) = retry_queues.remove(&iface_id.0) {
+                        if let Some(purged) = forget_interface_retry_state(
+                            iface_id.0,
+                            &mut retry_queues,
+                            &mut retry_queue_warned,
+                            &mut retry_queue_max_depth,
+                        ) {
                             if !purged.is_empty() {
                                 tracing::warn!(
                                     "Interface {} destroyed {} queued frame(s) on disconnect — \
@@ -4875,7 +4880,12 @@ async fn run_event_loop(
                             core_processor.as_mut(),
                         );
                         tighten_next_poll(&mut next_poll, processor_delay);
-                        retry_queues.remove(&iface_id.0);
+                        let _ = forget_interface_retry_state(
+                            iface_id.0,
+                            &mut retry_queues,
+                            &mut retry_queue_warned,
+                            &mut retry_queue_max_depth,
+                        );
                         registry.remove(iface_id);
                         retire_from_inventory(
                             &inventory,
@@ -5589,6 +5599,34 @@ fn record_discovery_announce(
             di.value
         );
     }
+}
+
+/// Forget every per-interface retry-queue bookkeeping entry for a
+/// departing interface, returning the frames that were still queued so
+/// the caller can report the loss.
+///
+/// Interface ids are monotonic and every accepted client gets a fresh
+/// one, so a map keyed by id that is only ever inserted into is a map
+/// that only grows. `retry_queues` and `retry_queue_warned` were
+/// already being cleared; the max-depth watermark was not, and it is
+/// the one entry that survives the queue going empty (which is the
+/// normal state and how the other two get pruned), so it had no
+/// removal path at all.
+///
+/// Dropping the watermark is also the right statement, not just the
+/// cheap one: it is a per-interface high-water mark, and the next
+/// interface to be handed this id is a different interface whose depth
+/// starts at zero — the same reasoning the driver already applies to
+/// its peer-count mirror on the way down.
+fn forget_interface_retry_state(
+    iface_idx: usize,
+    retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
+    retry_queue_warned: &mut std::collections::BTreeSet<usize>,
+    retry_queue_max_depth: &mut BTreeMap<usize, usize>,
+) -> Option<VecDeque<Vec<u8>>> {
+    retry_queue_warned.remove(&iface_idx);
+    retry_queue_max_depth.remove(&iface_idx);
+    retry_queues.remove(&iface_idx)
 }
 
 /// Append `data` to the per-interface retry queue. Emit a single
@@ -9800,5 +9838,88 @@ mod tests {
             None,
         );
         assert!(matches!(poll_completion(&mut fut), Poll::Ready(Ok(_))));
+    }
+}
+
+/// Item 4 of the 2026-09-21 hygiene batch: the per-interface retry
+/// bookkeeping a departing interface leaves behind.
+///
+/// Interface ids are monotonic (`register_interface` hands out a fresh
+/// one per accepted client), so a map keyed by id and never removed
+/// from grows for the life of the process. `retry_queues` and
+/// `retry_queue_warned` were already cleared on the way down;
+/// `retry_queue_max_depth` was not, and unlike the other two it
+/// survives the queue going empty, which is how the other two are
+/// pruned in the steady state.
+#[cfg(test)]
+mod interface_retry_state_teardown_tests {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    use super::forget_interface_retry_state;
+
+    /// THE pin: after teardown, nothing keyed by the departed id is
+    /// left in any of the three maps, and the surviving interface is
+    /// untouched.
+    #[test]
+    fn a_departing_interface_leaves_no_retry_bookkeeping_behind() {
+        let departing = 7usize;
+        let staying = 8usize;
+
+        let mut queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        queues.insert(departing, VecDeque::from(vec![vec![0xAAu8; 4]]));
+        queues.insert(staying, VecDeque::from(vec![vec![0xBBu8; 4]]));
+
+        let mut warned: BTreeSet<usize> = BTreeSet::new();
+        warned.insert(departing);
+        warned.insert(staying);
+
+        let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
+        max_depth.insert(departing, 42);
+        max_depth.insert(staying, 3);
+
+        let purged =
+            forget_interface_retry_state(departing, &mut queues, &mut warned, &mut max_depth);
+
+        assert_eq!(
+            purged.map(|q| q.len()),
+            Some(1),
+            "the frames still queued come back so the caller can report the loss"
+        );
+        assert!(!queues.contains_key(&departing), "queue forgotten");
+        assert!(!warned.contains(&departing), "warn flag forgotten");
+        assert!(
+            !max_depth.contains_key(&departing),
+            "the high-water mark belongs to an interface that is gone; the next \
+             interface handed this id starts at zero"
+        );
+
+        assert!(
+            queues.contains_key(&staying),
+            "the live interface keeps its queue"
+        );
+        assert!(warned.contains(&staying), "and its warn flag");
+        assert_eq!(
+            max_depth.get(&staying).copied(),
+            Some(3),
+            "and its watermark"
+        );
+    }
+
+    /// An interface that never queued a frame still has a watermark if
+    /// it ever warned; teardown must not depend on the queue existing.
+    #[test]
+    fn teardown_is_total_even_with_no_queue_left() {
+        let mut queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut warned: BTreeSet<usize> = BTreeSet::new();
+        let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
+        max_depth.insert(5, 11);
+
+        let purged = forget_interface_retry_state(5, &mut queues, &mut warned, &mut max_depth);
+
+        assert!(purged.is_none(), "no queue, nothing to report as lost");
+        assert!(
+            max_depth.is_empty(),
+            "an empty queue is the steady state, so it cannot be what prunes the watermark"
+        );
     }
 }
