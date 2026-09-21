@@ -113,6 +113,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lnpnd` no longer stores a peer's whole inbound sync inside one core-processor
+  hook. Every accepted message is one durable store append — write, `fsync`,
+  rename, `fsync` the directory — and the hook that classified the batch stored
+  all of it while holding the core lock, so the node went silent for as long as
+  the disk took. In the public mesh on miauhaus (2026-09-21) a 105-message sync
+  produced `CORE_PROCESSOR_OVER_BUDGET hook="on_tick" elapsed_us=239016
+  budget_us=5000 events=0` in the tick right after it, one of 73 overruns in
+  the daemon's first 32 minutes; `lnsd` on the same host and the same traffic
+  reported none. The engine now queues validated payloads and stores one per
+  hook, asking the driver straight back for the rest, and a peer's batch is
+  resumable across hooks while still being reported as one round. The batch
+  costs the same wall-clock — the disk did not get faster — but the core lock is
+  released between messages, so the node keeps answering while it absorbs a
+  sync. Client uploads take the same queue, for the same reason. One append can
+  still exceed the budget on a slow disk (6.4 ms measured against a 5 ms
+  budget); what is gone is the multiplier. The numbers are measurable from the
+  tree (`append_cost`, `leviculum-std/src/file_propagation_store.rs`) and the
+  rule is written up in `docs/src/concepts/core-lock-budget.md` (Codeberg #384).
+
 - `lnpnd --status` asks for the path it is waiting for. `wait_for_path` used
   to wait one whole retry interval before sending its first `PATH_REQUEST`,
   and the client ships a 5 s budget with a 5 s retry interval — so the

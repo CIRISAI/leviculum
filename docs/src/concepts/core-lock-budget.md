@@ -394,6 +394,64 @@ alongside it names the disk. The watchdog measures the *wait* for the
 core mutex, never the hold, which is exactly "how long the loop spent
 not polling" without an `Instant` in a dozen `select!` arms.
 
+## A durable store append is inside the budget too (#384)
+
+The #418 rule above is about a diagnostic, and a diagnostic can be dropped.
+The propagation node found the same shape in work that cannot be: storing a
+message somebody sent us.
+
+`lnpnd` ran for 32 minutes in the public mesh on miauhaus (2026-09-21) and
+emitted **73 `CORE_PROCESSOR_OVER_BUDGET` warnings** out of 324 log lines,
+54 of them under `hook="on_event"` and 19 under `hook="on_tick"`, with nine
+over 100 ms. `lnsd` on the same host, same uptime, same traffic: none. The
+worst one names its own cause in the line above it:
+
+```text
+10:25:12 lnpnd: sync in peer 535d9c5db65bfcd4 transferred 105 (30240 B): ok
+10:25:12 CORE_PROCESSOR_OVER_BUDGET hook="on_tick" elapsed_us=239016 budget_us=5000 events=0
+```
+
+A quarter of a second of core lock, having processed `events=0`. The time
+was not in event work; it was in the store. `FilePropagationStore::append`
+is a write, an `fsync`, a rename and a second `fsync`
+(`leviculum-std/src/file_propagation_store.rs`, "Power-cut safety, and why
+this store fsyncs"), and the engine stored the whole inbound batch inside
+the one hook that classified it.
+
+The attribution is a measurement, not a reading of the code. 105 appends of
+288-byte bodies cost **124 µs** into a memory store and **127-189 ms** into
+the file store on the coder host's ext4, over six runs — 1.1 to 1.5 ms each,
+worst single append 6.4 ms. Three orders of magnitude, on the same verb with
+the same bytes: the cost is the device, not the book-keeping. `append_cost`
+(`leviculum-std/src/file_propagation_store.rs`) prints both lines on
+whatever filesystem it is pointed at, and pointing it at a tmpfs — where
+`fsync` never reaches a device — reads 60x cheaper and proves nothing.
+
+Two things follow, and only one of them is a fix.
+
+**The store cannot be the layer that fixes it.** The fsyncs are what makes
+"persist before you prove" true
+(`docs/src/concepts/propagation-node-on-a-board.md` §3): dropping them
+trades a message for a millisecond. The cost is the device's, and the
+device's cost is not negotiable from this side.
+
+**The hook is.** `lnpnd`'s engine now queues validated payloads and stores
+`PERSIST_PER_HOOK` of them per hook (`lnpnd/src/engine.rs`), asking the
+driver to come straight back for the rest; a peer's batch is resumable
+across hooks (`PeeringRuntime::advance_sync_resource`, `lnpnd/src/peering.rs`)
+and still reports itself as one round. The batch still costs what it costs
+in wall-clock — the disk did not get faster — but the core lock is released
+between messages, so the node keeps answering while it absorbs a sync.
+
+> **A cost that cannot be made cheap and cannot be dropped is still a cost
+> that may not be paid all at once under the lock. Bound the work per hook
+> and come back.**
+
+What this does *not* buy: one append can exceed the budget on its own —
+6.4 ms measured, against a 5 ms budget — so `CORE_PROCESSOR_OVER_BUDGET`
+can still fire on a slow disk. What is gone is the multiplier, which is the
+part that scaled with someone else's batch size.
+
 ### A diagnostic's volume is a cost too, and the cadence is the wrong lever
 
 The same log gave the other half of the lesson. Of those 397 023 881
