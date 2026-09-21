@@ -1798,10 +1798,21 @@ fn place_by_common_shift(spans: &mut [AnchoredSpan], new: &[String]) {
         return;
     };
     for s in spans.iter_mut() {
-        if matches!(s.verdict, Anchor::Moved(_) | Anchor::Fresh) {
+        if s.verdict == Anchor::Fresh || (!s.weak && matches!(s.verdict, Anchor::Moved(_))) {
             continue;
         }
         let target = s.line as isize + shift;
+        // A wordless endpoint the neighbour-context rule already placed is
+        // corroborated if it landed where the shift says. Without this it
+        // would be discarded below and a range ending on a `}` would stay
+        // unrepairable however plainly its block had moved -- which is what
+        // the injected-drift control found.
+        if let Anchor::Moved(to) = s.verdict {
+            if to as isize == target {
+                s.weak = false;
+            }
+            continue;
+        }
         if target < 1 || target as usize > new.len() {
             continue;
         }
@@ -2242,6 +2253,9 @@ fn run_bare_anchor_canary() {
     let mut body: Vec<String> = (1..=20).map(|n| format!("// filler {n}")).collect();
     body[4] = "pub const CANARY_ANCHOR: u8 = 7;".into();
     body[9] = "pub fn canary_moves() {}".into();
+    // The end of a range, and wordless: only the shift its opening line
+    // establishes can place it.
+    body[19] = "}".into();
     let code = src.join("canary_anchor.rs");
     fs::write(&code, body.join("\n") + "\n").unwrap();
 
@@ -2249,10 +2263,14 @@ fn run_bare_anchor_canary() {
     // as part of the corpus this file guards.
     let stays = format!("`canary_anchor.rs:{}`", 5);
     let moves = format!("`canary_anchor.rs:{}`", 10);
+    let range = format!("`canary_anchor.rs:{}-{}`", 10, 20);
     let doc = docs.join("canary_anchor.md");
     fs::write(
         &doc,
-        format!("The constant ({stays}) and the function ({moves}) are both cited bare.\n"),
+        format!(
+            "The constant ({stays}), the function ({moves}) and the block \
+             ({range}) are all cited bare.\n"
+        ),
     )
     .unwrap();
 
@@ -2270,8 +2288,8 @@ fn run_bare_anchor_canary() {
     let citations = scan(root, &[doc], Corpus::Book);
     assert_eq!(
         citations.len(),
-        2,
-        "CANARY: the fixture's two citations were not both parsed"
+        3,
+        "CANARY: the fixture's three citations were not all parsed"
     );
     let (counts, drifted) = anchor_bare_citations(root, &citations);
     assert_eq!(
@@ -2282,12 +2300,29 @@ fn run_bare_anchor_canary() {
     );
     assert_eq!(
         drifted.len(),
-        1,
-        "CANARY: {} citations reported, expected exactly the moved one. This is \
-         the defect the check exists for.",
+        2,
+        "CANARY: {} citations reported, expected exactly the two moved ones. \
+         This is the defect the check exists for.",
         drifted.len()
     );
-    let (cited, spans) = &drifted[0];
+    // The range, whose closing `}` no anchor of its own can place: only the
+    // shift its opening line establishes carries it. Without that the fixer
+    // gives up on every range ending in a brace, which an injected-drift
+    // control found it doing.
+    let (block, block_spans) = drifted
+        .iter()
+        .find(|(c, _)| c.raw.contains('-'))
+        .expect("CANARY: the range citation was not reported");
+    assert_eq!(
+        repaired(block, block_spans).as_deref(),
+        Some(format!("`canary_anchor.rs:{}-{}`", 14, 24).as_str()),
+        "CANARY: a range whose end is a wordless line was not carried by the \
+         displacement its start established"
+    );
+    let (cited, spans) = drifted
+        .iter()
+        .find(|(c, _)| !c.raw.contains('-'))
+        .expect("CANARY: the single-line moved citation was not reported");
     assert!(
         cited.raw.contains(&moves[1..moves.len() - 1]),
         "CANARY: the wrong citation was reported: {}",
