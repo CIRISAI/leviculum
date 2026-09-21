@@ -28,6 +28,14 @@ use crate::{Destination, DestinationHash, Identity, NodeEvent};
 /// (`RNS.Transport.APP_NAME`, `Transport.py:61`).
 const REMOTE_APP_NAME: &str = "rnstransport";
 
+/// How often the path request is repeated while waiting. A fixed cadence, not
+/// `min(2 s, timeout)`: clamping it to the budget made the repeat interval
+/// equal the budget on short timeouts, which is the shape that cost
+/// `lnpnd --status` its first request entirely (2026-09-20). `wait_for_path`
+/// now sends the first request immediately regardless, so an interval larger
+/// than the budget only means "no repeat", never "no request".
+const PATH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Compute the `rnstransport.remote.management` destination hash from a remote
 /// transport identity hash.
 ///
@@ -192,22 +200,17 @@ pub async fn fetch_remote_status(
 ) -> Result<(serde_json::Value, Option<i64>), String> {
     let dest_hash = mgmt_destination_hash(identity_hash);
 
-    // 1. Ensure a path to the remote management destination. Issue the initial
-    // request immediately (the leaf is explicitly asking), then let
-    // `wait_for_path` re-request on a bounded cadence so a delayed answer — e.g.
-    // an upstream Python `rnsd` holding a forwarded announce under ingress
-    // limiting (Codeberg #44) — still resolves within the timeout instead of
-    // failing outright.
+    // 1. Ensure a path to the remote management destination. `wait_for_path`
+    // issues the initial request itself, immediately, then re-requests on a
+    // bounded cadence so a delayed answer — e.g. an upstream Python `rnsd`
+    // holding a forwarded announce under ingress limiting (Codeberg #44) —
+    // still resolves within the timeout instead of failing outright.
     if !node.has_path(&dest_hash) {
         if !quiet {
             eprintln!("Path to {} requested", hex_lower(identity_hash));
         }
-        node.request_path(&dest_hash)
-            .await
-            .map_err(|e| e.to_string())?;
-        let retry_interval = Duration::from_secs(2).min(timeout);
         if !node
-            .wait_for_path(&dest_hash, timeout, retry_interval)
+            .wait_for_path(&dest_hash, timeout, PATH_RETRY_INTERVAL)
             .await
             .map_err(|e| e.to_string())?
         {

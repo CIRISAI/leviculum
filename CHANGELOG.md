@@ -63,6 +63,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `lnpnd --status` asks for the path it is waiting for. `wait_for_path` used
+  to wait one whole retry interval before sending its first `PATH_REQUEST`,
+  and the client ships a 5 s budget with a 5 s retry interval — so the
+  deadline check fired on the very iteration the first request was due, and
+  the request never left the host. The client mints a fresh storage directory
+  per invocation, so there was no warm path table to fall back on either: a
+  healthy, announcing node answered `Getting lnpnd statistics timed out,
+  exiting now` after exactly 5 s of silence (field report 2026-09-20 14:51).
+  The first request now goes out immediately, which is what the reference's
+  client does (`lxmd.py:663-667` calls `request_path` before its first sleep);
+  the retry interval governs only the repeats, which remain ours. A path
+  already known still costs nothing. Measured on the reported topology — two
+  programs on one shared instance — the resolve now takes 100-101 ms against
+  the 5 s budget, so the default stays at 5 s: a larger one would only have
+  hidden the unsent request behind a longer fuse.
+
+  Two callers were sending their own `PATH_REQUEST` first to work around this
+  and no longer do, which removes a duplicate packet per query:
+  `fetch_remote_status` (`lnstatus -R`) and lnomad's page fetch. The first of
+  those also clamped its retry interval to `min(2 s, timeout)`, so
+  `lnstatus -w 2` or shorter put budget and interval back on equal footing and
+  lost every repeat; it now uses a fixed 2 s interval, which an interval
+  larger than the budget can no longer turn into "no request at all".
+
 - lnpnd tells a caller it refused their query instead of letting them time
   out. Its three control paths (`--status`, `--sync`, `--break`) were
   registered behind the core's `AllowList`, which drops a request from an

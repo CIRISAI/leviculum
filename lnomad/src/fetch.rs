@@ -36,7 +36,7 @@ use crate::url::Target;
 const PATH_BUDGET: Duration = Duration::from_secs(30);
 
 /// How often [`ReticulumNode::wait_for_path`] re-issues a `PATH_REQUEST` while
-/// waiting.
+/// waiting. The first one it sends immediately, so this governs repeats only.
 const PATH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Extra slack added on top of the caller's request timeout when waiting for a
@@ -392,12 +392,9 @@ impl Session {
 
         let dest_hash = DestinationHash::new(*dest);
 
-        // Learn a path if we do not have one.
+        // Learn a path if we do not have one. `wait_for_path` sends the first
+        // `PATH_REQUEST` itself, immediately, then repeats on the cadence.
         if !self.node.has_path(&dest_hash) {
-            self.node
-                .request_path(&dest_hash)
-                .await
-                .map_err(|e| FetchError::Node(e.to_string()))?;
             let found = self
                 .node
                 .wait_for_path(&dest_hash, PATH_BUDGET, PATH_RETRY_INTERVAL)
