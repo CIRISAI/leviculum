@@ -430,15 +430,16 @@ impl Node {
         self.inner.request_path(dest_hash).await
     }
 
-    /// Wait until a path to `dest_hash` is known, actively re-issuing a
-    /// PATH_REQUEST on a bounded cadence if it does not arrive passively.
+    /// Wait until a path to `dest_hash` is known, asking for it at once and
+    /// re-issuing the PATH_REQUEST on a bounded cadence until it arrives.
     ///
     /// Returns `Ok(true)` once a path is known, or `Ok(false)` if `timeout`
-    /// elapses first. The path arriving passively within the first
-    /// `retry_interval` never triggers a PATH_REQUEST, so the common case is
-    /// unchanged; a delayed announce (e.g. an upstream Python `rnsd` holding a
+    /// elapses first. A path we already know returns before anything is sent;
+    /// otherwise the first request goes out immediately, as the reference's
+    /// clients do, and `retry_interval` governs the repeats. The repeats are
+    /// ours: a delayed announce (e.g. an upstream Python `rnsd` holding a
     /// forwarded announce under ingress limiting, Codeberg #44) is recovered by
-    /// the explicit request, which is answered over the path-response path that
+    /// them, and the request is answered over the path-response path that
     /// bypasses the hold. Client-side only, with no medium awareness.
     pub async fn wait_for_path(
         &self,

@@ -2902,9 +2902,20 @@ impl ReticulumNode {
     /// PATH_REQUEST if it has not arrived passively within `retry_interval`.
     ///
     /// Returns `Ok(true)` as soon as `has_path` is satisfied, or `Ok(false)`
-    /// if `timeout` elapses first. The common case (path already known, or an
-    /// inbound announce installs it within the first `retry_interval`) never
-    /// emits a PATH_REQUEST, so healthy behaviour is unchanged.
+    /// if `timeout` elapses first. A path we already know costs nothing: the
+    /// `has_path` check comes first and returns before any packet is sent.
+    /// If we do not know one, the first PATH_REQUEST goes out immediately,
+    /// as the reference does (`reference/Reticulum/RNS/Transport.py` via
+    /// `reference/LXMF/LXMF/Utilities/lxmd.py:663-667`, which calls
+    /// `request_path` before its first sleep); `retry_interval` governs only
+    /// the *repeats*.
+    ///
+    /// Waiting one whole `retry_interval` before asking, as this used to,
+    /// is wrong at every budget and fatal when budget equals interval: the
+    /// deadline check fires on the same iteration the first request would
+    /// have, so nothing is ever asked. That is what made `lnpnd --status`
+    /// time out at its shipped 5 s default against a healthy node
+    /// (2026-09-20).
     ///
     /// When the passive announce is delayed the explicit PATH_REQUEST forces
     /// the upstream to answer over its path-response code path, which a Python
@@ -2918,9 +2929,9 @@ impl ReticulumNode {
     ///
     /// This is purely client-side: it issues the same PATH_REQUEST the stack
     /// already sends on demand and carries no medium awareness, so it stays
-    /// within the interface-isolation rule. `retry_interval` should be well
-    /// under `timeout` so several requests can be attempted before the
-    /// deadline.
+    /// within the interface-isolation rule. `retry_interval` may exceed
+    /// `timeout` without harm now — that only means no repeat is attempted —
+    /// but callers wanting a repeat should keep it well under the budget.
     pub async fn wait_for_path(
         &self,
         dest_hash: &leviculum_core::DestinationHash,
@@ -2929,7 +2940,10 @@ impl ReticulumNode {
     ) -> Result<bool, Error> {
         const POLL_INTERVAL: Duration = Duration::from_millis(100);
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut next_request = tokio::time::Instant::now() + retry_interval;
+        // Due now, not one interval from now: the caller is asking because it
+        // wants the path, and a request withheld until the first repeat is due
+        // is a request the smallest budgets never send at all.
+        let mut next_request = tokio::time::Instant::now();
         loop {
             if self.has_path(dest_hash) {
                 return Ok(true);

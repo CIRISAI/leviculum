@@ -18,8 +18,8 @@
 //! announced**, so no passive announce for it can ever reach the
 //! client. A plain passive poll therefore never installs the path
 //! (asserted as a control). The only mechanism that can install it is
-//! the explicit PATH_REQUEST that `wait_for_path` issues once the
-//! passive sub-window elapses: Python's `path_request_handler` finds
+//! the explicit PATH_REQUEST `wait_for_path` issues: Python's
+//! `path_request_handler` finds
 //! the destination local to daemon A and answers with a path-response
 //! announce (`Transport.py:2939-2941`), which is not subject to the
 //! `inbound()` announce-forward ingress hold. This is the code path the

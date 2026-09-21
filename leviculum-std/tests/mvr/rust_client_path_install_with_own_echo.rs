@@ -59,9 +59,9 @@ fn parse_dest_hash(hex_str: &str) -> DestinationHash {
 /// budget (Codeberg #44). The Rust side was provably innocent:
 /// `packets_received` did not tick for the held announce.
 ///
-/// The fix is client-side: the path-wait now falls back to an
-/// explicit PATH_REQUEST when the announce does not arrive
-/// passively (see `ReticulumNode::wait_for_path`). Python answers a
+/// The fix is client-side: the path-wait issues an explicit
+/// PATH_REQUEST rather than only waiting for the announce
+/// (see `ReticulumNode::wait_for_path`). Python answers a
 /// PATH_REQUEST over its path-response code path, which is not
 /// subject to the `inbound()` announce-forward hold, so the path is
 /// delivered inside the budget. This test now passes reliably.
@@ -165,9 +165,9 @@ async fn rust_client_installs_peer_path_while_own_echoes() {
     cps.push(("peer_announce_emitted", t0.elapsed()));
 
     // Wait up to 10 s for the Rust client to install the peer path.
-    // `wait_for_path` waits passively first and only falls back to an
-    // explicit PATH_REQUEST (every 1 s) if the announce is held upstream
-    // (Codeberg #44), so the healthy path is unchanged.
+    // `wait_for_path` asks for the path at once and repeats every 1 s, so
+    // an announce held upstream (Codeberg #44) is still recovered inside
+    // the budget.
     cps.push(("wait_for_path_start", t0.elapsed()));
     let installed = node
         .wait_for_path(&peer_hash, Duration::from_secs(10), Duration::from_secs(1))
