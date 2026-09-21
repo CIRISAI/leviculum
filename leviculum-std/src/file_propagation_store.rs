@@ -385,8 +385,13 @@ mod tests {
     /// the device and not the book-keeping. The same code against the
     /// platform tmpfs reads 5.9 ms in total, 27 µs median — a measurement
     /// of nothing, which is why the directory is an input.
+    ///
+    /// Nothing runs this: no tier does, and nothing in the release path
+    /// re-measures it. Run it by hand when that doc section is re-measured,
+    /// or when the write/fsync/rename/fsync path below changes — those are
+    /// the two moments its figures can go stale without anyone noticing.
     #[test]
-    #[ignore = "a measurement, and a slow one on a real disk"]
+    #[ignore = "a measurement: it asserts nothing, and needs a real disk named"]
     fn append_cost() {
         use std::time::Instant;
 

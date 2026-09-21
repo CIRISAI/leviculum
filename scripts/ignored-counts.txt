@@ -34,7 +34,19 @@
 # needs a core-side inbound Resource cancel).
 2    -p leviculum-lxmf --test direct_delivery_attempts
 
-4    -p leviculum-std --lib
+# Four of these need hardware or a live service: two RNode cases wanting a
+# board on /dev/ttyACM0, two i2p cases wanting a running i2pd SAM bridge.
+#
+# 4 -> 5 (2026-09-21): append_cost, added by 20261fbb as the evidence behind
+# docs/src/concepts/core-lock-budget.md "A durable store append is inside the
+# budget too". Like measure_send_lock_costs above it, it prints microseconds
+# and asserts nothing, so a tier that ran it would gate nothing; and its
+# default directory in an unattended run is the platform tmpfs, where fsync
+# never reaches a device and the figure is 60x cheaper than the answer. Run by
+# hand with LEVICULUM_APPEND_BENCH_DIR pointed at a real disk, whenever that
+# doc section is re-measured or the store's write/fsync/rename/fsync path
+# changes. Nothing in the release path re-measures it.
+5    -p leviculum-std --lib
 1    -p leviculum-std --doc
 9    -p leviculum-std --test mvr
 
