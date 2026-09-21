@@ -19,7 +19,7 @@ use leviculum_lxmf::msgpack;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use leviculum_std::config::Config;
 use leviculum_std::FilePropagationStore;
-use lnpnd::client::{ClientAction, ClientOptions};
+use lnpnd::client::{ClientAction, ClientOptions, DEFAULT_ACTION_TIMEOUT, DEFAULT_STATUS_TIMEOUT};
 use lnpnd::config::{
     default_config_dir, load_hash_file, loglevel_filter, parse_hash, RawConfig, EXAMPLE_CONFIG,
 };
@@ -290,7 +290,7 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
     };
     let (action, default_timeout) = if let Some(target) = &args.sync {
         match parse_hash(target.trim()) {
-            Some(hash) => (ClientAction::Sync(hash), 10.0),
+            Some(hash) => (ClientAction::Sync(hash), DEFAULT_ACTION_TIMEOUT),
             None => {
                 eprintln!("Invalid peer destination hash: {target}");
                 return ExitCode::from(203);
@@ -298,7 +298,7 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
         }
     } else if let Some(target) = &args.unpeer {
         match parse_hash(target.trim()) {
-            Some(hash) => (ClientAction::Unpeer(hash), 10.0),
+            Some(hash) => (ClientAction::Unpeer(hash), DEFAULT_ACTION_TIMEOUT),
             None => {
                 eprintln!("Invalid peer destination hash: {target}");
                 return ExitCode::from(203);
@@ -310,10 +310,13 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
                 show_status: args.status,
                 show_peers: args.peers,
             },
-            5.0,
+            DEFAULT_STATUS_TIMEOUT,
         )
     };
-    let timeout = Duration::from_secs_f64(args.timeout.unwrap_or(default_timeout).max(0.1));
+    let timeout = match args.timeout {
+        Some(seconds) => Duration::from_secs_f64(seconds.max(0.1)),
+        None => default_timeout,
+    };
     // A per-invocation client state directory: the client learns paths
     // and identities but must not collide with a running daemon's store.
     let storage_dir = std::env::temp_dir().join(format!("lnpnd-client-{}", std::process::id()));

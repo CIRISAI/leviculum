@@ -46,6 +46,24 @@ pub struct ClientOptions {
     pub timeout: Duration,
 }
 
+/// The shipped budget for `--status` / `--peers`, matching the reference's
+/// `get_status(..., timeout=5)` (`reference/LXMF/LXMF/Utilities/lxmd.py:682`).
+pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The shipped budget for `--sync` / `--break`. The reference passes no
+/// timeout to `_request_sync` / `_request_unpeer` (`lxmd.py:509`, `:580`),
+/// whose own default is 10 s.
+pub const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the client re-asks for the control path while waiting for it.
+///
+/// The reference asks exactly once and then polls (`lxmd.py:663-667`); the
+/// repeat is ours, for the case Codeberg #44 describes. It must stay well
+/// under the budget, and the budget must never be so small that the *first*
+/// request is the one that falls outside it — see the
+/// `status_resolves_the_control_path_at_the_shipped_default_budget` test.
+pub const PATH_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// The reference's exit codes (`lxmd.py:516-578`, `:689-697`).
 const EXIT_TIMEOUT: u8 = 200;
 const EXIT_NO_IDENTITY: u8 = 203;
@@ -95,6 +113,25 @@ pub async fn run(options: ClientOptions, action: ClientAction) -> u8 {
     code
 }
 
+/// Resolve a path to the control destination, exactly as every client
+/// action resolves it.
+///
+/// Public because it is what the shipped defaults have to survive, and a
+/// test that re-types the budget instead of calling this proves nothing
+/// about the binary an operator runs.
+pub async fn resolve_control_path(
+    node: &leviculum_std::ReticulumNode,
+    control_hash: &DestinationHash,
+    timeout: Duration,
+) -> bool {
+    if node.has_path(control_hash) {
+        return true;
+    }
+    node.wait_for_path(control_hash, timeout, PATH_RETRY_INTERVAL)
+        .await
+        .unwrap_or(false)
+}
+
 async fn query(
     node: &leviculum_std::ReticulumNode,
     options: &ClientOptions,
@@ -141,14 +178,8 @@ async fn query(
     let name_hash = Destination::compute_name_hash(APP_NAME, &CONTROL_ASPECTS);
     let control_hash = Destination::compute_destination_hash(&name_hash, remote_identity.hash());
 
-    if !node.has_path(&control_hash) {
-        let found = node
-            .wait_for_path(&control_hash, options.timeout, Duration::from_secs(5))
-            .await
-            .unwrap_or(false);
-        if !found {
-            return fail(EXIT_TIMEOUT, &timeout_exit);
-        }
+    if !resolve_control_path(node, &control_hash, options.timeout).await {
+        return fail(EXIT_TIMEOUT, &timeout_exit);
     }
 
     let signing_key = remote_identity.ed25519_verifying().to_bytes();
