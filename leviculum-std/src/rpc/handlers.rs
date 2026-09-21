@@ -3592,12 +3592,18 @@ mod tests {
         assert_eq!(get("packet_cache", "entries"), Value::I64(5));
         assert_eq!(get("packet_cache_prev", "entries"), Value::I64(0));
 
-        // A ceiling where one is enforced, an explicit None where none is.
+        // Every row carries the ceiling its collection is actually held to
+        // (Codeberg #421). The dedup cache reports the generation ceiling it
+        // rotates at, which is FileStorage's own cap and not the inner
+        // MemoryStorage's; the transport tables report theirs.
         assert_eq!(
             get("packet_cache", "capacity"),
             Value::I64(crate::storage::FILE_STORAGE_PACKET_HASH_CAP as i64 / 2)
         );
-        assert_eq!(get("path_table", "capacity"), Value::None);
+        assert_eq!(
+            get("path_table", "capacity"),
+            Value::I64(leviculum_core::memory_storage::TableCaps::desktop().path_cap as i64)
+        );
         assert_eq!(get("path_table", "entries"), Value::I64(0));
 
         let _ = std::fs::remove_dir_all(&tmp);

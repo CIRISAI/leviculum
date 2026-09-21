@@ -111,7 +111,8 @@ pub fn collection_fields(source: &str, struct_name: &str) -> Option<Vec<String>>
 /// Type names that make a field a collection for census purposes. A field
 /// whose type mentions one of these holds an unbounded-in-principle number of
 /// entries and therefore owes the report a count.
-const COLLECTION_TYPES: [&str; 10] = [
+const COLLECTION_TYPES: [&str; 11] = [
+    "BoundedMap",
     "BTreeMap",
     "BTreeSet",
     "VecDeque",

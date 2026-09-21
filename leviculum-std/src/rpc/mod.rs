@@ -1373,9 +1373,10 @@ mod tests {
         }
 
         // The collection census as a JSON reader sees it: a count per
-        // collection, the dedup cache as its two generations, and a ceiling
-        // that is a number where one is enforced and `null` where none is —
-        // `null`, not 0, which would read as "full".
+        // collection, the dedup cache as its two generations, and the ceiling
+        // each one is held to. Since Codeberg #421 no transport table answers
+        // `null` here — a `null` would mean a table whose size the
+        // neighbours' traffic chooses.
         let collections = json["collections"].as_array().unwrap();
         let row = |name: &str| {
             collections
@@ -1384,7 +1385,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must be counted: {collections:?}"))
         };
         assert_eq!(row("path_table")["entries"], serde_json::json!(1));
-        assert_eq!(row("path_table")["capacity"], serde_json::Value::Null);
+        assert!(
+            row("path_table")["capacity"].as_i64().unwrap() > 0,
+            "every transport table reports the ceiling it is held to"
+        );
         assert_eq!(row("packet_cache")["entries"], serde_json::json!(0));
         assert_eq!(row("packet_cache_prev")["entries"], serde_json::json!(0));
         assert!(

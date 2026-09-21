@@ -3,16 +3,30 @@
 //! `MemoryStorage` is the production Storage implementation for embedded targets
 //! and the default test storage for core tests. It is NOT `#[cfg(test)]`, it is
 //! always available.
+//!
+//! # Every table has a ceiling (Codeberg #421)
+//!
+//! Until #421 the caps this module advertised were three: the packet dedup
+//! generations, the known identities and the path-request tag ring. Every
+//! other table was bounded by expiry alone, which means its real ceiling was
+//! arrival rate times expiry window — a number the neighbours choose, not the
+//! operator. A field node held 73 901 reverse entries in one 8 minute window;
+//! doubling its traffic doubled the table.
+//!
+//! Now every collection is held to a [`TableCaps`] entry, and a full table
+//! evicts rather than refuses: the new entry always lands. A node that stops
+//! learning because a table filled would be a worse failure than forgetting
+//! something the protocol re-derives from a timeout or a path request.
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::bounded_map::BoundedMap;
 use crate::constants::{
     HASHLIST_MAXSIZE, MAX_PATH_REQUEST_TAGS, RATCHET_SIZE, RECEIPT_RETENTION_MS,
     TRUNCATED_HASHBYTES,
@@ -35,15 +49,161 @@ const COMPACT_PACKET_HASH_CAP: usize = 10_000;
 /// Compact identity capacity for constrained devices.
 const COMPACT_IDENTITY_CAP: usize = 1_000;
 
+/// Per-table ceilings (Codeberg #421).
+///
+/// Nine numbers cover twenty collections: tables keyed by the same population
+/// share a knob, because two different ceilings on one population means the
+/// tighter one silently truncates the other and no operator can see which.
+///
+/// # How the defaults were derived
+///
+/// Every figure below is `entries × modelled bytes`, where the modelled bytes
+/// are the ones [`MemoryStorage::diagnostic_dump`] prints: key + `size_of` of
+/// the value + any heap the value owns + the [`BoundedMap`] order index (a
+/// `u64` sequence and a second copy of the key, 24 bytes for a 16-byte hash),
+/// all times the 3× `BTreeMap` overhead factor this module has used since
+/// #174. They are checkable, not chosen for looking round.
+///
+/// | table | bytes/entry | desktop | compact |
+/// |---|---|---|---|
+/// | `path_table` | 480 (4-blob window) | 32 768 → 15.7 MB | 8 192 → 3.9 MB |
+/// | `path_states` | 123 | 32 768 → 4.0 MB | 8 192 → 1.0 MB |
+/// | `path_requests` | 144 | 32 768 → 4.7 MB | 8 192 → 1.2 MB |
+/// | `discovery_path_requests` | 168 | 32 768 → 5.5 MB | 8 192 → 1.4 MB |
+/// | `reverse_table` | 192 | 200 000 → 38.4 MB | 16 384 → 3.1 MB |
+/// | `link_table` | 384 | 8 192 → 3.1 MB | 1 024 → 0.4 MB |
+/// | `announce_table` | 960 (200 B packet) | 16 384 → 15.7 MB | 2 048 → 2.0 MB |
+/// | `announce_cache` | 792 (200 B packet) | 50 000 → 39.6 MB | 4 096 → 3.2 MB |
+/// | `announce_rate_table` | 192 | 50 000 → 9.6 MB | 4 096 → 0.8 MB |
+/// | `known_ratchets` | 240 | 50 000 → 12.0 MB | 4 096 → 1.0 MB |
+/// | `known_dest_use` | 168 | 50 000 → 8.4 MB | 4 096 → 0.7 MB |
+/// | `local_client_dest_map` | 168 | 4 096 → 0.7 MB | 1 024 → 0.2 MB |
+/// | `local_client_known_dests` | 144 | 4 096 → 0.6 MB | 1 024 → 0.1 MB |
+/// | `dest_ratchet_keys` | 384 | 4 096 → 1.6 MB | 1 024 → 0.4 MB |
+/// | `receipts` | 384 | 1 024 → 0.4 MB | 1 024 → 0.4 MB |
+/// | `known_identities` | 1 656 | 50 000 → 82.8 MB | 1 000 → 1.7 MB |
+/// | packet dedup (both generations) | 96 | 1 000 000 → 96 MB | 10 000 → 1.0 MB |
+///
+/// Desktop totals about 339 MB, of which 179 MB is the two caps that already
+/// existed (dedup and identities). Compact totals about 22 MB, which is what
+/// makes it fit a Raspberry Pi Zero 2W: 512 MB shared with the GPU, no swap.
+/// A path table whose blob windows are all full (64 blobs, the Python
+/// `MAX_RANDOM_BLOBS`) adds 59 MB desktop / 15 MB compact on top; that is the
+/// worst case, not the working set.
+///
+/// # Where the entry counts come from
+///
+/// * `reverse_table` 200 000 is 2.7× the 73 901 entries #421 measured on a
+///   node forwarding ~154 packets per second through an 8 minute expiry
+///   window. Reaching it takes sustained traffic at more than twice the
+///   busiest node we have ever run.
+/// * `path_table` 32 768 is 1.5× the 22 362 paths the largest public-mesh
+///   node we run has held. Its expiry is seven days, so on any node up for
+///   less than a week the size ceiling is the only one there is.
+/// * `link_table` 8 192 is 9× the 892 links the same measurement saw.
+/// * the destination-keyed tables take `known_identities`' existing 50 000,
+///   because they are keyed by the same set of remote destinations.
+/// * `receipts` 1 024 is Python's `Transport.MAX_RECEIPTS` (Transport.py:95),
+///   the one cap the reference has and we did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCaps {
+    /// Packet dedup hashes across both generations; a generation rotates at
+    /// half this.
+    pub packet_hash_cap: usize,
+    /// `known_identities`.
+    pub identity_cap: usize,
+    /// `path_table`, `path_states`, `path_requests`,
+    /// `discovery_path_requests` — all keyed by a destination we have or want
+    /// a route to.
+    pub path_cap: usize,
+    /// `reverse_table`.
+    pub reverse_cap: usize,
+    /// `link_table`.
+    pub link_cap: usize,
+    /// `announce_table`, the pending-rebroadcast queue.
+    pub announce_cap: usize,
+    /// `announce_cache`, `announce_rate_table`, `known_ratchets`,
+    /// `known_dest_use` — all keyed by a remote destination we have heard
+    /// announce.
+    pub destination_cap: usize,
+    /// `local_client_dest_map`, `local_client_known_dests`,
+    /// `dest_ratchet_keys` — all driven by locally attached clients.
+    pub local_dest_cap: usize,
+    /// `receipts`.
+    pub receipt_cap: usize,
+}
+
+impl TableCaps {
+    /// Desktop/server profile. See the type documentation for the arithmetic.
+    pub const fn desktop() -> Self {
+        Self {
+            packet_hash_cap: HASHLIST_MAXSIZE,
+            identity_cap: DEFAULT_IDENTITY_CAP,
+            path_cap: 32_768,
+            reverse_cap: 200_000,
+            link_cap: 8_192,
+            announce_cap: 16_384,
+            destination_cap: DEFAULT_IDENTITY_CAP,
+            local_dest_cap: 4_096,
+            receipt_cap: MAX_RECEIPTS,
+        }
+    }
+
+    /// Constrained profile, sized to leave a Raspberry Pi Zero 2W usable.
+    pub const fn compact() -> Self {
+        Self {
+            packet_hash_cap: COMPACT_PACKET_HASH_CAP,
+            identity_cap: COMPACT_IDENTITY_CAP,
+            path_cap: 8_192,
+            reverse_cap: 16_384,
+            link_cap: 1_024,
+            announce_cap: 2_048,
+            destination_cap: 4_096,
+            local_dest_cap: 1_024,
+            receipt_cap: MAX_RECEIPTS,
+        }
+    }
+}
+
+impl Default for TableCaps {
+    fn default() -> Self {
+        Self::desktop()
+    }
+}
+
+/// Receipts kept at once, Python's `Transport.MAX_RECEIPTS`
+/// (`reference/Reticulum/RNS/Transport.py:95`).
+///
+/// Not profile-dependent: it is a reference number, it is the same on both
+/// sides of the mesh, and 1 024 outstanding receipts is already far more than
+/// any node we run has in flight. We had only the 30 second
+/// [`RECEIPT_RETENTION_MS`] window, which under load is no bound at all.
+pub const MAX_RECEIPTS: usize = 1_024;
+
+/// Bytes a [`BoundedMap`]'s FIFO order index costs per live entry: the `u64`
+/// insertion sequence it is keyed by, plus the second copy of the key it maps
+/// to. 24 bytes for a 16-byte destination hash.
+///
+/// The diagnostic dump adds this to every bounded row. A row that priced only
+/// the entry would under-report by a fifth on the reverse table, and this dump
+/// is read to attribute a resident set — a row that under-reports is worse
+/// than no row, because it is believed.
+const fn order_index_bytes(key_bytes: usize) -> usize {
+    core::mem::size_of::<u64>() + key_bytes
+}
+
+/// [`order_index_bytes`] for the 16-byte destination hash every table but
+/// `local_client_dest_map` is keyed by.
+const HASH_ORDER_BYTES: usize = order_index_bytes(TRUNCATED_HASHBYTES);
+
 /// In-memory storage with configurable per-collection capacity limits.
 ///
 /// Uses BTreeMap/BTreeSet for all collections. Not persistent, all data is
 /// lost when the process exits. For persistent storage, use `FileStorage`
 /// in `leviculum-std`.
 pub struct MemoryStorage {
-    // Capacity limits
-    packet_hash_cap: usize,
-    identity_cap: usize,
+    /// Ceilings every collection below is held to.
+    caps: TableCaps,
 
     // Packet dedup
     /// Current generation of packet hashes
@@ -52,47 +212,160 @@ pub struct MemoryStorage {
     packet_cache_prev: BTreeSet<[u8; 32]>,
 
     // Path table
-    path_table: BTreeMap<[u8; TRUNCATED_HASHBYTES], PathEntry>,
-    path_states: BTreeMap<[u8; TRUNCATED_HASHBYTES], PathState>,
+    /// Routes to destinations.
+    ///
+    /// **Eviction: oldest first, refreshed on re-announce.** Dropping an
+    /// entry costs one path request — recoverable, but not free, so the cap
+    /// is set above the largest mesh we have measured. Plain FIFO would be
+    /// wrong here on its own, because a stable path installed on day one
+    /// would be evicted ahead of a churning one installed a minute ago;
+    /// refresh-on-re-insert fixes that, since every announce for a live
+    /// destination re-inserts its path and moves it to the back. The seven
+    /// day expiry never fires on a node up for less than a week, so this
+    /// ceiling is usually the only one acting.
+    path_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], PathEntry>,
+    /// Per-path quality state.
+    ///
+    /// **Eviction: oldest first.** Bounded by `path_cap` because
+    /// `clean_stale_path_metadata` already holds it to the path table's key
+    /// set; a dropped entry falls back to `PathState::Unknown`, which is the
+    /// state a path starts in.
+    path_states: BoundedMap<[u8; TRUNCATED_HASHBYTES], PathState>,
 
     // Reverse table
-    reverse_table: BTreeMap<[u8; TRUNCATED_HASHBYTES], ReverseEntry>,
+    /// Where a reply to a forwarded packet has to leave by.
+    ///
+    /// **Eviction: oldest first.** Dropping an entry loses one reply, so the
+    /// cap has to be large enough that ordinary forwarding never reaches it
+    /// — 200 000 against a measured 73 901 (#421). Oldest-first is right
+    /// despite that cost: the 8 minute expiry already declares old entries
+    /// worthless, so the oldest live entry is the one closest to being
+    /// dropped anyway. Entries are keyed per packet hash and never
+    /// re-inserted, so FIFO here is plain arrival order.
+    reverse_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], ReverseEntry>,
 
     // Link table
-    link_table: BTreeMap<[u8; TRUNCATED_HASHBYTES], LinkEntry>,
+    /// Links routed through this node.
+    ///
+    /// **Eviction: unvalidated first, then oldest.** Not plain FIFO, because
+    /// dropping a live link's entry breaks that link, while an unvalidated
+    /// entry is a link request whose proof has not arrived and may never —
+    /// which is also the shape of a flood. So an overflow drops the oldest
+    /// unvalidated entry it can find and only falls back to the oldest
+    /// validated one when every candidate is live. Pinned by
+    /// `link_table_prefers_unvalidated_entries_on_overflow`.
+    link_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], LinkEntry>,
 
     // Announce table
-    announce_table: BTreeMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry>,
-    announce_cache: BTreeMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>>,
-    announce_rate_table: BTreeMap<[u8; TRUNCATED_HASHBYTES], AnnounceRateEntry>,
+    /// Announces queued for rebroadcast.
+    ///
+    /// **Eviction: oldest first.** A dropped entry is a rebroadcast that
+    /// does not happen; the announcing destination re-announces on its own
+    /// cadence, and the neighbours that would have received it hear the
+    /// original from somewhere else or on the next announce. This is a work
+    /// queue, so oldest-first also drops the entry most likely to have
+    /// missed its retransmit window already.
+    announce_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], AnnounceEntry>,
+    /// Raw announce bytes, re-sent to answer a path request.
+    ///
+    /// **Eviction: oldest unretained first, then oldest.** Not plain FIFO: a
+    /// retained entry (Codeberg #84, Python's `known_destinations[dest][4] ==
+    /// -1`) is one an application pinned, and `clean_announce_cache` already
+    /// refuses to reap it, so a size overflow must not do by the back door
+    /// what the time sweep refuses to do. Refresh-on-re-insert makes the
+    /// unretained order least-recently-announced rather than oldest-ever.
+    /// Pinned by `announce_cache_evicts_unretained_entries_first`.
+    announce_cache: BoundedMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>>,
+    /// Per-destination announce rate state.
+    ///
+    /// **Eviction: oldest first.** Dropping an entry forgets that a
+    /// destination has been announcing too fast, which costs at most one
+    /// extra rebroadcast before the state rebuilds; the entry is re-inserted
+    /// on its next announce anyway.
+    announce_rate_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], AnnounceRateEntry>,
 
     // Receipts
-    receipts: BTreeMap<[u8; TRUNCATED_HASHBYTES], PacketReceipt>,
+    /// Sent packets awaiting proof.
+    ///
+    /// **Eviction: terminal receipts first, then oldest — and the dropped
+    /// one still gets its timeout.** Not plain FIFO: a `Delivered`/`Failed`
+    /// receipt is only being kept for the [`RECEIPT_RETENTION_MS`] grace
+    /// window and its outcome already reached the application, so it is free
+    /// to drop, while a `Sent` receipt still owes its sender an answer.
+    /// When every candidate is still pending the oldest goes, and it is
+    /// parked in `culled_receipts` so the next `expire_receipts` reports it
+    /// as a timeout — which is exactly what Python does on the same overflow
+    /// (`Transport.py:558-561` sets `timeout = -1` and calls
+    /// `check_timeout()`). Pinned by
+    /// `receipts_evict_terminal_first_and_cull_pending_with_a_timeout`.
+    receipts: BoundedMap<[u8; TRUNCATED_HASHBYTES], PacketReceipt>,
+    /// Pending receipts dropped by a size overflow, waiting to be reported as
+    /// timeouts by the next `expire_receipts`. Bounded by `receipt_cap`: a
+    /// caller that never sweeps must not grow this instead of the table.
+    culled_receipts: VecDeque<PacketReceipt>,
 
     // Path requests
-    path_requests: BTreeMap<[u8; TRUNCATED_HASHBYTES], u64>,
+    /// When we last asked for a path to a destination.
+    ///
+    /// **Eviction: oldest first.** Dropping an entry lifts the rate limit on
+    /// one destination's path requests — one extra request on the air, which
+    /// is what the table exists to avoid but not a correctness problem.
+    path_requests: BoundedMap<[u8; TRUNCATED_HASHBYTES], u64>,
     path_request_tags: VecDeque<[u8; 32]>,
     path_request_tag_set: BTreeSet<[u8; 32]>,
 
     // Known identities
-    known_identities: BTreeMap<[u8; TRUNCATED_HASHBYTES], Identity>,
+    /// Public keys of destinations we have heard announce.
+    ///
+    /// **Eviction: oldest first, refreshed on re-announce.** This table was
+    /// already capped, but it evicted "the first key", i.e. the numerically
+    /// smallest destination hash — deterministic, unrelated to age, and it
+    /// meant a destination whose hash starts with 0x00 could never stay
+    /// known. FIFO with refresh drops the least recently re-announced
+    /// instead. A dropped identity is re-learned from the next announce.
+    known_identities: BoundedMap<[u8; TRUNCATED_HASHBYTES], Identity>,
 
     // Known ratchets (sender-side cache)
-    known_ratchets: BTreeMap<[u8; TRUNCATED_HASHBYTES], ([u8; RATCHET_SIZE], u64)>,
+    /// **Eviction: oldest first, refreshed on re-announce.** A dropped
+    /// ratchet means the next packet to that destination goes out under the
+    /// long-term key, which is a privacy loss, not a delivery failure, and
+    /// the next announce restores it.
+    known_ratchets: BoundedMap<[u8; TRUNCATED_HASHBYTES], ([u8; RATCHET_SIZE], u64)>,
 
     // Local client destinations (per-interface tracking)
-    local_client_dest_map: BTreeMap<usize, BTreeSet<[u8; TRUNCATED_HASHBYTES]>>,
+    /// Destinations each locally attached client has registered, keyed by
+    /// `(interface index, destination hash)` so the pair carries one FIFO
+    /// position — the previous map-of-sets had no order to evict by at all.
+    ///
+    /// **Eviction: oldest first.** Dropping an entry means a local client's
+    /// destination stops being recognised as local until it re-registers.
+    /// The cap exists so a looping local client cannot grow the daemon
+    /// without bound; at 4 096 it is far above any real client's
+    /// registration count.
+    local_client_dest_map: BoundedMap<(usize, [u8; TRUNCATED_HASHBYTES]), ()>,
 
     // Local client known destinations (persist across disconnects)
-    local_client_known_dests: BTreeMap<[u8; TRUNCATED_HASHBYTES], u64>,
+    /// **Eviction: oldest first.** Same population and same argument as
+    /// `local_client_dest_map`; an entry dropped early is re-added the next
+    /// time the client is seen.
+    local_client_known_dests: BoundedMap<[u8; TRUNCATED_HASHBYTES], u64>,
 
     // Discovery path requests
     /// Pending discovery path requests: dest_hash → (requesting_interface, timeout_ms)
     /// Removal: expire_discovery_path_requests() or remove_discovery_path_request()
-    discovery_path_requests: BTreeMap<[u8; TRUNCATED_HASHBYTES], (usize, u64)>,
+    ///
+    /// **Eviction: oldest first, and no refresh** — the table's own rule is
+    /// that the first request wins (Python `Transport.py:2793-2794`), so a
+    /// repeat request must not move the entry or change its interface.
+    /// Remote peers drive this one, which is why it gets a ceiling at all.
+    discovery_path_requests: BoundedMap<[u8; TRUNCATED_HASHBYTES], (usize, u64)>,
 
     // Sender-side ratchet keys (destination private keys)
-    dest_ratchet_keys: BTreeMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>>,
+    /// **Eviction: oldest first.** These are our own destinations' ratchet
+    /// private keys, so the population is bounded by how many destinations
+    /// this node creates; the cap is a backstop against a client that
+    /// creates them in a loop.
+    dest_ratchet_keys: BoundedMap<[u8; TRUNCATED_HASHBYTES], Vec<u8>>,
 
     // Known-destination cache lifecycle (Codeberg #84).
     // Mirrors Python's known_destinations[dest][4] use-state field: an entry is
@@ -100,7 +373,12 @@ pub struct MemoryStorage {
     // -1). Absence means "never used" (Python 0). Keyed by destination hash; the
     // authoritative "known" set is announce_cache. Retained entries survive
     // clean_announce_cache even without a path.
-    known_dest_use: BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestUse>,
+    //
+    // **Eviction: oldest unretained first, then oldest** — the same argument
+    // as `announce_cache`, whose lifecycle this table describes: evicting a
+    // `Retained` marker would silently unpin a destination the application
+    // asked to keep.
+    known_dest_use: BoundedMap<[u8; TRUNCATED_HASHBYTES], KnownDestUse>,
 }
 
 /// Cache-lifecycle state for a known destination, mirroring the fifth field of
@@ -116,39 +394,62 @@ enum KnownDestUse {
 impl MemoryStorage {
     /// Create MemoryStorage with generous defaults (suitable for Linux/desktop)
     pub fn with_defaults() -> Self {
-        Self {
-            packet_hash_cap: HASHLIST_MAXSIZE,
-            identity_cap: DEFAULT_IDENTITY_CAP,
-            packet_cache: BTreeSet::new(),
-            packet_cache_prev: BTreeSet::new(),
-            path_table: BTreeMap::new(),
-            path_states: BTreeMap::new(),
-            reverse_table: BTreeMap::new(),
-            link_table: BTreeMap::new(),
-            announce_table: BTreeMap::new(),
-            announce_cache: BTreeMap::new(),
-            announce_rate_table: BTreeMap::new(),
-            receipts: BTreeMap::new(),
-            path_requests: BTreeMap::new(),
-            path_request_tags: VecDeque::new(),
-            path_request_tag_set: BTreeSet::new(),
-            known_identities: BTreeMap::new(),
-            known_ratchets: BTreeMap::new(),
-            local_client_dest_map: BTreeMap::new(),
-            local_client_known_dests: BTreeMap::new(),
-            discovery_path_requests: BTreeMap::new(),
-            dest_ratchet_keys: BTreeMap::new(),
-            known_dest_use: BTreeMap::new(),
-        }
+        Self::with_caps(TableCaps::desktop())
     }
 
     /// Create MemoryStorage with small caps (suitable for constrained devices)
     pub fn compact() -> Self {
+        Self::with_caps(TableCaps::compact())
+    }
+
+    /// Create MemoryStorage with explicit per-table ceilings (Codeberg #421).
+    ///
+    /// The caps are fixed at construction: a `BoundedMap` is built around its
+    /// ceiling, and a daemon that could change one at runtime would have to
+    /// decide what to do with the entries already over it. The operator sets
+    /// them in the config file, which is read before the node is built.
+    pub fn with_caps(caps: TableCaps) -> Self {
         Self {
-            packet_hash_cap: COMPACT_PACKET_HASH_CAP,
-            identity_cap: COMPACT_IDENTITY_CAP,
-            ..Self::with_defaults()
+            caps,
+            packet_cache: BTreeSet::new(),
+            packet_cache_prev: BTreeSet::new(),
+            path_table: BoundedMap::new(caps.path_cap),
+            path_states: BoundedMap::new(caps.path_cap),
+            reverse_table: BoundedMap::new(caps.reverse_cap),
+            link_table: BoundedMap::new(caps.link_cap),
+            announce_table: BoundedMap::new(caps.announce_cap),
+            announce_cache: BoundedMap::new(caps.destination_cap),
+            announce_rate_table: BoundedMap::new(caps.destination_cap),
+            receipts: BoundedMap::new(caps.receipt_cap),
+            culled_receipts: VecDeque::new(),
+            path_requests: BoundedMap::new(caps.path_cap),
+            path_request_tags: VecDeque::new(),
+            path_request_tag_set: BTreeSet::new(),
+            known_identities: BoundedMap::new(caps.identity_cap),
+            known_ratchets: BoundedMap::new(caps.destination_cap),
+            local_client_dest_map: BoundedMap::new(caps.local_dest_cap),
+            local_client_known_dests: BoundedMap::new(caps.local_dest_cap),
+            discovery_path_requests: BoundedMap::new(caps.path_cap),
+            dest_ratchet_keys: BoundedMap::new(caps.local_dest_cap),
+            known_dest_use: BoundedMap::new(caps.destination_cap),
         }
+    }
+
+    /// The ceilings this storage was built with.
+    pub fn caps(&self) -> TableCaps {
+        self.caps
+    }
+
+    /// Write a known-destination use marker, evicting an unpinned marker
+    /// before a `Retained` one.
+    ///
+    /// Same argument as `announce_cache`, whose lifecycle this table
+    /// describes: a size overflow that dropped a `Retained` marker would
+    /// silently unpin a destination the application asked to keep, and the
+    /// next `clean_announce_cache` would then reap its cached announce.
+    fn set_known_dest_use(&mut self, dest: [u8; TRUNCATED_HASHBYTES], use_state: KnownDestUse) {
+        self.known_dest_use
+            .insert_preferring(dest, use_state, |_, v| !matches!(v, KnownDestUse::Retained));
     }
 
     // Test convenience methods
@@ -190,6 +491,7 @@ impl MemoryStorage {
         self.announce_cache.clear();
         self.announce_rate_table.clear();
         self.receipts.clear();
+        self.culled_receipts.clear();
         self.path_requests.clear();
         self.path_request_tags.clear();
         self.path_request_tag_set.clear();
@@ -284,7 +586,8 @@ impl MemoryStorage {
         let n = self.path_table.len();
         let mut raw = 0u64;
         for entry in self.path_table.values() {
-            raw += (TRUNCATED_HASHBYTES
+            raw += (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
                 + core::mem::size_of::<PathEntry>()
                 + entry.random_blobs.capacity() * crate::constants::RANDOM_HASHBYTES)
                 as u64;
@@ -299,7 +602,8 @@ impl MemoryStorage {
 
         // path_states: BTreeMap<[u8; 16], PathState>, 3x
         let n = self.path_states.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<PathState>())) as u64;
+        let raw = (n * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<PathState>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -310,7 +614,9 @@ impl MemoryStorage {
 
         // reverse_table: BTreeMap<[u8; 16], ReverseEntry>, 3x
         let n = self.reverse_table.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<ReverseEntry>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<ReverseEntry>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -324,7 +630,8 @@ impl MemoryStorage {
         // costs the same whether or not a proof ever arrived; the old model
         // added it conditionally and under-priced every unvalidated link.
         let n = self.link_table.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<LinkEntry>())) as u64;
+        let raw = (n * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<LinkEntry>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -340,7 +647,8 @@ impl MemoryStorage {
         let n = self.announce_table.len();
         let mut raw = 0u64;
         for entry in self.announce_table.values() {
-            raw += (TRUNCATED_HASHBYTES
+            raw += (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
                 + core::mem::size_of::<AnnounceEntry>()
                 + entry.raw_packet.capacity()) as u64;
         }
@@ -356,7 +664,10 @@ impl MemoryStorage {
         let n = self.announce_cache.len();
         let mut raw = 0u64;
         for v in self.announce_cache.values() {
-            raw += (TRUNCATED_HASHBYTES + core::mem::size_of::<Vec<u8>>() + v.capacity()) as u64;
+            raw += (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
+                + core::mem::size_of::<Vec<u8>>()
+                + v.capacity()) as u64;
         }
         let est = raw * 3;
         total += est;
@@ -368,7 +679,9 @@ impl MemoryStorage {
 
         // announce_rate_table: BTreeMap<[u8; 16], AnnounceRateEntry>, 3x
         let n = self.announce_rate_table.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<AnnounceRateEntry>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<AnnounceRateEntry>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -379,7 +692,9 @@ impl MemoryStorage {
 
         // receipts: BTreeMap<[u8; 16], PacketReceipt>, 3x
         let n = self.receipts.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<PacketReceipt>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<PacketReceipt>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -388,9 +703,23 @@ impl MemoryStorage {
             n, raw, est
         );
 
+        // culled_receipts: VecDeque<PacketReceipt>, 1x. Pending receipts a
+        // size overflow dropped, held only until the next expiry sweep
+        // reports them as timeouts.
+        let n = self.culled_receipts.len();
+        let raw = (n * core::mem::size_of::<PacketReceipt>()) as u64;
+        let est = raw;
+        total += est;
+        let _ = writeln!(
+            s,
+            "culled_receipts: {} entries, raw {} bytes, estimated {} bytes (VecDeque 1x)",
+            n, raw, est
+        );
+
         // path_requests: BTreeMap<[u8; 16], u64>, 3x
         let n = self.path_requests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
+        let raw =
+            (n * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -439,7 +768,8 @@ impl MemoryStorage {
         // worse than no row, because it is believed.
         // `diagnostic_model_tests` holds each row to it.
         let n = self.known_identities.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>())) as u64;
+        let raw = (n * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -450,8 +780,10 @@ impl MemoryStorage {
 
         // known_ratchets: BTreeMap<[u8; 16], ([u8; 32], u64)>, 3x
         let n = self.known_ratchets.len();
-        let raw =
-            (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<([u8; RATCHET_SIZE], u64)>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
+                + core::mem::size_of::<([u8; RATCHET_SIZE], u64)>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -460,24 +792,28 @@ impl MemoryStorage {
             n, raw, est
         );
 
-        // local_client_dest_map: BTreeMap<usize, BTreeSet<[u8; 16]>>, 3x
-        let n: usize = self.local_client_dest_map.values().map(|s| s.len()).sum();
-        let raw = (n * TRUNCATED_HASHBYTES
-            + self.local_client_dest_map.len()
-                * (core::mem::size_of::<usize>()
-                    + core::mem::size_of::<BTreeSet<[u8; TRUNCATED_HASHBYTES]>>()))
+        // local_client_dest_map: BoundedMap<(usize, [u8; 16]), ()>, 3x.
+        // Keyed by the (interface, destination) pair since #421, so a
+        // destination costs its key and its order-index slot and nothing
+        // else; the map-of-sets this replaced also charged a BTreeSet header
+        // per interface.
+        let n = self.local_client_dest_map.len();
+        let raw = (n
+            * (core::mem::size_of::<(usize, [u8; TRUNCATED_HASHBYTES])>()
+                + order_index_bytes(core::mem::size_of::<(usize, [u8; TRUNCATED_HASHBYTES])>())))
             as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
             s,
-            "local_client_dest_map: {} ifaces, {} dest entries, raw {} bytes, estimated {} bytes (BTreeMap 3x)",
-            self.local_client_dest_map.len(), n, raw, est
+            "local_client_dest_map: {} dest entries, raw {} bytes, estimated {} bytes (BTreeMap 3x)",
+            n, raw, est
         );
 
         // local_client_known_dests: BTreeMap<[u8; 16], u64>, 3x
         let n = self.local_client_known_dests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
+        let raw =
+            (n * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -488,7 +824,9 @@ impl MemoryStorage {
 
         // discovery_path_requests: BTreeMap<[u8; 16], (usize, u64)>, 3x
         let n = self.discovery_path_requests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<(usize, u64)>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<(usize, u64)>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -501,7 +839,10 @@ impl MemoryStorage {
         let n = self.dest_ratchet_keys.len();
         let mut raw = 0u64;
         for v in self.dest_ratchet_keys.values() {
-            raw += (TRUNCATED_HASHBYTES + core::mem::size_of::<Vec<u8>>() + v.capacity()) as u64;
+            raw += (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
+                + core::mem::size_of::<Vec<u8>>()
+                + v.capacity()) as u64;
         }
         let est = raw * 3;
         total += est;
@@ -513,7 +854,9 @@ impl MemoryStorage {
 
         // known_dest_use: BTreeMap<[u8; 16], KnownDestUse>, 3x
         let n = self.known_dest_use.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<KnownDestUse>())) as u64;
+        let raw = (n
+            * (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<KnownDestUse>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -540,8 +883,7 @@ impl MemoryStorage {
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
     ) -> bool {
         self.local_client_dest_map
-            .get(&iface_id)
-            .is_some_and(|set| set.contains(dest_hash))
+            .contains_key(&(iface_id, *dest_hash))
     }
 
     /// Test-only: check if a destination hash is in the known-dest set
@@ -559,7 +901,7 @@ impl Storage for MemoryStorage {
     fn add_packet_hash(&mut self, hash: [u8; 32]) {
         self.packet_cache.insert(hash);
         // Two-generation rotation: when current exceeds half cap, rotate
-        if self.packet_cache.len() > self.packet_hash_cap / 2 {
+        if self.packet_cache.len() > self.caps.packet_hash_cap / 2 {
             self.rotate_packet_cache();
         }
     }
@@ -651,7 +993,10 @@ impl Storage for MemoryStorage {
     }
 
     fn set_link_entry(&mut self, link_id: [u8; TRUNCATED_HASHBYTES], entry: LinkEntry) {
-        self.link_table.insert(link_id, entry);
+        // An overflow drops a half-open link request before it breaks a live
+        // link; see the field's eviction note.
+        self.link_table
+            .insert_preferring(link_id, entry, |_, e| !e.validated);
     }
 
     fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
@@ -691,7 +1036,17 @@ impl Storage for MemoryStorage {
     }
 
     fn set_announce_cache(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], raw: Vec<u8>) {
-        self.announce_cache.insert(dest_hash, raw);
+        // A retained destination is pinned against the time sweep
+        // (`clean_announce_cache`), so a size overflow must not unpin it by
+        // the back door; see the field's eviction note.
+        let Self {
+            announce_cache,
+            known_dest_use,
+            ..
+        } = self;
+        announce_cache.insert_preferring(dest_hash, raw, |hash, _| {
+            !matches!(known_dest_use.get(hash), Some(KnownDestUse::Retained))
+        });
     }
 
     // Announce Rate
@@ -716,7 +1071,21 @@ impl Storage for MemoryStorage {
     }
 
     fn set_receipt(&mut self, hash: [u8; TRUNCATED_HASHBYTES], receipt: PacketReceipt) {
-        self.receipts.insert(hash, receipt);
+        // Terminal receipts are only serving out their retention grace, so
+        // they go before a pending one; a pending one that has to go is
+        // parked for the next sweep to report as a timeout, which is what
+        // Python does at Transport.py:558-561.
+        let culled = self
+            .receipts
+            .insert_preferring(hash, receipt, |_, r| r.status != ReceiptStatus::Sent);
+        if let Some((_, dropped)) = culled {
+            if dropped.status == ReceiptStatus::Sent {
+                if self.culled_receipts.len() >= self.caps.receipt_cap {
+                    self.culled_receipts.pop_front();
+                }
+                self.culled_receipts.push_back(dropped);
+            }
+        }
     }
 
     // Path Requests
@@ -753,15 +1122,10 @@ impl Storage for MemoryStorage {
     }
 
     fn set_identity(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], identity: Identity) {
-        // Evict oldest when at cap (BTreeMap has no insertion order,
-        // so we just remove the first key, deterministic but arbitrary)
-        if self.known_identities.len() >= self.identity_cap
-            && !self.known_identities.contains_key(&dest_hash)
-        {
-            if let Some(&first_key) = self.known_identities.keys().next() {
-                self.known_identities.remove(&first_key);
-            }
-        }
+        // Drop-oldest with refresh-on-re-announce. Before #421 this evicted
+        // the numerically smallest destination hash, which is deterministic
+        // but unrelated to age: a destination whose hash starts low could
+        // never stay known on a full node.
         self.known_identities.insert(dest_hash, identity);
     }
 
@@ -780,7 +1144,9 @@ impl Storage for MemoryStorage {
     }
 
     fn expire_receipts(&mut self, now_ms: u64) -> Vec<PacketReceipt> {
-        let mut expired = Vec::new();
+        // Pending receipts a size overflow had to cull owe their sender a
+        // timeout, and this sweep is what delivers it.
+        let mut expired: Vec<PacketReceipt> = self.culled_receipts.drain(..).collect();
         self.receipts.retain(|_, receipt| {
             if receipt.status == ReceiptStatus::Sent && receipt.is_expired(now_ms) {
                 // A still-pending packet whose proof never came: timed out.
@@ -855,7 +1221,7 @@ impl Storage for MemoryStorage {
         // Python Identity._retain_destination_data: pin iff the destination is
         // known (has a cached announce), setting use-state to the -1 sentinel.
         if self.announce_cache.contains_key(dest) {
-            self.known_dest_use.insert(*dest, KnownDestUse::Retained);
+            self.set_known_dest_use(*dest, KnownDestUse::Retained);
             true
         } else {
             false
@@ -866,8 +1232,7 @@ impl Storage for MemoryStorage {
         // Python Identity._unretain_destination_data: reset use-state to a
         // recency timestamp (lifting the pin) iff the destination is known.
         if self.announce_cache.contains_key(dest) {
-            self.known_dest_use
-                .insert(*dest, KnownDestUse::Used(now_ms));
+            self.set_known_dest_use(*dest, KnownDestUse::Used(now_ms));
             true
         } else {
             false
@@ -884,8 +1249,7 @@ impl Storage for MemoryStorage {
         if matches!(self.known_dest_use.get(dest), Some(KnownDestUse::Retained)) {
             return false;
         }
-        self.known_dest_use
-            .insert(*dest, KnownDestUse::Used(now_ms));
+        self.set_known_dest_use(*dest, KnownDestUse::Used(now_ms));
         true
     }
 
@@ -957,12 +1321,13 @@ impl Storage for MemoryStorage {
     /// Every collection above, in field order, with the ceilings the code
     /// above actually enforces (Codeberg #174).
     ///
-    /// Only four ceilings exist: the two dedup generations rotate at half
-    /// `packet_hash_cap`, the path-request tag ring and its index are trimmed
-    /// to `MAX_PATH_REQUEST_TAGS`, and `known_identities` evicts at
-    /// `identity_cap`. Every other collection here is bounded by expiry alone
-    /// — no ceiling, so `None`, which is the honest answer and the input
-    /// Codeberg #421 needs.
+    /// Since Codeberg #421 every row carries a ceiling: the two dedup
+    /// generations rotate at half `packet_hash_cap`, the path-request tag
+    /// ring and its index are trimmed to `MAX_PATH_REQUEST_TAGS`, and every
+    /// other collection is a [`BoundedMap`] reporting its own capacity. A
+    /// `None` here would mean a table whose size the neighbours choose, which
+    /// is the shape #421 was opened to remove; `every_collection_declares_a_ceiling`
+    /// holds the list to that.
     ///
     /// Cost: `len()` throughout, O(1), except `local_client_dest_map` whose
     /// entries live in the inner sets and are summed over the local
@@ -974,7 +1339,7 @@ impl Storage for MemoryStorage {
         // the cap — not the cap — is the ceiling either generation is held
         // to. Reporting the full cap here would make a rotating cache look
         // half empty at the moment it rotates.
-        let generation_cap = self.packet_hash_cap / 2;
+        let generation_cap = self.caps.packet_hash_cap / 2;
         vec![
             CollectionCount::bounded("packet_cache", self.packet_cache.len(), generation_cap),
             CollectionCount::bounded(
@@ -982,15 +1347,52 @@ impl Storage for MemoryStorage {
                 self.packet_cache_prev.len(),
                 generation_cap,
             ),
-            CollectionCount::unbounded("path_table", self.path_table.len()),
-            CollectionCount::unbounded("path_states", self.path_states.len()),
-            CollectionCount::unbounded("reverse_table", self.reverse_table.len()),
-            CollectionCount::unbounded("link_table", self.link_table.len()),
-            CollectionCount::unbounded("announce_table", self.announce_table.len()),
-            CollectionCount::unbounded("announce_cache", self.announce_cache.len()),
-            CollectionCount::unbounded("announce_rate_table", self.announce_rate_table.len()),
-            CollectionCount::unbounded("receipts", self.receipts.len()),
-            CollectionCount::unbounded("path_requests", self.path_requests.len()),
+            CollectionCount::bounded(
+                "path_table",
+                self.path_table.len(),
+                self.path_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "path_states",
+                self.path_states.len(),
+                self.path_states.capacity(),
+            ),
+            CollectionCount::bounded(
+                "reverse_table",
+                self.reverse_table.len(),
+                self.reverse_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "link_table",
+                self.link_table.len(),
+                self.link_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_table",
+                self.announce_table.len(),
+                self.announce_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_cache",
+                self.announce_cache.len(),
+                self.announce_cache.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_rate_table",
+                self.announce_rate_table.len(),
+                self.announce_rate_table.capacity(),
+            ),
+            CollectionCount::bounded("receipts", self.receipts.len(), self.receipts.capacity()),
+            CollectionCount::bounded(
+                "culled_receipts",
+                self.culled_receipts.len(),
+                self.caps.receipt_cap,
+            ),
+            CollectionCount::bounded(
+                "path_requests",
+                self.path_requests.len(),
+                self.path_requests.capacity(),
+            ),
             CollectionCount::bounded(
                 "path_request_tags",
                 self.path_request_tags.len(),
@@ -1004,23 +1406,38 @@ impl Storage for MemoryStorage {
             CollectionCount::bounded(
                 "known_identities",
                 self.known_identities.len(),
-                self.identity_cap,
+                self.known_identities.capacity(),
             ),
-            CollectionCount::unbounded("known_ratchets", self.known_ratchets.len()),
-            CollectionCount::unbounded(
+            CollectionCount::bounded(
+                "known_ratchets",
+                self.known_ratchets.len(),
+                self.known_ratchets.capacity(),
+            ),
+            CollectionCount::bounded(
                 "local_client_dest_map",
-                self.local_client_dest_map.values().map(|s| s.len()).sum(),
+                self.local_client_dest_map.len(),
+                self.local_client_dest_map.capacity(),
             ),
-            CollectionCount::unbounded(
+            CollectionCount::bounded(
                 "local_client_known_dests",
                 self.local_client_known_dests.len(),
+                self.local_client_known_dests.capacity(),
             ),
-            CollectionCount::unbounded(
+            CollectionCount::bounded(
                 "discovery_path_requests",
                 self.discovery_path_requests.len(),
+                self.discovery_path_requests.capacity(),
             ),
-            CollectionCount::unbounded("dest_ratchet_keys", self.dest_ratchet_keys.len()),
-            CollectionCount::unbounded("known_dest_use", self.known_dest_use.len()),
+            CollectionCount::bounded(
+                "dest_ratchet_keys",
+                self.dest_ratchet_keys.len(),
+                self.dest_ratchet_keys.capacity(),
+            ),
+            CollectionCount::bounded(
+                "known_dest_use",
+                self.known_dest_use.len(),
+                self.known_dest_use.capacity(),
+            ),
         ]
     }
 
@@ -1064,13 +1481,12 @@ impl Storage for MemoryStorage {
         dest_hash: [u8; TRUNCATED_HASHBYTES],
     ) -> bool {
         self.local_client_dest_map
-            .entry(iface_id)
-            .or_default()
-            .insert(dest_hash)
+            .insert_if_absent((iface_id, dest_hash), ())
     }
 
     fn remove_local_client_dests(&mut self, iface_id: usize) {
-        self.local_client_dest_map.remove(&iface_id);
+        self.local_client_dest_map
+            .retain(|(i, _), _| *i != iface_id);
     }
 
     // Local Client Known Destinations
@@ -1103,8 +1519,7 @@ impl Storage for MemoryStorage {
     ) {
         // Only store first request (Python behavior at Transport.py:2793-2794)
         self.discovery_path_requests
-            .entry(dest_hash)
-            .or_insert((requesting_interface, timeout_ms));
+            .insert_if_absent(dest_hash, (requesting_interface, timeout_ms));
     }
 
     fn get_discovery_path_request(
@@ -1208,15 +1623,16 @@ mod tests {
     }
 
     /// A count without its ceiling does not say how close to full a table is.
-    /// The four collections this storage actually bounds report theirs; the
-    /// rest report `None`, which is a fact about the design, not a gap.
+    /// Every collection reports the ceiling it is actually held to, and the
+    /// two dedup generations report half the hash cap, because half is what
+    /// either generation is held to across a rotation.
     #[test]
     fn collection_counts_carry_the_configured_ceilings() {
-        let storage = MemoryStorage {
+        let storage = MemoryStorage::with_caps(TableCaps {
             packet_hash_cap: 10,
             identity_cap: 7,
-            ..MemoryStorage::with_defaults()
-        };
+            ..TableCaps::desktop()
+        });
         let cap = |name: &str| {
             storage
                 .collection_counts()
@@ -1231,8 +1647,11 @@ mod tests {
         assert_eq!(cap("known_identities"), Some(7));
         assert_eq!(cap("path_request_tags"), Some(MAX_PATH_REQUEST_TAGS));
         assert_eq!(cap("path_request_tag_set"), Some(MAX_PATH_REQUEST_TAGS));
-        assert_eq!(cap("path_table"), None);
-        assert_eq!(cap("announce_cache"), None);
+        assert_eq!(cap("path_table"), Some(TableCaps::desktop().path_cap));
+        assert_eq!(
+            cap("announce_cache"),
+            Some(TableCaps::desktop().destination_cap)
+        );
     }
 
     /// The rotation is the event worth seeing, and a sum of the two
@@ -1241,10 +1660,10 @@ mod tests {
     /// visible.
     #[test]
     fn the_two_dedup_generations_are_counted_separately() {
-        let mut storage = MemoryStorage {
+        let mut storage = MemoryStorage::with_caps(TableCaps {
             packet_hash_cap: 10,
-            ..MemoryStorage::with_defaults()
-        };
+            ..TableCaps::desktop()
+        });
         let count = |s: &MemoryStorage, name: &str| {
             s.collection_counts()
                 .into_iter()
@@ -1310,10 +1729,10 @@ mod tests {
 
     #[test]
     fn test_packet_hash_rotation() {
-        let mut s = MemoryStorage {
+        let mut s = MemoryStorage::with_caps(TableCaps {
             packet_hash_cap: 10,
-            ..MemoryStorage::with_defaults()
-        };
+            ..TableCaps::desktop()
+        });
         // Add 6 hashes (exceeds half of 10 = 5), triggers rotation
         for i in 0..6u8 {
             let mut hash = [0u8; 32];
@@ -1476,10 +1895,10 @@ mod tests {
 
     #[test]
     fn test_known_identities_cap() {
-        let mut s = MemoryStorage {
+        let mut s = MemoryStorage::with_caps(TableCaps {
             identity_cap: 2,
-            ..MemoryStorage::with_defaults()
-        };
+            ..TableCaps::desktop()
+        });
         let id1 = Identity::generate(&mut rand_core::OsRng);
         let id2 = Identity::generate(&mut rand_core::OsRng);
         let id3 = Identity::generate(&mut rand_core::OsRng);
@@ -2042,7 +2461,7 @@ mod tests {
         let mut s = MemoryStorage::with_defaults();
         s.set_identity([0x11; TRUNCATED_HASHBYTES], Identity::generate(&mut OsRng));
 
-        let expected = TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>();
+        let expected = HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>();
         let (dump, _) = s.diagnostic_dump();
         assert!(
             dump.contains(&alloc::format!(
@@ -2186,46 +2605,47 @@ mod diagnostic_model_tests {
         // which is what size_of carries and a literal never did.
         assert_eq!(
             raw_bytes_of(&dump, "path_table"),
-            (TRUNCATED_HASHBYTES + size_of::<PathEntry>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<PathEntry>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "path_states"),
-            (TRUNCATED_HASHBYTES + size_of::<PathState>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<PathState>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "reverse_table"),
-            (TRUNCATED_HASHBYTES + size_of::<ReverseEntry>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<ReverseEntry>()) as u64,
         );
         // Including the signing key, which is stored inline whether or
         // not it is present — the old model added it conditionally and
         // so priced a link without a proof below what it occupies.
         assert_eq!(
             raw_bytes_of(&dump, "link_table"),
-            (TRUNCATED_HASHBYTES + size_of::<LinkEntry>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<LinkEntry>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "announce_rate_table"),
-            (TRUNCATED_HASHBYTES + size_of::<AnnounceRateEntry>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<AnnounceRateEntry>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "receipts"),
-            (TRUNCATED_HASHBYTES + size_of::<PacketReceipt>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<PacketReceipt>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "path_requests"),
-            (TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "known_ratchets"),
-            (TRUNCATED_HASHBYTES + size_of::<([u8; RATCHET_SIZE], u64)>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<([u8; RATCHET_SIZE], u64)>())
+                as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "local_client_known_dests"),
-            (TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "discovery_path_requests"),
-            (TRUNCATED_HASHBYTES + size_of::<(usize, u64)>()) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<(usize, u64)>()) as u64,
         );
     }
 
@@ -2276,23 +2696,370 @@ mod diagnostic_model_tests {
 
         assert_eq!(
             raw_bytes_of(&dump, "path_table"),
-            (TRUNCATED_HASHBYTES
+            (HASH_ORDER_BYTES
+                + TRUNCATED_HASHBYTES
                 + size_of::<PathEntry>()
                 + blob_capacity * crate::constants::RANDOM_HASHBYTES) as u64,
             "the blob window costs what it reserved, not what it holds"
         );
         assert_eq!(
             raw_bytes_of(&dump, "announce_table"),
-            (TRUNCATED_HASHBYTES + size_of::<AnnounceEntry>() + packet_capacity) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<AnnounceEntry>() + packet_capacity)
+                as u64,
             "the second copy of the announce is the point of this row"
         );
         assert_eq!(
             raw_bytes_of(&dump, "announce_cache"),
-            (TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 64) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 64) as u64,
         );
         assert_eq!(
             raw_bytes_of(&dump, "dest_ratchet_keys"),
-            (TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 32) as u64,
+            (HASH_ORDER_BYTES + TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 32) as u64,
+        );
+    }
+}
+
+/// Codeberg #421: every table has a ceiling, and reaching it evicts rather
+/// than refuses.
+///
+/// The acceptance bar from the issue: under sustained insert pressure a table
+/// stops growing, keeps accepting, keeps the newest entry and has dropped the
+/// oldest. The three tables whose eviction order is not plain FIFO get a test
+/// of their own for the order they do use.
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use crate::destination::DestinationHash;
+
+    /// Small enough that filling past it is cheap, big enough that the
+    /// 64-entry eviction scan is not the whole table.
+    const TINY: usize = 100;
+
+    fn tiny_caps() -> TableCaps {
+        TableCaps {
+            packet_hash_cap: TINY,
+            identity_cap: TINY,
+            path_cap: TINY,
+            reverse_cap: TINY,
+            link_cap: TINY,
+            announce_cap: TINY,
+            destination_cap: TINY,
+            local_dest_cap: TINY,
+            receipt_cap: TINY,
+        }
+    }
+
+    fn hash16(n: u32) -> [u8; TRUNCATED_HASHBYTES] {
+        let mut h = [0u8; TRUNCATED_HASHBYTES];
+        h[..4].copy_from_slice(&n.to_be_bytes());
+        h
+    }
+
+    fn reverse(ts: u64) -> ReverseEntry {
+        ReverseEntry {
+            timestamp_ms: ts,
+            receiving_interface_index: 0,
+            outbound_interface_index: 1,
+        }
+    }
+
+    fn path(expires_ms: u64) -> PathEntry {
+        PathEntry {
+            hops: 1,
+            expires_ms,
+            interface_index: 0,
+            random_blobs: Vec::new(),
+            next_hop: None,
+            via_peer: None,
+        }
+    }
+
+    fn link(validated: bool) -> LinkEntry {
+        LinkEntry {
+            timestamp_ms: 0,
+            next_hop_interface_index: 0,
+            remaining_hops: 1,
+            received_interface_index: 0,
+            hops: 1,
+            validated,
+            proof_timeout_ms: 0,
+            destination_hash: hash16(0),
+            peer_signing_key: None,
+        }
+    }
+
+    fn declared_cap(s: &MemoryStorage, name: &str) -> Option<usize> {
+        s.collection_counts()
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no census row named {name}"))
+            .capacity
+    }
+
+    /// Not one collection may answer "no ceiling". A `None` here is the
+    /// bounded-only-by-the-neighbours'-traffic shape #421 was opened for.
+    #[test]
+    fn every_collection_declares_a_ceiling() {
+        let s = MemoryStorage::with_defaults();
+        let uncapped: Vec<&str> = s
+            .collection_counts()
+            .into_iter()
+            .filter(|c| c.capacity.is_none())
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            uncapped.is_empty(),
+            "collections with no ceiling: {uncapped:?}"
+        );
+    }
+
+    /// The reverse table under sustained forwarding pressure: it stops
+    /// growing, and an insert past the ceiling still lands. This is the
+    /// table #421 measured at 73 901 entries in one expiry window.
+    #[test]
+    fn reverse_table_stops_growing_and_keeps_accepting() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        let pressure = 10_000u32;
+        for i in 0..pressure {
+            s.set_reverse(hash16(i), reverse(i as u64));
+        }
+        let cap = declared_cap(&s, "reverse_table").unwrap_or_else(|| {
+            panic!(
+                "reverse_table declares no ceiling; it grew to {} entries under {pressure} inserts",
+                s.reverse_entries().len()
+            )
+        });
+        assert_eq!(cap, TINY);
+        assert_eq!(s.reverse_entries().len(), cap, "size holds at the ceiling");
+        assert!(
+            s.get_reverse(&hash16(pressure - 1)).is_some(),
+            "the newest entry is present"
+        );
+        assert!(s.get_reverse(&hash16(0)).is_none(), "the oldest is gone");
+
+        s.set_reverse(hash16(pressure), reverse(pressure as u64));
+        assert!(
+            s.get_reverse(&hash16(pressure)).is_some(),
+            "an insert after the ceiling still succeeds"
+        );
+        assert_eq!(
+            s.reverse_entries().len(),
+            cap,
+            "and does not grow the table"
+        );
+    }
+
+    /// The path table's seven-day expiry never fires on a young node, so the
+    /// ceiling is the only bound; a re-announced destination has to survive
+    /// it, which is what refresh-on-re-insert buys.
+    #[test]
+    fn path_table_holds_at_its_cap_and_keeps_the_re_announced_path() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        let kept = hash16(0);
+        s.set_path(kept, path(1));
+        for i in 1..TINY as u32 {
+            s.set_path(hash16(i), path(1));
+        }
+        // Re-announce the oldest destination: it goes to the back of the
+        // queue, so the next ceiling-worth of inserts evicts the paths that
+        // were never re-announced and leaves it alone.
+        s.set_path(kept, path(2));
+        let newest = TINY as u32 * 2 - 2;
+        for i in TINY as u32..=newest {
+            s.set_path(hash16(i), path(1));
+        }
+
+        assert_eq!(s.path_count(), TINY, "the table stopped growing");
+        assert!(
+            s.get_path(&kept).is_some(),
+            "the re-announced path survived entries inserted after it"
+        );
+        assert!(
+            s.get_path(&hash16(1)).is_none(),
+            "a path never re-announced was evicted"
+        );
+        assert!(
+            s.get_path(&hash16(newest)).is_some(),
+            "the newest path is present"
+        );
+    }
+
+    /// Not plain FIFO: a half-open link request goes before a live link.
+    #[test]
+    fn link_table_prefers_unvalidated_entries_on_overflow() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        // Oldest entry is a live link; everything after it is unvalidated.
+        let live = hash16(0);
+        s.set_link_entry(live, link(true));
+        for i in 1..TINY as u32 {
+            s.set_link_entry(hash16(i), link(false));
+        }
+        assert_eq!(s.link_entry_count(), TINY);
+
+        s.set_link_entry(hash16(TINY as u32), link(false));
+        assert_eq!(s.link_entry_count(), TINY, "the ceiling holds");
+        assert!(
+            s.get_link_entry(&live).is_some(),
+            "the live link survived although it was the oldest entry"
+        );
+        assert!(
+            s.get_link_entry(&hash16(1)).is_none(),
+            "the oldest unvalidated entry went instead"
+        );
+    }
+
+    /// When every candidate is a live link there is nothing better to drop,
+    /// and the insert must still succeed — a preference is not a refusal.
+    #[test]
+    fn link_table_still_accepts_when_every_entry_is_validated() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        for i in 0..TINY as u32 {
+            s.set_link_entry(hash16(i), link(true));
+        }
+        s.set_link_entry(hash16(TINY as u32), link(true));
+        assert_eq!(s.link_entry_count(), TINY);
+        assert!(s.get_link_entry(&hash16(TINY as u32)).is_some());
+        assert!(
+            s.get_link_entry(&hash16(0)).is_none(),
+            "it fell back to the plain oldest"
+        );
+    }
+
+    /// Not plain FIFO: a destination an application pinned survives an
+    /// overflow, the way it already survives `clean_announce_cache`.
+    #[test]
+    fn announce_cache_evicts_unretained_entries_first() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        let pinned = hash16(0);
+        s.set_announce_cache(pinned, vec![1u8; 8]);
+        assert!(s.retain_known_dest(&pinned), "pin the oldest entry");
+        for i in 1..TINY as u32 {
+            s.set_announce_cache(hash16(i), vec![1u8; 8]);
+        }
+
+        s.set_announce_cache(hash16(TINY as u32), vec![1u8; 8]);
+        assert_eq!(s.announce_cache_keys().len(), TINY);
+        assert!(
+            s.get_announce_cache(&pinned).is_some(),
+            "the retained destination survived although it was the oldest"
+        );
+        assert!(
+            s.is_known_dest_retained(&pinned),
+            "and its pin survived with it"
+        );
+        assert!(
+            s.get_announce_cache(&hash16(1)).is_none(),
+            "the oldest unretained entry went instead"
+        );
+    }
+
+    /// Not plain FIFO: a terminal receipt is only serving out its retention
+    /// grace, so it goes first; when only pending receipts are left, the one
+    /// that is dropped is still reported as a timeout.
+    #[test]
+    fn receipts_evict_terminal_first_and_cull_pending_with_a_timeout() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+
+        let pending_oldest = hash16(0);
+        s.set_receipt(
+            pending_oldest,
+            PacketReceipt::new([0u8; 32], DestinationHash::new(pending_oldest), 0),
+        );
+        // One terminal receipt behind it, then fill to the ceiling.
+        let terminal = hash16(1);
+        let mut delivered = PacketReceipt::new([1u8; 32], DestinationHash::new(terminal), 0);
+        delivered.status = ReceiptStatus::Delivered;
+        s.set_receipt(terminal, delivered);
+        for i in 2..TINY as u32 {
+            s.set_receipt(
+                hash16(i),
+                PacketReceipt::new([2u8; 32], DestinationHash::new(hash16(i)), 0),
+            );
+        }
+
+        let overflow = hash16(TINY as u32);
+        s.set_receipt(
+            overflow,
+            PacketReceipt::new([3u8; 32], DestinationHash::new(overflow), 0),
+        );
+        assert!(
+            s.get_receipt(&terminal).is_none(),
+            "the terminal receipt went first"
+        );
+        assert!(
+            s.get_receipt(&pending_oldest).is_some(),
+            "the older pending receipt was kept"
+        );
+        assert!(
+            s.expire_receipts(0).is_empty(),
+            "a terminal receipt owes nobody a timeout"
+        );
+
+        // Now every entry is pending: the next overflow has to cull one, and
+        // it must come back as a timeout (Python Transport.py:558-561).
+        let next = hash16(TINY as u32 + 1);
+        s.set_receipt(
+            next,
+            PacketReceipt::new([4u8; 32], DestinationHash::new(next), 0),
+        );
+        let timed_out = s.expire_receipts(0);
+        assert_eq!(timed_out.len(), 1, "the culled pending receipt is reported");
+        assert_eq!(timed_out[0].truncated_hash, pending_oldest);
+        assert!(
+            s.get_receipt(&next).is_some(),
+            "the new receipt still landed"
+        );
+    }
+
+    /// A locally attached client that registers destinations in a loop must
+    /// not be able to grow the daemon without bound.
+    #[test]
+    fn local_client_destinations_are_bounded_across_interfaces() {
+        let mut s = MemoryStorage::with_caps(tiny_caps());
+        for i in 0..(TINY as u32 * 3) {
+            s.add_local_client_dest(1, hash16(i));
+        }
+        assert_eq!(declared_cap(&s, "local_client_dest_map"), Some(TINY));
+        assert!(s.has_local_client_dest(1, &hash16(TINY as u32 * 3 - 1)));
+        assert!(!s.has_local_client_dest(1, &hash16(0)));
+
+        // A second interface shares the ceiling, and dropping one interface
+        // must not touch the other's entries.
+        s.add_local_client_dest(2, hash16(9_999));
+        assert!(s.has_local_client_dest(2, &hash16(9_999)));
+        s.remove_local_client_dests(1);
+        assert!(s.has_local_client_dest(2, &hash16(9_999)));
+        assert!(!s.has_local_client_dest(1, &hash16(TINY as u32 * 3 - 1)));
+    }
+
+    /// The compact profile is the one that has to fit a Raspberry Pi Zero
+    /// 2W, so it may never be looser than the desktop one.
+    #[test]
+    fn the_compact_profile_is_never_larger_than_the_desktop_one() {
+        let d = TableCaps::desktop();
+        let c = TableCaps::compact();
+        assert!(c.packet_hash_cap <= d.packet_hash_cap);
+        assert!(c.identity_cap <= d.identity_cap);
+        assert!(c.path_cap <= d.path_cap);
+        assert!(c.reverse_cap <= d.reverse_cap);
+        assert!(c.link_cap <= d.link_cap);
+        assert!(c.announce_cap <= d.announce_cap);
+        assert!(c.destination_cap <= d.destination_cap);
+        assert!(c.local_dest_cap <= d.local_dest_cap);
+        assert_eq!(
+            c.receipt_cap, d.receipt_cap,
+            "receipts take the reference's number on both profiles"
+        );
+    }
+
+    /// The reverse-table default has to clear the busiest window #421
+    /// measured, or the cap would drop replies in ordinary operation.
+    #[test]
+    fn the_reverse_default_clears_the_measured_field_load() {
+        assert!(
+            TableCaps::desktop().reverse_cap >= 73_901 * 2,
+            "the desktop reverse cap must leave headroom over the 73 901 \
+             entries measured in one 8 minute window"
         );
     }
 }
