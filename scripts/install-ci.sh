@@ -86,6 +86,22 @@ for cmd in nomadnet; do
     fi
 done
 
+# Optional test dependency: valgrind's massif is the only instrument that says
+# WHICH CALL SITE the live heap belongs to — the counting allocator in
+# leviculum-std/src/heap_accounting.rs gives the total and nothing else. It
+# works on a gnu-target build of `heap-gap-bench` only (massif interposes on
+# malloc by symbol, and the musl-static default has nothing to interpose on:
+# it records mem_heap_B=0). No tier runs it; it is reached by hand during a
+# heap investigation, so warn rather than fail.
+for cmd in valgrind; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: optional test dependency '$cmd' not found"
+        echo "[install-ci] Hint: sudo apt install valgrind"
+        echo "[install-ci]       (massif call-site attribution for heap-gap-bench;"
+        echo "[install-ci]        see the binary's module docs for the --alloc-fn list)"
+    fi
+done
+
 # Optional rig dependency: uhubctl cuts and restores power on a single USB
 # hub port, which is how a board that stopped enumerating gets recovered
 # without touching it (scripts/install-usbhub-helper.sh wires the
