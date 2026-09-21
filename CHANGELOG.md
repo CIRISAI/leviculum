@@ -131,6 +131,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A destination's last `app_data` now survives a daemon restart, so the
+  propagation role can still recall what a neighbour said about itself after
+  one. `known_destinations` is written with the `app_data` the destination
+  announced, which is where Python's `Identity.recall_app_data` reads it from
+  (`RNS/Identity.py:162-172`, written by `remember` at validate time); ours
+  wrote `None` there for every destination learned at runtime and answered
+  the recall from the memory-only announce cache. The window that opened on
+  every start was a full announce interval wide — six hours at the reference
+  cadence — and inside it a node that syncs its store to us is read as "not a
+  node": we keep its mail and never sync back (Codeberg #420, the restart
+  half of #417). The file is the one an `rnsd` sharing the storage directory
+  reads and writes, so the recall now crosses both stacks. On a board nothing
+  changes: `EmbeddedStorage` persists nothing, and its recall bound stays
+  "while a path to that destination lives, and not across a reset".
+
 - Four structured-event call sites no longer pass a free-text message to the
   tracing macro: `TUNNEL_PATH_ASSOCIATED`, `TUNNEL_REAPPEARED`,
   `PATH_RESTORED` and `LOCK_DEPTH_OVERFLOW`. The prose rendered under a
