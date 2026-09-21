@@ -9483,6 +9483,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     continue;
                 }
 
+                // Retire an entry that will never retransmit once its rate
+                // window has closed. Both conditions above are counters that
+                // only advance when an entry FIRES, so an entry inserted
+                // without a schedule (a leaf node's `enable_transport =
+                // false` arm in handle_announce, and any entry whose retry
+                // was cancelled by a neighbour echo) could never reach
+                // either, and lived until the same destination announced
+                // again — carrying a second full copy of the announce in
+                // `raw_packet` beside `announce_cache` the whole time.
+                //
+                // `announce_rate_limit_ms` is the honest lifetime, not a
+                // guess: the ONLY reader of an unscheduled entry is
+                // handle_announce's rate gate, which compares `now -
+                // timestamp_ms` against exactly this window (and counts
+                // neighbour echoes inside it). Past the window the entry
+                // changes no decision. The reference never creates one at
+                // all — it inserts only under `transport_enabled() or
+                // is_from_local_client` (Transport.py:1886) and pops on the
+                // local-rebroadcast limit (:1731); we keep ours for the
+                // window because we use it as the rate window and Python
+                // uses a separate table for that.
+                if entry.retransmit_at_ms.is_none()
+                    && now.saturating_sub(entry.timestamp_ms) >= self.config.announce_rate_limit_ms
+                {
+                    to_remove.push(dest_hash);
+                    continue;
+                }
+
                 // Check if retransmit is due
                 if let Some(retransmit_at) = entry.retransmit_at_ms {
                     if retransmit_at <= now && !entry.raw_packet.is_empty() {

@@ -85,6 +85,8 @@ mod mvr_group_decrypt_delivery;
 mod mvr_hop_asymmetry;
 #[cfg(test)]
 mod mvr_identify_relay;
+#[cfg(test)]
+mod mvr_inert_announce_retire;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
