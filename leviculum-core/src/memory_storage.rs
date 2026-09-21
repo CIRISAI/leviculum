@@ -1217,7 +1217,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must be reported"))
                 .entries
         };
-        let mut add = |storage: &mut MemoryStorage, i: u8| {
+        let add = |storage: &mut MemoryStorage, i: u8| {
             let mut hash = [0u8; 32];
             hash[0] = i;
             storage.add_packet_hash(hash);
