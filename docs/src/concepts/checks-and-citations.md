@@ -22,7 +22,7 @@ person what to do. This one is about the cases where the person forgot.
 | 14 further ignored tests in `rnsd_interop` executed by nothing (#189) | **B** |
 | scenario steps across the corpus produced a delivery figure no step asserted; GREEN at 70-90 % (#188, Periculum #25) | **neither** — scenario steps |
 | the status-parity volume guard compared one interface, so a whole-inventory divergence stayed green (#177) | **A**, only if the author's negative control covers the whole inventory rather than the one interface they compared |
-| drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:6`), sixteen across the whole book on the guard's first automated run | **C** |
+| drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:8`), sixteen across the whole book on the guard's first automated run | **C** |
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
 | a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
 | `PROCESSOR_TICK_BUDGET` justified the only number in a public API constant with "the number comes off `docs/…/core-lock-budget.md`" and then named 126.6 ms; that figure occurred exactly once in the tree, in that comment (#200) | **C**, only since the figure check below — a prose attribution carries no line and no identifier, so the resolver never saw it |
@@ -311,6 +311,11 @@ prose. The honest response is to publish the ratio on every run so
 nobody reads a green guard as full coverage, and to convert
 opportunistically (#167 is the standing example).
 
+That last sentence was half wrong, and section 5 below is what replaced
+it. The identifier form cannot be mechanised — but the identifier is not
+the only thing about a citation that survives a move, and the other
+thing needs no prose written at all.
+
 ### 4. A prose attribution is not a citation, and was not checked
 
 `leviculum-std/tests/doc_citations.rs` resolves `path:line` and checks
@@ -352,6 +357,96 @@ Two paragraphs in the tree trigger it and five figures are checked. Both
 numbers are printed on every run for the same reason the citation counts
 are: with a trigger this narrow, "no failures" and "the trigger stopped
 firing" are otherwise the same output.
+
+### 5. The bare half is checkable against the tree's own history
+
+The counts above are a coverage *ratio*, and a ratio does not say how
+many of the uncovered citations are actually wrong. Measured, on
+2026-09-21: of 3228 citations in the two corpora, 2464 carry no
+identifier, and **424 of those pointed at the wrong line** — 541
+individual line numbers. Before that measurement the guard had been
+reporting zero for as long as it had existed, and the only competing
+figure was the 126 an aborted merge sweep happened to touch.
+
+Nothing in the tree as it stands can check a bare `file.rs` at line 810. The
+file exists and has 810 lines, and it goes on having them after the
+cited code slides to 883. But the *text of the cited line* survives a
+move exactly the way an identifier does, and unlike an identifier it is
+already there — no citation has to be rewritten to acquire one. The
+tree's own history is where it is kept:
+
+1. `git blame` the line the citation sits on gives the commit that last
+   wrote it — the newest moment anyone can be assumed to have looked at
+   the citation.
+2. The cited file as of that commit, at the cited line, is the anchor.
+   For `reference/<submodule>` citations that means the submodule's own
+   history at the gitlink this tree pinned back then, so a citation into
+   Python-RNS is checked against the reference we actually pinned.
+3. If the cited line still holds that text, the citation still points at
+   what it pointed at.
+4. If not, and that text now sits at exactly one other line, the number
+   is wrong and the guard says by how much.
+
+Only the unique match in step 4 fails a run. That is the load-bearing
+choice: the cited text is demonstrably in the file at a line the
+citation does not name, so the report needs no judgement about what the
+citing sentence meant, and a guard with false positives gets switched
+off. Everything else is counted in the open and decides nothing — an
+anchor that matches several lines, an anchor that has vanished (the code
+was rewritten in place, which only a reader can adjudicate), a citing
+line nobody has committed yet.
+
+Two refinements earned their place by being needed on the real corpus,
+and both place endpoints by evidence rather than by inference:
+
+- **A line that is ambiguous alone is often unique with its
+  neighbours.** `else:` is forty lines in `Transport.py`; `else:` with
+  the line above and below it is usually one.
+- **A range whose endpoints agree on one displacement can carry the
+  endpoint that placed nothing.** `Transport.py` lines 1722-1764 end on a `]`
+  the reference now has four of, and exactly one of them is a line from
+  where the opening line's +145 puts it.
+
+And one anti-refinement, which the corpus also demanded: **an anchor
+carrying no word never establishes drift.** Nobody cites a docstring
+delimiter on purpose. `Identity.py` lines 84 and 383 pointed at a stray one the
+day it was written and at the right constant today; "repairing" it to
+where that delimiter went would have broken a correct citation. A
+wordless anchor can still be carried along by a displacement the rest of
+the citation has established — that is what keeps the `]` case
+repairable — but on its own it says nothing.
+
+**What this cannot see, stated rather than hidden.** The baseline is the
+citing line's own last edit, so a citation that was already wrong when
+it was written passes, and reflowing a paragraph re-baselines every
+citation in it. A citation whose *sentence* went wrong while the cited
+line stayed put is invisible here as it is to every other check on this
+page. The number is a floor, not a census.
+
+Because the finder knows where the text went, it can also put the
+citation there: `LEVICULUM_CITATION_FIX=1` rewrites the repairable ones
+in place. Finder and fixer are the same code deliberately — a separate
+fixing script would be a second implementation of the anchor rule, and
+the first symptom of the two disagreeing is a repair pointed at the
+wrong line. 445 of the 2026-09-21 findings were repaired that way; the
+remaining 21 were spans whose other end a human had to locate, and eight
+of those left the bare class entirely by acquiring the identifier they
+should have had.
+
+The fixer has one trap worth naming, because it sprang once: this guard
+is itself in the corpus it guards, so a fixture string naming a git hook
+and a line number in its own tests is a citation as far as the scan is
+concerned, and got "repaired" to the line that text had moved to —
+breaking the assertion beneath it. Fixture citations in that file are
+now built rather than spelled out, which is what the canary fixtures
+already did and for the same reason.
+
+The standing canary is a miniature git repository: two bare citations,
+one of which a second commit makes wrong by moving the code under it.
+Both directions are asserted, because every failure mode of a check made
+of subprocess calls — blame returning nothing, a `cat-file` batch
+desynchronising — produces no findings, which reads exactly like a clean
+tree.
 
 ### What C cannot reach
 

@@ -40,8 +40,8 @@
 //! already writes:
 //!
 //! ```text
-//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:353`)   -- paren
-//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:353`)  -- comma
+//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:512`)   -- paren
+//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:512`)  -- comma
 //! ```
 //!
 //! Nothing but whitespace may sit between the name and the citation, so
@@ -52,7 +52,7 @@
 //! attach — those sit next to citations in tables and would otherwise be
 //! read as the subject of the citation beside them.
 //!
-//! The comma spelling was admitted in 2026-08 after `lora.rs:725` drifted
+//! The comma spelling was admitted in 2026-08 after `lora.rs:1044` drifted
 //! onto radio-init code inside a *regulatory* claim and this guard passed
 //! it. Adding it converted 75 book and 55 source citations from
 //! existence-checked to drift-checked without editing one of them, and
@@ -88,7 +88,7 @@
 //! references, not about truth.
 
 use regex::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -193,6 +193,10 @@ enum Corpus {
 struct Citation {
     doc: PathBuf,
     doc_line: usize,
+    /// Byte offset of the citation in its file. `doc_line` locates it for a
+    /// reader; this locates it for the fixer, which has to rewrite one
+    /// citation on a line that may carry several.
+    offset: usize,
     raw: String,
     path: String,
     /// Inclusive line spans: `329` → [(329,329)], `155-199,204` →
@@ -273,7 +277,7 @@ fn ident_regexes() -> [Regex; 2] {
 }
 
 /// A backticked token that is itself a citation: `Destination.py:322`,
-/// `Justfile:719`. Tables list these next to each other, so without this
+/// `Justfile:1103`. Tables list these next to each other, so without this
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
@@ -351,6 +355,7 @@ fn scan(root: &Path, files: &[PathBuf], corpus: Corpus) -> Vec<Citation> {
             citations.push(Citation {
                 doc: file.strip_prefix(root).unwrap_or(file).to_path_buf(),
                 doc_line: text[..whole.start()].matches('\n').count() + 1,
+                offset: whole.start(),
                 raw: whole.as_str().to_string(),
                 path: m[1].to_string(),
                 spans,
@@ -536,7 +541,7 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
                 .into_owned()
         })
         .collect();
-    // Bare filenames like `transport.rs:211` resolve by suffix.
+    // Bare filenames like `transport.rs:257` resolve by suffix.
     let resolve = |cited: &str| -> Vec<&str> {
         let suffix = format!("/{cited}");
         rel_files
@@ -1121,7 +1126,7 @@ fn run_canary() {
     let correct = format!("canary_target.rs:{CANARY_SUBJECT_LINE}");
     // The drifted citations must be reported: this is the failure the guard
     // exists for, and the one that decays silently. Once per spelling --
-    // a comma-form drift that goes unreported is the `lora.rs:725` case
+    // a comma-form drift that goes unreported is the `lora.rs:1044` case
     // over again, which is what admitting the spelling was for.
     let drifts: Vec<&Failure> = failures
         .iter()
@@ -1197,14 +1202,28 @@ fn githook_citations_match_without_loosening_the_pattern() {
     // The leading dot is part of the captured path: the directory is spelled
     // `.githooks` on disk and `check` resolves the path as written, so a
     // capture that dropped it would resolve to nothing.
+    //
+    // The fixture citations are BUILT, like the canary's, and now for a
+    // second reason on top of "a literal here is scanned as corpus": this
+    // file is in the corpus, the anchor check reports a fixture line number
+    // that has moved in the real hook, and `LEVICULUM_CITATION_FIX` then
+    // rewrites the number this test asserts on. It did exactly that once.
+    let subject = format!(
+        "lints the pipelines, .githooks/pre-push:{}, before Tier 0",
+        21
+    );
     let caps = source
-        .captures("lints the pipelines, .githooks/pre-push:21, before Tier 0")
+        .captures(&subject)
         .expect("a .githooks citation in a source comment must match");
     assert_eq!(&caps[1], ".githooks/pre-push");
     assert_eq!(&caps[2], "21");
 
+    let subject = format!(
+        "the commit-msg hook (`.githooks/commit-msg:{}`) does the same",
+        5
+    );
     let caps = book
-        .captures("the commit-msg hook (`.githooks/commit-msg:5`) does the same")
+        .captures(&subject)
         .expect("a .githooks citation in the book must match");
     assert_eq!(&caps[1], ".githooks/commit-msg");
 
@@ -1253,7 +1272,10 @@ fn githook_citations_match_without_loosening_the_pattern() {
     let gone = format!(".githooks/{}-commit:1", "post");
     fs::write(
         docs.join("hooks.md"),
-        format!("Tier 0 runs from `.githooks/pre-push:3`, and once from `{gone}`.\n"),
+        format!(
+            "Tier 0 runs from `.githooks/pre-push:{}`, and once from `{gone}`.\n",
+            3
+        ),
     )
     .unwrap();
 
@@ -1319,7 +1341,7 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`Transport.outbound()` is the loop, and (",
         // A citation next to a citation, the shape a comparison table has.
         "| Self-announce one-shot | `Destination.py:322`, ",
-        "the recipe moved (`Justfile:719`, ",
+        "the recipe moved (`Justfile:1103`, ",
         // A token with no letter in its last segment cannot be searched
         // for as an identifier.
         "the VID:PID `1209:0001` (",
@@ -1477,4 +1499,860 @@ fn concept_docs_reachable_from_summary() {
         "concept document(s) not listed in docs/src/SUMMARY.md \
          (invisible in the built book): {orphaned:?}"
     );
+}
+
+// --- the bare half: anchoring a line number to what was on the line ------
+//
+// Everything above checks a citation that *names* what it points at. That is
+// 764 of the corpus's 3228. The other 2464 name nothing, and for those the
+// checks above are existence and length: the file is there and has at least
+// that many lines. A citation that drifted from line 810 to 883 satisfies
+// both forever, which is the whole defect — 59 % of the corpus guarded by a
+// check that cannot see the thing that goes wrong with it.
+//
+// The name is not the only thing that survives a move. The *text of the
+// cited line* does too, and unlike a name it is already there: no citation
+// has to be rewritten to acquire one. So:
+//
+//   1. `git blame` the line the citation sits on -> commit C, the last
+//      commit that wrote it. That is the newest moment anyone can be
+//      assumed to have looked at the citation.
+//   2. The cited file as of C, at the cited line -> the anchor, the text the
+//      author was pointing at. For a citation into `reference/<submodule>`
+//      that means the submodule's own history, read at the gitlink this tree
+//      pinned in C.
+//   3. The cited file now, at the same line. Same text (leading and trailing
+//      whitespace ignored) -> the citation still points at what it pointed
+//      at.
+//   4. Otherwise, search the current file for the anchor text. Found at
+//      exactly one other line -> the text is still there, at a line the
+//      citation does not name. The number is wrong, and by how much.
+//
+// Only step 4's *unique* match is a failure, and that is deliberate: the
+// anchor text is demonstrably in the file at a line the citation does not
+// name, so the report needs no judgement about what the citing sentence
+// meant. Everything else is left undecided and counted, in the open:
+//
+//   - the anchor matches several lines (`}`, `*/`): decides nothing;
+//   - the anchor has vanished: the cited code was rewritten in place, which
+//     may or may not have invalidated the sentence, and only a reader can
+//     say. Reported as a count, not a failure — making it red would train
+//     the reflex of re-pointing citations to make a gate green;
+//   - the citing line is uncommitted, or the cited file did not exist at C.
+//
+// # What this cannot see, stated rather than hidden
+//
+// The baseline is the citing line's own last edit, so a citation that was
+// already wrong when it was last written passes. Reflowing a paragraph
+// re-baselines every citation in it. And a citation whose *sentence* went
+// wrong while the cited line stayed put is invisible here, as it is to every
+// other check in this file: Guarantee C is about references, not truth.
+//
+// So the number this reports is a floor. On the tree it was introduced
+// against it was 387 — against the 126 an aborted merge sweep had touched,
+// and against the 0 the guard had been reporting since it was written.
+
+/// Run git in `repo`, returning stdout on success.
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Line number -> the commit that last wrote that line.
+///
+/// `--line-porcelain` puts a full header in front of every line, so the
+/// mapping is read off directly. A header is `<40 hex> <orig> <final>`; every
+/// other line either starts with a tab (the content) or with a keyword.
+///
+/// The working tree, not `HEAD`: a citation edited but not yet committed is
+/// blamed to the all-zero sha, and an unanchored citation is the honest
+/// verdict for one nobody has committed yet. Blaming `HEAD` instead would
+/// check the line the author just wrote against the anchor of the line it
+/// replaced, and report every repair as fresh drift.
+fn blame_commits(root: &Path, file: &Path) -> BTreeMap<usize, String> {
+    let mut map = BTreeMap::new();
+    let Some(out) = git(
+        root,
+        &["blame", "--line-porcelain", "--", &file.to_string_lossy()],
+    ) else {
+        return map;
+    };
+    for line in out.lines() {
+        let mut fields = line.split(' ');
+        let (Some(sha), Some(_), Some(final_line)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        if let Ok(n) = final_line.parse::<usize>() {
+            map.insert(n, sha.to_string());
+        }
+    }
+    map
+}
+
+/// `<rev>:<path>` for many pairs at once.
+///
+/// One `git cat-file --batch` per repository rather than one `git show` per
+/// pair: the corpus asks for roughly 1500 blobs and the process spawns, not
+/// the reads, are what a gate would feel. Requests go in through a file so
+/// there is no pipe to deadlock on.
+fn read_blobs(
+    repo: &Path,
+    reqs: &BTreeSet<(String, String)>,
+) -> BTreeMap<(String, String), Vec<String>> {
+    let mut out = BTreeMap::new();
+    if reqs.is_empty() {
+        return out;
+    }
+    let Ok(mut req_file) = tempfile::NamedTempFile::new() else {
+        return out;
+    };
+    {
+        use std::io::Write;
+        for (rev, path) in reqs {
+            if writeln!(req_file, "{rev}:{path}").is_err() {
+                return out;
+            }
+        }
+        if req_file.flush().is_err() {
+            return out;
+        }
+    }
+    let Ok(stdin) = fs::File::open(req_file.path()) else {
+        return out;
+    };
+    let Ok(finished) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::from(stdin))
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return out;
+    };
+    let buf = finished.stdout;
+    let mut pos = 0usize;
+    for req in reqs {
+        let Some(rel_nl) = buf[pos..].iter().position(|&b| b == b'\n') else {
+            break;
+        };
+        let header = String::from_utf8_lossy(&buf[pos..pos + rel_nl]).into_owned();
+        pos += rel_nl + 1;
+        // `<oid> blob <size>` for a hit; `<request> missing` for anything
+        // else -- a path not in that tree, or a rev that is not there.
+        let Some(size) = header
+            .contains(" blob ")
+            .then(|| header.rsplit(' ').next())
+            .flatten()
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if pos + size > buf.len() {
+            break;
+        }
+        let body = String::from_utf8_lossy(&buf[pos..pos + size]).into_owned();
+        pos += size + 1;
+        out.insert(req.clone(), body.lines().map(str::to_string).collect());
+    }
+    out
+}
+
+/// The reference commit this tree pinned for `sub` at `commit`.
+///
+/// The submodules lived under `vendor/` until 2026-07-12 (`7f52d1e6`), so a
+/// citation whose line has not been touched since then is pinned at the old
+/// path. Without the fallback 651 citations into the Python references are
+/// undecidable rather than checked, which is most of what this exists for.
+fn gitlink_at(root: &Path, commit: &str, sub: &str) -> Option<String> {
+    ["reference", "vendor"].iter().find_map(|prefix| {
+        git(root, &["rev-parse", &format!("{commit}:{prefix}/{sub}")])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// `("LXMF", "LXMF/LXMRouter.py")` for a path inside a reference submodule.
+fn submodule_of(path: &str) -> Option<(&'static str, String)> {
+    let rest = path.strip_prefix("reference/")?;
+    SUBMODULES.iter().find_map(|sub| {
+        rest.strip_prefix(sub)
+            .and_then(|r| r.strip_prefix('/'))
+            .map(|inner| (*sub, inner.to_string()))
+    })
+}
+
+/// What became of one cited line.
+#[derive(Clone, PartialEq, Eq)]
+enum Anchor {
+    /// The line still holds the text it held when the citation was written.
+    Fresh,
+    /// That text is now, uniquely, at this line. The citation is wrong.
+    Moved(usize),
+    /// That text is gone from the file. A reader has to decide.
+    Rewritten,
+    /// That text is now on several lines (`else:`, `}`, `]`), so on its own
+    /// it places nothing. [`place_by_common_shift`] can still place it if the
+    /// rest of the citation agrees on where the block went.
+    Several(Vec<usize>),
+    /// Nothing to compare: a blank line, no history for the citing line, or
+    /// the cited file absent at the citing commit.
+    Undecided(&'static str),
+}
+
+/// Where the cited line sits in `new` when it is read together with the line
+/// above and the line below it.
+///
+/// A line like `else:`, `}` or `]` is the same as forty other lines in the
+/// file and places nothing on its own. With its two neighbours it usually
+/// places exactly one spot, and that is still the citation's own text rather
+/// than a guess about it. Only a unique match counts; two matches are as
+/// undecidable as before.
+fn unique_context_line(old: &[String], new: &[String], line: usize) -> Option<usize> {
+    let window = |v: &[String], centre: usize| -> Option<Vec<String>> {
+        let lo = centre.checked_sub(2)?;
+        let hi = (centre + 1).min(v.len());
+        (hi > centre).then(|| v[lo..hi].iter().map(|l| l.trim().to_string()).collect())
+    };
+    let needle = window(old, line)?;
+    if needle.len() < 2 {
+        return None;
+    }
+    let mut found = None;
+    for centre in 2..=new.len() {
+        if window(new, centre).as_ref() == Some(&needle) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(centre);
+        }
+    }
+    found
+}
+
+fn anchor_verdict(old: &[String], new: &[String], line: usize) -> Anchor {
+    if old.len() < line {
+        return Anchor::Undecided("the cited file was shorter than the citation when cited");
+    }
+    if new.len() < line {
+        return Anchor::Undecided("the cited file is shorter than the citation now");
+    }
+    let anchor = old[line - 1].trim();
+    if anchor.is_empty() {
+        return Anchor::Undecided("the cited line was blank when it was cited");
+    }
+    if new[line - 1].trim() == anchor {
+        return Anchor::Fresh;
+    }
+    let hits: Vec<usize> = new
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == anchor)
+        .map(|(i, _)| i + 1)
+        .collect();
+    match hits.len() {
+        0 => Anchor::Rewritten,
+        1 => Anchor::Moved(hits[0]),
+        _ => match unique_context_line(old, new, line) {
+            Some(only) => Anchor::Moved(only),
+            None => Anchor::Several(hits),
+        },
+    }
+}
+
+/// Place the endpoints a single anchor could not place, when the rest of the
+/// same citation agrees on one displacement.
+///
+/// A citation like `Identity.py:768-777` can have its first line move
+/// unambiguously while its last line is blank, or is a `}` that occurs forty
+/// times. That endpoint is unplaceable on its own -- but if every endpoint
+/// the anchor DID place moved by the same number of lines, the line that
+/// number away can simply be looked at: if it holds this endpoint's text, the
+/// endpoint is placed by evidence, not by inference. A blank endpoint lands
+/// on a blank line the same way.
+///
+/// Nothing is assumed. An endpoint whose text is not at the displaced line
+/// stays unplaced, and a citation with two different displacements in it gets
+/// no help at all -- that is a citation somebody has to read.
+fn place_by_common_shift(spans: &mut [AnchoredSpan], new: &[String]) {
+    let shifts: BTreeSet<isize> = spans
+        .iter()
+        .filter(|s| !s.weak)
+        .filter_map(|s| match s.verdict {
+            Anchor::Moved(to) => Some(to as isize - s.line as isize),
+            _ => None,
+        })
+        .collect();
+    let [shift] = shifts.into_iter().collect::<Vec<_>>()[..] else {
+        return;
+    };
+    for s in spans.iter_mut() {
+        if matches!(s.verdict, Anchor::Moved(_) | Anchor::Fresh) {
+            continue;
+        }
+        let target = s.line as isize + shift;
+        if target < 1 || target as usize > new.len() {
+            continue;
+        }
+        match &s.verdict {
+            // The displaced line holds this endpoint's text: placed. A
+            // wordless anchor that lands here is corroborated and stops
+            // being weak.
+            _ if new[target as usize - 1].trim() == s.anchor => {
+                s.verdict = Anchor::Moved(target as usize);
+                s.weak = false;
+            }
+            // The text is on several lines, and the block it ends changed
+            // length, so the displaced line is not one of them. Exactly one
+            // occurrence near where the rest of the citation went is still
+            // evidence: `Transport.py:1722-1764` ends on a `]` that the
+            // reference now has four of, and only one of them is a line away
+            // from the +145 its opening line moved. Two candidates that close
+            // would not be evidence, and neither would one far away, so both
+            // place nothing. The tolerance is `WINDOW`, the same slack the
+            // identifier check allows between a citation and its subject.
+            Anchor::Several(hits) => {
+                let near: Vec<usize> = hits
+                    .iter()
+                    .copied()
+                    .filter(|&h| (h as isize - target).unsigned_abs() <= WINDOW)
+                    .collect();
+                if let [only] = near[..] {
+                    s.verdict = Anchor::Moved(only);
+                    s.weak = false;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One endpoint of one span of one citation, with what became of it.
+struct AnchoredSpan {
+    span: usize,
+    /// 0 for the start of the span, 1 for its end.
+    edge: usize,
+    line: usize,
+    anchor: String,
+    verdict: Anchor,
+    /// The anchor carries no word: `"""`, `}`, `]`, `);`. Nobody cites a
+    /// delimiter on purpose, so finding one somewhere else is no evidence
+    /// that the citation drifted -- `Identity.py:84,383` pointed at a stray
+    /// `"""` the day it was written and at the right constant today, and
+    /// "repairing" it to where that `"""` went would have broken a correct
+    /// citation. A wordless anchor therefore never establishes drift by
+    /// itself; [`place_by_common_shift`] may still carry it along once the
+    /// rest of the citation has established where the block went, which is
+    /// what keeps a range ending on a `]` repairable.
+    weak: bool,
+}
+
+/// Whether the anchor text can carry a citation at all.
+fn wordless(anchor: &str) -> bool {
+    !anchor.chars().any(|c| c.is_alphanumeric())
+}
+
+#[derive(Default)]
+struct AnchorCounts {
+    fresh: usize,
+    moved: usize,
+    rewritten: usize,
+    undecided: usize,
+    external: usize,
+    unresolved: usize,
+}
+
+/// Anchor every bare citation in `citations` against the tree's own history.
+///
+/// Returns the per-endpoint verdicts for the citations that have at least one
+/// moved endpoint, plus the counts over all of them.
+fn anchor_bare_citations<'a>(
+    root: &Path,
+    citations: &'a [Citation],
+) -> (AnchorCounts, Vec<(&'a Citation, Vec<AnchoredSpan>)>) {
+    let mut counts = AnchorCounts::default();
+    let mut drifted = Vec::new();
+
+    let mut index = Vec::new();
+    walk(root, SKIP_DIRS, &mut index);
+    let rel_index: Vec<String> = index
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    // One blame per citing file, not per citation: 233 files carry the 2464
+    // bare citations between them.
+    let mut blame: BTreeMap<PathBuf, BTreeMap<usize, String>> = BTreeMap::new();
+    // (candidate path, citing commit) for every bare citation, resolved.
+    struct Pending<'a> {
+        citation: &'a Citation,
+        /// Every file the cited name resolves to. A bare `constants.rs:9`
+        /// matches several, and the prose rather than the path disambiguates
+        /// -- so, exactly as `check` does it, the citation passes if ANY
+        /// candidate still holds its text, and drift is only reported when
+        /// no candidate does.
+        cands: Vec<String>,
+        commit: String,
+    }
+    let mut pending = Vec::new();
+
+    for c in citations {
+        if c.ident.is_some() {
+            continue;
+        }
+        if EXTERNAL_PREFIXES.iter().any(|p| c.path.starts_with(p)) {
+            counts.external += 1;
+            continue;
+        }
+        let suffix = format!("/{}", c.path);
+        let cands: Vec<String> = rel_index
+            .iter()
+            .filter(|f| **f == c.path || f.ends_with(&suffix))
+            .cloned()
+            .collect();
+        if cands.is_empty() {
+            // Already a hard failure in `check`; not this check's business.
+            counts.unresolved += 1;
+            continue;
+        }
+        let commits = blame
+            .entry(c.doc.clone())
+            .or_insert_with(|| blame_commits(root, &c.doc));
+        let Some(commit) = commits.get(&c.doc_line) else {
+            counts.undecided += c.spans.len();
+            continue;
+        };
+        if commit.chars().all(|ch| ch == '0') {
+            // The citing line is not committed yet: nothing to anchor to.
+            counts.undecided += c.spans.len();
+            continue;
+        }
+        pending.push(Pending {
+            citation: c,
+            cands,
+            commit: commit.clone(),
+        });
+    }
+
+    // Gitlinks first: a citation into a reference submodule is read out of
+    // that submodule's history, at the commit this tree pinned back then.
+    let mut gitlinks: BTreeMap<(String, &str), Option<String>> = BTreeMap::new();
+    for p in &pending {
+        for cand in &p.cands {
+            if let Some((sub, _)) = submodule_of(cand) {
+                let key = (p.commit.clone(), sub);
+                gitlinks
+                    .entry(key)
+                    .or_insert_with(|| gitlink_at(root, &p.commit, sub));
+            }
+        }
+    }
+
+    // Batch the blob reads, grouped by the repository they come from.
+    let mut want: BTreeMap<PathBuf, BTreeSet<(String, String)>> = BTreeMap::new();
+    let repo_and_path = |commit: &str, cand: &str| -> Option<(PathBuf, String, String)> {
+        match submodule_of(cand) {
+            Some((sub, inner)) => {
+                let link = gitlinks.get(&(commit.to_string(), sub))?.clone()?;
+                Some((root.join("reference").join(sub), link, inner))
+            }
+            None => Some((root.to_path_buf(), commit.to_string(), cand.to_string())),
+        }
+    };
+    for p in &pending {
+        for cand in &p.cands {
+            if let Some((repo, rev, path)) = repo_and_path(&p.commit, cand) {
+                want.entry(repo).or_default().insert((rev, path));
+            }
+        }
+    }
+    let blobs: BTreeMap<PathBuf, BTreeMap<(String, String), Vec<String>>> = want
+        .iter()
+        .map(|(repo, reqs)| (repo.clone(), read_blobs(repo, reqs)))
+        .collect();
+
+    for p in &pending {
+        let mut per_candidate = Vec::new();
+        for cand in &p.cands {
+            let Some((repo, rev, path)) = repo_and_path(&p.commit, cand) else {
+                continue;
+            };
+            // "Then" comes out of history; "now" comes off disk, because the
+            // working tree is what a reader following the citation opens.
+            let Some(old) = blobs[&repo].get(&(rev, path)) else {
+                continue;
+            };
+            let Ok(text) = fs::read_to_string(root.join(cand)) else {
+                continue;
+            };
+            let new: Vec<String> = text.lines().map(str::to_string).collect();
+            let new = &new;
+            let mut spans: Vec<AnchoredSpan> = Vec::new();
+            for (i, &(start, end)) in p.citation.spans.iter().enumerate() {
+                for (edge, line) in [(0, start), (1, end)] {
+                    if edge == 1 && end == start {
+                        continue;
+                    }
+                    spans.push(AnchoredSpan {
+                        span: i,
+                        edge,
+                        line,
+                        anchor: old
+                            .get(line - 1)
+                            .map(|l| l.trim().to_string())
+                            .unwrap_or_default(),
+                        verdict: anchor_verdict(old, new, line),
+                        weak: old.get(line - 1).is_some_and(|l| wordless(l.trim())),
+                    });
+                }
+            }
+            place_by_common_shift(&mut spans, new);
+            // Whatever the shift did not corroborate, a wordless anchor
+            // cannot claim on its own.
+            for s in spans.iter_mut() {
+                if s.weak && matches!(s.verdict, Anchor::Moved(_)) {
+                    s.verdict = Anchor::Undecided("the cited line carries no word to anchor to");
+                }
+            }
+            per_candidate.push(spans);
+        }
+
+        // A candidate that still holds the citation's text, with nothing
+        // moved, settles it: the citation is right about that file, whatever
+        // the same-named file one directory over now says.
+        let settled = per_candidate.iter().position(|spans| {
+            !spans.iter().any(|s| matches!(s.verdict, Anchor::Moved(_)))
+                && spans.iter().any(|s| s.verdict == Anchor::Fresh)
+        });
+        let chosen = settled.or_else(|| {
+            per_candidate
+                .iter()
+                .position(|spans| spans.iter().any(|s| matches!(s.verdict, Anchor::Moved(_))))
+        });
+        let Some(chosen) = chosen else {
+            counts.undecided += per_candidate
+                .first()
+                .map_or(p.citation.spans.len(), |s| s.len());
+            continue;
+        };
+        let spans = &per_candidate[chosen];
+        for s in spans {
+            match s.verdict {
+                Anchor::Fresh => counts.fresh += 1,
+                Anchor::Moved(_) => counts.moved += 1,
+                Anchor::Rewritten => counts.rewritten += 1,
+                Anchor::Several(_) | Anchor::Undecided(_) => counts.undecided += 1,
+            }
+        }
+        if settled.is_none() {
+            drifted.push((p.citation, per_candidate.swap_remove(chosen)));
+        }
+    }
+
+    (counts, drifted)
+}
+
+/// The citation rewritten with every endpoint moved to where its text went.
+///
+/// `None` when some endpoint of the citation could not be decided: half a
+/// repaired span would be worse than the drift it replaces.
+fn repaired(c: &Citation, spans: &[AnchoredSpan]) -> Option<String> {
+    let mut fixed = c.spans.clone();
+    for s in spans {
+        match s.verdict {
+            Anchor::Moved(to) => {
+                // A single-line span carries only its start edge, so moving
+                // that edge has to move both ends or the span inverts.
+                let point = c.spans.get(s.span).is_some_and(|&(a, b)| a == b);
+                let slot = fixed.get_mut(s.span)?;
+                if s.edge == 0 {
+                    slot.0 = to;
+                    if point {
+                        slot.1 = to;
+                    }
+                } else {
+                    slot.1 = to;
+                }
+            }
+            Anchor::Fresh => {}
+            _ => return None,
+        }
+    }
+    if fixed.iter().any(|&(a, b)| a > b) {
+        return None;
+    }
+    let spec = fixed
+        .iter()
+        .map(|&(a, b)| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}-{b}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let quote = if c.raw.starts_with('`') { "`" } else { "" };
+    Some(format!("{quote}{}:{spec}{quote}", c.path))
+}
+
+/// Rewrite every repairable citation in place. Returns how many it rewrote.
+///
+/// Off unless `LEVICULUM_CITATION_FIX` is set. The finder and the fixer are
+/// the same code on purpose: a separate fixing script would be a second
+/// implementation of the anchor rule, and the first symptom of the two
+/// disagreeing is a repair pointed at the wrong line.
+fn apply_repairs(root: &Path, drifted: &[(&Citation, Vec<AnchoredSpan>)]) -> usize {
+    let mut per_file: BTreeMap<PathBuf, Vec<(usize, usize, String)>> = BTreeMap::new();
+    for (c, spans) in drifted {
+        if let Some(new) = repaired(c, spans) {
+            per_file
+                .entry(c.doc.clone())
+                .or_default()
+                .push((c.offset, c.raw.len(), new));
+        }
+    }
+    let mut n = 0;
+    for (doc, mut edits) in per_file {
+        let path = root.join(&doc);
+        let Ok(mut text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Back to front, so an earlier edit does not move a later offset.
+        edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+        for (offset, len, new) in edits {
+            if text.get(offset..offset + len).is_none() {
+                continue;
+            }
+            text.replace_range(offset..offset + len, &new);
+            n += 1;
+        }
+        let _ = fs::write(&path, text);
+    }
+    n
+}
+
+fn anchor_report(
+    label: &str,
+    counts: &AnchorCounts,
+    drifted: &[(&Citation, Vec<AnchoredSpan>)],
+) -> Vec<Failure> {
+    println!(
+        "{label} bare-citation anchors: {} cited lines still hold the text they held \
+         when cited, {} moved, {} rewritten in place, {} undecidable; {} external, \
+         {} unresolved",
+        counts.fresh,
+        counts.moved,
+        counts.rewritten,
+        counts.undecided,
+        counts.external,
+        counts.unresolved
+    );
+    drifted
+        .iter()
+        .map(|(c, spans)| {
+            let mut lines = vec![format!("{}:{}: {}", c.doc.display(), c.doc_line, c.raw)];
+            for s in spans.iter() {
+                if let Anchor::Moved(to) = s.verdict {
+                    lines.push(format!(
+                        "    line {} held `{}` when this citation was last written; \
+                         that text is now at line {} ({:+})",
+                        s.line,
+                        s.anchor.chars().take(90).collect::<String>(),
+                        to,
+                        to as isize - s.line as isize
+                    ));
+                }
+            }
+            match repaired(c, spans) {
+                Some(new) => lines.push(format!("    the citation should read {new}")),
+                None => lines.push(
+                    "    not all of this citation's endpoints could be placed; \
+                     re-read it rather than renumbering it"
+                        .into(),
+                ),
+            }
+            Failure {
+                kind: FailureKind::Drift,
+                message: lines.join("\n"),
+            }
+        })
+        .collect()
+}
+
+/// The standing canary for the anchor rule: a miniature repo with two bare
+/// citations, one of which is made wrong by a commit that moves the code
+/// under it.
+///
+/// The concept page requires a permanent pair, not a one-time demonstration.
+/// This check is made of subprocess calls into git and a text comparison, and
+/// every one of those failure modes -- blame that returns nothing, a
+/// `cat-file` batch that desynchronises, a resolution that finds no candidate
+/// -- produces *no findings*, which reads exactly like a clean tree. So both
+/// directions are asserted on the same fixture: the moved citation must be
+/// reported with the line its text moved to, and the citation whose line did
+/// not move must not be reported at all.
+fn run_bare_anchor_canary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let git_in = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=canary",
+                "-c",
+                "user.email=canary@localhost",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "CANARY: git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    let src = root.join("leviculum-core/src");
+    fs::create_dir_all(&src).unwrap();
+    let docs = root.join("docs/src/concepts");
+    fs::create_dir_all(&docs).unwrap();
+
+    // Line 5 is the one that stays put; line 10 is the one that moves.
+    let mut body: Vec<String> = (1..=20).map(|n| format!("// filler {n}")).collect();
+    body[4] = "pub const CANARY_ANCHOR: u8 = 7;".into();
+    body[9] = "pub fn canary_moves() {}".into();
+    let code = src.join("canary_anchor.rs");
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+
+    // Built rather than spelled out: a literal citation here would be scanned
+    // as part of the corpus this file guards.
+    let stays = format!("`canary_anchor.rs:{}`", 5);
+    let moves = format!("`canary_anchor.rs:{}`", 10);
+    let doc = docs.join("canary_anchor.md");
+    fs::write(
+        &doc,
+        format!("The constant ({stays}) and the function ({moves}) are both cited bare.\n"),
+    )
+    .unwrap();
+
+    git_in(&["init", "-q"]);
+    git_in(&["add", "-A"]);
+    git_in(&["commit", "-qm", "fixture"]);
+
+    // Four lines land between the two cited lines. Nothing above line 5
+    // changes, so that citation is still right; the function slides to 14.
+    body.splice(6..6, (1..=4).map(|n| format!("// inserted {n}")));
+    fs::write(&code, body.join("\n") + "\n").unwrap();
+    git_in(&["add", "-A"]);
+    git_in(&["commit", "-qm", "move the function down"]);
+
+    let citations = scan(root, &[doc], Corpus::Book);
+    assert_eq!(
+        citations.len(),
+        2,
+        "CANARY: the fixture's two citations were not both parsed"
+    );
+    let (counts, drifted) = anchor_bare_citations(root, &citations);
+    assert_eq!(
+        counts.fresh, 1,
+        "CANARY: {} of the 1 unmoved citation was seen as still pointing at its \
+         text. Anchoring has stopped resolving, and a green run means nothing.",
+        counts.fresh
+    );
+    assert_eq!(
+        drifted.len(),
+        1,
+        "CANARY: {} citations reported, expected exactly the moved one. This is \
+         the defect the check exists for.",
+        drifted.len()
+    );
+    let (cited, spans) = &drifted[0];
+    assert!(
+        cited.raw.contains(&moves[1..moves.len() - 1]),
+        "CANARY: the wrong citation was reported: {}",
+        cited.raw
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .filter_map(|s| match s.verdict {
+                Anchor::Moved(to) => Some(to),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![14],
+        "CANARY: the moved citation was reported without the line its text moved to"
+    );
+    assert_eq!(
+        repaired(cited, spans).as_deref(),
+        Some(format!("`canary_anchor.rs:{}`", 14).as_str()),
+        "CANARY: the repair does not name the line the text actually moved to"
+    );
+}
+
+/// A bare citation's line number still points at the text it pointed at.
+///
+/// The half of Guarantee C that was unguarded: see the block comment above
+/// for the rule and for what it deliberately leaves undecided.
+#[test]
+fn bare_citations_still_point_at_the_text_they_cited() {
+    run_bare_anchor_canary();
+
+    let root = repo_root();
+    if git(&root, &["rev-parse", "--git-dir"]).is_none() {
+        // Loudly, not silently: a guard that quietly checks nothing is the
+        // shape this whole check exists to remove.
+        println!(
+            "bare-citation anchors: SKIPPED -- {} is not a git checkout, so there is \
+             no history to anchor a line number against.",
+            root.display()
+        );
+        return;
+    }
+    if git(&root, &["rev-parse", "--is-shallow-repository"]).is_some_and(|s| s.trim() == "true") {
+        println!(
+            "bare-citation anchors: SKIPPED -- shallow clone. `git fetch --unshallow` \
+             to check the 2464 bare citations this tree cannot otherwise see."
+        );
+        return;
+    }
+
+    let mut failures = Vec::new();
+    let mut fixed = 0usize;
+    for (label, citations) in [
+        ("doc", book_citations(&root)),
+        ("source", source_citations(&root, SOURCE_CRATES)),
+    ] {
+        let (counts, drifted) = anchor_bare_citations(&root, &citations);
+        if std::env::var_os("LEVICULUM_CITATION_FIX").is_some() {
+            fixed += apply_repairs(&root, &drifted);
+        }
+        failures.extend(anchor_report(label, &counts, &drifted));
+    }
+    if std::env::var_os("LEVICULUM_CITATION_FIX").is_some() {
+        println!("LEVICULUM_CITATION_FIX: rewrote {fixed} citation(s)");
+        return;
+    }
+    report("bare-citation anchor", &failures);
 }
