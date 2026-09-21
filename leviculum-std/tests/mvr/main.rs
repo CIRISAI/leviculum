@@ -29,6 +29,7 @@ mod local_client_announce_burst_half_duplex;
 mod lxmf_opportunistic_fallback_threshold;
 mod pn_offer_outgrows_the_link_mdu;
 mod ratchet_rotation_single_packet;
+mod recall_survives_a_restart;
 mod reliable_channel_delivery_backpressure;
 mod resource_consecutive_push_window_policy;
 mod responder_close_delivery;

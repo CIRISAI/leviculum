@@ -3191,20 +3191,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// deciding whether a node syncing into it is a node at all (Codeberg
     /// #417) — must be answered from history, not from the current session.
     ///
-    /// **Known limit:** history here means this process's history. Python's
-    /// recall also survives a restart, because `known_destinations` persists
-    /// `app_data`; our `known_destinations` writer has no `app_data` to write
-    /// for a runtime-learned destination (`leviculum-std/src/storage.rs`,
-    /// `take_flush_snapshot`) and the announce cache is memory-only. Closing
-    /// that is a persistence change of its own, not a caller's problem.
+    /// History outlives the process wherever the storage does (Codeberg
+    /// #420): when this run's announce cache has nothing — the first answer
+    /// after a restart, every time — the question is put to
+    /// [`Storage::recalled_app_data`], which a persisting target fills from
+    /// its known-destinations table, the same place Python's recall reads. A target that persists nothing
+    /// answers `None` there, so on a board the bound stays the one #417
+    /// measured: while a path to that destination lives, and not across a
+    /// reset.
     pub fn recall_app_data(&self, dest_hash: &DestinationHash) -> Option<Vec<u8>> {
-        let cached_raw = self
-            .transport
-            .storage()
-            .get_announce_cache(dest_hash.as_bytes())?;
-        let packet = crate::packet::Packet::unpack(cached_raw).ok()?;
-        let announce = crate::announce::ReceivedAnnounce::from_packet(&packet).ok()?;
-        Some(announce.app_data().to_vec())
+        let storage = self.transport.storage();
+        let from_this_run = storage
+            .get_announce_cache(dest_hash.as_bytes())
+            .and_then(|raw| crate::announce::cached_announce_app_data(raw));
+        from_this_run.or_else(|| {
+            storage
+                .recalled_app_data(dest_hash.as_bytes())
+                .map(|data| data.to_vec())
+        })
     }
 
     /// The raw routing decision for `dest_hash`, for a sender's log line

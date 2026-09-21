@@ -222,7 +222,7 @@ that passes the sanity window and is refused anyway, because its
 estimate is recognisably behind real time and every expiry it
 computes is already in the past on every healed peer. The gate is
 `NodeCore::has_plausible_wall_clock`
-(`leviculum-core/src/node/mod.rs:3347`), and since Codeberg #247 it
+(`leviculum-core/src/node/mod.rs:3352`), and since Codeberg #247 it
 asks the rank: `anchor_rank() < BIRTH_ANCHOR_RANK`.
 
 Fields the peer decides nothing on are always emitted. The LXMF
@@ -307,7 +307,7 @@ they stay keyed on the value:
   #161 §1 regression this page forbids — instead of healing in one
   step. It now asks `anchor_rank() == BIRTH_ANCHOR_RANK`.
 - **The ticket refusal.** `NodeCore::has_plausible_wall_clock`
-  (`leviculum-core/src/node/mod.rs:3347`) became vacuously true at
+  (`leviculum-core/src/node/mod.rs:3352`) became vacuously true at
   the build floor: the refusal would never fire again, and a
   birth-anchored node would issue tickets whose expiry is already in
   the past on every healed peer — the silently-discarded field the

@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use leviculum_core::cached_announce_app_data;
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::memory_storage::{MemoryStorage, TableCaps};
 use leviculum_core::storage_census::CollectionCount;
@@ -472,20 +473,40 @@ impl Storage {
             // New identities get a minimal entry; existing entries get their
             // timestamp and public_key refreshed (the runtime version was just
             // validated from a live announce, so it takes precedence over the
-            // disk version). app_data and packet_hash are preserved, they
-            // come from the original announce and are not available here.
+            // disk version). packet_hash is preserved: it belongs to the
+            // announce packet and is not available here.
+            //
+            // app_data comes from the cached announce, which is what Python
+            // hands `Identity.remember` at validate time
+            // (`reference/Reticulum/RNS/Identity.py:598`). Writing it is what
+            // lets the recall survive a restart (Codeberg #420); writing
+            // `None` instead left every runtime-learned destination
+            // unrecallable for a full announce interval after every start,
+            // and a propagation peer that syncs into such a node in that
+            // window is read as "not a node" (#417). A destination whose
+            // announce has since been swept from the cache keeps whatever was
+            // remembered before — the reference overwrites the field only on
+            // a new announce too.
             for (hash, identity) in self.inner.known_identity_iter() {
+                let announced = self
+                    .inner
+                    .get_announce_cache(hash)
+                    .and_then(|raw| cached_announce_app_data(raw))
+                    .filter(|data| !data.is_empty());
                 self.known_dest_entries
                     .entry(*hash)
                     .and_modify(|e| {
                         e.timestamp = timestamp;
                         e.public_key = identity.public_key_bytes();
+                        if announced.is_some() {
+                            e.app_data = announced.clone();
+                        }
                     })
                     .or_insert_with(|| KnownDestEntry {
                         timestamp,
                         packet_hash: vec![0u8; PACKET_HASH_LEN],
                         public_key: identity.public_key_bytes(),
-                        app_data: None,
+                        app_data: announced,
                     });
             }
             Some((self.identities_gen, self.known_dest_entries.clone()))
@@ -709,6 +730,21 @@ impl leviculum_core::traits::Storage for Storage {
     }
     fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         self.inner.announce_cache_keys()
+    }
+
+    /// The `app_data` of the last announce this destination made in an
+    /// earlier run (Codeberg #420), straight out of the known-destinations
+    /// table this storage loaded at startup — the daemon's counterpart of
+    /// Python reading `Identity.known_destinations[dest][3]`
+    /// (`reference/Reticulum/RNS/Identity.py:162-172`).
+    ///
+    /// The table is also the live one, so this answers for a destination
+    /// heard in THIS run as soon as a flush has folded it in; the recall
+    /// prefers the announce cache anyway, which is the fresher of the two.
+    fn recalled_app_data(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&[u8]> {
+        self.known_dest_entries
+            .get(dest_hash)
+            .and_then(|entry| entry.app_data.as_deref())
     }
 
     // Known-destination cache lifecycle (Codeberg #84)
@@ -1348,6 +1384,80 @@ mod tests {
         assert!(
             CoreStorage::has_packet_hash(&storage, &hash),
             "should auto-load packet hash from packet_hashlist"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// Codeberg #420: the known-destinations file must carry what a
+    /// destination said about itself in the field Python reads for it —
+    /// entry index 3, `Identity.recall_app_data`
+    /// (`reference/Reticulum/RNS/Identity.py:162-172`), written by
+    /// `remember` from the validated announce (`:598`).
+    ///
+    /// Before this, a destination learned at runtime was written with
+    /// `app_data` nil, so the file said "this destination announced nothing
+    /// about itself" — to our own next start and to an `rnsd` sharing the
+    /// storage directory alike.
+    #[test]
+    fn test_flush_writes_the_announced_app_data_of_a_runtime_destination() {
+        use leviculum_core::traits::Storage as CoreStorage;
+        use leviculum_core::{Destination, DestinationType, Direction};
+
+        let path = temp_dir().join(format!(
+            "reticulum_test_flush_appdata_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+
+        // The state a validated announce leaves behind in storage: the
+        // identity in the runtime table, the raw packet in the announce cache.
+        let mut destination = Destination::new(
+            Some(crate::generate_identity()),
+            Direction::In,
+            DestinationType::Single,
+            "lxmf",
+            &["propagation"],
+        )
+        .expect("a propagation destination");
+        let dest_hash = *destination.hash().as_bytes();
+        let identity = destination
+            .identity()
+            .expect("the destination carries its identity")
+            .clone();
+        let app_data = b"\x93\xc2\xce\x6a\xb1\xb4\x91".to_vec();
+        let packet = destination
+            .announce(Some(&app_data), &mut rand_core::OsRng, 0, 1_700_000_000)
+            .expect("announce packet");
+        let mut raw = vec![0u8; 600];
+        let len = packet.pack(&mut raw).expect("pack the announce");
+        raw.truncate(len);
+
+        {
+            let mut storage = Storage::new(&path).unwrap();
+            CoreStorage::set_identity(&mut storage, dest_hash, identity);
+            CoreStorage::set_announce_cache(&mut storage, dest_hash, raw);
+            CoreStorage::flush(&mut storage);
+        }
+
+        let bytes =
+            std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).expect("the file was written");
+        let entries = decode_known_destinations(&bytes).expect("decodes as Python would");
+        let entry = entries
+            .get(&dest_hash)
+            .expect("the destination was written");
+        assert_eq!(
+            entry.app_data.as_deref(),
+            Some(app_data.as_slice()),
+            "the file must carry the announced app_data, not nil"
+        );
+
+        // And the storage that reads that file answers the recall with it.
+        let storage = Storage::new(&path).unwrap();
+        assert_eq!(
+            CoreStorage::recalled_app_data(&storage, &dest_hash),
+            Some(app_data.as_slice()),
+            "a restarted node must recall what the destination announced"
         );
 
         let _ = std::fs::remove_dir_all(&path);

@@ -534,6 +534,24 @@ pub trait Storage {
     /// Return every destination hash that has a cached announce (Codeberg #84).
     fn announce_cache_keys(&self) -> Vec<[u8; TRUNCATED_HASHBYTES]>;
 
+    /// The `app_data` a destination announced in an EARLIER run of this node,
+    /// read back from persistent known-destinations storage (Codeberg #420).
+    ///
+    /// The announce cache above is this process's memory and starts empty, so
+    /// it cannot answer [`crate::NodeCore::recall_app_data`] after a restart.
+    /// Python has no such gap: `Identity.known_destinations` carries `app_data`
+    /// as a field, is written to storage and loaded again on start
+    /// (`reference/Reticulum/RNS/Identity.py:101-113, 177-265`), which is what
+    /// `recall_app_data` reads (`:162-172`).
+    ///
+    /// The default is `None` — "this target persists nothing", which is the
+    /// literal truth for [`NoStorage`] and for a board's `EmbeddedStorage`,
+    /// where the recall bound stays the one #417 measured: while a path to
+    /// that destination lives, and not across a reset.
+    fn recalled_app_data(&self, _dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&[u8]> {
+        None
+    }
+
     // Known-destination cache lifecycle (Codeberg #84).
     // These mirror Python's Identity retain/used/unretain over the fifth
     // known_destinations field, driven over the shared-instance RPC.

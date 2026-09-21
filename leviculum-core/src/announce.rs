@@ -607,6 +607,22 @@ pub fn verify_announce_packet(packet: &Packet) -> bool {
     }
 }
 
+/// The `app_data` of a raw announce as the announce cache holds it, or `None`
+/// when those bytes do not parse as an announce.
+///
+/// Two callers need the same three lines — the recall
+/// ([`crate::NodeCore::recall_app_data`]) and, on a target that persists it,
+/// the known-destinations writer, which has the cached bytes but no node to
+/// ask. Python needs no equivalent because it remembers `app_data` as a field
+/// of `Identity.known_destinations` at validate time
+/// (`reference/Reticulum/RNS/Identity.py:598`) rather than keeping the
+/// announce itself.
+pub fn cached_announce_app_data(raw: &[u8]) -> Option<Vec<u8>> {
+    let packet = Packet::unpack(raw).ok()?;
+    let announce = ReceivedAnnounce::from_packet(&packet).ok()?;
+    Some(announce.app_data().to_vec())
+}
+
 impl core::fmt::Debug for ReceivedAnnounce {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ReceivedAnnounce")
