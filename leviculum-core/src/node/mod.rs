@@ -3473,6 +3473,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.tunnel_table_entries()
     }
 
+    /// How many tunnels the transport holds, without building their rows.
+    ///
+    /// The size half of [`Self::tunnel_table_entries`]: a `len()` against a
+    /// walk that clones every tunnel and every path inside it. The
+    /// `transport_tables` RPC reports a size for every table it can dump,
+    /// including this one, on every call (Codeberg #028).
+    pub fn tunnel_count(&self) -> usize {
+        self.transport.tunnel_count()
+    }
+
     /// Clone a path entry by destination hash (for RPC lookups).
     pub fn get_path_clone(
         &self,
