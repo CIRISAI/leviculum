@@ -10,6 +10,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::constants::{
@@ -17,6 +18,7 @@ use crate::constants::{
     TRUNCATED_HASHBYTES,
 };
 use crate::identity::Identity;
+use crate::storage_census::CollectionCount;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathEntry, PathState,
     ReceiptStatus, ReverseEntry,
@@ -479,6 +481,17 @@ impl MemoryStorage {
             n, raw, est
         );
 
+        // known_dest_use: BTreeMap<[u8; 16], KnownDestUse>, 3x
+        let n = self.known_dest_use.len();
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<KnownDestUse>())) as u64;
+        let est = raw * 3;
+        total += est;
+        let _ = writeln!(
+            s,
+            "known_dest_use: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 3x)",
+            n, raw, est
+        );
+
         (s, total)
     }
 }
@@ -906,6 +919,76 @@ impl Storage for MemoryStorage {
     }
 
     // Diagnostics
+    /// Every collection above, in field order, with the ceilings the code
+    /// above actually enforces (Codeberg #174).
+    ///
+    /// Only four ceilings exist: the two dedup generations rotate at half
+    /// `packet_hash_cap`, the path-request tag ring and its index are trimmed
+    /// to `MAX_PATH_REQUEST_TAGS`, and `known_identities` evicts at
+    /// `identity_cap`. Every other collection here is bounded by expiry alone
+    /// — no ceiling, so `None`, which is the honest answer and the input
+    /// Codeberg #421 needs.
+    ///
+    /// Cost: `len()` throughout, O(1), except `local_client_dest_map` whose
+    /// entries live in the inner sets and are summed over the local
+    /// interfaces (a single-digit count on every node we run). The number
+    /// reported for it is the destination total, not the interface count,
+    /// because what it costs is destinations.
+    fn collection_counts(&self) -> Vec<CollectionCount> {
+        // A generation is rotated out once it passes half the cap, so half
+        // the cap — not the cap — is the ceiling either generation is held
+        // to. Reporting the full cap here would make a rotating cache look
+        // half empty at the moment it rotates.
+        let generation_cap = self.packet_hash_cap / 2;
+        vec![
+            CollectionCount::bounded("packet_cache", self.packet_cache.len(), generation_cap),
+            CollectionCount::bounded(
+                "packet_cache_prev",
+                self.packet_cache_prev.len(),
+                generation_cap,
+            ),
+            CollectionCount::unbounded("path_table", self.path_table.len()),
+            CollectionCount::unbounded("path_states", self.path_states.len()),
+            CollectionCount::unbounded("reverse_table", self.reverse_table.len()),
+            CollectionCount::unbounded("link_table", self.link_table.len()),
+            CollectionCount::unbounded("announce_table", self.announce_table.len()),
+            CollectionCount::unbounded("announce_cache", self.announce_cache.len()),
+            CollectionCount::unbounded("announce_rate_table", self.announce_rate_table.len()),
+            CollectionCount::unbounded("receipts", self.receipts.len()),
+            CollectionCount::unbounded("path_requests", self.path_requests.len()),
+            CollectionCount::bounded(
+                "path_request_tags",
+                self.path_request_tags.len(),
+                MAX_PATH_REQUEST_TAGS,
+            ),
+            CollectionCount::bounded(
+                "path_request_tag_set",
+                self.path_request_tag_set.len(),
+                MAX_PATH_REQUEST_TAGS,
+            ),
+            CollectionCount::bounded(
+                "known_identities",
+                self.known_identities.len(),
+                self.identity_cap,
+            ),
+            CollectionCount::unbounded("known_ratchets", self.known_ratchets.len()),
+            CollectionCount::unbounded(
+                "local_client_dest_map",
+                self.local_client_dest_map.values().map(|s| s.len()).sum(),
+            ),
+            CollectionCount::unbounded(
+                "local_client_known_dests",
+                self.local_client_known_dests.len(),
+            ),
+            CollectionCount::unbounded(
+                "discovery_path_requests",
+                self.discovery_path_requests.len(),
+            ),
+            CollectionCount::unbounded("dest_ratchet_keys", self.dest_ratchet_keys.len()),
+            CollectionCount::unbounded("known_dest_use", self.known_dest_use.len()),
+        ]
+    }
+
     fn diagnostic_dump(&self) -> (String, u64) {
         let (mut s, mut total) = self.diagnostic_dump_packet_cache();
         let (s2, total2) = self.diagnostic_dump_non_packet_cache();
@@ -1030,6 +1113,156 @@ mod tests {
     use super::*;
     use crate::destination::DestinationHash;
     use alloc::vec;
+
+    /// Codeberg #174: the census and the struct agree, in both directions.
+    ///
+    /// Rust has no reflection, so the binding is the source text of this very
+    /// file: a collection field added without a counter fails here rather
+    /// than quietly going unreported. That failure mode is not hypothetical —
+    /// `known_dest_use` (Codeberg #84) was added to this struct and to
+    /// nothing that reports it, and stayed invisible until a soak node's
+    /// memory had to be attributed.
+    #[test]
+    fn collection_counts_names_every_collection_field() {
+        let fields = crate::storage_census::collection_fields(
+            include_str!("memory_storage.rs"),
+            "MemoryStorage",
+        )
+        .expect("MemoryStorage is declared in this file");
+        assert!(
+            fields.len() > 10,
+            "the parse found only {fields:?}, which cannot be this struct"
+        );
+
+        let storage = MemoryStorage::with_defaults();
+        let counted: Vec<&str> = storage.collection_counts().iter().map(|c| c.name).collect();
+
+        for field in &fields {
+            assert!(
+                counted.contains(&field.as_str()),
+                "MemoryStorage.{field} is a collection that collection_counts() does not report"
+            );
+        }
+        for name in &counted {
+            assert!(
+                fields.iter().any(|f| f == name),
+                "collection_counts() reports {name}, which is not a collection field"
+            );
+        }
+        assert_eq!(
+            counted.len(),
+            fields.len(),
+            "one row per collection, no duplicates: {counted:?} vs {fields:?}"
+        );
+    }
+
+    /// The text dump is the other surface that enumerates these collections
+    /// by hand, and it is the one that already drifted. Bind it to the same
+    /// list so it cannot drift again separately.
+    #[test]
+    fn diagnostic_dump_names_every_collection_field() {
+        let storage = MemoryStorage::with_defaults();
+        let (dump, _) = storage.diagnostic_dump();
+        for row in storage.collection_counts() {
+            assert!(
+                dump.contains(row.name),
+                "diagnostic_dump() does not mention {}",
+                row.name
+            );
+        }
+    }
+
+    /// A count without its ceiling does not say how close to full a table is.
+    /// The four collections this storage actually bounds report theirs; the
+    /// rest report `None`, which is a fact about the design, not a gap.
+    #[test]
+    fn collection_counts_carry_the_configured_ceilings() {
+        let storage = MemoryStorage {
+            packet_hash_cap: 10,
+            identity_cap: 7,
+            ..MemoryStorage::with_defaults()
+        };
+        let cap = |name: &str| {
+            storage
+                .collection_counts()
+                .into_iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} must be reported"))
+                .capacity
+        };
+        // Half the cap: that is the size at which a generation rotates.
+        assert_eq!(cap("packet_cache"), Some(5));
+        assert_eq!(cap("packet_cache_prev"), Some(5));
+        assert_eq!(cap("known_identities"), Some(7));
+        assert_eq!(cap("path_request_tags"), Some(MAX_PATH_REQUEST_TAGS));
+        assert_eq!(cap("path_request_tag_set"), Some(MAX_PATH_REQUEST_TAGS));
+        assert_eq!(cap("path_table"), None);
+        assert_eq!(cap("announce_cache"), None);
+    }
+
+    /// The rotation is the event worth seeing, and a sum of the two
+    /// generations hides it: the total barely moves across a rotation while
+    /// one generation is freed whole. Reported separately, the step is
+    /// visible.
+    #[test]
+    fn the_two_dedup_generations_are_counted_separately() {
+        let mut storage = MemoryStorage {
+            packet_hash_cap: 10,
+            ..MemoryStorage::with_defaults()
+        };
+        let count = |s: &MemoryStorage, name: &str| {
+            s.collection_counts()
+                .into_iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} must be reported"))
+                .entries
+        };
+        let mut add = |storage: &mut MemoryStorage, i: u8| {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            storage.add_packet_hash(hash);
+        };
+
+        for i in 0..5u8 {
+            add(&mut storage, i);
+        }
+        assert_eq!(count(&storage, "packet_cache"), 5);
+        assert_eq!(count(&storage, "packet_cache_prev"), 0);
+
+        // The sixth hash crosses the threshold: the generation is handed to
+        // prev whole and a fresh empty one takes its place.
+        add(&mut storage, 5);
+        assert_eq!(count(&storage, "packet_cache"), 0);
+        assert_eq!(count(&storage, "packet_cache_prev"), 6);
+
+        // Fill the new generation to the threshold again. Now the rotation
+        // FREES the six hashes in prev, and this is the shape a sawtooth in
+        // the resident set has: the sum falls by a whole generation at once.
+        for i in 6..11u8 {
+            add(&mut storage, i);
+        }
+        let sum_before = count(&storage, "packet_cache") + count(&storage, "packet_cache_prev");
+        assert_eq!(sum_before, 11);
+        add(&mut storage, 11);
+        assert_eq!(count(&storage, "packet_cache"), 0);
+        assert_eq!(count(&storage, "packet_cache_prev"), 6);
+    }
+
+    /// A map of sets costs what its inner sets hold, not what its outer map
+    /// holds, so that is what the count states.
+    #[test]
+    fn local_client_dest_map_counts_destinations_not_interfaces() {
+        let mut storage = MemoryStorage::with_defaults();
+        for (iface, dest) in [(0usize, 1u8), (0, 2), (1, 3)] {
+            storage.add_local_client_dest(iface, [dest; TRUNCATED_HASHBYTES]);
+        }
+        let row = storage
+            .collection_counts()
+            .into_iter()
+            .find(|c| c.name == "local_client_dest_map")
+            .expect("local_client_dest_map must be reported");
+        assert_eq!(row.entries, 3);
+    }
 
     #[test]
     fn test_packet_hash_dedup() {

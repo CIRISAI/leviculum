@@ -11,6 +11,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use heapless::FnvIndexMap;
@@ -27,6 +28,11 @@ use crate::constants::{RATCHET_SIZE, RECEIPT_RETENTION_MS, TRUNCATED_HASHBYTES};
 /// (see `path_request_tag_set`) is not truncatable.
 const DEDUP_KEY_BYTES: usize = 16;
 
+/// Entries one dedup generation is allowed before it rotates. Half the
+/// `FnvIndexSet` capacity below, mirroring `MemoryStorage`: the live window
+/// is 128-256 packets across the rotation, not 256.
+const PACKET_CACHE_GENERATION_CAP: usize = 128;
+
 /// The stored dedup key of a full 32-byte hash.
 fn dedup_key(hash: &[u8; 32]) -> [u8; DEDUP_KEY_BYTES] {
     let mut key = [0u8; DEDUP_KEY_BYTES];
@@ -34,6 +40,7 @@ fn dedup_key(hash: &[u8; 32]) -> [u8; DEDUP_KEY_BYTES] {
     key
 }
 use crate::identity::Identity;
+use crate::storage_census::CollectionCount;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathEntry, PathState,
     ReceiptStatus, ReverseEntry,
@@ -538,6 +545,11 @@ where
         self.map.len()
     }
 
+    /// The compile-time ceiling, for the storage census.
+    fn capacity(&self) -> usize {
+        N
+    }
+
     fn contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)
     }
@@ -639,6 +651,15 @@ where
         self.set.contains_key(key)
     }
 
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// The compile-time ceiling, for the storage census.
+    fn capacity(&self) -> usize {
+        N
+    }
+
     /// Key of the oldest entry (greatest age under wrapping arithmetic).
     fn oldest_key(&self) -> Option<K> {
         let next = self.next_seq;
@@ -668,6 +689,94 @@ where
 }
 
 impl Storage for EmbeddedStorage {
+    /// Every collection this storage holds, in field order, each with the
+    /// compile-time ceiling it is held to (Codeberg #174).
+    ///
+    /// Unlike `MemoryStorage`, nothing here is unbounded: every map is
+    /// heapless with a const-generic capacity, so every row carries one. The
+    /// dedup generations report the rotation threshold, not the set capacity
+    /// — see [`PACKET_CACHE_GENERATION_CAP`]. All counts are O(1).
+    fn collection_counts(&self) -> Vec<CollectionCount> {
+        vec![
+            CollectionCount::bounded(
+                "packet_cache",
+                self.packet_cache.len(),
+                PACKET_CACHE_GENERATION_CAP,
+            ),
+            CollectionCount::bounded(
+                "packet_cache_prev",
+                self.packet_cache_prev.len(),
+                PACKET_CACHE_GENERATION_CAP,
+            ),
+            CollectionCount::bounded(
+                "path_table",
+                self.path_table.len(),
+                self.path_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "path_states",
+                self.path_states.len(),
+                self.path_states.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_table",
+                self.announce_table.len(),
+                self.announce_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_cache",
+                self.announce_cache.len(),
+                self.announce_cache.capacity(),
+            ),
+            CollectionCount::bounded(
+                "announce_rate_table",
+                self.announce_rate_table.len(),
+                self.announce_rate_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "link_table",
+                self.link_table.len(),
+                self.link_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "reverse_table",
+                self.reverse_table.len(),
+                self.reverse_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "discovery_path_requests",
+                self.discovery_path_requests.len(),
+                self.discovery_path_requests.capacity(),
+            ),
+            CollectionCount::bounded(
+                "path_requests",
+                self.path_requests.len(),
+                self.path_requests.capacity(),
+            ),
+            CollectionCount::bounded(
+                "path_request_tag_set",
+                self.path_request_tag_set.len(),
+                self.path_request_tag_set.capacity(),
+            ),
+            CollectionCount::bounded(
+                "known_identities",
+                self.known_identities.len(),
+                self.known_identities.capacity(),
+            ),
+            CollectionCount::bounded(
+                "known_ratchets",
+                self.known_ratchets.len(),
+                self.known_ratchets.capacity(),
+            ),
+            CollectionCount::bounded(
+                "dest_ratchet_keys",
+                self.dest_ratchet_keys.len(),
+                self.dest_ratchet_keys.capacity(),
+            ),
+            CollectionCount::bounded("receipts", self.receipts.len(), self.receipts.capacity()),
+        ]
+    }
+
     // Packet Dedup
     fn has_packet_hash(&self, hash: &[u8; 32]) -> bool {
         let key = dedup_key(hash);
@@ -677,7 +786,7 @@ impl Storage for EmbeddedStorage {
     fn add_packet_hash(&mut self, hash: [u8; 32]) {
         let _ = self.packet_cache.insert(dedup_key(&hash));
         // Two-generation rotation: when current exceeds half capacity, rotate
-        if self.packet_cache.len() > 128 {
+        if self.packet_cache.len() > PACKET_CACHE_GENERATION_CAP {
             self.rotate_packet_cache();
         }
     }
@@ -1148,6 +1257,68 @@ impl Storage for EmbeddedStorage {
 mod tests {
     use super::*;
     use crate::destination::DestinationHash;
+
+    /// Codeberg #174, the embedded half: the census and the struct agree.
+    /// Same binding as `MemoryStorage` — the source text of this file is the
+    /// only thing that can catch a seventeenth collection added without a
+    /// counter.
+    #[test]
+    fn collection_counts_names_every_collection_field() {
+        let fields = crate::storage_census::collection_fields(
+            include_str!("embedded_storage.rs"),
+            "EmbeddedStorage",
+        )
+        .expect("EmbeddedStorage is declared in this file");
+        assert!(
+            fields.len() > 10,
+            "the parse found only {fields:?}, which cannot be this struct"
+        );
+
+        let storage = EmbeddedStorage::new();
+        let counted: Vec<&str> = storage.collection_counts().iter().map(|c| c.name).collect();
+
+        for field in &fields {
+            assert!(
+                counted.contains(&field.as_str()),
+                "EmbeddedStorage.{field} is a collection that collection_counts() does not report"
+            );
+        }
+        for name in &counted {
+            assert!(
+                fields.iter().any(|f| f == name),
+                "collection_counts() reports {name}, which is not a collection field"
+            );
+        }
+        assert_eq!(counted.len(), fields.len(), "one row per collection");
+    }
+
+    /// Every heapless map is bounded by construction, so every row carries a
+    /// ceiling — and the dedup generations carry the rotation threshold, not
+    /// the raw set capacity, which is the number that decides when they are
+    /// freed.
+    #[test]
+    fn every_embedded_collection_reports_its_ceiling() {
+        let storage = EmbeddedStorage::new();
+        for row in storage.collection_counts() {
+            assert!(
+                row.capacity.is_some(),
+                "{} is heapless and must report its capacity",
+                row.name
+            );
+            assert_eq!(row.entries, 0, "{} starts empty", row.name);
+        }
+        let cap = |name: &str| {
+            storage
+                .collection_counts()
+                .into_iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} must be reported"))
+                .capacity
+        };
+        assert_eq!(cap("packet_cache"), Some(PACKET_CACHE_GENERATION_CAP));
+        assert_eq!(cap("path_table"), Some(32));
+        assert_eq!(cap("link_table"), Some(8));
+    }
 
     #[test]
     fn embedded_storage_base_size_guard() {

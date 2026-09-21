@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::memory_storage::MemoryStorage;
+use leviculum_core::storage_census::CollectionCount;
 use leviculum_core::traits::Storage as CoreStorage;
 use leviculum_core::Identity;
 
@@ -44,7 +45,11 @@ use leviculum_core::ratchet_store::RatchetStore;
 /// Default packet hash capacity for FileStorage (100k entries).
 /// Two-generation rotation: each generation holds up to cap/2 entries.
 /// At 32 bytes/entry × 1.5x HashSet overhead ≈ 4.8 MB max.
-const FILE_STORAGE_PACKET_HASH_CAP: usize = 100_000;
+///
+/// `pub(crate)` so the RPC census test can assert the daemon reports THIS
+/// cap and not `HASHLIST_MAXSIZE`, which is the inner `MemoryStorage`'s and
+/// ten times larger.
+pub(crate) const FILE_STORAGE_PACKET_HASH_CAP: usize = 100_000;
 
 pub struct Storage {
     // Snapshotted by take_flush_snapshot: the off-lock flush writer builds
@@ -836,6 +841,48 @@ impl leviculum_core::traits::Storage for Storage {
     }
 
     // Diagnostics
+    /// The inner census with this wrapper's own collections substituted in
+    /// (Codeberg #174).
+    ///
+    /// Three of these rows would otherwise be wrong on a daemon. The two
+    /// dedup generations are *not* the inner `MemoryStorage`'s: `FileStorage`
+    /// overrides `add_packet_hash` and keeps its own `HashSet`s with its own
+    /// cap, so the inner ones sit permanently at zero — reporting them would
+    /// state that the largest structure in the daemon is empty. And
+    /// `known_dest_entries` exists only here, so the inner census cannot know
+    /// about it at all.
+    ///
+    /// Everything else is delegated, which keeps this wrapper from having to
+    /// be edited when a collection is added to `MemoryStorage`.
+    fn collection_counts(&self) -> Vec<CollectionCount> {
+        // Same rotation rule as MemoryStorage: a generation rotates once it
+        // passes half the cap, so half the cap is what it is held to.
+        let generation_cap = self.packet_hash_cap / 2;
+        let mut counts: Vec<CollectionCount> = self
+            .inner
+            .collection_counts()
+            .into_iter()
+            .map(|row| match row.name {
+                "packet_cache" => CollectionCount::bounded(
+                    "packet_cache",
+                    self.packet_cache.len(),
+                    generation_cap,
+                ),
+                "packet_cache_prev" => CollectionCount::bounded(
+                    "packet_cache_prev",
+                    self.packet_cache_prev.len(),
+                    generation_cap,
+                ),
+                _ => row,
+            })
+            .collect();
+        counts.push(CollectionCount::unbounded(
+            "known_dest_entries",
+            self.known_dest_entries.len(),
+        ));
+        counts
+    }
+
     fn diagnostic_dump(&self) -> (String, u64) {
         use std::fmt::Write;
         let mut s = String::new();
@@ -860,6 +907,30 @@ impl leviculum_core::traits::Storage for Storage {
         let _ = writeln!(
             s,
             "packet_cache_prev: {} entries, raw {} bytes, estimated {} bytes (HashSet 1.5x)",
+            n, raw, est
+        );
+
+        // known_dest_entries: BTreeMap<[u8; 16], KnownDestEntry>, 1.5x.
+        // Held only here, so the inner dump cannot account for it: the
+        // identity plus its announce hash and app data, per known
+        // destination.
+        let n = self.known_dest_entries.len();
+        let raw: u64 = self
+            .known_dest_entries
+            .values()
+            .map(|e| {
+                (TRUNCATED_HASHBYTES
+                    + 8
+                    + e.packet_hash.len()
+                    + e.public_key.len()
+                    + e.app_data.as_ref().map_or(0, |d| d.len())) as u64
+            })
+            .sum();
+        let est = raw * 3 / 2;
+        total += est;
+        let _ = writeln!(
+            s,
+            "known_dest_entries: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 1.5x)",
             n, raw, est
         );
 
@@ -1554,6 +1625,87 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// Codeberg #174: this wrapper's own collections are bound to its census
+    /// the same way `MemoryStorage`'s are, because the daemon's dedup cache
+    /// and known-destination map live HERE, not in the inner storage. A
+    /// collection added to this struct without a counter fails this test.
+    #[test]
+    fn collection_counts_names_every_collection_field_of_the_wrapper() {
+        use leviculum_core::storage_census::collection_fields;
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let fields = collection_fields(include_str!("storage.rs"), "Storage")
+            .expect("Storage is declared in this file");
+        assert!(
+            fields.contains(&"packet_cache".to_string())
+                && fields.contains(&"known_dest_entries".to_string()),
+            "the parse found only {fields:?}, which cannot be this struct"
+        );
+
+        let storage = temp_storage();
+        let counted: Vec<&str> = CoreStorage::collection_counts(&storage)
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        for field in &fields {
+            assert!(
+                counted.contains(&field.as_str()),
+                "Storage.{field} is a collection that collection_counts() does not report"
+            );
+        }
+        // Everything the inner storage holds is reported too, delegated.
+        for row in
+            leviculum_core::traits::Storage::collection_counts(&MemoryStorage::with_defaults())
+        {
+            assert!(
+                counted.contains(&row.name),
+                "the inner MemoryStorage collection {} is not reported",
+                row.name
+            );
+        }
+    }
+
+    /// The census must report the daemon's OWN dedup cache. The inner
+    /// `MemoryStorage` never sees a packet hash here, so a delegated count
+    /// would report a full cache as empty — the exact blindness that made a
+    /// 100 MB sawtooth unattributable.
+    #[test]
+    fn the_census_counts_this_wrappers_dedup_cache_not_the_inner_one() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let mut storage = temp_storage();
+        for i in 0..5u8 {
+            CoreStorage::add_packet_hash(&mut storage, [i; 32]);
+        }
+        let row = CoreStorage::collection_counts(&storage)
+            .into_iter()
+            .find(|c| c.name == "packet_cache")
+            .expect("packet_cache must be reported");
+        assert_eq!(row.entries, 5);
+        assert_eq!(
+            row.capacity,
+            Some(FILE_STORAGE_PACKET_HASH_CAP / 2),
+            "the reported ceiling is the rotation threshold of one generation"
+        );
+    }
+
+    /// The text dump enumerates the same collections by hand; bind it too, so
+    /// the two surfaces cannot drift apart.
+    #[test]
+    fn diagnostic_dump_names_every_counted_collection() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let storage = temp_storage();
+        let (dump, _) = CoreStorage::diagnostic_dump(&storage);
+        for row in CoreStorage::collection_counts(&storage) {
+            assert!(
+                dump.contains(row.name),
+                "diagnostic_dump() does not mention {}",
+                row.name
+            );
+        }
     }
 
     #[test]

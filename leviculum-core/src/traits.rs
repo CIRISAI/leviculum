@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 
 use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use crate::identity::Identity;
+use crate::storage_census::CollectionCount;
 use crate::storage_types::{
     AnnounceEntry, AnnounceRateEntry, LinkEntry, PacketReceipt, PathEntry, PathState, ReverseEntry,
 };
@@ -750,6 +751,21 @@ pub trait Storage {
         (String::new(), 0)
     }
 
+    /// Entry count of every collection this storage holds, one
+    /// [`CollectionCount`] per collection, with the configured ceiling beside
+    /// the count where the collection has one.
+    ///
+    /// This is the machine-readable half of `diagnostic_dump`, and the one an
+    /// operator can reach: the dump is a text blob the daemon writes to its
+    /// own log, this is what `lnstatus --tables` serves. Required, not
+    /// defaulted, because a storage that answers "no collections" while
+    /// holding a million hashes is precisely the blind spot this exists to
+    /// close — a new implementation must state its own inventory.
+    ///
+    /// Every count is O(1) except where an implementation documents
+    /// otherwise, so this is safe to call on every status request.
+    fn collection_counts(&self) -> Vec<CollectionCount>;
+
     /// Estimated heap bytes this storage pins beyond its own inline
     /// struct (#388 census). Default 0: implementations that never feed
     /// the firmware census (host storages with their own diagnostics)
@@ -806,6 +822,12 @@ impl Storage for NoStorage {
     }
     fn path_count(&self) -> usize {
         0
+    }
+
+    /// Nothing is stored, so there is nothing to count. Not an empty
+    /// inventory of collections that exist — an inventory of none.
+    fn collection_counts(&self) -> Vec<CollectionCount> {
+        Vec::new()
     }
     fn expire_paths(&mut self, _now_ms: u64) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         Vec::new()
