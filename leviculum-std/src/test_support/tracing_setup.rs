@@ -47,10 +47,12 @@ pub fn init_tracing_with_event_log() {
     INIT.call_once(|| {
         let env_filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        // Filter is attached to the fmt layer only — keeps fmt-output
-        // tame at info-level by default while letting the event-log
-        // layer see every record.  RUST_LOG=debug still works for
-        // anyone who wants verbose fmt output.
+        // The EnvFilter is the fmt layer's alone — it keeps fmt output
+        // tame at info by default, and RUST_LOG=debug still turns it
+        // verbose.  It does NOT bound the event log: the event-log layer
+        // carries its own per-layer filter (`EventFieldFilter`), which
+        // admits every record that declares an `event` field at any
+        // level and refuses the rest.
         let fmt_layer = fmt::layer().with_test_writer().with_filter(env_filter);
         let event_layer = crate::event_log::layer();
         // Plain-WARN capture for tests that assert on an ordinary

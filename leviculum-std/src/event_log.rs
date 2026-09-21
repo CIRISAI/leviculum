@@ -23,9 +23,16 @@
 //! - `t=` is always last; relative milliseconds since the layer was
 //!   registered (process-global init time).
 //!
-//! Records that do not carry an `event = "..."` field are silently
-//! ignored — the legacy printf-style `tracing::debug!("[FOO] ...")`
-//! sites stay compatible.
+//! Records that do not carry an `event = "..."` field are ignored — the
+//! legacy printf-style `tracing::debug!("[FOO] ...")` sites stay
+//! compatible.  They are ignored at the CALLSITE, once, by
+//! [`EventFieldFilter`]: the field names a site can emit are fixed at
+//! compile time, so a site with no `event` field is answered
+//! `Interest::never()` and never dispatched here again.  Roughly 800
+//! `tracing` sites exist across `leviculum-core` and `leviculum-std` and
+//! 127 of them carry `event =`; before the filter, the other ~670 each
+//! built a `BTreeMap<String, String>` with a `String` per field name and
+//! per value, on every emission, to be dropped one line later.
 //!
 //! # Architecture: the file sink does not run on your thread (#418)
 //!
@@ -125,8 +132,11 @@ use crate::sync_ext::MutexRecover;
 use std::time::{Duration, Instant};
 
 use tracing::field::{Field, Visit};
-use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing::subscriber::Interest;
+use tracing::{Event, Metadata, Subscriber};
+use tracing_subscriber::filter::Filtered;
+use tracing_subscriber::layer::{Context, Filter, Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 
@@ -667,10 +677,73 @@ pub(crate) fn new_handle(
 /// Build the layer used by the global subscriber installers.  One
 /// global layer per process; the active-handles list it owns is shared
 /// with every [`EventLogHandle`] via `active_list`.
-pub fn layer() -> EventLogLayer {
+///
+/// The layer comes wrapped in [`EventFieldFilter`], and it is handed out
+/// no other way on purpose: an unwrapped `EventLogLayer` declares
+/// interest in every callsite in the process, which is how ~800 `tracing`
+/// sites came to be visited so that 127 of them could be kept.
+pub fn layer<S>() -> Filtered<EventLogLayer, EventFieldFilter, S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
     EventLogLayer {
         active: Arc::clone(active_list()),
         init_time: Instant::now(),
+    }
+    .with_filter(EventFieldFilter)
+}
+
+/// Answers, once per callsite, whether a record from it can carry an
+/// `event = "..."` field — the only records [`EventLogLayer`] keeps.
+///
+/// A callsite's field names are fixed at compile time and live in its
+/// `Metadata`, so `Interest::never()` for a site without an `event` field
+/// is a permanent, correct answer: `tracing` caches it and stops
+/// dispatching that site to this layer entirely.
+///
+/// # Why this is a per-layer `Filter` and not `Layer::enabled`
+///
+/// `Layer::register_callsite` is a filter on the WHOLE subscriber.
+/// `Layered::pick_interest` returns an outer layer's `never` immediately,
+/// without asking the layers beneath it
+/// (`tracing-subscriber/src/layer/layered.rs`), so implementing this on
+/// `EventLogLayer` itself would delete the fmt layer's `RUST_LOG` output
+/// for every callsite that does not carry an `event` field — which is
+/// nearly all of them, including every plain `warn!` an operator reads a
+/// daemon's journal for.
+///
+/// A per-layer `Filter` is scoped to its own layer: `Filtered` adds this
+/// interest to the per-callsite sum and returns `Interest::always()`
+/// upward so the other layers keep their say. `tests/
+/// event_log_callsite_filter.rs` holds that distinction as a test, not
+/// only as this comment.
+///
+/// No `max_level_hint` is declared, deliberately: `event =` sites exist at
+/// every level from TRACE to WARN, and a hint here would cap the process
+/// global level and silence them.
+pub struct EventFieldFilter;
+
+impl EventFieldFilter {
+    /// Whether this callsite declares an `event` field. Spans are always
+    /// accepted: this layer ignores them, but a filter that refuses them
+    /// would be making a claim about span storage it has no reason to
+    /// make.
+    fn wants(meta: &Metadata<'_>) -> bool {
+        !meta.is_event() || meta.fields().field("event").is_some()
+    }
+}
+
+impl<S: Subscriber> Filter<S> for EventFieldFilter {
+    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
+        if Self::wants(meta) {
+            Interest::always()
+        } else {
+            Interest::never()
+        }
+    }
+
+    fn enabled(&self, meta: &Metadata<'_>, _cx: &Context<'_, S>) -> bool {
+        Self::wants(meta)
     }
 }
 
