@@ -694,10 +694,11 @@ impl Storage for EmbeddedStorage {
     ///
     /// Unlike `MemoryStorage`, nothing here is unbounded: every map is
     /// heapless with a const-generic capacity, so every row carries one. The
-    /// dedup generations report the rotation threshold, not the set capacity
-    /// — see `PACKET_CACHE_GENERATION_CAP`, private to this module and so
-    /// named rather than linked (rustdoc refuses a public link to it). All
-    /// counts are O(1).
+    /// two dedup generations are the one place where the ceiling reported is
+    /// not the collection's own capacity: a generation rotates once it passes
+    /// half the set capacity, so half is what it is held to, and the live
+    /// window across the rotation is that half to the full set. All counts
+    /// are O(1).
     fn collection_counts(&self) -> Vec<CollectionCount> {
         vec![
             CollectionCount::bounded(
