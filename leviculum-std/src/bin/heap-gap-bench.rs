@@ -86,6 +86,38 @@
 //! binary prints under valgrind includes valgrind's own footprint, which is
 //! where a `factor=13.78` came from.
 //!
+//! # Reading mallocng's own books
+//!
+//! massif and the counting shim both answer "what did the program ask
+//! for". Neither can answer "which size class is the resident set sitting
+//! in", and that is the question a `rss / live` of 1.4 actually poses.
+//! mallocng knows: `ctx.usage_by_class[]` is the slot capacity it holds per
+//! class, and its meta areas carry one `struct meta` per group with the
+//! avail/freed bitmasks that say how much of each group is live. A
+//! musl-static binary carries both as local symbols, so gdb reads them with
+//! no instrumentation in our code at all —
+//! `scripts/mallocng-census.gdb` plus `scripts/mallocng-census.py` do
+//! exactly that, once per `HEAPGAP_PROGRESS` line.
+//!
+//! The binary must be a plain `cargo build --release`: the profile strips
+//! debuginfo, and it has to stay stripped, because with DWARF present gdb
+//! resolves the hidden `__malloc_context` against the current frame's unit
+//! and silently reads zeros.
+//!
+//! That is what named the 5 MB step of 2026-09-21, which no live-byte
+//! series could see. Over the window `fed` 200 000 → 220 000 of
+//! `--repeats 11 --tick-every 500`, RSS rose 3.71 MB against 0.37 MB of
+//! live growth, and the census says where it went: the 192-byte class lost
+//! 17 933 live slots while keeping all but 15 of its 2 018 groups — 3.41 MB
+//! of resident, empty slots — and the 240-byte class gained 567 groups
+//! (4.86 MB). A live-neutral migration of one per-destination allocation
+//! across one size-class boundary, charged as 3.7 MB of resident set,
+//! because mallocng returns a group only when the group is ENTIRELY free
+//! (`okay_to_free`, reached from `nontrivial_free`, in musl 1.2.5's
+//! mallocng `free.c` — not a path in this repo, so no line citation). The same run
+//! on the gnu build has no step: RSS flat at 40 603 648 from `fed` 74 000 to
+//! 204 000, with a live series matching musl's to 0.03 %.
+//!
 //! # Usage
 //!
 //! ```text

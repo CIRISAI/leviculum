@@ -102,6 +102,21 @@ for cmd in valgrind; do
     fi
 done
 
+# Optional test dependency: the other half of the same investigation. massif
+# and the counting allocator both say what the PROGRAM asked for; neither can
+# say which musl size class the resident set is sitting in. mallocng keeps
+# that in symbols a musl-static binary carries, and scripts/mallocng-census.gdb
+# reads them out of a running heap-gap-bench without instrumenting our code.
+# Reached by hand during a heap investigation, so warn rather than fail.
+for cmd in gdb; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[install-ci] Note: optional test dependency '$cmd' not found"
+        echo "[install-ci] Hint: sudo apt install gdb"
+        echo "[install-ci]       (scripts/mallocng-census.gdb, the per-size-class"
+        echo "[install-ci]        census behind heap-gap-bench's ratio)"
+    fi
+done
+
 # Optional rig dependency: uhubctl cuts and restores power on a single USB
 # hub port, which is how a board that stopped enumerating gets recovered
 # without touching it (scripts/install-usbhub-helper.sh wires the
