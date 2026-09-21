@@ -1138,8 +1138,29 @@ impl EventLogLayer {
     }
 }
 
+/// How many records this layer has visited, i.e. how many times it has
+/// built an [`EventVisitor`] and let a record walk it.
+///
+/// This is an instrument, not a statistic. A visit costs a
+/// `BTreeMap<String, String>` plus a `String` per field name and per value,
+/// and the layer discards every record that turns out to carry no
+/// `event = "..."` — so "how many visits produced nothing" is the number a
+/// memory experiment on this sink has to be able to read. It is what
+/// `heap-gap-bench` prints as `visits=` and what
+/// `tests/event_log_callsite_filter.rs` asserts on.
+///
+/// Relaxed: nothing orders against it, and a reader wants the count, not a
+/// position in anyone's history.
+static VISITS: AtomicU64 = AtomicU64::new(0);
+
+/// Records visited since process start — see [`VISITS`].
+pub fn visit_count() -> u64 {
+    VISITS.load(Ordering::Relaxed)
+}
+
 impl<S: Subscriber> Layer<S> for EventLogLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        VISITS.fetch_add(1, Ordering::Relaxed);
         let mut visitor = EventVisitor::default();
         event.record(&mut visitor);
 
