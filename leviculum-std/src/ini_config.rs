@@ -301,6 +301,11 @@ fn warn_unimplemented_keys(interfaces: &HashMap<String, InterfaceConfig>) {
     }
 }
 
+/// A `usize` config value that only counts when it is positive.
+fn parse_positive(value: &str) -> Option<usize> {
+    value.trim().parse().ok().filter(|&n: &usize| n > 0)
+}
+
 fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
     match key {
         "enable_transport" => {
@@ -376,6 +381,33 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // unaffected. Lets a periculum node run with a board-like cap.
         "max_links" => {
             config.max_links = value.trim().parse().ok().filter(|&n: &usize| n > 0);
+        }
+        // Transport-table sizing (Codeberg #421). Leviculum-only keys; rnsd
+        // has none, so a stock config is unaffected and keeps the desktop
+        // profile. `storage_profile` sets all of them at once, the four caps
+        // override individual tables on top. A non-numeric or zero value is
+        // left unset rather than aborting the parse — a zero would mean a
+        // table of one entry, which no operator means to ask for.
+        "storage_profile" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "desktop" || v == "compact" {
+                config.storage_profile = Some(v);
+            }
+        }
+        "path_table_cap" => {
+            config.path_table_cap = parse_positive(value);
+        }
+        "reverse_table_cap" => {
+            config.reverse_table_cap = parse_positive(value);
+        }
+        "link_table_cap" => {
+            config.link_table_cap = parse_positive(value);
+        }
+        "announce_table_cap" => {
+            config.announce_table_cap = parse_positive(value);
+        }
+        "destination_cap" => {
+            config.destination_cap = parse_positive(value);
         }
         // Per-path PATH_TABLE_ENTRY diagnostic dump. Leviculum-only key,
         // default off: its volume is one line per path per dump, which on a
@@ -2217,6 +2249,60 @@ mod tests {
         assert_eq!(garbage.reticulum.max_links, None);
         let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
         assert_eq!(absent.reticulum.max_links, None);
+    }
+
+    #[test]
+    fn table_caps_come_from_the_profile_and_the_per_table_overrides() {
+        use leviculum_core::memory_storage::TableCaps;
+
+        // Absent: the desktop profile, unchanged.
+        let absent = parse_ini("[reticulum]\n  enable_transport = Yes\n").unwrap();
+        assert_eq!(absent.reticulum.storage_profile, None);
+        assert_eq!(absent.reticulum.table_caps(), TableCaps::desktop());
+
+        // The profile sets every table at once.
+        let compact = parse_ini("[reticulum]\n  storage_profile = Compact\n").unwrap();
+        assert_eq!(
+            compact.reticulum.storage_profile.as_deref(),
+            Some("compact")
+        );
+        assert_eq!(compact.reticulum.table_caps(), TableCaps::compact());
+
+        // An override applies on top of the profile and leaves the rest of it
+        // alone — the case a Pi operator with a busy uplink actually has.
+        let mixed =
+            parse_ini("[reticulum]\n  storage_profile = compact\n  reverse_table_cap = 40000\n")
+                .unwrap();
+        let caps = mixed.reticulum.table_caps();
+        assert_eq!(caps.reverse_cap, 40_000);
+        assert_eq!(caps.path_cap, TableCaps::compact().path_cap);
+
+        // Every exposed key reaches its table.
+        let all = parse_ini(
+            "[reticulum]\n  path_table_cap = 11\n  reverse_table_cap = 22\n               link_table_cap = 33\n  announce_table_cap = 44\n  destination_cap = 55\n",
+        )
+        .unwrap()
+        .reticulum
+        .table_caps();
+        assert_eq!(
+            (
+                all.path_cap,
+                all.reverse_cap,
+                all.link_cap,
+                all.announce_cap,
+                all.destination_cap
+            ),
+            (11, 22, 33, 44, 55)
+        );
+
+        // Garbage, zero and an unknown profile leave the defaults standing
+        // rather than aborting the parse or building a one-entry table.
+        let junk = parse_ini(
+            "[reticulum]\n  storage_profile = tiny\n  path_table_cap = 0\n               reverse_table_cap = lots\n",
+        )
+        .unwrap();
+        assert_eq!(junk.reticulum.storage_profile, None);
+        assert_eq!(junk.reticulum.table_caps(), TableCaps::desktop());
     }
 
     #[test]

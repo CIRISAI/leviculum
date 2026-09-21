@@ -856,9 +856,12 @@ impl ReticulumNodeBuilder {
                 }
             });
 
-        // Storage::new() loads persistent data (known_destinations, packet_hashlist)
-        // into its inner MemoryStorage automatically.
-        let storage = Storage::new(&storage_path)?;
+        // Storage::new_with_caps() loads persistent data (known_destinations,
+        // packet_hashlist) into its inner MemoryStorage automatically, and
+        // gives every runtime table the ceiling the config asked for
+        // (Codeberg #421).
+        let table_caps = config.reticulum.table_caps();
+        let storage = Storage::new_with_caps(&storage_path, table_caps)?;
         let clock = SystemClock::new();
         // Align the LoRa airtime bucket's anchor with Transport's
         // SystemClock so `try_send_prioritized`'s `last_update_ms` and

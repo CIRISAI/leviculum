@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
-use leviculum_core::memory_storage::MemoryStorage;
+use leviculum_core::memory_storage::{MemoryStorage, TableCaps};
 use leviculum_core::storage_census::CollectionCount;
 use leviculum_core::traits::Storage as CoreStorage;
 use leviculum_core::Identity;
@@ -94,13 +94,23 @@ impl Storage {
     /// stays `pub(crate)`; the core reaches it through
     /// [`leviculum_core::traits::Storage`], which is public already.
     pub fn new<P: AsRef<Path>>(base_path: P) -> Result<Self> {
+        Self::new_with_caps(base_path, TableCaps::desktop())
+    }
+
+    /// Like [`Self::new`], with explicit per-table ceilings (Codeberg #421).
+    ///
+    /// This is the constructor the daemon uses: the operator's `[reticulum]`
+    /// table-cap keys reach the runtime collections through here, so a node
+    /// on a Raspberry Pi Zero 2W can be given a memory ceiling it fits under
+    /// without a rebuild.
+    pub fn new_with_caps<P: AsRef<Path>>(base_path: P, caps: TableCaps) -> Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
 
         // Create directories if they don't exist
         std::fs::create_dir_all(&base_path)
             .map_err(|e| Error::Storage(format!("Failed to create storage dir: {e}")))?;
 
-        let mut inner = MemoryStorage::with_defaults();
+        let mut inner = MemoryStorage::with_caps(caps);
 
         // Load known_destinations via store
         let mut kd_store = FileKnownDestinationsStore::new(&base_path);

@@ -70,7 +70,7 @@ Verify the build; the output carries the version and the build commit:
 
 The daemon resolves its config directory in the same order as Python
 Reticulum (`configdir`, `RNS/Reticulum.py:231`), implemented in
-`default_config_dir` (`leviculum-std/src/config.rs:859`):
+`default_config_dir` (`leviculum-std/src/config.rs:946`):
 
 1. `/etc/reticulum` — if `/etc/reticulum/config` exists. This is what
    the `.deb` package sets up.

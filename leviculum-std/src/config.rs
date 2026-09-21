@@ -1,5 +1,6 @@
 //! Configuration loading and management
 
+use leviculum_core::memory_storage::TableCaps;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -191,6 +192,86 @@ pub struct ReticulumConfig {
     /// #107).
     #[serde(default = "default_discovery_job_interval_secs")]
     pub discovery_job_interval_secs: u64,
+    /// Transport-table sizing profile (Codeberg #421): `desktop` (default) or
+    /// `compact`. Leviculum-only key, rnsd has none.
+    ///
+    /// The profile picks every table ceiling at once; the four keys below
+    /// override individual ones on top of it. `compact` is sized to leave a
+    /// Raspberry Pi Zero 2W (512 MB shared with the GPU, no swap) usable —
+    /// see [`TableCaps`] for the
+    /// per-table arithmetic. An unrecognised value keeps the default.
+    #[serde(default)]
+    pub storage_profile: Option<String>,
+    /// Maximum `path_table` entries, and with it `path_states`,
+    /// `path_requests` and `discovery_path_requests` (Codeberg #421).
+    ///
+    /// Exposed because the path table's expiry is seven days, so on a node up
+    /// for less than a week this ceiling is the only bound it has, and
+    /// because how many destinations a node routes for is a property of the
+    /// mesh it sits in, not of the software. `None` keeps the profile's.
+    #[serde(default)]
+    pub path_table_cap: Option<usize>,
+    /// Maximum `reverse_table` entries (Codeberg #421).
+    ///
+    /// Exposed because this is the table whose size is most directly the
+    /// neighbours' traffic: entries expire after 8 minutes, so the working
+    /// size is forwarding rate times that window — a field node measured
+    /// 73 901. An operator who knows their link rate can size it.
+    #[serde(default)]
+    pub reverse_table_cap: Option<usize>,
+    /// Maximum `link_table` entries (Codeberg #421).
+    ///
+    /// Exposed because it is the third table #421 measured, and because a
+    /// transport node in a link-heavy mesh is exactly the deployment that
+    /// wants it raised. Distinct from [`Self::max_links`], which bounds the
+    /// node's own endpoint links rather than the ones it routes for.
+    #[serde(default)]
+    pub link_table_cap: Option<usize>,
+    /// Maximum `announce_table` entries — the pending-rebroadcast queue
+    /// (Codeberg #421).
+    ///
+    /// Exposed because each entry holds a full copy of an announce packet,
+    /// which makes it one of the two most expensive tables per entry.
+    #[serde(default)]
+    pub announce_table_cap: Option<usize>,
+    /// Maximum entries in the destination-keyed tables — `announce_cache`,
+    /// `announce_rate_table`, `known_ratchets`, `known_dest_use` (Codeberg
+    /// #421).
+    ///
+    /// One key for four tables because they are keyed by the same population,
+    /// the remote destinations this node has heard announce; separate
+    /// ceilings on one population would mean the tightest silently truncating
+    /// the others. `announce_cache` is what answers a path request, so
+    /// lowering this is what an operator trades for memory.
+    #[serde(default)]
+    pub destination_cap: Option<usize>,
+}
+
+impl ReticulumConfig {
+    /// The per-table ceilings this config asks for (Codeberg #421): the named
+    /// profile, with any individually configured key overriding it.
+    pub fn table_caps(&self) -> TableCaps {
+        let mut caps = match self.storage_profile.as_deref() {
+            Some("compact") => TableCaps::compact(),
+            _ => TableCaps::desktop(),
+        };
+        if let Some(n) = self.path_table_cap {
+            caps.path_cap = n;
+        }
+        if let Some(n) = self.reverse_table_cap {
+            caps.reverse_cap = n;
+        }
+        if let Some(n) = self.link_table_cap {
+            caps.link_cap = n;
+        }
+        if let Some(n) = self.announce_table_cap {
+            caps.announce_cap = n;
+        }
+        if let Some(n) = self.destination_cap {
+            caps.destination_cap = n;
+        }
+        caps
+    }
 }
 
 /// Default discovery announcer job interval (seconds), Python
@@ -269,6 +350,12 @@ impl Default for ReticulumConfig {
             autoconnect_discovered_interfaces: 0,
             network_identity: None,
             discovery_job_interval_secs: DEFAULT_DISCOVERY_JOB_INTERVAL_SECS,
+            storage_profile: None,
+            path_table_cap: None,
+            reverse_table_cap: None,
+            link_table_cap: None,
+            announce_table_cap: None,
+            destination_cap: None,
         }
     }
 }
