@@ -625,7 +625,7 @@ fn bind_outbound_socket() -> io::Result<UdpSocket> {
     UdpSocket::from_std(socket.into())
 }
 
-/// Receive result from `recv_from_any`.
+/// Receive result from `recv_from_any_by`.
 pub(crate) struct RecvResult {
     /// Number of bytes received
     pub bytes_read: usize,
@@ -635,7 +635,7 @@ pub(crate) struct RecvResult {
     pub socket_index: usize,
 }
 
-/// Poll multiple UDP sockets and return data from the first one ready.
+/// Poll the UDP socket of every item and return data from the first one ready.
 ///
 /// For small N (1-3 NICs), iterative polling is efficient.
 /// Returns when any socket has data available.
@@ -647,18 +647,29 @@ pub(crate) struct RecvResult {
 /// Uses `readable()` + `try_recv_from()` pattern (edge-triggered).
 /// On `WouldBlock`, loops back to `readable()` to re-register waker.
 ///
-/// Generic over socket container: accepts `&[UdpSocket]` or `&[Arc<UdpSocket>]`.
-pub(crate) async fn recv_from_any<S: std::borrow::Borrow<UdpSocket>>(
-    sockets: &[S],
+/// `pick` projects the socket out of each item, so a caller that keeps one
+/// struct per NIC does not need a socket vec parallel to it. It projects
+/// instead of taking a ready-made `&[&UdpSocket]` because this is the hot
+/// path: building that slice would allocate on every iteration of the
+/// orchestrator's select loop, three times per iteration.
+///
+/// `pick` is called on each poll rather than once, so it must be cheap: a
+/// field access or an `Arc` deref, which is what the orchestrator passes.
+pub(crate) async fn recv_from_any_by<T, F>(
+    items: &[T],
+    pick: F,
     buf: &mut [u8],
     poll_start: &mut usize,
-) -> io::Result<RecvResult> {
-    if sockets.is_empty() {
+) -> io::Result<RecvResult>
+where
+    F: Fn(&T) -> &UdpSocket,
+{
+    if items.is_empty() {
         std::future::pending::<()>().await;
         unreachable!()
     }
 
-    let len = sockets.len();
+    let len = items.len();
     let start = *poll_start;
 
     loop {
@@ -667,9 +678,7 @@ pub(crate) async fn recv_from_any<S: std::borrow::Borrow<UdpSocket>>(
             let idx = std::future::poll_fn(|cx| {
                 for offset in 0..len {
                     let idx = (start + offset) % len;
-                    match std::borrow::Borrow::<UdpSocket>::borrow(&sockets[idx])
-                        .poll_recv_ready(cx)
-                    {
+                    match pick(&items[idx]).poll_recv_ready(cx) {
                         std::task::Poll::Ready(Ok(())) => {
                             return std::task::Poll::Ready(Ok(idx));
                         }
@@ -686,7 +695,7 @@ pub(crate) async fn recv_from_any<S: std::borrow::Borrow<UdpSocket>>(
         };
 
         // Try non-blocking recv on the ready socket
-        match std::borrow::Borrow::<UdpSocket>::borrow(&sockets[ready_idx]).try_recv_from(buf) {
+        match pick(&items[ready_idx]).try_recv_from(buf) {
             Ok((n, addr)) => {
                 let v6 = match addr {
                     std::net::SocketAddr::V6(v6) => v6,
@@ -1062,8 +1071,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recv_from_any_single_socket() {
-        // Bind two sockets, send to the second, verify recv_from_any returns it.
+    async fn test_recv_from_any_by_single_socket() {
+        // Bind two sockets, send to the second, verify recv_from_any_by returns it.
         let s1 = bind_outbound_socket().unwrap();
         let s2 = bind_outbound_socket().unwrap();
         let s2_port = s2.local_addr().unwrap().port();
@@ -1085,7 +1094,7 @@ mod tests {
         let mut poll_start = 0;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            recv_from_any(&sockets, &mut buf, &mut poll_start),
+            recv_from_any_by(&sockets, |s: &UdpSocket| s, &mut buf, &mut poll_start),
         )
         .await
         .expect("timeout")

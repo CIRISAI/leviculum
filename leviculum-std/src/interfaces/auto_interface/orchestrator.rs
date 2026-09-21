@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 use super::{
     bind_data_socket, bind_multicast_socket, bind_unicast_socket, build_discovery_packet,
     derive_multicast_address, enumerate_nics, group_name_tag, make_discovery_token,
-    parse_discovery_packet, recv_from_any, unicast_discovery_port, verify_discovery_token,
+    parse_discovery_packet, recv_from_any_by, unicast_discovery_port, verify_discovery_token,
     AdoptedNic, AutoInterfaceConfig, DeduplicationCache, ANNOUNCE_INTERVAL_SECS, AUTO_HW_MTU,
     DISCOVERY_PACKET_SIZE, MCAST_ECHO_TIMEOUT_SECS, NIC_RETRY_INTERVAL_SECS, NIC_WAIT_WARN_EVERY,
     NONCE_SIZE, PEERING_TIMEOUT_SECS, PEER_JOB_INTERVAL_SECS,
@@ -49,63 +49,113 @@ struct PeerInfo {
     counters: Arc<InterfaceCounters>,
 }
 
-/// Per-NIC multicast echo tracking for carrier detection
-struct NicState {
-    /// Last time a multicast echo was received on this NIC
+/// Everything one NIC owns: its identity, its three sockets, and the
+/// discovery material derived from them.
+///
+/// This is what the orchestrator used to carry as six containers indexed by
+/// the same `socket_index` — three socket vecs plus `active_nics`,
+/// `our_tokens`, `discovery_packets`, and a `nic_states` map keyed by name.
+/// Keeping them in step needed a helper whose only job was to skip the same
+/// entries in all of them (`build_active_nics_and_tokens`), and that
+/// alignment held only because nothing was ever added or removed. With one
+/// `Nic` per NIC a failed bind is simply an entry that does not exist, and
+/// there is no positional index left to fall out of step.
+pub(crate) struct Nic {
+    /// Interface name (e.g. "eth0", "wlan0")
+    name: String,
+    /// OS interface index, used as `scope_id` when addressing this NIC
+    index: u32,
+    /// Multicast discovery socket. Also sends reverse peering tokens, since
+    /// it is already bound to this interface.
+    mcast: UdpSocket,
+    /// Unicast discovery socket
+    unicast: UdpSocket,
+    /// Data socket, shared with the send task of every peer on this NIC
+    data: Arc<UdpSocket>,
+    /// Our discovery token on this NIC: `hash(group_id + our link-local)`.
+    /// A peer verifies it against the source address of our datagrams, so it
+    /// is a property of the NIC and is derived once, when the NIC is bound.
+    token: [u8; 32],
+    /// The announce datagram we put on the wire on this NIC: token, instance
+    /// nonce, data port. Constant for the life of the NIC.
+    discovery_packet: [u8; DISCOVERY_PACKET_SIZE],
+    /// Last time a multicast echo was received on this NIC (carrier detection)
     last_echo: Option<Instant>,
     /// Whether the NIC is currently timed out (no carrier)
     timed_out: bool,
 }
 
-/// Given all enumerated NICs and per-NIC bind results, return only the NICs
-/// that succeeded and pre-compute their discovery tokens.
-///
-/// Socket vecs (`mcast_sockets`, `unicast_sockets`, `data_sockets`) only contain
-/// entries for NICs where all three binds succeeded. This function produces
-/// parallel `active_nics` vecs so that `socket_index` maps to the correct NIC.
-///
-/// Removal path: entries are static for the lifetime of the orchestrator.
-pub(crate) fn build_active_nics_and_tokens(
-    nics: &[AdoptedNic],
-    bind_results: &[bool],
-    group_id: &[u8],
-) -> (Vec<AdoptedNic>, Vec<([u8; 32], String)>) {
-    let active_indices: Vec<usize> = bind_results
-        .iter()
-        .enumerate()
-        .filter(|(_, ok)| **ok)
-        .map(|(i, _)| i)
-        .collect();
-
-    let active: Vec<AdoptedNic> = active_indices.iter().map(|&i| nics[i].clone()).collect();
-
-    let tokens: Vec<([u8; 32], String)> = active
-        .iter()
-        .map(|n| {
-            let addr_str = n.link_local.to_string();
-            let token = make_discovery_token(group_id, &addr_str);
-            (token, addr_str)
-        })
-        .collect();
-
-    (active, tokens)
+/// The three sockets one NIC needs, before they are folded into a [`Nic`].
+pub(crate) struct NicSockets {
+    mcast: UdpSocket,
+    unicast: UdpSocket,
+    data: UdpSocket,
 }
 
-/// Compute the discovery token for a reverse peering announcement.
+impl Nic {
+    /// Fold one enumerated NIC and its three bound sockets into the single
+    /// value that describes it, deriving the discovery material on the way.
+    fn new(
+        adopted: &AdoptedNic,
+        sockets: NicSockets,
+        group_id: &[u8],
+        instance_nonce: &[u8; NONCE_SIZE],
+        data_port: u16,
+    ) -> Self {
+        let token = make_discovery_token(group_id, &adopted.link_local.to_string());
+        Nic {
+            name: adopted.name.clone(),
+            index: adopted.index,
+            mcast: sockets.mcast,
+            unicast: sockets.unicast,
+            data: Arc::new(sockets.data),
+            token,
+            discovery_packet: build_discovery_packet(&token, instance_nonce, data_port),
+            last_echo: None,
+            timed_out: false,
+        }
+    }
+}
+
+/// Bind the three sockets each enumerated NIC needs, keeping only the NICs
+/// where all three succeeded, in enumeration order.
 ///
-/// The token must be verifiable by the peer using the sender's source IP.
-/// Looks up the peer's NIC in `active_nics` to find OUR link-local address
-/// on that NIC, the peer will verify `hash(group_id + our_source_ip)`.
-///
-/// Returns `None` if the NIC is not found in `active_nics`.
-pub(crate) fn compute_reverse_peering_token(
+/// `bind` is the seam: everything that touches the OS sits behind it, so the
+/// property that used to need `build_active_nics_and_tokens` — a NIC whose
+/// bind failed must not shift the NICs after it — stays testable without a
+/// NIC. It cannot shift them any more: what comes out is one self-contained
+/// `Nic` per NIC that came up, and nothing outside it describes that NIC.
+fn bind_nics_with<F>(
+    adopted: &[AdoptedNic],
     group_id: &[u8],
-    peer_nic_name: &str,
-    active_nics: &[AdoptedNic],
-) -> Option<[u8; 32]> {
-    let our_nic = active_nics.iter().find(|n| n.name == peer_nic_name)?;
-    let our_addr_str = our_nic.link_local.to_string();
-    Some(make_discovery_token(group_id, &our_addr_str))
+    instance_nonce: &[u8; NONCE_SIZE],
+    data_port: u16,
+    mut bind: F,
+) -> Vec<Nic>
+where
+    F: FnMut(&AdoptedNic) -> Option<NicSockets>,
+{
+    adopted
+        .iter()
+        .filter_map(|nic| {
+            let sockets = bind(nic)?;
+            Some(Nic::new(nic, sockets, group_id, instance_nonce, data_port))
+        })
+        .collect()
+}
+
+/// The discovery token for a reverse peering announcement to a peer.
+///
+/// The token must be verifiable by the peer using the sender's source IP, so
+/// it is OUR token on the NIC the peer was discovered on — the peer checks
+/// `hash(group_id + our_source_ip)` — and never anything derived from the
+/// peer's own address.
+///
+/// Returns `None` if the peer's NIC is not among `nics`.
+pub(crate) fn compute_reverse_peering_token(peer_nic_name: &str, nics: &[Nic]) -> Option<[u8; 32]> {
+    nics.iter()
+        .find(|n| n.name == peer_nic_name)
+        .map(|n| n.token)
 }
 
 /// Spawn the AutoInterface orchestrator as a background tokio task.
@@ -127,19 +177,6 @@ pub(crate) fn spawn_auto_interface(
         }
     });
     peer_count_rx
-}
-
-/// The sockets and per-NIC data that one successful bring-up round produced.
-///
-/// The three socket vecs are parallel to `active_nics` and `our_tokens`:
-/// `recv_from_any` reports which socket received, and that index selects the
-/// NIC the packet arrived on.
-pub(crate) struct BoundNics {
-    mcast_sockets: Vec<UdpSocket>,
-    unicast_sockets: Vec<UdpSocket>,
-    data_sockets: Vec<Arc<UdpSocket>>,
-    active_nics: Vec<AdoptedNic>,
-    our_tokens: Vec<([u8; 32], String)>,
 }
 
 /// Log a failed per-NIC bind loudly the first time and quietly afterwards.
@@ -180,92 +217,83 @@ fn try_bind_nics(
     config: &AutoInterfaceConfig,
     mcast_addr: &Ipv6Addr,
     unicast_port: u16,
+    instance_nonce: &[u8; NONCE_SIZE],
     attempt: u64,
-) -> Option<BoundNics> {
+) -> Option<Vec<Nic>> {
     let first_attempt = attempt == 1;
 
-    let nics = enumerate_nics(config);
+    let adopted = enumerate_nics(config);
+    if adopted.is_empty() {
+        return None;
+    }
+
+    let nics = bind_nics_with(
+        &adopted,
+        &config.group_id,
+        instance_nonce,
+        config.data_port,
+        |nic| {
+            // A NIC needs all three sockets or none: returning `None` drops the
+            // ones bound so far, which is what the pop-what-we-pushed dance in
+            // the parallel-vec version was for.
+            let mcast = match bind_multicast_socket(
+                nic,
+                mcast_addr,
+                config.discovery_port,
+                &config.discovery_scope,
+                config.multicast_loopback,
+            ) {
+                Ok(s) => {
+                    tracing::info!(
+                        "AutoInterface: multicast socket on {} ({})",
+                        nic.name,
+                        nic.link_local
+                    );
+                    s
+                }
+                Err(e) => {
+                    log_bind_failure(first_attempt, &nic.name, "multicast", &e);
+                    return None;
+                }
+            };
+
+            let unicast = match bind_unicast_socket(nic, unicast_port) {
+                Ok(s) => s,
+                Err(e) => {
+                    log_bind_failure(first_attempt, &nic.name, "unicast", &e);
+                    return None;
+                }
+            };
+
+            let data = match bind_data_socket(nic, config.data_port) {
+                Ok(s) => s,
+                Err(e) => {
+                    log_bind_failure(first_attempt, &nic.name, "data", &e);
+                    return None;
+                }
+            };
+
+            Some(NicSockets {
+                mcast,
+                unicast,
+                data,
+            })
+        },
+    );
+
     if nics.is_empty() {
         return None;
     }
 
-    // Bind sockets per NIC, tracking which succeeded
-    let mut mcast_sockets = Vec::new();
-    let mut unicast_sockets = Vec::new();
-    let mut data_sockets = Vec::new();
-    let mut bind_results = Vec::with_capacity(nics.len());
-    for nic in &nics {
-        match bind_multicast_socket(
-            nic,
-            mcast_addr,
-            config.discovery_port,
-            &config.discovery_scope,
-            config.multicast_loopback,
-        ) {
-            Ok(s) => {
-                tracing::info!(
-                    "AutoInterface: multicast socket on {} ({})",
-                    nic.name,
-                    nic.link_local
-                );
-                mcast_sockets.push(s);
-            }
-            Err(e) => {
-                log_bind_failure(first_attempt, &nic.name, "multicast", &e);
-                bind_results.push(false);
-                continue;
-            }
-        }
-
-        match bind_unicast_socket(nic, unicast_port) {
-            Ok(s) => unicast_sockets.push(s),
-            Err(e) => {
-                log_bind_failure(first_attempt, &nic.name, "unicast", &e);
-                // Remove the multicast socket we just pushed, can't function without unicast
-                mcast_sockets.pop();
-                bind_results.push(false);
-                continue;
-            }
-        }
-
-        match bind_data_socket(nic, config.data_port) {
-            Ok(s) => {
-                data_sockets.push(Arc::new(s));
-            }
-            Err(e) => {
-                log_bind_failure(first_attempt, &nic.name, "data", &e);
-                mcast_sockets.pop();
-                unicast_sockets.pop();
-                bind_results.push(false);
-                continue;
-            }
-        }
-        bind_results.push(true);
-    }
-
-    if mcast_sockets.is_empty() {
-        return None;
-    }
-
-    // Build active_nics (only NICs where all 3 sockets bound) and their tokens
-    let (active_nics, our_tokens) =
-        build_active_nics_and_tokens(&nics, &bind_results, &config.group_id);
-
     tracing::info!(
         "AutoInterface: {} NIC(s), multicast={}, discovery_port={}, data_port={}",
-        active_nics.len(),
+        nics.len(),
         mcast_addr,
         config.discovery_port,
         config.data_port
     );
 
-    Some(BoundNics {
-        mcast_sockets,
-        unicast_sockets,
-        data_sockets,
-        active_nics,
-        our_tokens,
-    })
+    Some(nics)
 }
 
 /// Retry `setup` every `retry_interval` until it yields a usable set of NICs,
@@ -275,24 +303,26 @@ fn try_bind_nics(
 /// routinely starts before the network does, and a task that returns here is
 /// a node that stays deaf on the LAN for the rest of its life with one warn
 /// line as the only trace. `setup` receives the 1-based attempt number so it
-/// can keep its own logging from repeating forever.
+/// can keep its own logging from repeating forever, and the instance nonce,
+/// which every NIC it binds needs to build its announce datagram.
 ///
 /// Returns `None` only when the event loop is gone, which is the one case
 /// where giving up is right, and the only one that says so in the log.
 async fn wait_for_usable_nics<F>(
     mut setup: F,
+    instance_nonce: &[u8; NONCE_SIZE],
     retry_interval: Duration,
     shutdown: &mpsc::Sender<InterfaceHandle>,
-) -> Option<BoundNics>
+) -> Option<Vec<Nic>>
 where
-    F: FnMut(u64) -> Option<BoundNics>,
+    F: FnMut(u64, &[u8; NONCE_SIZE]) -> Option<Vec<Nic>>,
 {
     let started = Instant::now();
     let mut attempts: u64 = 0;
 
     loop {
         attempts += 1;
-        if let Some(bound) = setup(attempts) {
+        if let Some(bound) = setup(attempts, instance_nonce) {
             if attempts > 1 {
                 tracing::info!(
                     "AutoInterface: a usable network interface appeared after {:.0}s \
@@ -358,8 +388,9 @@ async fn run_auto_interface(
     let unicast_port = unicast_discovery_port(config.discovery_port);
 
     let setup_config = config.clone();
-    let setup =
-        move |attempt: u64| try_bind_nics(&setup_config, &mcast_addr, unicast_port, attempt);
+    let setup = move |attempt: u64, nonce: &[u8; NONCE_SIZE]| {
+        try_bind_nics(&setup_config, &mcast_addr, unicast_port, nonce, attempt)
+    };
 
     run_auto_interface_with(
         config,
@@ -388,7 +419,7 @@ async fn run_auto_interface_with<F>(
     retry_interval: Duration,
 ) -> io::Result<()>
 where
-    F: FnMut(u64) -> Option<BoundNics>,
+    F: FnMut(u64, &[u8; NONCE_SIZE]) -> Option<Vec<Nic>>,
 {
     let unicast_port = unicast_discovery_port(config.discovery_port);
     // Per-group tag appended to peer interface names so peers reachable in
@@ -396,16 +427,23 @@ where
     // the default group keeps single-section naming unchanged.
     let group_tag = group_name_tag(&config.group_id);
 
-    let Some(bound) = wait_for_usable_nics(setup, retry_interval, &new_iface_tx).await else {
+    // Generate per-instance nonce for self-echo detection.
+    // Two nodes on the same machine share NIC addresses, so IP-based
+    // self-echo detection fails. The nonce distinguishes our own packets.
+    // It is generated before the first bind because the announce datagram
+    // each NIC carries is built from it.
+    let instance_nonce: [u8; NONCE_SIZE] = {
+        use rand_core::RngCore;
+        let mut buf = [0u8; NONCE_SIZE];
+        rand_core::OsRng.fill_bytes(&mut buf);
+        buf
+    };
+
+    let Some(mut nics) =
+        wait_for_usable_nics(setup, &instance_nonce, retry_interval, &new_iface_tx).await
+    else {
         return Ok(());
     };
-    let BoundNics {
-        mcast_sockets,
-        unicast_sockets,
-        data_sockets,
-        active_nics,
-        our_tokens,
-    } = bound;
 
     // Per-peer state: keyed by peer's (IPv6 link-local, data_port).
     // Data receive does a two-tier lookup: try exact (ip, port) first,
@@ -414,21 +452,6 @@ where
     // - Cross-machine Python peers (send from ephemeral port → ip-only)
     // Removal path: peers are removed on timeout in the peer_job_timer branch.
     let mut peers: HashMap<(Ipv6Addr, u16), PeerInfo> = HashMap::new();
-
-    // Per-NIC state for carrier detection. Only NICs that got a full socket
-    // set can echo, so the map is keyed off those and not the raw enumeration.
-    let mut nic_states: HashMap<String, NicState> = active_nics
-        .iter()
-        .map(|n| {
-            (
-                n.name.clone(),
-                NicState {
-                    last_echo: None,
-                    timed_out: false,
-                },
-            )
-        })
-        .collect();
 
     // Deduplication cache for data packets received on multiple NICs
     let mut dedup = DeduplicationCache::new();
@@ -443,22 +466,6 @@ where
     let mut announce_timer = tokio::time::interval(announce_interval);
     let mut peer_job_timer = tokio::time::interval(peer_job_interval);
 
-    // Generate per-instance nonce for self-echo detection.
-    // Two nodes on the same machine share NIC addresses, so IP-based
-    // self-echo detection fails. The nonce distinguishes our own packets.
-    let instance_nonce: [u8; NONCE_SIZE] = {
-        use rand_core::RngCore;
-        let mut buf = [0u8; NONCE_SIZE];
-        rand_core::OsRng.fill_bytes(&mut buf);
-        buf
-    };
-
-    // Pre-build discovery packets: [token(32)] + [nonce(8)] + [data_port(2)] per NIC
-    let discovery_packets: Vec<[u8; DISCOVERY_PACKET_SIZE]> = our_tokens
-        .iter()
-        .map(|(token, _)| build_discovery_packet(token, &instance_nonce, config.data_port))
-        .collect();
-
     let mut mcast_buf = [0u8; 64];
     let mut unicast_buf = [0u8; 64];
     let mut data_buf = [0u8; MAX_DATAGRAM_SIZE];
@@ -469,7 +476,7 @@ where
     loop {
         tokio::select! {
             // Multicast discovery recv
-            result = recv_from_any(&mcast_sockets, &mut mcast_buf, &mut mcast_poll) => {
+            result = recv_from_any_by(&nics, |n| &n.mcast, &mut mcast_buf, &mut mcast_poll) => {
                 let recv = match result {
                     Ok(r) => r,
                     Err(e) => {
@@ -479,26 +486,22 @@ where
                 };
                 let data = &mcast_buf[..recv.bytes_read];
                 let src_addr = *recv.source.ip();
-                let nic_idx = recv.socket_index;
-                let nic = &active_nics[nic_idx];
                 handle_discovery_packet(
                     data,
                     src_addr,
-                    nic,
+                    &mut nics[recv.socket_index],
                     &config,
                     &group_tag,
                     &instance_nonce,
-                    &mut nic_states,
                     &mut peers,
                     &peer_count_tx,
                     &next_id,
                     &new_iface_tx,
-                    &data_sockets[nic_idx],
                 );
             }
 
             // Unicast discovery recv
-            result = recv_from_any(&unicast_sockets, &mut unicast_buf, &mut unicast_poll) => {
+            result = recv_from_any_by(&nics, |n| &n.unicast, &mut unicast_buf, &mut unicast_poll) => {
                 let recv = match result {
                     Ok(r) => r,
                     Err(e) => {
@@ -508,27 +511,23 @@ where
                 };
                 let data = &unicast_buf[..recv.bytes_read];
                 let src_addr = *recv.source.ip();
-                let nic_idx = recv.socket_index;
-                let nic = &active_nics[nic_idx];
 
                 handle_discovery_packet(
                     data,
                     src_addr,
-                    nic,
+                    &mut nics[recv.socket_index],
                     &config,
                     &group_tag,
                     &instance_nonce,
-                    &mut nic_states,
                     &mut peers,
                     &peer_count_tx,
                     &next_id,
                     &new_iface_tx,
-                    &data_sockets[nic_idx],
                 );
             }
 
             // Data recv + demux
-            result = recv_from_any(&data_sockets, &mut data_buf, &mut data_poll) => {
+            result = recv_from_any_by(&nics, |n| n.data.as_ref(), &mut data_buf, &mut data_poll) => {
                 let recv = match result {
                     Ok(r) => r,
                     Err(e) => {
@@ -592,10 +591,9 @@ where
 
             // Announce timer (send multicast token)
             _ = announce_timer.tick() => {
-                for (nic_idx, sock) in mcast_sockets.iter().enumerate() {
-                    let nic = &active_nics[nic_idx];
+                for nic in &nics {
                     let dest = SocketAddrV6::new(mcast_addr, config.discovery_port, 0, nic.index);
-                    if let Err(e) = sock.send_to(&discovery_packets[nic_idx], dest).await {
+                    if let Err(e) = nic.mcast.send_to(&nic.discovery_packet, dest).await {
                         tracing::debug!(
                             "AutoInterface: multicast send on {} failed: {}",
                             nic.name,
@@ -637,11 +635,7 @@ where
                     if now.duration_since(peer.last_reverse_peering) > reverse_peering_interval {
                         peer.last_reverse_peering = now;
                         // Token must be verifiable by the peer using OUR source IP
-                        let token = match compute_reverse_peering_token(
-                            &config.group_id,
-                            &peer.nic_name,
-                            &active_nics,
-                        ) {
+                        let token = match compute_reverse_peering_token(&peer.nic_name, &nics) {
                             Some(t) => t,
                             None => continue,
                         };
@@ -652,40 +646,38 @@ where
                             0,
                             peer.scope_id,
                         );
-                        // Find the NIC index to use the correct multicast socket for sending
-                        // (it's already bound to the right interface)
-                        if let Some(nic_idx) = active_nics.iter().position(|n| n.name == peer.nic_name) {
-                            if nic_idx < mcast_sockets.len() {
-                                if let Err(e) = mcast_sockets[nic_idx].send_to(&pkt, dest).await {
-                                    tracing::debug!(
-                                        "AutoInterface: reverse peering send to {} failed: {}",
-                                        peer_ip,
-                                        e
-                                    );
-                                }
+                        // Send from the NIC the peer was discovered on: its
+                        // multicast socket is already bound to that interface.
+                        if let Some(nic) = nics.iter().find(|n| n.name == peer.nic_name) {
+                            if let Err(e) = nic.mcast.send_to(&pkt, dest).await {
+                                tracing::debug!(
+                                    "AutoInterface: reverse peering send to {} failed: {}",
+                                    peer_ip,
+                                    e
+                                );
                             }
                         }
                     }
                 }
 
                 // Check multicast echo timeouts (carrier detection)
-                for (nic_name, state) in &mut nic_states {
-                    let echo_timed_out = match state.last_echo {
+                for nic in &mut nics {
+                    let echo_timed_out = match nic.last_echo {
                         Some(last) => now.duration_since(last) > echo_timeout,
                         None => continue, // No echo yet — normal at startup
                     };
 
-                    if echo_timed_out && !state.timed_out {
-                        state.timed_out = true;
+                    if echo_timed_out && !nic.timed_out {
+                        nic.timed_out = true;
                         tracing::warn!(
                             "AutoInterface: multicast echo timeout on {}. Carrier lost.",
-                            nic_name
+                            nic.name
                         );
-                    } else if !echo_timed_out && state.timed_out {
-                        state.timed_out = false;
+                    } else if !echo_timed_out && nic.timed_out {
+                        nic.timed_out = false;
                         tracing::warn!(
                             "AutoInterface: carrier recovered on {}",
-                            nic_name
+                            nic.name
                         );
                     }
                 }
@@ -715,16 +707,14 @@ where
 fn handle_discovery_packet(
     data: &[u8],
     src_addr: Ipv6Addr,
-    nic: &AdoptedNic,
+    nic: &mut Nic,
     config: &AutoInterfaceConfig,
     group_tag: &Option<String>,
     instance_nonce: &[u8; NONCE_SIZE],
-    nic_states: &mut HashMap<String, NicState>,
     peers: &mut HashMap<(Ipv6Addr, u16), PeerInfo>,
     peer_count_tx: &watch::Sender<usize>,
     next_id: &Arc<AtomicUsize>,
     new_iface_tx: &mpsc::Sender<InterfaceHandle>,
-    data_socket: &Arc<UdpSocket>,
 ) {
     // Parse token (+ optional nonce)
     let parsed = match parse_discovery_packet(data) {
@@ -763,9 +753,7 @@ fn handle_discovery_packet(
     if let Some(nonce) = parsed.nonce {
         if nonce == *instance_nonce {
             // Our own 40-byte packet echoed back, carrier detection
-            if let Some(state) = nic_states.get_mut(&nic.name) {
-                state.last_echo = Some(Instant::now());
-            }
+            nic.last_echo = Some(Instant::now());
             return;
         }
     }
@@ -793,7 +781,7 @@ fn handle_discovery_packet(
     // (IP, data_port). Using the NIC data socket means our source port =
     // our data_port, which the peer matches against its peer map key.
     let peer_dest = SocketAddrV6::new(src_addr, peer_data_port, 0, nic.index);
-    let send_socket = data_socket.clone();
+    let send_socket = Arc::clone(&nic.data);
     let send_counters = Arc::clone(&counters);
     tokio::spawn(async move {
         peer_send_task(outgoing_rx, send_socket, peer_dest, send_counters).await;
@@ -914,78 +902,107 @@ mod tests {
     use super::*;
     use socket2::{Domain, Protocol, SockAddr, Type};
 
-    #[test]
-    fn test_active_nics_skip_failed_binds() {
+    /// The nonce every test NIC bakes into its announce datagram. Any value
+    /// works; what matters is that it is the one the self-echo check compares
+    /// against, so `DiscoveryTestCtx` uses the same one.
+    const TEST_NONCE: [u8; NONCE_SIZE] = [0x42u8; NONCE_SIZE];
+
+    /// Three ephemeral sockets standing in for one NIC's socket set. Past
+    /// binding, nothing in the orchestrator cares which interface they are on.
+    fn fake_nic_sockets() -> NicSockets {
+        NicSockets {
+            mcast: bind_test_socket(),
+            unicast: bind_test_socket(),
+            data: bind_test_socket(),
+        }
+    }
+
+    /// One `Nic` on ephemeral sockets, with its token and announce datagram
+    /// derived exactly as a real bind derives them.
+    fn fake_nic(name: &str, link_local: &str, index: u32, group_id: &[u8]) -> Nic {
+        Nic::new(
+            &AdoptedNic {
+                name: name.into(),
+                link_local: link_local.parse().unwrap(),
+                index,
+            },
+            fake_nic_sockets(),
+            group_id,
+            &TEST_NONCE,
+            AutoInterfaceConfig::default().data_port,
+        )
+    }
+
+    fn adopted(name: &str, link_local: &str, index: u32) -> AdoptedNic {
+        AdoptedNic {
+            name: name.into(),
+            link_local: link_local.parse().unwrap(),
+            index,
+        }
+    }
+
+    /// A NIC whose bind fails must not shift the NICs that come after it.
+    ///
+    /// That property used to need `build_active_nics_and_tokens`, which
+    /// skipped the same index in six parallel containers. The assertion is
+    /// unchanged: entry 0 is eth1, and the discovery material entry 0 carries
+    /// is eth1's — only now a failed NIC has no entry at all rather than
+    /// being skipped consistently everywhere.
+    #[tokio::test]
+    async fn test_active_nics_skip_failed_binds() {
         let nics = vec![
-            AdoptedNic {
-                name: "eth0".into(),
-                link_local: "fe80::1".parse().unwrap(),
-                index: 1,
-            },
-            AdoptedNic {
-                name: "eth1".into(),
-                link_local: "fe80::2".parse().unwrap(),
-                index: 2,
-            },
-            AdoptedNic {
-                name: "eth2".into(),
-                link_local: "fe80::3".parse().unwrap(),
-                index: 3,
-            },
+            adopted("eth0", "fe80::1", 1),
+            adopted("eth1", "fe80::2", 2),
+            adopted("eth2", "fe80::3", 3),
         ];
         // eth0 failed to bind, eth1 and eth2 succeeded
-        let bind_results = vec![false, true, true];
+        let bound = bind_nics_with(&nics, b"reticulum", &TEST_NONCE, 42671, |nic| {
+            (nic.name != "eth0").then(fake_nic_sockets)
+        });
 
-        let (active, tokens) = build_active_nics_and_tokens(&nics, &bind_results, b"reticulum");
+        // nics[0] must be eth1, NOT eth0
+        assert_eq!(bound.len(), 2);
+        assert_eq!(bound[0].name, "eth1");
+        assert_eq!(bound[1].name, "eth2");
 
-        // active_nics[0] must be eth1, NOT eth0
-        assert_eq!(active.len(), 2);
-        assert_eq!(active[0].name, "eth1");
-        assert_eq!(active[1].name, "eth2");
-
-        // Token at index 0 must be for eth1's address (fe80::2)
+        // The token at index 0 must be for eth1's address (fe80::2)
         let expected = make_discovery_token(b"reticulum", "fe80::2");
-        assert_eq!(tokens[0].0, expected, "token[0] must match eth1, not eth0");
+        assert_eq!(
+            bound[0].token, expected,
+            "token[0] must match eth1, not eth0"
+        );
+        assert_eq!(
+            &bound[0].discovery_packet[..32],
+            &expected[..],
+            "the announce datagram must carry the same NIC's token"
+        );
     }
 
-    #[test]
-    fn test_active_nics_all_succeed() {
-        let nics = vec![
-            AdoptedNic {
-                name: "eth0".into(),
-                link_local: "fe80::1".parse().unwrap(),
-                index: 1,
-            },
-            AdoptedNic {
-                name: "eth1".into(),
-                link_local: "fe80::2".parse().unwrap(),
-                index: 2,
-            },
-        ];
-        let bind_results = vec![true, true];
+    #[tokio::test]
+    async fn test_active_nics_all_succeed() {
+        let nics = vec![adopted("eth0", "fe80::1", 1), adopted("eth1", "fe80::2", 2)];
 
-        let (active, tokens) = build_active_nics_and_tokens(&nics, &bind_results, b"reticulum");
+        let bound = bind_nics_with(&nics, b"reticulum", &TEST_NONCE, 42671, |_| {
+            Some(fake_nic_sockets())
+        });
 
-        assert_eq!(active.len(), 2);
-        assert_eq!(active[0].name, "eth0");
-        assert_eq!(active[1].name, "eth1");
-        assert_eq!(tokens.len(), 2);
+        assert_eq!(bound.len(), 2);
+        assert_eq!(bound[0].name, "eth0");
+        assert_eq!(bound[1].name, "eth1");
+        assert_eq!(
+            bound[1].token,
+            make_discovery_token(b"reticulum", "fe80::2")
+        );
     }
 
-    #[test]
-    fn test_reverse_peering_token_verifiable_by_peer() {
+    #[tokio::test]
+    async fn test_reverse_peering_token_verifiable_by_peer() {
         let group_id = b"reticulum";
-        let our_nic = AdoptedNic {
-            name: "eth0".into(),
-            link_local: "fe80::1".parse().unwrap(),
-            index: 1,
-        };
-        let active_nics = vec![our_nic];
+        let nics = vec![fake_nic("eth0", "fe80::1", 1, group_id)];
         // Peer's address is different from ours
         let _peer_addr: Ipv6Addr = "fe80::99".parse().unwrap();
 
-        let token =
-            compute_reverse_peering_token(group_id, "eth0", &active_nics).expect("should find NIC");
+        let token = compute_reverse_peering_token("eth0", &nics).expect("should find NIC");
 
         // Peer receives this token and verifies against our source IP (fe80::1)
         assert!(
@@ -999,31 +1016,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_reverse_peering_token_unknown_nic() {
-        let active_nics = vec![AdoptedNic {
-            name: "eth0".into(),
-            link_local: "fe80::1".parse().unwrap(),
-            index: 1,
-        }];
+    #[tokio::test]
+    async fn test_reverse_peering_token_unknown_nic() {
+        let nics = vec![fake_nic("eth0", "fe80::1", 1, b"reticulum")];
 
-        let result = compute_reverse_peering_token(b"reticulum", "wlan0", &active_nics);
+        let result = compute_reverse_peering_token("wlan0", &nics);
         assert!(result.is_none(), "unknown NIC should return None");
     }
 
-    #[test]
-    fn test_active_nics_all_fail() {
-        let nics = vec![AdoptedNic {
-            name: "eth0".into(),
-            link_local: "fe80::1".parse().unwrap(),
-            index: 1,
-        }];
-        let bind_results = vec![false];
+    #[tokio::test]
+    async fn test_active_nics_all_fail() {
+        let nics = vec![adopted("eth0", "fe80::1", 1)];
 
-        let (active, tokens) = build_active_nics_and_tokens(&nics, &bind_results, b"reticulum");
+        let bound = bind_nics_with(&nics, b"reticulum", &TEST_NONCE, 42671, |_| None);
 
-        assert!(active.is_empty());
-        assert!(tokens.is_empty());
+        assert!(bound.is_empty());
     }
 
     #[test]
@@ -1111,15 +1118,16 @@ mod tests {
     /// Helper to set up a standard test context for handle_discovery_packet tests
     struct DiscoveryTestCtx {
         config: AutoInterfaceConfig,
-        nic: AdoptedNic,
-        nic_states: HashMap<String, NicState>,
+        /// The NIC the packet arrived on. It carries its own sockets and its
+        /// own echo state now, so the test context has neither a separate
+        /// data socket nor a `nic_states` map.
+        nic: Nic,
         peers: HashMap<(Ipv6Addr, u16), PeerInfo>,
         peer_count_tx: watch::Sender<usize>,
         _peer_count_rx: watch::Receiver<usize>,
         next_id: Arc<AtomicUsize>,
         new_iface_tx: mpsc::Sender<InterfaceHandle>,
         new_iface_rx: mpsc::Receiver<InterfaceHandle>,
-        data_socket: Arc<UdpSocket>,
         our_nonce: [u8; NONCE_SIZE],
         group_tag: Option<String>,
     }
@@ -1128,41 +1136,19 @@ mod tests {
         fn new() -> Self {
             let (peer_count_tx, _peer_count_rx) = watch::channel(0usize);
             let (new_iface_tx, new_iface_rx) = mpsc::channel(8);
-            let mut nic_states = HashMap::new();
-            nic_states.insert(
-                "eth0".to_string(),
-                NicState {
-                    last_echo: None,
-                    timed_out: false,
-                },
-            );
-            // Bind data socket on port 0 (ephemeral) for tests
-            let data_socket = {
-                let socket =
-                    socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-                socket.set_nonblocking(true).unwrap();
-                let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
-                socket.bind(&SockAddr::from(bind_addr)).unwrap();
-                Arc::new(UdpSocket::from_std(socket.into()).unwrap())
-            };
             let config = AutoInterfaceConfig::default();
             let group_tag = group_name_tag(&config.group_id);
+            let nic = fake_nic("eth0", "fe80::1", 1, &config.group_id);
             Self {
                 config,
-                nic: AdoptedNic {
-                    name: "eth0".to_string(),
-                    link_local: "fe80::1".parse().unwrap(),
-                    index: 1,
-                },
-                nic_states,
+                nic,
                 peers: HashMap::new(),
                 peer_count_tx,
                 _peer_count_rx,
                 next_id: Arc::new(AtomicUsize::new(100)),
                 new_iface_tx,
                 new_iface_rx,
-                data_socket,
-                our_nonce: [0x42u8; NONCE_SIZE],
+                our_nonce: TEST_NONCE,
                 group_tag,
             }
         }
@@ -1171,16 +1157,14 @@ mod tests {
             handle_discovery_packet(
                 data,
                 src_addr,
-                &self.nic,
+                &mut self.nic,
                 &self.config,
                 &self.group_tag,
                 &self.our_nonce,
-                &mut self.nic_states,
                 &mut self.peers,
                 &self.peer_count_tx,
                 &self.next_id,
                 &self.new_iface_tx,
-                &self.data_socket,
             );
         }
     }
@@ -1188,7 +1172,7 @@ mod tests {
     #[tokio::test]
     async fn test_self_echo_not_added_as_peer() {
         let mut ctx = DiscoveryTestCtx::new();
-        ctx.nic_states.get_mut("eth0").unwrap().timed_out = true;
+        ctx.nic.timed_out = true;
 
         // Create a valid 42-byte discovery packet with OUR nonce
         let token = make_discovery_token(&ctx.config.group_id, "fe80::1");
@@ -1200,7 +1184,7 @@ mod tests {
         assert!(ctx.peers.is_empty(), "self-echo should not create a peer");
         // Should update echo timestamp
         assert!(
-            ctx.nic_states["eth0"].last_echo.is_some(),
+            ctx.nic.last_echo.is_some(),
             "self-echo should update echo timestamp"
         );
     }
@@ -1423,36 +1407,20 @@ mod tests {
         );
     }
 
-    /// Build a `BoundNics` out of ephemeral sockets, standing in for a NIC
-    /// that has just appeared.
+    /// One NIC's worth of ephemeral sockets, standing in for a NIC that has
+    /// just appeared, plus the port its multicast socket listens on so the
+    /// test can announce to it.
     ///
     /// No real NIC is involved: past enumeration and binding, the discovery
-    /// loop only needs three bound sockets plus a parallel NIC entry, which
-    /// is exactly why the bring-up step is injected. Returns the port the
-    /// multicast socket listens on so the test can announce to it.
-    fn fake_bound_nics(name: &str, group_id: &[u8]) -> (BoundNics, u16) {
-        let mcast = bind_test_socket();
-        let port = match mcast.local_addr().unwrap() {
+    /// loop only needs three bound sockets, which is exactly why the
+    /// bring-up step is injected.
+    fn fake_bound_sockets() -> (NicSockets, u16) {
+        let sockets = fake_nic_sockets();
+        let port = match sockets.mcast.local_addr().unwrap() {
             std::net::SocketAddr::V6(v6) => v6.port(),
             _ => panic!("expected v6"),
         };
-        let nic = AdoptedNic {
-            name: name.to_string(),
-            link_local: "fe80::1".parse().unwrap(),
-            index: 0,
-        };
-        let (active_nics, our_tokens) =
-            build_active_nics_and_tokens(std::slice::from_ref(&nic), &[true], group_id);
-        (
-            BoundNics {
-                mcast_sockets: vec![mcast],
-                unicast_sockets: vec![bind_test_socket()],
-                data_sockets: vec![Arc::new(bind_test_socket())],
-                active_nics,
-                our_tokens,
-            },
-            port,
-        )
+        (sockets, port)
     }
 
     /// The minimal test for the ordinary boot of a laptop or a small board:
@@ -1474,17 +1442,30 @@ mod tests {
         let (new_iface_tx, mut new_iface_rx) = mpsc::channel(8);
         let (peer_count_tx, peer_count_rx) = watch::channel(0usize);
 
-        let (bound, mcast_port) = fake_bound_nics("late0", &config.group_id);
-        let mut bound = Some(bound);
+        let (sockets, mcast_port) = fake_bound_sockets();
+        let mut sockets = Some(sockets);
+        let group_id = config.group_id.clone();
+        let data_port = config.data_port;
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_seen = Arc::clone(&attempts);
-        let setup = move |attempt: u64| {
+        // The orchestrator hands its own instance nonce to the bring-up step,
+        // so the NIC that appears announces with the nonce the loop will
+        // recognise as its own.
+        let setup = move |attempt: u64, nonce: &[u8; NONCE_SIZE]| {
             attempts_seen.store(attempt as usize, Ordering::Relaxed);
             // No suitable NIC on the first two rounds, then one appears.
             if attempt < 3 {
                 None
             } else {
-                bound.take()
+                sockets.take().map(|s| {
+                    vec![Nic::new(
+                        &adopted("late0", "fe80::1", 0),
+                        s,
+                        &group_id,
+                        nonce,
+                        data_port,
+                    )]
+                })
             }
         };
 
@@ -1545,7 +1526,7 @@ mod tests {
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_seen = Arc::clone(&attempts);
-        let setup = move |attempt: u64| {
+        let setup = move |attempt: u64, _nonce: &[u8; NONCE_SIZE]| {
             attempts_seen.store(attempt as usize, Ordering::Relaxed);
             None
         };
@@ -1600,6 +1581,7 @@ mod tests {
             &config,
             &mcast_addr,
             unicast_discovery_port(config.discovery_port),
+            &TEST_NONCE,
             1,
         );
         assert!(
