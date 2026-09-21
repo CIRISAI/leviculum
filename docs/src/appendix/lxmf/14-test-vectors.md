@@ -183,7 +183,7 @@ expose `/offer`.
 
 ### VEC-PROP-GET-LIST
 
-`[None, None]` (`LXMRouter.py:492-501`):
+`[None, None]` (`LXMRouter.py:511-520`):
 
 ```
 request: 92c0c0
@@ -192,7 +192,7 @@ request: 92c0c0
 ### VEC-PROP-GET-DOWNLOAD
 
 One wanted ID (`20..3f`), one already-held ID (`40..5f`), transfer limit 1000
-KB (`LXMRouter.py:1521-1539`):
+KB (`LXMRouter.py:1577-1595`):
 
 ```
 request:
@@ -204,7 +204,7 @@ cd03e8
 ### VEC-PROP-GET-ACK
 
 `[None, [transient_id]]`, which asks the node to purge the acknowledged entry
-(`LXMRouter.py:1569-1581`):
+(`LXMRouter.py:1625-1637`):
 
 ```
 request: 92c091c420000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -242,7 +242,7 @@ first_byte = 0x93  (new-format sniff)
 decoded: display_name="Alice", stamp_cost=8, compression_supported=true
 ```
 
-(`LXMRouter.py:985-1001`; `LXMF.py:151-200`)
+(`LXMRouter.py:1034-1050`; `LXMF.py:151-200`)
 
 ## VEC-ANN-PROPAGATION (frozen) — propagation node announce app_data
 
@@ -254,4 +254,4 @@ app_data: 97c2ce6553f100c3cd0100cd2800931003128101c4044e6f6465
 valid = true; pn_name = "Node"; pn_stamp_cost = 16
 ```
 
-(`LXMRouter.py:306-318`; `LXMF.py:202-250`)
+(`LXMRouter.py:324-336`; `LXMF.py:202-250`)

@@ -69,7 +69,7 @@ type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
 const UPSTREAM: [u8; TRUNCATED_HASHBYTES] = [0x5A; TRUNCATED_HASHBYTES];
 
 /// A transport node with `EmbeddedStorage`, built exactly as the firmware
-/// builds it (`bin/t114.rs:142`) — `build_boxed`, because a by-value
+/// builds it (`bin/t114.rs:217`) — `build_boxed`, because a by-value
 /// `NodeCore` with inline storage is >40 KB of frame.
 fn make_node() -> Box<EmbeddedNode> {
     NodeCoreBuilder::new().enable_transport(true).build_boxed(
@@ -238,7 +238,7 @@ fn embedded_transport_forwards_data_back_out_the_arrival_interface() {
     assert_eq!(
         packet.flags.header_type,
         HeaderType::Type2,
-        "a relay with a next hop keeps the transport header (transport.rs:5876-5857)"
+        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:6835-6839)"
     );
     assert_eq!(
         packet.transport_id,

@@ -79,7 +79,7 @@ if not packet.packet_hash in Transport.packet_hashlist and
     return True
 ```
 
-`Transport.packet_hashlist` at `Transport.py:99` is `set()`.
+`Transport.packet_hashlist` at `Transport.py:106` is `set()`.
 `Transport.packet_hashlist_prev` at line 100 is the rolling
 previous window used to keep the dedup memory constant-bounded.
 A duplicate return here bails out of `inbound()` before any
@@ -90,7 +90,7 @@ for the broadcast-back-to-source echo pattern that B1 relies on.
 ### Insertion into announce_table
 
 For announces (`packet.packet_type == ANNOUNCE`) that pass dedup,
-the code path at `Transport.py:1722-1764` initialises an
+the code path at `Transport.py:1867-1908` initialises an
 `announce_table` entry:
 
 ```python
@@ -120,7 +120,7 @@ guard below, this makes local-client-sourced announces fire
 
 ### Retry loop
 
-The periodic job at `Transport.py:519-532` walks `announce_table`:
+The periodic job at `Transport.py:576-591` walks `announce_table`:
 
 ```python
 for destination_hash in Transport.announce_table:
@@ -144,10 +144,10 @@ With the constants:
 
 | Constant | Value | Citation |
 |---|---:|---|
-| `PATHFINDER_R` | 1 | `Transport.py:67` |
-| `PATHFINDER_G` | 5 s | `Transport.py:68` |
-| `PATHFINDER_RW` | 0.5 s | `Transport.py:69` |
-| `LOCAL_REBROADCASTS_MAX` | 2 | `Transport.py:76` |
+| `PATHFINDER_R` | 1 | `Transport.py:68` |
+| `PATHFINDER_G` | 5 s | `Transport.py:69` |
+| `PATHFINDER_RW` | 0.5 s | `Transport.py:70` |
+| `LOCAL_REBROADCASTS_MAX` | 2 | `Transport.py:77` |
 
 ### Deterministic walk — non-local-client source
 
@@ -213,7 +213,7 @@ line 537). This is how path-responses ride the same scheduler.
 ### Trigger
 
 `Transport.request_path(destination_hash, ...)` at
-`Transport.py:2541` is the main producer. Clients call into it
+`Transport.py:2771` is the main producer. Clients call into it
 via `Destination.request_path()` or explicit transport calls.
 
 ### On-wire behaviour
@@ -224,7 +224,7 @@ At line 2561-2587: builds a `Packet` with
 `packet.send()` once. Same one-shot pattern as self-announce.
 
 Fan-out goes through the same `Transport.outbound()` broadcast
-loop at `Transport.py:1025-1167`.
+loop at `Transport.py:1180-1317`.
 
 **Count = 1 on-wire broadcast per path-request call. No
 retries in the scheduler for path-requests.**
@@ -232,7 +232,7 @@ retries in the scheduler for path-requests.**
 ### Rate-limiting
 
 Path-requests are subject to `PATH_REQUEST_MI = 20` seconds
-minimum interval per destination (`Transport.py:81`) — clients
+minimum interval per destination (`Transport.py:83`) — clients
 requesting the same path more often are throttled upstream of
 `Transport.outbound()`.
 
@@ -248,7 +248,7 @@ Two paths produce a `PATH_RESPONSE`:
    `Packet.ANNOUNCE` with `context = PATH_RESPONSE`
    (`Destination.py:309-310, 319-322`) and sends it once.
 2. **Rebroadcast with block_rebroadcasts**: the retry loop at
-   `Transport.py:519-540` emits path-responses when
+   `Transport.py:576-604` emits path-responses when
    `announce_entry[IDX_AT_BLCK_RBRD]` is set. Same 2-fire count
    as a regular received-announce rebroadcast.
 
@@ -296,7 +296,7 @@ and sends it.
 ### On-wire behaviour
 
 `Packet.LINKREQUEST` (`Packet.py:62`) is **unicast**, not
-broadcast. At `Transport.py:1938`: local-destination link
+broadcast. At `Transport.py:2091`: local-destination link
 requests are dispatched to the destination's attached interface
 directly. Non-local paths route through next-hop. There is no
 broadcast fanout.
@@ -308,9 +308,9 @@ broadcast parity directly, but enumerated here for completeness.**
 
 | Item | Value | Citation |
 |---|---|---|
-| Storage | `set()` | `Transport.py:99` |
-| Previous-window storage | `set()` | `Transport.py:100` |
-| Max size | 1 000 000 entries | `Transport.py:145` |
+| Storage | `set()` | `Transport.py:106` |
+| Previous-window storage | `set()` | `Transport.py:107` |
+| Max size | 1 000 000 entries | `Transport.py:175` |
 | Check site | line 1227 | `Transport.py` |
 | Rotation | half-cleared when reaches `hashlist_maxsize/2` | approximate, see cull job |
 
@@ -325,11 +325,11 @@ reliably is a hard requirement for B1.
 
 | Constant | Value | Citation |
 |---|---:|---|
-| `Reticulum.ANNOUNCE_CAP` | 2 (percent of bandwidth) | `Reticulum.py:116` |
+| `Reticulum.ANNOUNCE_CAP` | 2 (percent of bandwidth) | `Reticulum.py:114` |
 
 Interface instances set
 `interface.announce_cap = Reticulum.ANNOUNCE_CAP/100.0 = 0.02`
-at `Reticulum.py:731`. Each interface also has
+at `Reticulum.py:819`. Each interface also has
 `interface.bitrate` (bps).
 
 ### Logic
@@ -372,9 +372,9 @@ mechanism, not a transport-wide one.
 
 Covered in section 3 (retry loop). The enforcement sites are:
 
-- `Transport.py:523`: retry-loop guard A. Prevents emission when
+- `Transport.py:582`: retry-loop guard A. Prevents emission when
   `retries >= LOCAL_REBROADCASTS_MAX`.
-- `Transport.py:1588`: secondary site that removes an entry from
+- `Transport.py:1728`: secondary site that removes an entry from
   `announce_table` when a duplicate announce arrives and the
   local rebroadcast counter has saturated. This is the "I'm
   hearing too many copies of this announce from others, stop
@@ -386,14 +386,14 @@ Covered in section 3 (retry loop). The enforcement sites are:
 
 | Constant | Value | Citation |
 |---|---:|---|
-| `mgmt_announce_interval` | 7 200 s (2 h) | `Transport.py:162` |
-| Initial-fire trick | `last_mgmt_announce = now - interval + 15` | `Transport.py:247` |
+| `mgmt_announce_interval` | 7 200 s (2 h) | `Transport.py:194` |
+| Initial-fire trick | `last_mgmt_announce = now - interval + 15` | `Transport.py:283` |
 
 ### Behaviour
 
-`Transport.py:247` runs at startup and sets `last_mgmt_announce`
+`Transport.py:283` runs at startup and sets `last_mgmt_announce`
 to 15 seconds ago minus the full interval, so the next check at
-`Transport.py:835` fires ~15 s after startup. Each fire walks
+`Transport.py:963` fires ~15 s after startup. Each fire walks
 `Transport.mgmt_destinations` (a list of transport-control
 destinations like probe responders and blackhole destinations,
 populated at lines 220-241, 367 during `Transport.start()`) and
@@ -454,10 +454,10 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `constants.rs:133`; enforcement at `transport.rs:4129` |
 | `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `constants.rs:242`; impl at `transport.rs:290-299, 4125` |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
-| `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `constants.rs:148`; `node/mod.rs:1014-1048` |
-| mgmt-announce initial 15 s trick | `Transport.py:247` | `node/mod.rs:75` + constant | ✓ | Verified by B4 audit |
+| `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `constants.rs:148`; `node/mod.rs:1390-1424` |
+| mgmt-announce initial 15 s trick | `Transport.py:283` | `node/mod.rs:75` + constant | ✓ | Verified by B4 audit |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
-| Path-request one-shot broadcast | `Transport.py:2541-2587` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
+| Path-request one-shot broadcast | `Transport.py:2771-2809` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
 | Path-response targeted | `transport.rs:4239-4189` | same mechanism | ✓ | Preserved |
 | Interface modes (FULL/ROAMING/…) | 5 modes | none (all = FULL) | ⚠ | Documented gap; separate task |
 | `block_rebroadcasts` | per-entry flag | `AnnounceEntry.block_rebroadcasts` | ✓ | Verified by B7 audit |

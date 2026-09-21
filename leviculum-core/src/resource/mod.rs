@@ -112,10 +112,10 @@ pub const SLOW_RATE_THRESHOLD: u64 = 15_000;
 /// Very slow rate threshold (bytes/sec). Below this, window_max = WINDOW_MAX_VERY_SLOW.
 pub const VERY_SLOW_RATE_THRESHOLD: u64 = 1_000;
 
-/// Sender grace time before declaring failure (Python Resource.py:131 SENDER_GRACE_TIME = 10.0).
+/// Sender grace time before declaring failure (Python Resource.py:132 SENDER_GRACE_TIME = 10.0).
 pub const SENDER_GRACE_TIME_MS: u64 = 10_000;
 
-/// Additional delay per retry used, for progressive backoff (Python Resource.py:134 PER_RETRY_DELAY = 0.5).
+/// Additional delay per retry used, for progressive backoff (Python Resource.py:135 PER_RETRY_DELAY = 0.5).
 pub const PER_RETRY_DELAY_MS: u64 = 500;
 
 /// Small grace period added to each timeout check (Python Resource.py:133 RETRY_GRACE_TIME = 0.25).

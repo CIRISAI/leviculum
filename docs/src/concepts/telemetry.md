@@ -29,7 +29,7 @@ and receipts. A peer that does not know the field sees a message with no
 text, which is the correct failure — subject to the empty-content rule
 below.
 
-The field numbers are LXMF's (`leviculum-lxmf/src/constants.rs:43-69`).
+The field numbers are LXMF's (`leviculum-lxmf/src/constants.rs:52-78`).
 Three matter here: `FIELD_TELEMETRY` (0x02) carries one node's readings,
 `FIELD_TELEMETRY_STREAM` (0x03) carries many nodes' readings collected
 by a third party, and `FIELD_COMMANDS` (0x09) carries the request that
@@ -430,8 +430,8 @@ A collector redistributes positions of people who are not asking for
 that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
-is (`leviculum-std/src/config.rs:95`, empty by default at
-`leviculum-std/src/config.rs:227`); on a firmware with no filesystem it
+is (`leviculum-std/src/config.rs:96`, empty by default at
+`leviculum-std/src/config.rs:308`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 

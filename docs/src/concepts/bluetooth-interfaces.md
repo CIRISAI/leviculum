@@ -479,7 +479,7 @@ links and resources are reliable and directed.
 
 The constraint on how to combine them comes from the interface boundary. An
 Interface is sent only bytes: `try_send(&[u8])`
-(`leviculum-core/src/traits.rs:277`, plus a prioritized variant that adds a
+(`leviculum-core/src/traits.rs:280`, plus a prioritized variant that adds a
 priority hint) takes a packet buffer, no destination and no next hop. The next hop and the choice of interface live one
 layer up in the transport. So an interface cannot decide "open a connection
 because this packet is for node X" without reading the destination out of the

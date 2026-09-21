@@ -1517,7 +1517,7 @@ impl Storage for MemoryStorage {
         requesting_interface: usize,
         timeout_ms: u64,
     ) {
-        // Only store first request (Python behavior at Transport.py:2793-2794)
+        // Only store first request (`discovery_path_requests`, Transport.py:3016-3017)
         self.discovery_path_requests
             .insert_if_absent(dest_hash, (requesting_interface, timeout_ms));
     }

@@ -11,7 +11,7 @@ The hands-on introduction is the [tutorial](rust-api-tutorial.md); the layer
 overview is [Choosing a layer](choosing-a-layer.md).
 
 All `leviculum-std` types are re-exported from the crate root
-(`leviculum-std/src/lib.rs:35-57`), so `use leviculum_std::{NodeEvent, LinkHandle,
+(`leviculum-std/src/lib.rs:63-90`), so `use leviculum_std::{NodeEvent, LinkHandle,
 …}` works without naming submodules.
 
 ## `leviculum-std` (std / tokio)
@@ -42,26 +42,26 @@ returns `self`.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new() -> Self` — `builder.rs:93` | Builder with defaults |
-| `fn identity(self, identity: Identity) -> Self` — `builder.rs:207` | Pin an explicit identity (else one is generated/persisted) |
-| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:258` | Connect outward to a Reticulum node |
-| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:311` | Listen for inbound connections |
-| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:372` | One datagram per packet |
-| `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:412` | LoRa interface; required radio settings |
-| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:471` | KISS over raw serial |
-| `fn add_auto_interface(self) -> Self` — `builder.rs:584` | IPv6 multicast LAN discovery |
-| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:627` | Act as a relay/forwarder |
-| `fn config(self, config: Config) -> Self` — `builder.rs:232` | Use a pre-loaded `Config` |
-| `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:242` | Load an INI config file |
-| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:250` | Identity / known-destinations / ratchet store dir |
-| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:668` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
-| `fn without_events(self) -> Self` — `builder.rs:199` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:964` | Build the node (not yet running) |
-| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:746` | Same as `build`, outside an async context |
+| `fn new() -> Self` — `builder.rs:110` | Builder with defaults |
+| `fn identity(self, identity: Identity) -> Self` — `builder.rs:248` | Pin an explicit identity (else one is generated/persisted) |
+| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:270` | Connect outward to a Reticulum node |
+| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:360` | Listen for inbound connections |
+| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:421` | One datagram per packet |
+| `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:424` | LoRa interface; required radio settings |
+| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:483` | KISS over raw serial |
+| `fn add_auto_interface(self) -> Self` — `builder.rs:596` | IPv6 multicast LAN discovery |
+| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:650` | Act as a relay/forwarder |
+| `fn config(self, config: Config) -> Self` — `builder.rs:244` | Use a pre-loaded `Config` |
+| `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:254` | Load an INI config file |
+| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:262` | Identity / known-destinations / ratchet store dir |
+| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:702` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
+| `fn without_events(self) -> Self` — `builder.rs:240` | Daemon mode: no application event channel |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:967` | Build the node (not yet running) |
+| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:789` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
 
-The running node. Defined at `leviculum-std/src/driver/mod.rs:412`; re-exported
+The running node. Defined at `leviculum-std/src/driver/mod.rs:1107`; re-exported
 as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
@@ -70,19 +70,19 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:1123` | Stop and flush |
 | `fn is_running(&self) -> bool` — `driver/mod.rs:1176` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:1184` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:1600` | Announce a registered destination |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:2045` | Announce a registered destination |
 | `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:1202` | Open a link; returns a pending handle |
 | `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:1235` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:1853` | Single-packet send handle |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:2329` | Single-packet send handle |
 | `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:1807` | Send one unreliable datagram |
 | `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:1251` | Take the event stream, once |
-| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:1367` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:1412` | Whether a path is known |
+| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:1781` | The node's own identity hash |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:2862` | Whether a path is known |
 | `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:1453` | Hop count to a destination |
-| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:1437` | Send a PATH_REQUEST; result arrives as `PathFound` |
-| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:1421` | Identity learned from an announce (its signing key feeds `connect`) |
+| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:2886` | Send a PATH_REQUEST; result arrives as `PathFound` |
+| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:1835` | Identity learned from an announce (its signing key feeds `connect`) |
 | `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:1547` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:1867` | Relay mode flag |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3540` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals
@@ -93,7 +93,7 @@ hidden; it is what `leviculum-ffi` wraps. Notable facade-only helpers:
 
 ### `LinkHandle`
 
-Send-only async handle for a link. Defined at `leviculum-std/src/driver/stream.rs:45`;
+Send-only async handle for a link. Defined at `leviculum-std/src/driver/stream.rs:47`;
 re-exported as `leviculum_std::LinkHandle`. Incoming data is delivered via
 `NodeEvent`, not on the handle.
 
@@ -108,7 +108,7 @@ re-exported as `leviculum_std::LinkHandle`. Incoming data is delivered via
 ### `PacketSender`
 
 Send-only async handle for single packets, the single-packet analog of
-`LinkHandle`. Defined at `leviculum-std/src/driver/sender.rs:42`; re-exported as
+`LinkHandle`. Defined at `leviculum-std/src/driver/sender.rs:44`; re-exported as
 `leviculum_std::PacketSender`.
 
 | Signature | Purpose |
@@ -119,7 +119,7 @@ Send-only async handle for single packets, the single-packet analog of
 ### `EventReceiver` and `NodeEvent`
 
 `EventReceiver` is the merged event stream, defined at
-`leviculum-std/src/driver/mod.rs:259`. It internally fronts a lossless control
+`leviculum-std/src/driver/mod.rs:378`. It internally fronts a lossless control
 plane and a droppable data plane (Codeberg #71), draining control first.
 
 | Signature | Purpose |
@@ -128,7 +128,7 @@ plane and a droppable data plane (Codeberg #71), draining control first.
 | `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:298` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
-`leviculum-core/src/node/event.rs:21` and re-exported as
+`leviculum-core/src/node/event.rs:41` and re-exported as
 `leviculum_std::NodeEvent`. It is `#[non_exhaustive]`, so always include a
 catch-all arm. The variants most applications match (field names verbatim from
 source):
@@ -151,8 +151,8 @@ requests/responses, identify, stale/recovered, control-plane overflow) is in
 
 ### `Config`
 
-Configuration, defined at `leviculum-std/src/config.rs:11`; re-exported as
-`leviculum_std::Config`. `pub reticulum: ReticulumConfig` (`config.rs:14`) and
+Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
+`leviculum_std::Config`. `pub reticulum: ReticulumConfig` (`config.rs:15`) and
 `pub interfaces: HashMap<String, InterfaceConfig>` (`config.rs:17`).
 
 | Signature | Purpose |
@@ -171,7 +171,7 @@ All are re-exported from `leviculum-core/src/lib.rs:123-143`.
 
 The sans-IO protocol engine, generic over an RNG `R: CryptoRngCore`, a clock
 `C: Clock`, and storage `S: Storage`. Defined at
-`leviculum-core/src/node/mod.rs:143`. It never performs I/O; every method that
+`leviculum-core/src/node/mod.rs:365`. It never performs I/O; every method that
 can produce output returns a [`TickOutput`](#core-tickoutput-and-action) the
 caller must dispatch.
 
@@ -185,8 +185,8 @@ caller must dispatch.
 | `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:504` | Send on an established link |
 | `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:419` | Close a link |
 | `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:1032` | Feed received bytes from an interface |
-| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:1124` | Run periodic maintenance (call at the next deadline) |
-| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:1155` | Earliest timer deadline (ms); when to call `handle_timeout` |
+| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2321` | Run periodic maintenance (call at the next deadline) |
+| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2352` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`

@@ -3,7 +3,7 @@
 //! Both Python and Rust use full 32-byte SHA-256 hashes for packet
 //! deduplication. Files are fully compatible in both directions.
 //!
-//! Python ref: Transport.py:196-203 (load), Transport.py:2955-2977 (save)
+//! Python ref: Transport.py:229-236 (load), Transport.py:2955-2977 (save)
 //! Format: msgpack array of 32-byte binary values.
 
 use std::collections::BTreeSet;

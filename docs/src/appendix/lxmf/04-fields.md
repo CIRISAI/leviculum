@@ -1,11 +1,11 @@
 # Fields
 
-The `fields` element of the payload (`LXMessage.py:359`) is a msgpack map with
+The `fields` element of the payload (`LXMessage.py:362`) is a msgpack map with
 integer keys. Keys are the `FIELD_*` identifiers; values are field-specific. An
 empty map `{}` is valid and is the default. Field keys are packed as msgpack
 integers, including the high-value debug keys which serialize as `uint8`.
 
-## Field identifiers (`LXMF.py:8-41`)
+## Field identifiers (`LXMF.py:8-51`)
 
 | Key | Name | Value convention |
 |-----|------|------------------|
@@ -35,7 +35,7 @@ An implementation MUST treat unknown field keys as opaque and preserve them
 carries `{0x0F: 0x02}` (`FIELD_RENDERER: RENDERER_MARKDOWN`) and shows it packed
 inside the payload.
 
-## Renderers (`LXMF.py:89-92`)
+## Renderers (`LXMF.py:99-102`)
 
 | Value | Name |
 |-------|------|
@@ -44,7 +44,7 @@ inside the payload.
 | 0x02 | `RENDERER_MARKDOWN` |
 | 0x03 | `RENDERER_BBCODE` |
 
-## Audio modes (`LXMF.py:55-79`)
+## Audio modes (`LXMF.py:65-89`)
 
 Used as the first element of `FIELD_AUDIO`. Codec2 modes `AM_CODEC2_450PWB`
 (0x01) through `AM_CODEC2_3200` (0x09); Opus modes `AM_OPUS_OGG` (0x10) through

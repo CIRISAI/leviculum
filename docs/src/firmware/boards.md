@@ -31,7 +31,7 @@ runs an event-driven main loop that dispatches packets between them:
 
 (Interface registration and MTUs:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:232-240`) and
-`leviculum-nrf/src/bin/rak4631.rs:230-238`. The main loop selecting over
+`leviculum-nrf/src/bin/rak4631.rs:283-324`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
 `leviculum-nrf/src/bin/t114.rs:559`.)
 
@@ -39,7 +39,7 @@ Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
 (`enable_transport` (`leviculum-nrf/src/bin/t114.rs:182`),
-`leviculum-nrf/src/bin/rak4631.rs:201`)
+`leviculum-nrf/src/bin/rak4631.rs:217`)
 
 ## Hardware coverage
 
@@ -181,7 +181,7 @@ radio pinout turned out to be the easy half.
 > and for the Heltec Mesh Pocket, whose radio is wired differently and
 > which is not covered here. Both our tools match that string exactly
 > (`board_for_id` (`lnflash/src/manifest.rs:485`),
-> `leviculum-nrf/tools/uf2-runner.sh:79`), so if the `INFO_UF2.TXT`
+> `leviculum-nrf/tools/uf2-runner.sh:108`), so if the `INFO_UF2.TXT`
 > `Board-ID` is identical too, neither can tell a Mesh Pocket from a
 > T114. We cannot check that without the hardware. Until someone does,
 > treat a `HT-n5262` match as a family hint and confirm the model by
@@ -378,13 +378,13 @@ board. Exactly one BSP feature must be enabled per build; a
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
 > (`leviculum-nrf/src/bin/t114.rs:330`,
-> `leviculum-nrf/src/bin/rak4631.rs:272`). The Cargo `softdevice`
+> `leviculum-nrf/src/bin/rak4631.rs:387`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:133`,
+> features (`leviculum-nrf/Cargo.toml:262`,
 > `leviculum-nrf/Cargo.toml:139`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:141-144`) and spawned only when that feature
+(`leviculum-nrf/Cargo.toml:301-309`) and spawned only when that feature
 is on (`leviculum-nrf/src/bin/rak4631.rs:323-350`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
@@ -399,8 +399,8 @@ The mapping from board to binary and features used by the flash recipes:
 | WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:719`, `Justfile:746`,
-`Justfile:759`.)
+`just flash-rak4631-pocket` recipes: `Justfile:1104`, `Justfile:1131`,
+`Justfile:1144`.)
 
 ### What the `lnflash` bundle carries
 
@@ -466,10 +466,10 @@ RNode configuration on the same LoRa network.
 | Coding rate | CR4/5 |
 | TX power | 22 dBm |
 
-(`leviculum-nrf/README.md:8`. The `eu_medium` profile the firmware loads
-at boot: `leviculum-nrf/src/lora.rs:136-161`, applied at
+(`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
+`eu_medium` (`leviculum-nrf/src/lora.rs:333-362`), applied at
 `leviculum-nrf/src/bin/t114.rs:291` and
-`leviculum-nrf/src/bin/rak4631.rs:264`.)
+`leviculum-nrf/src/bin/rak4631.rs:379`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

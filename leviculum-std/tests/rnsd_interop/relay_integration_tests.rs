@@ -232,7 +232,7 @@ async fn test_diamond_relay_and_failure_recovery() {
     // BOTH daemons (A->B via R1 and B->A via R1); for step 19's LinkRequest
     // round-trip to succeed, both sides must have a fresh R2 path to the
     // peer, not just one. Space the two announces by 2s so Python's
-    // ingress_control (IC_BURST_FREQ_NEW=3.5/s, Interface.py:117) does not
+    // ingress_control (IC_BURST_FREQ_NEW=3.5/s, Interface.py:145) does not
     // penalise the second — same subtlety documented in
     // architecture-broadcast-python-parity.md section B1.
     daemon_a

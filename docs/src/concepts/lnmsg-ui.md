@@ -158,7 +158,7 @@ and the error string when there is one. In a terminal that is a key press
 on a focused message.
 
 **Never claim a read receipt.** LXMF has no such field
-(`leviculum-lxmf/src/constants.rs:20-46`). Any UI element that suggests one
+(`leviculum-lxmf/src/constants.rs:52-78`). Any UI element that suggests one
 is a lie in the protocol's own terms.
 
 **Say what `Delivered` means, once.** It means the bytes reached the
@@ -266,8 +266,8 @@ labelled as an estimate.
 When the peer advertises a stamp cost, the estimate must include the
 proof-of-work, and that number has to be *measured* first: the crate
 contains no benchmarks, and the cost model (2^cost hashes plus a 3000-round
-workblock, `leviculum-lxmf/src/constants.rs:16`,
-`leviculum-lxmf/src/stamp.rs:258-266`) predicts scaling but not
+workblock, `leviculum-lxmf/src/constants.rs:45`,
+`leviculum-lxmf/src/stamp.rs:351-359`) predicts scaling but not
 milliseconds on a Pi.
 
 ### Offline as a state, not a failure
@@ -303,7 +303,7 @@ of `visible_links` rather than new machinery.
 ### Terminal QR for paper messages and for your own address
 
 `PaperMessage::to_uri()` produces an `lxm://` URI
-(`leviculum-lxmf/src/paper.rs:170`) and the crate stops there. A QR code
+(`leviculum-lxmf/src/paper.rs:172`) and the crate stops there. A QR code
 rendered in Unicode half blocks is a well-trodden trick, and `lnomad`
 already has the half-block ladder for images. That gives an air-gapped send
 path: compose, render, photograph, and the recipient scans it. Also useful
@@ -311,7 +311,7 @@ for showing your own address to someone sitting next to you, which NomadNet
 does (`Ctrl-P` in the conversation list).
 
 Constraint: `PAPER_MDU` is 2210 bytes
-(`leviculum-lxmf/src/constants.rs:9`), which is near the practical limit of
+(`leviculum-lxmf/src/constants.rs:38`), which is near the practical limit of
 what a QR code can hold and certainly beyond what a phone camera reads off
 a terminal at normal font sizes. The UI must say when a message is too big
 to be a QR and offer the URI as text instead.

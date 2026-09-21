@@ -483,7 +483,7 @@ pub struct TxPowerProgram {
 /// profile table any more: the four-point table was an artefact of deriving
 /// output from `SetPaConfig`, and deriving it from `SetTxParams` instead makes
 /// all 32 points reachable — including the negatives `lnflash --radio-txpower`
-/// has always accepted (`lnflash/src/radio.rs:76`).
+/// has always accepted (`lnflash/src/radio.rs:75`).
 ///
 /// **A value the chip cannot do is clamped and announced, never refused.**
 /// The operator is the operator (Codeberg #257), so the stack warns and

@@ -14,7 +14,7 @@ use crate::identity::Identity;
 ///
 /// Tracks whether a path is known to be working, unresponsive, or unknown.
 /// Used to allow accepting same-emission worse-hop announces when the
-/// current path has been marked unresponsive (Python Transport.py:1672-1681).
+/// current path has been marked unresponsive (Python Transport.py:1817-1826).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathState {
     /// Default state, no knowledge about path quality
@@ -118,7 +118,7 @@ pub struct AnnounceEntry {
     pub receiving_interface_index: usize,
     /// If set, send the deferred rebroadcast only to this specific interface
     /// instead of broadcasting to all. Used for path request responses, which
-    /// should go only to the requesting interface (Python Transport.py:1037-1038).
+    /// should go only to the requesting interface (Python Transport.py:1190-1191).
     pub target_interface: Option<usize>,
     /// Number of times neighbors echoed this announce
     pub local_rebroadcasts: u8,

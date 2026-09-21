@@ -10,7 +10,7 @@ deduplication, TTLs) are informative.
 
 To discover a path, a node sends a path request: a DATA packet to the PLAIN
 destination `rnstransport.path.request` (`Transport.request_path`,
-`Transport.py:2786-2787`). The payload is (`Transport.py:2783-2784`):
+`Transport.py:2786-2787`). The payload is (`Transport.py:2849-2850`):
 
 ```
 target_destination_hash(16) || [transport_identity_hash(16)] || request_tag
@@ -42,12 +42,12 @@ The following are reference behaviour an implementation MAY diverge from:
 - **Announce propagation.** Announces are rebroadcast with a hop limit
   `PATHFINDER_M = 128`, up to `LOCAL_REBROADCASTS_MAX = 2` local rebroadcasts,
   after a grace `PATHFINDER_G = 5 s` plus random jitter `PATHFINDER_RW = 0.5 s`
-  (`Transport.py:63-77`).
+  (`PATHFINDER_M`, `Transport.py:63-77`).
 - **Path TTLs.** Default `PATHFINDER_E = 7 days`; access-point paths `AP_PATH_TIME
-  = 1 day`; roaming paths `ROAMING_PATH_TIME = 6 hours` (`Transport.py:71-73`).
+  = 1 day`; roaming paths `ROAMING_PATH_TIME = 6 hours` (`PATHFINDER_E`, `Transport.py:71-73`).
 - **Deduplication.** A rolling table of recent packet hashes suppresses loops.
 - **Path request pacing.** `PATH_REQUEST_TIMEOUT = 15 s`, `PATH_REQUEST_MI = 20 s`
-  minimum interval, and per-interface announce caps (`Transport.py:79-83`).
+  minimum interval, and per-interface announce caps (`PATH_REQUEST_TIMEOUT`, `Transport.py:79-83`).
 
 These values and structures are documented for fidelity; only the path request
 and path response packets above are normative.

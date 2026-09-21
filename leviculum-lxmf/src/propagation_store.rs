@@ -32,7 +32,7 @@
 //! * [`PropagationStore::append`] ↔ `RecordLog::append(key, time, tag, body)`
 //!   (`lib.rs:429`) — key = transient ID, `time` = received-at (truncated to
 //!   `u32` on the board), `tag` = stamp value.
-//! * [`PropagationStore::for_each`] ↔ `RecordLog::for_each` (`lib.rs:546`).
+//! * [`PropagationStore::for_each`] ↔ `RecordLog::for_each` (`lib.rs:541`).
 //!   The visitor sees directory data only, never a full body; the record log
 //!   yields `Record { key, time, tag, len }` and the adapter reads the first
 //!   16 body bytes for the destination hash with `read_body` — one `memcpy`
@@ -151,7 +151,7 @@ pub trait PropagationStore {
 
     /// Number of stored messages — one directory pass by default; the record
     /// log's mount already reports the same count
-    /// (`leviculum-nrf/record-log/src/lib.rs:411`).
+    /// (`leviculum-nrf/record-log/src/lib.rs:406`).
     fn count(&self) -> Result<usize, StorageError> {
         let mut total = 0usize;
         self.for_each(&mut |_| total += 1)?;

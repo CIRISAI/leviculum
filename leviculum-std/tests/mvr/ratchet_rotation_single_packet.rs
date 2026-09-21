@@ -9,7 +9,7 @@
 //! destinations. Drive: announce + discover, exchange 5 single packets each
 //! way (expect 10), let the ratchet interval expire, re-announce (this is what
 //! rotates — `Destination::announce` -> `rotate_ratchet_if_needed`,
-//! destination.rs:1079), verify both sides rotated, exchange 5 each way again
+//! destination.rs:1146), verify both sides rotated, exchange 5 each way again
 //! (expect 10).
 //!
 //! The suspected mechanism is a crypto-window: a post-rotation message

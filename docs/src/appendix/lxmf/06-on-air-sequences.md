@@ -14,7 +14,7 @@ This section describes the on-air event sequence for each delivery method. The
 1. If there is no path to the destination, request one and wait (informative
    cadence). After `MAX_PATHLESS_TRIES` the message may be sent pathless.
 2. Send a single Reticulum Packet whose payload is `packed[16:]` (the destination
-   hash is omitted; `LXMessage.py:631`).
+   hash is omitted; `LXMessage.py:634`).
 3. The message state becomes `SENT`. Delivery is confirmed by a Reticulum proof;
    on timeout the router re-queues up to `MAX_DELIVERY_ATTEMPTS`.
 
@@ -27,9 +27,9 @@ content limit.
    `lxmf/delivery` endpoint.
 2. When the link is `ACTIVE` (`LXMessage.py:650`):
    - if representation is `PACKET`, send one Packet carrying the full `packed`
-     bytes over the link (`LXMessage.py:633`);
+     bytes over the link (`LXMessage.py:636`);
    - if representation is `RESOURCE`, transfer `packed` as a Reticulum Resource
-     over the link (`LXMessage.py:650-651`), with compression negotiated per the
+     over the link (`LXMessage.py:653-654`), with compression negotiated per the
      peer's advertised support.
 3. On link failure before delivery, tear down and retry.
 
@@ -38,20 +38,20 @@ content limit.
 1. Establish a `Link` to the configured outbound propagation node.
 2. Send `propagation_packed` (the encrypted envelope, see
    [Propagation](10-propagation.md)) as a Packet or Resource depending on size
-   (`LXMessage.py:634-635,652-653`).
+   (`LXMessage.py:637-638,655-656`).
 3. Success marks the message `SENT` (not `DELIVERED`): final delivery to the
    recipient happens asynchronously when the recipient syncs from the node.
 
 ## Paper
 
 No Reticulum transport. `pack()` produces the encrypted paper form; `as_uri()`
-renders it as an `lxm://` URI (`LXMessage.py:687-702`) or `as_qr()` as a QR code.
+renders it as an `lxm://` URI (`LXMessage.py:698-713`) or `as_qr()` as a QR code.
 The recipient ingests the URI out of band.
 
 ## State model (informative)
 
 A message moves through the states `GENERATING (0x00) -> OUTBOUND (0x01) ->
 SENDING (0x02) -> SENT (0x04) -> DELIVERED (0x08)`, with terminal `REJECTED
-(0xFD)`, `CANCELLED (0xFE)`, and `FAILED (0xFF)` (`LXMessage.py:14-21`). These
+(0xFD)`, `CANCELLED (0xFE)`, and `FAILED (0xFF)` (`LXMessage.py:15-22`). These
 are local lifecycle states, not on-wire values, and an implementation MAY model
 the lifecycle differently.

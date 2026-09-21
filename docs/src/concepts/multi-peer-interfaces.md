@@ -263,7 +263,7 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 |---|---|---|
 | Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
-| SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:88`) | **not the relevant budget, see below** |
+| SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:143`) | **not the relevant budget, see below** |
 
 Three BLE children cost `1 347 + 2 × 579 = 2 505 B` of heap, 4 041 B if
 every step happens to split a node. Against 33 260 B free at the worst
@@ -274,7 +274,7 @@ The 928 B SoftDevice margin does *not* bound this, and it is worth
 being explicit because the number is small enough to look alarming.
 That margin sizes the SoftDevice's own RAM requirement, which scales
 with `conn_count`: 15 272 B at two connections, 23 968 B at four
-(`leviculum-nrf/memory.x:88`), and #372 paid for that by moving the app
+(`leviculum-nrf/memory.x:143`), and #372 paid for that by moving the app
 RAM floor up 8 576 B. A Reticulum interface object is application heap;
 it does not appear in `sd_ble_enable`'s requirement at all. Spawning
 three children over the same four BLE connections costs the SoftDevice
@@ -289,7 +289,7 @@ fan-out — an announce emits one action per entry in the routing map
 (`interface_names`, `leviculum-core/src/transport.rs:9877`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
-`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:404`).
+`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:510`).
 Same peak, moved one layer up.
 
 ### Which machinery is per medium, and which is per link

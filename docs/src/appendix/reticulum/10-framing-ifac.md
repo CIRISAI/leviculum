@@ -50,5 +50,5 @@ on mismatch (`Transport.inbound`, `Transport.py:1398-1434`).
 `9f4a2cf485c1dfcea0…`, the IFAC flag set in the masked header, and proves a full
 mask/unmask roundtrip recovers the original packet and a matching tag
 (`unmask_roundtrip_ok = true`). `IFAC_MIN_SIZE = 1`, and `IFAC_SALT` is a fixed
-32-byte constant (`Reticulum.py:149-150`). An implementation sharing an interface
+32-byte constant (`Reticulum.py:146-147`). An implementation sharing an interface
 with Python peers MUST reproduce this masking exactly or its packets are dropped.

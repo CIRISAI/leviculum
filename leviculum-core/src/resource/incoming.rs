@@ -613,7 +613,7 @@ impl IncomingResource {
         // Store assembled data (including metadata prefix) for proof computation
         self.assembled_with_metadata = Some(assembled.clone());
 
-        // 6. Extract metadata if present (only in segment 1, per Python Resource.py:685)
+        // 6. Extract metadata if present (only in segment 1, per Python Resource.py:696)
         let (app_data, metadata) = if self.flags.has_metadata && self.segment_index == 1 {
             if assembled.len() < 3 {
                 return Err(ResourceError::HashMismatch);
@@ -664,7 +664,7 @@ impl IncomingResource {
         match self.status {
             ResourceStatus::Transferring => {
                 // Timeout factor reduces after first data received
-                // (Python Resource.py:828. PART_TIMEOUT_FACTOR_AFTER_RTT).
+                // (Python Resource.py:839. PART_TIMEOUT_FACTOR_AFTER_RTT).
                 let timeout_factor = if self.data_received {
                     PART_TIMEOUT_FACTOR_AFTER_RTT // 2
                 } else {
@@ -677,7 +677,7 @@ impl IncomingResource {
                 // one RTT. If measured eifr suggests longer, the measurement is
                 // contaminated by dropped frames inflating the req-to-first-part
                 // elapsed time. Python avoids this by falling back to the link
-                // establishment rate (Resource.py:552).
+                // establishment rate (Resource.py:555).
                 let eifr_tof = if self.num_parts > 0 && self.eifr > 0 {
                     self.transfer_size.saturating_mul(1000) / self.num_parts as u64 / self.eifr
                 } else {
@@ -685,7 +685,7 @@ impl IncomingResource {
                 };
                 let per_part_tof = core::cmp::min(eifr_tof, rtt_ms);
                 let base = per_part_tof * core::cmp::max(self.outstanding_parts, 1) as u64;
-                // Per-retry progressive delay (Python Resource.py:594).
+                // Per-retry progressive delay (Python Resource.py:597).
                 let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
                 let timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
 
@@ -708,7 +708,7 @@ impl IncomingResource {
                         self.window_state.on_timeout(self.window_policy);
                         self.last_activity_ms = now_ms;
                         // Rebuild request with only the currently missing parts
-                        // (matches Python Resource.py:622, request_next() on timeout).
+                        // (matches Python Resource.py:626, request_next() on timeout).
                         let req = self.build_request();
                         self.req_sent_ms = Some(now_ms);
                         ResourcePollResult::RetransmitAdv(req)

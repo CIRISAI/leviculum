@@ -23,7 +23,7 @@ carrying a msgpack dictionary (`ResourceAdvertisement.pack`, `Resource.py:1333-1
 | `f` | flags byte |
 | `m` | hashmap segment (4-byte `MAPHASH_LEN` entries) |
 
-The flags byte is (`Resource.py:1307`):
+The flags byte is (`Resource.py:1304`):
 
 ```
 f = (has_metadata<<5) | (is_response<<4) | (is_request<<3) | (split<<2) | (compressed<<1) | encrypted
@@ -53,7 +53,7 @@ hashes as the window advances. The sliding window sizes (`WINDOW`, `WINDOW_MIN`,
 
 On completion the receiver assembles the parts, verifies integrity, and the
 sender sends a RESOURCE_PRF packet (context 0x05, unencrypted) carrying
-(`Resource.py:755-756`):
+(`Resource.py:752-753`):
 
 ```
 proof      = full_hash(data || resource_hash)
@@ -62,7 +62,7 @@ proof_data = resource_hash(32) || proof(32)
 
 a single SHA-256 over the assembled data concatenated with the resource hash,
 prefixed by the resource hash. `validate_proof` accepts when `proof_data` is 64
-bytes and its second half matches the expected proof (`Resource.py:782-786`).
+bytes and its second half matches the expected proof (`Resource.py:779-783`).
 `[VEC-RES-PROOF]` records this construction. Either party may abort with
 RESOURCE_ICL (0x06, initiator) or RESOURCE_RCL (0x07, receiver).
 

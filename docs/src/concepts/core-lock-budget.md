@@ -33,10 +33,10 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:2852`).
+(`leviculum-std/src/driver/mod.rs:3369`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1336`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1486`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -210,7 +210,7 @@ stays for the embedded caller.
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
-(`leviculum-std/src/driver/remote_mgmt.rs:84`) is the reference for how
+(`leviculum-std/src/driver/remote_mgmt.rs:82`) is the reference for how
 much is acceptable there: take the lock, build a small bundle, hand
 back a `TickOutput`, return.
 
@@ -318,7 +318,7 @@ is the one that matters: `generate_with` is an `async fn`, so no
 synchronous callee of the event loop can drive it to completion at all.
 It is not true that the tree contains no synchronous proof-of-work.
 `leviculum-core::discovery::stamp::generate_stamp`
-(`leviculum-core/src/discovery/stamp.rs:147`) is a public synchronous
+(`leviculum-core/src/discovery/stamp.rs:176`) is a public synchronous
 brute-force loop taking a caller-supplied `cost`, and nothing stops a
 loop callee from calling it. It is not a DoS vector today because no
 peer picks its number: the only caller is the discovery announcer,

@@ -7,7 +7,7 @@
 //! else, overwriting `desired_method` as it goes, so the caller's wish is not
 //! recoverable afterwards (`LXMessage.pack`,
 //! `reference/LXMF/LXMF/LXMessage.py:399-401`). Ours is in
-//! [`LxmfNode::representation`] (`leviculum-lxmf/src/node.rs:562`), and until
+//! [`LxmfNode::representation`] (`leviculum-lxmf/src/node.rs:601`), and until
 //! this file nothing in the suite pinned any of it.
 //!
 //! **The named failure mode:** a message at the single-packet threshold is

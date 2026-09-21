@@ -315,7 +315,7 @@ pub const RAW_RECEIPT_TIMEOUT_FLOOR_MS: u64 = 1_000;
 /// Max grace time for response in ms (Python Resource.RESPONSE_MAX_GRACE_TIME = 10s)
 pub const RESPONSE_MAX_GRACE_TIME_MS: u64 = 10_000;
 
-/// Maximum number of queued announces per interface (Python Interface.py:260)
+/// Maximum number of queued announces per interface (Python Interface.py:337)
 pub const MAX_QUEUED_ANNOUNCES_PER_INTERFACE: usize = 16384;
 
 /// Default announce bandwidth cap as percentage of link capacity (Python Interface.py:25)

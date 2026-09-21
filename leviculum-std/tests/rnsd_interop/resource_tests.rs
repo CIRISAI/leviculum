@@ -6,7 +6,7 @@
 //! `umsgpack.packb(metadata)` BEFORE prepending the 3-byte BE uint24 length.
 //! Wire format: `[3-byte len][msgpack-encoded metadata][data]`.
 //!
-//! Python's assemble() (Resource.py:687-720) strips the 3-byte prefix,
+//! Python's assemble() (Resource.py:698-731) strips the 3-byte prefix,
 //! saves packed bytes, then calls `umsgpack.unpackb()` to decode.
 //!
 //! Rust's OutgoingResource::new() takes metadata as `&[u8]` documented as

@@ -940,7 +940,7 @@ impl Config {
     }
 
     /// Resolve the default config directory using the same lookup
-    /// order as Python-Reticulum (RNS/Reticulum.py:230-237):
+    /// order as Python-Reticulum (RNS/Reticulum.py:229-236):
     ///   1. `/etc/reticulum`          — if `/etc/reticulum/config` exists
     ///   2. `$HOME/.config/reticulum` — if that dir's `config` exists
     ///   3. `$HOME/.reticulum`        — fallback, returned even if absent
@@ -1216,7 +1216,7 @@ mod tests {
         );
     }
 
-    // Mirror Python-Reticulum's RNS/Reticulum.py:230-237 lookup order.
+    // Mirror Python-Reticulum's RNS/Reticulum.py:229-236 lookup order.
 
     // Integ-level load: drive Config::load against a real on-disk INI file
     // carrying every RNS 1.2.2..1.3.5 new key plus the tcp-override case.

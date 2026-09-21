@@ -49,10 +49,10 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1032`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1152`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1302`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` — `leviculum-core/src/node/mod.rs:1183`. The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2352`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -181,7 +181,7 @@ impl Clock for EmbassyClock {
 ```
 
 `now_secs`, `has_elapsed`, and `deadline` have default implementations
-(`leviculum-core/src/traits.rs:167-179`); you only provide `now_ms`. It must be
+(`leviculum-core/src/traits.rs:402-414`); you only provide `now_ms`. It must be
 monotonic.
 
 ### `Interface`
@@ -231,7 +231,7 @@ a single-peer interface implements nothing.
 ### `Storage`
 
 Key-value persistence for the path table, link table, announce caches,
-identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:196`). It
+identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:431`). It
 is a large trait; you do not write it from scratch:
 
 - `NoStorage` (`leviculum-core/src/traits.rs:817`) — zero-sized, every lookup

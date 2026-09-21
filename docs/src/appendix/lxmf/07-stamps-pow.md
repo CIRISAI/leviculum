@@ -19,16 +19,16 @@ stamp_workblock(material, expand_rounds):
     return workblock
 ```
 
-(`LXStamper.py:18-29`). Each round appends 256 bytes, so the workblock is
+(`LXStamper.py:49-60`). Each round appends 256 bytes, so the workblock is
 `expand_rounds * 256` bytes. The salt for round `n` is
 `full_hash(material || msgpack(n))`, where `msgpack(n)` is the msgpack encoding of
 the integer `n` (`LXStamper.py:24`). The expand-round counts are:
 
 | Context | Rounds | Workblock size | Citation |
 |---------|--------|----------------|----------|
-| Delivery stamp | `WORKBLOCK_EXPAND_ROUNDS` = 3000 | 768 000 B | `LXStamper.py:10` |
-| Propagation stamp | `WORKBLOCK_EXPAND_ROUNDS_PN` = 1000 | 256 000 B | `LXStamper.py:11` |
-| Peering key | `WORKBLOCK_EXPAND_ROUNDS_PEERING` = 25 | 6 400 B | `LXStamper.py:12` |
+| Delivery stamp | `WORKBLOCK_EXPAND_ROUNDS` = 3000 | 768 000 B | `LXStamper.py:12` |
+| Propagation stamp | `WORKBLOCK_EXPAND_ROUNDS_PN` = 1000 | 256 000 B | `LXStamper.py:13` |
+| Peering key | `WORKBLOCK_EXPAND_ROUNDS_PEERING` = 25 | 6 400 B | `LXStamper.py:14` |
 
 The Python reference holds the entire workblock in RAM. The Rust cooperative
 executor instead feeds one 256-byte HKDF block at a time into SHA-256, keeping
@@ -42,7 +42,7 @@ stamp_valid(stamp, target_cost, workblock):
     return int.from_bytes(full_hash(workblock || stamp), "big") <= target
 ```
 
-(`LXStamper.py:42-46`). The digest is interpreted as a big-endian 256-bit
+(`LXStamper.py:73-77`). The digest is interpreted as a big-endian 256-bit
 integer and compared against `target`. `target_cost` is the number of required
 leading zero bits. The stamp itself is 32 random bytes (`STAMP_SIZE`,
 `LXStamper.py:15`).
@@ -54,7 +54,7 @@ stamp_value(workblock, stamp):
     count leading zero bits of full_hash(workblock || stamp)   # big-endian
 ```
 
-(`LXStamper.py:31-40`). The value is the achieved number of leading zero bits.
+(`LXStamper.py:62-71`). The value is the achieved number of leading zero bits.
 
 ### Proof: `[VEC-STAMP-1]`
 
@@ -79,7 +79,7 @@ outer propagation-node stamp.
 `generate_stamp(material, stamp_cost, expand_rounds)` brute-forces random 32-byte
 stamps until `stamp_valid` (`LXStamper.py:92-111`). The reference parallelizes
 this across processes on Linux and falls back to single-process elsewhere
-(`LXStamper.py:145-354`); the parallelism is informative, the resulting stamp is
+(`LXStamper.py:178-376`); the parallelism is informative, the resulting stamp is
 not.
 
 ## Rust execution model
@@ -112,14 +112,14 @@ not make threads a protocol dependency.
 - **Delivery stamp**: the recipient advertises a `stamp_cost` in its delivery
   announce (see [Announce application data](09-announce-appdata.md)). The sender
   generates a stamp over the message-id and appends it as payload element `[4]`
-  (`LXMessage.py:368-370,317`). The recipient validates it with `validate_stamp`
+  (`LXMessage.py:371-373,320`). The recipient validates it with `validate_stamp`
   (`LXMessage.py:270-291`).
 - **Propagation stamp**: generated over the transient-id with
   `WORKBLOCK_EXPAND_ROUNDS_PN` and the node's advertised cost
-  (`LXMessage.py:326-350`).
+  (`LXMessage.py:329-353`).
 - **Ticket shortcut**: if a valid ticket is held, the stamp is
   `truncated_hash(ticket || message_id)` and the value is `COST_TICKET = 256`,
-  bypassing proof-of-work (`LXMessage.py:274-277,296-300`). See
+  bypassing proof-of-work (`LXMessage.py:277-280,299-303`). See
   [Tickets](08-tickets.md).
 
 ## Validation order

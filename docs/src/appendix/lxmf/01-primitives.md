@@ -8,11 +8,11 @@ because their outputs are signed, hashed, and exchanged on the wire.
 
 - **`full_hash(x)`** is SHA-256 over `x`, 32 bytes (`RNS.Identity.HASHLENGTH` =
   256 bits). LXMF uses it for the message hash and message-id
-  (`LXMessage.py:365-366`), the transient-id (`LXMessage.py:431`), and the stamp
-  digest (`LXStamper.py:34,44`).
+  (`LXMessage.py:368-369`), the transient-id (`LXMessage.py:434`), and the stamp
+  digest (`LXStamper.py:65,75`).
 - **`truncated_hash(x)`** is the leading 16 bytes of `full_hash(x)`
   (`RNS.Identity.TRUNCATED_HASHLENGTH` = 128 bits). LXMF uses it for the ticket
-  stamp shortcut (`LXMessage.py:274,297`).
+  stamp shortcut (`LXMessage.py:277,300`).
 
 ## Signing
 
@@ -22,7 +22,7 @@ because their outputs are signed, hashed, and exchanged on the wire.
   one.
 - **`Identity.validate(sig, m)`** verifies an Ed25519 signature. The inbound
   path calls it as `source.identity.validate(signature, signed_part)`
-  (`LXMessage.py:794`).
+  (`LXMessage.py:809`).
 
 ## Encryption
 
@@ -34,14 +34,14 @@ because their outputs are signed, hashed, and exchanged on the wire.
   (`[VEC-PROP-ENVELOPE]`, `[VEC-PAPER-URI]`) are proven by a decrypt round trip,
   not by frozen ciphertext.
 - LXMF calls `encrypt` for the propagated and paper forms over the message tail
-  `packed[16:]` (`LXMessage.py:427,446`), and `Destination.decrypt` on receipt.
+  `packed[16:]` (`LXMessage.py:430,449`), and `Destination.decrypt` on receipt.
 - The encryption description strings `"AES-128"` / `"Curve25519"` /
-  `"Unencrypted"` (`LXMessage.py:97-99`) are local labels only, not on the wire.
+  `"Unencrypted"` (`LXMessage.py:98-100`) are local labels only, not on the wire.
 
 ## Key derivation
 
 - **`Cryptography.hkdf(length, derive_from, salt, context)`** is HKDF-SHA-256.
-  LXMF uses it only to build the stamp workblock (`LXStamper.py:22-25`); see
+  LXMF uses it only to build the stamp workblock (`LXStamper.py:53-56`); see
   [Stamps and proof-of-work](07-stamps-pow.md).
 
 ## Identities

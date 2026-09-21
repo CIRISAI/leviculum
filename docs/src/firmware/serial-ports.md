@@ -51,7 +51,7 @@ keyed off the per-board USB PID:
 
 (Symlink names and PIDs: `leviculum-nrf/udev/99-leviculum.rules`. The
 firmware-side USB VID/PID constants:
-`leviculum-nrf/src/boards/t114.rs:168-169` for `1209:0001`,
+`leviculum-nrf/src/boards/t114.rs:172-173` for `1209:0001`,
 `leviculum-nrf/src/boards/rak4631.rs:147-148` for `1209:0002`.)
 
 > **Multiple boards of the same kind.** The short symlinks
@@ -184,7 +184,7 @@ implements no RNode KISS command set — there is no `CMD_DETECT`,
 > `SerialInterface` honours [the LoRa keys] too and configures the
 > attached LNode's radio over the serial port — the LNode frames HDLC,
 > so it cannot be driven by the KISS-framed `RNodeInterface`.
-> (`docs/src/guide/configuration.md:182-191`)
+> (`docs/src/guide/configuration.md:282-291`)
 
 ```ini
 [interfaces]
@@ -209,12 +209,12 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port
 
 **Who applies the LoRa keys.** Under `lnsd` the five LoRa keys are sent
 to the board as a radio-config frame at interface startup
-(`leviculum-std/src/interfaces/serial.rs:186`), so the config decides
+(`leviculum-std/src/interfaces/serial.rs:360`), so the config decides
 the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled
 `eu_medium` default (869.463 MHz, BW 125 kHz, SF8, CR4/5, 22 dBm;
-`leviculum-nrf/src/lora.rs:136-165`, `RadioConfig::eu_medium`) or the
+`leviculum-nrf/src/lora.rs:333-362`, `RadioConfig::eu_medium`) or the
 preset chosen at flash time. The values above are that default written
 out, so a Python-driven LNode and an `lnsd`-driven one land on the same
 channel. Changing the channel of a Python-driven board is a reflash
@@ -247,7 +247,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`leviculum-core/src/node/mod.rs:513-517`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:708-712`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:159`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated
@@ -285,7 +285,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:141` sets `respond_to_probes` and
+(`leviculum-nrf/src/bin/t114.rs:162` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,

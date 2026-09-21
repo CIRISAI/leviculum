@@ -17,7 +17,7 @@
 //! It is a LIVELOCK, not a deadlock: both nodes exchange packets continuously
 //! but neither transfer ever concludes, because BOTH resource watchdogs reset
 //! on ANY inbound event rather than on genuine progress:
-//!   - sender: `outgoing.rs:537-538` resets `retries`/`last_activity_ms` on
+//!   - sender: `outgoing.rs:728-729` resets `retries`/`last_activity_ms` on
 //!     every REQ it receives;
 //!   - receiver: `incoming.rs` resets its activity on every received part.
 //!

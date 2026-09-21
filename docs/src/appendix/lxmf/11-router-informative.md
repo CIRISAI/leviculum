@@ -5,7 +5,7 @@ router behaves so an implementation can match observable timing and limits where
 useful, but an implementation MAY diverge from any of it without breaking wire or
 semantic compatibility. The normative obligations are in the preceding sections.
 
-## Delivery scheduling (`LXMRouter.py:30-83`)
+## Delivery scheduling (`LXMRouter.py:30-91`)
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
@@ -28,14 +28,14 @@ semantic compatibility. The normative obligations are in the preceding sections.
 | `DELIVERY_LIMIT` | 1000 KB | direct delivery resource limit |
 | `PN_STAMP_THROTTLE` | 180 s | propagation stamp throttle window |
 
-## Peering (`LXMRouter.py:43-60`)
+## Peering (`LXMRouter.py:43-63`)
 
 `MAX_PEERS` = 20, `AUTOPEER` = true, `AUTOPEER_MAXDEPTH` = 4 hops,
 `ROTATION_HEADROOM_PCT` = 10, `ROTATION_AR_MAX` = 0.5, `PEERING_COST` = 18
 (max 26), `PROPAGATION_COST` = 16 (min 13, flex 3). Peer selection and rotation
 policy are internal.
 
-## Jobloop cadence (`LXMRouter.py:853-860`)
+## Jobloop cadence (`LXMRouter.py:871-879`)
 
 A single jobloop dispatches staggered jobs: outbound processing (1 s), deferred
 stamp generation (1 s), link cleanup (1 s), transient-cache cleanup (60 s),

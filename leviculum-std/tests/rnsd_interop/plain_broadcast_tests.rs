@@ -21,7 +21,7 @@ use crate::harness::{find_available_ports, TestDaemon};
 /// Test: Python local client sends a plain broadcast → Python remote node receives it.
 ///
 /// This exercises the local-client → all-network-interfaces forwarding path
-/// (Python Transport.py:1390-1393) which is missing in Rust.
+/// (Python Transport.py:1524-1527) which is missing in Rust.
 #[tokio::test]
 async fn test_plain_broadcast_local_client_to_network() {
     init_tracing();
@@ -110,7 +110,7 @@ async fn test_plain_broadcast_local_client_to_network() {
 /// Test: Python remote node sends a plain broadcast → Python local client receives it.
 ///
 /// This exercises the network → local-client-interfaces forwarding path
-/// (Python Transport.py:1396-1398) which is missing in Rust.
+/// (Python Transport.py:1530-1532) which is missing in Rust.
 #[tokio::test]
 async fn test_plain_broadcast_network_to_local_client() {
     init_tracing();

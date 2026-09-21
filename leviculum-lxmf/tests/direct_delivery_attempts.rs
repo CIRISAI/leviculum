@@ -21,7 +21,7 @@
 //!   (`RESOURCE_RCL`) on the sending side is exactly what produces
 //!   `Resource.REJECTED`. Our equivalent is `NodeEvent::ResourceFailed` with
 //!   `is_sender: true` and `ResourceError::Cancelled`
-//!   (`leviculum-core/src/node/link_management.rs:2805-2816`).
+//!   (`leviculum-core/src/node/link_management.rs:2942-2953`).
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -681,7 +681,7 @@ fn deferring_config() -> RouterConfig {
 }
 
 /// Assert the message really takes the Resource path. `DIRECT_PACKET_MDU` is
-/// 431 bytes (`leviculum-lxmf/src/node.rs:39`), so the 2 KiB bodies below are
+/// 431 bytes (`leviculum-lxmf/src/node.rs:40`), so the 2 KiB bodies below are
 /// `DirectResource` — but only an assertion says so.
 fn assert_direct_resource(message: &Message) {
     assert_eq!(

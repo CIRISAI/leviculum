@@ -6,25 +6,25 @@ sender; the sender then derives stamps from it cheaply.
 
 ## Derivation
 
-A ticketed stamp is (`LXMessage.py:297`, validated at `:274`):
+A ticketed stamp is (`LXMessage.py:300`, validated at `:274`):
 
 ```
 stamp = truncated_hash(ticket || message_id)
 ```
 
-with value `COST_TICKET = 256` (`LXMessage.py:52,298`). On the receiving side,
+with value `COST_TICKET = 256` (`LXMessage.py:53,301`). On the receiving side,
 `validate_stamp` accepts the message if `stamp` equals
 `truncated_hash(ticket || message_id)` for any held inbound ticket
-(`LXMessage.py:271-277`). An implementation MUST use `truncated_hash` (16 bytes),
+(`LXMessage.py:274-280`). An implementation MUST use `truncated_hash` (16 bytes),
 matching the stamp width expectation of this path.
 
 ## Issuing
 
-`generate_ticket(destination_hash, expiry)` (`LXMRouter.py:1025-1052`) returns
+`generate_ticket(destination_hash, expiry)` (`LXMRouter.py:1073-1100`) returns
 `[expires, ticket]` where:
 
-- `ticket = os.urandom(16)` (`LXMRouter.py:1048`);
-- `expires = now + TICKET_EXPIRY` (`LXMRouter.py:1047`).
+- `ticket = os.urandom(16)` (`LXMRouter.py:1096`);
+- `expires = now + TICKET_EXPIRY` (`LXMRouter.py:1095`).
 
 An existing inbound ticket with more than `TICKET_RENEW` validity left is reused
 rather than reissued (`LXMRouter.py:1083-1089`), and a new ticket is not issued to
@@ -50,10 +50,10 @@ must be passed to `Message::create()` so it is covered by the signature.
 
 | Constant | Value | Seconds | Citation |
 |----------|-------|---------|----------|
-| `TICKET_EXPIRY` | 21 days | 1 814 400 | `LXMessage.py:48` |
-| `TICKET_GRACE` | 5 days | 432 000 | `LXMessage.py:49` |
-| `TICKET_RENEW` | 14 days | 1 209 600 | `LXMessage.py:50` |
-| `TICKET_INTERVAL` | 1 day | 86 400 | `LXMessage.py:51` |
+| `TICKET_EXPIRY` | 21 days | 1 814 400 | `LXMessage.py:49` |
+| `TICKET_GRACE` | 5 days | 432 000 | `LXMessage.py:50` |
+| `TICKET_RENEW` | 14 days | 1 209 600 | `LXMessage.py:51` |
+| `TICKET_INTERVAL` | 1 day | 86 400 | `LXMessage.py:52` |
 
 The validity windows are part of the interoperable behaviour: a ticket can
 stamp messages until its encoded expiry, while the issuer retains its record

@@ -3,7 +3,7 @@
 Part of the [lnmsg design record](lnmsg.md).
 
 The library stores one key (`ROUTER_STATE_KEY`, `b"lxmf/router-state"`,
-`leviculum-lxmf/src/router.rs:53`) and hands each received message to the
+`leviculum-lxmf/src/router.rs:64`) and hands each received message to the
 application exactly once. **All history is the client's problem.**
 
 ## Options
@@ -83,7 +83,7 @@ Three reasons for the shape:
    problem it once was on our side: the emission timestamp carries it, as
    the reference's `time.time()` does, because at whole-second granularity
    two identical messages created inside one second collapse to one ID —
-   `leviculum-lxmf/src/router.rs:452-456`, Codeberg #217. Precision and
+   `leviculum-lxmf/src/router.rs:531-535`, Codeberg #217. Precision and
    skew are different failures, and only the second one is a sorting
    question.)
 3. **`fields` stored as raw msgpack, not exploded into columns.** Unknown

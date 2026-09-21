@@ -674,7 +674,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .build_data_packet_with_context(&envelope_data, PacketContext::Channel, &mut self.rng)
             .map_err(|_| send::SendError::LinkFailed)?;
 
-        // Register receipt for channel delivery tracking (Python Channel.py:606)
+        // Register receipt for channel delivery tracking (Python Channel.py:631)
         if let Some(seq) = self
             .links
             .get(link_id)
@@ -1227,7 +1227,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let link_id = LinkId::new(packet.destination_hash);
         let now_secs = now_ms / MS_PER_SECOND;
 
-        // Recover stale links on any inbound traffic (Python Link.py:987-988)
+        // Recover stale links on any inbound traffic (Python Link.py:983-984)
         self.try_recover_stale(&link_id, now_secs);
 
         if !self.links.contains_key(&link_id) {
@@ -1702,7 +1702,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// Protocol: plaintext = public_key(64) + signature(64) = 128 bytes.
     /// signed_data = link_id(16) + public_key(64) = 80 bytes.
-    /// Only accepted on responder side (non-initiator). Matches Python Link.py:1014-1032.
+    /// Only accepted on responder side (non-initiator). Matches Python Link.py:1010-1031.
     fn handle_link_identify(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
@@ -1845,7 +1845,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Handle an incoming request packet (responder side).
     ///
     /// Protocol: plaintext = msgpack fixarray(3) [timestamp, path_hash, data].
-    /// Matches Python Link.py:1036 request_handler().
+    /// Matches Python Link.py:1035 request_handler().
     fn handle_request_packet(
         &mut self,
         link_id: LinkId,
@@ -2333,7 +2333,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// If the link is Stale and we receive any valid packet, recover to Active.
-    /// Matches Python Link.py:987-988.
+    /// Matches Python Link.py:983-984.
     fn try_recover_stale(&mut self, link_id: &LinkId, now_secs: u64) -> bool {
         let Some(link) = self.links.get_mut(link_id) else {
             return false;
@@ -3690,7 +3690,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                             None
                         };
                         if let Some(ph) = packet_hash {
-                            // CacheRequest is NOT encrypted (Python Packet.py:209-211)
+                            // CacheRequest is NOT encrypted (Python Packet.py:210-212)
                             let cache_req = if let Some(link) = self.links.get(&link_id) {
                                 link.build_raw_data_packet(&ph, PacketContext::CacheRequest)
                                     .ok()
@@ -3920,7 +3920,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.remove_pending_requests_for_link(wire_id, link_id);
 
         // Path recovery for locally-initiated links that never activated
-        // (Python Transport.py:472-494)
+        // (Python Transport.py:521-544)
         if reason == LinkCloseReason::Timeout
             && is_initiator
             && !self.transport.config().enable_transport

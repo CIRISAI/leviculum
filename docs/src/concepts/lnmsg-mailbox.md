@@ -192,9 +192,9 @@ them can be doing it on purpose.
 
 Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
-(`leviculum-lxmf/src/message.rs:213-215`), and such messages **are
+(`leviculum-lxmf/src/message.rs:229-231`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1421-1424`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1463-1466`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 
@@ -240,7 +240,7 @@ disappears.**
    `Conversations.py`, lines 2186-2204). The library will tell you: our own
    helper checks `core.storage().get_identity(&peer)` before composing and
    reports which call was skipped rather than timing out later
-   (`leviculum-lxmf-node/src/processor.rs:683-692`).
+   (`leviculum-lxmf-node/src/processor.rs:1055-1064`).
 6. **Contact status as persisted state**, columba's `ACTIVE` /
    `PENDING_IDENTITY` / `UNRESOLVED`, rather than a live lookup, so the
    list can be rendered without touching the network.

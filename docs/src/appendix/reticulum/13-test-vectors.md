@@ -25,7 +25,7 @@ Pinned to RNS 1.3.5 @ `d5e62d4`. Fixed inputs: source identity private =
 
 ## Primitives
 
-- **VEC-HASH** (frozen, `Identity.py:373-390`): `full_hash("reticulum-spec") =
+- **VEC-HASH** (frozen, `Identity.py:409-426`): `full_hash("reticulum-spec") =
   659fe249468c635cdfe90a12624abec49f0bd36ba66d467b4f7155c79e8addf2`; truncated
   `659fe249468c635cdfe90a12624abec4`.
 - **VEC-HKDF** (frozen, `HKDF.py:35`): `hkdf(32, 00..1f, salt=00..0f) =
@@ -39,7 +39,7 @@ Pinned to RNS 1.3.5 @ `d5e62d4`. Fixed inputs: source identity private =
 - **VEC-ID-HASH** (frozen): 64-byte public key from `0001…3f`; identity hash
   `aca31af0441d81dbec71e82da0b4b5f5`.
 - **VEC-ID-SIGN** (frozen): Ed25519 signature `bbfdcde5aa05197f…`, `validate` true.
-- **VEC-ID-TOKEN** (frozen-injection, `Identity.py:827-928`): 112-byte token
+- **VEC-ID-TOKEN** (frozen-injection, `encrypt`, `Identity.py:827-928`): 112-byte token
   `efd9ec3449e46df2…` = ephemeral_pub(32) || IV(16) || ciphertext || HMAC(32);
   `decrypt(token) == plaintext`.
 
@@ -54,7 +54,7 @@ Pinned to RNS 1.3.5 @ `d5e62d4`. Fixed inputs: source identity private =
 - **VEC-PKT-PLAIN** (frozen): `0800fc0910664040482cd653166c8f225520006869` —
   flags `08` (PLAIN/DATA), hops `00`, dest(16), context `00`, data `"hi"`.
 - **VEC-PKT-ENC** (frozen-injection): SINGLE encrypted HEADER_1 packet, flags `00`.
-- **VEC-PKT-HEADER2** (computed, `Packet.py:255-259`):
+- **VEC-PKT-HEADER2** (computed, `Packet.py:256-260`):
   `4000 a0..af b0..bf 00 64617461` — flags `40` (HEADER_2), transport id(16),
   dest(16), context, data.
 
@@ -75,9 +75,9 @@ Pinned to RNS 1.3.5 @ `d5e62d4`. Fixed inputs: source identity private =
 
 ## Resource
 
-- **VEC-RES-ADV** (computed, `Resource.py:1278-1355`): advertisement dict with
+- **VEC-RES-ADV** (computed, `Resource.py:1275-1352`): advertisement dict with
   flags `03` (compressed+encrypted), packs to 146 bytes.
-- **VEC-RES-PROOF** (frozen, `Resource.py:755-756`): `proof_data = resource_hash ||
+- **VEC-RES-PROOF** (frozen, `Resource.py:752-753`): `proof_data = resource_hash ||
   full_hash(data || resource_hash)` = `d257b38bc5d6aa22…` (64 bytes).
 
 ## Channel and Buffer
@@ -96,6 +96,6 @@ Pinned to RNS 1.3.5 @ `d5e62d4`. Fixed inputs: source identity private =
 
 - **VEC-HDLC** (frozen, `TCPInterface.py:44-52`): `01 7E 02 7D 03` frames to
   `7e017d5e027d5d037e`.
-- **VEC-IFAC** (frozen, `Transport.py:1051-1087`): tag `2cf485c1dfcea002`, masked
+- **VEC-IFAC** (frozen, `Transport.py:1112-1148`): tag `2cf485c1dfcea002`, masked
   output `9f4a2cf485c1dfcea0…`, IFAC header flag set, mask/unmask roundtrip
   recovers the original packet and tag.

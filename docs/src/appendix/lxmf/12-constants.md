@@ -11,21 +11,21 @@ in [`vectors.json`](vectors/vectors.json) `constants`.
 | `APP_NAME` | "lxmf" | 1 |
 | `SF_COMPRESSION` | 0x00 | 108 |
 
-## Message states (`LXMessage.py:14-21`) — informative
+## Message states (`LXMessage.py:15-22`) — informative
 
 `GENERATING` 0x00, `OUTBOUND` 0x01, `SENDING` 0x02, `SENT` 0x04, `DELIVERED`
 0x08, `REJECTED` 0xFD, `CANCELLED` 0xFE, `FAILED` 0xFF.
 
-## Representations and methods (`LXMessage.py:24-32`)
+## Representations and methods (`LXMessage.py:25-33`)
 
 `UNKNOWN` 0x00, `PACKET` 0x01, `RESOURCE` 0x02. `OPPORTUNISTIC` 0x01, `DIRECT`
 0x02, `PROPAGATED` 0x03, `PAPER` 0x05.
 
-## Unverified reasons (`LXMessage.py:35-36`)
+## Unverified reasons (`LXMessage.py:36-37`)
 
 `SOURCE_UNKNOWN` 0x01, `SIGNATURE_INVALID` 0x02.
 
-## Sizes (`LXMessage.py:39-105`)
+## Sizes (`LXMessage.py:40-106`)
 
 | Constant | Value | Line |
 |----------|-------|------|
@@ -45,7 +45,7 @@ in [`vectors.json`](vectors/vectors.json) `constants`.
 | `PAPER_MDU` | 2210 | 105 |
 | `URI_SCHEMA` | "lxm" | 102 |
 
-## Tickets (`LXMessage.py:48-52`)
+## Tickets (`LXMessage.py:49-53`)
 
 | Constant | Value | Seconds | Line |
 |----------|-------|---------|------|
@@ -55,24 +55,24 @@ in [`vectors.json`](vectors/vectors.json) `constants`.
 | `TICKET_INTERVAL` | 1 day | 86 400 | 51 |
 | `COST_TICKET` | 0x100 (256) | — | 52 |
 
-## Fields (`LXMF.py:8-41`)
+## Fields (`LXMF.py:8-51`)
 
 `FIELD_EMBEDDED_LXMS` 0x01 … `FIELD_RENDERER` 0x0F; `FIELD_CUSTOM_TYPE` 0xFB,
 `FIELD_CUSTOM_DATA` 0xFC, `FIELD_CUSTOM_META` 0xFD; `FIELD_NON_SPECIFIC` 0xFE,
 `FIELD_DEBUG` 0xFF. See [Fields](04-fields.md) for the full table.
 
-## Renderers and audio modes (`LXMF.py:55-92`)
+## Renderers and audio modes (`LXMF.py:65-102`)
 
 `RENDERER_PLAIN` 0x00 … `RENDERER_BBCODE` 0x03. `AM_CODEC2_*` 0x01–0x09,
 `AM_OPUS_*` 0x10–0x19, `AM_CUSTOM` 0xFF.
 
-## Propagation metadata (`LXMF.py:98-104`)
+## Propagation metadata (`LXMF.py:132-138`)
 
 `PN_META_VERSION` 0x00, `PN_META_NAME` 0x01, `PN_META_SYNC_STRATUM` 0x02,
 `PN_META_SYNC_THROTTLE` 0x03, `PN_META_AUTH_BAND` 0x04, `PN_META_UTIL_PRESSURE`
 0x05, `PN_META_CUSTOM` 0xFF.
 
-## Stamps (`LXStamper.py:10-14`)
+## Stamps (`LXStamper.py:12-16`)
 
 | Constant | Value | Line |
 |----------|-------|------|
@@ -98,7 +98,7 @@ states/strategies, or a propagation server. Its default `/get` transfer limit
 is 1000 KB, which stays below Core's current 1,048,575-byte single-segment
 request/response Resource ceiling.
 
-## Router (`LXMRouter.py:30-83`) — informative
+## Router (`LXMRouter.py:30-91`) — informative
 
 See [Router internals](11-router-informative.md) for the full set
 (`MAX_DELIVERY_ATTEMPTS`, `MESSAGE_EXPIRY`, `PROPAGATION_COST`, etc.).

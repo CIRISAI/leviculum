@@ -3,8 +3,8 @@
 //! Format: msgpack map {dest_hash(16 bytes) → [timestamp(f64), packet_hash(32 bytes),
 //! public_key(64 bytes), app_data(bytes or nil)]}
 //!
-//! Python ref: Identity.py:93-103 (remember), Identity.py:163-216 (save),
-//! Identity.py:220-236 (load)
+//! Python ref: `remember` (Identity.py:101-113), `save_known_destinations`
+//! (Identity.py:177-239), `load_known_destinations` (Identity.py:242-265)
 
 use std::collections::BTreeMap;
 

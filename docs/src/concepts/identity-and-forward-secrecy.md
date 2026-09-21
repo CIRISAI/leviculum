@@ -9,7 +9,7 @@ to the [Reticulum specification](../appendix/reticulum-specification.md)
 ## Identities are dual keypairs
 
 A Reticulum identity holds **two** keypairs, used for two different
-jobs (`leviculum-core/src/identity.rs:45`):
+jobs (`leviculum-core/src/identity.rs:55`):
 
 - **X25519** — for key agreement (ECDH). This is how two parties
   derive a shared secret to encrypt traffic to each other.
@@ -21,7 +21,7 @@ and sign) or *public-only* (it holds just the public keys, learned
 from someone else's announce, and can only encrypt and verify). In the
 source this is the difference between the `Option`-wrapped private
 fields and the always-present public fields
-(`leviculum-core/src/identity.rs:48`).
+(`leviculum-core/src/identity.rs:58`).
 
 ## Destinations are derived addresses
 

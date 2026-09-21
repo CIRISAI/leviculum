@@ -17,11 +17,11 @@ answers on a fixed USB ID, and publishes what it is in a text file.
 
 **Application.** Our firmware enumerates `1209:0001` (T114) or
 `1209:0002` (RAK4631), from `usb_vid`/`usb_pid` in
-`leviculum-nrf/src/boards/t114.rs:168-169` and
+`leviculum-nrf/src/boards/t114.rs:172-173` and
 `leviculum-nrf/src/boards/rak4631.rs:146`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
-`leviculum-nrf/src/usb.rs:103`. Heltec stock firmware uses `239a:8071`.
+`leviculum-nrf/src/usb.rs:117`. Heltec stock firmware uses `239a:8071`.
 Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
 "XIAO-BOOT" while doing so. Nothing stops an application from naming
 itself after a bootloader, which is the sharpest available argument for
@@ -29,7 +29,7 @@ the rule above: the product string is application data, not evidence.
 
 **Bootloader (UF2/DFU).** A different USB ID entirely, which is why an
 application-ID match can never be true while a board sits in DFU
-(`leviculum-nrf/tools/uf2-runner.sh:332`). Measured on the rig:
+(`leviculum-nrf/tools/uf2-runner.sh:279`). Measured on the rig:
 
 | board | bootloader USB ID | mass-storage label |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ Two mechanisms, and only one of them is ours to control.
 
 **1200-baud touch.** The host opens a CDC port at exactly 1200 baud.
 Our firmware answers the resulting `SET_LINE_CODING` in
-`leviculum-nrf/src/usb.rs:168`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
+`leviculum-nrf/src/usb.rs:186`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
 `GPREGRET` at `0x4000_051C` and resets. The bootloader reads that
 retained register on the next boot and stays in mass-storage mode.
 Measured latency from `stty ... 1200` to the bootloader appearing on
@@ -62,7 +62,7 @@ reset arrives while the flag is still live.
 
 The touch only exists if the running firmware implements it. Ours does.
 Stock Meshtastic does not, which is why a first flash away from
-Meshtastic needs the manual double-tap (`Justfile:492`); for that case
+Meshtastic needs the manual double-tap (`Justfile:1127`); for that case
 Meshtastic offers its own admin command, wrapped as `just dfu-rak4631`.
 For Meshcore, microReticulum and RNode firmware on nRF we have not
 measured it.
@@ -255,7 +255,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:76`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:196`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5
@@ -469,7 +469,7 @@ tests equality first and the swap only as an alternative, so a board
 that keeps its serial is matched as readily as one that swaps
 it. The older runner is unaffected because it
 only compares serials in application mode
-(`leviculum-nrf/tools/uf2-runner.sh:252`).
+(`leviculum-nrf/tools/uf2-runner.sh:287`).
 
 **Writing needs root.** The mass-storage device appears as `/dev/sdX`
 owned `root:disk`. Automounting assumes a desktop stack that a headless
@@ -481,13 +481,13 @@ tool, but it cannot write the drive unprivileged.
 the moment the final UF2 block lands, while the filesystem still wants
 to flush metadata, producing `device offline error ... lost async page
 write`. This is the normal completion path, not a failure
-(`leviculum-nrf/tools/uf2-runner.sh:199`).
+(`leviculum-nrf/tools/uf2-runner.sh:234`).
 
 **A copy returning 0 does not mean the flash took.** Verify that the
 application re-enumerated and that the bootloader drive is gone
-(`leviculum-nrf/tools/uf2-runner.sh:273`). Stronger still, read the
+(`leviculum-nrf/tools/uf2-runner.sh:308`). Stronger still, read the
 periodic `[FW_BUILD]` banner off the debug port and compare the git SHA,
-as `scripts/flash-lnodes-from-head.sh:133` does.
+as `scripts/flash-lnodes-from-head.sh:113` does.
 
 **More than one board can be in its bootloader at once, and the wrong
 one is usually first.** The volumes are anonymous mass storage; only
@@ -706,7 +706,7 @@ data entry, in the catalogue plus one image. The `license` field is not
 bureaucracy: it makes shipping a third-party blob without its licence
 impossible by construction, which is exactly the mistake described
 above. Board names stay identical to the firmware-side ones in
-`leviculum-nrf/src/boards/mod.rs:11`, so that two namespaces never
+`leviculum-nrf/src/boards/mod.rs:39`, so that two namespaces never
 diverge.
 
 ### Identify in two stages, write only after

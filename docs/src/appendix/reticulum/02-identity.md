@@ -6,14 +6,14 @@ signing. This section is proven by `[VEC-ID-HASH]`, `[VEC-ID-SIGN]`, and
 
 ## Key material
 
-The public key is the concatenation (`Identity.py:757`):
+The public key is the concatenation (`Identity.py:811`):
 
 ```
 public_key = X25519_public(32) || Ed25519_public(32)        # 64 bytes
 ```
 
 and the private key is `X25519_private(32) || Ed25519_seed(32)`
-(`Identity.py:750,768-777`). `KEYSIZE = 512` bits (`Identity.py:59`),
+(`Identity.py:804,822-831`). `KEYSIZE = 512` bits (`Identity.py:59`),
 `SIGLENGTH = 512` bits (`:81`). `[VEC-ID-HASH]` records a 64-byte public key from
 the fixed private material `00010203…3f`.
 
@@ -23,11 +23,11 @@ the fixed private material `00010203…3f`.
 identity_hash = truncated_hash(X25519_public || Ed25519_public)      # 16 bytes
 ```
 
-(`Identity.py:805-810`). `[VEC-ID-HASH]`: identity hash `aca31af0441d81dbec71e82da0b4b5f5`.
+(`Identity.py:859-864`). `[VEC-ID-HASH]`: identity hash `aca31af0441d81dbec71e82da0b4b5f5`.
 
 ## Name hash
 
-`NAME_HASH_LENGTH = 80` bits (`Identity.py:83`); the name hash is the leading 10
+`NAME_HASH_LENGTH = 80` bits (`Identity.py:84`); the name hash is the leading 10
 bytes of `full_hash` of the dotted destination name. Used in destination hashing
 and announces; see [Destination](03-destination.md).
 
@@ -41,7 +41,7 @@ and announces; see [Destination](03-destination.md).
 
 ## Encryption token (ECIES)
 
-`encrypt(plaintext)` to a SINGLE destination produces (`Identity.py:827-857`):
+`encrypt(plaintext)` to a SINGLE destination produces (`Identity.py:881-911`):
 
 ```
 ephemeral_X25519_public(32) || token(IV(16) || AES-CBC ciphertext || HMAC(32))
@@ -49,13 +49,13 @@ ephemeral_X25519_public(32) || token(IV(16) || AES-CBC ciphertext || HMAC(32))
 
 The derivation:
 
-1. generate an ephemeral X25519 key pair (`Identity.py:836`);
+1. generate an ephemeral X25519 key pair (`Identity.py:890`);
 2. `shared = ephemeral_private.exchange(target_X25519_public)` (`:844`);
 3. `derived_key = hkdf(length=64, derive_from=shared, salt=target_identity_hash,
    context=None)` (`:846-851`);
 4. `token = Token(derived_key).encrypt(plaintext)` (`:854`).
 
-`DERIVED_KEY_LENGTH = 64` bytes (`Identity.py:90`): 32 for the AES-256 key and 32
+`DERIVED_KEY_LENGTH = 64` bytes (`Identity.py:91`): 32 for the AES-256 key and 32
 for the HMAC key. `decrypt` recovers the ephemeral public key from the first 32
 bytes, re-derives the key, and (when ratchets are present) tries each ratchet
 before the base identity (`Identity.py:872-928`).

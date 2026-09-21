@@ -308,7 +308,7 @@ fn opt_int(v: Option<i64>) -> Value {
 ///     `r_battery_state != 0x00`).
 ///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
 ///     has reported a received packet via `apply_radio_stat`
-///     (interfaces/rnode.rs:758-766). These two are ours: Python does not
+///     (interfaces/rnode.rs:633-641). These two are ours: Python does not
 ///     place them in the dict (its RSSI feeds per-packet reporting), so they
 ///     are emitted as additive keys and omitted while `None` — rnstatus
 ///     renders by key lookup (rnstatus.py:475-533) and ignores them.
@@ -974,7 +974,7 @@ fn build_path_table(
                     // Relayed: next_hop is the relay's transport ID
                     Some(h) => pickle_bytes(h),
                     // Direct: Python uses the destination hash as received_from
-                    // (Transport.py:1600), never None, rnpath crashes on None.
+                    // (Transport.py:1741), never None, rnpath crashes on None.
                     None => pickle_bytes(&entry.hash),
                 },
             ),
@@ -1650,7 +1650,7 @@ fn get_next_hop(core: &StdNodeCore, destination_hash: &[u8]) -> Value {
     match core.get_path_clone(&hash) {
         Some(entry) => match &entry.next_hop {
             Some(h) => pickle_bytes(h),
-            // Direct path: Python returns destination_hash (Transport.py:1600)
+            // Direct path: Python returns destination_hash (Transport.py:1741)
             None => pickle_bytes(&hash),
         },
         None => pickle_none(),

@@ -458,7 +458,7 @@ given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
 `leviculum-nrf/src/record_store.rs:81`); `lnflash --store-storm
-COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:327`).
+COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:372`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
 

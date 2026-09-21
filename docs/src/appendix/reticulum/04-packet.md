@@ -28,7 +28,7 @@ offset 0     1          2                       18           19
 ```
 
 (`Packet.pack`, `Packet.py:177-239`; `unpack`, `:262-264`). The fixed header is
-`HEADER_MINSIZE = 19` bytes (`Reticulum.py:147`).
+`HEADER_MINSIZE = 19` bytes (`Reticulum.py:144`).
 
 `[VEC-PKT-PLAIN]` is a PLAIN HEADER_1 DATA packet,
 `0800fc0910664040482cd653166c8f225520006869`:
@@ -49,14 +49,14 @@ byte for byte.
 ## HEADER_2 layout
 
 When the header type bit is set, a 16-byte transport id precedes the destination
-hash (`Packet.py:255-259`):
+hash (`Packet.py:256-260`):
 
 ```
 flags(1) || hops(1) || transport_id(16) || destination_hash(16) || context(1) || data
 offset 0     1          2                   18                      34            35
 ```
 
-`HEADER_MAXSIZE = 35` bytes (`Reticulum.py:148`). `[VEC-PKT-HEADER2]` shows the
+`HEADER_MAXSIZE = 35` bytes (`Reticulum.py:145`). `[VEC-PKT-HEADER2]` shows the
 constructed layout `4000 a0..af b0..bf 00 64617461`: flags `40` (header_type 1),
 transport id `a0a1…af`, destination hash `b0b1…bf`. HEADER_2 is emitted by
 transport nodes forwarding toward a known next hop.

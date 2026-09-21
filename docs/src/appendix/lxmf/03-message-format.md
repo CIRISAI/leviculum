@@ -5,7 +5,7 @@ This section is normative and is proven by `[VEC-MSG-1]`, `[VEC-MSG-2]`, and
 
 ## Packed layout
 
-A packed LXMF message is the concatenation (`LXMessage.py:379-383`):
+A packed LXMF message is the concatenation (`LXMessage.py:382-386`):
 
 ```
 destination_hash(16) || source_hash(16) || signature(64) || packed_payload
@@ -18,14 +18,14 @@ bytes.
 
 ## Payload array
 
-The payload is a msgpack array (`LXMessage.py:359`):
+The payload is a msgpack array (`LXMessage.py:362`):
 
 ```
 [ timestamp, title, content, fields ]
 ```
 
 with an optional fifth element `stamp` appended when a stamp is generated
-(`LXMessage.py:368-370`); see [Stamps](07-stamps-pow.md).
+(`LXMessage.py:371-373`); see [Stamps](07-stamps-pow.md).
 
 The msgpack **type discipline is normative for a writer** and is a common
 interop trap. It is deliberately *not* normative for a reader: see
@@ -34,14 +34,14 @@ same trap.
 
 | Element | msgpack type | Citation |
 |---------|--------------|----------|
-| `timestamp` | float64 (`f64`), seconds since the Unix epoch | `LXMessage.py:354,359` |
+| `timestamp` | float64 (`f64`), seconds since the Unix epoch | `LXMessage.py:357,362` |
 | `title` | binary (`bin`), not string | `LXMessage.py:196-197` |
-| `content` | binary (`bin`), not string | `LXMessage.py:199-202` |
-| `fields` | map, integer keys (may be empty `{}`) | `LXMessage.py:212-216` |
-| `stamp` (optional) | binary (`bin`), 32 bytes | `LXMessage.py:370` |
+| `content` | binary (`bin`), not string | `LXMessage.py:202-205` |
+| `fields` | map, integer keys (may be empty `{}`) | `LXMessage.py:215-219` |
+| `stamp` (optional) | binary (`bin`), 32 bytes | `LXMessage.py:373` |
 
 `title` and `content` are stored and packed as bytes; the `*_as_string`
-accessors only decode UTF-8 on demand (`LXMessage.py:196,205`). An implementation
+accessors only decode UTF-8 on demand (`LXMessage.py:199,208`). An implementation
 MUST pack them as msgpack `bin`, never `str`. Mismatching this changes the
 serialized bytes and therefore the message-id, so a Python peer rejects the
 message.
@@ -89,7 +89,7 @@ require `bin` for those.
 
 ## Hashing input (message-id)
 
-The message hash is (`LXMessage.py:361-366`):
+The message hash is (`LXMessage.py:364-369`):
 
 ```
 hashed_part = destination_hash || source_hash || msgpack(payload_without_stamp)
@@ -120,7 +120,7 @@ message-id than the sender for some legal inputs.
 
 ## Signing input
 
-The signature is (`LXMessage.py:372-375`):
+The signature is (`LXMessage.py:375-378`):
 
 ```
 signed_part = hashed_part || message_id        (= dest || src || msgpack(payload) || message_id)
@@ -147,7 +147,7 @@ unpacked message instead of returning what it received will emit bytes the
 message's own signature does not cover.
 
 Verification requires the source identity to be known (learned from its
-announce). The outcome is one of (`LXMessage.py:790-801`):
+announce). The outcome is one of (`LXMessage.py:801-816`):
 
 - signature valid: `signature_validated = true`;
 - signature present but invalid: `unverified_reason = SIGNATURE_INVALID (0x02)`;

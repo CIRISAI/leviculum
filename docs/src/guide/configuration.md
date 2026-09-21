@@ -6,7 +6,7 @@ accepts, and the two share the shared-instance IPC socket so client
 tools (`rnstatus`, `rncp`, `lnstest diag`, Sideband, Nomadnet) attach to
 either daemon without changes. Keys `lnsd` does not implement are
 tolerated, not rejected — an unknown key never makes `lnsd` refuse a
-config a current `rnsd` would load (`ini_config.rs:350-355`).
+config a current `rnsd` would load (`ini_config.rs:355-360`).
 
 ## File location and lookup order
 
@@ -45,23 +45,23 @@ as `false` (`ini_config.rs:819-830`).
 ## The `[reticulum]` section
 
 Core daemon settings. Every key below is parsed in
-`ini_config.rs:215-357`; defaults come from `config.rs:213-238`.
+`ini_config.rs:215-362`; defaults come from `config.rs:213-238`.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `enable_transport` | bool | `true` | Route announces and serve paths for other peers. `lnsd` defaults this to `true` (it is a daemon); the Python *library* default is `false`. (`config.rs:27-28`, `202`) |
-| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `203`; `ini_config.rs:312-314`) |
+| `use_implicit_proof` | bool | `true` | Use implicit proof for link identification. (`config.rs:30-31`, `203`; `ini_config.rs:317-319`) |
 | `share_instance` | bool | `false` | Listen on the abstract Unix socket `\0rns/<instance_name>` for local clients. Required for `lnstest diag`, `rnstatus`, Sideband etc. to attach. (`config.rs:37-40`, `205`; key `share_instance` → `shared_instance`, `ini_config.rs:310-312`) |
 | `instance_name` | string | `default` | Names the shared-instance socket: `\0rns/<instance_name>`. Use a unique name to run two daemons side by side. (`config.rs:41-44`, `206`; `ini_config.rs:233-235`) |
 | `shared_instance_type` | `unix`/`tcp` | unset | Parsed for `rnsd` compatibility. Only `tcp`/`unix` are stored; `tcp` clears `shared_instance_socket` (tcp disables AF_UNIX upstream). `lnsd` currently serves only the abstract AF_UNIX socket. (`config.rs:45-52`; `ini_config.rs:281-290`, `179-181`) |
 | `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:53-58`; `ini_config.rs:291-293`) |
 | `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:298-300`) |
-| `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:310-314`) |
+| `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:315-319`) |
 | `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:453`)) |
-| `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:322-326`) |
+| `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:327-331`) |
 | `control_channel_capacity` | usize | `256` | Capacity of the lossless control-plane event channel (announces, paths, link/resource lifecycle). Raise on servers under heavy announce load. (`config.rs:74-82`, `150`) |
 | `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). Reliable channel messages are exempt: the node stops proofing them to the sender instead of dropping them, so this value also bounds how far a slow reader lets a channel run ahead. (`config.rs:83-90`, `151`) |
-| `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:327-334`) |
+| `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:332-339`) |
 | `storage_profile` | `desktop`/`compact` | `desktop` | Transport-table sizing profile (Codeberg #421). `compact` is sized to leave a Raspberry Pi Zero 2W (512 MB shared with the GPU, no swap) usable. An unrecognised value keeps `desktop`. (`config.rs:197-205`; `ini_config.rs:385-396`) |
 | `path_table_cap` | usize | profile | Maximum `path_table` entries, and with them `path_states`, `path_requests` and `discovery_path_requests`. Desktop `32768`, compact `8192`. The path table expires after seven days, so on a node up less than a week this is its only bound. (`config.rs:206-213`; `ini_config.rs:397-399`) |
 | `reverse_table_cap` | usize | profile | Maximum `reverse_table` entries. Desktop `200000`, compact `16384`. Entries expire after 8 minutes, so the working size is forwarding rate times that window; a field node measured 73 901. (`config.rs:214-221`; `ini_config.rs:400-402`) |

@@ -7,7 +7,7 @@ outputs are hashed, signed, and exchanged on the wire.
 ## Hashing
 
 - **`full_hash(x)`** is SHA-256 over `x`, 32 bytes (`Identity.HASHLENGTH = 256`
-  bits, `Identity.py:80,373`).
+  bits, `Identity.py:81,374`).
 - **`truncated_hash(x)`** is the leading 16 bytes of `full_hash(x)`
   (`TRUNCATED_HASHLENGTH = 128` bits, `Identity.py:84,383`).
 

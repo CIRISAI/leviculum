@@ -42,17 +42,17 @@ the address without spending 16 bytes on the wire.
 
 ## Validation
 
-A receiver validates an announce by (`Identity.py:532-634`):
+A receiver validates an announce by (`Identity.py:568-670`):
 
 1. parsing `public_key = data[:64]`, then `name_hash`, `random_hash`, optional
    `ratchet` (when the context flag is set), `signature`, and `app_data` at the
-   offsets above (`Identity.py:546-564`);
+   offsets above (`Identity.py:582-600`);
 2. reconstructing `signed_data` and verifying the signature against the
    transmitted public key (`Identity.py:579`);
 3. recomputing `expected_destination_hash = truncated_hash(name_hash ||
    identity_hash)` and checking it matches (`Identity.py:584-585`);
 4. remembering the public key, app_data, and (if present) the ratchet for future
-   encryption (`Identity.py:598,618-619`).
+   encryption (`Identity.py:634,654-655`).
 
 `[VEC-ANN-NORATCHET]` and `[VEC-ANN-RATCHET]` are **frozen-injection** vectors:
 under pinned randomness and time the announce reproduces byte for byte, and the

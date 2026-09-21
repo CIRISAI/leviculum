@@ -562,7 +562,7 @@ pub fn dispatch_actions(
 // PathEntry, PathState, ReverseEntry, LinkEntry, AnnounceEntry,
 // AnnounceRateEntry live in crate::storage_types and are imported above.
 
-/// Per-interface announce bandwidth cap state (Python Interface.py:25-28, Transport.py:1091-1104)
+/// Announce bandwidth cap state (Interface.py:25-28, `announce_cap`, Transport.py:1252-1260)
 ///
 /// Tracks when the next announce is allowed on this interface and queues
 /// excess announces to be drained as bandwidth permits.
@@ -2655,7 +2655,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Filter HEADER_2 packets not addressed to this transport instance
-        // (Python Transport.py:1193-1196). Announces are exempt.
+        // (Python Transport.py:1342-1345). Announces are exempt.
         // Bound as `if let` rather than compared through the `Option` so the
         // carried id can be named below without an `unwrap()`.
         if let Some(carried_transport_id) = packet.transport_id {
@@ -2716,7 +2716,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        // Filter PLAIN and GROUP destination packets (Python Transport.py:1205-1225).
+        // Filter PLAIN and GROUP destination packets (Python Transport.py:1354-1374).
         // These destination types are for direct neighbors only.
         if packet.flags.dest_type == DestinationType::Plain
             || packet.flags.dest_type == DestinationType::Group
@@ -2746,7 +2746,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 return Ok(());
             }
             // Non-announce: drop if hops > 1 (PLAIN/GROUP are direct-neighbor only).
-            // Python Transport.py:1205: hops > 1 after increment on receipt.
+            // Python Transport.py:1354: hops > 1 after increment on receipt.
             // We now also increment on receipt, so the check is the same.
             if packet.hops > 1 {
                 crate::tracing::trace!(
@@ -2796,7 +2796,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Single announces are exempt from packet_hash dedup because direct (Type1)
         // and relayed (Type2) copies hash identically (get_hashable_part strips hops
         // and transport_id). Both copies must be processed so the best path wins.
-        // Matches Python Transport.py:1230-1232.
+        // Matches Python Transport.py:1378-1380.
         //
         // Local-client link-table relays are also exempt: resource retransmissions
         // produce identical raw bytes (build_raw_data_packet has no nonce), so the
@@ -2890,7 +2890,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Defer cache insertion for link-table and LRPROOF packets
-        // (Python Transport.py:1355-1372). On shared media, these packets
+        // (Python Transport.py:1491-1506). On shared media, these packets
         // may be heard before reaching us via the correct link path.
         // Inserting early would block the correct copy. The handler inserts
         // the hash on successful processing; failed packets stay uncached
@@ -3103,7 +3103,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Send raw data on all online interfaces (emits Broadcast action).
     /// Matches Python Reticulum's Transport.outbound one-shot semantics:
     /// Destination.announce at Destination.py:322 calls Packet.send exactly
-    /// once, and Packet.send at Packet.py:273-299 invokes Transport.outbound
+    /// once, and Packet.send at Packet.py:274-300 invokes Transport.outbound
     /// once. This call therefore puts the packet on air exactly once; a caller
     /// announcing one of its own destinations pairs it with
     /// [`Self::schedule_own_announce_retry`] for the second emission the
@@ -3111,7 +3111,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub fn send_on_all_interfaces(&mut self, data: &[u8]) {
         // Cache outbound packet hash so echoes returning via redundant paths
         // are dropped by the dedup check in process_incoming().
-        // This matches Python Reticulum's Transport.py:1168-1169.
+        // This matches Python Reticulum's Transport.py:1318-1319.
         let cache_hash = packet_hash(data);
         self.storage.add_packet_hash(cache_hash);
 
@@ -4217,7 +4217,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2798. A destination with no cached
+    /// link-request path uses at transport.rs:2826. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -4983,7 +4983,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1106 ran in the
+        // Gate on the already-incremented hops (transport.rs:1134 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -5008,7 +5008,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // UNLESS:
         // the path is unresponsive (path recovery), OR
         // the announce has fewer hops than the existing path (better route)
-        // (Python Transport.py:1676-1681).
+        // (Python Transport.py:1821-1826).
         if let Some(path) = self.storage.get_path(&dest_hash) {
             if path.random_blobs.contains(&random_hash)
                 && !self.path_is_unresponsive(&dest_hash)
@@ -5047,7 +5047,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let elapsed = now.saturating_sub(existing.timestamp_ms);
             if elapsed < self.config.announce_rate_limit_ms {
                 // Local rebroadcast detection: neighbor sent same announce at same or +1 hop.
-                // Python parity (Transport.py:1584-1590): always increment the counter
+                // Python parity (`IDX_AT_LCL_RBRD`, Transport.py:1724-1731): always increment the counter
                 // but only cancel our pending retries once we have emitted at least one
                 // rebroadcast ourselves (`retries > 0`). Without this guard, a neighbor
                 // heard within the jitter window of the initial entry could cancel our
@@ -5089,7 +5089,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // therefore cannot attribute a difference to any single branch; the
         // emitted `reason` on PATH_ADD can be counted per arm and can.
         //
-        // Matches Python Transport.py:1620-1681 logic:
+        // Matches Python Transport.py:1765-1826 logic:
         // Equal or fewer hops: accept if emission timestamp is newer
         // More hops: accept only if path is expired, emission is newer,
         //   or path is unresponsive with same emission (path recovery)
@@ -5141,7 +5141,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else if announce_emitted == path_timebase && self.path_is_unresponsive(&dest_hash)
                 {
                     // Same emission but path is unresponsive: accept worse-hop
-                    // announce as alternative route (Python Transport.py:1677-1679).
+                    // announce as alternative route (Python Transport.py:1822-1824).
                     // do NOT call mark_path_unknown_state() here, state
                     // stays UNRESPONSIVE until a fresh announce resets it.
                     Some("unresponsive_same_emission")
@@ -5259,14 +5259,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
             }
 
-            // Check for pending discovery path requests (Python Transport.py:1838-1865).
+            // Check for pending discovery path requests (Python Transport.py:1983-2010).
             // If a transport node forwarded a path request for this destination,
             // send a targeted PATH_RESPONSE to the requesting interface.
             if self.config.enable_transport {
                 self.send_discovery_path_response(&dest_hash, packet.hops, raw);
             }
 
-            // Per-destination announce rate limiting (Python Transport.py:1692-1719)
+            // Per-destination announce rate limiting (Python Transport.py:1838-1861)
             // Only blocks rebroadcast (announce_table insertion), path_table is already updated.
             // Skipped for PATH_RESPONSE context packets.
             let rate_blocked = if !is_path_response {
@@ -5330,7 +5330,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // directly from handle_announce. They are inserted into
             // announce_table below and the retry scheduler performs every
             // on-air rebroadcast. Python does the same at Transport.py:1754
-            // (inserts entry) + Transport.py:519-540 (scheduler fires).
+            // (inserts entry) + Transport.py:576-604 (scheduler fires).
 
             // A PATH_RESPONSE from a local client that satisfies a pending
             // external path request is scheduled for ONE immediate
@@ -5373,7 +5373,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     AnnounceEntry {
                         timestamp_ms: now,
                         hops: packet.hops,
-                        // Python parity (Transport.py:1722, 1748-1752):
+                        // Python parity (Transport.py:1867, 1748-1752):
                         // non-local-client announces start at retries=0 and
                         // fire twice from the scheduler (bounded by
                         // LOCAL_REBROADCASTS_MAX=2); local-client announces
@@ -5405,12 +5405,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // for why that went.
                             Some(now)
                         } else if should_rebroadcast {
-                            // Python-RNS parity (Transport.py:1728): the first
+                            // Python-RNS parity (Transport.py:1873): the first
                             // rebroadcast for a received non-local-client
                             // announce is scheduled within the jitter window
                             // of receipt, without the PATHFINDER_G grace.
                             // Subsequent reschedules below add PATHFINDER_G,
-                            // matching Transport.py:531.
+                            // matching Transport.py:590.
                             let jitter = self
                                 .deterministic_jitter_ms(&dest_hash, self.announce_jitter_max_ms());
                             Some(now + jitter)
@@ -5451,7 +5451,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // requests for destinations announced before the client connected.
             self.storage.set_announce_cache(dest_hash, raw.to_vec());
 
-            // Forward announce to local client interfaces (Python Transport.py:1788-1833).
+            // Forward announce to local client interfaces (Python Transport.py:1933-1978).
             // Convert to Header2 with the daemon's own transport_id and receipt-incremented
             // hops. The client uses transport_id to construct outbound Header2 packets.            // if we forward raw network bytes, the client sets the relay's transport_id
             // instead of ours, and our transport_id filter rejects the client's packets.
@@ -5564,7 +5564,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Forward link request if transport enabled, or if from/for a local client
-        // (Python Transport.py:1404)
+        // (Python Transport.py:1538)
         let from_local = self.is_local_client(interface_index);
         let for_local = self.is_for_local_client(&dest_hash);
 
@@ -5627,7 +5627,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let link_id = Link::calculate_link_id(raw);
 
             // Extract responder's Ed25519 signing key from cached announce
-            // (Python Transport.py:2021-2033: peer_identity = Identity.recall(...))
+            // (Python Transport.py:2179-2191: peer_identity = Identity.recall(...))
             let peer_signing_key =
                 self.storage
                     .get_announce_cache(&dest_hash)
@@ -5705,7 +5705,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
 
             // Clamp MTU signaling bytes to next-hop interface capacity
-            // (Python Transport.py:1453-1480)
+            // (Python Transport.py:1585-1612)
             let data = Self::clamp_link_request_mtu(
                 &packet.data,
                 interface_index,
@@ -5866,7 +5866,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Route proofs via link table if transport enabled, or for local client links
-        // (Python Transport.py:2016)
+        // (Python Transport.py:2174)
         let from_local = self.is_local_client(interface_index);
         let for_local_link = self.is_for_local_client_link(&dest_hash);
         if self.config.enable_transport || from_local || for_local_link {
@@ -5889,7 +5889,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // delivery). The hop mismatch is logged, not dropped. Direction
                 // (interface gate), Ed25519 signature and size are still enforced
                 // below; loops stay bounded by the global max_hops drop. This is a
-                // deliberate deviation from Python's relay (Transport.py:2112),
+                // deliberate deviation from Python's relay (Transport.py:2176),
                 // which drops on hop mismatch — and it holds ONLY across
                 // interfaces. On ONE shared interface the frozen hop counts are
                 // the sole loop breaker (same_iface arm below).
@@ -5979,7 +5979,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         // NOT dest_hash — for a link packet dest_hash is the link
                         // id (Transport.py:1498), so the path table never keys on
                         // it and every field read `none`. The destination survives
-                        // only at IDX_LT_DSTHASH (storage_types.rs:76).
+                        // only at IDX_LT_DSTHASH (storage_types.rs:84).
                         let (path_hops_now, path_age_ms, path_next_hop, path_iface) =
                             self.path_entry_log_fields(&link_entry.destination_hash, now_ms);
                         if self.config.lrproof_rewrite_on_asymmetry {
@@ -6105,7 +6105,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 };
 
                 // LRPROOF validation: check proof data size and signature before forwarding
-                // (Python Transport.py:2021-2033)
+                // (Python Transport.py:2179-2191)
                 if packet.context == PacketContext::Lrproof {
                     use crate::constants::{
                         ED25519_KEY_SIZE, ED25519_SIGNATURE_SIZE, X25519_KEY_SIZE,
@@ -6216,9 +6216,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
                 }
 
-                // Insert hash for non-LRPROOF proofs (Python Transport.py:1543).
+                // Insert hash for non-LRPROOF proofs (Python Transport.py:1675).
                 // LRPROOF hashes are intentionally NOT cached during link-table
-                // forwarding (Python Transport.py:2016-2039).
+                // forwarding (Python Transport.py:2174-2197).
                 if packet.context != PacketContext::Lrproof {
                     self.storage.add_packet_hash(cache_hash);
 
@@ -6285,7 +6285,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Reverse table routing for regular proofs
-        // (Python Transport.py:2091)
+        // (Python Transport.py:2256)
         {
             let proof_for_local = self
                 .storage
@@ -6334,7 +6334,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // LRPROOF (link establishment proofs, context=Lrproof) need delivery
         // for non-transport nodes (Python Transport.py:2054-2073).
         // Data proofs (96 bytes, context=None) need delivery for channel ACK
-        // processing (Python Link.py:1173 generates proof for every CHANNEL packet).
+        // processing (Python Link.py:1172 generates proof for every CHANNEL packet).
         //
         // If we reach this point:
         // Not in Transport::receipts (receipt check at line 1404 failed)
@@ -6399,7 +6399,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Plain broadcast forwarding through shared instance
-        // (Python Transport.py:1384-1398). Plain broadcasts bypass transport
+        // (Python Transport.py:1518-1532). Plain broadcasts bypass transport
         // routing, they are forwarded directly between local clients and
         // network interfaces. Control destinations (path requests, tunnel
         // synthesis) are excluded, they have their own handlers.
@@ -6472,7 +6472,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 });
             }
             // Early return: Python falls through to "general transport handling"
-            // (Transport.py:1404) but that path is a no-op for PLAIN broadcasts.            // for_local_client is always False (no path table entry for PLAIN dests).
+            // (Transport.py:1538) but that path is a no-op for PLAIN broadcasts.            // for_local_client is always False (no path table entry for PLAIN dests).
             return Ok(());
         }
 
@@ -6514,7 +6514,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Route via link/path table if transport enabled, or for local client traffic
-        // (Python Transport.py:1404)
+        // (Python Transport.py:1538)
         let from_local = self.is_local_client(interface_index);
         let for_local = self.is_for_local_client(&dest_hash);
         let for_local_link = self.is_for_local_client_link(&dest_hash);
@@ -6716,7 +6716,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
 
-        // Deliver link-addressed Data packets to local links (Python Transport.py:1969-1994).
+        // Deliver link-addressed Data packets to local links (Python Transport.py:2124-2150).
         // On non-transport nodes, link_table routing is skipped entirely.
         // On transport nodes, relayed links are handled via link_table above;
         // only packets for our own local links reach this point.
@@ -6859,7 +6859,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// clamp to min(path_mtu, prev_hop_hw_mtu, next_hop_hw_mtu), re-encode.
     /// If no signaling bytes (64-byte request) or no HW_MTU known for
     /// next-hop, return the data unchanged.
-    /// (Python Transport.py:1453-1480)
+    /// (Python Transport.py:1585-1612)
     fn clamp_link_request_mtu(
         data: &PacketData,
         prev_hop_iface: usize,
@@ -6977,7 +6977,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Checks TTL and updates stats. Hops were already incremented on receipt.
     /// Pack and broadcast a relayed packet on every online interface except
     /// the one it arrived on. Matches Python Transport.outbound() behaviour
-    /// for packets of transport_type BROADCAST (Transport.py:1388-1392),
+    /// for packets of transport_type BROADCAST (Transport.py:1522-1526),
     /// which explicitly skips the receiving interface.
     fn forward_on_all_except(
         &mut self,
@@ -7028,7 +7028,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Pack and broadcast a relayed announce on every online interface,
     /// including the one the original packet arrived on. Matches Python
-    /// Transport.outbound() for ANNOUNCE packets (Transport.py:1025-1167),
+    /// Transport.outbound() for ANNOUNCE packets (Transport.py:1180-1317),
     /// which loops all interfaces without filtering by receiving_interface.
     /// Self-heard echoes are dropped on arrival by the packet_hashlist dedup
     /// in process_incoming, seeded here before the broadcast is emitted.
@@ -7138,7 +7138,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Build path request data:
         //   Transport node:     dest_hash(16) + transport_id(16) + tag(16) = 48 bytes
         //   Non-transport node: dest_hash(16) + tag(16)                    = 32 bytes
-        // Python Transport.py:2541-2557
+        // Python `request_path`, Transport.py:2771-2787
         let data = if self.config.enable_transport {
             let transport_id_bytes = *self.identity.hash();
             let mut d = Vec::with_capacity(48);
@@ -7905,7 +7905,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Check if a destination is for a local client (path exists with hops=0).
     /// Since we now increment hops on receipt, hops=0 means the announce came
-    /// from a local client (net zero: +1 then -1). Matches Python Transport.py:1379.
+    /// from a local client (net zero: +1 then -1). Matches Python Transport.py:1513.
     fn is_for_local_client(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         self.storage
             .get_path(dest_hash)
@@ -7932,7 +7932,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Check if a link table entry references a local client interface
-    /// (either received_interface or next_hop_interface). Python Transport.py:1380-1381.
+    /// (either received_interface or next_hop_interface). Python Transport.py:1514-1515.
     fn is_for_local_client_link(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         if let Some(entry) = self.storage.get_link_entry(dest_hash) {
             self.is_local_client(entry.received_interface_index)
@@ -8557,7 +8557,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// PLAIN destination with name "rnstransport.tunnel.synthesize".
     /// Tunnels are not implemented in Rust, but Python nodes send these
     /// control packets. We must recognize them to avoid forwarding them
-    /// as plain broadcasts (Python Transport.py:1387 control_hashes check).
+    /// as plain broadcasts (Python Transport.py:1521 control_hashes check).
     fn compute_tunnel_synthesize_hash() -> [u8; TRUNCATED_HASHBYTES] {
         let name_hash = Destination::compute_name_hash("rnstransport", &["tunnel", "synthesize"]);
         truncated_hash(&name_hash)
@@ -8588,7 +8588,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ) {
         // Cache outbound packet hash so echoes returning via shared-medium
         // relay are dropped by the dedup check in process_incoming().
-        // Matches Python Transport.py:1168-1169 and send_on_all_interfaces().
+        // Matches Python Transport.py:1318-1319 and send_on_all_interfaces().
         let cache_hash = known_hash.unwrap_or_else(|| packet_hash(data));
         self.storage.add_packet_hash(cache_hash);
 
@@ -8830,7 +8830,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let from_local = self.is_local_client(interface_index);
 
         // 2a. Local client path request with cached announce → respond immediately
-        // Python Transport.py:2723,2755-2756: when is_from_local_client, send cached
+        // Python Transport.py:2943,2975-2976: when is_from_local_client, send cached
         // announce directly back to the requesting client (retransmit_timeout = now,
         // attached_interface = requesting_interface).
         // Gated on the path table (Python Transport.py:2943 `destination_hash in
@@ -8873,7 +8873,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 //    with transport_id from path table (Transport.py:1000-1011)
                 // Sending Header2 with our identity ensures the client's path table
                 // stores our transport_id, so outbound packets use the correct
-                // transport_id and pass our filter (Transport.py:1192-1194).
+                // transport_id and pass our filter (Transport.py:1341-1343).
                 if let Ok(mut announce) = Packet::unpack(&cached_raw) {
                     announce.hops = announce.hops.saturating_add(1);
                     announce.flags.header_type = HeaderType::Type2;
@@ -8898,7 +8898,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // 2b. Transport node with cached announce → schedule deferred rebroadcast.
-        // Send only to the requesting interface (Python Transport.py:1037-1038).
+        // Send only to the requesting interface (Python Transport.py:1190-1191).
         // Gated on the path table (Python Transport.py:2943): with the path
         // dropped or expired the orphaned cache must not answer; the request
         // falls through to case 3 and re-originates discovery (Codeberg #117).
@@ -9236,7 +9236,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // 4. Local client with unknown destination → forward to network interfaces
-        // (Python Transport.py:2783-2790). This works even without transport enabled.
+        // (Python Transport.py:3006-3013). This works even without transport enabled.
         if from_local {
             let mut buf = [0u8; crate::constants::MTU];
             let len = packet.pack(&mut buf)?;
@@ -9939,7 +9939,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     /// Drain announce queues for interfaces whose holdoff has expired.
     /// Called from `poll()`. Dequeues lowest-hops announce first, then oldest
-    /// within same hops (Python Interface.py:263-266).
+    /// within same hops (Python Interface.py:340-343).
     fn drain_announce_queues(&mut self, now: u64) {
         // (iface_idx, raw, dst, hops) for each drained announce. dst/hops carry
         // the OBS-1 ANN_TX fields for the deferred send.
@@ -9994,7 +9994,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         for (_link_hash, entry) in expired {
             // Path rediscovery only for unvalidated links (proof never arrived).
-            // Matches Python Transport.py:629-699.
+            // Matches Python Transport.py:692-764.
             if entry.validated {
                 continue;
             }
@@ -10046,7 +10046,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             if should_request_path {
                 // For non-transport nodes, force-expire the current path so
                 // higher-hop-count announces can be accepted.
-                // Python Transport.py:695-699.
+                // Python Transport.py:760-764.
                 if !self.config.enable_transport {
                     self.expire_path(&dest_hash);
                 }
@@ -10065,7 +10065,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Remove path_states and announce_rate entries for destinations no longer in path_table.
-    /// Matches Python Transport.py:601-604, 813-814.
+    /// Matches Python Transport.py:666-670, 813-814.
     fn clean_path_states(&mut self) {
         self.storage.clean_stale_path_metadata();
 
@@ -10217,7 +10217,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///
     /// Called from `handle_announce()` when `should_update` is true and the path
     /// table has been refreshed. This is the Rust equivalent of Python
-    /// Transport.py:1838-1865.
+    /// Transport.py:1983-2010.
     fn send_discovery_path_response(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
@@ -11367,7 +11367,7 @@ mod tests {
         // Stage 1: Announce Rebroadcast Tests
         #[test]
         fn test_rebroadcast_scheduled_twice_then_removed() {
-            // Python parity (Transport.py:519-540): for a received non-local-
+            // Python parity (Transport.py:576-604): for a received non-local-
             // client announce, the retry scheduler fires exactly twice before
             // removing the entry (once from retries=0 → 1, once from 1 → 2,
             // then the `retries > PATHFINDER_RETRIES=1` guard fires).
@@ -13391,7 +13391,7 @@ mod tests {
             let actions = transport.drain_actions();
 
             // Path response should be a targeted SendPacket to interface 0 (the requester),
-            // not a Broadcast. Python sends only to the requesting interface (Transport.py:1037-1038).
+            // not a Broadcast. Python sends only to the requesting interface (Transport.py:1190-1191).
             let sends: Vec<_> = actions
                 .iter()
                 .filter_map(|a| match a {
@@ -14010,8 +14010,8 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // transport.rs:3964-3950, a deliberate anti-replay extension — so
-            // the blob count is not a rejection indicator.)
+            // `random_blobs` (transport.rs:5520), a deliberate anti-replay
+            // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
                 .advance(transport.config().announce_rate_limit_ms + 1);
@@ -14957,7 +14957,7 @@ mod tests {
         fn test_path_request_reoriginated_has_zero_hops() {
             // A path request arriving with hops=3 for an unknown destination
             // must be re-originated with hops=0 (not forwarded with hops=3).
-            // Python Transport.py:2802-2806: each hop creates a fresh packet.
+            // Python Transport.py:3034-3041: each hop creates a fresh packet.
             // Uses handle_path_request() directly to bypass process_incoming's
             // PLAIN filter (which drops hops > 1).
             let mut transport = make_transport_enabled();
@@ -16473,7 +16473,7 @@ mod tests {
         #[test]
         fn test_local_announce_skips_cap() {
             // Locally-originated announces (hops == 0 after local client adjust) should
-            // bypass caps entirely (Python Transport.py:1086-1089).
+            // bypass caps entirely (Python Transport.py:1247-1250).
             // Since Block B, the first local client announce is delayed by 250ms.            // caps are still bypassed when the deferred rebroadcast fires.
             let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
@@ -17998,7 +17998,7 @@ mod tests {
             //
             // Rust stores raw wire hops (no increment on receipt), so hops == 0
             // means directly connected, the Python equivalent of hops == 1
-            // (Python increments on receipt, Transport.py:1319).
+            // (Python increments on receipt, Transport.py:1457).
             use crate::destination::DestinationType;
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
 
@@ -18628,7 +18628,7 @@ mod tests {
             );
 
             // Each rebroadcast fans out on all interfaces without excluding
-            // the receiving one (Python parity, Transport.py:1025-1167); the
+            // the receiving one (Python parity, Transport.py:1180-1317); the
             // self-heard echo is dropped on RX by the packet_hashlist dedup.
             // The rebroadcasted packet is Type2/Transport with our transport_id.
             for action in &actions {
@@ -18714,7 +18714,7 @@ mod tests {
         }
 
         /// B6 parity: heard-neighbor rebroadcasts do not cancel a pending
-        /// first emission. Python (Transport.py:1587) gates the
+        /// first emission. Python (Transport.py:1727) gates the
         /// LOCAL_REBROADCASTS_MAX cancellation on `retries > 0`, so an
         /// announce still in its initial jitter window keeps its scheduled
         /// first fire regardless of how many neighbors are already
@@ -19596,7 +19596,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1106) before
+        // The inbound path increments hops once (transport.rs:1134) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -19669,7 +19669,7 @@ mod tests {
         // Stage 10: Hop count comparison in handle_announce
         #[test]
         fn test_worse_hop_announce_with_newer_emission_updates_path() {
-            // Per Python Transport.py:1664-1668: a worse-hop announce with a
+            // Per Python Transport.py:1809-1813: a worse-hop announce with a
             // newer emission timestamp DOES update the path, even if not expired.
             use crate::destination::{Destination, DestinationType, Direction};
 
@@ -21145,7 +21145,7 @@ mod tests {
 
         #[test]
         fn test_equal_hop_announce_with_same_emission_does_not_update() {
-            // Per Python Transport.py:1627: equal hops require announce_emitted > path_timebase.
+            // Per Python Transport.py:1772: equal hops require announce_emitted > path_timebase.
             // If emission is the same (not newer), path should NOT update.
             use crate::destination::{Destination, DestinationType, Direction};
 
@@ -21585,7 +21585,7 @@ mod tests {
         fn test_header2_non_own_transport_id_dropped() {
             // HEADER_2 data packet with a foreign transport_id should be silently dropped
             // BEFORE polluting the dedup cache, and BEFORE being forwarded.
-            // Python Transport.py:1193-1196
+            // Python Transport.py:1342-1345
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
 
             let mut transport = make_transport_enabled();
@@ -21716,7 +21716,7 @@ mod tests {
         #[test]
         fn test_header2_announce_not_filtered_by_transport_id() {
             // HEADER_2 announce with a foreign transport_id should NOT be dropped.            // announces are exempt from the transport_id filter.
-            // Python Transport.py:1193-1196
+            // Python Transport.py:1342-1345
             use crate::announce::build_announce_payload;
             use crate::destination::{Destination, DestinationType, Direction};
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
@@ -21783,7 +21783,7 @@ mod tests {
         #[test]
         fn test_plain_packet_with_hops_above_1_dropped() {
             // PLAIN data packets with hops > 0 must be dropped. PLAIN destinations
-            // are for direct neighbors only. Python Transport.py:1205-1213
+            // are for direct neighbors only. `RNS.Destination.PLAIN`, Transport.py:1354-1363
             use crate::destination::DestinationType;
             use crate::packet::{HeaderType, PacketData, PacketFlags, TransportType};
 
@@ -22203,7 +22203,7 @@ mod tests {
         #[test]
         fn test_lrproof_not_cached_on_forwarding() {
             // LRPROOF forwarded via link table:
-            // NOT cached by process_incoming (deferred, Python Transport.py:2016-2039)
+            // NOT cached by process_incoming (deferred, Python Transport.py:2174-2197)
             // NOT cached by the forwarding path (forward_on_interface → send_on_interface)
             // Only ORIGINATION paths (send_to_destination, send_on_all_interfaces) cache.
             // This matches Python where Transport.transmit() doesn't cache hashes.
@@ -25723,7 +25723,7 @@ mod tests {
         fn test_plain_broadcast_from_local_client_forwards_to_all() {
             // A PLAIN BROADCAST from a local client should be forwarded to
             // ALL interfaces (Action::Broadcast) except the sender.
-            // Python Transport.py:1390-1393.
+            // Python Transport.py:1524-1527.
             let mut transport = make_transport_with_local_client();
             let dest_hash = [0xAB; TRUNCATED_HASHBYTES];
             let raw = make_plain_broadcast_raw(dest_hash, b"broadcast from local");
@@ -25753,7 +25753,7 @@ mod tests {
         fn test_plain_broadcast_from_network_forwards_to_local_clients() {
             // A PLAIN BROADCAST from a network interface should be forwarded
             // ONLY to local client interfaces (Action::SendPacket).
-            // Python Transport.py:1396-1398.
+            // Python Transport.py:1530-1532.
             let mut transport = make_transport_with_local_client();
             let dest_hash = [0xCD; TRUNCATED_HASHBYTES];
             let raw = make_plain_broadcast_raw(dest_hash, b"broadcast from network");

@@ -9,7 +9,7 @@ only and are not implemented by `leviculum-lxmf`.
 
 ## Propagation transfer envelope
 
-A propagated message is wrapped as follows (`LXMessage.py:423-433`):
+A propagated message is wrapped as follows (`LXMessage.py:426-436`):
 
 ```
 pn_encrypted_data = destination.encrypt(packed[16:])
@@ -23,12 +23,12 @@ Normative points:
 
 - The destination hash (`packed[:16]`) stays in cleartext; the rest of the packed
   message (`packed[16:]`, i.e. source hash, signature, payload) is encrypted to
-  the recipient (`LXMessage.py:427,430`).
+  the recipient (`LXMessage.py:430,433`).
 - `transient_id = full_hash(lxmf_data)` and is computed **before** any
-  propagation stamp is appended (`LXMessage.py:431-432`).
+  propagation stamp is appended (`LXMessage.py:434-435`).
 - The envelope is `msgpack([timestamp, [lxmf_data, ...]])`: a timestamp followed
-  by a list of one or more `lxmf_data` blobs (`LXMessage.py:433`). The peer-sync
-  path reuses the same shape with many blobs (`LXMPeer.py:462`).
+  by a list of one or more `lxmf_data` blobs (`LXMessage.py:436`). The peer-sync
+  path reuses the same shape with many blobs (`LXMPeer.py:466`).
 
 ## Origin upload (implemented)
 
@@ -85,7 +85,7 @@ announce that advertises the node's limits and stamp costs.
 
 A Python propagation peer requests `OFFER_REQUEST_PATH = "/offer"`
 (`LXMPeer.py:14`) over a
-Link with the payload (`LXMPeer.py:381,385`):
+Link with the payload (`LXMPeer.py:385,389`):
 
 ```
 offer = [ peering_key, [ transient_id, ... ] ]
@@ -96,7 +96,7 @@ list is the transient-ids it offers. The node replies via `offer_response`
 (`LXMPeer.py:400`); the reply is one of: `False` (node already has all),
 `True` (node wants all), or a list (the subset the node wants). The wanted
 messages are then pushed as one Resource carrying
-`msgpack([timestamp, [lxmf_data, ...]])` (`LXMPeer.py:462-464`).
+`msgpack([timestamp, [lxmf_data, ...]])` (`LXMPeer.py:466-468`).
 
 `leviculum-lxmf` exposes no `/offer` request path, handler, peering-key engine,
 or peer-sync state machine.
@@ -104,16 +104,16 @@ or peer-sync state machine.
 ## `/get` (collect from a node)
 
 A recipient requests `MESSAGE_GET_PATH = "/get"` (`LXMPeer.py:15`) with the
-payload (`LXMRouter.py:1427-1449`):
+payload (`LXMRouter.py:1482-1504`):
 
 ```
 [ want, have ]
 ```
 
 - if both `want` and `have` are `None`, the node returns a list of the recipient's
-  available `transient_id`s, sorted by size (`LXMRouter.py:1436-1449`);
+  available `transient_id`s, sorted by size (`LXMRouter.py:1491-1504`);
 - otherwise `have` lists transient-ids the client already holds (so the node can
-  drop them) and `want` lists the ones to send (`LXMRouter.py:1450-1500`).
+  drop them) and `want` lists the ones to send (`LXMRouter.py:1506-1556`).
 
 The exact list, download, acknowledgement, list-response, and download-response
 bytes are pinned by `VEC-PROP-GET-LIST`, `VEC-PROP-GET-DOWNLOAD`,
@@ -166,6 +166,6 @@ with `WORKBLOCK_EXPAND_ROUNDS_PEERING` = 25 rounds against the node's advertised
 ## Node transient ingest and expiry (Python reference only; not implemented)
 
 A node stores each accepted message keyed by `transient_id`, validates its
-propagation stamp in batches (`LXStamper.py:87-90`), and expires entries after
+propagation stamp in batches (`LXStamper.py:118-121`), and expires entries after
 `MESSAGE_EXPIRY` = 30 days (`LXMRouter.py:38`). The on-disk layout and peer
 bookkeeping are informative.

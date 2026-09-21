@@ -73,7 +73,7 @@ section and a proof; a normative symbol with no mapping is a coverage gap.
   in full in [Test vectors](14-test-vectors.md). They live in machine-readable
   form in [`vectors/vectors.json`](vectors/vectors.json).
 - **Hashes** are SHA-256 unless stated. Integers in stamp arithmetic are
-  big-endian (`LXStamper.py:35,45`).
+  big-endian (`LXStamper.py:66,76`).
 
 ## Regenerating the vectors
 

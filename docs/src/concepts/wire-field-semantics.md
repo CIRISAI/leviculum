@@ -90,7 +90,7 @@ Two rules generalise from it:
   learn, without weakening the boundary that actually protects peers.
 
 Symmetry is worth asking about but is not automatic: our read side
-now drops an announced 255 (`leviculum-lxmf/src/router.rs:656-687`)
+now drops an announced 255 (`leviculum-lxmf/src/router.rs:1181-1227`)
 although the reference does not, because that deviation is invisible
 on the wire and to any conforming peer, and removes an unbounded loop
 reachable from the network.

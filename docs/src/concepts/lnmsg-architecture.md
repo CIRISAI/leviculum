@@ -179,7 +179,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:73-76`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:97-100`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel
@@ -211,7 +211,7 @@ client that forgets this will silently never see incoming messages.
 
 ### `RouterEvent`
 
-Fifteen variants (`leviculum-lxmf/src/router.rs:268-296`):
+Fifteen variants (`leviculum-lxmf/src/router.rs:294-342`):
 `MessageQueued`, `MessageState { message_id, state }`, `MessageReceived`,
 `InboundRejected`, `DirectLinkEstablished`, `Duplicate`,
 `InvalidSignature`, `InvalidStamp`, `ResourceBuildPending`, `StampPending`,
@@ -222,16 +222,16 @@ What is missing is as informative as what is there. There is no announce
 event: `LxmfNodeEvent::PeerAnnounced` carries the destination hash only,
 with app data discarded (`leviculum-lxmf/src/node.rs:133-135`,
 `:746-754`), and `handle_node_event` does not forward it at all — it falls
-into `_ => {}` (`leviculum-lxmf/src/router.rs:1329`). The router does
+into `_ => {}` (`leviculum-lxmf/src/router.rs:1358`). The router does
 decode the delivery announce but keeps only `stamp_cost` and
 `compression_supported`, discarding the display name
-(`leviculum-lxmf/src/router.rs:1180-1190`). **Display-name learning is
+(`leviculum-lxmf/src/router.rs:1209-1219`). **Display-name learning is
 entirely the client's job**, from raw `NodeEvent::AnnounceReceived`.
 
 `Sending` does arrive, on the event every verdict travels on:
 `RouterEvent::MessageState`, from all three sites that enter the state —
-the composed send (`leviculum-lxmf/src/router.rs:1751-1756`), the
-built-transfer commit (`leviculum-lxmf/src/router.rs:1004-1009`) and the
+the composed send (`leviculum-lxmf/src/router.rs:1797-1802`), the
+built-transfer commit (`leviculum-lxmf/src/router.rs:1033-1038`) and the
 upload the transport reports through `UploadSubmitted`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:354-366`) — and on the
 transition only: a submission onto an entry already in that state reports
@@ -244,7 +244,7 @@ tick, and *that* transition is reported nowhere.
 
 There is still no event for `Outbound` and none for progress: the router
 folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress` without
-emitting anything (`leviculum-lxmf/src/router.rs:1381-1393`), so progress
+emitting anything (`leviculum-lxmf/src/router.rs:1410-1422`), so progress
 must be polled through `outbound()`
 (`leviculum-lxmf/src/router.rs:698`).
 
@@ -264,7 +264,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
 2. **`Sent` means two different things and never applies to direct
    delivery.** For opportunistic messages it means the packet was handed to
    Reticulum unproven, and the message is still queued and still retryable
-   (`leviculum-lxmf/src/router.rs:1298-1312`). For propagated messages it
+   (`leviculum-lxmf/src/router.rs:1327-1341`). For propagated messages it
    means the propagation node accepted the upload, and the entry is
    *deleted* (`leviculum-lxmf/src/router/propagation_runtime.rs:386-393`).
    Direct delivery goes `Outbound -> Sending -> Delivered | Rejected |
@@ -279,9 +279,9 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    the destination identity. It does not prove an LXMF client parsed them
    and it certainly does not prove a human read them. There is no
    read-receipt field in LXMF at all
-   (`leviculum-lxmf/src/constants.rs:20-46`).
+   (`leviculum-lxmf/src/constants.rs:52-78`).
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
-   Resource transfer" (`leviculum-lxmf/src/router.rs:1256-1269`) or "the
+   Resource transfer" (`leviculum-lxmf/src/router.rs:1285-1298`) or "the
    propagation node refused the upload for an insufficient stamp"
    (`leviculum-lxmf/src/router/propagation_runtime.rs:418-430`), and the
    event alone cannot distinguish them.
@@ -297,7 +297,7 @@ Terminal states remove the entry from the outbound map
 `leviculum-lxmf/src/router/propagation_runtime.rs:895`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
-`MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:46`).
+`MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:47`).
 
 ### Propagation: what the router does, and what it refuses to do
 
@@ -386,12 +386,12 @@ crate is `no_std`.
 The router writes exactly one key, `b"lxmf/router-state"`
 (`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:64`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:1919-1936`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:2034-2051`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:1904-1907`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:2019-2022`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -408,7 +408,7 @@ restarts, and must not pretend to.
 - **Paper messages** (`leviculum-lxmf/src/paper.rs`): a message encrypted
   to a destination and rendered as an `lxm://` base64 URI (`to_uri`,
   `leviculum-lxmf/src/paper.rs:172`), capped at `PAPER_MDU = 2210` bytes
-  (`leviculum-lxmf/src/constants.rs:9`). Ingest via
+  (`leviculum-lxmf/src/constants.rs:38`). Ingest via
   `router.ingest_paper(uri)`
   (`ingest_paper`, `leviculum-lxmf/src/router/paper_runtime.rs:17`). No QR
   generation exists; that is the client's job.
@@ -417,29 +417,29 @@ restarts, and must not pretend to.
   invisible and automatic: received tickets are remembered from any
   signature-valid inbound message — `remember_verified_ticket`
   (`leviculum-lxmf/src/router.rs:1501`) — and applied when a message is
-  enqueued (`leviculum-lxmf/src/router.rs:791`). Expiry 21 days, renew at 14,
+  enqueued (`leviculum-lxmf/src/router.rs:820`). Expiry 21 days, renew at 14,
   minimum one day between issuances to the same peer
-  (`leviculum-lxmf/src/constants.rs:34-37`). `issue_ticket_field` refuses
+  (`leviculum-lxmf/src/constants.rs:40-43`). `issue_ticket_field` refuses
   with `RouterError::NoWallClock` when the node's clock is implausible
-  (`leviculum-lxmf/src/router.rs:652-653`), and can also legitimately
+  (`leviculum-lxmf/src/router.rs:681-682`), and can also legitimately
   return `Ok((None, _))` when rate-limited
-  (`leviculum-lxmf/src/router.rs:670`). A UI has to distinguish "granted",
+  (`leviculum-lxmf/src/router.rs:699`). A UI has to distinguish "granted",
   "not yet, try tomorrow" and "cannot, no clock".
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is
   2^cost hashes plus a workblock expansion of 3000 rounds
   (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:45`). Costs
   above about 40 bits are described in-tree as "already unreachable in
-  practice" (`leviculum-lxmf/src/router.rs:1116-1117`). No wall-clock
+  practice" (`leviculum-lxmf/src/router.rs:1145-1146`). No wall-clock
   benchmark exists in the crate and none was run for this document, so any
   UI estimate of mining time must be measured first, not guessed. There is
   no cancellation and no deadline: `generate` loops until it succeeds
-  (`leviculum-lxmf/src/stamp.rs:171-182`), and `StampError::Cancelled`
-  exists but is never constructed (`leviculum-lxmf/src/stamp.rs:24`).
+  (`leviculum-lxmf/src/stamp.rs:249-260`), and `StampError::Cancelled`
+  exists but is never constructed (`leviculum-lxmf/src/stamp.rs:25`).
 
 ### Fields with constants but no codec
 
-`leviculum-lxmf/src/constants.rs:20-46` declares the full LXMF field set
+`leviculum-lxmf/src/constants.rs:52-78` declares the full LXMF field set
 including `FIELD_THREAD (0x08)`, `FIELD_RENDERER (0x0F)`,
 `FIELD_REPLY_TO (0x30)`, `FIELD_REPLY_QUOTE (0x31)`,
 `FIELD_REACTION (0x40)` and `FIELD_COMMENT (0x41)`, but only files, image
@@ -463,7 +463,7 @@ classifies, and seven of the event types LXMF needs, including
 `PacketReceived` and `LinkDataReceived`, are `EventClass::Data` and
 therefore droppable under load. A processor fed from `take_event_receiver`
 "would silently lose inbound messages with nothing underneath to retransmit
-them" (`leviculum-std/src/driver/processor.rs:182-190`, "Where the events
+them" (`leviculum-std/src/driver/processor.rs:191-199`, "Where the events
 come from").
 
 So the messenger must register a `CoreProcessor`
@@ -502,7 +502,7 @@ queue on either side, which is exactly the shape that tests well.
 **A. One process. TUI plus an in-driver `CoreProcessor`.** The binary
 builds a `ReticulumNode` as a shared-instance client with
 `core_processor(...)` installed, exactly as `leviculum-lxmf-node` does
-(`leviculum-lxmf-node/src/main.rs:170-177`). The processor owns the
+(`leviculum-lxmf-node/src/main.rs:193-201`). The processor owns the
 `LxmfRouter`; the TUI owns the model. They talk over two unbounded
 channels.
 
@@ -680,7 +680,7 @@ why the exit code is what the tests assert. The ID does not become
 unobtainable, because `lnmsg status <id>` needs it: `LNMSG_ENQUEUED … id=…`
 carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
 turns on and which is written by an unfiltered layer, so the line arrives even
-at the `warn` default (`leviculum-std/src/event_log.rs:518-525`). No
+at the `warn` default (`leviculum-std/src/event_log.rs:547-554`). No
 `--print-id` flag was added: nothing consumes the ID today, and an option
 added against a hypothetical user is an option nobody tests.
 
@@ -741,7 +741,7 @@ not a list of open work.
 1. **No display name reaches the application.**
    `LxmfNodeEvent::PeerAnnounced` carries the destination hash only
    (`leviculum-lxmf/src/node.rs:133-135`), the router drops the name after
-   reading the stamp cost (`leviculum-lxmf/src/router.rs:1180-1190`), and
+   reading the stamp cost (`leviculum-lxmf/src/router.rs:1209-1219`), and
    `RouterEvent` has no announce variant. Every client will re-implement
    announce filtering and `DeliveryAnnounce::decode`. A
    `RouterEvent::PeerAnnounced { destination, announce }` would remove that
@@ -762,11 +762,11 @@ not a list of open work.
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:1919-1936`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:2034-2051`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
-   (`leviculum-lxmf/src/stamp.rs:171-182`) and `StampError::Cancelled` is
-   declared but never constructed (`leviculum-lxmf/src/stamp.rs:24`). A
+   (`leviculum-lxmf/src/stamp.rs:249-260`) and `StampError::Cancelled` is
+   declared but never constructed (`leviculum-lxmf/src/stamp.rs:25`). A
    user who starts a message to a high-cost peer and changes their mind has
    no way out.
 7. **No inbound Resource cancellation**, stated as deliberate pending core
@@ -780,13 +780,13 @@ not a list of open work.
    `Display`. Every user-facing string is the client's to write, and two
    clients will word them differently.
 9. **No typed codecs for reply, thread, reaction or renderer fields**
-   (`leviculum-lxmf/src/constants.rs:28-46`), so each client hand-rolls
+   (`leviculum-lxmf/src/constants.rs:60-78`), so each client hand-rolls
    msgpack for the same wire structures. This is a compatibility risk more
    than an ergonomics one.
 10. **Codeberg #203** (`StampExecutor::generate` returns a `!Send` future)
     applies to us as it applied to `leviculum-lxmf-node`, which worked
     around it with a dedicated thread running a current-thread runtime
-    (`leviculum-lxmf-node/src/main.rs:224-255`). We will make the same
+    (`leviculum-lxmf-node/src/main.rs:253-304`). We will make the same
     workaround.
 11. **Codeberg #204** (a hook owns the events its own core calls return) is
     a documentation gap we will hit on day one. The bounded re-feed loop is

@@ -61,7 +61,7 @@ wrong value, and it fails silently — see
   on are parsed for compatibility — for example `shared_instance_type`
   and `shared_instance_socket` are read and honoured per RNS 1.3.x
   semantics so an existing `rnsd` config works unchanged
-  (`leviculum-std/src/config.rs:47-53`).
+  (`leviculum-std/src/config.rs:53-59`).
 
 This drop-in property is a deliberate design goal, not an accident.
 It is also what makes honest A/B testing possible: the test harness
@@ -165,7 +165,7 @@ whose maximum is lower answers by clamping and echoing the clamped
 value (`RNode_Firmware/RNode_Firmware.ino:861-879` — 17 dBm on an
 SX127x, `PA_MAX_OUTPUT` on an SX1262 with an external PA). Confirmation
 is otherwise an exact match on both stacks (ours at
-`leviculum-std/src/interfaces/rnode.rs:469`, the reference at
+`leviculum-std/src/interfaces/rnode.rs:570`, the reference at
 `RNodeInterface.py:677`), so the derived default — and only the derived
 default — accepts a confirmation *below* what it asked for, logs the
 board's ceiling, and runs. An explicitly configured power keeps the

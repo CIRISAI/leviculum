@@ -538,7 +538,7 @@ async fn test_local_client_initiates_link_through_daemon() {
 
 /// Test: Non-transport Rust daemon still relays link traffic for shared
 /// instance clients. The `from_local` / `for_local` / `for_local_link` gates
-/// bypass the `enable_transport` check (Python Transport.py:1404).
+/// bypass the `enable_transport` check (Python Transport.py:1538).
 ///
 /// Topology:
 /// ```text

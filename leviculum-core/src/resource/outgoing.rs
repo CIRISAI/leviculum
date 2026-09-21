@@ -908,7 +908,7 @@ impl OutgoingResource {
 
         match self.status {
             ResourceStatus::Advertised => {
-                // Python Resource.py:571: timeout + PROCESSING_GRACE
+                // Python Resource.py:574: timeout + PROCESSING_GRACE
                 let timeout = self
                     .advertisement_timeout_ms
                     .unwrap_or_else(|| rtt_ms.saturating_mul(6))
@@ -943,7 +943,7 @@ impl OutgoingResource {
             ResourceStatus::Transferring => {
                 // Sender watchdog: wait for receiver's REQ. The receiver drives
                 // retransmission, so the sender should be patient.
-                // Python sender uses global budget (Resource.py:627-633).
+                // Python sender uses global budget (Resource.py:631-637).
                 let timeout_factor = if self.req_received {
                     PART_TIMEOUT_FACTOR_AFTER_RTT // 2: link characteristics known
                 } else {
@@ -980,7 +980,7 @@ impl OutgoingResource {
                 }
             }
             ResourceStatus::AwaitingProof => {
-                // Python Resource.py:638-640: PROOF_TIMEOUT_FACTOR * RTT + SENDER_GRACE_TIME
+                // Python Resource.py:642-644: PROOF_TIMEOUT_FACTOR * RTT + SENDER_GRACE_TIME
                 let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
                 let timeout = rtt_ms.saturating_mul(PROOF_TIMEOUT_FACTOR)
                     + SENDER_GRACE_TIME_MS

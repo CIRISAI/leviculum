@@ -178,7 +178,7 @@ pub(crate) fn generate_random_hash(
 ///
 /// The random_hash is 10 bytes: 5 random + 5 timestamp. This reads bytes 5..10
 /// as a big-endian integer, matching Python's `int.from_bytes(random_blob[5:10], "big")`
-/// (Transport.py:2935-2936). The result is a 40-bit value used only for
+/// (Transport.py:3178-3179). The result is a 40-bit value used only for
 /// relative comparison, a truncated seconds-since-epoch timestamp.
 pub(crate) fn emission_from_random_hash(random_hash: &[u8; RANDOM_HASHBYTES]) -> u64 {
     let ts = &random_hash[RANDOM_HASH_RANDOM_SIZE..];
