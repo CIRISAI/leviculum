@@ -276,11 +276,18 @@ impl MemoryStorage {
         let mut s = String::new();
         let mut total = 0u64;
 
-        // path_table: BTreeMap<[u8; 16], PathEntry>, 3x
+        // path_table: BTreeMap<[u8; 16], PathEntry>, 3x.
+        // The blob window is priced by CAPACITY, not by length: capacity is
+        // what was asked of the allocator and what the process holds, and
+        // the two differ whenever a window has been appended to past its
+        // cap.
         let n = self.path_table.len();
         let mut raw = 0u64;
         for entry in self.path_table.values() {
-            raw += (TRUNCATED_HASHBYTES + 33 + entry.random_blobs.len() * 10) as u64;
+            raw += (TRUNCATED_HASHBYTES
+                + core::mem::size_of::<PathEntry>()
+                + entry.random_blobs.capacity() * crate::constants::RANDOM_HASHBYTES)
+                as u64;
         }
         let est = raw * 3;
         total += est;
@@ -292,7 +299,7 @@ impl MemoryStorage {
 
         // path_states: BTreeMap<[u8; 16], PathState>, 3x
         let n = self.path_states.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 1)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<PathState>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -303,7 +310,7 @@ impl MemoryStorage {
 
         // reverse_table: BTreeMap<[u8; 16], ReverseEntry>, 3x
         let n = self.reverse_table.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 24)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<ReverseEntry>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -312,15 +319,12 @@ impl MemoryStorage {
             n, raw, est
         );
 
-        // link_table: BTreeMap<[u8; 16], LinkEntry>, 3x
+        // link_table: BTreeMap<[u8; 16], LinkEntry>, 3x.
+        // `peer_signing_key` is an Option<[u8; 32]> stored INLINE, so it
+        // costs the same whether or not a proof ever arrived; the old model
+        // added it conditionally and under-priced every unvalidated link.
         let n = self.link_table.len();
-        let mut raw = 0u64;
-        for entry in self.link_table.values() {
-            raw += (TRUNCATED_HASHBYTES + 51) as u64;
-            if entry.peer_signing_key.is_some() {
-                raw += 32;
-            }
-        }
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<LinkEntry>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -329,11 +333,16 @@ impl MemoryStorage {
             n, raw, est
         );
 
-        // announce_table: BTreeMap<[u8; 16], AnnounceEntry>, 3x
+        // announce_table: BTreeMap<[u8; 16], AnnounceEntry>, 3x. The
+        // `raw_packet` heap is the second full copy of the announce beside
+        // `announce_cache`, which is the whole reason this row is worth
+        // reading.
         let n = self.announce_table.len();
         let mut raw = 0u64;
         for entry in self.announce_table.values() {
-            raw += (TRUNCATED_HASHBYTES + 28 + entry.raw_packet.len()) as u64;
+            raw += (TRUNCATED_HASHBYTES
+                + core::mem::size_of::<AnnounceEntry>()
+                + entry.raw_packet.capacity()) as u64;
         }
         let est = raw * 3;
         total += est;
@@ -347,7 +356,7 @@ impl MemoryStorage {
         let n = self.announce_cache.len();
         let mut raw = 0u64;
         for v in self.announce_cache.values() {
-            raw += (TRUNCATED_HASHBYTES + v.len()) as u64;
+            raw += (TRUNCATED_HASHBYTES + core::mem::size_of::<Vec<u8>>() + v.capacity()) as u64;
         }
         let est = raw * 3;
         total += est;
@@ -359,7 +368,7 @@ impl MemoryStorage {
 
         // announce_rate_table: BTreeMap<[u8; 16], AnnounceRateEntry>, 3x
         let n = self.announce_rate_table.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 17)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<AnnounceRateEntry>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -370,7 +379,7 @@ impl MemoryStorage {
 
         // receipts: BTreeMap<[u8; 16], PacketReceipt>, 3x
         let n = self.receipts.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 81)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<PacketReceipt>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -381,7 +390,7 @@ impl MemoryStorage {
 
         // path_requests: BTreeMap<[u8; 16], u64>, 3x
         let n = self.path_requests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 8)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -422,6 +431,13 @@ impl MemoryStorage {
         // the resident-set gap it was being used to explain was
         // correspondingly overstated (2026-09-21). Every key is stored
         // inline, so `size_of` is the whole cost and cannot drift again.
+        //
+        // That is now the rule for every row above and below, not an
+        // exception made for one type: a literal byte count is a claim
+        // about a struct that nothing rechecks, and this dump is read to
+        // attribute a resident-set gap -- a row that under-reports is
+        // worse than no row, because it is believed.
+        // `diagnostic_model_tests` holds each row to it.
         let n = self.known_identities.len();
         let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<Identity>())) as u64;
         let est = raw * 3;
@@ -434,7 +450,8 @@ impl MemoryStorage {
 
         // known_ratchets: BTreeMap<[u8; 16], ([u8; 32], u64)>, 3x
         let n = self.known_ratchets.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + RATCHET_SIZE + 8)) as u64;
+        let raw =
+            (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<([u8; RATCHET_SIZE], u64)>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -445,7 +462,11 @@ impl MemoryStorage {
 
         // local_client_dest_map: BTreeMap<usize, BTreeSet<[u8; 16]>>, 3x
         let n: usize = self.local_client_dest_map.values().map(|s| s.len()).sum();
-        let raw = (n * TRUNCATED_HASHBYTES + self.local_client_dest_map.len() * 8) as u64;
+        let raw = (n * TRUNCATED_HASHBYTES
+            + self.local_client_dest_map.len()
+                * (core::mem::size_of::<usize>()
+                    + core::mem::size_of::<BTreeSet<[u8; TRUNCATED_HASHBYTES]>>()))
+            as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -456,7 +477,7 @@ impl MemoryStorage {
 
         // local_client_known_dests: BTreeMap<[u8; 16], u64>, 3x
         let n = self.local_client_known_dests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 8)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<u64>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -467,7 +488,7 @@ impl MemoryStorage {
 
         // discovery_path_requests: BTreeMap<[u8; 16], (usize, u64)>, 3x
         let n = self.discovery_path_requests.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + 8 + 8)) as u64;
+        let raw = (n * (TRUNCATED_HASHBYTES + core::mem::size_of::<(usize, u64)>())) as u64;
         let est = raw * 3;
         total += est;
         let _ = writeln!(
@@ -480,7 +501,7 @@ impl MemoryStorage {
         let n = self.dest_ratchet_keys.len();
         let mut raw = 0u64;
         for v in self.dest_ratchet_keys.values() {
-            raw += (TRUNCATED_HASHBYTES + v.len()) as u64;
+            raw += (TRUNCATED_HASHBYTES + core::mem::size_of::<Vec<u8>>() + v.capacity()) as u64;
         }
         let est = raw * 3;
         total += est;
@@ -2054,5 +2075,224 @@ mod tests {
         assert!(dump.contains("packet_cache: 2 entries"));
         assert!(dump.contains("path_table: 1 entries"));
         assert!(total > 0);
+    }
+}
+
+/// Item 5 of the 2026-09-21 hygiene batch: the diagnostic dump's model
+/// of what an entry costs, pinned to the types it models.
+///
+/// The dump is read to attribute a resident-set gap, which means a row
+/// that under-reports is worse than no row at all: it is believed, and
+/// the gap it leaves gets attributed to something else. It had already
+/// happened once — `Identity` was modelled at 128 bytes against a type
+/// four times that, and on a node sitting at the 50 000-entry identity
+/// cap the dump was short by tens of megabytes on its single largest
+/// table.
+///
+/// Rust has no reflection, so the only way a row can track its type is
+/// to be written in terms of `size_of`. These tests assert exactly
+/// that, row by row: a literal byte count reintroduced here fails,
+/// and a field added to any of the modelled structs moves the row with
+/// it instead of silently widening the gap.
+#[cfg(test)]
+mod diagnostic_model_tests {
+    use super::*;
+    use crate::destination::DestinationHash;
+    use alloc::vec;
+    use core::mem::size_of;
+
+    /// The `raw N bytes` figure the dump prints for one named row.
+    fn raw_bytes_of(dump: &str, row: &str) -> u64 {
+        let line = dump
+            .lines()
+            .find(|l| l.starts_with(&alloc::format!("{row}:")))
+            .unwrap_or_else(|| panic!("the dump has no {row} row:\n{dump}"));
+        let after = line
+            .split("raw ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no `raw ` in {line}"));
+        after
+            .split(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no number after `raw ` in {line}"))
+    }
+
+    fn hash(n: u8) -> [u8; TRUNCATED_HASHBYTES] {
+        let mut h = [0u8; TRUNCATED_HASHBYTES];
+        h[0] = n;
+        h
+    }
+
+    /// Every fixed-size row is its key plus `size_of` of its value.
+    #[test]
+    fn each_row_prices_its_entry_by_size_of_the_type_it_stores() {
+        let mut s = MemoryStorage::with_defaults();
+
+        s.set_path(
+            hash(1),
+            PathEntry {
+                hops: 1,
+                expires_ms: 0,
+                interface_index: 0,
+                random_blobs: Vec::new(),
+                next_hop: None,
+                via_peer: None,
+            },
+        );
+        s.set_path_state(hash(1), PathState::Unknown);
+        s.set_reverse(
+            hash(2),
+            ReverseEntry {
+                timestamp_ms: 0,
+                receiving_interface_index: 0,
+                outbound_interface_index: 0,
+            },
+        );
+        s.set_link_entry(
+            hash(3),
+            LinkEntry {
+                timestamp_ms: 0,
+                next_hop_interface_index: 0,
+                remaining_hops: 1,
+                received_interface_index: 0,
+                hops: 1,
+                validated: false,
+                proof_timeout_ms: 0,
+                destination_hash: hash(3),
+                peer_signing_key: None,
+            },
+        );
+        s.set_announce_rate(
+            hash(4),
+            AnnounceRateEntry {
+                last_ms: 0,
+                rate_violations: 0,
+                blocked_until_ms: 0,
+            },
+        );
+        s.set_receipt(
+            hash(5),
+            PacketReceipt::new([0u8; 32], DestinationHash::new(hash(5)), 0),
+        );
+        s.set_path_request_time(hash(6), 0);
+        s.remember_known_ratchet(hash(7), [0u8; RATCHET_SIZE], 0);
+        s.set_local_client_known_dest(hash(8), 0);
+        s.set_discovery_path_request(hash(9), 0, 0);
+
+        let (dump, _) = s.diagnostic_dump_non_packet_cache();
+
+        // An empty blob window still costs the Vec header inside PathEntry,
+        // which is what size_of carries and a literal never did.
+        assert_eq!(
+            raw_bytes_of(&dump, "path_table"),
+            (TRUNCATED_HASHBYTES + size_of::<PathEntry>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "path_states"),
+            (TRUNCATED_HASHBYTES + size_of::<PathState>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "reverse_table"),
+            (TRUNCATED_HASHBYTES + size_of::<ReverseEntry>()) as u64,
+        );
+        // Including the signing key, which is stored inline whether or
+        // not it is present — the old model added it conditionally and
+        // so priced a link without a proof below what it occupies.
+        assert_eq!(
+            raw_bytes_of(&dump, "link_table"),
+            (TRUNCATED_HASHBYTES + size_of::<LinkEntry>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "announce_rate_table"),
+            (TRUNCATED_HASHBYTES + size_of::<AnnounceRateEntry>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "receipts"),
+            (TRUNCATED_HASHBYTES + size_of::<PacketReceipt>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "path_requests"),
+            (TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "known_ratchets"),
+            (TRUNCATED_HASHBYTES + size_of::<([u8; RATCHET_SIZE], u64)>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "local_client_known_dests"),
+            (TRUNCATED_HASHBYTES + size_of::<u64>()) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "discovery_path_requests"),
+            (TRUNCATED_HASHBYTES + size_of::<(usize, u64)>()) as u64,
+        );
+    }
+
+    /// Heap-carrying rows add the allocation the entry actually holds,
+    /// on top of the header `size_of` accounts for — and they measure
+    /// `capacity`, because that is what was asked of the allocator.
+    #[test]
+    fn heap_carrying_rows_add_capacity_on_top_of_the_header() {
+        let mut s = MemoryStorage::with_defaults();
+
+        let mut blobs: Vec<[u8; crate::constants::RANDOM_HASHBYTES]> = Vec::with_capacity(8);
+        blobs.push([0u8; crate::constants::RANDOM_HASHBYTES]);
+        let blob_capacity = blobs.capacity();
+        s.set_path(
+            hash(1),
+            PathEntry {
+                hops: 1,
+                expires_ms: 0,
+                interface_index: 0,
+                random_blobs: blobs,
+                next_hop: None,
+                via_peer: None,
+            },
+        );
+
+        let mut raw_packet: Vec<u8> = Vec::with_capacity(200);
+        raw_packet.extend_from_slice(&[7u8; 100]);
+        let packet_capacity = raw_packet.capacity();
+        s.set_announce(
+            hash(2),
+            AnnounceEntry {
+                timestamp_ms: 0,
+                hops: 1,
+                retries: 0,
+                retransmit_at_ms: None,
+                raw_packet,
+                receiving_interface_index: 0,
+                target_interface: None,
+                local_rebroadcasts: 0,
+                block_rebroadcasts: false,
+            },
+        );
+
+        s.set_announce_cache(hash(3), vec![9u8; 64]);
+        s.store_dest_ratchet_keys(hash(4), vec![1u8; 32]);
+
+        let (dump, _) = s.diagnostic_dump_non_packet_cache();
+
+        assert_eq!(
+            raw_bytes_of(&dump, "path_table"),
+            (TRUNCATED_HASHBYTES
+                + size_of::<PathEntry>()
+                + blob_capacity * crate::constants::RANDOM_HASHBYTES) as u64,
+            "the blob window costs what it reserved, not what it holds"
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "announce_table"),
+            (TRUNCATED_HASHBYTES + size_of::<AnnounceEntry>() + packet_capacity) as u64,
+            "the second copy of the announce is the point of this row"
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "announce_cache"),
+            (TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 64) as u64,
+        );
+        assert_eq!(
+            raw_bytes_of(&dump, "dest_ratchet_keys"),
+            (TRUNCATED_HASHBYTES + size_of::<Vec<u8>>() + 32) as u64,
+        );
     }
 }

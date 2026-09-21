@@ -917,16 +917,21 @@ impl leviculum_core::traits::Storage for Storage {
         // Held only here, so the inner dump cannot account for it: the
         // identity plus its announce hash and app data, per known
         // destination.
+        //
+        // Priced by `size_of` plus the heap the entry actually holds, the
+        // same rule the inner dump follows: the public key is stored
+        // inline and the two Vec headers are not free, so spelling the
+        // fixed part out by hand under-reported the largest table that
+        // only ever grows (Codeberg #421).
         let n = self.known_dest_entries.len();
         let raw: u64 = self
             .known_dest_entries
             .values()
             .map(|e| {
                 (TRUNCATED_HASHBYTES
-                    + 8
-                    + e.packet_hash.len()
-                    + e.public_key.len()
-                    + e.app_data.as_ref().map_or(0, |d| d.len())) as u64
+                    + std::mem::size_of::<KnownDestEntry>()
+                    + e.packet_hash.capacity()
+                    + e.app_data.as_ref().map_or(0, |d| d.capacity())) as u64
             })
             .sum();
         let est = raw * 3 / 2;
