@@ -31,6 +31,10 @@ pub(crate) mod file_ratchet_store;
 /// cargo-fuzz harness. Compiled only under `--cfg fuzzing` (set by cargo-fuzz).
 #[cfg(fuzzing)]
 pub mod fuzz;
+/// The counting allocator shim that answers "how many bytes are live" by
+/// measurement rather than by the dump's model. Inert in a process that does
+/// not install it as the global allocator.
+pub mod heap_accounting;
 pub(crate) mod ini_config;
 pub mod interfaces;
 pub(crate) mod known_destinations;
