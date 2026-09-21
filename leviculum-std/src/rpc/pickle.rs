@@ -795,6 +795,198 @@ mod tests {
     // msgpack codec (RNS 1.3.x) — mirrors `RNS.vendor.umsgpack`.
 
     /// Build a msgpack `{"get": <command>}` request the way RNS does.
+    /// Every request the dispatcher above accepts, as the wire dict a client
+    /// sends it as. Kept exhaustive by
+    /// `rpc_request_vocabulary_fits_under_the_ceiling`, which parses each one
+    /// — a dict that does not parse is not in the vocabulary and the numbers
+    /// it produces would be worthless.
+    fn request_vocabulary() -> Vec<(&'static str, Value)> {
+        // Destination and identity hashes are truncated (16 bytes on the
+        // wire); packet hashes are full SHA-256 (32).
+        let dest = vec![0xABu8; 16];
+        let ident = vec![0xCDu8; 16];
+        let packet = vec![0xEFu8; 32];
+        let get = |verb: &'static str| {
+            (
+                verb,
+                pickle_dict(vec![(pickle_str_key("get"), pickle_str(verb))]),
+            )
+        };
+        let get_with = |verb: &'static str, key: &str, hash: &[u8]| {
+            (
+                verb,
+                pickle_dict(vec![
+                    (pickle_str_key("get"), pickle_str(verb)),
+                    (pickle_str_key(key), pickle_bytes(hash)),
+                ]),
+            )
+        };
+        let mut v = vec![
+            get("interface_stats"),
+            get("link_count"),
+            get("link_table"),
+            get("transport_tables"),
+            get("identities"),
+            get("discovered_interfaces"),
+            get("rate_table"),
+            get("lowest_interface_bitrate"),
+            get("medium_path_timeout"),
+            get("active_link_count"),
+            get("blackholed_identities"),
+            get_with("next_hop", "destination_hash", &dest),
+            get_with("next_hop_if_name", "destination_hash", &dest),
+            get_with("first_hop_timeout", "destination_hash", &dest),
+            get_with("packet_rssi", "packet_hash", &packet),
+            get_with("packet_snr", "packet_hash", &packet),
+            get_with("packet_q", "packet_hash", &packet),
+            get_with("is_blackholed", "identity_hash", &ident),
+        ];
+        v.push((
+            "path_table",
+            pickle_dict(vec![
+                (pickle_str_key("get"), pickle_str("path_table")),
+                (pickle_str_key("max_hops"), pickle_int(128)),
+            ]),
+        ));
+        for drop_verb in ["path", "all_via"] {
+            v.push((
+                "drop",
+                pickle_dict(vec![
+                    (pickle_str_key("drop"), pickle_str(drop_verb)),
+                    (pickle_str_key("destination_hash"), pickle_bytes(&dest)),
+                ]),
+            ));
+        }
+        v.push((
+            "drop announce_queues",
+            pickle_dict(vec![(
+                pickle_str_key("drop"),
+                pickle_str("announce_queues"),
+            )]),
+        ));
+        v.push((
+            "blackhole_identity",
+            pickle_dict(vec![
+                (pickle_str_key("blackhole_identity"), pickle_bytes(&ident)),
+                (pickle_str_key("until"), pickle_float(1_800_000_000.0)),
+                // The one free-length field in the whole vocabulary; a
+                // plausible long human reason, not a bound.
+                (
+                    pickle_str_key("reason"),
+                    pickle_str(
+                        "repeated invalid announces from this identity, blackholed by operator",
+                    ),
+                ),
+            ]),
+        ));
+        v.push((
+            "unblackhole_identity",
+            pickle_dict(vec![(
+                pickle_str_key("unblackhole_identity"),
+                pickle_bytes(&ident),
+            )]),
+        ));
+        for op in ["used", "retain", "unretain"] {
+            v.push((
+                "destination_data",
+                pickle_dict(vec![
+                    (pickle_str_key("destination_data"), pickle_str(op)),
+                    (pickle_str_key("destination_hash"), pickle_bytes(&dest)),
+                ]),
+            ));
+        }
+        for op in ["retain", "unretain"] {
+            v.push((
+                "identity_data",
+                pickle_dict(vec![
+                    (pickle_str_key("identity_data"), pickle_str(op)),
+                    (pickle_str_key("identity_hash"), pickle_bytes(&ident)),
+                ]),
+            ));
+        }
+        v
+    }
+
+    /// Sizes the RPC read ceiling from the traffic it has to admit rather than
+    /// from a round number: every request in the vocabulary, in both codecs,
+    /// measured against `MAX_REQUEST_LEN`. A ceiling a legitimate `lnstatus`
+    /// or `rncp` call trips would be a worse bug than the unbounded
+    /// allocation it replaces, so this stays a test and not a one-off
+    /// measurement.
+    #[test]
+    fn rpc_request_vocabulary_fits_under_the_ceiling() {
+        use super::super::connection::MAX_REQUEST_LEN;
+
+        let mut largest = (0usize, String::new());
+        for (name, dict) in request_vocabulary() {
+            let pickled = serde_pickle::value_to_vec(&dict, Default::default()).unwrap();
+            let packed = encode_request_msgpack(&dict).unwrap();
+            // Positive control: a dict the dispatcher rejects is not part of
+            // the vocabulary, and measuring it would prove nothing.
+            parse_request(&pickled).unwrap_or_else(|e| panic!("{name} must parse as pickle: {e}"));
+            parse_request(&packed).unwrap_or_else(|e| panic!("{name} must parse as msgpack: {e}"));
+            for (codec, bytes) in [("pickle", &pickled), ("msgpack", &packed)] {
+                assert!(
+                    bytes.len() < MAX_REQUEST_LEN,
+                    "{name} ({codec}) is {} bytes, ceiling is {MAX_REQUEST_LEN}",
+                    bytes.len()
+                );
+                if bytes.len() > largest.0 {
+                    largest = (bytes.len(), format!("{name} ({codec})"));
+                }
+            }
+        }
+        println!(
+            "largest RPC request: {} bytes -- {} (ceiling {MAX_REQUEST_LEN})",
+            largest.0, largest.1
+        );
+        // The vocabulary carries one variable-length field (the blackhole
+        // reason) and nothing else that scales with node state, so the
+        // measured maximum stays a small multiple of a hash. Pinning it two
+        // orders of magnitude under the ceiling is what makes the headroom a
+        // fact rather than a hope.
+        assert!(
+            largest.0 < MAX_REQUEST_LEN / 100,
+            "largest request {} bytes has less than 100x headroom",
+            largest.0
+        );
+    }
+
+    /// What the response ceiling is denominated in: one `path_table` row, the
+    /// unit responses grow by. `MAX_RESPONSE_LEN / this` is the row count the
+    /// client can still read.
+    #[test]
+    fn a_path_table_row_costs_about_a_hundred_bytes() {
+        use super::super::connection::MAX_RESPONSE_LEN;
+
+        let row = pickle_dict(vec![
+            (pickle_str_key("hash"), pickle_bytes(&[0xABu8; 16])),
+            (pickle_str_key("timestamp"), pickle_float(1_800_000_000.0)),
+            (pickle_str_key("via"), pickle_bytes(&[0xCDu8; 16])),
+            (pickle_str_key("hops"), pickle_int(3)),
+            (pickle_str_key("expires"), pickle_float(1_800_043_200.0)),
+            (
+                pickle_str_key("interface"),
+                pickle_str("RNodeInterface[lora0]"),
+            ),
+            (
+                pickle_str_key("announce_emitted"),
+                pickle_int(1_800_000_000),
+            ),
+        ]);
+        let encoded = encode_request_msgpack(&row).unwrap();
+        println!(
+            "path_table row: {} bytes -- response ceiling admits ~{} rows",
+            encoded.len(),
+            MAX_RESPONSE_LEN / encoded.len()
+        );
+        assert!(
+            MAX_RESPONSE_LEN / encoded.len() > 500_000,
+            "response ceiling admits only {} path rows",
+            MAX_RESPONSE_LEN / encoded.len()
+        );
+    }
+
     fn msgpack_get_request(command: &str) -> Vec<u8> {
         let v = rmpv::Value::Map(vec![(rmpv::Value::from("get"), rmpv::Value::from(command))]);
         let mut buf = Vec::new();

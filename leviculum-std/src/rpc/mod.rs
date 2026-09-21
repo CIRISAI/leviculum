@@ -38,7 +38,7 @@ use tokio::net::UnixStream as RpcStream;
 use crate::driver::{AutoPeerCount, StdNodeCore};
 use crate::interfaces::inventory::SharedInventory;
 use crate::interfaces::InterfaceStatsMap;
-use connection::{read_message, server_handshake, write_message};
+use connection::{read_message, read_message_bounded, server_handshake, write_message};
 use error::RpcError;
 use handlers::handle_request;
 use pickle::parse_request;
@@ -259,7 +259,12 @@ pub(crate) async fn rpc_client_call(
     let exchange = async {
         connection::client_handshake(&mut stream, authkey).await?;
         write_message(&mut stream, &request_bytes).await?;
-        let response_bytes = read_message(&mut stream).await?;
+        // A response is not a request: `path_table`/`transport_tables` grow
+        // with the daemon's tables, so this read gets the response ceiling.
+        // It is reached only after the handshake above has authenticated the
+        // daemon, and the handshake itself reads through the request ceiling.
+        let response_bytes =
+            read_message_bounded(&mut stream, connection::MAX_RESPONSE_LEN).await?;
         let response = pickle::decode_response_msgpack(&response_bytes)?;
         Ok::<_, RpcError>(response)
     };
