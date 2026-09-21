@@ -1279,6 +1279,7 @@ mod tests {
         // Every table is named even when empty, so a reader can tell an empty
         // table from a daemon that cannot answer.
         for key in [
+            "collections",
             "path_table",
             "reverse_table",
             "link_table",
@@ -1292,6 +1293,26 @@ mod tests {
                 "{key} must be present as an array: {json}"
             );
         }
+
+        // The collection census as a JSON reader sees it: a count per
+        // collection, the dedup cache as its two generations, and a ceiling
+        // that is a number where one is enforced and `null` where none is —
+        // `null`, not 0, which would read as "full".
+        let collections = json["collections"].as_array().unwrap();
+        let row = |name: &str| {
+            collections
+                .iter()
+                .find(|c| c["name"] == serde_json::json!(name))
+                .unwrap_or_else(|| panic!("{name} must be counted: {collections:?}"))
+        };
+        assert_eq!(row("path_table")["entries"], serde_json::json!(1));
+        assert_eq!(row("path_table")["capacity"], serde_json::Value::Null);
+        assert_eq!(row("packet_cache")["entries"], serde_json::json!(0));
+        assert_eq!(row("packet_cache_prev")["entries"], serde_json::json!(0));
+        assert!(
+            row("packet_cache")["capacity"].as_i64().unwrap() > 0,
+            "a rotating cache reports the generation ceiling it rotates at"
+        );
 
         let paths = json["path_table"].as_array().unwrap();
         assert_eq!(paths.len(), 1, "one seeded path: {paths:?}");

@@ -36,7 +36,7 @@ Options:
   -j, --json
           output in JSON format
       --tables
-          add the transport's internal tables to the JSON output (requires -j)
+          add the transport's internal tables and collection sizes to the JSON output (requires -j)
   -R <REMOTE>
           transport identity hash of remote instance to get status from
   -i <IDENTITY>
@@ -132,7 +132,8 @@ lnstatus -j
 ### The transport's tables
 
 `--tables` adds one key, `transport_tables`, to that JSON object. It carries
-the tables the transport maintains — `path_table`, `reverse_table`,
+the tables the transport maintains and the size of everything the storage
+holds — `path_table`, `reverse_table`,
 `link_table` (relayed links), `announce_table`, `announce_cache`, `tunnels`,
 and `local_links` (links this node terminates) — so a test can assert on the
 route a packet will take instead of inferring it from log lines:
@@ -140,6 +141,16 @@ route a packet will take instead of inferring it from log lines:
 ```sh
 lnstatus -j --tables
 ```
+
+Beside the tables it carries `collections`: one row per collection the
+daemon's storage holds, with `name`, `entries` and `capacity` (`null` where
+the collection has no configured ceiling). It covers all of them, not just
+the seven dumped above — including the packet dedup cache, which is the
+largest structure in the daemon and appears as its two generations
+`packet_cache` and `packet_cache_prev` rather than as a sum, because a
+rotation frees one generation whole and a sum does not move when it happens.
+That is how a resident set that steps up and falls back gets attributed to a
+structure instead of guessed at.
 
 `rnstatus` has no counterpart, so the flag requires `-j` and never changes what
 a reference flag prints. `lnstatus -j` on its own is exactly what it was.

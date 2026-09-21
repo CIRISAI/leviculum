@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lnstatus -j --tables` now reports the size of **every** collection the
+  daemon's storage holds, not just the seven tables whose rows it dumps, under
+  a new `collections` key: one row per collection with `name`, `entries` and
+  `capacity` (`null` where the collection has no configured ceiling). Thirteen
+  collections had no counter in any RPC, among them the packet dedup cache,
+  which is the largest structure in the daemon and the only one that frees an
+  entire generation in one step — so a resident set that steps up and falls
+  back in 100 MB blocks could not be attributed to a structure at all. The
+  dedup cache is reported as its two generations separately rather than as a
+  sum, because the rotation is the event worth seeing and a sum is flat across
+  it. Counts are `len()` throughout, O(1), so the census costs nothing on a
+  status call. Reporting only: no ceiling was added or changed (Codeberg #174,
+  input for #421). A `Storage` implementation must now state its own inventory
+  (`Storage::collection_counts`), and a test in each storage module binds that
+  list to the struct's fields, so a collection added without a counter fails a
+  test instead of going unreported — which is how `known_dest_use` had been
+  missing from the diagnostic dump, now also fixed, along with the daemon-only
+  `known_dest_entries` map.
 - `Destination::set_default_app_data` / `clear_default_app_data`: app data an
   application parks on a destination once, which every announce the stack
   generates for it carries unless the caller passes explicit app data. The

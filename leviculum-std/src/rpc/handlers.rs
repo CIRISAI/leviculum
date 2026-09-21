@@ -1239,6 +1239,10 @@ fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) ->
         .collect();
 
     pickle_dict(vec![
+        (
+            pickle_str_key("collections"),
+            pickle_list(build_collection_counts(core)),
+        ),
         (pickle_str_key("path_table"), pickle_list(path_table)),
         (pickle_str_key("reverse_table"), pickle_list(reverse_table)),
         (pickle_str_key("link_table"), pickle_list(link_table)),
@@ -1253,6 +1257,58 @@ fn build_transport_tables(core: &StdNodeCore, start_time: std::time::Instant) ->
         (pickle_str_key("tunnels"), pickle_list(tunnels)),
         (pickle_str_key("local_links"), build_link_table(core)),
     ])
+}
+
+// The size of every collection the storage holds, not just the seven whose
+// rows are dumped above.
+//
+// The dump answers "what is in the tables"; this answers "how big is
+// everything", which is a different question and until now had no answer at
+// all. Thirteen of the storage's twenty collections appeared nowhere in any
+// RPC — including the packet dedup cache, which is the largest structure in
+// the daemon by an order of magnitude and the only one that frees an entire
+// generation in one step. A resident set that steps down by 100 MB cannot be
+// attributed to a structure whose size the daemon will not state, and
+// attribution is what separates "costs too much by design" from "leaks".
+//
+// Shape, and why:
+//
+//   * One row per collection, `{name, entries, capacity}`, in the storage's
+//     own field order. `name` IS the struct field name, so a row can be read
+//     against the source without a translation table; a test in each storage
+//     module binds the two.
+//   * `capacity` is the ceiling the storage already enforces, or None where
+//     it enforces none. A count alone does not answer the operator's actual
+//     question, which is not "how many" but "how close to the limit". A None
+//     is a real answer: that collection is bounded by expiry only.
+//   * The two dedup generations are separate rows, never a sum. The rotation
+//     — one generation freed whole — is the event worth seeing, and a sum is
+//     flat across exactly that event.
+//
+// Cost: every count is `len()`, O(1), so this adds no meaningful work to a
+// status call. The one walk is over the local-client map's inner sets, which
+// is O(number of local interfaces).
+//
+// Reporting only: nothing here enforces a ceiling, and no ceiling changed to
+// add it (Codeberg #421 decides those, and needs these numbers first).
+fn build_collection_counts(core: &StdNodeCore) -> Vec<Value> {
+    use leviculum_core::traits::Storage as _;
+    core.storage()
+        .collection_counts()
+        .into_iter()
+        .map(|c| {
+            pickle_dict(vec![
+                (pickle_str_key("name"), pickle_str(c.name)),
+                (pickle_str_key("entries"), pickle_int(c.entries as i64)),
+                (
+                    pickle_str_key("capacity"),
+                    c.capacity
+                        .map(|cap| pickle_int(cap as i64))
+                        .unwrap_or_else(pickle_none),
+                ),
+            ])
+        })
+        .collect()
 }
 
 // Identity listing (lnstatus --identities) — a Leviculum-only verb; see
@@ -3228,6 +3284,7 @@ mod tests {
         // Every table is named, including the ones that are empty here. An
         // absent key must never be the way a reader learns a table is empty.
         for key in [
+            "collections",
             "path_table",
             "reverse_table",
             "link_table",
@@ -3344,6 +3401,92 @@ mod tests {
             Value::Bool(true),
             "retaining a destination must be visible in the dump"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Codeberg #174: the collection census the dump carries. What is pinned
+    // here is that the daemon reports the size of EVERY collection its
+    // storage holds — not the seven whose rows it dumps — that the dedup
+    // cache appears as its two generations and never as a sum, and that a
+    // ceiling travels with the count where one exists.
+    //
+    // The dedup rows are the point. They come from the daemon's own
+    // `FileStorage` HashSets; a census that delegated them to the inner
+    // `MemoryStorage` would report 0 here while five hashes are held.
+    #[test]
+    fn transport_tables_count_every_collection_including_both_dedup_generations() {
+        use crate::clock::SystemClock;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::traits::Storage as _;
+        use std::collections::BTreeMap;
+
+        let tmp = std::env::temp_dir().join(format!("rpc-tt-counts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        for i in 0..5u8 {
+            core.storage_mut().add_packet_hash([i; 32]);
+        }
+
+        let Value::Dict(top) = build_transport_tables(&core, std::time::Instant::now()) else {
+            panic!("transport_tables must be a dict")
+        };
+        let Some(Value::List(rows)) = top.get(&HashableValue::String("collections".into())) else {
+            panic!("collections must be a list")
+        };
+        let by_name: BTreeMap<String, BTreeMap<HashableValue, Value>> = rows
+            .iter()
+            .map(|r| match r {
+                Value::Dict(d) => match d.get(&HashableValue::String("name".into())) {
+                    Some(Value::String(n)) => (n.clone(), d.clone()),
+                    other => panic!("every row needs a string name, got {other:?}"),
+                },
+                other => panic!("every collection row is a dict, got {other:?}"),
+            })
+            .collect();
+
+        // Every collection the storage holds is named, not just the dumped
+        // tables. The storage is the authority on its own inventory.
+        for row in core.storage().collection_counts() {
+            assert!(
+                by_name.contains_key(row.name),
+                "{} is held by the storage but missing from the dump, got {:?}",
+                row.name,
+                by_name.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            by_name.len() > 7,
+            "the census must cover more than the dumped tables, got {:?}",
+            by_name.keys().collect::<Vec<_>>()
+        );
+
+        let get = |name: &str, key: &str| -> Value {
+            by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be reported"))
+                .get(&HashableValue::String(key.into()))
+                .unwrap_or_else(|| panic!("{name} must carry {key}"))
+                .clone()
+        };
+
+        // Two generations, separately: the sum would have been 5 either way,
+        // the split says which generation holds them.
+        assert_eq!(get("packet_cache", "entries"), Value::I64(5));
+        assert_eq!(get("packet_cache_prev", "entries"), Value::I64(0));
+
+        // A ceiling where one is enforced, an explicit None where none is.
+        assert_eq!(
+            get("packet_cache", "capacity"),
+            Value::I64(crate::storage::FILE_STORAGE_PACKET_HASH_CAP as i64 / 2)
+        );
+        assert_eq!(get("path_table", "capacity"), Value::None);
+        assert_eq!(get("path_table", "entries"), Value::I64(0));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -3480,6 +3623,7 @@ mod tests {
                 panic!("{codec:?}: transport_tables must decode to a dict")
             };
             for key in [
+                "collections",
                 "path_table",
                 "reverse_table",
                 "link_table",
@@ -3496,6 +3640,26 @@ mod tests {
                     "{codec:?}: {key} must survive as a list"
                 );
             }
+            // A None capacity has to survive the transcode as a None, not as
+            // a zero: zero would read as "ceiling reached".
+            let Some(Value::List(rows)) = d.get(&HashableValue::String("collections".into()))
+            else {
+                panic!("{codec:?}: collections must be a list")
+            };
+            let unbounded = rows
+                .iter()
+                .filter_map(|r| match r {
+                    Value::Dict(row) => row
+                        .get(&HashableValue::String("capacity".into()))
+                        .map(|c| matches!(c, Value::None)),
+                    _ => None,
+                })
+                .filter(|is_none| *is_none)
+                .count();
+            assert!(
+                unbounded > 0,
+                "{codec:?}: a collection with no ceiling must decode as None"
+            );
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }

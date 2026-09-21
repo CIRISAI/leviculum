@@ -55,8 +55,9 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 :   Output in JSON format.
 
 **--tables**
-:   Add the transport's internal tables to the JSON output as a
-    `transport_tables` object. Requires **-j**; not available with **-R** or
+:   Add the transport's internal tables, and the entry count of every
+    collection its storage holds, to the JSON output as a `transport_tables`
+    object. Requires **-j**; not available with **-R** or
     **-d**/**-D**. Leviculum extension — `rnstatus` has no counterpart, and a
     daemon that does not implement it (a Python `rnsd`, or an older `lnsd`)
     causes the key to be omitted, with a note on stderr and exit status 0.
@@ -171,7 +172,19 @@ With **--tables**, the **-j** object gains one additional key,
 `transport_tables`. Nothing else about the output changes, so anything that
 parses `lnstatus -j` today keeps working.
 
-The object holds one key per table, each a list of rows:
+The object holds one key per table, each a list of rows, plus
+`collections`:
+
+`collections`
+:   How large every collection the daemon's storage holds currently is — not
+    only the tables dumped below. One row per collection: `name` (the field
+    name in the storage, so a row can be read against the source), `entries`
+    (live count) and `capacity` (the ceiling the daemon enforces, or `null`
+    where it enforces none). The packet dedup cache appears as its two
+    generations, `packet_cache` and `packet_cache_prev`, never as a sum: a
+    rotation frees one generation whole, and a sum is flat across exactly
+    that event. A `null` capacity is an answer, not a gap — that collection
+    is bounded by expiry alone.
 
 `path_table`
 :   Destinations this node knows a route to. Keys `hash`, `timestamp`, `via`,
@@ -224,6 +237,19 @@ keys:
     announces for one destination by this value, so it is a claim about a
     remote machine's time, never about ours. `0` means no announce blob is
     stored for the row.
+
+### What a count is for
+
+`entries` without `capacity` does not say whether a node is near its limit,
+which is the question an operator has, so the two travel together. Both are
+reported, never enforced here: reading this changes no ceiling and adds none.
+
+Use it to attribute memory. Multiply a count by what one entry of that
+collection costs and the products either account for the daemon's resident
+set or they do not — the difference is what separates a design that costs too
+much from a leak. Before this existed, seven tables of the twenty collections
+were visible, and the largest structure in the daemon, the dedup cache, was
+not among them.
 
 ### Absent is not empty
 

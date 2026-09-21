@@ -80,7 +80,7 @@ struct Args {
     #[arg(short = 'j', long = "json", default_value_t = false)]
     json: bool,
 
-    /// add the transport's internal tables to the JSON output (requires -j)
+    /// add the transport's internal tables and collection sizes to the JSON output (requires -j)
     ///
     /// Additive Leviculum extension (Codeberg #174): `rnstatus` has no
     /// counterpart, so the flag is gated on `-j` rather than changing what any
