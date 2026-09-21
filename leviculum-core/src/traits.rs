@@ -584,6 +584,15 @@ pub trait Storage {
     /// Set the last path request timestamp for a destination
     fn set_path_request_time(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], time_ms: u64);
 
+    /// Drop path-request timestamps older than `max_age_ms`.
+    ///
+    /// The map is a throttle and nothing else: every reader compares
+    /// `now - stored` against `PATH_REQUEST_MIN_INTERVAL_MS`, so an entry
+    /// past that interval already answers exactly as a missing one does.
+    /// Without this it had no removal path at all and grew with every
+    /// destination the node ever asked about.
+    fn expire_path_requests(&mut self, now_ms: u64, max_age_ms: u64);
+
     /// Check if a path request tag is a duplicate. If new, records it and returns false.
     /// If already seen, returns true.
     fn check_path_request_tag(&mut self, tag: &[u8; 32]) -> bool;
@@ -936,6 +945,7 @@ impl Storage for NoStorage {
         None
     }
     fn set_path_request_time(&mut self, _dest_hash: [u8; TRUNCATED_HASHBYTES], _time_ms: u64) {}
+    fn expire_path_requests(&mut self, _now_ms: u64, _max_age_ms: u64) {}
     fn check_path_request_tag(&mut self, _tag: &[u8; 32]) -> bool {
         false
     }

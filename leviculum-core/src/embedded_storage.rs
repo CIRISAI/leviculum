@@ -986,6 +986,22 @@ impl Storage for EmbeddedStorage {
         self.path_requests.insert(dest_hash, time_ms);
     }
 
+    fn expire_path_requests(&mut self, now_ms: u64, max_age_ms: u64) {
+        // The map is capacity-bounded here (OrderedMap evicts the oldest
+        // when full), so this is not a leak guard on the firmware — it
+        // frees the slot a live destination would otherwise have to
+        // evict something for.
+        let stale: heapless::Vec<[u8; TRUNCATED_HASHBYTES], 8> = self
+            .path_requests
+            .iter()
+            .filter(|(_, last_ms)| now_ms.saturating_sub(**last_ms) >= max_age_ms)
+            .map(|(hash, _)| *hash)
+            .collect();
+        for hash in &stale {
+            self.path_requests.remove(hash);
+        }
+    }
+
     fn check_path_request_tag(&mut self, tag: &[u8; 32]) -> bool {
         if self.path_request_tag_set.contains(tag) {
             return true;

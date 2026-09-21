@@ -754,6 +754,9 @@ impl leviculum_core::traits::Storage for Storage {
     fn set_path_request_time(&mut self, dest_hash: [u8; TRUNCATED_HASHBYTES], time_ms: u64) {
         self.inner.set_path_request_time(dest_hash, time_ms)
     }
+    fn expire_path_requests(&mut self, now_ms: u64, max_age_ms: u64) {
+        self.inner.expire_path_requests(now_ms, max_age_ms)
+    }
     fn check_path_request_tag(&mut self, tag: &[u8; 32]) -> bool {
         self.inner.check_path_request_tag(tag)
     }

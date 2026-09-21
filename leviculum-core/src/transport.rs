@@ -10074,6 +10074,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // Expire discovery path requests past their 15s timeout.
         self.storage.expire_discovery_path_requests(now);
 
+        // Drop path-request throttle records past the interval they
+        // throttle. Every reader of the map (`request_path`,
+        // `reoriginate_toward_peer_links`, `clean_link_table`) compares
+        // against exactly this constant, so a record older than it is
+        // already indistinguishable from a missing one — this is the
+        // map's only removal path.
+        self.storage
+            .expire_path_requests(now, PATH_REQUEST_MIN_INTERVAL_MS);
+
         // Preserve announce_cache entries for both daemon-owned destinations
         // AND surviving local client destinations (Block C: reconnect
         // needs cached bytes to respond to path requests during client downtime).

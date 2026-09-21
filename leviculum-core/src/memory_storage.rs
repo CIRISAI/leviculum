@@ -707,6 +707,11 @@ impl Storage for MemoryStorage {
         self.path_requests.insert(dest_hash, time_ms);
     }
 
+    fn expire_path_requests(&mut self, now_ms: u64, max_age_ms: u64) {
+        self.path_requests
+            .retain(|_, last_ms| now_ms.saturating_sub(*last_ms) < max_age_ms);
+    }
+
     fn check_path_request_tag(&mut self, tag: &[u8; 32]) -> bool {
         if self.path_request_tag_set.contains(tag) {
             return true;
