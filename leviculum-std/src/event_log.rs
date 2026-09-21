@@ -153,11 +153,27 @@ pub struct EventSchema {
     pub required_keys: &'static [&'static str],
 }
 
-/// Production catalogue — one entry per converted call site in
-/// `leviculum-core/src/transport.rs`.  Adding entries without a
-/// live emitter is the "stale catalogue" failure mode (Variant 3
-/// can't detect it), so every entry here MUST have a corresponding
-/// `tracing::debug!(event = "FOO", ...)` in production code.
+/// Production catalogue — every structured event name any workspace
+/// member emits, with the keys that MUST be present on every emission.
+///
+/// Both directions of the correspondence are rules, and only one of
+/// them is checked:
+///
+/// - **Every emitted name appears here.**  The `#[cfg(test)]` module
+///   `crate::event_catalog_completeness` enumerates the `tracing::*!(event =
+///   "...")` sites of every workspace member's `src/` and fails on a
+///   name this list is missing.  It has to be a check and not a habit:
+///   the layer validates an event's SHAPE only for a name it finds
+///   here, so an undeclared event can quietly lose a required field
+///   forever.
+/// - **Every entry here has a live emitter.**  Adding one without is
+///   the "stale catalogue" failure mode (Variant 3 can't detect it),
+///   so every entry MUST have a corresponding `tracing::debug!(event
+///   = "FOO", ...)` in production code.
+///
+/// A name may appear in several entries when its emitters use
+/// per-reason shapes (Codeberg #320); a record passes if any one shape
+/// is fully present.
 pub const EVENT_CATALOG: &[EventSchema] = &[
     // Per-packet journey contract (Periculum phase 6): PKT_RX / PKT_TX /
     // PKT_FORWARD / PKT_DROP / DEDUP_DROP live on the dedicated
@@ -575,6 +591,274 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "PN_SYNC",
         required_keys: &["peer", "dir", "transferred", "bytes", "result"],
+    },
+    EventSchema {
+        name: "PN_STORE",
+        required_keys: &["used", "limit", "count"],
+    },
+    EventSchema {
+        name: "PN_REJECT",
+        required_keys: &["reason", "via"],
+    },
+    EventSchema {
+        name: "PN_MAILBOX",
+        required_keys: &["src", "bytes"],
+    },
+    // ---------------------------------------------------------------
+    // Catalogue completeness sweep (2026-09-21).
+    //
+    // The miauhaus soak of 2026-09-18 (397 023 881 events) ended with a
+    // schema-health phase that mirrors this list, and named events it had
+    // seen emitted that were not declared here. Declaring them is not
+    // cosmetic: `on_event` validates the shape of an event only if the name
+    // is catalogued, so an undeclared event can lose a required field
+    // forever without a single EVENT_SCHEMA_VIOLATION. `LINK_ENTRY_SET` is
+    // the proof — 612 639 emissions in that log, and what caught its broken
+    // `next_hop` was the field-VALUE check, which runs regardless of this
+    // catalogue, not the schema check, which could not run at all.
+    //
+    // The soak could only name what that one deployment emits. The sweep
+    // below came from the tree instead: `src/event_catalog_completeness.rs`
+    // enumerates every `tracing::*!(event = "...")` site in every workspace
+    // member's `src/` and fails on any name missing here, so the next
+    // addition cannot slip past the same way.
+    //
+    // `required_keys` is the INTERSECTION of the keys a name's sites emit —
+    // the contract is "present on every emission". Where sites differ in a
+    // way worth checking, the name gets several entries (#320) and a record
+    // passes if any shape is satisfied. Note the limit of that rule: a
+    // shorter shape dominates a longer one that extends it, so a second
+    // entry only earns its place when neither shape contains the other.
+    // ---------------------------------------------------------------
+
+    // Tunnels (Codeberg #64), `leviculum-core/src/transport.rs`. A tunnel is
+    // keyed by `tunnel` (the tunnel id) and lives on one interface at a
+    // time; SYNTHESIZE_SENT is the initiator side, ESTABLISHED/REAPPEARED/
+    // VOIDED the responder's lifecycle, and PATH_ASSOCIATED/PATH_RESTORED
+    // the path bookkeeping that makes a tunnel worth having.
+    EventSchema {
+        name: "TUNNEL_SYNTHESIZE_SENT",
+        required_keys: &["tunnel", "iface"],
+    },
+    EventSchema {
+        name: "TUNNEL_ESTABLISHED",
+        required_keys: &["tunnel", "iface"],
+    },
+    EventSchema {
+        name: "TUNNEL_REAPPEARED",
+        required_keys: &["tunnel", "iface", "paths"],
+    },
+    EventSchema {
+        name: "TUNNEL_VOIDED",
+        required_keys: &["tunnel", "iface"],
+    },
+    EventSchema {
+        name: "TUNNEL_PATH_ASSOCIATED",
+        required_keys: &["dst", "tunnel"],
+    },
+    EventSchema {
+        name: "PATH_RESTORED",
+        required_keys: &["dst", "hops", "iface", "next_hop", "source"],
+    },
+    // The relay side of a link request: the hop count frozen into the link
+    // entry at forward time. `recv` and `next_hop` are INTERFACE NAMES, not
+    // hashes -- the soak's 252 669 field violations on `next_hop` were
+    // interface names carrying whitespace, which is why every emitter wraps
+    // a name in `Scalar`/`iface_name` before it reaches a field.
+    EventSchema {
+        name: "LINK_ENTRY_SET",
+        required_keys: &["dst", "remaining_hops", "packet_hops", "recv", "next_hop"],
+    },
+    // Remaining `leviculum-core` transport events.
+    EventSchema {
+        name: "ANN_SLOW",
+        required_keys: &["ms", "iface", "from_held"],
+    },
+    EventSchema {
+        name: "PATH_SOLICIT",
+        required_keys: &["dst", "iface_in", "reason"],
+    },
+    EventSchema {
+        name: "PKT_LOCAL_DROP",
+        required_keys: &[
+            "dst",
+            "iface",
+            "type",
+            "hops",
+            "transport_id",
+            "expected",
+            "reason",
+        ],
+    },
+    EventSchema {
+        name: "PR_REORIG",
+        required_keys: &["dst", "iface_in", "iface_out", "peers"],
+    },
+    // The management destination's own announce (`node/mod.rs`); `iface` is
+    // the literal `all`, since it goes out on every interface at once.
+    EventSchema {
+        name: "MGMT_ANN_TX",
+        required_keys: &["dst", "iface"],
+    },
+    // Resource transfer (`leviculum-core/src/resource/`, and the two link
+    // guards in `node/link_management.rs`). `rh` is the first 4 bytes of the
+    // resource hash, the correlator across a whole transfer.
+    EventSchema {
+        name: "RESOURCE_TX_STATE",
+        // `adv_retries` rides along on the advertisement-retry sites only.
+        required_keys: &["rh", "status", "retries"],
+    },
+    EventSchema {
+        name: "RESOURCE_REQ_RX",
+        required_keys: &[
+            "rh",
+            "n_req",
+            "matched",
+            "first_req_idx",
+            "distinct_sent",
+            "num_parts",
+            "status",
+        ],
+    },
+    EventSchema {
+        name: "RESOURCE_REQ_NO_MATCH",
+        required_keys: &["rh", "n_req", "search_start", "search_end"],
+    },
+    EventSchema {
+        name: "RESOURCE_REQ_ERR",
+        // Six sites, one per `reason`; only `rh` and `reason` are common to
+        // all of them, the rest (`len`, `req_rh`, `idx`) are per-reason
+        // detail. Same shape of contract as PATH_LOOKUP above.
+        required_keys: &["rh", "reason"],
+    },
+    EventSchema {
+        name: "RESOURCE_REQ_DROP",
+        required_keys: &["reason", "link", "state"],
+    },
+    EventSchema {
+        name: "RESOURCE_PART_RX",
+        required_keys: &["rh", "idx", "outstanding", "consecutive"],
+    },
+    // Two genuinely disjoint shapes, so both are declared: the
+    // `not_transferring` refusal reports the resource's `status`, the
+    // `no_matching_hash` refusal reports the part hash and the window it
+    // searched. Neither contains the other.
+    EventSchema {
+        name: "RESOURCE_PART_REJECT",
+        required_keys: &["rh", "reason", "status"],
+    },
+    EventSchema {
+        name: "RESOURCE_PART_REJECT",
+        required_keys: &["rh", "reason", "mh", "consecutive", "win_start", "win_end"],
+    },
+    EventSchema {
+        name: "RESOURCE_PART_DROP",
+        required_keys: &["reason", "link", "state"],
+    },
+    // The receive window's per-round sample. NOTE: this site emits its own
+    // `t` field, and the layer appends the relative timestamp as `t=` too,
+    // so the line carries two. A line's own stamp is its LAST `t=` (the rule
+    // `merge_event_logs` already applies), so the parsers agree -- but the
+    // round's elapsed milliseconds are shadowed and only the second `t` is
+    // readable. Declared as emitted; renaming the field is a wire change for
+    // whoever greps these lines.
+    EventSchema {
+        name: "RESOURCE_RW",
+        required_keys: &["rh", "round", "window", "wmax", "rate", "outst", "t"],
+    },
+    // `leviculum-std` driver. ANNOUNCE_TX/ANNOUNCE_WITHHELD are the
+    // peer-up announce burst (distinct from the transport's ANN_TX, which
+    // is a rebroadcast of a stored announce); CORE_STALL and the two
+    // CORE_PROCESSOR_* lines are the #198/#418 core-lock observability.
+    EventSchema {
+        name: "ANNOUNCE_TX",
+        required_keys: &["reason", "peer", "iface", "count"],
+    },
+    EventSchema {
+        name: "ANNOUNCE_WITHHELD",
+        required_keys: &["reason", "peer", "iface"],
+    },
+    EventSchema {
+        name: "CORE_STALL",
+        required_keys: &["ms"],
+    },
+    EventSchema {
+        name: "CORE_PROCESSOR_OVER_BUDGET",
+        required_keys: &["hook", "elapsed_us", "budget_us", "events"],
+    },
+    EventSchema {
+        name: "CORE_PROCESSOR_PANICKED",
+        required_keys: &["hook"],
+    },
+    // The self-deadlock tripwire (`sync_ext.rs`, Codeberg #198).
+    // LOCK_DEPTH_OVERFLOW says the tripwire went inactive on a thread;
+    // REENTRANT_LOCK is the tripwire firing, emitted immediately before the
+    // panic so the line survives whatever the panic machinery does next.
+    EventSchema {
+        name: "LOCK_DEPTH_OVERFLOW",
+        required_keys: &["max_depth", "tripwire"],
+    },
+    EventSchema {
+        name: "REENTRANT_LOCK",
+        required_keys: &["mutex", "held_depth"],
+    },
+    // The RNode interface's vport teardown (#316 family): one line per
+    // sub-interface whose queue was abandoned when its incoming side closed.
+    EventSchema {
+        name: "RNODE_VPORT_DEREGISTERED",
+        required_keys: &["iface", "vport_iface", "vport", "frames", "reason"],
+    },
+    // Columba BLE interface events the catalogue had not caught up with.
+    // BLE_ADV_GATE's `state=off` branch also carries `reason`; it cannot be
+    // required, because the `state=on` branch has no reason to give and a
+    // shorter shape dominates (see the note at the head of this sweep).
+    EventSchema {
+        name: "BLE_ADV_GATE",
+        required_keys: &["iface", "state"],
+    },
+    EventSchema {
+        name: "BLE_DIAL_NOT_ALLOWED",
+        required_keys: &["iface", "addr", "hint", "listed"],
+    },
+    EventSchema {
+        name: "BLE_DIAL_QUEUE",
+        required_keys: &["iface", "depth", "wait_ms"],
+    },
+    EventSchema {
+        name: "BLE_PEER_UP",
+        required_keys: &["iface", "peer"],
+    },
+    EventSchema {
+        name: "BLE_PEER_LOST",
+        required_keys: &["iface", "peer"],
+    },
+    EventSchema {
+        name: "BLE_SCAN_FALLBACK",
+        required_keys: &["iface", "after_ms"],
+    },
+    EventSchema {
+        name: "BLE_SCAN_WINDOW",
+        required_keys: &["iface", "seen", "chosen", "rule"],
+    },
+    // Two disjoint shapes: the GATT-notify writer names the `link` it
+    // waited on, the BlueZ writer names the peer `addr`. Neither contains
+    // the other, so both are declared.
+    EventSchema {
+        name: "BLE_TX_GAP",
+        required_keys: &["iface", "link", "waited_ms"],
+    },
+    EventSchema {
+        name: "BLE_TX_GAP",
+        required_keys: &["iface", "addr", "waited_ms"],
+    },
+    // `leviculum-std/src/bin/event-log-helper.rs`, the fixture binary the
+    // multi-process event-log tests drive. It emits through the production
+    // subscriber like anything else, so it is declared like anything else:
+    // an "it is only a test helper" exception list is precisely the kind of
+    // hole that let five names go undeclared for months.
+    EventSchema {
+        name: "HELPER_TICK",
+        required_keys: &["i"],
     },
 ];
 

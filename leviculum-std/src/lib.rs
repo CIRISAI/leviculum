@@ -19,6 +19,15 @@ pub mod config;
 pub(crate) mod discovery;
 pub mod driver;
 pub mod error;
+/// `EVENT_CATALOG` completeness, checked against the tree.
+///
+/// A `#[cfg(test)]` module in `src/` and not an integration test under
+/// `tests/`, on purpose: the forge gate and `just fast` run
+/// `cargo test --workspace --lib`, so a check that lives in `tests/`
+/// would not run on the push path. A completeness check that five names
+/// already escaped needs to run where escapes happen.
+#[cfg(test)]
+mod event_catalog_completeness;
 pub mod event_log;
 pub mod file_identity_store;
 pub(crate) mod file_known_destinations_store;

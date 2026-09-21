@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EVENT_CATALOG` now declares every structured event name the workspace
+  emits, and a test holds it that way. Forty-one names were emitted but
+  undeclared, among them `LINK_ENTRY_SET`, the five `TUNNEL_*` events, the
+  nine `RESOURCE_*` transfer events and eight Columba BLE events. That is
+  not a cosmetic gap: the event-log layer validates an event's SHAPE only for
+  a name it finds in the catalogue, so an undeclared event can lose a required
+  field forever without a single `EVENT_SCHEMA_VIOLATION`. The miauhaus soak
+  of 2026-09-18 (397 023 881 events) proved it on `LINK_ENTRY_SET` — 612 639
+  emissions, 252 669 of them with a broken `next_hop`, and what caught the
+  field was the field-VALUE check, which runs regardless of the catalogue,
+  never the schema check, which could not run at all. The new
+  `#[cfg(test)] mod event_catalog_completeness` in `leviculum-std` walks the
+  `tracing::*!(event = "...")` sites of every workspace member's `src/` and
+  fails on any name the catalogue is missing, so the next one is caught the
+  day its call site is written rather than after two months of public mesh.
+  It runs under `cargo test --workspace --lib`, which is what `just fast` and
+  the forge gate run.
+
 - `lnstatus -j --tables` now reports the size of **every** collection the
   daemon's storage holds, not just the seven tables whose rows it dumps, under
   a new `collections` key: one row per collection with `name`, `entries` and
@@ -112,6 +130,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellation path passes a fresh `StampCancel::new()`.
 
 ### Fixed
+
+- Four structured-event call sites no longer pass a free-text message to the
+  tracing macro: `TUNNEL_PATH_ASSOCIATED`, `TUNNEL_REAPPEARED`,
+  `PATH_RESTORED` and `LOCK_DEPTH_OVERFLOW`. The prose rendered under a
+  `message` field whose spaces split the line for every token-based parser
+  (`jl`, `jldiff`, the periculum cells' awk); the miauhaus soak reported the
+  first of them as `EVENT_FIELD_VIOLATION event=TUNNEL_PATH_ASSOCIATED
+  field=message value_problem=whitespace`. The structured fields already
+  carried everything the sentences said, except on `LOCK_DEPTH_OVERFLOW`,
+  which now states it as `tripwire=inactive`. The same new completeness test
+  fails on any event site that passes a message argument, so the class is
+  closed rather than fixed one instance at a time.
 
 - `lnpnd` no longer stores a peer's whole inbound sync inside one core-processor
   hook. Every accepted message is one durable store append — write, `fsync`,

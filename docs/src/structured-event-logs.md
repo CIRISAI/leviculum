@@ -183,8 +183,14 @@ Two steps, both in the same commit:
    field-value validator fires (see below).  For Rust keywords
    like `type`, use the raw identifier `r#type`.
 
+   **No trailing message.**  `tracing::debug!(event = "FOO", a = 1,
+   "some prose")` renders the prose under a `message` field whose
+   spaces split the line for every token-based parser.  What the
+   sentence would have said belongs in a structured field or in a
+   comment at the call site.
+
 2. **Add a catalogue entry** in
-   `leviculum-std/src/test_support/event_log.rs`'s `EVENT_CATALOG`:
+   `leviculum-std/src/event_log.rs`'s `EVENT_CATALOG`:
 
    ```rust
    EventSchema {
@@ -193,16 +199,40 @@ Two steps, both in the same commit:
    },
    ```
 
-   `required_keys` should list every field the call site sets.
-   The subscriber checks that every catalogued event's emission
-   includes all required keys; missing keys produce a
-   `EVENT_SCHEMA_VIOLATION` line in the dumped buffer alongside
-   the original event.
+   `required_keys` is the INTERSECTION of the keys the name's call
+   sites set — the contract is "present on every emission".  Where
+   sites differ in a way worth checking, the name gets several
+   entries and a record passes if any one shape is fully present
+   (Codeberg #320); note that a shorter shape dominates a longer one
+   that merely extends it, so a second entry only earns its place
+   when neither shape contains the other.  The subscriber checks
+   that every catalogued event's emission satisfies some declared
+   shape; a record that satisfies none produces a
+   `EVENT_SCHEMA_VIOLATION` line in the dumped buffer alongside the
+   original event.
+
+Step 2 is not on the honour system.  `leviculum-std`'s
+`#[cfg(test)] mod event_catalog_completeness` walks the
+`tracing::*!(event = "...")` sites of every workspace member's `src/`
+and fails on a name `EVENT_CATALOG` is missing, and on a site that
+passes a message argument.  It runs under `cargo test --workspace
+--lib`, which is what `just fast` and the forge gate run.
+
+It exists because the honour system had already failed: the miauhaus
+soak of 2026-09-18 (397 023 881 events) found eight emitted names
+undeclared, `LINK_ENTRY_SET` among them at 612 639 emissions.  An
+undeclared name is not cosmetic — the layer validates a shape only for
+a name it finds in the catalogue, so an undeclared event can lose a
+required field forever and nothing says a word.  What caught
+`LINK_ENTRY_SET`'s broken `next_hop`, 252 669 times, was the
+field-VALUE check, which runs regardless of the catalogue.
 
 Catalogue entries without a live emitting site are explicitly
 discouraged: the runtime-validation layer can't detect them, so
 they silently rot.  Only add entries you have a corresponding
-emit for.
+emit for.  (That direction is still unchecked, and the catalogue
+carries entries whose emitter lives outside this workspace:
+`SILENCE_LNODE_ENTER`/`SILENCE_LNODE_EXIT` are periculum's.)
 
 ## Firmware-side events
 
