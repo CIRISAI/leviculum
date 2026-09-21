@@ -11,17 +11,17 @@
 //! by 1.92x, so a resident-to-data ratio computed from it is a ratio of a
 //! model and not of the node.
 //!
-//! [`live_bytes`] is not a model. It is the sum of what the allocator handed
-//! out minus what it took back, so `rss / live` is a fragmentation number
-//! and nothing else.
+//! [`crate::heap_accounting::live_bytes`] is not a model. It is the sum of
+//! what the allocator handed out minus what it took back, so `rss / live`
+//! is a fragmentation number and nothing else.
 //!
 //! # It does not change the allocator
 //!
 //! "Do not change the allocator" is a standing rule for the heap
-//! investigation and this obeys it: every call is forwarded to [`System`]
-//! with the layout it arrived with, so a binary carrying the shim runs the
-//! same musl mallocng, takes the same code paths and produces the same group
-//! layout as one without it. What it adds is two relaxed atomics per call —
+//! investigation and this obeys it: every call is forwarded to
+//! [`std::alloc::System`] with the layout it arrived with, so a binary
+//! carrying the shim runs the same musl mallocng, takes the same code paths
+//! and produces the same group layout as one without it. What it adds is two relaxed atomics per call —
 //! `heap-gap-bench --alloc-overhead` measures what that costs.
 //!
 //! # Users
