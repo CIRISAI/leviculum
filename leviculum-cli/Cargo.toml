@@ -48,6 +48,20 @@ path = "src/lntd.rs"
 name = "auto-crossmachine-test"
 path = "src/bin/auto_crossmachine_test.rs"
 
+# Off by default, and it has to stay that way: a node built without it is
+# byte-identical to one built before the feature existed (verified by
+# sha256 on the musl-static `lnsd`, 2026-09-21). With it, `lnsd` installs
+# `leviculum_std::heap_accounting::CountingAllocator` in front of the system
+# allocator and the SIGUSR1 dump gains a MEASURED live-bytes line beside the
+# modelled one — which is what a field node needs, because the modelled
+# figure over-reported live data by 1.92x at the heap bench's table shape and
+# a resident-to-data ratio computed from it is a ratio of a model.
+#
+#   cargo build --release -p leviculum-cli --bin lnsd --features heap-accounting
+[features]
+default = []
+heap-accounting = []
+
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = true }
 leviculum-std = { path = "../leviculum-std" }

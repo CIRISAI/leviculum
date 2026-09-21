@@ -15,6 +15,41 @@ use tracing::info;
 use leviculum_std::config::Config;
 use leviculum_std::Reticulum;
 
+/// Measured live heap, under the default-off `heap-accounting` feature.
+///
+/// Why a build flag and not a permanent fixture: the shim adds two relaxed
+/// atomics to every allocation, and a daemon that carries other people's
+/// traffic should pay that only when someone is asking the question. Why it
+/// exists at all: the dump's own total is modelled — flat multipliers per
+/// collection — and at the heap bench's table shape the model over-reported
+/// live data by 1.92x, so "resident is N times the data" computed from it is
+/// a statement about the model. This number is the allocator's own balance:
+/// bytes handed out minus bytes taken back.
+///
+/// The allocator is only counted, never replaced: every call is forwarded to
+/// `System` with the layout it arrived with, so a node built with this runs
+/// the same mallocng, takes the same paths and fragments the same way as one
+/// built without it.
+#[cfg(feature = "heap-accounting")]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
+    leviculum_std::heap_accounting::CountingAllocator;
+
+/// The line that rides beside the dump's `=== Total estimated: ... ===`, so
+/// the model and the measurement are read together and the model stays
+/// checkable (it is only knowable that it over-reports by 1.92x because both
+/// were printed).
+#[cfg(feature = "heap-accounting")]
+fn measured_live_line() -> String {
+    use leviculum_std::heap_accounting::{allocation_count, live_bytes, total_bytes};
+    format!(
+        "=== Measured live: {} bytes ({} allocations, {} bytes handed out) ===\n",
+        live_bytes(),
+        allocation_count(),
+        total_bytes(),
+    )
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "lnsd")]
 #[command(author, version = env!("LEVICULUM_VERSION"), about = "Reticulum network daemon")]
@@ -101,6 +136,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     leviculum_std::event_log::install_global_subscriber(&default_filter);
 
     info!("Starting lnsd v{}", env!("CARGO_PKG_VERSION"));
+    // Said at startup, because an operator reading a SIGUSR1 dump has to be
+    // able to tell which build produced it without diffing two binaries.
+    #[cfg(feature = "heap-accounting")]
+    info!("Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate");
     if args.service {
         info!("Service mode (-s): logging to stdout for systemd/journald capture");
     }
@@ -187,6 +226,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ = sigusr1.recv() => {
                     let dump = rns.diagnostic_dump();
                     eprint!("{}", dump);
+                    // Beside the dump and not inside it: the dump is
+                    // leviculum-std's and is printed by every build, this
+                    // line exists only in a build that can measure it.
+                    #[cfg(feature = "heap-accounting")]
+                    eprint!("{}", measured_live_line());
                 }
                 _ = sigusr2.recv() => {
                     let reached = leviculum_std::interfaces::request_firmware_reset();
