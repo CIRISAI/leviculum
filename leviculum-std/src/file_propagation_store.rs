@@ -359,6 +359,85 @@ impl PropagationStore for FilePropagationStore {
 mod tests {
     use super::*;
 
+    /// What one `append` costs, on a filesystem the caller names.
+    ///
+    /// The number matters to a caller that appends under a lock, so it is
+    /// measurable from the tree rather than quoted from a report
+    /// (`docs/src/concepts/core-lock-budget.md`, "A durable store append is
+    /// inside the budget too"). `#[ignore]`d: it is a measurement, and its
+    /// result is a property of the disk under it, which is why it prints
+    /// the directory it used and why the directory is the caller's to pick.
+    ///
+    /// ```text
+    /// LEVICULUM_APPEND_BENCH_DIR=/var/tmp \
+    ///   cargo test -p leviculum-std --lib append_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// The default is the platform temp directory, and on Linux that is
+    /// usually a tmpfs where `fsync` returns without touching a device —
+    /// which reads 60x cheaper and answers nothing. Point it at the disk
+    /// the store will live on.
+    ///
+    /// Coder host, ext4 on a virtio disk, 105 bodies of 288 bytes, debug
+    /// profile, six runs: **127-189 ms in total, 1.1-1.5 ms per append,
+    /// worst single append 6.4 ms**. The memory-store control on the same
+    /// bodies is **124 µs for all 105**, so what the file store reports is
+    /// the device and not the book-keeping. The same code against the
+    /// platform tmpfs reads 5.9 ms in total, 27 µs median — a measurement
+    /// of nothing, which is why the directory is an input.
+    #[test]
+    #[ignore = "a measurement, and a slow one on a real disk"]
+    fn append_cost() {
+        use std::time::Instant;
+
+        const MESSAGES: usize = 105;
+        let base = std::env::var("LEVICULUM_APPEND_BENCH_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let dir = tempfile::tempdir_in(&base).expect("a writable bench directory");
+        let mut store = FilePropagationStore::open(dir.path(), 50_000_000).expect("open");
+        let body = body_for(0x11, 288);
+        let mut each = Vec::with_capacity(MESSAGES);
+        let all = Instant::now();
+        for index in 0..MESSAGES {
+            let mut transient_id = [0u8; 32];
+            transient_id[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            let one = Instant::now();
+            store
+                .append(&transient_id, 1_789_000_000 + index as u64, 13, &body)
+                .expect("append");
+            each.push(one.elapsed().as_micros() as u64);
+        }
+        let total = all.elapsed().as_micros() as u64;
+        each.sort_unstable();
+        println!(
+            "APPEND dir={} n={MESSAGES} bytes={} total_us={total} min_us={} median_us={} max_us={}",
+            dir.path().display(),
+            body.len(),
+            each[0],
+            each[MESSAGES / 2],
+            each[MESSAGES - 1],
+        );
+
+        // The control that makes the number an attribution: the same verb,
+        // the same bodies, the same count, with nothing durable underneath.
+        // What separates the two lines is the device.
+        let mut memory = leviculum_lxmf::propagation_store::MemoryPropagationStore::new(50_000_000);
+        let all = Instant::now();
+        for index in 0..MESSAGES {
+            let mut transient_id = [0u8; 32];
+            transient_id[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            memory
+                .append(&transient_id, 1_789_000_000 + index as u64, 13, &body)
+                .expect("append");
+        }
+        println!(
+            "APPEND store=memory n={MESSAGES} bytes={} total_us={}",
+            body.len(),
+            all.elapsed().as_micros(),
+        );
+    }
+
     fn body_for(destination: u8, len: usize) -> Vec<u8> {
         let mut body = vec![destination; len];
         body[16..].fill(0xCD);
