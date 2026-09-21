@@ -1226,7 +1226,14 @@ impl EventLogLayer {
 /// position in anyone's history.
 static VISITS: AtomicU64 = AtomicU64::new(0);
 
-/// Records visited since process start — see [`VISITS`].
+/// Records this layer has visited since process start.
+///
+/// A visit is one `EventVisitor` built and walked: a
+/// `BTreeMap<String, String>` plus a `String` per field name and per
+/// value. It is an instrument, not a statistic — `heap-gap-bench` prints
+/// it as `visits=` and `tests/event_log_callsite_filter.rs` asserts on
+/// it, because "how many visits produced nothing" is the number a churn
+/// experiment on this sink has to be able to read.
 pub fn visit_count() -> u64 {
     VISITS.load(Ordering::Relaxed)
 }

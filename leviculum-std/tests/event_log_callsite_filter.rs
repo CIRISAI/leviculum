@@ -21,12 +21,12 @@
 //! `Layer::register_callsite` returning `Interest::never()` disables the
 //! callsite for the ENTIRE subscriber — `Layered::pick_interest` returns
 //! the outer layer's `never` without consulting the inner layers
-//! (`tracing-subscriber-0.3.22/src/layer/layered.rs:442`). The fmt layer
+//! (tracing-subscriber 0.3.22, `layer::layered`). The fmt layer
 //! sits below the event-log layer, so a global filter here would silently
 //! delete ordinary `RUST_LOG` output. A per-layer `Filter` is scoped: the
 //! `Filtered` wrapper adds its interest to the per-callsite sum and returns
 //! `Interest::always()` upward so the layers beneath it keep their say
-//! (`filter/layer_filters/mod.rs:741-763`).
+//! (tracing-subscriber 0.3.22, `filter::layer_filters`).
 //!
 //! So there are four assertions here and all four are required: records
 //! without an `event` field are not visited; records with one still are;
