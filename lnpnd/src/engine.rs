@@ -2267,10 +2267,18 @@ mod inbound_sync_slices {
     /// the failure and not an exaggeration of it. At this latency the old
     /// behaviour holds the core for 52 ms — ten times the budget — and one
     /// slice costs 0.5 ms.
+    ///
+    /// The store is charged this in ARITHMETIC, not in `thread::sleep`.
+    /// A sleep returns when the host's scheduler gets round to it: during a
+    /// `just fast` run on a saturated coder host (2026-09-22) one hook that
+    /// did exactly the one append the budget pays for measured 7.9 ms and
+    /// failed the budget assertion below. The number this test asserts on
+    /// has to be the implementation's — how many appends a hook takes times
+    /// what an append costs — and not the host's wake-up latency.
     const APPEND_LATENCY: Duration = Duration::from_micros(500);
 
-    /// A store that counts its appends and charges each one what a durable
-    /// write costs.
+    /// A store that counts its appends; the caller charges each one what a
+    /// durable write costs.
     struct ModelledStore {
         inner: MemoryPropagationStore,
         appends: Arc<AtomicUsize>,
@@ -2285,7 +2293,6 @@ mod inbound_sync_slices {
             body: &[u8],
         ) -> Result<(), StorageError> {
             self.appends.fetch_add(1, Ordering::Relaxed);
-            std::thread::sleep(APPEND_LATENCY);
             self.inner
                 .append(transient_id, received_at, stamp_value, body)
         }
@@ -2378,8 +2385,12 @@ mod inbound_sync_slices {
             let now_ms = core.now_ms();
             let started = Instant::now();
             let _ = engine.on_tick(&mut core, now_ms);
-            worst_hold = worst_hold.max(started.elapsed());
-            worst_slice = worst_slice.max(appends.load(Ordering::Relaxed) - before);
+            let hook_work = started.elapsed();
+            let slice = appends.load(Ordering::Relaxed) - before;
+            // The hold the daemon would feel: the hook's own work plus the
+            // store latency every append in this slice is charged for.
+            worst_hold = worst_hold.max(hook_work + APPEND_LATENCY * slice as u32);
+            worst_slice = worst_slice.max(slice);
             stored = match &engine.state {
                 State::Ready(ready) => ready.node.store().count().unwrap_or(0),
                 _ => panic!("engine must stay ready"),
