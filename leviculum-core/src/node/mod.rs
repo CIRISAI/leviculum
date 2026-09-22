@@ -3718,6 +3718,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
 
+            TransportEvent::AnnounceLearnedNotRelayed {
+                destination_hash,
+                closed,
+                discovery,
+            } => {
+                self.events.push(NodeEvent::AnnounceLearnedNotRelayed {
+                    destination_hash: DestinationHash::new(destination_hash),
+                    closed,
+                    discovery,
+                });
+            }
+
             TransportEvent::PacketReceived {
                 destination_hash,
                 packet,

@@ -20,6 +20,26 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A board that learns a path from an announce and passes it on to nobody now
+  says so. That outcome is not a drop — the announce arrived, was validated,
+  and the path is installed — so no counter moves and, until now, no line was
+  written anywhere: the single most informative thing about the failure, that
+  it happened at all, was invisible in every capture. A board is where it
+  bites, because a board registers no shared-instance local client, so
+  `handle_announce`'s local-client forward cannot run there and the announce
+  table is the only general route to its serial host. The new
+  `NodeEvent::AnnounceLearnedNotRelayed` fires at that point and the boards
+  render it as one `ANNOUNCE_LEARNED_NOT_RELAYED closed=<r> discovery=<w>
+  dest=<hex8>` line, carrying which term of the announce-table gate closed and
+  whether anyone had a discovery path request open for the destination.
+  Deliberately not a `PKT_DROP_SUMMARY` bucket, in the wording as well as the
+  taxonomy. Its trigger is narrow by measurement, not by assertion: it fires
+  only on a node that relays announces at all, a duplicate announce inside
+  the rate window never reaches it, and an announce that bought a rebroadcast
+  is silent (`leviculum-core/src/node/mvr_board_announce_uplink.rs`). One line
+  costs 106 bytes on the debug CDC at its widest, and nothing at all when no
+  reader is attached.
+
 - The firmware's `[LORA] RX` line carries the **context byte**, `ctx=0x<hh>`,
   appended after `dst=` so every existing consumer of the line reads
   unchanged. It is the only field that separates a relayed announce

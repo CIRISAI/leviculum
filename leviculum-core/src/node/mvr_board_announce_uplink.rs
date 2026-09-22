@@ -42,6 +42,15 @@
 //!    announce shape `handle_announce` deliberately keeps out of the announce
 //!    table.
 //!
+//! ## The instrumentation this file also pins
+//!
+//! The swallow moves no counter and, before this, wrote no line: it is not a
+//! drop, so nothing calls it one, and a route that was never taken leaves
+//! nothing behind. `NodeEvent::AnnounceLearnedNotRelayed` is the line, and
+//! the assertions below hold it to firing exactly where the swallow happens
+//! and nowhere else — on every positive control above, the event must be
+//! ABSENT, or a capture would fill with it at the announce rates we run.
+//!
 //! Sans-I/O: no LoRa, no Docker, no Python, sub-second wall clock.
 
 extern crate std;
@@ -55,11 +64,11 @@ use crate::constants::{MTU, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::identity::Identity;
 use crate::memory_storage::MemoryStorage;
-use crate::node::{NodeCore, NodeCoreBuilder};
+use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::packet::{HeaderType, Packet, PacketContext, PacketType, TransportType};
 use crate::test_utils::{MockClock, TEST_TIME_MS};
 use crate::traits::{Clock, InterfaceMode};
-use crate::transport::{Action, InterfaceId, TickOutput};
+use crate::transport::{Action, AnnounceTableClosed, DiscoveryWindow, InterfaceId, TickOutput};
 use crate::DestinationHash;
 
 type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
@@ -216,6 +225,27 @@ fn announces_for(packets: &[Vec<u8>], dest: &DestinationHash) -> usize {
         .count()
 }
 
+/// Every `AnnounceLearnedNotRelayed` in an output, as the pair a capture
+/// line carries: the reason the announce-table route was closed and the state
+/// of the destination's discovery window.
+fn not_relayed_for(
+    output: &TickOutput,
+    dest: &DestinationHash,
+) -> Vec<(AnnounceTableClosed, DiscoveryWindow)> {
+    output
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::AnnounceLearnedNotRelayed {
+                destination_hash,
+                closed,
+                discovery,
+            } if destination_hash == dest => Some((*closed, *discovery)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// How long the board is given to hand the announce up. Two full
 /// `PATHFINDER_G` grace periods plus the jitter ceiling, so a scheduled
 /// rebroadcast that fires at all has fired by the time this returns.
@@ -240,6 +270,13 @@ fn a_plain_relayed_announce_reaches_the_host() {
     assert!(
         board.hops_to(&dest).is_some(),
         "precondition: the board must have learned the path itself"
+    );
+    assert_eq!(
+        not_relayed_for(&out, &dest),
+        Vec::new(),
+        "the instrumentation must stay silent on the route that works; an \
+         announce that bought a rebroadcast is relayed, and a line here \
+         would fire on every announce the board hears"
     );
     serial.extend(serial_traffic_over(&mut board, UPLINK_BUDGET_MS));
 
@@ -328,6 +365,13 @@ fn a_path_response_announce_is_learned_and_not_passed_on() {
         board.hops_to(&dest).is_some(),
         "the board learns the path from a PATH_RESPONSE announce"
     );
+    assert_eq!(
+        not_relayed_for(&out, &dest),
+        std::vec![(AnnounceTableClosed::PathResponse, DiscoveryWindow::None)],
+        "the swallow must say so, and say which of the two gates closed: \
+         the announce table refused it for being a PATH_RESPONSE, and \
+         nobody had a discovery request open for it"
+    );
     serial.extend(serial_traffic_over(&mut board, UPLINK_BUDGET_MS));
 
     assert_eq!(
@@ -411,8 +455,11 @@ fn build_path_request(
 /// re-originates on LoRa, and `answer_delay_ms` later the relay's
 /// `PATH_RESPONSE` announce arrives on LoRa.
 ///
-/// Returns `(board learned the path, announces that reached the host)`.
-fn discovery_round(answer_delay_ms: u64) -> (bool, usize) {
+/// Returns `(board learned the path, announces that reached the host, the
+/// `AnnounceLearnedNotRelayed` pairs the answer produced)`.
+fn discovery_round(
+    answer_delay_ms: u64,
+) -> (bool, usize, Vec<(AnnounceTableClosed, DiscoveryWindow)>) {
     let mut board = make_board();
     let (mut origin, dest) = make_origin("probe");
     let relay_id = [0xb2u8; TRUNCATED_HASHBYTES];
@@ -440,11 +487,13 @@ fn discovery_round(answer_delay_ms: u64) -> (bool, usize) {
     let _ = serial_traffic_over(&mut board, answer_delay_ms);
 
     let out = board.handle_packet(InterfaceId(LORA), &answer);
+    let not_relayed = not_relayed_for(&out, &dest);
     let mut serial = bound_for(&out, SERIAL);
     serial.extend(serial_traffic_over(&mut board, UPLINK_BUDGET_MS));
     (
         board.hops_to(&dest).is_some(),
         announces_for(&serial, &dest),
+        not_relayed,
     )
 }
 
@@ -455,11 +504,17 @@ fn discovery_round(answer_delay_ms: u64) -> (bool, usize) {
 /// back onto the interface the question came in on.
 #[test]
 fn a_path_response_inside_the_discovery_window_reaches_the_host() {
-    let (learned, delivered) = discovery_round(5_000);
+    let (learned, delivered, not_relayed) = discovery_round(5_000);
     assert!(learned, "the board learns the path either way");
     assert!(
         delivered > 0,
         "inside the 30 s discovery window the board must answer its host"
+    );
+    assert_eq!(
+        not_relayed,
+        Vec::new(),
+        "an answer that reached the requester is not a swallow; the line \
+         must not fire on the working case"
     );
 }
 
@@ -476,16 +531,144 @@ fn a_path_response_inside_the_discovery_window_reaches_the_host() {
 /// 30 s is the normal case on a LoRa hop, not the pathological one.
 #[test]
 fn a_path_response_past_the_discovery_window_is_learned_and_swallowed() {
-    let (learned, delivered) = discovery_round(35_000);
+    let (learned, delivered, not_relayed) = discovery_round(35_000);
     assert!(
         learned,
         "the board still learns the path from the late answer"
     );
     assert_eq!(
+        not_relayed,
+        std::vec![(AnnounceTableClosed::PathResponse, DiscoveryWindow::None)],
+        "this is the field failure, and the line is the whole point of the \
+         instrumentation: one occurrence, naming the gate that closed \
+         (PATH_RESPONSE)"
+    );
+    // Measured limit of the `discovery=` scalar, pinned rather than
+    // described: the window reads `none` and NOT `expired`, because
+    // `clean_path_states` reaped the entry on the first tick past
+    // DISCOVERY_TIMEOUT_MS, five seconds before the answer arrived. So
+    // `discovery=none` on a capture means "no entry in the table", not
+    // "nobody asked" — a late answer to our own question is indistinguishable
+    // from an unsolicited one on this line alone. Closing that would mean
+    // keeping a record past the window, which is a routing change and not
+    // instrumentation.
+    assert_eq!(
         delivered, 0,
         "measurement pin: past DISCOVERY_TIMEOUT_MS the board keeps what it \
          learned to itself. Change this number only with the mechanism that \
          changed it."
+    );
+}
+
+/// The `discovery=expired` reading, so the scalar has no unreachable value:
+/// the answer arrives past `DISCOVERY_TIMEOUT_MS` but before any tick has
+/// reaped the entry. The clock is moved without calling `handle_timeout`,
+/// which is the only way to be inside that gap — and is why the field case
+/// above reads `none` instead.
+#[test]
+fn an_answer_past_the_window_but_before_the_reaper_reads_expired() {
+    let mut board = make_board();
+    let (mut origin, dest) = make_origin("probe");
+    let relay_id = [0xb2u8; TRUNCATED_HASHBYTES];
+    let answer = relayed(
+        &own_announce(&mut origin, &dest),
+        relay_id,
+        PacketContext::PathResponse,
+    );
+
+    let path_req_hash = *board.transport().path_request_hash();
+    let request = build_path_request(
+        &path_req_hash,
+        &dest,
+        &[0x77u8; TRUNCATED_HASHBYTES],
+        &[0x33u8; TRUNCATED_HASHBYTES],
+    );
+    let out = board.handle_packet(InterfaceId(SERIAL), &request);
+    assert!(!bound_for(&out, LORA).is_empty(), "re-originated");
+
+    // No `handle_timeout` anywhere between here and the answer.
+    let now = board.transport().clock().now_ms();
+    board.transport().clock().set(now + 35_000);
+
+    let out = board.handle_packet(InterfaceId(LORA), &answer);
+    assert_eq!(
+        not_relayed_for(&out, &dest),
+        std::vec![(AnnounceTableClosed::PathResponse, DiscoveryWindow::Expired)],
+        "an entry still in the table with its window run out reads `expired`"
+    );
+    assert!(
+        bound_for(&out, SERIAL).is_empty(),
+        "and is still not answered: `send_discovery_path_response` cleans the \
+         expired entry up rather than serving it"
+    );
+}
+
+/// The chattiness bound, measured rather than asserted about: the common
+/// repeat — a neighbour whose announce we have already seen arriving again
+/// inside the 2 s rate window — does NOT reach the instrumentation at all.
+/// It leaves `handle_announce` at the `rate_limited && !should_update` early
+/// return, which is a real drop with a real counter
+/// (`DropReason::AnnounceRateLimited`) and therefore not this event's
+/// business. Without this, the line would fire once per duplicate reception
+/// on a board that hears every rebroadcast of every announce in the room.
+#[test]
+fn a_duplicate_announce_inside_the_rate_window_emits_no_line() {
+    let mut board = make_board();
+    let (mut origin, dest) = make_origin("probe");
+    let relay_id = [0xb2u8; TRUNCATED_HASHBYTES];
+    let frame = relayed(
+        &own_announce(&mut origin, &dest),
+        relay_id,
+        PacketContext::None,
+    );
+
+    let out = board.handle_packet(InterfaceId(LORA), &frame);
+    assert_eq!(not_relayed_for(&out, &dest), Vec::new(), "first copy");
+
+    let now = board.transport().clock().now_ms();
+    board.transport().clock().set(now + 500);
+    let out = board.handle_packet(InterfaceId(LORA), &frame);
+    assert_eq!(
+        not_relayed_for(&out, &dest),
+        Vec::new(),
+        "a duplicate inside the rate window is a counted drop, not a \
+         swallowed announce; the line must not fire per duplicate reception"
+    );
+}
+
+/// The other half of the chattiness bound, and the one the workspace suite
+/// found rather than the author: a node that relays nobody's announces —
+/// `enable_transport` off, no local client — must emit nothing. For such a
+/// node "learned and not relayed" is the configured steady state of every
+/// announce it ever hears, so an ungated event would put one line on the log
+/// per reception and say nothing by saying it every time.
+#[test]
+fn a_node_that_relays_nothing_emits_no_line_at_all() {
+    let clock = MockClock::new(TEST_TIME_MS);
+    let mut endpoint = NodeCoreBuilder::new()
+        .enable_transport(false)
+        .max_random_blobs(8)
+        .build(OsRng, clock, MemoryStorage::with_defaults());
+    endpoint.set_interface_name(LORA, String::from("lora_sx1262"));
+    endpoint.set_interface_mode(LORA, InterfaceMode::Gateway);
+
+    let (mut origin, dest) = make_origin("probe");
+    let frame = relayed(
+        &own_announce(&mut origin, &dest),
+        [0xb2u8; TRUNCATED_HASHBYTES],
+        PacketContext::None,
+    );
+
+    let out = endpoint.handle_packet(InterfaceId(LORA), &frame);
+    assert!(
+        endpoint.hops_to(&dest).is_some(),
+        "precondition: the endpoint still learns the path"
+    );
+    assert_eq!(
+        not_relayed_for(&out, &dest),
+        Vec::new(),
+        "a node that rebroadcasts nobody else's announces is not swallowing \
+         them; the line must fire only where relaying was expected"
     );
 }
 

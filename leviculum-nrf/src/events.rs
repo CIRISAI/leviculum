@@ -51,5 +51,31 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                 ),
             );
         }
+        // The announce a board learned from and had nowhere to send.
+        // A board registers no shared-instance local client, so
+        // the announce table is its only general route to the serial
+        // host; an announce the table does not take, with no discovery
+        // request waiting for it, reaches the host by no route at all.
+        // Nothing dropped it, so no bucket moves and — until this line —
+        // no capture could show it happened. The wording is deliberate:
+        // the packet arrived and the path is installed.
+        if let NodeEvent::AnnounceLearnedNotRelayed {
+            destination_hash,
+            closed,
+            discovery,
+        } = event
+        {
+            crate::log::log_fmt(
+                "ANNOUNCE_LEARNED_NOT_RELAYED ",
+                format_args!(
+                    "{}",
+                    leviculum_log_line::AnnounceLearnedNotRelayedBody {
+                        closed: closed.as_str(),
+                        discovery: discovery.as_str(),
+                        dest: *destination_hash.as_bytes(),
+                    }
+                ),
+            );
+        }
     }
 }

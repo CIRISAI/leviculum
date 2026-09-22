@@ -369,7 +369,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1184`): the emitting thread does a
+`leviculum-std/src/event_log.rs:1195`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
@@ -384,9 +384,9 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:4816`) | announce handling itself took ≥ 100 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:4911`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4003`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1278`) | one batch write to the log file took ≥ 50 ms |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1289`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`

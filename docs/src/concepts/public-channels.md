@@ -29,7 +29,7 @@ announced, and without an announce there is no path table entry.
 `Transport.outbound` skips the path lookup for both types outright
 (`Transport.py:1121`), and any receiving node drops such a packet once
 `hops > 1` (`Transport.py:1354-1373`, mirrored in
-`leviculum-core/src/transport.rs:2227-2259`). The reach of a Reticulum
+`leviculum-core/src/transport.rs:2322-2354`). The reach of a Reticulum
 broadcast is exactly one hop plus locally attached clients.
 
 For PLAIN the manual gives the reason: "To be transportable over multiple

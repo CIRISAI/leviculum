@@ -1653,6 +1653,77 @@ impl TransportStats {
 }
 
 // Events
+/// Why the announce table scheduled no rebroadcast of an announce this node
+/// accepted into its path table.
+///
+/// Not a drop taxonomy and deliberately not part of [`DropReason`]: every
+/// value here describes an announce that was received, validated and
+/// LEARNED. Nothing was discarded — a route onward simply was not opened.
+/// See [`TransportEvent::AnnounceLearnedNotRelayed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AnnounceTableClosed {
+    /// The announce carried `PacketContext::PATH_RESPONSE`, which
+    /// `handle_announce` keeps out of the announce table by design
+    /// (Python `Transport.py:1886`).
+    PathResponse,
+    /// The per-destination announce-rate limit blocked the rebroadcast.
+    RateBlocked,
+    /// A table entry for this destination was younger than
+    /// `announce_rate_limit_ms`, so this copy scheduled nothing of its own.
+    RateLimited,
+}
+
+impl AnnounceTableClosed {
+    /// The scalar a structured log line carries. Stable: capture consumers
+    /// count these.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AnnounceTableClosed::PathResponse => "path_response",
+            AnnounceTableClosed::RateBlocked => "rate_blocked",
+            AnnounceTableClosed::RateLimited => "rate_limited",
+        }
+    }
+}
+
+/// The state of this destination's discovery path request when an announce
+/// for it arrived — the second of the two routes an announce has to a
+/// requester that is not a local client.
+///
+/// Reports the discovery TABLE, not the history of who asked what. A pending
+/// entry is reaped on the first tick past its timeout
+/// (`clean_path_states` → `Storage::expire_discovery_path_requests`), so a
+/// request that timed out more than one tick ago reads as
+/// [`None`](DiscoveryWindow::None) and not as
+/// [`Expired`](DiscoveryWindow::Expired). That is the normal reading for a
+/// late path answer on a LoRa hop, and it is a real limit of this scalar:
+/// **`None` does not distinguish "nobody asked" from "somebody asked and the
+/// record is gone".**
+/// Nothing in the node outlives the entry to close that gap today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DiscoveryWindow {
+    /// No entry in the discovery table for this destination.
+    None,
+    /// A request was pending and still inside `DISCOVERY_TIMEOUT_MS`.
+    Open,
+    /// An entry was still in the table with its window already run out —
+    /// an announce that arrived after the timeout but before the tick that
+    /// reaps it.
+    Expired,
+}
+
+impl DiscoveryWindow {
+    /// The scalar a structured log line carries.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DiscoveryWindow::None => "none",
+            DiscoveryWindow::Open => "open",
+            DiscoveryWindow::Expired => "expired",
+        }
+    }
+}
+
 /// Events emitted by Transport for the application to handle
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -1747,6 +1818,30 @@ pub enum TransportEvent {
     ReceiptTimeout {
         /// Truncated hash identifying the receipt
         packet_hash: [u8; TRUNCATED_HASHBYTES],
+    },
+
+    /// An announce updated the path table and left on no interface.
+    ///
+    /// **This is not a drop.** The announce was received, validated and
+    /// learned; the node knows the path and keeps it. What is being reported
+    /// is that no route onward was open for it — the announce table scheduled
+    /// no rebroadcast (`closed`), no discovery path request was waiting to be
+    /// answered with it (`discovery`), and this node has no shared-instance
+    /// local client to hand it to. Nothing was lost and no counter moves.
+    ///
+    /// It exists because that outcome is otherwise invisible. A drop leaves a
+    /// bucket; a route that was never taken leaves nothing at all, and on a
+    /// board — which registers no local client, so the announce table is the
+    /// only general route to its serial host — it is the shape a swallowed
+    /// path answer takes (`node/mvr_board_announce_uplink.rs`).
+    AnnounceLearnedNotRelayed {
+        /// The destination the announce was for.
+        destination_hash: [u8; TRUNCATED_HASHBYTES],
+        /// Why the announce table opened no rebroadcast.
+        closed: AnnounceTableClosed,
+        /// Whether anyone had a discovery path request open for this
+        /// destination when the announce arrived.
+        discovery: DiscoveryWindow,
     },
 }
 
@@ -4219,7 +4314,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2826. A destination with no cached
+    /// link-request path uses at transport.rs:2921. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5261,12 +5356,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 );
             }
 
+            // The second of the three routes an announce has out of here,
+            // read BEFORE it is taken: `send_discovery_path_response`
+            // consumes the entry on use, so after the call the difference
+            // between "answered someone" and "nobody had asked" is gone.
+            // Carried to `AnnounceLearnedNotRelayed` below.
+            let discovery_window = match self.storage.get_discovery_path_request(&dest_hash) {
+                None => DiscoveryWindow::None,
+                Some((_, timeout)) if now < timeout => DiscoveryWindow::Open,
+                Some(_) => DiscoveryWindow::Expired,
+            };
+
             // Check for pending discovery path requests (Python Transport.py:1983-2010).
             // If a transport node forwarded a path request for this destination,
             // send a targeted PATH_RESPONSE to the requesting interface.
             if self.config.enable_transport {
                 self.send_discovery_path_response(&dest_hash, packet.hops, raw);
             }
+            // An open window is only an answer where the call above could run.
+            let answered_a_requester =
+                self.config.enable_transport && discovery_window == DiscoveryWindow::Open;
 
             // Per-destination announce rate limiting (Python Transport.py:1838-1861)
             // Only blocks rebroadcast (announce_table insertion), path_table is already updated.
@@ -5369,7 +5478,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // judged rate-limited and never egressed, leaving the
             // destination unreachable beyond this daemon (#255,
             // ble_lxmf_delivery).
-            if (!rate_blocked && !rate_limited && !is_path_response) || forwards_pending_response {
+            let announce_table_took_it =
+                (!rate_blocked && !rate_limited && !is_path_response) || forwards_pending_response;
+            if announce_table_took_it {
                 self.storage.set_announce(
                     dest_hash,
                     AnnounceEntry {
@@ -5502,6 +5613,58 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         }
                     }
                 }
+            }
+
+            // The third route, and the one that leaves no trace when it is
+            // not taken. An announce that
+            // updated the path table above and reaches here without a
+            // scheduled rebroadcast, without having answered a requester and
+            // without a local client to hand it to has gone precisely
+            // nowhere — and, because nothing dropped it, no counter and no
+            // existing line says so.
+            //
+            // `retransmit_at_ms` and not merely "an entry exists": the
+            // non-rebroadcasting arm above writes an INERT entry (`None`),
+            // which is a table row and not a route. The read-back also
+            // covers the case where the entry belongs to an earlier copy of
+            // this announce whose own retransmit has already fired or been
+            // cancelled.
+            //
+            // Gated on this node relaying announces AT ALL. A node with
+            // `enable_transport` off rebroadcasts nobody else's announces by
+            // configuration: for it "learned and not relayed" is the steady
+            // state of every announce it ever hears, and reporting it would
+            // put one line on the log per reception while saying nothing.
+            // The event is about an announce that went nowhere UNEXPECTEDLY,
+            // which only a relaying node can have.
+            if (self.config.enable_transport || from_local)
+                && !announce_table_took_it
+                && !answered_a_requester
+                && !self.has_local_clients()
+            {
+                // Total by construction: `announce_table_took_it` is the
+                // negation of exactly these three terms (plus the pending-
+                // forward exception, which makes it true), so a false gate
+                // means at least one of them fired. Reported in the order
+                // the gate evaluates them.
+                let closed = if rate_blocked {
+                    AnnounceTableClosed::RateBlocked
+                } else if rate_limited {
+                    AnnounceTableClosed::RateLimited
+                } else {
+                    AnnounceTableClosed::PathResponse
+                };
+                crate::tracing::debug!(
+                    event = "ANNOUNCE_LEARNED_NOT_RELAYED",
+                    dst = %HexShort(&dest_hash),
+                    closed = closed.as_str(),
+                    discovery = discovery_window.as_str(),
+                );
+                self.events.push(TransportEvent::AnnounceLearnedNotRelayed {
+                    destination_hash: dest_hash,
+                    closed,
+                    discovery: discovery_window,
+                });
             }
 
             self.stats.announces_processed += 1;
@@ -9052,7 +9215,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1697`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1768`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14101,7 +14264,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5529), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5692), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

@@ -35,6 +35,14 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // of the application — no link exists to accept, and the initiator's
     // establishment retry owns recovery.
     "LinkRefused",
+    // An announce this node learned from and relayed nowhere: pure
+    // instrumentation, and the wrong shape for a C application entirely. It
+    // reports the ABSENCE of a route onward for somebody else's announce,
+    // asks nothing of the application, and is not about any destination the
+    // application registered. A C app that wants to know whether it can reach
+    // the destination asks `lev_hops_to` — the path the announce carried is
+    // installed either way.
+    "AnnounceLearnedNotRelayed",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into

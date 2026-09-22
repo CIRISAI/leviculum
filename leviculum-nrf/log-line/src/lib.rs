@@ -200,6 +200,45 @@ impl core::fmt::Display for LinkRefusedBody {
     }
 }
 
+/// The body of the firmware's `ANNOUNCE_LEARNED_NOT_RELAYED` line, rendered
+/// from the core's `NodeEvent::AnnounceLearnedNotRelayed` for the same reason
+/// [`LinkRefusedBody`] is: the boards build leviculum-core without `tracing`
+/// and the core's own line is compiled out there.
+///
+/// **The line does not report a loss.** An announce reached this board,
+/// was validated, and updated its path table; the board then had no route to
+/// pass it on. `closed` says why the announce table opened no rebroadcast and
+/// `discovery` whether anyone had a path request open for the destination.
+/// A reader who greps this for packet loss will mis-read it — the packet
+/// arrived, and the path it carried is installed.
+///
+/// `closed` and `discovery` are the core's own scalars
+/// (`AnnounceTableClosed::as_str`, `DiscoveryWindow::as_str`), passed through
+/// as `&'static str` so this crate keeps no dependencies. `dest` is shortened
+/// to its first 4 bytes, like [`LinkRefusedBody`]'s.
+pub struct AnnounceLearnedNotRelayedBody {
+    /// Why the announce table opened no rebroadcast.
+    pub closed: &'static str,
+    /// The state of the destination's discovery path request.
+    pub discovery: &'static str,
+    /// The destination the announce was for.
+    pub dest: [u8; 16],
+}
+
+impl core::fmt::Display for AnnounceLearnedNotRelayedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "closed={} discovery={} dest=",
+            self.closed, self.discovery
+        )?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -273,6 +312,49 @@ mod tests {
         assert_eq!(
             got,
             std::format!("{}.{:06}", u64::MAX / 1_000_000, u64::MAX % 1_000_000)
+        );
+    }
+
+    /// The swallowed-announce line, byte for byte, in the shape the field
+    /// capture has to be readable in: the board learned a path from a
+    /// PATH_RESPONSE announce past its discovery window and had nowhere to
+    /// send it. 91 bytes on the wire including the stamp and the CRLF.
+    #[test]
+    fn the_announce_learned_not_relayed_line_has_the_shape_the_capture_greps() {
+        let mut dest = [0u8; 16];
+        dest[..4].copy_from_slice(&[0xbb, 0x12, 0x4c, 0x3b]);
+        let body = AnnounceLearnedNotRelayedBody {
+            closed: "path_response",
+            discovery: "expired",
+            dest,
+        };
+        assert_eq!(
+            line(
+                "ANNOUNCE_LEARNED_NOT_RELAYED ",
+                format_args!("{body}"),
+                131002
+            ),
+            concat!(
+                "ANNOUNCE_LEARNED_NOT_RELAYED closed=path_response ",
+                "discovery=expired dest=bb124c3b t=131002\r\n"
+            )
+        );
+        // The per-occurrence cost on the debug CDC, stated as a number
+        // rather than as an estimate: the widest scalar combination the
+        // core can emit is `path_response`/`expired`, at the widest stamp.
+        let widest = AnnounceLearnedNotRelayedBody {
+            closed: "path_response",
+            discovery: "expired",
+            dest,
+        };
+        assert_eq!(
+            line(
+                "ANNOUNCE_LEARNED_NOT_RELAYED ",
+                format_args!("{widest}"),
+                u64::MAX
+            )
+            .len(),
+            106
         );
     }
 

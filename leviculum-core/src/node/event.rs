@@ -11,6 +11,7 @@ use crate::announce::ReceivedAnnounce;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
+use crate::transport::{AnnounceTableClosed, DiscoveryWindow};
 
 /// Why the driver destroyed frames bound to an interface (#25).
 ///
@@ -209,6 +210,28 @@ pub enum NodeEvent {
         links: usize,
         /// The configured cap that was hit.
         max: usize,
+    },
+
+    /// An announce updated the path table and left on no interface.
+    ///
+    /// **Not a drop, and must not be counted as one.** The announce was
+    /// received, validated and learned; what is reported is the absence of a
+    /// route onward, not the loss of a packet. See
+    /// [`TransportEvent::AnnounceLearnedNotRelayed`](crate::transport::TransportEvent::AnnounceLearnedNotRelayed)
+    /// for the mechanism and why the outcome is otherwise invisible.
+    ///
+    /// Like [`LinkRefused`](NodeEvent::LinkRefused), it exists so the boards
+    /// can see it: they build leviculum-core without `tracing`, so the core's
+    /// own line is compiled out there. They render it as one
+    /// `ANNOUNCE_LEARNED_NOT_RELAYED` line on the debug CDC.
+    AnnounceLearnedNotRelayed {
+        /// The destination the announce was for.
+        destination_hash: DestinationHash,
+        /// Why the announce table opened no rebroadcast.
+        closed: AnnounceTableClosed,
+        /// Whether a discovery path request for this destination was open
+        /// when the announce arrived.
+        discovery: DiscoveryWindow,
     },
 
     // Proof Events
@@ -511,6 +534,8 @@ impl NodeEvent {
             | NodeEvent::PacketProofRequested { .. }
             // A refusal is the absence of a link; there is no id to rewrite.
             | NodeEvent::LinkRefused { .. }
+            // An announce that went nowhere is not link-borne at all.
+            | NodeEvent::AnnounceLearnedNotRelayed { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::InterfaceDown(_)
@@ -556,7 +581,13 @@ impl NodeEvent {
             | NodeEvent::LinkDeliveryConfirmed { .. }
             | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
-            | NodeEvent::ResourceProgress { .. } => EventClass::Data,
+            | NodeEvent::ResourceProgress { .. }
+            // Pure instrumentation: a line on a capture, never an input to
+            // anything. Losing one under backpressure costs a reader one
+            // occurrence of a repeating condition; classifying it CONTROL
+            // would make a diagnostic compete with path discovery for the
+            // control plane, which is the opposite of what it is for.
+            | NodeEvent::AnnounceLearnedNotRelayed { .. } => EventClass::Data,
 
             // Link lifecycle and identity — at most one per link, must not be
             // lost or links wedge. A refusal is the lifecycle event of a link
@@ -615,6 +646,7 @@ impl NodeEvent {
             NodeEvent::PathFound { .. } => "PathFound",
             NodeEvent::PathRequestReceived { .. } => "PathRequestReceived",
             NodeEvent::PathLost { .. } => "PathLost",
+            NodeEvent::AnnounceLearnedNotRelayed { .. } => "AnnounceLearnedNotRelayed",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",

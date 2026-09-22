@@ -208,6 +208,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PKT_LOCAL",
         required_keys: &["dst", "iface", "matched"],
     },
+    // An announce this node learned from and relayed nowhere. Not a drop
+    // and deliberately not in the PKT_DROP taxonomy: the packet arrived,
+    // was validated, and the path it carried is installed — what is
+    // reported is that no route onward was open for it. `closed` names the
+    // announce-table term that closed, `discovery` the state of the
+    // destination's discovery path request. See
+    // docs/src/structured-event-logs.md.
+    EventSchema {
+        name: "ANNOUNCE_LEARNED_NOT_RELAYED",
+        required_keys: &["dst", "closed", "discovery"],
+    },
     // Codeberg #365: the routing decision for an ORIGINATED packet, one
     // line per `send_to_destination`, so a log distinguishes "sent to a
     // live carrier" from "withheld because the path's interface is
