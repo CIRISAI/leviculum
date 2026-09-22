@@ -27,14 +27,17 @@ pub(super) fn build(
         }
         None => defaults.discovery_interval,
     };
-    // A bad entry is a startup error, not a dropped line: `initiate_only`
-    // exists so an unlisted peer is NOT dialled, and a typo that silently
-    // shortened the list would restore the free-for-all it was written to
-    // prevent — invisibly, and only at the one moment it matters.
-    let initiate_only = match config.initiate_only.as_deref() {
-        Some(entries) => links::InitiateAllowlist::parse(entries).map_err(Error::Config)?,
-        None => links::InitiateAllowlist::default(),
+    // A bad entry is a startup error, not a dropped line: the two
+    // allow-lists exist so an unlisted peer is NOT dialled and NOT
+    // served, and a typo that silently shortened either list would
+    // restore the free-for-all it was written to prevent — invisibly,
+    // and only at the one moment it matters.
+    let allowlist = |key: &'static str, entries: Option<&[String]>| match entries {
+        Some(entries) => links::PeerAllowlist::parse(key, entries).map_err(Error::Config),
+        None => Ok(links::PeerAllowlist::default()),
     };
+    let initiate_only = allowlist("initiate_only", config.initiate_only.as_deref())?;
+    let accept_only = allowlist("accept_only", config.accept_only.as_deref())?;
     let opts = BleOptions {
         adapter: config.device.clone(),
         max_connections: config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS),
@@ -43,6 +46,7 @@ pub(super) fn build(
         enable_central: config.enable_central.unwrap_or(true),
         enable_peripheral: config.enable_peripheral.unwrap_or(true),
         initiate_only,
+        accept_only,
     };
     if !opts.enable_central && !opts.enable_peripheral {
         return Err(Error::Config(
@@ -61,22 +65,26 @@ pub(super) fn build(
         ctx.identity_hash,
         ctx.peer_event_tx.clone(),
     );
+    // "any" rather than 0: a node that dials whoever the sort picks, and
+    // serves whoever dials it, is the default — a count of zero reads
+    // like a node that dials or serves nobody.
+    let listed = |list: &links::PeerAllowlist| {
+        if list.is_empty() {
+            "any".to_string()
+        } else {
+            format!("{} peer(s)", list.len())
+        }
+    };
     tracing::info!(
         "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm, \
-         initiate_only={})",
+         initiate_only={}, accept_only={})",
         opts.adapter.as_deref().unwrap_or("default adapter"),
         opts.enable_central,
         opts.enable_peripheral,
         opts.max_connections,
         opts.min_rssi,
-        // "any" rather than 0: a node that dials whoever the sort picks
-        // is the default, and a count of zero reads like a node that
-        // dials nobody.
-        if opts.initiate_only.is_empty() {
-            "any".to_string()
-        } else {
-            format!("{} peer(s)", opts.initiate_only.len())
-        },
+        listed(&opts.initiate_only),
+        listed(&opts.accept_only),
     );
     Ok(Built::Handles(vec![handle]))
 }
@@ -215,6 +223,75 @@ mod tests {
         assert!(bare.initiate_only.is_none());
         build(1, &bare, &owner.ctx()).expect("no key, no restriction");
         assert!(BleOptions::default().initiate_only.is_empty());
+    }
+
+    /// The symmetric key gets the symmetric treatment: a bad
+    /// `accept_only` entry stops the daemon, and the error names the
+    /// key that holds it rather than the other list. An interface that
+    /// built with a silently shortened accept list would serve a peer
+    /// the operator had excluded, which is the hole the key closes.
+    #[tokio::test]
+    async fn a_bad_accept_only_entry_is_a_config_error() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            accept_only: Some(vec!["b2a8bea1".to_string(), "nonsense".to_string()]),
+            ..Default::default()
+        };
+        let err = build(0, &config, &owner.ctx())
+            .err()
+            .expect("must not build");
+        assert!(err.to_string().contains("accept_only"), "{err}");
+        assert!(!err.to_string().contains("initiate_only"), "{err}");
+        assert!(err.to_string().contains("nonsense"), "{err}");
+    }
+
+    /// A good accept list builds; an absent one is the value the
+    /// interface had before the key existed — the negative control that
+    /// every deployment today depends on.
+    #[tokio::test]
+    async fn a_good_accept_only_list_builds_and_an_absent_one_is_the_default() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            accept_only: Some(vec![
+                "AA:BB:CC:DD:EE:FF".to_string(),
+                "b2a8bea1a1a1a1a1a1a1a1a1a1a1a1a1".to_string(),
+            ]),
+            ..Default::default()
+        };
+        build(0, &config, &owner.ctx()).expect("two well-formed entries build");
+
+        let bare = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            ..Default::default()
+        };
+        assert!(bare.accept_only.is_none());
+        build(1, &bare, &owner.ctx()).expect("no key, no restriction");
+        assert!(BleOptions::default().accept_only.is_empty());
+    }
+
+    /// The two keys are set independently and neither reads the other's
+    /// value: a config that pins whom it dials says nothing about whom
+    /// it serves, and the reverse.
+    #[tokio::test]
+    async fn the_two_allowlists_are_independent_at_build_time() {
+        let owner = CtxOwner::new();
+        let dial_only = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            initiate_only: Some(vec!["b2a8bea1".to_string()]),
+            ..Default::default()
+        };
+        assert!(dial_only.accept_only.is_none());
+        build(0, &dial_only, &owner.ctx()).expect("a dial pin alone builds");
+
+        let serve_only = InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            accept_only: Some(vec!["b2a8bea1".to_string()]),
+            ..Default::default()
+        };
+        assert!(serve_only.initiate_only.is_none());
+        build(1, &serve_only, &owner.ctx()).expect("a serve pin alone builds");
     }
 
     /// A negative or non-finite discovery_interval is refused at build

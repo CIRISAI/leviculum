@@ -689,9 +689,25 @@ pub struct InterfaceConfig {
     /// open a connection to and nothing else — an unlisted peer that
     /// dials US is served exactly as before. Entries are validated when
     /// the interface is built (`InitiateAllowlist::parse`,
-    /// `leviculum-std/src/interfaces/ble/links.rs:984`). No reference
+    /// `leviculum-std/src/interfaces/ble/links.rs:1044`). No reference
     /// key: `ble-reticulum` has none, and this changes no wire byte.
     pub initiate_only: Option<Vec<String>>,
+    /// Peers whose INCOMING link this interface serves — the symmetric
+    /// counterpart of `initiate_only`, same vocabulary (BLE addresses
+    /// `AA:BB:CC:DD:EE:FF`, or peer identities in hex, 8 or 32 digits),
+    /// same parse-time validation. Absent or empty means every peer,
+    /// the behaviour that predates the key; a non-empty list narrows
+    /// who we SERVE and nothing else — a peer left off it is still
+    /// dialled if `initiate_only` allows it.
+    ///
+    /// An unlisted peer's connection is refused at the identity
+    /// handshake (`LinkTable::peripheral_frame`), the earliest moment
+    /// an inbound connection has named itself, so it never becomes a
+    /// link and never a Reticulum peer; the refusal is logged as
+    /// `BLE_LINK_NOT_ADMITTED`. Entries are validated when the
+    /// interface is built (`PeerAllowlist::parse`). No reference key:
+    /// `ble-reticulum` has none, and this changes no wire byte.
+    pub accept_only: Option<Vec<String>>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -831,6 +847,7 @@ impl Default for InterfaceConfig {
             enable_central: None,
             enable_peripheral: None,
             initiate_only: None,
+            accept_only: None,
         }
     }
 }

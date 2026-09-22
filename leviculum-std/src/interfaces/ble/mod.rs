@@ -91,7 +91,13 @@ pub(crate) struct BleOptions {
     /// every peer, exactly as before the key existed. Consulted on the
     /// scan path only: it never reaches admission, so a peer left off
     /// it that dials us is served like any other.
-    pub initiate_only: links::InitiateAllowlist,
+    pub initiate_only: links::PeerAllowlist,
+    /// Peers whose incoming link we SERVE (`accept_only`). Empty — the
+    /// default — serves every peer that dials us, exactly as before the
+    /// key existed. Handed to the [`LinkTable`], which asks it at the
+    /// identity handshake; it never reaches the scan path, so a peer
+    /// left off it is still dialled if `initiate_only` allows.
+    pub accept_only: links::PeerAllowlist,
 }
 
 impl Default for BleOptions {
@@ -103,7 +109,8 @@ impl Default for BleOptions {
             discovery_interval: Duration::from_secs(5),
             enable_central: true,
             enable_peripheral: true,
-            initiate_only: links::InitiateAllowlist::default(),
+            initiate_only: links::PeerAllowlist::default(),
+            accept_only: links::PeerAllowlist::default(),
         }
     }
 }
@@ -300,7 +307,8 @@ impl BleTask {
         let start = Instant::now();
         let now_ms = |i: Instant| i.duration_since(start).as_millis() as u64;
 
-        let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections);
+        let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections)
+            .with_accept_only(self.opts.accept_only.clone());
         // The peripheral notify pipe's inter-packet gap (#376). One
         // pacer for the pipe IS per-link pacing here: a notification
         // reaches every subscribed central at once, so all peripheral
@@ -464,6 +472,10 @@ impl BleTask {
                 self.counters
                     .rx_bytes
                     .fetch_add(data.len() as u64, Ordering::Relaxed);
+                // Read before the table is borrowed for the frame:
+                // only the refusal arm needs it, and hoisting keeps the
+                // arm free of a second borrow.
+                let accept_listed = table.accept_only_len();
                 match table.peripheral_frame(addr.0, mtu, &data, now) {
                     Inbound::Packet(packet) => self.deliver(packet).await,
                     Inbound::HandshakeComplete {
@@ -486,7 +498,13 @@ impl BleTask {
                         }
                     }
                     Inbound::HandshakeRejected(admission) => {
-                        self.log_rejection(admission, Role::Peripheral, &data, &addr.0);
+                        self.log_rejection(
+                            admission,
+                            Role::Peripheral,
+                            &data,
+                            &addr.0,
+                            accept_listed,
+                        );
                         backoff_until.insert(addr.0, now + DUPLICATE_ADDR_TTL_MS);
                         disconnect_quietly(adapter, addr.0).await;
                     }
@@ -642,7 +660,13 @@ impl BleTask {
                         let _ = ack.send(true);
                     }
                     other => {
-                        self.log_rejection(other, Role::Central, &identity, &addr.0);
+                        self.log_rejection(
+                            other,
+                            Role::Central,
+                            &identity,
+                            &addr.0,
+                            table.accept_only_len(),
+                        );
                         backoff_until.insert(
                             addr.0,
                             now + match other {
@@ -1048,7 +1072,17 @@ impl BleTask {
         );
     }
 
-    fn log_rejection(&self, admission: Admission, role: Role, identity: &[u8], addr: &Addr) {
+    /// `listed` is how many peers `accept_only` names — the number that
+    /// tells a reader of `BLE_LINK_NOT_ADMITTED` that a list is in
+    /// force at all, and how big it is.
+    fn log_rejection(
+        &self,
+        admission: Admission,
+        role: Role,
+        identity: &[u8],
+        addr: &Addr,
+        listed: usize,
+    ) {
         match admission {
             Admission::RejectSelf => tracing::warn!(
                 event = "BLE_LINK_SELF",
@@ -1078,6 +1112,24 @@ impl BleTask {
                 "BLE {}: link limit reached, rejecting {}",
                 self.name,
                 hex12(addr)
+            ),
+            // The one refusal a run has to be able to SEE: without a
+            // line here a measuring host that turned strangers away
+            // would look exactly like a host nobody tried, and "the
+            // room was empty" and "the room was full of refused
+            // phones" are not the same measurement. Both spellings the
+            // key accepts are printed, so an operator who decides the
+            // device belongs in the cell can paste either into
+            // `accept_only`.
+            Admission::RejectNotAdmitted => tracing::warn!(
+                event = "BLE_LINK_NOT_ADMITTED",
+                iface = %Scalar(&self.name),
+                peer = %hex8(identity),
+                identity = %hex_all(identity),
+                addr = %hex12(addr),
+                role = role.as_str(),
+                listed = listed,
+                action = "disconnect",
             ),
             Admission::Accept => {}
         }
@@ -1112,6 +1164,15 @@ fn hex8(identity: &[u8]) -> String {
         .take(4)
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// `identity=` value: the whole identity hash as hex. `peer=`'s four
+/// bytes are what every other BLE line carries and what the air
+/// publishes as a hint; the full hash is printed only where an operator
+/// is expected to copy it back into a config key, and `accept_only`
+/// takes either spelling.
+fn hex_all(identity: &[u8]) -> String {
+    identity.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `addr=` value: the 48-bit address as 12 hex digits in display order,

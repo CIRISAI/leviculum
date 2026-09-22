@@ -456,6 +456,20 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "old_data_silence_ms",
         ],
     },
+    // `accept_only` turned an incoming link away: the peer is not one
+    // this interface serves, and the connection is dropped at the
+    // identity handshake, before it becomes a link. `identity` carries
+    // the whole hash beside `peer`'s four bytes because both are
+    // spellings the key accepts, and the operator reading this line is
+    // the one deciding whether to add it. `listed` is how many peers
+    // the list names, so "a list is in force" is legible without the
+    // config.
+    EventSchema {
+        name: "BLE_LINK_NOT_ADMITTED",
+        required_keys: &[
+            "iface", "peer", "identity", "addr", "role", "listed", "action",
+        ],
+    },
     EventSchema {
         name: "BLE_LINK_SELF",
         required_keys: &["addr", "action"],

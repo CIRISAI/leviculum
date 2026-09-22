@@ -331,7 +331,18 @@ name carries), the admission decisions are the firmware's
 lines carry `rule=`, `origin=incoming|outgoing`, `old_mtu=`/`new_mtu=`,
 `old_silence_ms=` and the reported `old_data_silence_ms=` exactly as
 the firmware's do (#360 round 2), plus `old_role=` on a replacement —
-and a fan-out drop on a congested
+and one lnsd has no firmware counterpart for:
+`BLE_LINK_NOT_ADMITTED peer=<hex8> identity=<hex32> addr=<a>
+role=peripheral listed=<n> action=disconnect` — the `accept_only`
+config key refused this incoming link at its identity handshake, so
+the peer never became a link.  `identity=` carries the whole hash
+beside `peer=`'s four bytes because both are spellings the key
+accepts, and `listed=` is how many peers the list names, so a capture
+shows that a list is in force without the config beside it.  The line
+exists so a measuring host that turned strangers away does not read
+like a host nobody tried; its dialling-side sibling is
+`BLE_DIAL_NOT_ALLOWED`, which fires when `initiate_only` is what
+stopped a dial.  A fan-out drop on a congested
 link is `BLE_TX_FANOUT_DROP`.  The delivery-hint decision
 is the firmware's `BLE_TX_ROUTE` / `BLE_TX_FLOOD` /
 `BLE_TX_ROUTE_MISS` (#376), with `conn=central|peripheral` naming the

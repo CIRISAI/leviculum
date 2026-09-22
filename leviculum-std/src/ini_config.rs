@@ -712,21 +712,16 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) {
         "discovery_interval" => iface.discovery_interval = value.parse().ok(),
         "enable_central" => iface.enable_central = Some(parse_bool(value)),
         "enable_peripheral" => iface.enable_peripheral = Some(parse_bool(value)),
-        // Comma-separated (ConfigObj `as_list`, the spelling
-        // `remote_management_allowed` and I2P `peers` already use).
-        // Stored verbatim; an entry is resolved to an address or an
-        // identity hint when the interface is built, where a bad one is
-        // a startup error rather than a silently shorter list. An empty
-        // value parses to an empty list, which allows every peer — the
-        // same as leaving the key out.
+        // Comma-separated (see `split_csv`): an entry is resolved to an
+        // address or an identity hint when the interface is built.
         "initiate_only" => {
-            iface.initiate_only = Some(
-                value
-                    .split(',')
-                    .map(|p| p.trim().to_string())
-                    .filter(|p| !p.is_empty())
-                    .collect(),
-            );
+            iface.initiate_only = Some(split_csv(value));
+        }
+        // The symmetric key: whose incoming link we serve. Same list
+        // spelling, same deferred validation, same "empty means
+        // everyone" as `initiate_only` above.
+        "accept_only" => {
+            iface.accept_only = Some(split_csv(value));
         }
         // Unknown per-interface key: log and ignore. An unrecognised key (a
         // Backbone-only knob like `prioritise`, an IFAC field, a kernel device
@@ -811,6 +806,23 @@ fn normalize_backbone_interface(iface: &mut InterfaceConfig) {
     } else {
         "TCPServerInterface".to_string()
     };
+}
+
+/// Split a ConfigObj list value (`as_list`, the spelling
+/// `remote_management_allowed` and I2P `peers` already use): comma
+/// separated, whitespace trimmed, blanks dropped.
+///
+/// Entries are stored verbatim and resolved when the interface is
+/// built, where a bad one is a startup error rather than a silently
+/// shorter list. A value with nothing but separators yields an empty
+/// list, which for both BLE allow-lists means every peer — the same as
+/// leaving the key out.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Parse a ConfigObj boolean value (case-insensitive, like ConfigObj).
@@ -1028,6 +1040,10 @@ mod tests {
             ble.initiate_only, None,
             "no key is no restriction, not an empty list"
         );
+        assert_eq!(
+            ble.accept_only, None,
+            "and the same for the key that says whom we serve"
+        );
     }
 
     /// `initiate_only` is a ConfigObj list: comma-separated, whitespace
@@ -1059,6 +1075,49 @@ mod tests {
         // every peer — the same as leaving it out.
         let empty = config.interfaces.get("Empty").expect("empty");
         assert_eq!(empty.initiate_only.as_deref(), Some([].as_slice()));
+    }
+
+    /// `accept_only` is the same list shape, parsed the same way, and
+    /// it lands in its own field: a section that sets one key must not
+    /// end up with the other one set.
+    #[test]
+    fn test_ble_accept_only_parses_as_its_own_list() {
+        let config = parse_ini(
+            r#"
+[interfaces]
+  [[BLE Interface]]
+    type = BLEInterface
+    accept_only = b2a8bea1, AA:BB:CC:DD:EE:FF
+  [[Both]]
+    type = BLEInterface
+    initiate_only = b2a8bea1
+    accept_only = c4a8083f
+  [[Empty]]
+    type = BLEInterface
+    accept_only =
+"#,
+        )
+        .unwrap();
+
+        let ble = config.interfaces.get("BLE Interface").expect("ble");
+        assert_eq!(
+            ble.accept_only.as_deref(),
+            Some(["b2a8bea1".to_string(), "AA:BB:CC:DD:EE:FF".to_string()].as_slice())
+        );
+        assert_eq!(ble.initiate_only, None, "the other key stays unset");
+
+        let both = config.interfaces.get("Both").expect("both");
+        assert_eq!(
+            both.initiate_only.as_deref(),
+            Some(["b2a8bea1".to_string()].as_slice())
+        );
+        assert_eq!(
+            both.accept_only.as_deref(),
+            Some(["c4a8083f".to_string()].as_slice())
+        );
+
+        let empty = config.interfaces.get("Empty").expect("empty");
+        assert_eq!(empty.accept_only.as_deref(), Some([].as_slice()));
     }
 
     #[test]

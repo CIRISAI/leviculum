@@ -10,7 +10,7 @@
 //!
 //! Which one applies is not a preference: the writer opens the file ONCE
 //! per process and caches the handle in a `OnceLock`
-//! (`leviculum-std/src/event_log.rs:1041-1060`), and there is no reopen path
+//! (`leviculum-std/src/event_log.rs:1055-1074`), and there is no reopen path
 //! and no signal handler anywhere that could give it a new one. Under
 //! rename-and-create the daemon therefore keeps writing into the renamed
 //! inode for ever: the new file stays empty, the old one keeps growing, and

@@ -193,6 +193,12 @@ pub(crate) enum Admission {
     },
     /// `max_links` reached.
     RejectFull,
+    /// The peer is not named by `accept_only`, so its incoming link is
+    /// not served. Distinct from every other rejection because nothing
+    /// about it will change: a duplicate resolves, a full table drains,
+    /// but an unlisted peer stays unlisted until the config does. The
+    /// driver logs `BLE_LINK_NOT_ADMITTED` and disconnects.
+    RejectNotAdmitted,
 }
 
 /// What one inbound carrier frame amounted to.
@@ -297,6 +303,14 @@ pub(crate) struct LinkTable {
     /// fragment stream from the peer — which before the line existed
     /// was invisible on every surface.
     abandon_reports: Vec<(IdentityHash, u32, u32)>,
+    /// Whose incoming link we serve (`accept_only`). Empty — the
+    /// default, and what an absent key resolves to — serves every peer
+    /// that dials us, exactly as the table did before the key existed.
+    /// It lives here rather than in the driver because the one moment
+    /// it can be asked is inside [`Self::peripheral_frame`]: the
+    /// identity arrives as the handshake's 16 bytes, and the driver
+    /// does not see that it was a handshake until the table says so.
+    accept_only: PeerAllowlist,
 }
 
 impl LinkTable {
@@ -307,7 +321,21 @@ impl LinkTable {
             links: Vec::new(),
             pending: Vec::new(),
             abandon_reports: Vec::new(),
+            accept_only: PeerAllowlist::default(),
         }
+    }
+
+    /// Serve only the peers this list names (`accept_only`). An empty
+    /// list — never calling this — serves everyone.
+    pub(crate) fn with_accept_only(mut self, accept_only: PeerAllowlist) -> Self {
+        self.accept_only = accept_only;
+        self
+    }
+
+    /// How many peers `accept_only` names, for the refusal log line and
+    /// the startup banner.
+    pub(crate) fn accept_only_len(&self) -> usize {
+        self.accept_only.len()
     }
 
     #[cfg(test)]
@@ -558,6 +586,23 @@ impl LinkTable {
             let mut identity = [0u8; 16];
             identity.copy_from_slice(data);
             self.pending.retain(|p| p.addr != addr);
+            // `accept_only`, asked HERE and nowhere later. This is the
+            // earliest point an inbound connection has told us who it
+            // is: BlueZ reports a peripheral-role connection by address
+            // alone, and under RPA that address is a random number that
+            // names nobody — the 16 bytes on this line are the first
+            // thing on the connection that does. Refusing here keeps
+            // the peer out of `links` entirely, so it never reaches
+            // `admit`, never displaces a live link, never enters the
+            // fan-out, and the driver never reports it to the core as a
+            // peer: it is refused at the link layer, before it is a
+            // Reticulum peer at all. (A peer that connects and never
+            // writes its identity is not refusable by name and is not
+            // refused: it sits in `pending` and the handshake timeout
+            // disconnects it, as it always has.)
+            if !self.accept_only.allows_identity(&addr, &identity) {
+                return Inbound::HandshakeRejected(Admission::RejectNotAdmitted);
+            }
             let (admission, displaced) = self.admit(identity, addr, Role::Peripheral, mtu, now_ms);
             return match admission {
                 Admission::Accept => Inbound::HandshakeComplete {
@@ -906,21 +951,23 @@ pub(crate) fn decide_from_scan(
 }
 
 // ---------------------------------------------------------------------
-// Who we are willing to DIAL (#407 follow-up)
+// Who we DIAL, and whose dial we SERVE (#407 follow-up)
 // ---------------------------------------------------------------------
 
-/// One entry of [`InitiateAllowlist`]: a peer named the way a scanner
-/// can recognise it before it has dialled anything.
+/// One entry of [`PeerAllowlist`]: a peer named the way the interface
+/// can recognise it at the moment the list is consulted — a sighting on
+/// the scan path, the identity handshake on the accept path.
 ///
-/// Two spellings because the two things a scanner holds at that moment
-/// are exactly these, and they are not equally durable: a BLE address is
-/// what BlueZ reports for every sighting but rotates under RPA, an
-/// identity hint is stable across a rotation and a reboot but is only
-/// there when the advertiser publishes one (#412). Neither is dropped,
-/// so an operator naming a fixed-address peer and a harness naming a
-/// board by its identity both get the key they already have.
+/// Two spellings because those are the two things the interface holds
+/// at those moments, and they are not equally durable: a BLE address is
+/// what BlueZ reports for every sighting and for every connection but
+/// rotates under RPA, an identity hint is stable across a rotation and
+/// a reboot but is only there when the advertiser publishes one (#412).
+/// Neither is dropped, so an operator naming a fixed-address peer and a
+/// harness naming a board by its identity both get the key they already
+/// have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InitiateEntry {
+enum AllowlistEntry {
     /// A BLE address in display order, as [`Addr`] carries it.
     Addr(Addr),
     /// The first [`IDENTITY_HINT_LEN`] bytes of a peer identity — what
@@ -929,38 +976,46 @@ enum InitiateEntry {
     Hint([u8; IDENTITY_HINT_LEN]),
 }
 
-/// The peers this interface is willing to OPEN a connection to.
+/// A set of peers a BLE interface names, resolved from one config key.
 ///
-/// Empty — the default, and what an absent or empty config key resolves
-/// to — means every peer, which is the behaviour that predates this
-/// type: the sort and the eligibility filters alone decide. A non-empty
-/// list narrows that and nothing else.
+/// Empty — the default, and what an absent or empty key resolves to —
+/// means every peer, the behaviour that predates this type. A non-empty
+/// list narrows exactly the one question its key asks and nothing else.
+/// There are two such keys, they are independent, and they are asked at
+/// different moments:
 ///
-/// # What it is not
+/// - `initiate_only` — whom we may DIAL. Asked on the scan path
+///   against a sighting's address and advertised hint. Unlisted means
+///   we do not pick up the phone first; the peer sees what it would see
+///   from a node that has not got around to dialling it — we keep
+///   advertising, we keep answering, and no wire byte differs.
+/// - `accept_only` — whose incoming link we SERVE. Asked in
+///   [`LinkTable::peripheral_frame`] at the identity handshake, the
+///   earliest point an inbound connection has said who it is. Unlisted
+///   means the handshake is refused and the device disconnected, so the
+///   peer never becomes a link and never a Reticulum peer.
 ///
-/// It is not admission control. Nothing here is consulted by
-/// [`LinkTable::admit`], by [`LinkTable::peripheral_frame`] or by any
-/// part of the GATT server: a peer left off the list that dials US is
-/// served exactly as before. This is about who picks up the phone
-/// first, and a peer we decline to dial sees what it would see from a
-/// node that has not got around to dialling it — we keep advertising,
-/// we keep answering. No wire byte and no protocol state differs.
+/// Neither key is consulted for the other's question. A node may dial
+/// one peer and serve another, or dial everyone and serve two; setting
+/// either list leaves the other's behaviour byte for byte as it was,
+/// which is what the negative-control tests pin.
 ///
 /// # Why an allow-list rather than a deny-list
 ///
-/// The use it was built for is pinning a topology (a periculum BLE cell
-/// that wants a chain rather than a star) and the operator case next to
-/// it — a node that is a leaf on one uplink rather than a hub. Both are
-/// statements about the small set that IS dialled; spelling them as the
+/// The uses are pinning a topology (a periculum BLE cell that wants a
+/// chain rather than a star, or one that wants the room's phones out of
+/// its measurement) and the operator case next to it — a node that is a
+/// leaf on one uplink rather than a hub. All are statements about the
+/// small set that IS dialled or IS served; spelling them as the
 /// complement means the room's next unknown participant joins the set
 /// by default, which is the property that made the 2026-09-15 corpus
 /// measure a mesh it had not described.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct InitiateAllowlist {
-    entries: Vec<InitiateEntry>,
+pub(crate) struct PeerAllowlist {
+    entries: Vec<AllowlistEntry>,
 }
 
-impl InitiateAllowlist {
+impl PeerAllowlist {
     /// Resolve the config key's entries. The digit count decides what an
     /// entry is, and the three counts are three things a log line
     /// already prints:
@@ -977,18 +1032,23 @@ impl InitiateAllowlist {
     ///
     /// No count is ambiguous, so nothing has to be guessed: an entry
     /// that is none of the three is an error rather than a skipped
-    /// line. The whole point of the key is that an unlisted peer is not
-    /// dialled, so a typo that silently shortened the list would
-    /// restore precisely the free-for-all it was written to prevent,
-    /// and a harness would read the resulting race as a finding.
-    pub(crate) fn parse<S: AsRef<str>>(entries: &[S]) -> Result<Self, String> {
+    /// line. The whole point of either key is that an unlisted peer is
+    /// not dialled, or not served, so a typo that silently shortened
+    /// the list would restore precisely the free-for-all it was written
+    /// to prevent, and a harness would read the resulting race as a
+    /// finding.
+    ///
+    /// `key` is the config key the entries came from; it appears in the
+    /// error so a startup failure sends the operator to the line they
+    /// actually wrote.
+    pub(crate) fn parse<S: AsRef<str>>(key: &str, entries: &[S]) -> Result<Self, String> {
         let mut parsed = Vec::new();
         for raw in entries {
             let entry = raw.as_ref().trim();
             if entry.is_empty() {
                 continue;
             }
-            parsed.push(parse_initiate_entry(entry)?);
+            parsed.push(parse_allowlist_entry(key, entry)?);
         }
         Ok(Self { entries: parsed })
     }
@@ -1018,16 +1078,30 @@ impl InitiateAllowlist {
             return true;
         }
         self.entries.iter().any(|entry| match entry {
-            InitiateEntry::Addr(want) => want == addr,
-            InitiateEntry::Hint(want) => hint.is_some_and(|seen| &seen == want),
+            AllowlistEntry::Addr(want) => want == addr,
+            AllowlistEntry::Hint(want) => hint.is_some_and(|seen| &seen == want),
         })
+    }
+
+    /// Whether a peer that has just presented `identity` over an
+    /// incoming connection may be served — the accept-path counterpart
+    /// of [`Self::allows`].
+    ///
+    /// The handshake carries the whole 16-byte hash, so the hint is
+    /// never absent here and an identity entry always has something to
+    /// match: the "unidentifiable stranger" case that makes the scan
+    /// path conservative cannot arise on this path. Both spellings mean
+    /// the same thing under either key, which is the point — a cell
+    /// writes one list of participants and uses it for both questions.
+    pub(crate) fn allows_identity(&self, addr: &Addr, identity: &IdentityHash) -> bool {
+        self.allows(addr, Some(leviculum_ble_tx::identity_hint(identity)))
     }
 }
 
-/// One `initiate_only` entry, address or identity. See
-/// [`InitiateAllowlist::parse`] for why the ambiguous 12-hex spelling
-/// is refused.
-fn parse_initiate_entry(entry: &str) -> Result<InitiateEntry, String> {
+/// One allow-list entry, address or identity, for the config key
+/// `key`. See [`PeerAllowlist::parse`] for why the digit count alone
+/// decides which spelling an entry is.
+fn parse_allowlist_entry(key: &str, entry: &str) -> Result<AllowlistEntry, String> {
     let separated = entry.contains(':') || entry.contains('-');
     // A bare 12-hex address is the spelling both stacks' logs print, so
     // it is read as one: an identity entry is 8 or 32 digits, never 12,
@@ -1040,15 +1114,15 @@ fn parse_initiate_entry(entry: &str) -> Result<InitiateEntry, String> {
             (0..6).filter_map(|i| entry.get(2 * i..2 * i + 2)).collect()
         };
         if groups.len() != addr.len() {
-            return Err(bad_initiate_entry(entry));
+            return Err(bad_allowlist_entry(key, entry));
         }
         for (slot, group) in addr.iter_mut().zip(groups) {
             *slot = (group.len() == 2)
                 .then(|| u8::from_str_radix(group, 16).ok())
                 .flatten()
-                .ok_or_else(|| bad_initiate_entry(entry))?;
+                .ok_or_else(|| bad_allowlist_entry(key, entry))?;
         }
-        return Ok(InitiateEntry::Addr(addr));
+        return Ok(AllowlistEntry::Addr(addr));
     }
     // An identity: the four hint bytes, or the whole 16-byte hash cut
     // down to them — a scenario author copies the `[IDENTITY]` line a
@@ -1061,23 +1135,24 @@ fn parse_initiate_entry(entry: &str) -> Result<InitiateEntry, String> {
     if (hex_len != 2 * IDENTITY_HINT_LEN && hex_len != 32)
         || !entry.bytes().all(|b| b.is_ascii_hexdigit())
     {
-        return Err(bad_initiate_entry(entry));
+        return Err(bad_allowlist_entry(key, entry));
     }
     let mut hint = [0u8; IDENTITY_HINT_LEN];
     for (i, slot) in hint.iter_mut().enumerate() {
         *slot = entry
             .get(2 * i..2 * i + 2)
             .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .ok_or_else(|| bad_initiate_entry(entry))?;
+            .ok_or_else(|| bad_allowlist_entry(key, entry))?;
     }
-    Ok(InitiateEntry::Hint(hint))
+    Ok(AllowlistEntry::Hint(hint))
 }
 
 /// The one message shape for a refused entry, so a config error names
-/// both accepted spellings wherever it is raised.
-fn bad_initiate_entry(entry: &str) -> String {
+/// the key it came from and both accepted spellings wherever it is
+/// raised.
+fn bad_allowlist_entry(key: &str, entry: &str) -> String {
     format!(
-        "BLEInterface initiate_only entry '{entry}' is neither a BLE address \
+        "BLEInterface {key} entry '{entry}' is neither a BLE address \
          (AA:BB:CC:DD:EE:FF or 12 hex digits) nor a peer identity \
          (8 or 32 hex digits)"
     )
@@ -2729,7 +2804,7 @@ mod tests {
     fn the_allowlist_is_honoured_by_address_and_by_identity() {
         let hint_a = leviculum_ble_tx::identity_hint(&ID_A);
         let hint_b = leviculum_ble_tx::identity_hint(&ID_B);
-        let list = InitiateAllowlist::parse(&["C0:00:00:00:00:01", "a1a1a1a1"])
+        let list = PeerAllowlist::parse("initiate_only", &["C0:00:00:00:00:01", "a1a1a1a1"])
             .expect("both spellings parse");
         assert_eq!(list.len(), 2);
 
@@ -2753,11 +2828,12 @@ mod tests {
     /// byte for byte what the interface did before the key existed.
     #[test]
     fn an_empty_allowlist_dials_everyone_exactly_as_before() {
-        let absent = InitiateAllowlist::default();
+        let absent = PeerAllowlist::default();
         let empty: Vec<String> = Vec::new();
-        let parsed = InitiateAllowlist::parse(&empty).expect("an empty list is legal");
+        let parsed = PeerAllowlist::parse("initiate_only", &empty).expect("an empty list is legal");
         // A key written with nothing but separators is the same thing.
-        let blanks = InitiateAllowlist::parse(&["", "   "]).expect("blank entries are skipped");
+        let blanks =
+            PeerAllowlist::parse("initiate_only", &["", "   "]).expect("blank entries are skipped");
         for list in [&absent, &parsed, &blanks] {
             assert!(list.is_empty());
             assert!(list.allows(&ADDR_1, None));
@@ -2771,15 +2847,15 @@ mod tests {
     /// is a node that simply had not dialled it yet.
     #[test]
     fn a_peer_we_will_not_dial_is_still_served_when_it_dials_us() {
-        let list = InitiateAllowlist::parse(&["a1a1a1a1"]).expect("parses");
+        let list = PeerAllowlist::parse("initiate_only", &["a1a1a1a1"]).expect("parses");
         assert!(
             !list.allows(&ADDR_2, Some(leviculum_ble_tx::identity_hint(&ID_B))),
             "precondition: ID_B is the peer we refuse to dial"
         );
 
-        // Nothing in the admission path consults the list — the table
-        // does not even hold one — so the refused peer's own dial is a
-        // link like any other.
+        // The dial list never reaches the accept path, and this table
+        // holds no accept list of its own, so the peer we refuse to
+        // dial opens a link like any other.
         let mut t = table();
         assert_eq!(
             t.peripheral_frame(ADDR_2, 185, &ID_B, 100),
@@ -2831,7 +2907,7 @@ mod tests {
         assert_eq!(fallback.decision, ConnectDecision::InitiateFallback);
         assert!(fallback.decision.initiate());
 
-        let list = InitiateAllowlist::parse(&["C0:00:00:00:00:01"]).expect("parses");
+        let list = PeerAllowlist::parse("initiate_only", &["C0:00:00:00:00:01"]).expect("parses");
         assert!(
             !list.allows(&higher, fallback.identity_hint),
             "the sort's fallback and the allow-list are different questions"
@@ -2844,15 +2920,17 @@ mod tests {
     fn allowlist_entries_are_parsed_or_refused_by_spelling() {
         // A full identity hash is cut to the four bytes the air carries,
         // so copying a board's `[IDENTITY]` line works.
-        let full = InitiateAllowlist::parse(&["a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"]).expect("parses");
+        let full = PeerAllowlist::parse("initiate_only", &["a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"])
+            .expect("parses");
         assert!(full.allows(&ADDR_3, Some(leviculum_ble_tx::identity_hint(&ID_A))));
         // Case and separator spelling are the operator's choice, and the
         // separator-free 12 hex is what both stacks' `addr=` lines print
         // — a scenario author copies one straight out of a capture.
-        let upper = InitiateAllowlist::parse(&["c0-00-00-00-00-01", "A1A1A1A1"]).expect("parses");
+        let upper = PeerAllowlist::parse("initiate_only", &["c0-00-00-00-00-01", "A1A1A1A1"])
+            .expect("parses");
         assert!(upper.allows(&ADDR_1, None));
         assert!(upper.allows(&ADDR_3, Some(leviculum_ble_tx::identity_hint(&ID_A))));
-        let bare = InitiateAllowlist::parse(&["C00000000001"]).expect("parses");
+        let bare = PeerAllowlist::parse("initiate_only", &["C00000000001"]).expect("parses");
         assert!(bare.allows(&ADDR_1, None));
         assert!(!bare.allows(&ADDR_2, None));
 
@@ -2864,12 +2942,184 @@ mod tests {
             "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1zz", // 32 long, tail is a typo
             "LN-a1a1a1a1",                      // the advertised name, not the key
         ] {
-            let err = InitiateAllowlist::parse(&[bad]).expect_err(bad);
+            let err = PeerAllowlist::parse("initiate_only", &[bad]).expect_err(bad);
             assert!(err.contains(bad), "the error names the entry: {err}");
             assert!(
                 err.contains("initiate_only"),
                 "and the key it came from: {err}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // accept_only: whose incoming link we SERVE (#407 follow-up)
+    // -----------------------------------------------------------------
+
+    /// THE negative control, and the one that has to hold for every
+    /// deployment that exists today: a table with no accept list serves
+    /// whoever dials it. Both a listed and an unlisted peer are
+    /// admitted, because with the key absent there is no such thing as
+    /// unlisted.
+    #[test]
+    fn an_absent_accept_list_serves_everyone_exactly_as_before() {
+        // Written three ways, because all three are what an operator
+        // gets today: no key at all, `accept_only =` with nothing after
+        // it, and a value that is only separators.
+        let empty: Vec<String> = Vec::new();
+        let lists = [
+            PeerAllowlist::default(),
+            PeerAllowlist::parse("accept_only", &empty).expect("an empty list is legal"),
+            PeerAllowlist::parse("accept_only", &["", "   "]).expect("blanks are skipped"),
+        ];
+        for list in lists {
+            assert!(list.is_empty());
+            let mut t = table().with_accept_only(list);
+            assert_eq!(
+                t.peripheral_frame(ADDR_1, 185, &ID_A, 0),
+                Inbound::HandshakeComplete {
+                    identity: ID_A,
+                    displaced: None
+                },
+            );
+            assert_eq!(
+                t.peripheral_frame(ADDR_2, 185, &ID_B, 10),
+                Inbound::HandshakeComplete {
+                    identity: ID_B,
+                    displaced: None
+                },
+            );
+            assert_eq!(t.live_links(), 2, "both served, as before the key");
+        }
+    }
+
+    /// A listed peer is served under either spelling, an unlisted one is
+    /// refused — and the identity spelling survives the address
+    /// rotation that is why it exists: the same peer dialling from a
+    /// fresh RPA is still admitted.
+    #[test]
+    fn the_accept_list_is_honoured_by_address_and_by_identity() {
+        let list = PeerAllowlist::parse("accept_only", &["C0:00:00:00:00:01", "b2b2b2b2"])
+            .expect("both spellings parse");
+        let mut t = table().with_accept_only(list);
+
+        // Named by address: ID_B happens to dial from ADDR_1.
+        assert!(matches!(
+            t.peripheral_frame(ADDR_1, 185, &ID_B, 0),
+            Inbound::HandshakeComplete { .. }
+        ));
+        // Named by identity, from an address nobody listed — and from a
+        // second one, the rotation case.
+        assert!(matches!(
+            t.peripheral_frame(ADDR_3, 185, &ID_B, 10),
+            Inbound::HandshakeComplete { .. }
+        ));
+        // Neither spelling names ID_A from ADDR_2.
+        assert_eq!(
+            t.peripheral_frame(ADDR_2, 185, &ID_A, 20),
+            Inbound::HandshakeRejected(Admission::RejectNotAdmitted),
+        );
+        assert!(!t.knows_identity(&ID_A));
+    }
+
+    /// A refused peer is refused at the LINK layer: it is not in the
+    /// table, its frames never reassemble, and it is not in the
+    /// fan-out — so nothing downstream of the interface ever learns it
+    /// existed. The refusal is also not a filter applied after
+    /// admission: an unlisted peer may not displace the live link of a
+    /// listed one, which is what a post-admission check would let it do.
+    #[test]
+    fn a_refused_peer_never_becomes_a_link_and_displaces_nothing() {
+        let list = PeerAllowlist::parse("accept_only", &["b2b2b2b2"]).expect("parses");
+        let mut t = table().with_accept_only(list);
+        assert!(matches!(
+            t.peripheral_frame(ADDR_2, 185, &ID_B, 0),
+            Inbound::HandshakeComplete { .. }
+        ));
+
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &ID_A, 100),
+            Inbound::HandshakeRejected(Admission::RejectNotAdmitted),
+        );
+        assert_eq!(t.live_links(), 1, "the listed peer's link is untouched");
+        assert!(t.knows_identity(&ID_B));
+        assert!(!t.knows_identity(&ID_A));
+        assert!(!t.knows_addr(&ADDR_1));
+
+        // Its traffic is not traffic: a complete packet's worth of
+        // fragments from the refused address reassembles into nothing.
+        for frag in fragment_packet(&vec![0x5A; 300], 185) {
+            assert_eq!(
+                t.peripheral_frame(ADDR_1, 185, &frag, 200),
+                Inbound::NotHandshaked,
+                "a refused peer's fragments are not reassembled"
+            );
+        }
+
+        // And we do not answer it: the fan-out is the listed link only.
+        let plan = t.plan_tx(&[0x01, 0x02]);
+        assert!(plan.central.is_empty());
+        assert!(
+            !plan.notify_fragments.is_empty(),
+            "the listed peer is still served"
+        );
+    }
+
+    /// A refused peer must not be reported as a full table either: the
+    /// accept check runs BEFORE admission, so the reason a run sees is
+    /// the reason that is true and will not change by itself.
+    #[test]
+    fn an_unlisted_peer_is_refused_by_name_not_by_capacity() {
+        let list = PeerAllowlist::parse("accept_only", &["b2b2b2b2"]).expect("parses");
+        let mut t = LinkTable::new(OWN, 1).with_accept_only(list);
+        assert!(matches!(
+            t.peripheral_frame(ADDR_2, 185, &ID_B, 0),
+            Inbound::HandshakeComplete { .. }
+        ));
+        assert!(t.is_full());
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &ID_A, 100),
+            Inbound::HandshakeRejected(Admission::RejectNotAdmitted),
+            "not RejectFull: the list, not the capacity, is why"
+        );
+    }
+
+    /// The two keys are independent questions. Setting `accept_only`
+    /// changes nothing about who we dial, and setting `initiate_only`
+    /// changes nothing about whom we serve — a node may serve a phone
+    /// it never dials, and dial an uplink that never dials it.
+    #[test]
+    fn the_two_keys_do_not_leak_into_each_other() {
+        let accept = PeerAllowlist::parse("accept_only", &["b2b2b2b2"]).expect("parses");
+        let hint_a = leviculum_ble_tx::identity_hint(&ID_A);
+        // accept_only names ID_B only, yet the DIAL question is asked of
+        // `initiate_only`, which is absent here: ID_A is dialled.
+        assert!(
+            PeerAllowlist::default().allows(&ADDR_1, Some(hint_a)),
+            "an absent initiate_only still dials everyone"
+        );
+        assert!(
+            !accept.allows_identity(&ADDR_1, &ID_A),
+            "precondition: ID_A is the peer we will not serve"
+        );
+
+        // The mirror: a dial list that names ID_A does not stop ID_B
+        // from being served, because the table holds no accept list.
+        let mut t = table();
+        assert!(matches!(
+            t.peripheral_frame(ADDR_2, 185, &ID_B, 0),
+            Inbound::HandshakeComplete { .. }
+        ));
+    }
+
+    /// The key an entry came from is named in its error, so a startup
+    /// failure sends the operator to the line they wrote rather than to
+    /// the other list.
+    #[test]
+    fn a_bad_accept_entry_names_accept_only() {
+        let err = PeerAllowlist::parse("accept_only", &["LN-b2b2b2b2"]).expect_err("refused");
+        assert!(err.contains("accept_only"), "{err}");
+        assert!(!err.contains("initiate_only"), "{err}");
+        let err = PeerAllowlist::parse("initiate_only", &["LN-b2b2b2b2"]).expect_err("refused");
+        assert!(err.contains("initiate_only"), "{err}");
     }
 }

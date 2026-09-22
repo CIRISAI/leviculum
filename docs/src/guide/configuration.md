@@ -77,7 +77,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1013`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1037`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -257,7 +257,8 @@ map onto this implementation:
 | `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:712`); `InterfaceConfig::discovery_interval` (`config.rs:676-678`)) |
 | `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:713`); `InterfaceConfig::enable_central` (`config.rs:679-681`)) |
 | `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:714`); `InterfaceConfig::enable_peripheral` (`config.rs:681-683`)) |
-| `initiate_only` | string (CSV) | unset (every peer) | Peers this interface may DIAL: BLE addresses (`AA:BB:CC:DD:EE:FF`, `-` or no separator) or peer identities in hex, 8 digits (the four bytes an advertiser publishes as its hint) or all 32 (a board's `[IDENTITY]` line, truncated to those four). Unset or empty dials whoever the connection-direction rule picks, the behaviour that predates the key. It narrows dialling and nothing else: a peer left off the list that connects to US is admitted and served exactly as before, and nothing on the wire changes — it sees a node that has not dialled it yet. The digit count decides which is which — 12 is an address, 8 or 32 an identity — so both spellings can be copied out of a log line (`BLE_SCAN_DECISION addr=`, a board's `BLE_CENTRAL_ADDR`, its `[IDENTITY]`). A malformed entry is a startup error, not a dropped line. (`initiate_only` (`ini_config.rs:722-731`); `InterfaceConfig::initiate_only` (`config.rs:684-693`); `InitiateAllowlist` (`interfaces/ble/links.rs:959`)) |
+| `initiate_only` | string (CSV) | unset (every peer) | Peers this interface may DIAL: BLE addresses (`AA:BB:CC:DD:EE:FF`, `-` or no separator) or peer identities in hex, 8 digits (the four bytes an advertiser publishes as its hint) or all 32 (a board's `[IDENTITY]` line, truncated to those four). Unset or empty dials whoever the connection-direction rule picks, the behaviour that predates the key. It narrows dialling and nothing else: a peer left off the list that connects to US is admitted and served exactly as before, and nothing on the wire changes — it sees a node that has not dialled it yet. The digit count decides which is which — 12 is an address, 8 or 32 an identity — so both spellings can be copied out of a log line (`BLE_SCAN_DECISION addr=`, a board's `BLE_CENTRAL_ADDR`, its `[IDENTITY]`). A malformed entry is a startup error, not a dropped line. (`initiate_only` (`ini_config.rs:717-719`); `InterfaceConfig::initiate_only` (`config.rs:685-694`); `PeerAllowlist` (`interfaces/ble/links.rs:1014`)) |
+| `accept_only` | string (CSV) | unset (every peer) | Peers whose INCOMING link this interface SERVES — the symmetric counterpart of `initiate_only`, same vocabulary, same validation, same "unset or empty means everyone". A non-empty list narrows who we serve and nothing else: a peer left off it is still dialled if `initiate_only` allows it, and a peer left off `initiate_only` is still served if this list names it. An unlisted peer that connects is refused at the identity handshake — the first moment an inbound BLE connection has said who it is, since under RPA its address names nobody — so it never becomes a link, never enters the fan-out and is never reported to the core as a peer. Each refusal emits one `BLE_LINK_NOT_ADMITTED peer=<hex8> identity=<hex32> addr=<a> role=peripheral listed=<n> action=disconnect` line, so a run that turned strangers away is distinguishable from a run nobody tried. A malformed entry is a startup error, not a dropped line. (`accept_only` (`ini_config.rs:723-725`); `InterfaceConfig::accept_only` (`config.rs:695-710`); the refusal point (`interfaces/ble/links.rs:603`)) |
 
 ```ini
 [interfaces]
@@ -269,6 +270,8 @@ map onto this implementation:
     # min_rssi = -85
     # Dial nothing but these two; still answer anyone who dials us.
     # initiate_only = b2a8bea1, AA:BB:CC:DD:EE:FF
+    # Serve nothing but these two; a stranger's connection is refused.
+    # accept_only = b2a8bea1, AA:BB:CC:DD:EE:FF
 ```
 
 A node that should be a leaf rather than a hub — one uplink out, still
@@ -276,6 +279,16 @@ reachable from anybody near it — is `initiate_only` naming that uplink.
 A node that should be a leaf and invisible as well adds
 `enable_peripheral = no`, which is the stronger statement: it stops
 advertising, so no peer can dial it either.
+
+The two keys answer independent questions and `accept_only` is the one
+for a room the operator does not control. `enable_peripheral = no`
+refuses every incoming link, including the ones the deployment wants;
+`accept_only` names the set it wants and refuses the rest, which is what
+a measurement in a flat needs — a Faraday cage stops LoRa, it does not
+stop the phone in someone's pocket from dialling a Columba advertiser.
+Setting both keys to the same list pins a closed mesh: we dial nobody
+else and we serve nobody else. Setting neither is the default and is
+what every existing deployment does.
 
 ### RNode and Serial (`RNodeInterface`, `SerialInterface`)
 
