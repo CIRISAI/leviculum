@@ -14,9 +14,22 @@
 # from a plain `git clone`.
 #
 # Runtime use of `reference/` is untouched and stays legitimate: the
-# rnsd_interop suites spawn the vendored Python and skip themselves when it is
-# absent. Only the compile-time form is forbidden, because only it takes the
-# whole crate down with it.
+# rnsd_interop suites spawn the vendored Python at RUN time, so a missing
+# submodule costs those tests and nothing else. It does cost them: measured
+# 2026-09-22, exactly one test in that suite skips itself when the vendored
+# RNS is absent (`reverse_rpc_interop_tests.rs:128`, guarded by its own
+# `python_rns_available()`); every other test there FAILS, because
+# `harness.rs:136` hands a missing `reference/Reticulum` on to
+# scripts/test_daemon.py and lets it error out. That is a deliberate
+# difference in kind, not a second bug: a failing test is a test that ran and
+# said something, while a compile-time `include_str!` into `reference/` takes
+# the whole crate — and every test in it — out of the run without a word.
+# Only the compile-time form is forbidden here.
+#
+# What the difference costs the release path is the subject of Codeberg #312:
+# because both forge pipelines clone without submodules, rnsd_interop runs in
+# neither, and the interop verdict reaches `publish` as a ref pushed by the
+# tier-2 nightly instead (scripts/check-nightly-green.sh).
 #
 # The remedy is always the same: copy the fixture into the crate's
 # `tests_data/` and pin it. The test wanted representative input, not that
