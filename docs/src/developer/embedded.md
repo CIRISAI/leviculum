@@ -65,11 +65,14 @@ you must dispatch.
 The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
-loop (`leviculum-nrf/src/bin/t114.rs:559-616`), here with three interfaces
-(serial, LoRa, BLE) selected over with Embassy's `select4`:
+loop: the deadline comes from `next_deadline`
+(`leviculum-nrf/src/bin/t114.rs:697-702`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/bin/t114.rs:755-774`). The board selects over nine event
+sources; the loop below narrows that to the three interfaces (serial, LoRa,
+BLE) and the timer:
 
 ```rust
-// Adapted from leviculum-nrf/src/bin/t114.rs:559
+// Adapted from the T114 main loop cited above.
 loop {
     let deadline = node
         .next_deadline()
@@ -137,11 +140,12 @@ drains the `EventReceiver`.
 
 `NodeCoreBuilder` (`leviculum-core/src/node/builder.rs:40`) takes the platform
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
-[`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. From the
-T114 firmware (`leviculum-nrf/src/bin/t114.rs:133-152`):
+[`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. The T114
+firmware builds its node the same way (`NodeCoreBuilder`,
+`leviculum-nrf/src/bin/t114.rs:181-199`):
 
 ```rust
-// Adapted from leviculum-nrf/src/bin/t114.rs:133
+// Adapted from the T114 builder cited above.
 let mut builder = NodeCoreBuilder::new()
     .enable_transport(true)
     .max_incoming_resource_size(8 * 1024)
@@ -151,11 +155,17 @@ if let Ok(Some(identity)) = id_store.load() {
     builder = builder.identity(identity);
 }
 
-let mut node = Box::new(builder.build(rng, EmbassyClock, EmbeddedStorage::new()));
+let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 ```
 
 `build` consumes the builder and the platform triple and returns the
-`NodeCore<R, C, S>`.
+`NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
+use `build_boxed` (`leviculum-core/src/node/builder.rs:309`), which allocates
+first and configures through the box. `Box::new(builder.build(..))` holds a
+full-size `NodeCore` as a by-value local on the way into the box, and with
+`EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a
+94 KB `main` frame on a 128 KB stack and corrupted SoftDevice RAM on the
+deeper paths.
 
 ## Implementing the platform traits
 
