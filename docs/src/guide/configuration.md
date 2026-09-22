@@ -42,6 +42,37 @@ throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
 as `false` (`ini_config.rs:919-930`).
 
+## A file with a syntax error is refused
+
+A line that is neither a section header nor a `key = value` pair is a parse
+error, and `lnsd` exits non-zero without starting rather than reading the
+rest of the file as nothing (`ini_config.rs:206-208`). The error names the
+line number and the line, and where the format is ambiguous it reports both
+the INI and the TOML verdict (`config.rs:949-956`):
+
+```
+$ lnsd --config /etc/reticulum
+lnsd: configuration error: Failed to parse config /etc/reticulum/config: not
+valid Reticulum INI (Invalid line 1 ('[reticulum'): matched as neither section
+nor keyword) and not valid TOML (...)
+```
+
+This is the reference's behaviour, not a house rule: ConfigObj raises
+`Invalid line ('[reticulum') (matched as neither section nor keyword)`, and
+`rnsd` logs `Could not parse the configuration at <path>` and exits 255
+(`RNS/Reticulum.py:330-333`). Every bracket shape ConfigObj accepts still
+loads here, including a header with a trailing comment (`[reticulum] # note`)
+and `[reticulum = x`, which ConfigObj reads as a key rather than a header
+(`ini_config.rs:44-62`).
+
+What is NOT refused, because the reference does not refuse it either: an
+interface whose `type` we do not implement is skipped with a warning and the
+daemon runs with the rest (`ini_config.rs:318-324`), the same way `rnsd` logs
+`Could not locate external interface module` and carries on. A key in a
+section `lnsd` does not read is likewise kept out of the config and logged
+(`ini_config.rs:177-190`).
+
+
 ## The `[reticulum]` section
 
 Core daemon settings. Every key below is parsed in
