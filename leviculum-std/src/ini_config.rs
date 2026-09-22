@@ -267,7 +267,7 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
         };
         iface.mode = Some(mode.to_string());
         // Python logs this at NOTICE; our levels fold notice into info
-        // (lnsd.rs:265-267). The wording is the reference's, because the point
+        // (lnsd.rs:292-294). The wording is the reference's, because the point
         // is the same: the operator must be able to see in the log why the
         // mode is not what the config file says.
         tracing::info!(

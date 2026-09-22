@@ -27,6 +27,7 @@ mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
 mod local_client_announce_burst_half_duplex;
 mod lxmf_opportunistic_fallback_threshold;
+mod media_silence_restore_signal;
 mod pn_offer_outgrows_the_link_mdu;
 mod ratchet_rotation_single_packet;
 mod recall_survives_a_restart;

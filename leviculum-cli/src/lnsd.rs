@@ -174,8 +174,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("Reticulum daemon running");
 
     // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on
-    // SIGUSR1, command a firmware reset on SIGUSR2, command an announce
-    // on SIGRTMIN.
+    // SIGUSR1, command a firmware reset on SIGUSR2, and command an
+    // announce, a media silence or a media restore on the three real-time
+    // numbers.
     //
     // SIGUSR2 joins an existing surface rather than inventing one: SIGUSR1
     // is already how this daemon is asked to do something out of band, and
@@ -211,13 +212,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         use tokio::signal::unix::{signal, SignalKind};
         let announce_signal = leviculum_std::interfaces::FIRMWARE_ANNOUNCE_SIGNAL;
+        let silence_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_SILENCE_SIGNAL;
+        let restore_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_RESTORE_SIGNAL;
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
         let mut announce = signal(SignalKind::from_raw(announce_signal))?;
+        let mut media_silence = signal(SignalKind::from_raw(silence_signal))?;
+        let mut media_restore = signal(SignalKind::from_raw(restore_signal))?;
         info!(
             "Out-of-band control: SIGUSR1 diagnostics, SIGUSR2 firmware reset, \
-             signal {announce_signal} commanded announce"
+             signal {announce_signal} commanded announce, signal {silence_signal} media \
+             silence, signal {restore_signal} media restore"
         );
         loop {
             tokio::select! {
@@ -247,6 +253,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // from "the announce went out and nobody heard it".
                     info!(
                         "Received signal {announce_signal}: commanded announce on \
+                         {reached} serial interface(s)"
+                    );
+                }
+                _ = media_silence.recv() => {
+                    let reached =
+                        leviculum_std::interfaces::request_firmware_media_silence();
+                    // The same count, for the same reason the announce
+                    // logs one: a scenario that takes a node off the air
+                    // and asserts the mesh routed around it has to be
+                    // able to tell "no board here" from "the carriers
+                    // went off and the mesh carried on regardless".
+                    info!(
+                        "Received signal {silence_signal}: commanded media silence on \
+                         {reached} serial interface(s)"
+                    );
+                }
+                _ = media_restore.recv() => {
+                    let reached =
+                        leviculum_std::interfaces::request_firmware_media_restore();
+                    info!(
+                        "Received signal {restore_signal}: commanded media restore on \
                          {reached} serial interface(s)"
                     );
                 }
