@@ -66,6 +66,8 @@ mod mvr_ble_peer_up_announce;
 #[cfg(test)]
 mod mvr_ble_routed_delivery_hint;
 #[cfg(test)]
+mod mvr_board_announce_uplink;
+#[cfg(test)]
 mod mvr_board_radio_pathresolve;
 #[cfg(test)]
 mod mvr_default_announce_app_data;
