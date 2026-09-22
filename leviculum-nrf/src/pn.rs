@@ -96,6 +96,11 @@
 //!                                               per peer (#388 pass 3),
 //!                                               offer plan, maps, duplicate
 //!                                               cache, flush queues
+//!         + (0)                                 SERVE_PEAK_BYTES, the
+//!                                               outbound serve transient —
+//!                                               97 036 B at the announced
+//!                                               cap and UNFUNDED, see the
+//!                                               arithmetic at the constant
 //!       + reserve                             fragmentation reserve
 //!                                             + the shared BLE channels
 //!                                             + one incoming resource at
@@ -105,9 +110,9 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 30 984, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 008, role 21 120, reserve 18 848,
 //! sessions 4 · 3 948 = 15 792, per_link 2 664 — the remainder is
-//! 11 560 B and the division yields **4**: the heap affords exactly the
+//! 11 536 B and the division yields **4** (leaving 880 B of slack): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth
@@ -171,6 +176,7 @@ use leviculum_lxmf::propagation::{
     MessageListResponse, PeerError, PropagationNodeAnnounce, TransientId,
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
+use leviculum_lxmf::propagation_node::serve_peak_bytes;
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::{
     CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
@@ -349,6 +355,45 @@ const BOARD_SYNC_LIMIT_KB: u64 = 8;
 // this limit.
 const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING_RESOURCE_BYTES);
 
+/// The link SDU the serve transient is sized against: Reticulum's
+/// smallest negotiated MTU (500) less the resource per-part overhead.
+/// The smallest SDU is the worst case, because it makes the most parts
+/// and therefore the most per-part bookkeeping.
+const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_OVERHEAD;
+
+/// Peak heap this board holds live AT ONCE while it serves one `/get`
+/// fetch at the announced [`BOARD_SYNC_LIMIT_KB`] — the term the role
+/// budget below was missing, and the one a T114 died in on 2026-09-22.
+///
+/// Its own record: `PN_GET dst=… form=fetch count=24 bytes=5376
+/// purged=0` as the last line of one boot, then
+/// `PANIC_PMRT … "memory allocation of 5446 bytes failed"` on the next.
+/// The request arrived, reassembled and was served; the board died
+/// between the serve and the response, and the Python peer saw a
+/// timeout, not a crash.
+///
+/// The 5 446 is arithmetic, not coincidence. Twenty-four bodies of
+/// 224 B encode to a 5 427 B `MessageGetResponse`, and 5 427 + 19 B of
+/// request/response framing is 5 446: the board died on `packed` in
+/// `NodeCore::send_response` — the framed copy that path builds BEFORE
+/// it compares the result with the link MDU and throws away when it
+/// does. It never reached the Resource fallback that would have cost it
+/// six more.
+///
+/// The arithmetic lives at [`serve_peak_bytes`], beside the serve path
+/// it describes, and is pinned by a measured mvr
+/// (`one_fetch_serve_holds_many_copies_of_its_own_response`,
+/// `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`),
+/// which counts requested bytes through the real path and measured
+/// 51 662 B live for that same 5 427 B response. The cap bounds the WIRE
+/// response; the path materialises it a dozen times over and holds most
+/// of those copies together.
+///
+/// **This term is NOT in [`ROLE_BUDGET_BYTES`] below, and that is the
+/// open decision, not an oversight** — see the arithmetic there.
+pub const SERVE_PEAK_BYTES: usize =
+    serve_peak_bytes(BOARD_SYNC_LIMIT_KB as usize * 1000, SERVE_RESOURCE_SDU);
+
 /// The role's slice of the boot heap budget (`HEAP_BUDGET role=`, #388):
 /// the worst case of the census's `pn_*` terms. Arithmetic:
 ///
@@ -363,6 +408,33 @@ const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING
 ///   because the keys did not fit its slack), the offer plan
 ///   (`pn_out`), the per-link maps, the role's duplicate cache and the
 ///   store adapters' queued writes (`pn_flush`).
+///
+/// A fourth term exists and is NOT in this sum: the OUTBOUND serve
+/// transient, [`SERVE_PEAK_BYTES`]. Every term above bounds something
+/// the board *receives* or *holds*; nothing here bounded what it costs
+/// to *answer* a `/get`, and answering one is what killed a T114 on
+/// 2026-09-22. The arithmetic, at today's constants on a T114:
+///
+/// * announced serve cap `BOARD_SYNC_LIMIT_KB` = 8 KB;
+/// * [`SERVE_PEAK_BYTES`] at that cap = **97 036 B**, twelve times the
+///   cap, because the serve path materialises the response a dozen times
+///   between the store and the resource advertisement;
+/// * what the plan leaves unclaimed for it =
+///   [`crate::heap_census::budget_slack`], **880 B** on a T114 — the
+///   remainder after `max_endpoint_links` floors its division, and it
+///   cannot grow without taking a link away from
+///   [`crate::ble::MAX_LINKS`];
+/// * deficit = **96 156 B**, on a 96 KiB heap.
+///
+/// So the honest statement of the fourth term is not a number to add
+/// here but a question this sum cannot answer: 880 B of slack funds a
+/// serve cap of under a hundred bytes — less than one stored message —
+/// and funding a useful one means taking bytes from a term above, from
+/// the reserve, from the link count, or from the materialisation itself.
+/// That is a capacity decision about the board's headline feature, it is
+/// the Lead's, and until it is made the boot line reports the gap
+/// (`HEAP_BUDGET … serve= slack=`, and the `HEAP_BUDGET_UNFUNDED` line
+/// beside it) rather than a budget that silently claims to fit.
 pub const ROLE_BUDGET_BYTES: usize =
     BOARD_SYNC_LIMIT_KB as usize * 1000 + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000 + 5 * 1024;
 

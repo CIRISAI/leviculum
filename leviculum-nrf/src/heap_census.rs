@@ -162,7 +162,7 @@ pub const fn budget_reserve() -> usize {
 /// link currently rides them, because a claimable GATT connection can
 /// fill its queues). What remains of [`crate::HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
-/// With today's numbers (T114: node box 30 984 B, role 21 120 B,
+/// With today's numbers (T114: node box 31 008 B, role 21 120 B,
 /// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 664 B) the
 /// division yields 4 — the heap affords exactly the BLE-session count,
 /// and no extra LoRa-backed links until a fixed term shrinks. The
@@ -194,12 +194,26 @@ pub const fn budget_total(node_box: usize) -> usize {
         + budget_reserve()
 }
 
+/// What the budget leaves unclaimed on a node box of `node_box` bytes:
+/// the remainder after [`max_endpoint_links`] floors its division. It is
+/// NOT spare capacity to spend — one more link costs
+/// [`budget_per_link`], so the slack is what is left over after the last
+/// affordable link, and spending it on anything else is spending the
+/// allocator's elbow room.
+///
+/// Named because the propagation role's unfunded outbound serve
+/// transient ([`crate::pn::SERVE_PEAK_BYTES`]) is measured against it:
+/// on a T114 this is 880 B against a 97 036 B need.
+pub const fn budget_slack(node_box: usize) -> usize {
+    crate::HEAP_SIZE.saturating_sub(budget_total(node_box))
+}
+
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
 ///
 /// ```text
 /// HEAP_BUDGET links=<max> ble_links=<m> per_link=<b> ble_session=<b>
-///   role=<b> reserve=<b> total=<b>
+///   role=<b> reserve=<b> total=<b> slack=<b> serve=<b>
 /// ```
 ///
 /// (one line on the wire; wrapped here for the page).
@@ -216,7 +230,23 @@ pub const fn budget_total(node_box: usize) -> usize {
 ///   budget that only fits with the role off is a config refusal
 ///   deferred to `--set-pn on`;
 /// * `reserve` — [`FRAG_RESERVE_BYTES`] + the shared node-facing BLE
-///   channels + one incoming resource at the binaries' cap.
+///   channels + one incoming resource at the binaries' cap;
+/// * `slack` — [`budget_slack`], what the sum leaves unclaimed;
+/// * `serve` — [`crate::pn::SERVE_PEAK_BYTES`], the peak transient one
+///   outbound `/get` serve costs at the announced cap. It is NOT in
+///   `total`, and when it exceeds `slack` a second critical line follows:
+///
+/// ```text
+/// HEAP_BUDGET_UNFUNDED serve=<b> slack=<b> deficit=<b>
+/// ```
+///
+///   This is the #384 finding, on the wire at every boot rather than in
+///   a post-mortem: the board announces a serve limit its heap plan does
+///   not fund, and a peer that collects its mail is what makes it fail.
+///   It is reported and not asserted on purpose — the panic is a real
+///   failure of a real feature, and a boot refusal would trade it for a
+///   board that does not come up at all, which is a choice this line
+///   exists to put in front of a person rather than make for them.
 ///
 /// `node_box` is passed by the binary (`size_of_val` of its concrete
 /// boxed `NodeCore`) and is inside `total=`. Asserted: `total ≤`
@@ -231,13 +261,26 @@ pub fn log_budget_and_assert(node_box: usize) {
     let role = crate::pn::ROLE_BUDGET_BYTES;
     let reserve = budget_reserve();
     let total = budget_total(node_box);
+    let slack = budget_slack(node_box);
+    let serve = crate::pn::SERVE_PEAK_BYTES;
     crate::log::log_fmt_critical(
         "[HEAP] ",
         format_args!(
-            "HEAP_BUDGET links={} ble_links={} per_link={} ble_session={} role={} reserve={} total={}",
-            links, ble_links, per_link, ble_session, role, reserve, total
+            "HEAP_BUDGET links={} ble_links={} per_link={} ble_session={} role={} reserve={} total={} slack={} serve={}",
+            links, ble_links, per_link, ble_session, role, reserve, total, slack, serve
         ),
     );
+    if serve > slack {
+        crate::log::log_fmt_critical(
+            "[HEAP] ",
+            format_args!(
+                "HEAP_BUDGET_UNFUNDED serve={} slack={} deficit={}",
+                serve,
+                slack,
+                serve - slack
+            ),
+        );
+    }
     assert!(
         total <= crate::HEAP_SIZE,
         "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
