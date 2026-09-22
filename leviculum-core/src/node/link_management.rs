@@ -520,6 +520,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Reject an incoming link request
+    ///
+    /// Deliberately does NOT `resolve_link_id`: the #66 establishment retry
+    /// only re-keys INITIATOR links (`handle_timeout`, guarded by
+    /// `if is_initiator`), so an incoming link never acquires an alias and
+    /// there is nothing to resolve. If responder-side re-keying is ever
+    /// added, this becomes the next stale-id bug.
     pub fn reject_link(&mut self, link_id: &LinkId) {
         self.remove_link(link_id);
     }

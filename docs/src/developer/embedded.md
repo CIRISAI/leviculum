@@ -52,7 +52,7 @@ The three entry points (signatures in the
 - `handle_timeout()` — `leviculum-core/src/node/mod.rs:1302`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:2352`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2370`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 

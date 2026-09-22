@@ -1983,6 +1983,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::resource::incoming::IncomingResource;
         use crate::resource::ResourceError;
 
+        // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
+        // link) so the lookup, the route and the event all name the same
+        // link. The application reaches this method from a
+        // `ResourceAdvertised` event, and that event reports the ORIGINAL
+        // caller-visible id (`link_origin_ids`), so the stale id is the
+        // NORMAL input here, not an edge case.
+        let link_id = &self.resolve_link_id(link_id);
+
         let now_ms = self.transport.clock().now_ms();
 
         let link = self
@@ -2033,6 +2041,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         use crate::packet::PacketContext;
         use crate::resource::ResourceError;
 
+        // Resolve a possibly-stale caller-visible id: as in `accept_resource`,
+        // the application arrives here holding the id a `ResourceAdvertised`
+        // event gave it, which predates a #66 re-key.
+        let link_id = &self.resolve_link_id(link_id);
+
         let link = self
             .links
             .get_mut(link_id)
@@ -2061,6 +2074,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: &LinkId,
         strategy: crate::resource::ResourceStrategy,
     ) -> Result<(), crate::resource::ResourceError> {
+        // Resolve a possibly-stale caller-visible id: the caller configures
+        // the link straight off the `LinkEstablished` event
+        // (`leviculum-cli/src/cp.rs:704`, `leviculum-std/src/remote_status.rs:258`),
+        // and after a #66 retry that id is the pre-re-key one.
+        let link_id = &self.resolve_link_id(link_id);
         let link = self
             .links
             .get_mut(link_id)
