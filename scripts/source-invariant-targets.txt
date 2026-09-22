@@ -90,6 +90,7 @@ skip  lblogd          web_plain                  # binds a TCP socket under a to
 skip  leviculum-cli   client_tools               # spawns lnsd and the client tools
 skip  leviculum-cli   lnsd_instance_conflict     # spawns two daemons and waits for one to refuse
 skip  leviculum-cli   storage_path_from_config   # spawns lnsd against a temp-dir config
+skip  leviculum-core  board_link_budget          # measures a real transfer under a tracking allocator; subject is the code
 skip  leviculum-core  compression_vectors        # reads a vector corpus, but the subject is the compressor
 skip  leviculum-core  embedded_eviction_alloc    # allocation behaviour under an embedded budget; subject is the code
 skip  leviculum-core  heap_census                # heap accounting; subject is the code

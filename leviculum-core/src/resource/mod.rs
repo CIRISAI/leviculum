@@ -178,9 +178,72 @@ pub const COLLISION_GUARD_SIZE: usize = 2 * RESOURCE_WINDOW_MAX_FAST + HASHMAP_M
 /// encrypted in bulk before segmentation).
 ///
 /// Standard MTU 500 → 500 - 35 - 1 = 464.
-pub fn resource_sdu(negotiated_mtu: u32) -> usize {
+///
+/// `const` since the embedded heap budgets call it: a binary that has to
+/// assert at COMPILE time that one incoming resource fits its share of the
+/// pool needs the part count, and the part count is derived from this
+/// (`incoming_peak_bytes`).
+pub const fn resource_sdu(negotiated_mtu: u32) -> usize {
     (negotiated_mtu as usize).saturating_sub(RESOURCE_SDU_OVERHEAD)
 }
+
+/// How many bytes of heap ONE incoming resource can have live at the same
+/// instant, on the target this is compiled for, when the receiver's cap is
+/// `max_size` and its link's Resource SDU is `sdu`.
+///
+/// # Why this exists, and why it is here rather than in a firmware crate
+///
+/// `NodeCoreBuilder::max_incoming_resource_size` is the only bound a node has
+/// on an allocation a PEER sizes. Every embedded binary therefore has to
+/// budget heap for it, and the budget is only worth having if it is computed
+/// from the same arithmetic the receive path actually performs. Two crates
+/// restating that arithmetic is the #388 failure: a budget computed from a
+/// different number than the one enforced is a budget that says nothing. So
+/// the sum lives once, here, beside the code it describes, and the firmware
+/// budgets and the host test that measures it against a real transfer
+/// (`leviculum-core/tests/board_link_budget.rs`) both call it.
+///
+/// # The terms, each one a line of the receive path
+///
+/// `n = ceil(max_size / sdu)` is the part count
+/// `IncomingResource::from_advertisement` derives — from the size it just
+/// bounded, never from the peer's `n`.
+///
+///  * **index, `n * (size_of::<Option<Vec<u8>>> + size_of::<Option<[u8; 4]>>)`**
+///    — the `parts` and `hashmap` vectors, both `vec![None; n]`, both
+///    allocated by the advertisement alone, before a single part has
+///    arrived. This is the term that makes an UNSET cap dangerous: the
+///    default admits a `t` of 1 048 643, which is 2 261 parts at the
+///    standard SDU and tens of kilobytes of index for one packet.
+///  * **`ASSEMBLY_LIVE_COPIES * max_size`** — the transfer's bytes, counted
+///    once per copy of them that is live at the same instant. The peak is
+///    inside `IncomingResource::assemble`, at the `assembled.clone()` that
+///    fills `assembled_with_metadata`: `self.parts` (still whole, nothing
+///    clears it), `stream`, `decrypted` (`truncate` does not release
+///    capacity), `assembled`, `hash_input` and the clone are all live
+///    together, and none is dropped before the function returns. Six.
+///
+/// What is deliberately NOT in the sum: the allocator's per-block overhead
+/// (`n + 7` blocks at the peak), which belongs to whatever fragmentation
+/// reserve the binary keeps, and the decompression path, which allocates
+/// again from `data_size` — a binary that builds `leviculum-core` without
+/// `compression` cannot reach it, and one that does must budget it on top.
+pub const fn incoming_peak_bytes(max_size: usize, sdu: usize) -> usize {
+    if sdu == 0 {
+        return 0;
+    }
+    let parts = max_size.div_ceil(sdu);
+    let index = parts
+        * (core::mem::size_of::<Option<alloc::vec::Vec<u8>>>()
+            + core::mem::size_of::<Option<[u8; RESOURCE_HASHMAP_LEN]>>());
+    index + ASSEMBLY_LIVE_COPIES * max_size
+}
+
+/// How many whole copies of a transfer's bytes are live at the peak of
+/// `IncomingResource::assemble`. Enumerated at [`incoming_peak_bytes`],
+/// which is the only caller; a change to the assembly path that adds or
+/// drops a buffer changes this number and nothing else.
+pub const ASSEMBLY_LIVE_COPIES: usize = 6;
 
 // Types
 /// Status of a resource transfer.
