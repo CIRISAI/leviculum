@@ -104,9 +104,18 @@ async fn serve(config: &Config) -> Result<(), MainError> {
         None => Counter::disabled(),
     });
 
-    let blog = BlogNode::start(config.blog_node_config(), content.clone())
-        .await?
-        .with_counter(Arc::clone(&counter));
+    // Waiting rather than exiting: at boot the shared instance is started in
+    // the same transaction and has not bound its IPC socket yet, which used
+    // to cost every boot and every fresh install one failed unit (Codeberg
+    // #311). A daemon that never appears still fails the start, after
+    // node::DAEMON_WAIT.
+    let blog = BlogNode::start_waiting(
+        config.blog_node_config(),
+        content.clone(),
+        node::DAEMON_WAIT,
+    )
+    .await?
+    .with_counter(Arc::clone(&counter));
     eprintln!("lblogd: node destination {}", blog.destination_hash());
     for path in blog.served_paths() {
         eprintln!("lblogd: serving {path}");

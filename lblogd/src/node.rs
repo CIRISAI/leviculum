@@ -107,6 +107,49 @@ impl BlogNodeConfig {
     }
 }
 
+/// How long [`BlogNode::start_waiting`] keeps re-dialling the shared-instance
+/// daemon before it gives up and fails the start.
+///
+/// Bounded rather than endless, because "the socket is not bound yet" and
+/// "no daemon will ever serve this `instance_name`" look identical from
+/// here, and a node that waits for ever on the second reports itself healthy
+/// while serving nothing. Sixty seconds is well above the gap the boot race
+/// actually produces — three seconds on an aarch64 PineNote (Codeberg #311)
+/// — and well below the point where an operator reading `systemctl status`
+/// would call the unit hung. The unit's `Restart=` stays the outer loop, so
+/// a daemon that takes longer than this still costs only a restart, not the
+/// service.
+pub const DAEMON_WAIT: Duration = Duration::from_secs(60);
+
+/// How often the daemon is re-dialled while waiting.
+///
+/// Dialling a local socket that nobody listens on costs a failed `connect`
+/// syscall, so this is short enough that the wait adds no perceptible delay
+/// once the daemon is up.
+const DAEMON_POLL: Duration = Duration::from_millis(250);
+
+/// Whether a failed start failed *only* because no daemon is listening yet.
+///
+/// The shared-instance socket is the only socket this node opens — it is
+/// built with `enable_transport(false)` and configures no interfaces of its
+/// own — so a refused or absent connection during start can be nothing else.
+/// `leviculum-std` preserves the error kind through the message it wraps the
+/// failure in: `ConnectionRefused` for Linux's abstract socket, `NotFound`
+/// for the filesystem-socket path the other platforms use.
+///
+/// Everything else — an unreadable identity file, a storage path that cannot
+/// be created — is permanent, and is returned immediately rather than hidden
+/// behind a minute of waiting.
+fn daemon_absent(err: &NodeError) -> bool {
+    let NodeError::Node(StdError::Io(io)) = err else {
+        return false;
+    };
+    matches!(
+        io.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
 /// A running blog page node: connected to the daemon, destination and page
 /// handlers registered. Call [`run`](Self::run) to announce and serve.
 pub struct BlogNode {
@@ -177,6 +220,48 @@ impl BlogNode {
             pending: HashMap::new(),
             counter: Arc::new(Counter::disabled()),
         })
+    }
+
+    /// [`start`](Self::start), but tolerating a daemon that is not listening
+    /// yet: retry for up to `wait` before failing (Codeberg #311).
+    ///
+    /// This is what a *daemon* wants, and the plain `start` is what a
+    /// one-shot command wants. At boot lblogd and the shared instance come
+    /// up in the same transaction, and ordering alone does not separate
+    /// them: `lnsd` is `Type=simple`, so systemd calls it started the moment
+    /// it is exec'd, seconds before it binds its IPC socket — and on a
+    /// package install the two `systemctl start` calls are not ordered
+    /// against each other at all. Exiting there wrote a failed unit into
+    /// every boot's journal and left `NRestarts` permanently non-zero, which
+    /// costs the counter its value for spotting real crashes.
+    ///
+    /// The wait is on the socket, not on a unit, so it holds for the Python
+    /// `rnsd` exactly as it does for `lnsd`. Once connected, keeping the
+    /// connection across a daemon restart is the interface's own job.
+    pub async fn start_waiting(
+        config: BlogNodeConfig,
+        content: SnapshotRx,
+        wait: Duration,
+    ) -> Result<Self, NodeError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut said_so = false;
+        loop {
+            let err = match Self::start(config.clone(), content.clone()).await {
+                Ok(node) => return Ok(node),
+                Err(e) => e,
+            };
+            if !daemon_absent(&err) || tokio::time::Instant::now() + DAEMON_POLL > deadline {
+                return Err(err);
+            }
+            // Once, not per attempt: the point is that the journal says why
+            // the node is not serving yet, not that it says so four times a
+            // second.
+            if !said_so {
+                eprintln!("lblogd: {err} — waiting up to {} s for it", wait.as_secs());
+                said_so = true;
+            }
+            tokio::time::sleep(DAEMON_POLL).await;
+        }
     }
 
     /// Count this node's requests and links into `counter`.

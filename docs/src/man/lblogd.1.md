@@ -13,7 +13,7 @@ lblogd -- dev blog server, on the web and on NomadNet
 
 **lblogd** serves a directory of Markdown posts on two sides at once: as a NomadNet page node over Reticulum, and as a web server on the clearnet. Posts are plain Markdown files with an optional TOML frontmatter block; adding a file and reloading the service publishes it to both sides.
 
-The NomadNet side is a shared-instance client, so a Reticulum daemon must already be running — either **lnsd**(1) or Python's **rnsd** — under the instance name named in the configuration file. **lblogd** exits if no daemon answers, and the packaged service restarts it until one does.
+The NomadNet side is a shared-instance client, so a Reticulum daemon must be running — either **lnsd**(1) or Python's **rnsd** — under the instance name named in the configuration file. It need not be running *yet*: at startup **lblogd** waits up to a minute for the daemon's IPC socket, which is what gets it through a boot where both start together and the daemon binds its socket a few seconds later. After that minute it exits, and the packaged service restarts it until a daemon answers.
 
 A post may use the whole standard Markdown feature set, basic and extended: tables, footnotes, strikethrough, task lists, definition lists, heading identifiers, highlights, sub- and superscript, and bare URLs and e-mail addresses, which become links without being written as such. The web side renders all of it as HTML. Micron, the NomadNet page format, has fewer constructs than HTML, so a few degrade on the mesh: struck text is dimmed, a highlight becomes a background colour, and `H~2~O` and `X^2^` use the Unicode subscripts and superscripts where they exist and keep their markers where they do not. Footnotes lose only the jump, not their content: the reference stays as `[1]` and the definitions are collected behind a divider at the end of the page. A heading identifier has nothing to attach itself to on the mesh and is dropped there. Emoji shortcodes such as `:joy:` are not translated on either side and stay as written.
 
@@ -91,7 +91,7 @@ The file is append-only and each record carries that day's whole running total, 
 
 ## EXIT STATUS
 
-**lblogd** exits non-zero when the configuration cannot be loaded, when a post cannot be parsed at startup, and when no Reticulum daemon is reachable on the configured shared instance. Once running it is more forgiving: a reload that fails leaves the previous content serving.
+**lblogd** exits non-zero when the configuration cannot be loaded, when a post cannot be parsed at startup, and when no Reticulum daemon becomes reachable on the configured shared instance within the startup wait. Once running it is more forgiving: a reload that fails leaves the previous content serving.
 
 ## EXAMPLES
 
