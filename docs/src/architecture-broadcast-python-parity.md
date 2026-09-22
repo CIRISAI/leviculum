@@ -455,7 +455,7 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `constants.rs:242`; impl at `transport.rs:290-299, 4125` |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `constants.rs:148`; `node/mod.rs:1390-1424` |
-| mgmt-announce initial 15 s trick | `Transport.py:283` | `node/mod.rs:77` + constant | ✓ | Verified by B4 audit |
+| mgmt-announce initial 15 s trick | `Transport.py:283` | `node/mod.rs:79` + constant | ✓ | Verified by B4 audit |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2771-2809` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
 | Path-response targeted | `transport.rs:4241-4191` | same mechanism | ✓ | Preserved |

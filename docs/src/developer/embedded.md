@@ -49,7 +49,7 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1032`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1304`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1306`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
 - `next_deadline()` (`leviculum-core/src/node/mod.rs:2370`). The earliest timer
