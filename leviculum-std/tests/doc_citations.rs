@@ -36,21 +36,34 @@
 //! The name is what survives the move, so a citation that carries one can
 //! be checked and a citation that carries none cannot.
 //!
-//! Two spellings count as attaching a name, and both are what the corpus
-//! already writes:
+//! Three spellings count as attaching a name, and all three are what the
+//! corpus already writes:
 //!
 //! ```text
 //! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:512`)   -- paren
 //! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:512`)  -- comma
+//! | `fn resolve_lt_alock(&self) -> bool` — `driver/mod.rs:512` -- table
 //! ```
 //!
-//! Nothing but whitespace may sit between the name and the citation, so
-//! the pairing is unambiguous: an identifier mentioned earlier in the
-//! sentence is not read as the citation's subject. A token that is itself
-//! a citation (`Destination.py:322`) or that carries no letter in its last
-//! segment (a `1209:0001` USB VID:PID) is not an identifier and does not
-//! attach — those sit next to citations in tables and would otherwise be
-//! read as the subject of the citation beside them.
+//! In the paren and comma spellings nothing but whitespace may sit between
+//! the name and the citation, so the pairing is unambiguous: an identifier
+//! mentioned earlier in the sentence is not read as the citation's
+//! subject. A token that is itself a citation (`Destination.py:322`) or
+//! that carries no letter in its last segment (a `1209:0001` USB VID:PID)
+//! is not an identifier and does not attach — those sit next to citations
+//! in tables and would otherwise be read as the subject of the citation
+//! beside them.
+//!
+//! The table spelling is the exception that distance rule has to make. A
+//! reference table writes the whole signature and then the citation, so
+//! the name is never adjacent; requiring adjacency read none of those
+//! rows, and they are the densest citations in the book. Inside a table
+//! row a `fn NAME(` in a backticked span therefore names the next citation
+//! on that row — and only the next one, because a citation between the two
+//! takes the signature for itself and leaves this one bare. That was
+//! Codeberg #307: a 17-row `ReticulumNode` method table whose citations had
+//! aged past 1000 lines while the guard called the file fine, because every
+//! row of it was bare.
 //!
 //! The comma spelling was admitted in 2026-08 after `lora.rs:1044` drifted
 //! onto radio-init code inside a *regulatory* claim and this guard passed
@@ -298,14 +311,103 @@ fn looks_like_identifier(token: &str, citation_shaped: &Regex) -> bool {
             .is_some_and(|seg| seg.chars().any(|c| c.is_ascii_alphabetic()))
 }
 
+/// A backticked code span, and the item a signature inside one declares.
+///
+/// `fn` rather than any identifier in the span: a signature names exactly
+/// one item, so there is nothing to choose between. The `[(<]` is what
+/// separates a declaration from prose about one — `fn` followed by a word
+/// and then a paren or a generic list is a signature, `the fn above` is
+/// not.
+fn signature_regexes() -> [Regex; 2] {
+    [
+        Regex::new(r"`([^`\n]+)`").unwrap(),
+        Regex::new(r"(?:^|[^A-Za-z0-9_])fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(<]").unwrap(),
+    ]
+}
+
+/// Everything needed to decide what a citation names, built once per scan.
+struct Naming {
+    idents: [Regex; 2],
+    citation_shaped: Regex,
+    /// `[0]` finds the backticked spans of a line, `[1]` the `fn` name
+    /// inside one.
+    signature: [Regex; 2],
+    /// The corpus's own citation shape, used to reject a signature that
+    /// has a citation of its own between it and this one.
+    cite: Regex,
+}
+
+impl Naming {
+    fn new(corpus: Corpus) -> Self {
+        Naming {
+            idents: ident_regexes(),
+            citation_shaped: citation_shaped(),
+            signature: signature_regexes(),
+            cite: cite_regex(corpus),
+        }
+    }
+}
+
 /// The identifier the citation starting at the end of `before` names, if
 /// any.
-fn attached_ident(before: &str, idents: &[Regex; 2], citation_shaped: &Regex) -> Option<String> {
-    idents
+fn attached_ident(before: &str, n: &Naming) -> Option<String> {
+    n.idents
         .iter()
         .find_map(|re| re.captures(before))
         .map(|c| c[1].to_string())
-        .filter(|token| looks_like_identifier(token, citation_shaped))
+        .filter(|token| looks_like_identifier(token, &n.citation_shaped))
+        // A `fn` name is an identifier by construction, so it needs no
+        // filtering of its own.
+        .or_else(|| signature_ident(before, n))
+}
+
+/// The item a table row names by spelling out its signature.
+///
+/// The two spellings above require the name to sit immediately before the
+/// citation, which a reference table does not write: it writes
+///
+/// ```text
+/// | `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:NNNN` |
+/// ```
+///
+/// (the line number stood in for here, because this file is itself in the
+/// corpus it guards and a real one would be scanned as a citation)
+///
+/// and the name is inside a signature several words away. Those rows are
+/// the densest citations in the book — 113 of them in
+/// `docs/src/developer/rust-api-spec.md` alone — and every one of them
+/// names its subject as plainly as a citation can. Reading none of them
+/// left a 17-row method table 1035 lines out of date under a green guard
+/// (Codeberg #307).
+///
+/// A row rather than a cell, because the corpus writes both `| `fn x()` —
+/// `f.rs:N` |` and `| `Clock` | `fn now_ms()` | `f.rs:N` |` (again standing
+/// in for the line number), and a cell boundary between a signature and the
+/// citation of that signature is a typesetting choice. What keeps the pairing unambiguous is instead that
+/// a citation between the signature and this one takes the signature for
+/// itself: the row's second citation is then bare, as it was before.
+fn signature_ident(before: &str, n: &Naming) -> Option<String> {
+    let line = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
+    // Doc comments carry markdown tables too, so the `|` may be behind a
+    // comment marker.
+    let cell = line.trim_start();
+    let cell = cell
+        .strip_prefix("//!")
+        .or_else(|| cell.strip_prefix("///"))
+        .or_else(|| cell.strip_prefix("//"))
+        .unwrap_or(cell);
+    if !cell.trim_start().starts_with('|') {
+        return None;
+    }
+    let (end, name) = n.signature[0]
+        .captures_iter(line)
+        .filter_map(|c| {
+            let span = c.get(1)?;
+            let name = n.signature[1].captures(span.as_str())?[1].to_string();
+            Some((c.get(0)?.end(), name))
+        })
+        .last()?;
+    (!n.cite.is_match(&line[end..])).then_some(name)
 }
 
 /// Scheme-relative or absolute URLs contain `host.tld` shapes that the path
@@ -324,8 +426,7 @@ fn inside_url(text: &str, start: usize) -> bool {
 
 fn scan(root: &Path, files: &[PathBuf], corpus: Corpus) -> Vec<Citation> {
     let cite_re = cite_regex(corpus);
-    let ident_res = ident_regexes();
-    let citation_shaped_re = citation_shaped();
+    let naming = Naming::new(corpus);
     let mut citations = Vec::new();
     for file in files {
         let Ok(text) = fs::read_to_string(file) else {
@@ -359,7 +460,7 @@ fn scan(root: &Path, files: &[PathBuf], corpus: Corpus) -> Vec<Citation> {
                 raw: whole.as_str().to_string(),
                 path: m[1].to_string(),
                 spans,
-                ident: attached_ident(&text[..whole.start()], &ident_res, &citation_shaped_re),
+                ident: attached_ident(&text[..whole.start()], &naming),
             });
         }
     }
@@ -1086,23 +1187,25 @@ fn run_canary() {
     );
     assert_eq!(
         citations.len(),
-        8,
-        "CANARY: the parser found {} of 8 fixture citations. It has stopped \
+        12,
+        "CANARY: the parser found {} of 12 fixture citations. It has stopped \
          matching; every green run since it broke means nothing.",
         citations.len()
     );
 
     let (counts, failures) = check(root, &citations);
-    // Six of the eight name what they point at: four in the paren spelling,
-    // two in the comma spelling. The remaining two are the last fixture
-    // line, whose leading backticked token is itself a citation -- pinned in
-    // both directions at once, because 5 means the comma spelling stopped
-    // being seen (and 130 real citations silently fell back to an existence
-    // check) while 7 means a citation next to a citation is being read as
-    // its subject.
+    // Nine of the twelve name what they point at: four in the paren
+    // spelling, two in the comma spelling, three in the table spelling. The
+    // three that do not are the second citation of the not-an-identifier
+    // line, whose leading backticked token is itself a citation, and the
+    // second citation of the last table row, whose signature was already
+    // claimed by the first -- pinned in both directions at once, because a
+    // lower number means a spelling stopped being seen (and hundreds of real
+    // citations silently fell back to an existence check) while a higher one
+    // means a citation beside a citation is being read as its subject.
     assert_eq!(
-        counts.with_ident, 6,
-        "CANARY: identifier detection saw {} of 6, which silently changes \
+        counts.with_ident, 9,
+        "CANARY: identifier detection saw {} of 9, which silently changes \
          how much of the corpus is drift-checked.",
         counts.with_ident
     );
@@ -1110,8 +1213,8 @@ fn run_canary() {
     let kinds: Vec<&FailureKind> = failures.iter().map(|f| &f.kind).collect();
     assert_eq!(
         kinds.len(),
-        4,
-        "CANARY: expected exactly 4 failures (two drifts, missing, absent \
+        5,
+        "CANARY: expected exactly 5 failures (three drifts, missing, absent \
          submodule); got {}:\n{}",
         kinds.len(),
         failures
@@ -1127,17 +1230,19 @@ fn run_canary() {
     // The drifted citations must be reported: this is the failure the guard
     // exists for, and the one that decays silently. Once per spelling --
     // a comma-form drift that goes unreported is the `lora.rs:1044` case
-    // over again, which is what admitting the spelling was for.
+    // over again, and a table-form one is Codeberg #307 over again, which is
+    // what admitting each spelling was for.
     let drifts: Vec<&Failure> = failures
         .iter()
         .filter(|f| f.kind == FailureKind::Drift && f.message.contains(&drifted))
         .collect();
     assert_eq!(
         drifts.len(),
-        2,
-        "CANARY: {} of the 2 deliberately drifted citations (paren spelling, \
-         comma spelling) were reported. The guard cannot see the defect it \
-         exists to catch in one of the two forms the corpus writes.",
+        3,
+        "CANARY: {} of the 3 deliberately drifted citations (paren spelling, \
+         comma spelling, table spelling) were reported. The guard cannot see \
+         the defect it exists to catch in one of the three forms the corpus \
+         writes.",
         drifts.len()
     );
     // The correct ones must not be, or the guard is noise and gets disabled.
@@ -1311,9 +1416,8 @@ fn githook_citations_match_without_loosening_the_pattern() {
 /// bare, because the coverage number then says the citation is checked.
 #[test]
 fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
-    let idents = ident_regexes();
-    let shaped = citation_shaped();
-    let ident = |before: &str| attached_ident(before, &idents, &shaped);
+    let naming = Naming::new(Corpus::Book);
+    let ident = |before: &str| attached_ident(before, &naming);
 
     // The two spellings, including across a line break.
     assert_eq!(
@@ -1333,6 +1437,25 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         Some("RadioConfig::eu_medium".into())
     );
 
+    // The table spelling: the name is inside a signature, several words
+    // from the citation, and only a table row admits that distance.
+    assert_eq!(
+        ident("| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — "),
+        Some("has_path".into())
+    );
+    assert_eq!(
+        ident("| `Clock` | `fn now_ms(&self) -> u64` | "),
+        Some("now_ms".into())
+    );
+    assert_eq!(
+        ident("| `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — "),
+        Some("load".into())
+    );
+    assert_eq!(
+        ident("  /// | `async fn build(self) -> Result<N>` — "),
+        Some("build".into())
+    );
+
     for not_attached in [
         // Prose between the name and the citation: the pairing has to be
         // unambiguous, so an identifier mentioned earlier in the sentence
@@ -1348,6 +1471,13 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`4.2` (",
         // Nothing at all: the bare citation, which stays existence-checked.
         "while the tracker is locked (",
+        // A signature outside a table row: only a row puts the name and
+        // the citation of that name several words apart on purpose, and
+        // reading prose that far back is how a sentence's first
+        // identifier gets read as a later citation's subject.
+        "the accessor `fn has_path(&self) -> bool` is defined at ",
+        // A row that mentions functions without declaring one.
+        "| the `fn` above | ",
     ] {
         assert_eq!(
             ident(not_attached),
@@ -1355,6 +1485,15 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
             "`{not_attached}` was read as naming the citation that follows it"
         );
     }
+
+    // A row's second citation is bare: the signature is the subject of the
+    // first one. Built rather than spelled out, because a literal citation
+    // in this file would be scanned as part of the corpus it guards.
+    let first = format!(
+        "| `fn has_path(&self) -> bool` — `driver/mod.rs:{}` — ",
+        2862
+    );
+    assert_eq!(ident(&first), None);
 }
 
 /// Guarantee C, kind 2: a figure a doc comment attributes to a document

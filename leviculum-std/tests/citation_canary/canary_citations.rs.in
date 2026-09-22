@@ -5,3 +5,6 @@
 // correct, comma spelling: (`canary_subject`, canary_target.rs:3)
 // drifted, comma spelling: (`canary_subject`, canary_target.rs:50)
 // not an identifier: (`canary_target.rs:3`, canary_target.rs:50)
+/// | `fn canary_subject()` — canary_target.rs:3 | correct, table spelling |
+/// | `fn canary_subject()` — canary_target.rs:50 | drifted, table spelling |
+/// | `fn canary_subject()` — canary_target.rs:3 — canary_target.rs:50 | only the first |

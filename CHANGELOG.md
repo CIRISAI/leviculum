@@ -209,6 +209,31 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- The citation guard now reads a reference table's signature as naming the
+  citation beside it, so the densest citation shape in the book is
+  drift-checked instead of existence-checked. A row like ``| `fn
+  has_path(&self, …) -> bool` — `driver/mod.rs:NNNN` |`` names its subject as
+  plainly as a citation can, but the name sits inside a signature several
+  words from the citation, and the two spellings the guard knew both required
+  adjacency — so every such row counted as bare and passed on the file merely
+  being long enough. Inside a table row a `fn NAME(` in a backticked span now
+  names the next citation on that row, and only the next one: a citation
+  between the two takes the signature for itself, which is what keeps the
+  pairing unambiguous without an adjacency rule. That moved 76 book citations
+  out of the bare class and immediately reported 41 of them as wrong. The
+  history anchor added for bare citations cannot reach this case — these
+  citing lines are older than the path they cite, so there is no blob to
+  anchor against and all of them counted as undecidable (Codeberg #307).
+
+- Every signature row in `docs/src/developer/rust-api-spec.md` points at the
+  item it names again. All 59 were wrong: a 17-row `ReticulumNode` method
+  table had aged past a thousand lines, and the `Identity`, `Destination`,
+  `NodeCore` and `Config` tables by 12 to 500. Each was re-derived from the
+  definition in the file its section names rather than shifted by the
+  distance the guard reported, because a citation that was already wrong and
+  gets moved to a new wrong number is harder to spot than one that is
+  obviously stale (Codeberg #307).
+
 - A destination's last `app_data` now survives a daemon restart, so the
   propagation role can still recall what a neighbour said about itself after
   one. `known_destinations` is written with the `app_data` the destination

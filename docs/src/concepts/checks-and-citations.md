@@ -448,6 +448,55 @@ of subprocess calls — blame returning nothing, a `cat-file` batch
 desynchronising — produces no findings, which reads exactly like a clean
 tree.
 
+### 6. A reference table names its subject, and was read as naming nothing
+
+Sections 1-5 divide every citation into two classes by one question:
+does an identifier sit immediately before it? That question has a third
+answer, and it is the densest citation shape in the book. A reference
+table writes
+
+```text
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:NNNN` | Whether a path is known |
+```
+
+The row names its subject as plainly as a citation can, and the
+adjacency rule read it as naming nothing, because the name is inside a
+signature several words from the citation. `docs/src/developer/rust-api-spec.md`
+is 113 such citations on its own — the largest single bare cluster in
+the corpus — and a 17-row `ReticulumNode` method table in it had aged
+past a thousand lines under a green guard (Codeberg #307).
+
+So: inside a table row, a `fn NAME(` in a backticked span names the next
+citation on that row. A row rather than a cell, because the corpus
+writes the signature and the citation in one cell and in adjacent cells
+about equally, and where the `|` falls between them is a typesetting
+choice. What replaces adjacency as the guarantee of an unambiguous
+pairing is that a citation *between* the signature and this one takes
+the signature for itself — the row's second citation stays bare, exactly
+as it was.
+
+Section 5's history anchor does not reach this case and could not: the
+method table's citing lines were last written in a restructuring commit
+older than the file they cite at its current path, so there is no blob
+to anchor against and every one of them counted as undecidable. A name
+the row already carries needs no history at all.
+
+The measurement, on the corpus the day it landed: 76 book citations
+moved from bare to drift-checked, and **59 of the 59 signature rows in
+`rust-api-spec.md` were pointing somewhere other than the item they
+name** — 41 of them far enough out to fail the guard outright, the other
+18 inside the 8-line window with the budget already spent. Each was
+re-derived from the definition in the file the section names, not
+shifted by the distance the guard reported; a citation that was already
+wrong and gets shifted to a new wrong number is harder to spot than one
+that is obviously stale.
+
+What it still does not reach, in the same file: the prose citations
+around those tables (`Defined at …`, the enum-variant rows whose name is
+in another cell, the newtype accessors written as a signature followed
+by a parenthesised citation). Those remain bare, and section 5's anchor
+is what covers them.
+
 ### What C cannot reach
 
 Issue comments, commit messages and batch reports carry hundreds of

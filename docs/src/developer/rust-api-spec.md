@@ -27,12 +27,12 @@ when you assemble interfaces in code.
 |-----------|---------|
 | `fn new() -> Result<Self>` — `reticulum.rs:22` | Build from the default config path, or defaults if absent |
 | `fn with_config(config: Config) -> Result<Self>` — `reticulum.rs:37` | Build from an explicit `Config` |
-| `fn with_config_daemon(config: Config) -> Result<Self>` — `reticulum.rs:55` | Like `with_config` but with no application event channel (daemon mode); `take_event_receiver()` then returns `None` |
-| `async fn start(&mut self) -> Result<()>` — `reticulum.rs:67` | Spawn the event loop |
-| `async fn stop(&mut self) -> Result<()>` — `reticulum.rs:73` | Stop and persist |
-| `fn is_running(&self) -> bool` — `reticulum.rs:80` | Whether the loop is running |
-| `fn config(&self) -> &Config` — `reticulum.rs:85` | Borrow the active config |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:110` | Take the event stream, once |
+| `fn with_config_daemon(config: Config) -> Result<Self>` — `reticulum.rs:60` | Like `with_config` but with no application event channel (daemon mode); `take_event_receiver()` then returns `None` |
+| `async fn start(&mut self) -> Result<()>` — `reticulum.rs:76` | Spawn the event loop |
+| `async fn stop(&mut self) -> Result<()>` — `reticulum.rs:82` | Stop and persist |
+| `fn is_running(&self) -> bool` — `reticulum.rs:89` | Whether the loop is running |
+| `fn config(&self) -> &Config` — `reticulum.rs:94` | Borrow the active config |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `reticulum.rs:119` | Take the event stream, once |
 
 ### `ReticulumNodeBuilder`
 
@@ -42,11 +42,11 @@ returns `self`.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new() -> Self` — `builder.rs:110` | Builder with defaults |
-| `fn identity(self, identity: Identity) -> Self` — `builder.rs:248` | Pin an explicit identity (else one is generated/persisted) |
+| `fn new() -> Self` — `builder.rs:96` | Builder with defaults |
+| `fn identity(self, identity: Identity) -> Self` — `builder.rs:219` | Pin an explicit identity (else one is generated/persisted) |
 | `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:270` | Connect outward to a Reticulum node |
-| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:360` | Listen for inbound connections |
-| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:421` | One datagram per packet |
+| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:323` | Listen for inbound connections |
+| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:384` | One datagram per packet |
 | `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:424` | LoRa interface; required radio settings |
 | `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:483` | KISS over raw serial |
 | `fn add_auto_interface(self) -> Self` — `builder.rs:596` | IPv6 multicast LAN discovery |
@@ -55,8 +55,8 @@ returns `self`.
 | `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:254` | Load an INI config file |
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:262` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:702` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
-| `fn without_events(self) -> Self` — `builder.rs:240` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:967` | Build the node (not yet running) |
+| `fn without_events(self) -> Self` — `builder.rs:211` | Daemon mode: no application event channel |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1018` | Build the node (not yet running) |
 | `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:789` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
@@ -66,22 +66,22 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:575` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:1123` | Stop and flush |
-| `fn is_running(&self) -> bool` — `driver/mod.rs:1176` | Loop state |
-| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:1184` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:2045` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:1202` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:1235` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:2329` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:1807` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:1251` | Take the event stream, once |
-| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:1781` | The node's own identity hash |
+| `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:1549` | Spawn the event loop, bring interfaces up |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2159` | Stop and flush |
+| `fn is_running(&self) -> bool` — `driver/mod.rs:2221` | Loop state |
+| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2229` | Make a local destination reachable (consumes it) |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3172` | Announce a registered destination |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2556` | Open a link; returns a pending handle |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2640` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3526` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3480` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2656` | Take the event stream, once |
+| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:2789` | The node's own identity hash |
 | `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:2862` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:1453` | Hop count to a destination |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:2964` | Hop count to a destination |
 | `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:2886` | Send a PATH_REQUEST; result arrives as `PathFound` |
-| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:1835` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:1547` | `rnstatus`-style counters |
+| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:2871` | Identity learned from an announce (its signing key feeds `connect`) |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3079` | `rnstatus`-style counters |
 | `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3540` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
@@ -99,11 +99,11 @@ re-exported as `leviculum_std::LinkHandle`. Incoming data is delivered via
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn link_id(&self) -> &LinkId` — `stream.rs:72` | The link's id |
-| `fn is_closed(&self) -> bool` — `stream.rs:77` | Handle state |
-| `async fn try_send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:86` | Non-blocking send; surfaces `Busy` / `PacingDelay` |
-| `async fn send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:108` | Send, retrying pacing/busy internally |
-| `async fn close(&mut self) -> Result<(), Error>` — `stream.rs:145` | Graceful close (sends LINKCLOSE) |
+| `fn link_id(&self) -> &LinkId` — `stream.rs:74` | The link's id |
+| `fn is_closed(&self) -> bool` — `stream.rs:79` | Handle state |
+| `async fn try_send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:88` | Non-blocking send; surfaces `Busy` / `PacingDelay` |
+| `async fn send(&self, data: &[u8]) -> Result<(), Error>` — `stream.rs:110` | Send, retrying pacing/busy internally |
+| `async fn close(&mut self) -> Result<(), Error>` — `stream.rs:147` | Graceful close (sends LINKCLOSE) |
 
 ### `PacketSender`
 
@@ -113,8 +113,8 @@ Send-only async handle for single packets, the single-packet analog of
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn dest_hash(&self) -> &DestinationHash` — `sender.rs:63` | The target destination |
-| `async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error>` — `sender.rs:74` | Send one unreliable packet; returns the truncated packet hash. A path must already be known |
+| `fn dest_hash(&self) -> &DestinationHash` — `sender.rs:65` | The target destination |
+| `async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error>` — `sender.rs:76` | Send one unreliable packet; returns the truncated packet hash. A path must already be known |
 
 ### `EventReceiver` and `NodeEvent`
 
@@ -124,8 +124,8 @@ plane and a droppable data plane (Codeberg #71), draining control first.
 
 | Signature | Purpose |
 |-----------|---------|
-| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:273` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
-| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:298` | Non-blocking receive |
+| `async fn recv(&mut self) -> Option<NodeEvent>` — `driver/mod.rs:435` | Next event, control plane prioritized; `None` once shut down. Cancel-safe |
+| `fn try_recv(&mut self) -> Result<NodeEvent, TryRecvError>` — `driver/mod.rs:475` | Non-blocking receive |
 
 `NodeEvent` is the event enum, defined in core at
 `leviculum-core/src/node/event.rs:41` and re-exported as
@@ -157,9 +157,9 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:315` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:360` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:369` | Default config file path |
+| `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
+| `fn default_config_dir() -> PathBuf` — `config.rs:953` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:962` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 
@@ -177,14 +177,14 @@ caller must dispatch.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new(identity: Identity, config: TransportConfig, proof_strategy: ProofStrategy, max_incoming_resource_size: usize, rng: R, clock: C, storage: S) -> Self` — `node/mod.rs:213` | Construct directly |
-| `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:256` | Register a local destination |
-| `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:410` | Build and queue an announce |
-| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:473` | Build an unreliable data packet |
-| `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:185` | Build a link request |
-| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:504` | Send on an established link |
-| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:419` | Close a link |
-| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:1032` | Feed received bytes from an interface |
+| `fn new(identity: Identity, config: TransportConfig, proof_strategy: ProofStrategy, max_incoming_resource_size: usize, rng: R, clock: C, storage: S) -> Self` — `node/mod.rs:524` | Construct directly |
+| `fn register_destination(&mut self, dest: Destination)` — `node/mod.rs:585` | Register a local destination |
+| `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:832` | Build and queue an announce |
+| `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1018` | Build an unreliable data packet |
+| `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:245` | Build a link request |
+| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:621` | Send on an established link |
+| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:528` | Close a link |
+| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2083` | Feed received bytes from an interface |
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2316` | Run periodic maintenance (call at the next deadline) |
 | `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2347` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
@@ -224,23 +224,23 @@ IFAC wrapping handled in core, so every driver gets it for free.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn generate<R: CryptoRngCore>(rng: &mut R) -> Self` — `identity.rs:71` | New random identity |
-| `fn from_public_key_bytes(bytes: &[u8]) -> Result<Self, IdentityError>` — `identity.rs:113` | Public-only identity |
-| `fn from_private_key_bytes(bytes: &[u8]) -> Result<Self, IdentityError>` — `identity.rs:127` | From the raw 64-byte private key (Python-compatible) |
-| `fn hash(&self) -> &[u8; IDENTITY_HASHBYTES]` — `identity.rs:155` | The 16-byte identity hash |
-| `fn public_key_bytes(&self) -> [u8; IDENTITY_KEY_SIZE]` — `identity.rs:160` | 64 bytes: X25519 `[0..32]`, Ed25519 `[32..64]` |
-| `fn has_private_keys(&self) -> bool` — `identity.rs:185` | Whether it can sign/decrypt |
-| `fn sign(&self, message: &[u8]) -> Result<…, IdentityError>` — `identity.rs:190` | Ed25519 sign |
-| `fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool, IdentityError>` — `identity.rs:202` | Ed25519 verify |
+| `fn generate<R: CryptoRngCore>(rng: &mut R) -> Self` — `identity.rs:81` | New random identity |
+| `fn from_public_key_bytes(bytes: &[u8]) -> Result<Self, IdentityError>` — `identity.rs:125` | Public-only identity |
+| `fn from_private_key_bytes(bytes: &[u8]) -> Result<Self, IdentityError>` — `identity.rs:139` | From the raw 64-byte private key (Python-compatible) |
+| `fn hash(&self) -> &[u8; IDENTITY_HASHBYTES]` — `identity.rs:167` | The 16-byte identity hash |
+| `fn public_key_bytes(&self) -> [u8; IDENTITY_KEY_SIZE]` — `identity.rs:172` | 64 bytes: X25519 `[0..32]`, Ed25519 `[32..64]` |
+| `fn has_private_keys(&self) -> bool` — `identity.rs:197` | Whether it can sign/decrypt |
+| `fn sign(&self, message: &[u8]) -> Result<…, IdentityError>` — `identity.rs:202` | Ed25519 sign |
+| `fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool, IdentityError>` — `identity.rs:214` | Ed25519 verify |
 
 `Destination` — a local or remote destination. Defined at
 `leviculum-core/src/destination.rs`. Re-exported as `leviculum_std::Destination`.
 
 | Signature | Purpose |
 |-----------|---------|
-| `fn new(identity: Option<Identity>, direction: Direction, dest_type: DestinationType, app_name: &str, aspects: &[&str]) -> Result<Self, DestinationError>` — `destination.rs:291` | Construct a destination |
-| `fn hash(&self) -> &DestinationHash` — `destination.rs:342` | Its 16-byte hash |
-| `fn direction(&self) -> Direction` — `destination.rs:357` | In / Out |
+| `fn new(identity: Option<Identity>, direction: Direction, dest_type: DestinationType, app_name: &str, aspects: &[&str]) -> Result<Self, DestinationError>` — `destination.rs:349` | Construct a destination |
+| `fn hash(&self) -> &DestinationHash` — `destination.rs:472` | Its 16-byte hash |
+| `fn direction(&self) -> Direction` — `destination.rs:493` | In / Out |
 
 `DestinationHash` — a 16-byte address (newtype, `destination.rs:158`):
 `fn new(bytes: [u8; TRUNCATED_HASHBYTES]) -> Self` (`destination.rs:162`),
@@ -258,9 +258,9 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:162` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:352` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
-| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:97` |
+| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:280` |
 
 Provided `Storage` implementations: `NoStorage` (`traits.rs:835`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
