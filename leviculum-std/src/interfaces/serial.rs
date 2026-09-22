@@ -67,6 +67,46 @@ pub enum FirmwareRequest {
     /// `ble_pn_board_upload`, 2026-09-14). The daemon is the only
     /// process that can ask, because it holds the port.
     Announce,
+    /// Take every carrier off the air: read the board's media profile
+    /// ([`leviculum_core::envelope::TYPE_MEDIA_QUERY`]), remember it, then
+    /// write a profile with both carriers clear
+    /// ([`leviculum_core::envelope::TYPE_MEDIA_PROFILE`]). Reaches the
+    /// daemon as [`FIRMWARE_MEDIA_SILENCE_SIGNAL`].
+    ///
+    /// Earned against the sentence above, and the alternatives are what
+    /// earn it. A scenario that measures how a mesh behaves when one node
+    /// stops being heard has to stop it being heard *mid-run*: cutting its
+    /// power takes its clock, its queues and its links with it, a
+    /// [`FirmwareRequest::Reset`] reboots it into a state the run did not
+    /// produce, and stopping this daemon takes the port with it — so
+    /// nothing would be left that could put the carriers back afterwards.
+    /// Silencing leaves the node running and the port answering, which is
+    /// the only shape in which "the mesh routed around a node that went
+    /// quiet" is a statement about the mesh rather than about the harness.
+    /// It is impossible any other way while the daemon is up, for the same
+    /// reason the reset is: the daemon holds the port.
+    MediaSilence,
+    /// Put back exactly the profile [`FirmwareRequest::MediaSilence`] read
+    /// off this board before it silenced it. Reaches the daemon as
+    /// [`FIRMWARE_MEDIA_RESTORE_SIGNAL`].
+    ///
+    /// A second variant rather than a parameter on the first, because the
+    /// two arrive as two signals and a signal carries no payload. It earns
+    /// its place for the reason the silence does — the port is held — plus
+    /// one of its own: a silence is only honest if it is reversible, and
+    /// the only process that can reverse it is the one holding the port.
+    /// Half a verb would leave every silenced board silent until someone
+    /// stopped the daemon and opened the port by hand.
+    ///
+    /// **The daemon owns what "restore" means.** The profile written back
+    /// is the one this daemon read off that board, never a value a caller
+    /// supplied and never a default: a scenario file that could name a
+    /// profile would be making a configuration change wearing a restore's
+    /// name, and the run after it would be measuring a board the run
+    /// itself reconfigured. [`remembered_media_profile`] is the whole
+    /// vocabulary, and a restore with nothing remembered is the documented
+    /// no-op there.
+    MediaRestore,
 }
 
 /// The signal a caller sends lnsd to ask for [`FirmwareRequest::Announce`].
@@ -89,6 +129,32 @@ pub enum FirmwareRequest {
 /// two still leaves it free. Senders write the number too — periculum's
 /// `announce_board` step is the other end of this contract.
 pub const FIRMWARE_ANNOUNCE_SIGNAL: i32 = 40;
+
+/// The signal a caller sends lnsd to ask for
+/// [`FirmwareRequest::MediaSilence`].
+///
+/// Numbers and not names, for the reason [`FIRMWARE_ANNOUNCE_SIGNAL`] gives
+/// in full — and re-measured rather than inherited, because the whole point
+/// of that reasoning is that `SIGRTMIN` is a libc's opinion and an opinion
+/// can change under us. Measured again on this host on 2026-09-22, by
+/// compiling one C program that prints `SIGRTMIN` and `SIGRTMAX` with each
+/// libc's own compiler: `gcc` (Debian GLIBC 2.41-12+deb13u4) answers
+/// `SIGRTMIN=34 SIGRTMAX=64`, `musl-gcc` (musl 1.2.5-3.1~deb13u1) answers
+/// `SIGRTMIN=35 SIGRTMAX=64`. So the range that is real-time under both
+/// libcs is 35-64, and the announce's 40 still sits inside it.
+///
+/// 41 and 42 continue upward from 40 rather than starting a new band: they
+/// are clear of the low end by the same margin, so a libc that reserves
+/// another one or two leaves all three free, and consecutive numbers make
+/// the three verbs one surface to read. Senders write the numbers too —
+/// periculum's steps are the other end of this contract, exactly as
+/// `announce_board` is for 40.
+pub const FIRMWARE_MEDIA_SILENCE_SIGNAL: i32 = 41;
+
+/// The signal a caller sends lnsd to ask for
+/// [`FirmwareRequest::MediaRestore`]; see
+/// [`FIRMWARE_MEDIA_SILENCE_SIGNAL`] for the measurement behind the number.
+pub const FIRMWARE_MEDIA_RESTORE_SIGNAL: i32 = 42;
 
 /// Broadcast of a [`FirmwareRequest`] to every attached board.
 ///
@@ -135,6 +201,56 @@ pub fn request_firmware_reset() -> usize {
 /// [`FirmwareRequest::Announce`], by its own name.
 pub fn request_firmware_announce() -> usize {
     request_firmware(FirmwareRequest::Announce)
+}
+
+/// [`FirmwareRequest::MediaSilence`], by its own name.
+pub fn request_firmware_media_silence() -> usize {
+    request_firmware(FirmwareRequest::MediaSilence)
+}
+
+/// [`FirmwareRequest::MediaRestore`], by its own name.
+pub fn request_firmware_media_restore() -> usize {
+    request_firmware(FirmwareRequest::MediaRestore)
+}
+
+/// What each board was configured for before this daemon silenced it,
+/// keyed by interface name.
+///
+/// Process-global and not a local of the io task, because the io task
+/// ends every time the port does. The profile lives in the board's flash
+/// — that is what makes a silence survive a reboot, and it is also what
+/// would strand a board silent if the memory of it died with a USB
+/// re-enumeration. Keyed by interface name because that is what the
+/// daemon addresses a board by everywhere else in this file, and names
+/// are unique within one daemon's config.
+///
+/// An entry means "this interface owes a restore". It is written before
+/// the silence frame goes out and removed only once a restore has been
+/// confirmed, so both crash windows fall the safe way round: a remembered
+/// profile for a board that was never silenced restores to the profile it
+/// already has (a no-op), while the reverse ordering would leave a
+/// silenced board with nothing to restore to.
+static SILENCED_MEDIA_PROFILES: std::sync::OnceLock<
+    Mutex<std::collections::HashMap<String, leviculum_core::envelope::MediaProfileWire>>,
+> = std::sync::OnceLock::new();
+
+fn silenced_media_profiles(
+) -> &'static Mutex<std::collections::HashMap<String, leviculum_core::envelope::MediaProfileWire>> {
+    SILENCED_MEDIA_PROFILES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The profile `interface`'s board was configured for before this daemon
+/// silenced it, or `None` when this daemon never silenced it.
+///
+/// The entire vocabulary [`FirmwareRequest::MediaRestore`] has: there is
+/// no way to ask for a profile that did not come off the board itself.
+pub fn remembered_media_profile(
+    interface: &str,
+) -> Option<leviculum_core::envelope::MediaProfileWire> {
+    silenced_media_profiles()
+        .lock_recover()
+        .get(interface)
+        .copied()
 }
 
 /// Radio configuration to send to LNode firmware over serial (test infrastructure).
@@ -591,6 +707,218 @@ async fn serial_reconnect_task(
     }
 }
 
+/// How long a media verb waits for the board's own report before giving
+/// up on it. The radio config's ACK budget, for the same reason: the
+/// answer is composed by the firmware's USB task the moment the frame
+/// lands, so anything beyond this is a board that is not going to answer.
+/// The io task's read and write paths are parked for the wait, which is
+/// why it is a budget and not a retry loop.
+const MEDIA_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Everything the read path needs to hand a frame to the transport,
+/// borrowed from the io task.
+///
+/// A struct because the media verbs' own read loop takes it whole: while a
+/// verb waits for the board's report, ordinary traffic keeps arriving on
+/// the same port, and dropping it — or counting it differently — would
+/// make a silenced-node measurement a measurement of the silencing.
+struct Ingress<'a> {
+    name: &'a str,
+    incoming_tx: &'a mpsc::Sender<IncomingPacket>,
+    counters: &'a InterfaceCounters,
+    drop_direct_ingress: bool,
+}
+
+impl Ingress<'_> {
+    /// Hand one deframed frame to the transport, with the TEST-ONLY
+    /// ingress filter and the rx counter applied. `false` means the
+    /// transport channel is gone and the io task must return.
+    async fn deliver(&self, data: Vec<u8>) -> bool {
+        if super::test_drop_direct_ingress_frame(
+            self.drop_direct_ingress,
+            self.name,
+            &data,
+            self.counters,
+        ) {
+            return true;
+        }
+        self.counters
+            .rx_bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.incoming_tx.send(IncomingPacket { data }).await.is_ok()
+    }
+}
+
+/// What a board said when asked about its media profile.
+enum MediaAnswer {
+    /// The board's own report: `(running, configured)`. See
+    /// [`leviculum_core::envelope::TYPE_MEDIA_REPORT`] for why those are
+    /// two values.
+    Report(
+        leviculum_core::envelope::MediaProfileWire,
+        leviculum_core::envelope::MediaProfileWire,
+    ),
+    /// The board refused by name, answered something malformed, or said
+    /// nothing within [`MEDIA_ANSWER_TIMEOUT`]. All three are "this board
+    /// did not tell us what it is doing", and the verbs treat them alike.
+    NoAnswer,
+    /// The port died during the exchange; the io task must return and let
+    /// the reconnect loop have it.
+    PortLost,
+}
+
+/// Write one media frame and wait for the board's [`
+/// leviculum_core::envelope::TYPE_MEDIA_REPORT`], forwarding everything
+/// else that arrives meanwhile to the transport.
+///
+/// `asked_type` is the frame type being answered, so a refusal aimed at
+/// *this* frame ends the wait while a refusal of something else does not.
+///
+/// The partial-frame rule of the main loop is kept inside the wait: a
+/// read that goes quiet for [`FRAME_TIMEOUT`] mid-frame discards the
+/// partial, exactly as the io task's own timeout arm does. Without it a
+/// stale half-frame at entry would glue itself to the report and the
+/// board would read as not having answered.
+async fn ask_board_media<S>(
+    port: &mut S,
+    payload: &[u8],
+    asked_type: u8,
+    frame_buf: &mut Vec<u8>,
+    deframer: &mut Deframer,
+    ingress: &Ingress<'_>,
+) -> MediaAnswer
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use leviculum_core::envelope;
+
+    let name = ingress.name;
+
+    frame(payload, frame_buf);
+    if let Err(e) = port.write_all(frame_buf).await {
+        tracing::warn!("Serial {}: media frame write failed: {}", name, e);
+        return MediaAnswer::PortLost;
+    }
+    if let Err(e) = port.flush().await {
+        tracing::warn!("Serial {}: media frame flush failed: {}", name, e);
+        return MediaAnswer::PortLost;
+    }
+
+    /// What one frame off the port was, as far as this wait cares.
+    enum Seen {
+        Report(Option<(envelope::MediaProfileWire, envelope::MediaProfileWire)>),
+        Refused(u8),
+        Other,
+    }
+
+    let deadline = Instant::now() + MEDIA_ANSWER_TIMEOUT;
+    let mut read_buf = vec![0u8; READ_BUF_SIZE];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                "Serial {}: no media report within {:?} of frame type 0x{:02x}",
+                name,
+                MEDIA_ANSWER_TIMEOUT,
+                asked_type
+            );
+            return MediaAnswer::NoAnswer;
+        }
+        let slice = if deframer.is_in_frame() {
+            remaining.min(FRAME_TIMEOUT)
+        } else {
+            remaining
+        };
+        let n = match tokio::time::timeout(slice, port.read(&mut read_buf)).await {
+            Err(_) => {
+                if deframer.is_in_frame() {
+                    tracing::trace!("Serial {}: frame timeout, discarding partial frame", name);
+                    deframer.reset();
+                }
+                continue;
+            }
+            Ok(Ok(0)) => {
+                tracing::debug!("Serial interface {} EOF", name);
+                return MediaAnswer::PortLost;
+            }
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                tracing::debug!("Serial interface {} read error: {}", name, e);
+                return MediaAnswer::PortLost;
+            }
+        };
+
+        // Every frame this read produced is dealt with before returning:
+        // an answer arriving in the same read as a data packet must not
+        // take that packet down with it.
+        let mut answer = None;
+        for r in deframer.process(&read_buf[..n]) {
+            let DeframeResult::Frame(data) = r else {
+                if matches!(r, DeframeResult::Oversized) {
+                    tracing::trace!("Serial {}: frame exceeds HW_MTU, discarded", name);
+                }
+                continue;
+            };
+            let seen = if answer.is_some() {
+                Seen::Other
+            } else {
+                match envelope::decode_frame(&data) {
+                    Ok(f) if f.frame_type == envelope::TYPE_MEDIA_REPORT => {
+                        Seen::Report(envelope::decode_media_report_payload(f.payload))
+                    }
+                    Ok(f) if f.frame_type == envelope::TYPE_REFUSAL => {
+                        match envelope::decode_refusal_payload(f.payload) {
+                            Some((refused, reason)) if refused == asked_type => {
+                                Seen::Refused(reason)
+                            }
+                            _ => Seen::Other,
+                        }
+                    }
+                    _ => Seen::Other,
+                }
+            };
+            match seen {
+                Seen::Report(Some((running, configured))) => {
+                    answer = Some(MediaAnswer::Report(running, configured));
+                }
+                Seen::Report(None) => {
+                    tracing::warn!(
+                        "Serial {}: media report payload is not two known flag bytes",
+                        name
+                    );
+                    answer = Some(MediaAnswer::NoAnswer);
+                }
+                Seen::Refused(reason) => {
+                    tracing::warn!(
+                        "Serial {}: board refused frame type 0x{:02x}, reason 0x{:02x}",
+                        name,
+                        asked_type,
+                        reason
+                    );
+                    answer = Some(MediaAnswer::NoAnswer);
+                }
+                Seen::Other => {
+                    if !ingress.deliver(data).await {
+                        return MediaAnswer::PortLost;
+                    }
+                }
+            }
+        }
+        if let Some(answer) = answer {
+            return answer;
+        }
+    }
+}
+
+/// One media profile as the scalar log keys periculum greps for.
+fn media_keys(prefix: &str, profile: leviculum_core::envelope::MediaProfileWire) -> String {
+    format!(
+        "{prefix}_lora={} {prefix}_ble={}",
+        u8::from(profile.lora_enabled),
+        u8::from(profile.ble_enabled)
+    )
+}
+
 /// Bidirectional serial I/O task.
 ///
 /// Read path: serial read → HDLC deframe → incoming channel
@@ -622,6 +950,14 @@ where
     // and acting on it would reboot (or announce from) a board nobody
     // asked about.
     let mut firmware_requests = firmware_request_channel().subscribe();
+    // Borrowed once for the whole task: the read path and the media
+    // verbs' wait hand frames on through the same one.
+    let ingress = Ingress {
+        name: &name,
+        incoming_tx: &incoming_tx,
+        counters: &counters,
+        drop_direct_ingress,
+    };
 
     loop {
         // Compute timeout: if mid-frame, use FRAME_TIMEOUT; otherwise wait indefinitely
@@ -653,16 +989,13 @@ where
                         for r in results {
                             match r {
                                 DeframeResult::Frame(data) => {
-                                    // TEST-ONLY range emulation: an out-of-range
-                                    // frame was never heard, so it is dropped
-                                    // before any counter or the transport sees it.
-                                    if super::test_drop_direct_ingress_frame(
-                                        drop_direct_ingress, &name, &data, &counters,
-                                    ) {
-                                        continue;
-                                    }
-                                    counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                                    if incoming_tx.send(IncomingPacket { data }).await.is_err() {
+                                    // The TEST-ONLY range emulation (an
+                                    // out-of-range frame was never heard, so it
+                                    // is dropped before any counter or the
+                                    // transport sees it) and the rx counter both
+                                    // live in the shared helper, which the media
+                                    // verbs' wait uses too.
+                                    if !ingress.deliver(data).await {
                                         return outgoing_rx;
                                     }
                                 }
@@ -758,31 +1091,151 @@ where
                         None
                     }
                 };
-                if let Some(request) = request {
-                    let (what, payload) = match request {
-                        FirmwareRequest::Reset => (
-                            "reset",
-                            leviculum_core::rnode::RADIO_RESET_FRAME.to_vec(),
-                        ),
-                        FirmwareRequest::Announce => (
-                            "announce",
-                            leviculum_core::envelope::encode_announce(),
-                        ),
-                    };
-                    tracing::info!(
-                        "Serial {}: commanded firmware {} requested, sending frame",
-                        name, what
-                    );
-                    frame(&payload, &mut frame_buf);
-                    if let Err(e) = port.write_all(&frame_buf).await {
-                        tracing::warn!("Serial {}: {} frame write failed: {}", name, what, e);
-                        return outgoing_rx;
+                match request {
+                    None => {}
+                    // The write-and-forget pair: the outcome is on the
+                    // bus or on the air, never on this port.
+                    Some(request @ (FirmwareRequest::Reset | FirmwareRequest::Announce)) => {
+                        let (what, payload) = match request {
+                            FirmwareRequest::Reset => (
+                                "reset",
+                                leviculum_core::rnode::RADIO_RESET_FRAME.to_vec(),
+                            ),
+                            _ => (
+                                "announce",
+                                leviculum_core::envelope::encode_announce(),
+                            ),
+                        };
+                        tracing::info!(
+                            "Serial {}: commanded firmware {} requested, sending frame",
+                            name, what
+                        );
+                        frame(&payload, &mut frame_buf);
+                        if let Err(e) = port.write_all(&frame_buf).await {
+                            tracing::warn!("Serial {}: {} frame write failed: {}", name, what, e);
+                            return outgoing_rx;
+                        }
+                        if let Err(e) = port.flush().await {
+                            tracing::warn!("Serial {}: {} frame flush failed: {}", name, what, e);
+                            return outgoing_rx;
+                        }
+                        tracing::info!("Serial {}: {} frame sent", name, what);
                     }
-                    if let Err(e) = port.flush().await {
-                        tracing::warn!("Serial {}: {} frame flush failed: {}", name, what, e);
-                        return outgoing_rx;
+                    // The media pair, which DOES wait: the profile that
+                    // has to be put back afterwards exists nowhere but in
+                    // the board's answer, so a silence that did not read
+                    // it is a silence nobody can undo.
+                    Some(FirmwareRequest::MediaSilence) => {
+                        tracing::info!(
+                            "Serial {}: commanded media silence requested, reading the board's profile",
+                            name
+                        );
+                        let asked = ask_board_media(
+                            &mut port, &leviculum_core::envelope::encode_media_query(),
+                            leviculum_core::envelope::TYPE_MEDIA_QUERY, &mut frame_buf,
+                            &mut deframer, &ingress,
+                        ).await;
+                        let configured = match asked {
+                            MediaAnswer::PortLost => return outgoing_rx,
+                            MediaAnswer::NoAnswer => {
+                                // Nothing was written, so nothing has to
+                                // be put back. Silencing a board whose
+                                // previous profile we failed to learn
+                                // would be the one unrecoverable outcome
+                                // this verb can produce.
+                                tracing::warn!(
+                                    "MEDIA_SILENCE iface={} outcome=no-report \
+                                     (board did not report its profile; nothing written)",
+                                    name
+                                );
+                                continue;
+                            }
+                            MediaAnswer::Report(_, configured) => configured,
+                        };
+                        // Remembered BEFORE the silence goes out: see
+                        // `SILENCED_MEDIA_PROFILES` for why that ordering
+                        // is the safe one. `configured` and not `running`
+                        // — writing a profile sets what a reboot comes up
+                        // with, so restoring `running` would silently drop
+                        // a carrier that was configured on but had not
+                        // come up.
+                        silenced_media_profiles()
+                            .lock_recover()
+                            .insert(name.clone(), configured);
+                        let silent = leviculum_core::envelope::MediaProfileWire {
+                            lora_enabled: false,
+                            ble_enabled: false,
+                        };
+                        let applied = ask_board_media(
+                            &mut port,
+                            &leviculum_core::envelope::encode_media_profile(&silent),
+                            leviculum_core::envelope::TYPE_MEDIA_PROFILE, &mut frame_buf,
+                            &mut deframer, &ingress,
+                        ).await;
+                        match applied {
+                            MediaAnswer::PortLost => return outgoing_rx,
+                            MediaAnswer::NoAnswer => tracing::warn!(
+                                "MEDIA_SILENCE iface={} outcome=unconfirmed {} \
+                                 (frame sent, no report back; the profile stays remembered)",
+                                name, media_keys("remembered", configured)
+                            ),
+                            MediaAnswer::Report(running, now_configured) => tracing::info!(
+                                "MEDIA_SILENCE iface={} outcome=applied {} {} {}",
+                                name,
+                                media_keys("remembered", configured),
+                                media_keys("running", running),
+                                media_keys("configured", now_configured)
+                            ),
+                        }
                     }
-                    tracing::info!("Serial {}: {} frame sent", name, what);
+                    Some(FirmwareRequest::MediaRestore) => {
+                        let Some(profile) = remembered_media_profile(&name) else {
+                            // The documented answer to "restore with no
+                            // prior silence": a no-op, said out loud. The
+                            // clever alternative — write the both-on
+                            // default — would be this daemon changing a
+                            // board's configuration on the strength of a
+                            // guess, and the guess is wrong for exactly
+                            // the boards a media profile exists for.
+                            tracing::warn!(
+                                "MEDIA_RESTORE iface={} outcome=nothing-remembered \
+                                 (no silence from this daemon; nothing written)",
+                                name
+                            );
+                            continue;
+                        };
+                        tracing::info!(
+                            "Serial {}: commanded media restore requested, {}",
+                            name, media_keys("remembered", profile)
+                        );
+                        let restored = ask_board_media(
+                            &mut port,
+                            &leviculum_core::envelope::encode_media_profile(&profile),
+                            leviculum_core::envelope::TYPE_MEDIA_PROFILE, &mut frame_buf,
+                            &mut deframer, &ingress,
+                        ).await;
+                        match restored {
+                            MediaAnswer::PortLost => return outgoing_rx,
+                            // The memory is kept: an unconfirmed restore
+                            // is a board that may still owe one, and a
+                            // second signal must be able to try again.
+                            MediaAnswer::NoAnswer => tracing::warn!(
+                                "MEDIA_RESTORE iface={} outcome=unconfirmed {} \
+                                 (frame sent, no report back; still remembered)",
+                                name, media_keys("restored", profile)
+                            ),
+                            MediaAnswer::Report(running, configured) => {
+                                silenced_media_profiles().lock_recover().remove(&name);
+                                tracing::info!(
+                                    "MEDIA_RESTORE iface={} outcome=restored {} {} {}",
+                                    name,
+                                    media_keys("restored", profile),
+                                    media_keys("running", running),
+                                    media_keys("configured", configured)
+                                );
+                            }
+                        }
+                    }
                 }
             }
 

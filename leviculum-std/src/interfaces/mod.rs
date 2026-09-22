@@ -32,8 +32,10 @@ pub use rnode::{
 };
 pub(crate) mod serial;
 pub use serial::{
-    request_firmware, request_firmware_announce, request_firmware_reset, FirmwareRequest,
-    FIRMWARE_ANNOUNCE_SIGNAL,
+    remembered_media_profile, request_firmware, request_firmware_announce,
+    request_firmware_media_restore, request_firmware_media_silence, request_firmware_reset,
+    FirmwareRequest, FIRMWARE_ANNOUNCE_SIGNAL, FIRMWARE_MEDIA_RESTORE_SIGNAL,
+    FIRMWARE_MEDIA_SILENCE_SIGNAL,
 };
 pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
