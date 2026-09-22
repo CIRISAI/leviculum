@@ -58,6 +58,23 @@ pub(crate) fn write_str(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
+/// Bytes [`write_bin`] appends for a `len`-byte payload: its header plus
+/// the payload itself.
+///
+/// Lets a caller size or refuse a frame without building it first —
+/// framing a response only to measure it and throw it away is what killed
+/// a board on 2026-09-22 (#384).
+pub(crate) const fn bin_len(len: usize) -> usize {
+    let header = if len <= 0xFF {
+        2
+    } else if len <= 0xFFFF {
+        3
+    } else {
+        5
+    };
+    header + len
+}
+
 /// Write binary data as bin8 or bin16.
 pub(crate) fn write_bin(buf: &mut Vec<u8>, data: &[u8]) {
     let len = data.len();

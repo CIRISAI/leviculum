@@ -203,7 +203,7 @@ pub const fn budget_total(node_box: usize) -> usize {
 ///
 /// Named because the propagation role's unfunded outbound serve
 /// transient ([`crate::pn::SERVE_PEAK_BYTES`]) is measured against it:
-/// on a T114 this is 880 B against a 97 036 B need.
+/// on a T114 this is 880 B against a 48 922 B need.
 pub const fn budget_slack(node_box: usize) -> usize {
     crate::HEAP_SIZE.saturating_sub(budget_total(node_box))
 }

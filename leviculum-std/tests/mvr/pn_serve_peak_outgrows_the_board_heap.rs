@@ -1,5 +1,5 @@
-//! mvr: serving one `/get` fetch costs the heap many times the response
-//! that a cap was supposed to bound.
+//! mvr: serving one `/get` fetch costs the heap several times the
+//! response that a cap was supposed to bound.
 //!
 //! **The named failure mode:** a board accepts mail, a peer collects it,
 //! and the board panics in `alloc` while building the answer. Its own
@@ -21,13 +21,28 @@
 //! many response-sized blocks the serve path holds live at once — by
 //! walking the real path (`MessageGetResponse::encode`, `send_response`,
 //! `send_response_resource`, `OutgoingResource::new_with_flags`) over a
-//! real established link with a counting allocator underneath. Measured
-//! on this host: a 5 427 B response, 5 465 B live in the single-packet
-//! refusal, **51 662 B live at the peak of the resource path**. The
+//! real established link with a counting allocator underneath. The
 //! measurement is compared against [`serve_peak_bytes`], the model the
 //! board's heap budget carries, in both directions — the model must
 //! bound reality, and must not be twice too loose to be worth sizing a
 //! 96 KiB heap with.
+//!
+//! **It is also the instrument that priced the fix.** Measured on this
+//! host, before and after #384 B1 (the four copies the path made for
+//! nothing):
+//!
+//! ```text
+//! response 5 427 B      before        after
+//!   single-packet refusal  5 465 B       0 B
+//!   resource-path peak    51 662 B  29 842 B
+//!   modelled at the 8 KB cap
+//!                         97 036 B  48 922 B
+//! ```
+//!
+//! The refusal is the headline: `send_response` compares a computed
+//! length against the MDU now, so the allocation the board actually died
+//! in does not happen at all. The rest is the peak, down 42 %, which is
+//! what a heap plan has to carry.
 //!
 //! **Only a board can prove the rest**: that the failing allocation is
 //! the one named above rather than a later one on the same path, and
@@ -205,8 +220,9 @@ fn field_fetch_response() -> Vec<u8> {
     response
 }
 
-/// The defect: serving one fetch holds many copies of its own response,
-/// and the first of them is the allocation the board died on.
+/// Serving one fetch still holds several copies of its own response --
+/// and the one the board died in, the framed copy a refusal used to
+/// build before it checked the MDU, is no longer among them.
 #[test]
 fn one_fetch_serve_holds_many_copies_of_its_own_response() {
     let response = field_fetch_response();
@@ -227,13 +243,14 @@ fn one_fetch_serve_holds_many_copies_of_its_own_response() {
         response.len()
     );
 
-    // 1. The single-packet path. No compression on it, so this figure is
-    //    the board's own: `send_response` frames the whole response
-    //    BEFORE it compares the result with the MDU, so a response it is
-    //    going to refuse still costs a full framed copy. That copy is
-    //    5 446 B, and 5 446 B is the number in the board's PANIC_PMRT
-    //    line: the board died here, before the resource path it would
-    //    have fallen back to ever started.
+    // 1. The single-packet path, and the allocation the board died in.
+    //    `send_response` used to frame the whole response BEFORE it
+    //    compared the result with the MDU, so a response it was going to
+    //    refuse still cost a full framed copy: 5 446 B, the number in
+    //    the board's PANIC_PMRT line. It died here, before the resource
+    //    path it would have fallen back to ever started. The check now
+    //    runs on a length computed from `bin_len`, so the refusal must
+    //    cost nothing at all -- not "less", zero.
     let peak_refusal = {
         let probe = alloc_probe::Probe::armed();
         let refused = refusing
@@ -246,10 +263,10 @@ fn one_fetch_serve_holds_many_copies_of_its_own_response() {
         );
         peak
     };
-    assert!(
-        peak_refusal >= framed,
-        "the refusal path must materialise the whole framed response \
-         ({framed} B); measured {peak_refusal} B"
+    assert_eq!(
+        peak_refusal, 0,
+        "a refusal must allocate nothing; it used to allocate the whole \
+         {framed} B frame, which is what killed a T114"
     );
 
     // 2. What this host adds that a board does not: `leviculum-std` links
@@ -328,12 +345,22 @@ modelled_here={modelled_here} modelled_at_cap={modelled_at_cap}",
          {board_peak} B -- too loose to size a 96 KiB heap with"
     );
 
-    // The finding itself, as one number: a response an 8 KB cap was
-    // supposed to bound costs the heap eight times its own length.
+    // The finding, as one number, and the fix, as the other. A response
+    // an 8 KB cap was supposed to bound still costs the heap multiples
+    // of its own length -- five copies is what the resource path is
+    // structurally worth until it streams (#384 B2). But it must cost
+    // well under the nine times it cost before B1, or the copies this
+    // batch removed have quietly come back.
     assert!(
-        board_peak >= 8 * response.len(),
+        board_peak >= 4 * response.len(),
         "serving a {} B response cost only {board_peak} B of transient; \
          the finding is that it costs multiples of it",
+        response.len()
+    );
+    assert!(
+        board_peak <= 6 * response.len(),
+        "serving a {} B response cost {board_peak} B -- more than six \
+         times it, so a copy B1 removed is back on the path",
         response.len()
     );
 }

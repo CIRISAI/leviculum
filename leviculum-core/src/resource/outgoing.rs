@@ -11,7 +11,7 @@ use rand_core::CryptoRngCore;
 #[cfg(feature = "compression")]
 use crate::constants::RESOURCE_AUTO_COMPRESS_MAX;
 use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST};
-use crate::crypto::full_hash;
+use crate::crypto::full_hash_parts;
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
 use crate::msgpack;
@@ -414,57 +414,71 @@ impl OutgoingResource {
 
         // Build combined = metadata_prefix + data
         // Python line 264: struct.pack(">I", metadata_size)[1:] + packed_metadata
-        let mut combined = Vec::new();
+        //
+        // Borrowed when there is no metadata to prepend, which is every
+        // resource a propagation node serves: `combined` was a straight,
+        // response-sized copy of `data` there, live to the end of this
+        // constructor for nothing (#384). With metadata it is still one
+        // buffer, but sized exactly rather than grown to the next power of
+        // two.
+        //
         // Metadata bytes are prepended only when present (segment 1). The
         // has_metadata *flag* may still be set on later segments of a split
         // resource (Python sets it for every segment); the receiver only strips
         // metadata on segment 1.
         let has_metadata = metadata.is_some() || seg.force_has_metadata;
-        if let Some(meta) = metadata {
-            let meta_len = meta.len();
-            // 3-byte big-endian length (high 3 bytes of u32)
-            combined.push((meta_len >> 16) as u8);
-            combined.push((meta_len >> 8) as u8);
-            combined.push(meta_len as u8);
-            combined.extend_from_slice(meta);
-        }
-        combined.extend_from_slice(data);
+        let combined_owned;
+        let combined: &[u8] = match metadata {
+            Some(meta) => {
+                let meta_len = meta.len();
+                let mut buf = Vec::with_capacity(3 + meta_len + data.len());
+                // 3-byte big-endian length (high 3 bytes of u32)
+                buf.push((meta_len >> 16) as u8);
+                buf.push((meta_len >> 8) as u8);
+                buf.push(meta_len as u8);
+                buf.extend_from_slice(meta);
+                buf.extend_from_slice(data);
+                combined_owned = buf;
+                &combined_owned
+            }
+            None => data,
+        };
 
         let uncompressed_size = combined.len() as u64;
-
-        // Try compression
-        #[allow(unused_mut)]
-        let mut compressed = false;
-        let data_to_encrypt = {
-            #[cfg(feature = "compression")]
-            {
-                if auto_compress && combined.len() <= RESOURCE_AUTO_COMPRESS_MAX {
-                    match super::compression::bz2_compress(&combined) {
-                        Ok(compressed_data) if compressed_data.len() < combined.len() => {
-                            compressed = true;
-                            compressed_data
-                        }
-                        _ => combined.clone(),
-                    }
-                } else {
-                    combined.clone()
-                }
-            }
-            #[cfg(not(feature = "compression"))]
-            {
-                let _ = auto_compress;
-                combined.clone()
-            }
-        };
 
         // Generate wire random (prepended, not stored)
         let mut wire_random = [0u8; RESOURCE_RANDOM_HASH_SIZE];
         rng.fill_bytes(&mut wire_random);
 
-        // Build plaintext: wire_random + data_to_encrypt
-        let mut plaintext = Vec::with_capacity(RESOURCE_RANDOM_HASH_SIZE + data_to_encrypt.len());
-        plaintext.extend_from_slice(&wire_random);
-        plaintext.extend_from_slice(&data_to_encrypt);
+        // Build plaintext: wire_random + (bz2 payload, or `combined` itself).
+        // The uncompressed branch used to `combined.clone()` into a
+        // `data_to_encrypt` buffer whose only reader was this copy. The
+        // firmware links no bz2, so on a board that clone was unconditional
+        // (#384); the compressed branch keeps its buffer only until the
+        // plaintext is assembled and drops it at the end of this block.
+        let mut plaintext = Vec::new();
+        let compressed = {
+            #[cfg(feature = "compression")]
+            let squeezed = if auto_compress && combined.len() <= RESOURCE_AUTO_COMPRESS_MAX {
+                match super::compression::bz2_compress(combined) {
+                    Ok(squeezed) if squeezed.len() < combined.len() => Some(squeezed),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            #[cfg(not(feature = "compression"))]
+            let squeezed: Option<Vec<u8>> = {
+                let _ = auto_compress;
+                None
+            };
+
+            let payload: &[u8] = squeezed.as_deref().unwrap_or(combined);
+            plaintext.reserve_exact(RESOURCE_RANDOM_HASH_SIZE + payload.len());
+            plaintext.extend_from_slice(&wire_random);
+            plaintext.extend_from_slice(payload);
+            squeezed.is_some()
+        };
 
         // Encrypt via link
         let enc_size = Link::encrypted_size(plaintext.len());
@@ -478,21 +492,14 @@ impl OutgoingResource {
         let mut random_hash = [0u8; RESOURCE_RANDOM_HASH_SIZE];
         rng.fill_bytes(&mut random_hash);
 
-        // resource_hash = full_hash(combined + random_hash), uses UNENCRYPTED combined
-        let mut hash_input = Vec::with_capacity(combined.len() + RESOURCE_RANDOM_HASH_SIZE);
-        hash_input.extend_from_slice(&combined);
-        hash_input.extend_from_slice(&random_hash);
-        let resource_hash_full = full_hash(&hash_input);
-        let mut resource_hash = [0u8; 32];
-        resource_hash.copy_from_slice(&resource_hash_full);
+        // resource_hash = full_hash(combined + random_hash), uses UNENCRYPTED
+        // combined. Fed to the hasher in two pieces instead of into a joined
+        // buffer: SHA-256 is streaming, so the digest is identical byte for
+        // byte, and two response-sized scratch buffers stop existing (#384).
+        let mut resource_hash = full_hash_parts(&[combined, &random_hash]);
 
         // expected_proof = full_hash(combined + resource_hash), precomputed
-        let mut proof_input = Vec::with_capacity(combined.len() + 32);
-        proof_input.extend_from_slice(&combined);
-        proof_input.extend_from_slice(&resource_hash);
-        let expected_proof_full = full_hash(&proof_input);
-        let mut expected_proof = [0u8; 32];
-        expected_proof.copy_from_slice(&expected_proof_full);
+        let mut expected_proof = full_hash_parts(&[combined, &resource_hash]);
 
         // Segment encrypted data into parts
         let num_parts = if encrypted.is_empty() {
@@ -523,17 +530,8 @@ impl OutgoingResource {
                     rng.fill_bytes(&mut random_hash);
 
                     // Recompute resource_hash and expected_proof with new random_hash
-                    let mut hi = Vec::with_capacity(combined.len() + RESOURCE_RANDOM_HASH_SIZE);
-                    hi.extend_from_slice(&combined);
-                    hi.extend_from_slice(&random_hash);
-                    let rh = full_hash(&hi);
-                    resource_hash.copy_from_slice(&rh);
-
-                    let mut pi = Vec::with_capacity(combined.len() + 32);
-                    pi.extend_from_slice(&combined);
-                    pi.extend_from_slice(&resource_hash);
-                    let ep = full_hash(&pi);
-                    expected_proof.copy_from_slice(&ep);
+                    resource_hash = full_hash_parts(&[combined, &random_hash]);
+                    expected_proof = full_hash_parts(&[combined, &resource_hash]);
 
                     collision_found = true;
                     break;

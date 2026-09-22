@@ -24,6 +24,22 @@ pub fn full_hash(data: &[u8]) -> [u8; 32] {
     sha256(data)
 }
 
+/// [`full_hash`] over the concatenation of `parts`, without ever
+/// materialising that concatenation.
+///
+/// SHA-256 is a streaming construction, so feeding the parts in order is
+/// bit-for-bit the same digest as hashing one buffer holding them —
+/// callers that only build a buffer to hash it once can drop the buffer.
+/// That matters on a board: the resource constructor hashed a
+/// response-sized copy twice for two digests it then threw away (#384).
+pub fn full_hash_parts(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
 /// Compute truncated hash (first 16 bytes of SHA-256)
 /// Used for destination addresses
 pub fn truncated_hash(data: &[u8]) -> [u8; TRUNCATED_HASHBYTES] {

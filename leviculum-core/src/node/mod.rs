@@ -1632,16 +1632,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             "response_data must be exactly one valid msgpack value"
         );
 
+        // Check against link MDU FIRST, on the framed length computed rather
+        // than built: fixarray(2) header + bin(request_id) + response_data.
+        // Building the frame before the comparison made a refusal cost one
+        // full response-sized allocation that was then dropped, which is the
+        // 5 446 B a T114 died in while answering a mailbox fetch (#384).
+        let framed_len = 1 + crate::msgpack::bin_len(request_id.len()) + response_data.len();
+        if framed_len > link.mdu() {
+            return Err(request::RequestError::PayloadTooLarge);
+        }
+
         // Build msgpack: fixarray(2) + bin(request_id) + response_data (raw)
-        let mut packed = Vec::new();
+        let mut packed = Vec::with_capacity(framed_len);
         write_fixarray_header(&mut packed, 2);
         write_bin(&mut packed, request_id);
         packed.extend_from_slice(response_data);
-
-        // Check against link MDU
-        if packed.len() > link.mdu() {
-            return Err(request::RequestError::PayloadTooLarge);
-        }
+        debug_assert_eq!(
+            packed.len(),
+            framed_len,
+            "the framed length the MDU check used must be the length built"
+        );
 
         // Build encrypted data packet with Response context
         let raw_packet = link
@@ -1834,10 +1844,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Frame the payload identically to send_response: fixarray(2) +
         // bin(request_id) + response_data (raw single msgpack value).
-        let mut wrapped = Vec::new();
+        // Exact capacity: `Vec::new()` grows to the next power of two, which
+        // on a response-sized frame is up to a second response of slack the
+        // board cannot spare (#384).
+        let framed_len = 1 + crate::msgpack::bin_len(request_id.len()) + response_data.len();
+        let mut wrapped = Vec::with_capacity(framed_len);
         write_fixarray_header(&mut wrapped, 2);
         write_bin(&mut wrapped, request_id);
         wrapped.extend_from_slice(response_data);
+        debug_assert_eq!(wrapped.len(), framed_len);
         ensure_single_segment_internal_resource_size(wrapped.len())?;
 
         let link = self

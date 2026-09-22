@@ -56,8 +56,9 @@ pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 /// Bytes the request/response envelope adds to a response body on its way
 /// to the wire: msgpack `fixarray(2)` (one byte) plus the 16-byte request
 /// id as msgpack `bin8` (two header bytes plus its payload). Both the
-/// single-packet path and the Resource path pack exactly this frame
-/// (`write_fixarray_header`, `leviculum-core/src/node/mod.rs:1637`).
+/// single-packet path and the Resource path pack exactly this frame, and
+/// since #384 both compute its length before building it rather than
+/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1640`).
 pub const RESPONSE_FRAME_BYTES: usize = 1 + 2 + 16;
 
 /// Bookkeeping heap each part of an outgoing Resource costs beyond its
@@ -74,16 +75,16 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///
 /// This is the term the board's role budget was missing (#384): the serve
 /// cap bounds the *wire* response, but the path from stored bodies to an
-/// advertised Resource materialises that response seven more times, and
-/// six of those copies are live simultaneously. On a 96 KiB heap the
-/// difference between "8 KB fits" and "8 KB costs 80 KB" is the whole
+/// advertised Resource materialises that response several more times, and
+/// all but one of those copies are live simultaneously. On a 96 KiB heap
+/// the difference between "8 KB fits" and "8 KB costs 49 KB" is the whole
 /// question.
 ///
 /// # Why the encoded response is bounded by the cap
 ///
 /// The serve loop accounts 24 B up front and `body + 16` per served
 /// message, where `body` is the *stamped* length, and stops strictly below
-/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:583`).
+/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:595`).
 /// What ships is the unstamped body, `STAMP_SIZE` (32 B) shorter, inside
 /// `msgpack [bin, ...]`: at most 5 B of array header and 5 B of `bin`
 /// header per message. Each accounted term therefore dominates its wire
@@ -100,35 +101,50 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///    `Vec::new()`, so its block is the next power of two at or above the
 ///    length. It is owned by the caller and live for the whole path below.
 ///    (`encode`, `leviculum-lxmf/src/propagation.rs:483`.)
-/// 2. **`packed`, ≤ 2F** — `NodeCore::send_response` frames the response
-///    *before* it compares the result with the link MDU, so an oversized
-///    response pays one full framed copy that is then thrown away
-///    (`send_response`, `leviculum-core/src/node/mod.rs:1636`). It is not
-///    live at the peak, but it is the FIRST allocation of that size on the
-///    path and therefore the first one that can fail.
-/// 3. **`wrapped`, ≤ 2F** — `send_response_resource` frames it again, and
-///    holds it until the call returns
-///    (`send_response_resource`, `leviculum-core/src/node/mod.rs:1838`).
-/// 4. **`combined`, ≤ 2F** — the Resource constructor's own copy, live to
-///    the end of the constructor
-///    (`new_with_flags`, `leviculum-core/src/resource/outgoing.rs:394`).
-/// 5. **`data_to_encrypt`, F** — `combined.clone()` when nothing
-///    compresses, an exact-capacity block.
-/// 6. **`plaintext`, F + 4** — `with_capacity(4 + len)`, the wire random
-///    prepended.
-/// 7. **`encrypted`, `Link::encrypted_size(plaintext)`** — IV, padding to
+/// 2. **`wrapped`, F** — `send_response_resource` frames the response
+///    into an exactly-sized block and holds it until the call returns
+///    (`send_response_resource`, `leviculum-core/src/node/mod.rs:1851`).
+/// 3. **`plaintext`, F + 4** — `reserve_exact(4 + len)`, the wire random
+///    prepended to the payload. Without a compressor linked (the firmware
+///    drops bz2) the payload IS `wrapped`, read straight through.
+/// 4. **`encrypted`, `Link::encrypted_size(plaintext)`** — IV, padding to
 ///    the next 16, HMAC.
-/// 8. **`parts`, ≈ `encrypted`** — `encrypted` re-split into one owned
-///    block per part, plus [`PART_BOOKKEEPING_BYTES`] each. `hash_input`
-///    and `proof_input` (each ≈ F) are built and dropped one at a time
-///    just before this, so `parts` is what stands at the peak.
+/// 5. **`parts`, ≈ `encrypted`** — `encrypted` re-split into one owned
+///    block per part, plus [`PART_BOOKKEEPING_BYTES`] each.
 ///
-/// Terms 1 and 3-8 are live together at the end of the constructor: that
-/// instant is the peak, and it is what this function sums. Term 2 is
-/// counted too — it is the same size and it is strictly earlier, so a
-/// heap that cannot serve the peak cannot serve term 2 either, and a
-/// bound that skipped it would be describing a path the code does not
-/// take.
+/// All five are live together at the end of the constructor: that instant
+/// is the peak, and it is what this function sums.
+///
+/// # What the path no longer spends (#384, B1)
+///
+/// Four response-sized copies that earlier revisions of this model had to
+/// carry are gone, and the numbers here moved with them:
+///
+/// * `packed` — `NodeCore::send_response` framed the response *before* it
+///   compared the result with the link MDU, so a response it was going to
+///   refuse still paid one full framed copy. That copy was the 5 446 B a
+///   T114 died in. It now compares a computed length and allocates
+///   nothing on the refusal (`send_response`,
+///   `leviculum-core/src/node/mod.rs:1640`).
+/// * `combined` — the Resource constructor copied its whole payload into
+///   a private buffer. With no metadata to prepend, which is every
+///   resource this role serves, it borrows the caller's bytes instead
+///   (`new_with_flags`, `leviculum-core/src/resource/outgoing.rs:431`).
+///   The metadata branch (`send_file_response`) still builds one buffer,
+///   now sized exactly rather than grown to the next power of two.
+/// * `data_to_encrypt` — `combined.clone()` whenever compression was off
+///   or did not win, i.e. unconditionally on a board. The plaintext is
+///   assembled from the payload directly.
+/// * `hash_input` / `proof_input` — two more full copies built only to be
+///   hashed once each. SHA-256 is streaming, so the two digests are now
+///   fed the same bytes in two pieces (`full_hash_parts`).
+///
+/// Term 2 also shrank from 2F to F: it was grown by extension from
+/// `Vec::new()` and is now `with_capacity`.
+///
+/// The single-packet path is not modelled separately because it cannot
+/// exceed this: on it, `response` is the same block, `packed` is one
+/// exactly-framed copy, and nothing is split into parts.
 ///
 /// # What is NOT in here
 ///
@@ -140,21 +156,17 @@ pub const fn serve_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
     let framed = cap_bytes + RESPONSE_FRAME_BYTES;
     // Term 1: the encoded response, grown by extension.
     let response = 2 * cap_bytes;
-    // Term 2: the framed copy send_response builds and discards.
-    let packed = 2 * framed;
-    // Term 3 and 4: framed again, then copied into the constructor.
-    let wrapped = 2 * framed;
-    let combined = 2 * framed;
-    // Term 5 and 6.
-    let data_to_encrypt = framed;
+    // Term 2: the framed copy the resource is built from, sized exactly.
+    let wrapped = framed;
+    // Term 3.
     let plaintext = RESOURCE_RANDOM_HASH_SIZE + framed;
-    // Term 7: IV + padding to the next 16 + HMAC, as Link::encrypted_size.
+    // Term 4: IV + padding to the next 16 + HMAC, as Link::encrypted_size.
     let encrypted = 16 + (plaintext / 16 + 1) * 16 + 32;
-    // Term 8: the same bytes again, one block per part.
+    // Term 5: the same bytes again, one block per part.
     let sdu = if resource_sdu == 0 { 1 } else { resource_sdu };
     let part_count = encrypted.div_ceil(sdu);
     let parts = encrypted + part_count * PART_BOOKKEEPING_BYTES;
-    response + packed + wrapped + combined + data_to_encrypt + plaintext + encrypted + parts
+    response + wrapped + plaintext + encrypted + parts
 }
 
 /// The largest serve cap whose [`serve_peak_bytes`] still fits

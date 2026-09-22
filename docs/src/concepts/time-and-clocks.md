@@ -222,7 +222,7 @@ that passes the sanity window and is refused anyway, because its
 estimate is recognisably behind real time and every expiry it
 computes is already in the past on every healed peer. The gate is
 `NodeCore::has_plausible_wall_clock`
-(`leviculum-core/src/node/mod.rs:3370`), and since Codeberg #247 it
+(`leviculum-core/src/node/mod.rs:3385`), and since Codeberg #247 it
 asks the rank: `anchor_rank() < BIRTH_ANCHOR_RANK`.
 
 Fields the peer decides nothing on are always emitted. The LXMF
@@ -307,7 +307,7 @@ they stay keyed on the value:
   #161 §1 regression this page forbids — instead of healing in one
   step. It now asks `anchor_rank() == BIRTH_ANCHOR_RANK`.
 - **The ticket refusal.** `NodeCore::has_plausible_wall_clock`
-  (`leviculum-core/src/node/mod.rs:3370`) became vacuously true at
+  (`leviculum-core/src/node/mod.rs:3385`) became vacuously true at
   the build floor: the refusal would never fire again, and a
   birth-anchored node would issue tickets whose expiry is already in
   the past on every healed peer — the silently-discarded field the
@@ -346,7 +346,7 @@ costs, when it is unavailable, what it guarantees.
 > (`leviculum-core/src/node/mod.rs:896`, and on the transport at
 > `transport.rs:3826`) said a platform wall clock always takes
 > precedence over an injection — the reverse of arms 2 and 3 — and its
-> `NodeCore::emission_secs` (`leviculum-core/src/node/mod.rs:3355`) rustdoc
+> `NodeCore::emission_secs` (`leviculum-core/src/node/mod.rs:3370`) rustdoc
 > listed the chain as
 > "platform wall clock, learned announce timebase, host injection,
 > uptime". This page is the spec; both now say so, and both name the
@@ -865,7 +865,7 @@ and an unattributed jump is indistinguishable from a bug. The core
 answers the first half: `Transport::time_source`
 (`leviculum-core/src/transport.rs:3942`) names the arm — including
 the platform clock, which answers for itself — and
-`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3387`) is
+`NodeCore::anchor_rank` (`leviculum-core/src/node/mod.rs:3402`) is
 the number the predicates use. The rest — which neighbour, when, and
 the cohort behind a median re-anchor — is still only the
 once-per-process implausible-own-clock warning

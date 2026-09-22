@@ -17,7 +17,7 @@ mod hmac_impl;
 mod token;
 
 pub use aes_cbc::{aes256_cbc_decrypt, aes256_cbc_encrypt};
-pub use hashes::{full_hash, sha256, sha512, truncated_hash};
+pub use hashes::{full_hash, full_hash_parts, sha256, sha512, truncated_hash};
 pub use hkdf_impl::derive_key;
 pub use hmac_impl::{hmac_sha256, verify_hmac};
 pub use token::{decrypt_token, encrypt_token, TokenError};

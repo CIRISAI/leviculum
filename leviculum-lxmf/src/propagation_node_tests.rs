@@ -493,15 +493,25 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
 ///
 /// The number is asserted rather than described because it is the term
 /// the board's role budget has to carry: an 8 KB announced serve limit
-/// buys a 97 036 B transient -- twelve times the cap, and 98.7 % of the
+/// buys a 48 922 B transient -- six times the cap, and half of the
 /// board's entire 96 KiB heap, before a single other allocation.
+///
+/// It was 97 036 B, twelve times the cap, until #384 B1 removed the four
+/// copies the path made for nothing (`packed`, `combined`,
+/// `data_to_encrypt`, and the two hash scratch buffers). Half the term
+/// is gone; the term is still larger than the heap can spare, which is
+/// why the boot line still reports a deficit rather than a fit.
 #[test]
-fn an_eight_kilobyte_serve_cap_costs_twelve_times_its_size() {
+fn an_eight_kilobyte_serve_cap_costs_six_times_its_size() {
     let peak = serve_peak_bytes(8_000, BOARD_RESOURCE_SDU);
-    assert_eq!(peak, 97_036);
+    assert_eq!(peak, 48_922);
     assert!(
-        peak > 12 * 8_000,
-        "the serve transient is more than twelve times the cap that bounds it"
+        peak > 6 * 8_000,
+        "the serve transient is more than six times the cap that bounds it"
+    );
+    assert!(
+        peak < 97_036,
+        "B1 must not have grown the transient it was ordered to shrink"
     );
 }
 
@@ -510,7 +520,7 @@ fn an_eight_kilobyte_serve_cap_costs_twelve_times_its_size() {
 /// the answer does not fit.
 #[test]
 fn the_funded_cap_is_the_inverse_of_the_peak() {
-    for budget in [0usize, 880, 5_000, 20_000, 97_036, 200_000] {
+    for budget in [0usize, 880, 5_000, 20_000, 48_922, 200_000] {
         let cap = serve_cap_for_peak(budget, BOARD_RESOURCE_SDU);
         assert!(
             serve_peak_bytes(cap, BOARD_RESOURCE_SDU) <= budget || cap == 0,
@@ -525,8 +535,9 @@ fn the_funded_cap_is_the_inverse_of_the_peak() {
 
 /// The answer to "what cap can today's plan honour": the T114's heap
 /// budget leaves 880 B unclaimed, and 880 B of transient buys a serve cap
-/// of under a hundred bytes -- less than one stored message. The plan as
-/// it stands funds no useful serve at all.
+/// of 104 bytes -- less than one stored message. Halving the per-byte
+/// cost (#384 B1) doubled the affordable cap and it is still nothing:
+/// the plan as it stands funds no useful serve at all.
 ///
 /// (`budget_slack`, `leviculum-nrf/src/heap_census.rs` -- 880 B is
 /// HEAP_SIZE 98 304 less the T114's node box 31 008, role 21 120,

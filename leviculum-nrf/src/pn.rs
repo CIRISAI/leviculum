@@ -98,7 +98,7 @@
 //!                                               cache, flush queues
 //!         + (0)                                 SERVE_PEAK_BYTES, the
 //!                                               outbound serve transient —
-//!                                               97 036 B at the announced
+//!                                               48 922 B at the announced
 //!                                               cap and UNFUNDED, see the
 //!                                               arithmetic at the constant
 //!       + reserve                             fragmentation reserve
@@ -375,19 +375,21 @@ const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_O
 /// The 5 446 is arithmetic, not coincidence. Twenty-four bodies of
 /// 224 B encode to a 5 427 B `MessageGetResponse`, and 5 427 + 19 B of
 /// request/response framing is 5 446: the board died on `packed` in
-/// `NodeCore::send_response` — the framed copy that path builds BEFORE
-/// it compares the result with the link MDU and throws away when it
-/// does. It never reached the Resource fallback that would have cost it
-/// six more.
+/// `NodeCore::send_response` — the framed copy that path built BEFORE
+/// it compared the result with the link MDU and threw away when it did.
+/// It never reached the Resource fallback that would have cost it
+/// several more. That allocation is gone (#384 B1): the MDU check now
+/// runs on a computed length and a refusal allocates nothing.
 ///
 /// The arithmetic lives at [`serve_peak_bytes`], beside the serve path
 /// it describes, and is pinned by a measured mvr
 /// (`one_fetch_serve_holds_many_copies_of_its_own_response`,
 /// `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`),
 /// which counts requested bytes through the real path and measured
-/// 51 662 B live for that same 5 427 B response. The cap bounds the WIRE
-/// response; the path materialises it a dozen times over and holds most
-/// of those copies together.
+/// 29 842 B live for that same 5 427 B response (51 662 B before #384 B1
+/// removed the copies the path made for nothing). The cap bounds the
+/// WIRE response; the path still materialises it five times over and
+/// holds all five together.
 ///
 /// **This term is NOT in [`ROLE_BUDGET_BYTES`] below, and that is the
 /// open decision, not an oversight** — see the arithmetic there.
@@ -416,21 +418,25 @@ pub const SERVE_PEAK_BYTES: usize =
 /// 2026-09-22. The arithmetic, at today's constants on a T114:
 ///
 /// * announced serve cap `BOARD_SYNC_LIMIT_KB` = 8 KB;
-/// * [`SERVE_PEAK_BYTES`] at that cap = **97 036 B**, twelve times the
-///   cap, because the serve path materialises the response a dozen times
-///   between the store and the resource advertisement;
+/// * [`SERVE_PEAK_BYTES`] at that cap = **48 922 B**, six times the
+///   cap, because the serve path still materialises the response five
+///   times between the store and the resource advertisement (it was
+///   97 036 B and a dozen copies before #384 B1);
 /// * what the plan leaves unclaimed for it =
 ///   [`crate::heap_census::budget_slack`], **880 B** on a T114 — the
 ///   remainder after `max_endpoint_links` floors its division, and it
 ///   cannot grow without taking a link away from
 ///   [`crate::ble::MAX_LINKS`];
-/// * deficit = **96 156 B**, on a 96 KiB heap.
+/// * deficit = **48 042 B**, on a 96 KiB heap — halved by B1, and still
+///   half the heap.
 ///
 /// So the honest statement of the fourth term is not a number to add
 /// here but a question this sum cannot answer: 880 B of slack funds a
-/// serve cap of under a hundred bytes — less than one stored message —
-/// and funding a useful one means taking bytes from a term above, from
-/// the reserve, from the link count, or from the materialisation itself.
+/// serve cap of 104 bytes — less than one stored message — and funding a
+/// useful one means taking bytes from a term above, from the reserve,
+/// from the link count, or from what is left of the materialisation
+/// (streaming the response out of the store, #384 B2, is the next order
+/// and is not in these numbers).
 /// That is a capacity decision about the board's headline feature, it is
 /// the Lead's, and until it is made the boot line reports the gap
 /// (`HEAP_BUDGET … serve= slack=`, and the `HEAP_BUDGET_UNFUNDED` line
