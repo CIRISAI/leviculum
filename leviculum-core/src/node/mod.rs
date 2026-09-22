@@ -1388,10 +1388,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         timeout_ms: Option<u64>,
     ) -> Result<([u8; TRUNCATED_HASHBYTES], crate::transport::TickOutput), request::RequestError>
     {
+        use crate::msgpack::{write_bin, write_fixarray_header, write_float64, write_nil};
         use crate::packet::PacketContext;
-        use crate::resource::msgpack::{
-            write_bin, write_fixarray_header, write_float64, write_nil,
-        };
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link) so the lookup, the pending-request bookkeeping, and the route
@@ -1427,8 +1425,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             debug_assert!(
                 {
                     let mut p = 0;
-                    crate::resource::msgpack::skip_msgpack_value(d, &mut p).is_some()
-                        && p == d.len()
+                    crate::msgpack::skip_msgpack_value(d, &mut p).is_some() && p == d.len()
                 },
                 "data must be exactly one valid msgpack value"
             );
@@ -1498,10 +1495,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         ),
         crate::resource::ResourceError,
     > {
+        use crate::msgpack::{write_bin, write_fixarray_header, write_float64, write_nil};
         use crate::packet::PacketContext;
-        use crate::resource::msgpack::{
-            write_bin, write_fixarray_header, write_float64, write_nil,
-        };
         use crate::resource::outgoing::OutgoingResource;
         use crate::resource::ResourceError;
 
@@ -1530,7 +1525,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             debug_assert!(
                 {
                     let mut position = 0;
-                    crate::resource::msgpack::skip_msgpack_value(data, &mut position).is_some()
+                    crate::msgpack::skip_msgpack_value(data, &mut position).is_some()
                         && position == data.len()
                 },
                 "data must be exactly one valid msgpack value"
@@ -1607,8 +1602,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8; TRUNCATED_HASHBYTES],
         response_data: &[u8],
     ) -> Result<crate::transport::TickOutput, request::RequestError> {
+        use crate::msgpack::{write_bin, write_fixarray_header};
         use crate::packet::PacketContext;
-        use crate::resource::msgpack::{write_bin, write_fixarray_header};
 
         // Resolve a possibly-stale caller-visible id (a #66 retry re-keys the
         // link) so the lookup and the route both use the current wire id.
@@ -1627,7 +1622,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         debug_assert!(
             {
                 let mut p = 0;
-                crate::resource::msgpack::skip_msgpack_value(response_data, &mut p).is_some()
+                crate::msgpack::skip_msgpack_value(response_data, &mut p).is_some()
                     && p == response_data.len()
             },
             "response_data must be exactly one valid msgpack value"
@@ -1822,8 +1817,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: &[u8; TRUNCATED_HASHBYTES],
         response_data: &[u8],
     ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::msgpack::{write_bin, write_fixarray_header};
         use crate::packet::PacketContext;
-        use crate::resource::msgpack::{write_bin, write_fixarray_header};
         use crate::resource::outgoing::OutgoingResource;
         use crate::resource::ResourceError;
 
@@ -10295,7 +10290,7 @@ mod tests {
         let mut pair = establish_nodecore_link_pair();
         let raw = alloc::vec![0x5a; RESOURCE_MAX_EFFICIENT_SIZE];
         let mut encoded = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded, &raw);
+        crate::msgpack::write_bin(&mut encoded, &raw);
 
         assert!(matches!(
             pair.initiator.send_request_resource(
@@ -10329,7 +10324,7 @@ mod tests {
 
         let mut pair = establish_nodecore_link_pair();
         let mut encoded = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded, &alloc::vec![0x33; 1_400]);
+        crate::msgpack::write_bin(&mut encoded, &alloc::vec![0x33; 1_400]);
         let _ = pair
             .initiator
             .send_request_resource(
@@ -10389,7 +10384,7 @@ mod tests {
             .send_request(&pair.initiator_link_id, "/echo", None, Some(60_000))
             .unwrap();
         let mut response = Vec::new();
-        crate::resource::msgpack::write_bin(&mut response, &alloc::vec![0x44; 1_400]);
+        crate::msgpack::write_bin(&mut response, &alloc::vec![0x44; 1_400]);
         let _ = pair
             .responder
             .send_response_resource(&pair.responder_link_id, &request_id, &response)
@@ -10449,7 +10444,7 @@ mod tests {
 
         // Build msgpack data: fixstr "hello"
         let mut data = Vec::new();
-        crate::resource::msgpack::write_fixstr(&mut data, "hello");
+        crate::msgpack::write_fixstr(&mut data, "hello");
 
         // Send request from initiator
         let (request_id, output) = pair
@@ -10482,7 +10477,7 @@ mod tests {
 
         // Send response from responder
         let mut response_data = Vec::new();
-        crate::resource::msgpack::write_bool(&mut response_data, true);
+        crate::msgpack::write_bool(&mut response_data, true);
         let output = pair
             .responder
             .send_response(&resp_link, &recv_rid, &response_data)
@@ -10535,7 +10530,7 @@ mod tests {
             .map(|index| ((index * 73 + 19) & 0xff) as u8)
             .collect();
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
 
         assert!(matches!(
             pair.initiator.send_request(
@@ -10607,7 +10602,7 @@ mod tests {
             .map(|index| ((index * 47 + 101) & 0xff) as u8)
             .collect();
         let mut encoded_response = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+        crate::msgpack::write_bin(&mut encoded_response, &response_bytes);
 
         assert!(matches!(
             pair.responder.send_response(
@@ -10809,7 +10804,7 @@ mod tests {
 
         // Send request matching that path
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 42);
+        crate::msgpack::write_uint(&mut data, 42);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/test/path", Some(&data), None)
@@ -10873,7 +10868,7 @@ mod tests {
 
         // The request still arrives on the first destination's link.
         let mut data = Vec::new();
-        crate::resource::msgpack::write_fixstr(&mut data, "hello");
+        crate::msgpack::write_fixstr(&mut data, "hello");
         let (request_id, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -10902,7 +10897,7 @@ mod tests {
         // ...and the response completes the round trip, so the client gets an
         // answer rather than the timeout the overwrite produced.
         let mut response_data = Vec::new();
-        crate::resource::msgpack::write_bool(&mut response_data, true);
+        crate::msgpack::write_bool(&mut response_data, true);
         let output = pair
             .responder
             .send_response(&resp_link, &recv_rid, &response_data)
@@ -10977,7 +10972,7 @@ mod tests {
         );
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_fixstr(&mut data, "hello");
+        crate::msgpack::write_fixstr(&mut data, "hello");
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11026,7 +11021,7 @@ mod tests {
         // Don't register any handler
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/unknown", Some(&data), None)
@@ -11062,7 +11057,7 @@ mod tests {
         );
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11111,7 +11106,7 @@ mod tests {
         );
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11159,7 +11154,7 @@ mod tests {
         );
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11197,7 +11192,7 @@ mod tests {
 
         // Don't identify, send request directly
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11232,7 +11227,7 @@ mod tests {
         );
 
         let mut data = Vec::new();
-        crate::resource::msgpack::write_uint(&mut data, 1);
+        crate::msgpack::write_uint(&mut data, 1);
         let (_, output) = pair
             .initiator
             .send_request(&pair.initiator_link_id, "/echo", Some(&data), None)
@@ -11295,7 +11290,7 @@ mod tests {
         let mut pair = establish_nodecore_link_pair();
         let request_bytes = alloc::vec![0x5a; 1_400];
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
 
         let (request_id, resource_hash, _output) = pair
             .initiator
@@ -11384,7 +11379,7 @@ mod tests {
         let mut pair = establish_nodecore_link_pair();
         let request_bytes = alloc::vec![0xa5; 1_400];
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
         let (request_id, resource_hash, _output) = pair
             .initiator
             .send_request_resource(
@@ -11631,7 +11626,7 @@ mod tests {
 
         let mut pair = establish_nodecore_link_pair();
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_uint(&mut encoded_request, 1);
+        crate::msgpack::write_uint(&mut encoded_request, 1);
         let (request_id, _output) = pair
             .initiator
             .send_request(
@@ -11644,7 +11639,7 @@ mod tests {
 
         let response_bytes = alloc::vec![0x7b; 1_600];
         let mut encoded_response = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+        crate::msgpack::write_bin(&mut encoded_response, &response_bytes);
         let (resource_hash, output) = pair
             .responder
             .send_response_resource(&pair.responder_link_id, &request_id, &encoded_response)
@@ -11757,7 +11752,7 @@ mod tests {
         // consume its correlation and restore a bounded response timeout.
         let mut completion_pair = establish_nodecore_link_pair();
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_uint(&mut encoded_request, 1);
+        crate::msgpack::write_uint(&mut encoded_request, 1);
         let (request_id, _output) = completion_pair
             .initiator
             .send_request(
@@ -11824,7 +11819,7 @@ mod tests {
             .unwrap();
         let response_bytes = alloc::vec![0x39; 1_600];
         let mut encoded_response = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_response, &response_bytes);
+        crate::msgpack::write_bin(&mut encoded_response, &response_bytes);
         let (resource_hash, output) = close_pair
             .responder
             .send_response_resource(
@@ -11872,7 +11867,7 @@ mod tests {
         let mut pair = establish_nodecore_link_pair();
         let request_bytes = alloc::vec![0xa1; 1_400];
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
         let (request_id, upload_hash, _output) = pair
             .initiator
             .send_request_resource(
@@ -11922,7 +11917,7 @@ mod tests {
     fn test_request_resource_correlation_cleans_on_response_and_link_close() {
         let request_bytes = alloc::vec![0x33; 1_400];
         let mut encoded_request = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded_request, &request_bytes);
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
 
         let mut response_pair = establish_nodecore_link_pair();
         let (request_id, resource_hash, _output) = response_pair
@@ -11935,9 +11930,9 @@ mod tests {
             )
             .unwrap();
         let mut response = Vec::new();
-        crate::resource::msgpack::write_fixarray_header(&mut response, 2);
-        crate::resource::msgpack::write_bin(&mut response, &request_id);
-        crate::resource::msgpack::write_uint(&mut response, 1);
+        crate::msgpack::write_fixarray_header(&mut response, 2);
+        crate::msgpack::write_bin(&mut response, &request_id);
+        crate::msgpack::write_uint(&mut response, 1);
         response_pair
             .initiator
             .handle_response_payload(response_pair.initiator_link_id, &response);
@@ -11995,7 +11990,7 @@ mod tests {
         // Build data larger than link MDU
         let big_data = alloc::vec![0u8; 500];
         let mut encoded = Vec::new();
-        crate::resource::msgpack::write_bin(&mut encoded, &big_data);
+        crate::msgpack::write_bin(&mut encoded, &big_data);
 
         let result = initiator.send_request(&pair.initiator_link_id, "/echo", Some(&encoded), None);
         assert!(

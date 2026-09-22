@@ -262,7 +262,7 @@ pub fn raw<'a>(d: &'a [u8], p: &mut usize) -> Result<&'a [u8], Error> {
 /// payloads nest only a couple of levels, so 64 is far above any legitimate
 /// use.
 ///
-/// Same value as `leviculum-core`'s `resource::msgpack::MAX_SKIP_DEPTH`, which
+/// Same value as `leviculum-core`'s `msgpack::MAX_SKIP_DEPTH`, which
 /// bounds the identical operation for resource advertisements. Keeping the two
 /// identical means one number to reason about rather than two nearly-equal ones.
 const MAX_SKIP_DEPTH: usize = 64;

@@ -50,7 +50,7 @@ use rand_core::CryptoRngCore;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::crypto::full_hash;
 use crate::identity::Identity;
-use crate::resource::msgpack;
+use crate::msgpack;
 
 /// Application name for the discovery destination.
 pub const APP_NAME: &str = "rnstransport";
@@ -523,7 +523,7 @@ fn parse_announce_app_data_inner(
 
     // Unpack the integer-keyed info map.
     let mut pos = 0usize;
-    let count = read_map_len(packed, &mut pos)?;
+    let count = msgpack::read_map_len(packed, &mut pos)?;
 
     let mut interface_type: Option<String> = None;
     let mut transport: Option<bool> = None;
@@ -617,23 +617,6 @@ fn parse_announce_app_data_inner(
         ifac_netkey,
         discovery_hash,
     })
-}
-
-/// Read a msgpack map length (fixmap or map16/map32).
-fn read_map_len(data: &[u8], pos: &mut usize) -> Option<usize> {
-    let tag = *data.get(*pos)?;
-    if tag & 0xf0 == 0x80 {
-        *pos += 1;
-        Some((tag & 0x0f) as usize)
-    } else if tag == 0xde {
-        *pos += 1;
-        Some(msgpack::read_be_u16(data, pos)? as usize)
-    } else if tag == 0xdf {
-        *pos += 1;
-        Some(msgpack::read_be_u32(data, pos)? as usize)
-    } else {
-        None
-    }
 }
 
 /// Stable per-endpoint hash: `full_hash((hex(transport_id) + name).utf8)`

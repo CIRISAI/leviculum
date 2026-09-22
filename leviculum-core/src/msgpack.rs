@@ -1,10 +1,20 @@
-//! Hand-rolled msgpack encode/decode helpers for the Resource protocol.
+//! The crate's hand-rolled msgpack encode/decode helpers.
 //!
-//! These handle only the exact msgpack types needed by ResourceAdvertisement
-//! serialization. Not a general-purpose msgpack library.
+//! These handle only the msgpack types this protocol actually puts on the
+//! wire or in a store. Not a general-purpose msgpack library.
 //!
-//! Pattern follows `destination.rs` module-private helpers, extended with
-//! integer encoding and map support needed by Resource.
+//! **This is the only tag table in `leviculum-core`, and it has to stay the
+//! only one** (Codeberg #302). It used to live under `resource/`, with a
+//! second copy in `destination.rs` whose header recorded that it followed
+//! this one's pattern; #267 was then a defect that had to be fixed in both,
+//! and the second site was found only because that batch happened to run an
+//! explicit audit for the shape. The two copies were also reachable by
+//! different paths — wire bytes here, the pre-signature-verification parse of
+//! the local ratchet store there — so "they are the same, one fix covers
+//! both" was not something a reader could assume. Callers that need a typed
+//! convenience (`read_str_or_nil`, `read_bin_array`) wrap these; they must
+//! not re-derive a tag byte. `leviculum-std/tests/msgpack_single_decoder.rs`
+//! enforces both halves of that.
 
 use alloc::vec::Vec;
 
@@ -125,6 +135,11 @@ pub(crate) fn write_bool(buf: &mut Vec<u8>, val: bool) {
 /// slice behind it panicked — a remote panic reachable with one packet after a
 /// link handshake. `checked_add` is the guard the wire actually needs; on a
 /// 64-bit host it is a no-op, which is why no test had ever seen the defect.
+///
+/// The wire is not the only untrusted caller. `Destination::load_ratchets_signed`
+/// parses the outer map of the local ratchet store *before* verifying the
+/// Ed25519 signature over it, so a corrupt store reaches these readers
+/// unauthenticated too, at destination registration.
 fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
     let end = (*pos).checked_add(n)?;
     let taken = data.get(*pos..end)?;
@@ -145,77 +160,39 @@ pub(crate) fn read_byte(data: &[u8], pos: &mut usize) -> Option<u8> {
     Some(b)
 }
 
+/// Take a fixed-width big-endian field at `*pos`, advancing past it.
+///
+/// Goes through [`take`] like every other reader, so the module holds no
+/// hand-spelled `*pos + n` at all — not because a literal width can wrap
+/// (it cannot), but because one exception is how the next wire-supplied
+/// length gets written the same way.
+fn take_be<const N: usize>(data: &[u8], pos: &mut usize) -> Option<[u8; N]> {
+    take(data, pos, N)?.try_into().ok()
+}
+
 /// Read a big-endian u16, advancing position.
 pub(crate) fn read_be_u16(data: &[u8], pos: &mut usize) -> Option<u16> {
-    if *pos + 2 > data.len() {
-        return None;
-    }
-    let val = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-    *pos += 2;
-    Some(val)
+    Some(u16::from_be_bytes(take_be(data, pos)?))
 }
 
 /// Read a big-endian u32, advancing position.
 pub(crate) fn read_be_u32(data: &[u8], pos: &mut usize) -> Option<u32> {
-    if *pos + 4 > data.len() {
-        return None;
-    }
-    let val = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-    *pos += 4;
-    Some(val)
+    Some(u32::from_be_bytes(take_be(data, pos)?))
 }
 
 /// Read a big-endian u64, advancing position.
 fn read_be_u64(data: &[u8], pos: &mut usize) -> Option<u64> {
-    if *pos + 8 > data.len() {
-        return None;
-    }
-    let val = u64::from_be_bytes([
-        data[*pos],
-        data[*pos + 1],
-        data[*pos + 2],
-        data[*pos + 3],
-        data[*pos + 4],
-        data[*pos + 5],
-        data[*pos + 6],
-        data[*pos + 7],
-    ]);
-    *pos += 8;
-    Some(val)
+    Some(u64::from_be_bytes(take_be(data, pos)?))
 }
 
 /// Read a msgpack float64 (or float32, promoted).
 pub(crate) fn read_float64(data: &[u8], pos: &mut usize) -> Option<f64> {
     let tag = read_byte(data, pos)?;
     match tag {
-        0xcb => {
-            // float64
-            if *pos + 8 > data.len() {
-                return None;
-            }
-            let val = f64::from_be_bytes([
-                data[*pos],
-                data[*pos + 1],
-                data[*pos + 2],
-                data[*pos + 3],
-                data[*pos + 4],
-                data[*pos + 5],
-                data[*pos + 6],
-                data[*pos + 7],
-            ]);
-            *pos += 8;
-            Some(val)
-        }
-        0xca => {
-            // float32 (Python could send this)
-            if *pos + 4 > data.len() {
-                return None;
-            }
-            let val =
-                f32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-            *pos += 4;
-            Some(val as f64)
-        }
+        // float64
+        0xcb => Some(f64::from_be_bytes(take_be(data, pos)?)),
+        // float32 (Python could send this)
+        0xca => Some(f32::from_be_bytes(take_be(data, pos)?) as f64),
         _ => None,
     }
 }
@@ -253,12 +230,7 @@ pub(crate) fn read_msgpack_str<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'
         return None;
     };
 
-    if *pos + len > data.len() {
-        return None;
-    }
-    let s = &data[*pos..*pos + len];
-    *pos += len;
-    Some(s)
+    take(data, pos, len)
 }
 
 /// Read a msgpack binary (bin8, bin16, bin32).
@@ -336,6 +308,46 @@ pub(crate) fn read_fixarray_len(data: &[u8], pos: &mut usize) -> Option<usize> {
     let tag = read_byte(data, pos)?;
     if tag & 0xf0 == 0x90 {
         Some((tag & 0x0f) as usize)
+    } else {
+        None
+    }
+}
+
+/// Read any map header — fixmap, map16 or map32 — returning the entry count.
+///
+/// The `fix*` readers above stay separate rather than delegating here: the
+/// payloads they parse (a ResourceAdvertisement is always a fixmap(11), a
+/// signed ratchet store always a fixmap(2)) are fixed-shape, and accepting a
+/// map32 there would widen what those decoders take off the wire for no
+/// reason. This one is for payloads that genuinely grow past 15 entries —
+/// Python's `get_interface_stats()` returns 28 keys per interface.
+pub(crate) fn read_map_len(data: &[u8], pos: &mut usize) -> Option<usize> {
+    let tag = read_byte(data, pos)?;
+    if tag & 0xf0 == 0x80 {
+        Some((tag & 0x0f) as usize)
+    } else if tag == 0xde {
+        Some(read_be_u16(data, pos)? as usize)
+    } else if tag == 0xdf {
+        Some(read_be_u32(data, pos)? as usize)
+    } else {
+        None
+    }
+}
+
+/// Read any array header — fixarray, array16 or array32 — returning the
+/// element count.
+///
+/// The count is an unvalidated number off the buffer, so it bounds a loop but
+/// must not size an allocation: an array32 header costs five bytes and can
+/// claim `u32::MAX` elements.
+pub(crate) fn read_array_len(data: &[u8], pos: &mut usize) -> Option<usize> {
+    let tag = read_byte(data, pos)?;
+    if tag & 0xf0 == 0x90 {
+        Some((tag & 0x0f) as usize)
+    } else if tag == 0xdc {
+        Some(read_be_u16(data, pos)? as usize)
+    } else if tag == 0xdd {
+        Some(read_be_u32(data, pos)? as usize)
     } else {
         None
     }
@@ -619,6 +631,58 @@ mod tests {
 
         let mut pos = 0;
         assert_eq!(skip_msgpack_value(&buf, &mut pos), None);
+    }
+
+    /// `read_map_len` / `read_array_len` accept the large headers their
+    /// `fix*` siblings reject, and reject the tag of the other container
+    /// kind. Both were a private copy in `discovery/` (twice, verbatim)
+    /// and in `destination.rs` before Codeberg #302 folded them in here.
+    #[test]
+    fn map_and_array_len_cover_the_large_headers() {
+        // fixmap(3) / fixarray(3)
+        let mut pos = 0;
+        assert_eq!(read_map_len(&[0x83], &mut pos), Some(3));
+        let mut pos = 0;
+        assert_eq!(read_array_len(&[0x93], &mut pos), Some(3));
+
+        // map16(300) / array16(300)
+        for (tag, want_map) in [(0xdeu8, true), (0xdcu8, false)] {
+            let mut buf = alloc::vec![tag];
+            buf.extend_from_slice(&300u16.to_be_bytes());
+            let mut pos = 0;
+            let got = if want_map {
+                read_map_len(&buf, &mut pos)
+            } else {
+                read_array_len(&buf, &mut pos)
+            };
+            assert_eq!(got, Some(300), "tag {tag:#04x}");
+            assert_eq!(pos, buf.len(), "tag {tag:#04x} consumed its header");
+        }
+
+        // map32 / array32
+        for (tag, want_map) in [(0xdfu8, true), (0xddu8, false)] {
+            let mut buf = alloc::vec![tag];
+            buf.extend_from_slice(&70_000u32.to_be_bytes());
+            let mut pos = 0;
+            let got = if want_map {
+                read_map_len(&buf, &mut pos)
+            } else {
+                read_array_len(&buf, &mut pos)
+            };
+            assert_eq!(got, Some(70_000), "tag {tag:#04x}");
+        }
+
+        // An array header is not a map header, and vice versa.
+        let mut pos = 0;
+        assert_eq!(read_map_len(&[0x93], &mut pos), None);
+        let mut pos = 0;
+        assert_eq!(read_array_len(&[0x83], &mut pos), None);
+
+        // A truncated large header is rejected, not read past.
+        let mut pos = 0;
+        assert_eq!(read_map_len(&[0xde, 0x01], &mut pos), None);
+        let mut pos = 0;
+        assert_eq!(read_array_len(&[0xdd, 0x00, 0x00], &mut pos), None);
     }
 
     #[test]

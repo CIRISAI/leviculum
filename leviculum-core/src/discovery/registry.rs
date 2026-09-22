@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use super::stamp::STAMP_SIZE;
 use super::DiscoveredInterface;
-use crate::resource::msgpack;
+use crate::msgpack;
 
 /// Age past which a record is considered `unknown` (Python
 /// `InterfaceDiscovery.THRESHOLD_UNKNOWN`, 24 h).
@@ -303,7 +303,7 @@ impl DiscoveredInterfaceRecord {
     /// base field.
     pub fn decode_msgpack(data: &[u8]) -> Option<Self> {
         let mut pos = 0usize;
-        let count = read_map_len(data, &mut pos)?;
+        let count = msgpack::read_map_len(data, &mut pos)?;
 
         let mut interface_type: Option<String> = None;
         let mut transport: Option<bool> = None;
@@ -472,23 +472,6 @@ fn write_map_header(buf: &mut Vec<u8>, count: u32) {
     } else {
         buf.push(0xdf);
         buf.extend_from_slice(&count.to_be_bytes());
-    }
-}
-
-/// Read a msgpack map length (fixmap or map16/map32).
-fn read_map_len(data: &[u8], pos: &mut usize) -> Option<usize> {
-    let tag = *data.get(*pos)?;
-    if tag & 0xf0 == 0x80 {
-        *pos += 1;
-        Some((tag & 0x0f) as usize)
-    } else if tag == 0xde {
-        *pos += 1;
-        Some(msgpack::read_be_u16(data, pos)? as usize)
-    } else if tag == 0xdf {
-        *pos += 1;
-        Some(msgpack::read_be_u32(data, pos)? as usize)
-    } else {
-        None
     }
 }
 

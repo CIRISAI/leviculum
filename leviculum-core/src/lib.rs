@@ -126,6 +126,11 @@ pub mod known_destinations;
 pub mod link;
 pub mod media_profile_store;
 pub mod memory_storage;
+/// The crate's one hand-rolled msgpack reader/writer. Top-level rather than
+/// under `resource/` because `destination`, `discovery` and `node` all decode
+/// msgpack too, and a decoder under `resource/` made every one of those an
+/// inversion — or an invitation to copy it (Codeberg #302).
+pub(crate) mod msgpack;
 pub mod node;
 pub mod node_name;
 pub mod node_name_store;

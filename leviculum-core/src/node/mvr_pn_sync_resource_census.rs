@@ -252,9 +252,9 @@ fn resource_control_packet_wire_sizes() {
     // single-part resource (`link_management.rs` / `outgoing.rs`).
     let mut hmu = Vec::new();
     hmu.extend_from_slice(&resource_hash);
-    crate::resource::msgpack::write_fixarray_header(&mut hmu, 2);
-    crate::resource::msgpack::write_uint(&mut hmu, 0);
-    crate::resource::msgpack::write_bin(&mut hmu, &[1u8, 2, 3, 4]);
+    crate::msgpack::write_fixarray_header(&mut hmu, 2);
+    crate::msgpack::write_uint(&mut hmu, 0);
+    crate::msgpack::write_bin(&mut hmu, &[1u8, 2, 3, 4]);
     // An exhausted REQ: flag + last map hash + resource hash, no requested
     // hashes (`incoming.rs::build_request`).
     let mut req_exhausted = Vec::new();

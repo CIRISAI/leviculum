@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
 
 use crate::crypto::{derive_key, full_hash};
-use crate::resource::msgpack;
+use crate::msgpack;
 
 /// Size of a stamp in bytes (`RNS.Identity.HASHLENGTH // 8`).
 pub const STAMP_SIZE: usize = 32;

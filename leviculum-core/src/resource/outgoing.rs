@@ -14,9 +14,9 @@ use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST};
 use crate::crypto::full_hash;
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
+use crate::msgpack;
 use crate::packet::PacketContext;
 use crate::resource::hashmap::map_hash;
-use crate::resource::msgpack;
 use crate::resource::{
     resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
     COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,

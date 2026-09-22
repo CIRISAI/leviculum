@@ -79,6 +79,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `leviculum-core` has one msgpack decoder instead of four. It used to live
+  under `resource/`, with a second full copy of the readers in
+  `destination.rs` and a third and fourth copy of the map-length reader in
+  `discovery/mod.rs` and `discovery/registry.rs`. That is not a style
+  complaint: #267 was a bounds check spelled `*pos + len > data.len()` with
+  `len` a full `u32` off the wire, which wraps below `data.len()` on the
+  32-bit firmware target, so the guard passed and the slice behind it
+  panicked. Fixing it meant fixing it twice, and the second site was found
+  only because that batch happened to run an explicit audit for the shape --
+  the issue named one file and the reported panic was in one file, so a fix
+  confined to the reported site would have looked complete. The two copies
+  were also not reachable the same way, which makes "they are the same, so
+  one fix covers both" an assumption rather than a fact: the resource decoder
+  takes bytes off the wire, while the destination one parses the ratchet
+  store's outer map *before* the Ed25519 signature over it is verified. The
+  readers now sit in `crate::msgpack`, top-level rather than under
+  `resource/` because `destination`, `discovery` and `node` all decode
+  msgpack and a decoder under `resource/` made every one of them an
+  inversion. `leviculum-std/tests/msgpack_single_decoder.rs` keeps it that
+  way: it fails on a second definition of any primitive reader, and on any
+  hand-spelled `*pos + n`, so the next copy is caught the day it is written
+  (Codeberg #302).
+
 - `just --list` now describes each recipe in one sentence instead of showing
   the tail of its comment block: `ci-gate` introduced itself as "day one it
   would only teach people to skip the gate" and `fast` as "sources, proof

@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:3369`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1486`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1483`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.

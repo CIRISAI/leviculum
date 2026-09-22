@@ -21,7 +21,7 @@
 //!   (`RESOURCE_RCL`) on the sending side is exactly what produces
 //!   `Resource.REJECTED`. Our equivalent is `NodeEvent::ResourceFailed` with
 //!   `is_sender: true` and `ResourceError::Cancelled`
-//!   (`leviculum-core/src/node/link_management.rs:2942-2953`).
+//!   (`leviculum-core/src/node/link_management.rs:2938-2949`).
 
 use std::cell::Cell;
 use std::collections::VecDeque;

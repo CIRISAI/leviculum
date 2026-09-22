@@ -29,7 +29,6 @@
 pub(crate) mod compression;
 pub(crate) mod hashmap;
 pub(crate) mod incoming;
-pub(crate) mod msgpack;
 pub(crate) mod outgoing;
 pub mod window;
 
@@ -41,6 +40,7 @@ pub use window::{RateSample, WindowPolicy};
 use crate::constants::{
     HEADER_MAXSIZE, IFAC_MIN_SIZE, RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST,
 };
+use crate::msgpack;
 use alloc::vec::Vec;
 
 // Constants

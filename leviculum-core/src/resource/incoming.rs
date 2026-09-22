@@ -10,8 +10,8 @@ use crate::constants::RESOURCE_HASHMAP_LEN;
 use crate::crypto::full_hash;
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
+use crate::msgpack;
 use crate::resource::hashmap::map_hash;
-use crate::resource::msgpack;
 use crate::resource::window::{RateSample, WindowPolicy, WindowState};
 use crate::resource::{
     ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus, HASHMAP_IS_EXHAUSTED,

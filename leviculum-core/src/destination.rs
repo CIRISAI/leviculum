@@ -21,6 +21,7 @@ use crate::constants::{
 };
 use crate::crypto::{decrypt_token, encrypt_token, sha256, truncated_hash};
 use crate::identity::{Identity, IdentityError};
+use crate::msgpack::{read_array_len, read_byte, read_msgpack_bin, read_msgpack_str};
 use crate::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
 };
@@ -1201,10 +1202,12 @@ impl Destination {
     }
 }
 
-// Hand-rolled msgpack helpers (no_std compatible)
+// Signed-ratchet-store msgpack: the shape of the store, not the grammar.
 //
-// These encode/decode only the exact msgpack types needed for the signed
-// ratchet format. Not a general-purpose msgpack library.
+// The tag bytes are `crate::msgpack`'s; these four functions only say what a
+// signed ratchet store is made of. Until Codeberg #302 this file carried its
+// own copy of the readers, which is how #267's wrapping bounds guard came to
+// need fixing twice.
 
 /// Encode an array of ratchet private keys as msgpack.
 ///
@@ -1302,9 +1305,13 @@ fn msgpack_parse_signed_ratchets(data: &[u8]) -> Option<(&[u8], &[u8])> {
 /// Returns slices into the original data.
 fn msgpack_parse_ratchet_array(data: &[u8]) -> Option<Vec<&[u8]>> {
     let mut pos = 0;
-    let count = read_msgpack_array_len(data, &mut pos)?;
+    let count = read_array_len(data, &mut pos)?;
 
-    let mut keys = Vec::with_capacity(count);
+    // Grown, not reserved: `count` comes off an array32 header that costs
+    // five bytes and may claim `u32::MAX` entries, while each entry needs 34
+    // bytes of `data` to parse. Reserving for the claim would allocate
+    // gigabytes before the first read refuted it.
+    let mut keys = Vec::new();
     for _ in 0..count {
         let blob = read_msgpack_bin(data, &mut pos)?;
         if blob.len() != RATCHET_SIZE {
@@ -1314,106 +1321,6 @@ fn msgpack_parse_ratchet_array(data: &[u8]) -> Option<Vec<&[u8]>> {
     }
 
     Some(keys)
-}
-
-// Low-level msgpack readers
-/// Take `n` bytes at `*pos`, advancing `*pos` past them.
-///
-/// Same guard, and the same reason, as `resource::msgpack::take` (Codeberg
-/// #267): `read_msgpack_bin` below takes a full `u32` off a bin32 header, and
-/// on the 32-bit firmware target the old `*pos + len > data.len()` wrapped
-/// below `data.len()`, so the guard passed and the slice behind it panicked.
-///
-/// This decoder is fed from local storage rather than the wire
-/// (`load_ratchets_signed`, via `NodeCore` at destination registration), and
-/// the outer map is parsed *before* the Ed25519 signature is verified — so a
-/// corrupt or hostile ratchet store reaches it unauthenticated.
-fn take<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
-    let end = (*pos).checked_add(n)?;
-    let taken = data.get(*pos..end)?;
-    *pos = end;
-    Some(taken)
-}
-
-fn read_byte(data: &[u8], pos: &mut usize) -> Option<u8> {
-    let b = *data.get(*pos)?;
-    *pos += 1;
-    Some(b)
-}
-
-fn read_be_u16(data: &[u8], pos: &mut usize) -> Option<u16> {
-    if *pos + 2 > data.len() {
-        return None;
-    }
-    let val = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-    *pos += 2;
-    Some(val)
-}
-
-fn read_be_u32(data: &[u8], pos: &mut usize) -> Option<u32> {
-    if *pos + 4 > data.len() {
-        return None;
-    }
-    let val = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-    *pos += 4;
-    Some(val)
-}
-
-fn read_msgpack_str<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
-    let tag = read_byte(data, pos)?;
-    let len = if tag & 0xe0 == 0xa0 {
-        // fixstr: 0xa0..0xbf, length in lower 5 bits
-        (tag & 0x1f) as usize
-    } else if tag == 0xd9 {
-        // str8
-        read_byte(data, pos)? as usize
-    } else if tag == 0xda {
-        // str16
-        read_be_u16(data, pos)? as usize
-    } else {
-        return None;
-    };
-
-    if *pos + len > data.len() {
-        return None;
-    }
-    let s = &data[*pos..*pos + len];
-    *pos += len;
-    Some(s)
-}
-
-fn read_msgpack_bin<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
-    let tag = read_byte(data, pos)?;
-    let len = if tag == 0xc4 {
-        // bin8
-        read_byte(data, pos)? as usize
-    } else if tag == 0xc5 {
-        // bin16
-        read_be_u16(data, pos)? as usize
-    } else if tag == 0xc6 {
-        // bin32
-        read_be_u32(data, pos)? as usize
-    } else {
-        return None;
-    };
-
-    take(data, pos, len)
-}
-
-fn read_msgpack_array_len(data: &[u8], pos: &mut usize) -> Option<usize> {
-    let tag = read_byte(data, pos)?;
-    if tag & 0xf0 == 0x90 {
-        // fixarray: 0x90..0x9f
-        Some((tag & 0x0f) as usize)
-    } else if tag == 0xdc {
-        // array16
-        Some(read_be_u16(data, pos)? as usize)
-    } else if tag == 0xdd {
-        // array32
-        Some(read_be_u32(data, pos)? as usize)
-    } else {
-        None
-    }
 }
 
 /// A detachable decrypt context for one Single destination — the key material
@@ -2644,14 +2551,19 @@ mod tests {
     }
 
     /// Regression (Codeberg #267, second instance found by the audit the issue
-    /// asked for): this module carries its own copy of the msgpack readers, and
-    /// its `read_msgpack_bin` had the same wrapping `*pos + len > data.len()`
-    /// guard on the bin32 arm.
+    /// asked for): this module used to carry its own copy of the msgpack
+    /// readers, and that copy's `read_msgpack_bin` had the same wrapping
+    /// `*pos + len > data.len()` guard on the bin32 arm.
     ///
     /// The store is local rather than wire-borne, but the outer map is parsed
     /// before the signature is verified, so a corrupt ratchet file panicked a
     /// 32-bit node at destination registration. Width-independent assertion:
     /// `Err`, not a panic, on both widths.
+    ///
+    /// Since #302 the copy is gone and this exercises `crate::msgpack`
+    /// end-to-end through `load_ratchets_signed` — which is the point: the
+    /// guard test proves there is one decoder, this proves the one decoder is
+    /// the one this path actually reaches.
     #[test]
     fn ratchet_store_bin32_length_near_usize_max_is_rejected() {
         let identity = Identity::generate(&mut OsRng);
@@ -2669,6 +2581,39 @@ mod tests {
         store.extend_from_slice(b"signature");
         store.push(0xc6);
         store.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        assert_eq!(
+            dest.load_ratchets_signed(&store),
+            Err(DestinationError::InvalidRatchetData)
+        );
+    }
+
+    /// An `array32` header in the ratchet store claims its element count in
+    /// five bytes; each element needs 34 to parse. The count therefore bounds
+    /// the loop but must never size the `Vec` — `with_capacity(u32::MAX)`
+    /// asks the allocator for tens of gigabytes and aborts the node before
+    /// the first element is read.
+    ///
+    /// Reached only behind a valid signature, so the store is signed here
+    /// with the destination's own identity: this is the corrupt-own-store
+    /// case, not a wire one.
+    #[test]
+    fn ratchet_store_array32_count_does_not_size_the_allocation() {
+        let identity = Identity::generate(&mut OsRng);
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["array32"],
+        )
+        .unwrap();
+
+        // inner = array32 claiming u32::MAX entries, with none behind it.
+        let mut inner = alloc::vec![0xddu8];
+        inner.extend_from_slice(&u32::MAX.to_be_bytes());
+        let signature = dest.identity().unwrap().sign(&inner).unwrap();
+        let store = msgpack_encode_signed_ratchets(&signature, &inner).unwrap();
 
         assert_eq!(
             dest.load_ratchets_signed(&store),

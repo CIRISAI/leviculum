@@ -107,7 +107,7 @@ unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps, built by
 `generate_random_hash` (`leviculum-core/src/announce.rs:156`), and
 request timestamps
-(`leviculum-core/src/node/mod.rs:1419`, `:1154`, Codeberg #164). Any
+(`leviculum-core/src/node/mod.rs:1417`, `:1154`, Codeberg #164). Any
 new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.

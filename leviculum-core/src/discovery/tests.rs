@@ -495,7 +495,7 @@ fn app_data_with_extra_entries(extra: &[(u64, Vec<u8>)]) -> Vec<u8> {
     use rand_core::OsRng;
     let packed = encode_info(&desc_a(), &arr16(TID_HEX), true).expect("encoded");
     let mut pos = 0usize;
-    let base_count = read_map_len(&packed, &mut pos).expect("map header");
+    let base_count = msgpack::read_map_len(&packed, &mut pos).expect("map header");
 
     let mut extended = Vec::new();
     write_map_header(&mut extended, (base_count + extra.len()) as u32);

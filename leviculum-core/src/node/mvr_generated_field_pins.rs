@@ -498,7 +498,7 @@ fn request_wire_pins_reference_request_semantics() {
 
     // One msgpack bin value as request data.
     let mut req_data = Vec::new();
-    crate::resource::msgpack::write_bin(&mut req_data, b"ping");
+    crate::msgpack::write_bin(&mut req_data, b"ping");
 
     let (request_id, out) = initiator
         .send_request(&caller_id, "/echo", Some(&req_data), None)
@@ -600,7 +600,7 @@ fn request_resource_timestamp_carries_epoch_seconds() {
 
     // One msgpack bin value, larger than the link MDU.
     let mut req_data = Vec::new();
-    crate::resource::msgpack::write_bin(&mut req_data, &std::vec![0x5a_u8; 1_400]);
+    crate::msgpack::write_bin(&mut req_data, &std::vec![0x5a_u8; 1_400]);
 
     let (request_id, out) = {
         let (rid, _hash, out) = initiator
@@ -956,7 +956,7 @@ fn data_proof_wire_carries_reference_packet_hash_and_signature() {
 ///
 /// We match: Transport emits `PathRequestReceived` and NodeCore regenerates
 /// via `dest.announce(None, ..)` (node/mod.rs Block A), where `None` falls
-/// back to the destination's default app data (destination.rs:1133-1142). Every
+/// back to the destination's default app data (destination.rs:1134-1143). Every
 /// expectation below is read from the response wire bytes and compared
 /// against values recomposed from the ORIGINAL announce's wire bytes.
 #[test]

@@ -1897,7 +1897,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         request_id: [u8; crate::constants::TRUNCATED_HASHBYTES],
         plaintext: &[u8],
     ) {
-        use crate::resource::msgpack::{
+        use crate::msgpack::{
             read_fixarray_len, read_float64, read_msgpack_bin, read_msgpack_raw_value,
         };
 
@@ -2058,9 +2058,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Shared by ordinary Response packets and response Resources. Responses
     /// are accepted only on the link where the request is pending.
     pub(super) fn handle_response_payload(&mut self, link_id: LinkId, plaintext: &[u8]) {
-        use crate::resource::msgpack::{
-            read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value,
-        };
+        use crate::msgpack::{read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value};
 
         // Parse msgpack
         let mut pos = 0;
@@ -2130,9 +2128,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     fn parse_wrapped_response(
         plaintext: &[u8],
     ) -> Option<([u8; crate::constants::TRUNCATED_HASHBYTES], Vec<u8>)> {
-        use crate::resource::msgpack::{
-            read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value,
-        };
+        use crate::msgpack::{read_fixarray_len, read_msgpack_bin, read_msgpack_raw_value};
         let mut pos = 0;
         if read_fixarray_len(plaintext, &mut pos)? != 2 {
             return None;
