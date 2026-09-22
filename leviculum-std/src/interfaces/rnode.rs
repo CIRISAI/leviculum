@@ -308,14 +308,24 @@ async fn open_serial_port(port_path: &str) -> Result<tokio_serial::SerialStream,
 /// `tokio_serial::SerialStream` or a host-supplied channel (USB-CDC, BLE GATT,
 /// mock pipe). The far end speaks RNode KISS regardless of substrate.
 ///
-/// Sequence matches Python `RNodeInterface.configure_device()` from the detect
+/// Sequence follows Python `RNodeInterface.configure_device()` from the detect
 /// step onward (the port-open + device-settle step is the caller's, since it is
 /// substrate-specific):
 /// 1. Detect + validate firmware >= 1.52
-/// 2. Send config commands: frequency, bandwidth, txpower, sf, cr, [st_alock], [lt_alock], radio ON
+/// 2. Send config commands: radio OFF, frequency, bandwidth, txpower, sf, cr,
+///    [st_alock], [lt_alock], radio ON
 /// 3. Sleep 250ms, read confirmation frames
 /// 4. Validate: frequency within 100 Hz, others exact match
 /// 5. Sleep 300ms
+///
+/// The leading radio OFF in step 2 is the one frame Python does not send.
+/// `initRadio` (`reference/Reticulum/RNS/Interfaces/RNodeInterface.py:470-478`)
+/// writes the five parameters, the two airtime locks and then `RADIO_STATE_ON`,
+/// and never an OFF; `reset_radio_state` above it (`:414-422`) only clears
+/// Python's own read-back variables and puts nothing on the wire. Ours is a
+/// deliberate deviation, and `send_radio_config` carries the firmware reasoning
+/// for it. Anyone diffing this block against Python should expect that extra
+/// frame rather than remove it as drift.
 async fn configure_stream<S>(
     port: &mut S,
     radio: &RadioParams,
