@@ -51,6 +51,89 @@ cannot prove (the firmware workspace, the cross-compiles, the
 submodule pins), and those stay on the local push path, which has
 the targets. Measured cost, cold: 3m23s including provisioning.
 
+## What may be published
+
+The forge gate is `fmt`, `clippy` and the workspace **lib** tests.
+`rnsd_interop` — the suite that measures whether we still interoperate
+with a Python-RNS peer, which is half of Priority 1 — runs in neither
+forge pipeline and cannot: it needs the `reference/Reticulum`
+submodule and a `python3`, and both pipelines clone with
+`submodules: false` on purpose, which is the property
+`just check-plain-clone` exists to hold (Codeberg #300). Fetching the
+submodule into the release path would undo exactly that.
+
+So the interop verdict is **imported rather than re-derived**
+(Codeberg #312). The tier-2 nightly already runs the whole workspace,
+with submodules, over a fresh clone pinned to `origin/master`. When
+that run is green it pushes a lightweight ref at the commit it tested:
+
+```
+refs/nightly/green/<YYYYMMDDTHHMMSSZ>  ->  <tested commit>
+```
+
+and `scripts/publish-nightly.sh` refuses, before it touches the forge,
+any commit those refs do not cover. Three conditions, and a refusal
+always names which one failed:
+
+| Condition | Meaning |
+| --- | --- |
+| `NO-SIGNAL` | there is no `refs/nightly/green/*` on the remote, or it could not be read |
+| `NOT-COVERED` | no green ref names this commit or a descendant of it — no nightly has seen this code |
+| `TOO-OLD` | the newest covering ref is older than the staleness bound (72 h) |
+
+The 72 h bound is measured, not assumed: over 2026-08-22..09-22 the
+nightly timer produced 27 runs with a median gap of 24 h, every gap
+but one at or under 54.4 h, and one 96 h gap (2026-09-04 to 09-08)
+which is precisely the case the bound exists to stop. The forge
+publishes on its own cron, so the freshest ref it can read is normally
+the previous night's and is already ~24 h old. 72 h therefore accepts
+the ordinary day plus one missed night and refuses two.
+
+### Publishing anyway
+
+A human can decide otherwise. Set, on the publish step:
+
+```
+LEVICULUM_PUBLISH_WITHOUT_NIGHTLY="why you are doing this"
+```
+
+It is deliberately not a boolean: the value is the reason, it must be
+at least 8 characters, and it is printed into the run's log where it
+stays with the build it excused. A value too short to be a reason is
+refused.
+
+Two ways to set it, and neither needs a code change:
+
+* **Woodpecker** — start the `nightly.yml` workflow manually and add
+  the variable in the run dialog.
+* **By hand, from a checkout** — `CI_REPO=Lew_Palm/leviculum
+  CI_COMMIT_SHA=$(git rev-parse HEAD) CODEBERG_TOKEN=...
+  LEVICULUM_PUBLISH_WITHOUT_NIGHTLY="..." bash
+  scripts/publish-nightly.sh`, with `dist/` already staged by
+  `scripts/collect-nightly-debs.sh`.
+
+`bash scripts/check-nightly-green.sh --commit <sha>` answers the
+question on its own, without publishing anything, which is the first
+thing to run when a nightly publish has gone red.
+
+### What holds the chain together
+
+| Gate | Asserts |
+| --- | --- |
+| `just nightly-green-selftest` | both scripts BEHAVE: each of the three refusals fires, the override works and needs a reason, and a red or absent `rnsd_interop` signs nothing |
+| `just check-publish-nightly-gate` | the mechanism is still CONNECTED: five links from the publish step to the manifest the signer reads, each broken on purpose in its own self-test |
+
+Both are in `just fast`, so they run on the push path. They are
+separate because the failure mode is available to both halves: a gate
+wired into nothing, and a gate wired in that says yes to everything.
+
+The signing half is `scripts/nightly-green-ref.sh`. It does not take
+the night's verdict on trust for the one property this is about — it
+reads the run's own manifest (`scripts/run-with-manifest.py`,
+Guarantee B) and refuses to sign unless the `rnsd_interop` unit
+executed and every test in it passed. "The nightly was green" must not
+be able to mean "the suite never ran".
+
 ## Installation
 
 One command, idempotent:

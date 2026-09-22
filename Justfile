@@ -272,6 +272,8 @@ nrf-shellcheck:
         scripts/check-prepush-guard.sh scripts/cargo-target-dir.sh \
         scripts/push-clean.sh scripts/check-ci-pipeline.sh scripts/ci-gate.sh \
         scripts/check-ci-secrets.sh \
+        scripts/check-nightly-green.sh scripts/nightly-green-ref.sh \
+        scripts/test-nightly-green.sh scripts/check-publish-nightly-gate.sh \
         scripts/check-plain-clone.sh \
         scripts/check-changelog-links.sh \
         scripts/publish-nightly.sh scripts/test-publish-nightly.sh \
@@ -555,6 +557,45 @@ check-ci-secrets:
 publish-selftest:
     @bash scripts/test-publish-nightly.sh
 
+# Codeberg #312: the two halves of the nightly publish signal, driven against
+# a fake remote.
+#
+# `rnsd_interop` — whether we still interoperate with a Python-RNS peer — runs
+# in NO forge pipeline: it needs the reference/Reticulum submodule and a
+# python3, and both pipelines clone with `submodules: false` on purpose (#300).
+# So the tier-2 nightly's verdict is imported instead of re-derived: on a green
+# night it pushes `refs/nightly/green/<stamp>` at the commit it tested, and the
+# publish step refuses a commit no such ref covers.
+#
+# Both scripts run exactly once a day on machines nobody is watching — the same
+# blind spot that left the rolling release standing still for five weeks — so
+# neither is exercised by being used. This makes each of the three refusals
+# fire (no ref, not an ancestor, too old), proves the override works and needs
+# a reason rather than a flag, and proves that a red or an ABSENT rnsd_interop
+# signs nothing. ~1 s, no network, no build: `git` is a fixture on PATH.
+[doc('Drive the nightly green-ref signal against a fake remote')]
+nightly-green-selftest:
+    @bash scripts/test-nightly-green.sh
+
+# The wiring the selftest above cannot see: that the mechanism is still
+# CONNECTED. Five links from a commit to the releases page — the publish step
+# runs publish-nightly.sh, that script runs the gate, it runs it before the
+# first forge request, `complete` still runs the whole workspace (narrowed to
+# `--lib` the ref would certify a run with no interop test in it), and the
+# signer reads rnsd_interop out of the run's manifest rather than trusting the
+# caller.
+#
+# Separate from nightly-green-selftest because the #312 failure mode is
+# available to both halves: a gate wired into nothing, and a gate wired in that
+# says yes to everything. --selftest is the positive control and is not
+# optional — it breaks each of the five links in a fixture tree and requires
+# the classifier to reject it. ~50 ms, reads YAML, the Justfile and shell as
+# text.
+[doc('Check that a red rnsd_interop cannot reach the publish step')]
+check-publish-nightly-gate:
+    @bash scripts/check-publish-nightly-gate.sh
+    @bash scripts/check-publish-nightly-gate.sh --selftest
+
 # The nightly's OTHER cron-only step, driven against a fixture tree.
 #
 # `package` and `publish` both carry `when: event: cron`, so until this
@@ -816,7 +857,9 @@ check-all-targets:
 # gates + a compile check of every workspace target (#220) + workspace lib
 # tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
 # the third-party notice guard (#288) + the process-supervision pair (census
-# over the sources, proof against the kernel).
+# over the sources, proof against the kernel) + the release gate's two halves
+# (#312: the nightly green-ref signal, and the wiring that keeps a red
+# rnsd_interop out of the publish step).
 #
 # notices-guard sits after lint-nrf deliberately: it reads the firmware
 # workspace `--frozen`, and lint-nrf is what guarantees that workspace's git
@@ -830,7 +873,7 @@ check-all-targets:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

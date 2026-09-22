@@ -148,9 +148,49 @@ EOF
 # The tag push must not reach a real remote, and whether it happened at all
 # is an assertion: a run that could not publish its assets must not move the
 # tag that names them.
+#
+# It also answers the queries scripts/check-nightly-green.sh makes, because
+# since Codeberg #312 the publish step begins by reading the tier-2 nightly's
+# verdict off the remote. Only a PUSH is logged as `GIT `; every other query
+# is logged as `GITQ `, so the assertions below still mean "the tag moved"
+# rather than "git was invoked at all".
 cat > "$BIN/git" <<'EOF'
 #!/usr/bin/env bash
-printf 'GIT %s\n' "$*" >> "$FAKE_DIR/log"
+set -uo pipefail
+printf 'GITQ %s\n' "$*" >> "$FAKE_DIR/log"
+# The subcommand is the first argument that is one: `-C <dir>` and any number
+# of `-c key=value` pairs come before it (publish-nightly.sh's tag push passes
+# two of the latter to keep the token out of the remote URL).
+sub=""
+for a in "$@"; do
+    case "$a" in
+        ls-remote|fetch|merge-base|push) sub="$a"; break ;;
+    esac
+done
+case "$sub" in
+    ls-remote)
+        cat "$FAKE_DIR/green-refs" 2>/dev/null
+        exit 0
+        ;;
+    fetch)
+        exit 0
+        ;;
+    merge-base)
+        # merge-base --is-ancestor <commit> <ref-commit>
+        seen=0; a=""; b=""
+        for x in "$@"; do
+            if [ "$seen" = "1" ] && [ -z "$a" ]; then a="$x"; continue; fi
+            if [ -n "$a" ] && [ -z "$b" ]; then b="$x"; continue; fi
+            [ "$x" = "--is-ancestor" ] && seen=1
+        done
+        [ "$a" = "$b" ] && exit 0
+        exit 1
+        ;;
+    push)
+        printf 'GIT %s\n' "$*" >> "$FAKE_DIR/log"
+        exit 0
+        ;;
+esac
 exit 0
 EOF
 chmod +x "$BIN/curl" "$BIN/git"
@@ -171,9 +211,17 @@ setup() {  # <case> [empty-dist]
     TREE="$WORK/$1/tree"
     mkdir -p "$FAKE_DIR" "$TREE/scripts" "$TREE/dist"
     cp "$PUBLISH_SH" "$TREE/scripts/publish-nightly.sh"
+    # Codeberg #312: the publish step now begins by reading the nightly's
+    # verdict, so the script it calls has to be in the fixture tree too.
+    cp "$SCRIPT_DIR/check-nightly-green.sh" "$TREE/scripts/check-nightly-green.sh"
     : > "$FAKE_DIR/log"
     : > "$FAKE_DIR/assets"
     : > "$FAKE_DIR/bodies"
+    # A green tier-2 nightly from a minute ago, naming the commit under
+    # publish. Every case below except the two that are about the gate itself
+    # is about what happens AFTER it, so the default fixture is a covered one.
+    printf '%s\trefs/nightly/green/%s\n' "deadbeefcafe" "$(date -u +%Y%m%dT%H%M%SZ)" \
+        > "$FAKE_DIR/green-refs"
     # The compiler stamp scripts/deb-stamp.sh leaves in the repo root. A
     # version that exists nowhere, so a body naming the host's own compiler
     # instead of the stamped one is visible (Codeberg #305).
@@ -285,6 +333,49 @@ expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
 [ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
 grep -q '^DELETE' "$FAKE_DIR/log" && fail "deleted an asset on a release that had none"
 grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: no green nightly covers the commit -----------------------------
+#
+# Codeberg #312, end to end. `rnsd_interop` runs in no forge pipeline — it
+# needs the reference/Reticulum submodule and both pipelines clone without
+# submodules (#300) — so the interop verdict is imported from the tier-2
+# nightly as a ref, and a commit no green ref covers must not reach the
+# releases page at all. The assertion is that the refusal happens BEFORE the
+# forge is touched: not one request, not one asset moved, and the tag where it
+# was.
+echo "[case] refuses-without-a-green-nightly"
+before=$failures
+setup no-nightly
+: > "$FAKE_DIR/green-refs"
+run_publish
+[ "$(rc)" != "0" ] || fail "exit 0 with no green nightly behind the commit"
+grep -q 'REFUSED (NO-SIGNAL)' "$FAKE_DIR/out" || fail "the refusal does not name which condition failed"
+grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE)' "$FAKE_DIR/log" && fail "the forge was contacted before the gate refused"
+[ "$(asset_ids)" = "1 2 3 4 5 6 " ] || fail "release holds ids '$(asset_ids)', expected the six previous assets untouched"
+grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although nothing was published"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: a human overrides the refusal ----------------------------------
+#
+# The override has to actually work, or the first forge outage makes somebody
+# comment the gate out and it never comes back.
+echo "[case] override-publishes-anyway"
+before=$failures
+setup override
+: > "$FAKE_DIR/green-refs"
+( cd "$TREE" && PATH="$BIN:$PATH" \
+    CI_REPO="Lew_Palm/leviculum" CI_COMMIT_SHA="deadbeefcafe" \
+    CODEBERG_TOKEN="fixture-token" LEVICULUM_BUILD_ID="fixture-build" \
+    LEVICULUM_PUBLISH_WITHOUT_NIGHTLY="nightly host down, release cut by hand" \
+    bash "$TREE/scripts/publish-nightly.sh" ) > "$FAKE_DIR/out" 2>&1
+echo $? > "$FAKE_DIR/rc"
+[ "$(rc)" = "0" ] || fail "exit $(rc) with a reasoned override"
+grep -q 'OVERRIDDEN' "$FAKE_DIR/out" || fail "the override did not announce itself in the log"
+grep -q 'nightly host down, release cut by hand' "$FAKE_DIR/out" \
+    || fail "the reason was not recorded with the build it excused"
+expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
+[ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
 [ "$failures" -eq "$before" ] || dumplog
 
 echo

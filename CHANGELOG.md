@@ -20,6 +20,24 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- The nightly decides what may be published. `rnsd_interop` — whether we still
+  interoperate with a Python-RNS peer — runs in neither forge pipeline and
+  cannot: it needs the `reference/Reticulum` submodule, and both pipelines
+  clone without submodules so that a plain clone builds (Codeberg #300). The
+  verdict is imported instead of re-derived: a green tier-2 nightly pushes
+  `refs/nightly/green/<YYYYMMDDTHHMMSSZ>` at the commit it tested, and
+  `scripts/publish-nightly.sh` refuses, before it touches the forge, any commit
+  those refs do not cover, naming which of three conditions failed — no
+  signal, not covered, or older than the 72-hour bound. The signer reads the
+  run's own test manifest rather than trusting the night's verdict, so a green
+  night cannot mean a suite that never ran, and
+  `LEVICULUM_PUBLISH_WITHOUT_NIGHTLY="<reason>"` lets a human publish anyway
+  with the reason recorded beside the build. `just nightly-green-selftest`
+  drives both halves against a fake remote and
+  `just check-publish-nightly-gate` asserts the five links between them are
+  still connected; both run in `just fast`. See
+  [CI Pipeline](docs/src/development-ci.md), "What may be published".
+
 - Published builds now record which compiler produced them. `rustc --version`
   is asked once in `scripts/deb-stamp.sh` — the one step that runs in an image
   with a Rust toolchain — and written forward as `.rustc-version`, the same

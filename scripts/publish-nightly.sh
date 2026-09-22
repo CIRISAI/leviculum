@@ -44,6 +44,24 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 [ -d "$DIST" ] || { echo "dist/ not found — run collect-nightly-debs.sh first"; exit 1; }
 
+# What the forge gate cannot prove, imported from the one run that can
+# (Codeberg #312). `just ci-gate` is fmt, clippy and the workspace LIB tests;
+# `rnsd_interop` — whether we still interoperate with a Python-RNS peer — runs
+# in no forge pipeline, because it needs the `reference/Reticulum` submodule
+# and both pipelines clone without submodules on purpose (#300). So the tier-2
+# nightly's verdict is read here instead: it pushes a `refs/nightly/green/*`
+# ref at the commit it tested, and this refuses a commit no such ref covers.
+#
+# FIRST, before any forge request, and inside this script rather than as a
+# separate pipeline step: a step is a line in a YAML file that a future commit
+# can reorder or drop, and `just check-publish-nightly-gate` would then be
+# asserting the wiring of something that no longer runs. Here the refusal is
+# the publisher's own.
+#
+# The refusal names which of three conditions failed and how to override it by
+# hand; see the script and docs/src/development-ci.md §"What may be published".
+bash "$ROOT/scripts/check-nightly-green.sh" || exit 1
+
 # Which compiler built what this release carries. In the body because that is
 # where a stranger looking at a download can read it without unpacking
 # anything, and because codegen differences between compiler versions are the

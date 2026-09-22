@@ -260,14 +260,28 @@ steps:
         from_secret: codeberg_token
     commands:
       # Same inventory discipline as `package` above. This script may use:
-      #   bash, coreutils (basename cat mktemp rm sha256sum), sed
-      #                    — debian:bookworm-slim ships all of these
+      #   bash, coreutils (basename cat date mktemp rm sha256sum), sed
+      #                    — debian:bookworm-slim ships all of these. `date`
+      #                      joined the list with Codeberg #312: the nightly
+      #                      gate below converts a ref name to an epoch and
+      #                      ages it against a bound.
       #   curl, jq         — apt-installed here, for the forge API
-      #   git              — apt-installed here: publish-nightly.sh
-      #                      force-pushes the `nightly` tag to the built
-      #                      commit at the end, because the API refresh path
-      #                      never moves the git ref, only release creation
-      #                      does.
+      #   git              — apt-installed here, and now for two things.
+      #                      publish-nightly.sh force-pushes the `nightly` tag
+      #                      to the built commit at the end, because the API
+      #                      refresh path never moves the git ref, only release
+      #                      creation does. And since #312 it first reads the
+      #                      tier-2 nightly's verdict off the remote
+      #                      (ls-remote + fetch + merge-base), because
+      #                      rnsd_interop runs in no forge pipeline and the
+      #                      interop truth has to be imported rather than
+      #                      re-derived here — see scripts/check-nightly-green.sh
+      #                      and docs/src/development-ci.md.
+      #   python3          — NOT available and not used. The gate is bash,
+      #                      coreutils and sed for exactly that reason; the
+      #                      signing half (scripts/nightly-green-ref.sh) runs
+      #                      on the nightly host, where python3 is, and reads
+      #                      the run manifest there.
       #   ca-certificates  — NOT in the slim image and never named here. It
       #                      arrives as a Recommends of curl and of git, so
       #                      an `--no-install-recommends` added to this line
