@@ -158,6 +158,24 @@ enum BoardFrame {
 /// when `socat` goes away with the [`PtyPair`], which every exit path of
 /// this file passes through.
 fn spawn_board(port: &str, initial: MediaProfileWire) -> Receiver<BoardFrame> {
+    spawn_board_inner(port, initial, true)
+}
+
+/// A board that takes the frames and says nothing back: firmware from
+/// before the envelope, which drops a five-byte control frame in packet
+/// parsing, and any board whose answer is lost.
+fn spawn_deaf_board(port: &str) -> Receiver<BoardFrame> {
+    spawn_board_inner(
+        port,
+        MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: false,
+        },
+        false,
+    )
+}
+
+fn spawn_board_inner(port: &str, initial: MediaProfileWire, answers: bool) -> Receiver<BoardFrame> {
     let mut read_half = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -193,6 +211,12 @@ fn spawn_board(port: &str, initial: MediaProfileWire) -> Receiver<BoardFrame> {
                     }
                     _ => continue,
                 };
+                if tx.send(seen).is_err() {
+                    return;
+                }
+                if !answers {
+                    continue;
+                }
                 // The firmware answers both types with a media report
                 // (`media_query_answer` / `media_profile_answer`), and both
                 // carriers on this stand-in came up at boot, so running and
@@ -202,9 +226,6 @@ fn spawn_board(port: &str, initial: MediaProfileWire) -> Receiver<BoardFrame> {
                     return;
                 }
                 out.clear();
-                if tx.send(seen).is_err() {
-                    return;
-                }
             }
         }
     });
@@ -447,4 +468,55 @@ fn an_unlistened_real_time_signal_is_not_a_media_verb() {
         "an unhandled real-time signal terminates the process: {status}"
     );
     expect_no_frame(&board, "a signal nothing listens for writes no frame");
+}
+
+/// A board that does not report its profile is not silenced at all.
+///
+/// This is the one unrecoverable outcome the verb can produce: a board
+/// whose carriers went off while the daemon never learned what they were
+/// has nothing to be restored to, and the profile lives in the board's
+/// flash, so the next boot comes up silent too. The daemon therefore
+/// writes nothing when the query goes unanswered, and the restore that
+/// follows has nothing remembered, which is how a scenario finds out.
+///
+/// The deaf board is not hypothetical: firmware from before the envelope
+/// drops a five-byte control frame in packet parsing and answers nothing,
+/// which is exactly the shape of a probe that times out.
+#[test]
+fn a_board_that_does_not_report_is_not_silenced() {
+    let pty = PtyPair::spawn();
+    let board = spawn_deaf_board(&pty.board_end);
+    let daemon = Daemon::spawn(&pty.daemon_end, "mvr-media-deaf");
+    let online = daemon.wait_for_log("online on", Duration::from_secs(10));
+    let iface = online
+        .split_whitespace()
+        .skip_while(|w| *w != "interface")
+        .nth(1)
+        .expect("the online line names the interface")
+        .to_string();
+
+    daemon.signal(FIRMWARE_MEDIA_SILENCE_SIGNAL);
+    assert_eq!(
+        expect_frame(&board, "media query"),
+        BoardFrame::Query,
+        "the query is still asked; it is the answer that never comes"
+    );
+    // The daemon's own answer budget is 2 s, so this line is what ends
+    // the wait, and by the time it is logged any profile frame would
+    // already have been written.
+    daemon.wait_for_log(
+        &format!("MEDIA_SILENCE iface={iface} outcome=no-report"),
+        Duration::from_secs(5),
+    );
+    expect_no_frame(
+        &board,
+        "a board whose profile could not be read must not be silenced",
+    );
+
+    // And nothing was remembered, so there is nothing to put back.
+    daemon.signal(FIRMWARE_MEDIA_RESTORE_SIGNAL);
+    daemon.wait_for_log(
+        &format!("MEDIA_RESTORE iface={iface} outcome=nothing-remembered"),
+        FRAME_WAIT,
+    );
 }
