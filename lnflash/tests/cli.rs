@@ -95,6 +95,7 @@ fn manifest_text(app_sha: &str, sd_sha: &str) -> String {
 [bundle]
 version = "0.8.0"
 built   = "2026-08-10"
+rustc   = "rustc 1.97.1 (a1b2c3d4e 2026-07-01)"
 
 [board.t114.app]
 file    = "t114/leviculum-t114-0.8.0.uf2"
@@ -164,6 +165,15 @@ fn an_unpacked_bundle_is_found_by_pointing_at_its_root() {
     assert!(out.status.success(), "{}", stdout(&out));
     assert!(stdout(&out).contains("matches its recorded checksum"));
     assert!(stdout(&out).contains("carrying t114"));
+    // Which compiler produced the images in it. A published UF2 could
+    // otherwise only be traced to a compiler by inferring one from a git
+    // tag, and codegen differences between versions move the firmware's
+    // stack frames (Codeberg #305).
+    assert!(
+        stdout(&out).contains("built with rustc 1.97.1 (a1b2c3d4e 2026-07-01)"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]

@@ -6,9 +6,11 @@
 # recipes and CI nightly). One build id per run, one Debian version per
 # package, since the packages are versioned independently, and one
 # cargo target directory, because the nightly's packaging step runs in an
-# image without a cargo to ask.
+# image without a cargo to ask — and, for the same reason, one
+# `rustc --version` of the compiler that produced the build.
 /.build-id
 /.cargo-target-dir
+/.rustc-version
 /.deb-version
 /.deb-version-*
 leviculum-nrf/target/

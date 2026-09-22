@@ -84,11 +84,14 @@ VER_LNPND="0.2.0-dev"
 DEB_LNPND="0.2.0~dev"
 NIGHTLY_SUFFIX="~nightly.20260918.abc1234"
 LNFLASH_VERSION="7.7.7"
+# A compiler version that exists nowhere: the VERSION file must carry what the
+# stamp says, not what the host running this test happens to have installed.
+FIXTURE_RUSTC="rustc 9.9.9 (fixturec0de 2026-01-01)"
 
 BINS_AMD=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd)
 
-setup() {  # <case> [stamp-mode: ok | missing | bogus | empty-target]
-    local case_name="$1" stamp_mode="${2:-ok}"
+setup() {  # <case> [stamp-mode: ok | missing | bogus | empty-target] [rustc-stamp: yes | no]
+    local case_name="$1" stamp_mode="${2:-ok}" rustc_stamp="${3:-yes}"
     TREE="$WORK/$case_name/tree"
     EXT_TARGET="$WORK/$case_name/cargo-target"
     mkdir -p "$TREE/scripts" "$TREE/lnomad" "$TREE/lblogd" \
@@ -117,6 +120,9 @@ EOF
     echo "${VER_LBLOGD}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lblogd"
     echo "${DEB_LNPND}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnpnd"
     echo "nightly.20260918-abc1234" > "$TREE/.build-id"
+    # Which compiler built the binaries, stamped in the rust:bookworm step
+    # because this one has no rustc to ask (Codeberg #305).
+    [ "$rustc_stamp" = yes ] && echo "$FIXTURE_RUSTC" > "$TREE/.rustc-version"
     case "$stamp_mode" in
     ok | empty-target) echo "$EXT_TARGET" > "$TREE/.cargo-target-dir" ;;
     missing) : ;;
@@ -232,6 +238,8 @@ grep -q "^version: ${VER_CLI}\$" "$lev/VERSION" 2>/dev/null \
     || fail "leviculum VERSION does not name version ${VER_CLI}"
 grep -q "^build-id: fixture-build\$" "$lev/VERSION" 2>/dev/null \
     || fail "leviculum VERSION does not name the build id"
+grep -qxF "rustc: ${FIXTURE_RUSTC}" "$lev/VERSION" 2>/dev/null \
+    || fail "leviculum VERSION does not name the compiler that built it: $(sed -n '/^rustc/p' "$lev/VERSION" 2>/dev/null)"
 
 # lnomad is versioned independently and must not carry the stack's changelog.
 rm -rf "$stage"; mkdir -p "$stage"
@@ -265,6 +273,24 @@ echo "$names" | grep -q '^leviculum-nightly-source/README.md$' \
 echo "$names" | grep -q 'target/' \
     && fail "source tarball carries build output from target/"
 
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: no compiler was stamped ----------------------------------------
+#
+# An older tree, or a build whose stamp step predates Codeberg #305, has no
+# .rustc-version. That is not worth failing a publish over — but the VERSION
+# file must say the compiler is unknown rather than carry an empty field that
+# reads like an answer.
+echo "[case] no-rustc-stamp"
+before=$failures
+setup no-rustc-stamp ok no
+run_collect
+[ "$(rc)" = "0" ] || fail "exit $(rc) with no .rustc-version, expected 0"
+rm -rf "$stage"; mkdir -p "$stage"
+tar -C "$stage" -xzf "$TREE/dist/leviculum-nightly-amd64.tar.gz" 2>/dev/null \
+    || fail "leviculum-nightly-amd64.tar.gz is not a readable gzip tarball"
+grep -qxF "rustc: unknown" "$stage/leviculum-nightly-amd64/VERSION" 2>/dev/null \
+    || fail "an unstamped compiler is not reported as unknown: $(sed -n '/^rustc/p' "$stage/leviculum-nightly-amd64/VERSION" 2>/dev/null)"
 [ "$failures" -eq "$before" ] || dumpout
 
 # --- Case: nobody stamped the target directory ----------------------------

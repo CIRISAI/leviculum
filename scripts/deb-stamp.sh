@@ -11,6 +11,7 @@
 # Produces, in the repo root:
 #   .build-id                    nightly.<UTCdate>-<sha7>[+<distance>]
 #   .cargo-target-dir            absolute path cargo writes artefacts to
+#   .rustc-version               `rustc --version` of the compiler in use
 #   .deb-version-<crate>         <crate version>~nightly.<UTCdate>.<sha7>
 #
 # and, under target/deb-changelog/:
@@ -71,6 +72,28 @@ cd "$ROOT"
 # shellcheck source=scripts/cargo-target-dir.sh
 source "$ROOT/scripts/cargo-target-dir.sh"
 CARGO_TARGET="$(cargo_target_dir "$ROOT")"
+
+# Which compiler produced this build, asked once and written forward for the
+# same reason the target directory above is: the steps that ship the artefacts
+# run in debian:bookworm-slim, which has no rustc to ask.
+#
+# The pin in rust-toolchain.toml justifies itself with "every machine and the
+# pipeline agree on which compiler produced a binary", and for a binary already
+# in a stranger's hands that was answerable only by inferring from a git tag
+# (Codeberg #305). It matters here more than the usual reproducible-build
+# argument does: this is embedded-adjacent code with a measured 3264-byte
+# stack-frame margin, and codegen differences between compiler versions move
+# frame sizes, so "which compiler built each of these two images" is the first
+# question a report of a board behaving differently asks.
+#
+# What is recorded is the compiler that RAN, not the channel that was asked
+# for. A tree built outside rustup, or with an override, says so here rather
+# than repeating the pin back at us.
+RUSTC_VERSION="$(rustc --version 2>/dev/null || true)"
+if [ -z "$RUSTC_VERSION" ]; then
+    echo "error: 'rustc --version' answered nothing — cannot stamp the compiler" >&2
+    exit 1
+fi
 
 # Every crate that ships a Debian package. Keyed by crate name, which is
 # what `cargo deb -p` and `cargo pkgid -p` both take; the resulting .deb
@@ -134,6 +157,7 @@ BUILD_ID="nightly.${DATE}-${SHA7}"
 
 echo "$BUILD_ID" >.build-id
 echo "$CARGO_TARGET" >.cargo-target-dir
+echo "$RUSTC_VERSION" >.rustc-version
 
 for crate in "${CRATES[@]}"; do
     # `cargo pkgid` resolves the version through cargo itself rather than
@@ -154,6 +178,7 @@ for crate in "${CRATES[@]}"; do
 ${pkg} (${deb_version}) unstable; urgency=medium
 
   * Nightly build from commit ${SHA7}.
+  * Built with ${RUSTC_VERSION}.
 
  -- ${MAINTAINER}  ${STAMP}
 EOF
@@ -166,6 +191,7 @@ else
     echo "[deb-stamp] distance=unknown (no v* tag reachable)"
 fi
 echo "[deb-stamp] cargo-target-dir=$(cat .cargo-target-dir)"
+echo "[deb-stamp] rustc=$(cat .rustc-version)"
 for crate in "${CRATES[@]}"; do
     echo "[deb-stamp] ${crate}=$(cat ".deb-version-${crate}")"
 done

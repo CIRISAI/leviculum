@@ -191,6 +191,16 @@ pub struct BundleInfo {
     /// Free-form provenance for a user staring at a tarball of unknown age.
     #[serde(default)]
     pub built: Option<String>,
+    /// `rustc --version` of the compiler that produced the images, as
+    /// scripts/lnflash-bundle.sh recorded it. Optional because a bundle
+    /// built before Codeberg #305 carries none, and a missing compiler
+    /// identity is not a reason to refuse to flash a board — it is a
+    /// reason to say so. When two boards behave differently on two
+    /// images, this is the first thing that has to be ruled out: codegen
+    /// differences between compiler versions move stack-frame sizes, and
+    /// the firmware's measured margin is 3264 bytes.
+    #[serde(default)]
+    pub rustc: Option<String>,
 }
 
 /// One board, as far as talking to it goes. All of it hardware fact, which
@@ -853,6 +863,7 @@ git_sha = "bb7c4f64"
 [bundle]
 version = "0.8.0"
 built = "2026-08-10"
+rustc = "rustc 1.97.1 (a1b2c3d4e 2026-07-01)"
 
 [board.t114.app]
 file    = "t114/leviculum-t114-0.8.0.uf2"
@@ -1182,6 +1193,10 @@ convert = "hex-to-uf2"
         let f = Fixture::new();
         let manifest = f.load().unwrap();
         assert_eq!(manifest.bundle.version, "0.8.0");
+        assert_eq!(
+            manifest.bundle.rustc.as_deref(),
+            Some("rustc 1.97.1 (a1b2c3d4e 2026-07-01)")
+        );
         let payloads = manifest.payloads("t114").unwrap();
         assert_eq!(payloads.app.git_sha.as_deref(), Some("bb7c4f64"));
         assert_eq!(
@@ -1189,6 +1204,23 @@ convert = "hex-to-uf2"
             Some(Convert::HexToUf2)
         );
         assert_eq!(manifest.names(), vec!["t114"]);
+    }
+
+    #[test]
+    fn a_bundle_from_before_the_compiler_was_recorded_still_loads() {
+        // Every bundle published before Codeberg #305 carries no `rustc`
+        // key, and refusing to flash from one would be a worse answer than
+        // saying the compiler is unknown: the images and their checksums
+        // are all still there.
+        let f = Fixture::new();
+        let text = f
+            .manifest_text()
+            .replace("rustc = \"rustc 1.97.1 (a1b2c3d4e 2026-07-01)\"\n", "");
+        assert!(!text.contains("rustc"), "the key was not removed: {text}");
+        f.write_manifest(&text);
+        let manifest = f.load().unwrap();
+        assert_eq!(manifest.bundle.rustc, None);
+        manifest.verify_all().unwrap();
     }
 
     #[test]

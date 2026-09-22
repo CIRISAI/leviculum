@@ -276,7 +276,7 @@ nrf-shellcheck:
         scripts/publish-site.sh scripts/test-site-publish.sh \
         packaging/site/lev-receive-nightly \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
-        scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh \
+        scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh \
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \

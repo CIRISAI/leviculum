@@ -79,6 +79,28 @@ FAMILY_ID=0xADA52840
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
 GIT_SHA="$(git rev-parse --short HEAD)"
 BUILT="$(git log -1 --format=%cs)"
+
+# Which compiler produced everything in this bundle. A UF2 in somebody's hands
+# could otherwise only be traced back to a compiler by inferring one from a git
+# tag, and the firmware is exactly where that matters: a measured 3264-byte
+# stack-frame margin, and codegen differences between compiler versions move
+# frame sizes (Codeberg #305).
+#
+# One value for both halves, and that is checked rather than assumed. The host
+# binary is built here and the firmware is built in leviculum-nrf, which has no
+# rust-toolchain.toml of its own — rustup walks up to the root pin — so the two
+# agree today. A per-directory override or a toolchain file added there would
+# silently make this key describe only one of the two images, so ask both.
+RUSTC_VERSION="$(rustc --version)"
+NRF_RUSTC_VERSION="$(cd "$NRF_DIR" && rustc --version)"
+if [ "$RUSTC_VERSION" != "$NRF_RUSTC_VERSION" ]; then
+    echo "the firmware and the flasher would be built by different compilers:" >&2
+    echo "  $ROOT:    $RUSTC_VERSION" >&2
+    echo "  $NRF_DIR: $NRF_RUSTC_VERSION" >&2
+    echo "the manifest records one compiler for the whole bundle, so record" >&2
+    echo "both here before shipping a bundle built by two" >&2
+    exit 1
+fi
 STAGE="$OUT_DIR/lnflash-$VERSION"
 TARBALL="$OUT_DIR/lnflash-$VERSION.tar.gz"
 
@@ -195,6 +217,8 @@ cat > "$STAGE/firmware/manifest.toml" <<EOF
 [bundle]
 version = "$VERSION"
 built   = "$BUILT"
+# The compiler that produced every image below and the flasher beside them.
+rustc   = "$RUSTC_VERSION"
 EOF
 
 for record in "${BOARDS[@]}"; do

@@ -764,7 +764,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let manifest = manifest::load(&dir, &catalogue)?;
 
     ui.say(&format!(
-        "lnflash {} — bundle {} from {}, carrying {}",
+        "lnflash {} — bundle {} from {}, built with {}, carrying {}",
         env!("CARGO_PKG_VERSION"),
         manifest.bundle.version,
         manifest
@@ -772,6 +772,15 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             .built
             .as_deref()
             .unwrap_or("an unknown date"),
+        // Said in the opening line rather than kept for `--check-bundle`,
+        // because the person who needs it is the one comparing two boards
+        // running two images and wondering what differs between them
+        // (Codeberg #305).
+        manifest
+            .bundle
+            .rustc
+            .as_deref()
+            .unwrap_or("an unrecorded compiler"),
         manifest.names().join(", ")
     ));
 

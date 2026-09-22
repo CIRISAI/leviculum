@@ -21,6 +21,10 @@
 #   CI_COMMIT_SHA   — current commit
 #   CODEBERG_TOKEN  — Codeberg API token (Woodpecker secret)
 #   LEVICULUM_BUILD_ID (optional, for release body)
+#
+# The compiler that produced the assets is read from .rustc-version, the
+# stamp scripts/deb-stamp.sh leaves in the repo root; this step's image has
+# no rustc to ask.
 
 set -euo pipefail
 
@@ -39,6 +43,17 @@ BUILD_ID="${LEVICULUM_BUILD_ID:-unknown}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 [ -d "$DIST" ] || { echo "dist/ not found — run collect-nightly-debs.sh first"; exit 1; }
+
+# Which compiler built what this release carries. In the body because that is
+# where a stranger looking at a download can read it without unpacking
+# anything, and because codegen differences between compiler versions are the
+# first thing a "this build behaves differently" report has to rule out
+# (Codeberg #305). Absent stamp says so rather than claiming a version.
+RUSTC_VERSION="unknown"
+if [ -r "$ROOT/.rustc-version" ]; then
+    RUSTC_VERSION="$(cat "$ROOT/.rustc-version")"
+fi
+[ -n "$RUSTC_VERSION" ] || RUSTC_VERSION="unknown"
 
 RELEASE_BODY=$(cat <<EOF
 Rolling nightly build. The assets under this release are **replaced on every CI run** — this tag always points at the latest nightly.
@@ -110,7 +125,7 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-sour
 
 Each asset is published with a matching \`.sha256\` next to it.
 
-Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`)
+Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`, built with \`${RUSTC_VERSION}\`)
 
 Verify with \`lnsd --version\` after install.
 EOF

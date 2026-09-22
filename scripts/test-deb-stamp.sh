@@ -19,13 +19,27 @@
 #      quietly disappears in a clone that has no tags — so the tagless case
 #      is a case here, not a hope.
 #
+#   3. The compiler that produced the build is recorded, in the stamp file and
+#      in the Debian changelog that travels inside every package (Codeberg
+#      #305). It must be the compiler that RAN, not the channel
+#      rust-toolchain.toml asked for, so the last case below puts a stub rustc
+#      in front of the real one and checks that the stub's answer is what
+#      comes out — a constant or a re-read of the pin would pass the first
+#      case and fail that one.
+#
 # ~2 s, no network, no build: four empty crates and `cargo pkgid`.
+#
+# DEB_STAMP_SH overrides the script under test, which is how a pre-fix copy is
+# checked to be red:
+#   DEB_STAMP_SH=<old copy> bash scripts/test-deb-stamp.sh
 #
 # Usage: bash scripts/test-deb-stamp.sh
 
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEB_STAMP_SH="${DEB_STAMP_SH:-$REPO/scripts/deb-stamp.sh}"
+[ -f "$DEB_STAMP_SH" ] || { echo "no script under test at $DEB_STAMP_SH"; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -45,10 +59,11 @@ export CARGO_NET_OFFLINE=true
 # leviculum-cli in a development window and the other three on plain
 # release versions. deb-stamp resolves ROOT from its own path, so it is
 # copied in beside the helper it sources, exactly as the real tree has them.
-setup() { # <tag-mode: tagged | tagless>
-    TREE="$WORK/${1}"
+setup() { # <tag-mode: tagged | tagless> [tree name, default the tag mode]
+    TREE="$WORK/${2:-$1}"
     mkdir -p "$TREE/scripts"
-    cp "$REPO/scripts/deb-stamp.sh" "$REPO/scripts/cargo-target-dir.sh" "$TREE/scripts/"
+    cp "$DEB_STAMP_SH" "$TREE/scripts/deb-stamp.sh"
+    cp "$REPO/scripts/cargo-target-dir.sh" "$TREE/scripts/"
 
     cat > "$TREE/Cargo.toml" <<'EOF'
 [workspace]
@@ -95,7 +110,8 @@ EOF
 }
 
 run_stamp() {
-    ( cd "$TREE" && bash scripts/deb-stamp.sh ) > "$WORK/stamp.out" 2>&1
+    ( cd "$TREE" && PATH="${STAMP_PATH_PREFIX:+$STAMP_PATH_PREFIX:}$PATH" \
+        bash scripts/deb-stamp.sh ) > "$WORK/stamp.out" 2>&1
 }
 
 dump() { echo "--- deb-stamp output ---"; cat "$WORK/stamp.out"; echo "---"; }
@@ -130,6 +146,19 @@ if [ -r "$changelog" ]; then
 else
     fail "no Debian changelog at target/deb-changelog/leviculum"
 fi
+
+# The compiler that produced the build, stamped forward for the packaging
+# steps — which run in an image with no rustc — and written into the Debian
+# changelog, which is the copy that travels inside the .deb to whoever
+# installs it (Codeberg #305).
+host_rustc="$(cd "$TREE" && rustc --version)"
+eq ".rustc-version" "$(cat "$TREE/.rustc-version" 2>/dev/null)" "$host_rustc"
+if [ -r "$changelog" ]; then
+    grep -qxF "  * Built with ${host_rustc}." "$changelog" \
+        || fail "the Debian changelog does not name the compiler: $(sed -n '3p' "$changelog")"
+fi
+grep -q "\[deb-stamp\] rustc=${host_rustc}" "$WORK/stamp.out" \
+    || { fail "deb-stamp does not report the compiler it stamped"; dump; }
 
 # The run says the distance in words, so a human reading CI output sees it.
 grep -q "distance=3 commit(s) past v0.9.0" "$WORK/stamp.out" \
@@ -177,6 +206,67 @@ eq ".deb-version-leviculum-cli (tagless)" \
 grep -q "distance=unknown" "$WORK/stamp.out" \
     || { fail "a tagless clone does not say the distance is unknown"; dump; }
 
+[ "$failures" -eq "$before" ] || dump
+
+# --- Case: the compiler that ran is the one recorded ----------------------
+#
+# The whole value of the stamp is that it describes the binary rather than
+# the intention. A stub rustc answers `--version` with a version that exists
+# nowhere in this tree and hands every other invocation to the real compiler,
+# so cargo still works and the only thing that can put the stub's answer in
+# the stamp is deb-stamp asking the compiler. Reading rust-toolchain.toml, or
+# hardcoding a version, passes the case above and fails here.
+echo "[case] compiler-is-asked-not-assumed"
+before=$failures
+STUB_DIR="$WORK/stub"
+mkdir -p "$STUB_DIR"
+real_rustc="$(command -v rustc)"
+STUB_VERSION="rustc 9.9.9 (fixturec0de 2026-01-01)"
+cat > "$STUB_DIR/rustc" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+    echo "${STUB_VERSION}"
+    exit 0
+fi
+exec "${real_rustc}" "\$@"
+EOF
+chmod +x "$STUB_DIR/rustc"
+
+setup tagged compiler-stub
+STAMP_PATH_PREFIX="$STUB_DIR" run_stamp \
+    || { fail "deb-stamp.sh exited non-zero with the stub compiler"; dump; }
+eq ".rustc-version (stub)" "$(cat "$TREE/.rustc-version" 2>/dev/null)" "$STUB_VERSION"
+changelog="$TREE/target/deb-changelog/leviculum"
+grep -qxF "  * Built with ${STUB_VERSION}." "$changelog" 2>/dev/null \
+    || fail "the changelog does not carry the compiler that ran"
+[ "$failures" -eq "$before" ] || dump
+
+# --- Case: no compiler to ask ---------------------------------------------
+#
+# A stamp that silently says nothing is the bug this fix exists to end, so a
+# rustc that cannot answer is a failure with a message rather than an empty
+# file. The stub answers `--version` with nothing and still serves cargo, so
+# the run reaches deb-stamp's own check instead of dying in `cargo metadata`.
+echo "[case] compiler-cannot-answer"
+before=$failures
+cat > "$STUB_DIR/rustc" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+    exit 1
+fi
+exec "${real_rustc}" "\$@"
+EOF
+chmod +x "$STUB_DIR/rustc"
+
+setup tagged no-compiler
+if STAMP_PATH_PREFIX="$STUB_DIR" run_stamp; then
+    fail "deb-stamp.sh exited 0 with no compiler version to record"
+    dump
+fi
+grep -q "cannot stamp the compiler" "$WORK/stamp.out" \
+    || { fail "the failure does not say the compiler could not be stamped"; dump; }
+[ -e "$TREE/.rustc-version" ] \
+    && fail "an empty .rustc-version was written anyway"
 [ "$failures" -eq "$before" ] || dump
 
 echo

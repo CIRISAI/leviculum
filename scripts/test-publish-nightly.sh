@@ -70,7 +70,10 @@ while [ $# -gt 0 ]; do
         *) url="$1"; shift;;
     esac
 done
-[ -n "$stdin_data" ] && cat >/dev/null
+# The request bodies are journalled rather than discarded: the release body
+# is the only place a stranger reads what a download was built from, so it is
+# an assertion here and not a hope.
+[ -n "$stdin_data" ] && cat >> "$D/bodies"
 
 log() { printf '%s\n' "$*" >> "$D/log"; }
 bump() { local n; n=$(cat "$D/$1" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/$1"; echo "$n"; }
@@ -170,6 +173,11 @@ setup() {  # <case> [empty-dist]
     cp "$PUBLISH_SH" "$TREE/scripts/publish-nightly.sh"
     : > "$FAKE_DIR/log"
     : > "$FAKE_DIR/assets"
+    : > "$FAKE_DIR/bodies"
+    # The compiler stamp scripts/deb-stamp.sh leaves in the repo root. A
+    # version that exists nowhere, so a body naming the host's own compiler
+    # instead of the stamped one is visible (Codeberg #305).
+    echo "rustc 9.9.9 (fixturec0de 2026-01-01)" > "$TREE/.rustc-version"
     local i=0 n
     for n in "${OLD_NAMES[@]}"; do i=$((i + 1)); printf '%s\t%s\n' "$i" "$n" >> "$FAKE_DIR/assets"; done
     if [ "${2:-}" != "empty-dist" ]; then
@@ -206,6 +214,8 @@ run_publish
 expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
 [ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
 grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
+grep -q 'built with .rustc 9.9.9 (fixturec0de 2026-01-01).' "$FAKE_DIR/bodies" \
+    || fail "the release body does not name the compiler the assets were built with"
 first_delete=$(grep -n '^DELETE ' "$FAKE_DIR/log" | head -1 | cut -d: -f1)
 last_upload=$(grep -n '^UPLOAD ' "$FAKE_DIR/log" | tail -1 | cut -d: -f1)
 if [ -z "$first_delete" ] || [ -z "$last_upload" ]; then

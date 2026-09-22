@@ -669,12 +669,13 @@ sentence the user is refused with, and stating both halves or neither
 fails to load. The refusal is therefore impossible to lose to an edit
 that widens the entry by accident.
 
-**Release facts** — which images this tarball carries and what they
-hash to — are the bundle's:
+**Release facts** — which images this tarball carries, what they hash
+to, and which compiler produced them — are the bundle's:
 
 ```toml
 [bundle]
 version = "0.8.0"
+rustc   = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
 
 [board.t114.app]
 file    = "t114/leviculum-t114-0.8.0.uf2"
@@ -699,7 +700,19 @@ with `no bundle found`, naming every place they looked.
 A bundle built before the split still loads: its board-fact sections
 are ignored, and the catalogue in the binary reading them is the more
 trustworthy of the two copies anyway, since binary and bundle ship
-together.
+together. A bundle built before `rustc` was recorded loads too, and
+`lnflash` says the compiler is unrecorded rather than refusing an image
+it can still verify against its checksum.
+
+`rustc` is the compiler that produced both the images and the flasher
+beside them, and it is `rustc --version` as the bundle build ran it
+rather than the channel `rust-toolchain.toml` names (Codeberg #305).
+Whichever image a board is running, the first question behind "these
+two boards behave differently" is which compiler built each of them:
+this is embedded code with a measured 3264-byte stack-frame margin, and
+codegen differences between compiler versions move frame sizes.
+`scripts/lnflash-bundle.sh` asks both workspaces and refuses to write a
+manifest claiming one compiler for a bundle built by two.
 
 A new board still needs no new binary in the sense that matters — it is
 data entry, in the catalogue plus one image. The `license` field is not

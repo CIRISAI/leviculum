@@ -18,6 +18,7 @@
 #   git available on PATH
 #   LEVICULUM_BUILD_ID env var (embedded in the per-arch VERSION file)
 #   .cargo-target-dir from scripts/deb-stamp.sh (where the artefacts are)
+#   .rustc-version from scripts/deb-stamp.sh (which compiler built them)
 #   .deb-version-<crate> files from scripts/deb-stamp.sh (ditto)
 #
 # Runs in debian:bookworm-slim in .woodpecker/nightly.yml, so it uses only
@@ -65,6 +66,17 @@ if [ -z "$TARGET" ] || [ ! -d "$TARGET" ]; then
     echo "error: .cargo-target-dir names '${TARGET}', which is not a directory" >&2
     exit 1
 fi
+
+# Which compiler produced the binaries in these tarballs. Read from the stamp
+# rather than asked, for the same reason as the target directory above: this
+# step runs in an image with no rustc in it. Missing is not fatal — a tarball
+# is still worth shipping with an unnamed compiler — but it is said out loud
+# in the VERSION file rather than left blank (Codeberg #305).
+RUSTC_VERSION="unknown"
+if [ -r .rustc-version ]; then
+    RUSTC_VERSION="$(cat .rustc-version)"
+fi
+[ -n "$RUSTC_VERSION" ] || RUSTC_VERSION="unknown"
 
 DIST="dist"
 rm -rf "$DIST"
@@ -162,6 +174,7 @@ pack_bin_tarball() {
 ${pkg} nightly build
 version: ${version}
 build-id: ${LEVICULUM_BUILD_ID:-unknown}
+rustc: ${RUSTC_VERSION}
 arch: linux-${arch_dash}
 EOF
 

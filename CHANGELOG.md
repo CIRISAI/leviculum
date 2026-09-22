@@ -20,6 +20,24 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- Published builds now record which compiler produced them. `rustc --version`
+  is asked once in `scripts/deb-stamp.sh` — the one step that runs in an image
+  with a Rust toolchain — and written forward as `.rustc-version`, the same
+  way the build id and the cargo target directory already are. From there it
+  reaches everything that ships: the Debian changelog inside every `.deb`
+  (`zcat /usr/share/doc/leviculum/changelog.gz`), the `VERSION` file in every
+  binary tarball, the rolling release body, and `[bundle] rustc` in the
+  lnflash bundle's `manifest.toml`, which `lnflash` prints in its opening
+  line. The toolchain pin is argued from published binaries and a measured
+  3264-byte embedded stack-frame margin, and codegen differences between
+  compiler versions move frame sizes — so "which compiler built this one"
+  is the first question a report of two boards behaving differently asks, and
+  until now it could only be answered by inferring a compiler from a git tag.
+  What is recorded is the compiler that ran, not the channel
+  `rust-toolchain.toml` asked for: a build outside rustup says so instead of
+  repeating the pin back. A bundle published before this carries no key and
+  still flashes, saying the compiler is unrecorded (Codeberg #305).
+
 - `just toolchain-status` says how far the pinned Rust toolchain has fallen
   behind current stable: pinned version, newest stable release, and the
   distance between them, on one line. Since the channel was pinned nothing
