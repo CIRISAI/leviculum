@@ -384,3 +384,158 @@ fn a_time_seed_does_not_mass_expire_uptime_era_records() {
     assert_eq!(evicted.len(), 1);
     assert_eq!(evicted[0].transient_id, stored);
 }
+
+/// The board's resource SDU: Reticulum's smallest negotiated MTU (500)
+/// less the resource per-part overhead — the most parts, so the most
+/// per-part bookkeeping, of any link the board can hold.
+const BOARD_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_OVERHEAD;
+
+/// The serve that killed a T114 on 2026-09-22, rebuilt byte for byte:
+/// 24 stored messages, 224 B of body each, fetched in one round under the
+/// board's announced 8 KB sync limit.
+///
+/// It reproduces the ARITHMETIC of the panic, not the panic: the board
+/// died in `alloc`, and only a board with a 96 KiB heap can do that. What
+/// this pins is the input to that death — that all 24 pass the cap, that
+/// the encoded response is 5 427 B, and that the first framed copy of it
+/// is 5 446 B, the exact size the board's `PANIC_PMRT` line names.
+#[test]
+fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
+    let mut node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            sync_limit_kb: 8,
+            ..PropagationNodeConfig::default()
+        },
+    );
+    let wants: Vec<TransientId> = (0..24)
+        .map(|seed| {
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 224), 0, no_validation))
+        })
+        .collect();
+
+    let fetch = MessageGetRequest {
+        wants: Some(wants.clone()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+    };
+    let outcome = node
+        .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch {
+        response,
+        served,
+        served_bytes,
+        ..
+    } = outcome
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+
+    // The cap did not bite: the board's own PN_GET line said count=24
+    // bytes=5376, and so does this.
+    assert_eq!(served.len(), 24, "all 24 must pass the 8 KB cap");
+    assert_eq!(served_bytes, 5376);
+    assert_eq!(response.len(), 5427, "the encoded MessageGetResponse");
+    assert_eq!(
+        response.len() + RESPONSE_FRAME_BYTES,
+        5446,
+        "the framed copy send_response builds before it checks the MDU -- \
+         the exact byte count in the board's PANIC_PMRT line"
+    );
+}
+
+/// The cap bounds the wire response, which is the premise
+/// [`serve_peak_bytes`] rests on. Checked on the shape that maximises the
+/// wire overhead per accounted byte: the smallest bodies the store takes,
+/// as many as the cap allows.
+#[test]
+fn the_encoded_response_never_outgrows_the_accounted_cap() {
+    for sync_limit_kb in [1u64, 2, 4, 8, 32] {
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(256 * 1024),
+            PropagationNodeConfig {
+                sync_limit_kb,
+                ..PropagationNodeConfig::default()
+            },
+        );
+        let smallest = crate::constants::LXMF_OVERHEAD + 1;
+        let wants: Vec<TransientId> = (0..u8::MAX)
+            .map(|seed| {
+                accepted_id(&node.handle_upload(
+                    &envelope_sized(7, seed, smallest),
+                    0,
+                    no_validation,
+                ))
+            })
+            .collect();
+        let fetch = MessageGetRequest {
+            wants: Some(wants),
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+        };
+        let GetOutcome::Fetch { response, .. } = node
+            .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+            .unwrap()
+        else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        let cap = (sync_limit_kb * 1000) as usize;
+        assert!(
+            response.len() <= cap,
+            "sync_limit_kb={sync_limit_kb}: encoded {} > cap {cap}",
+            response.len()
+        );
+    }
+}
+
+/// What the serve path costs the heap, at the cap the boards announce.
+///
+/// The number is asserted rather than described because it is the term
+/// the board's role budget has to carry: an 8 KB announced serve limit
+/// buys a 97 036 B transient -- twelve times the cap, and 98.7 % of the
+/// board's entire 96 KiB heap, before a single other allocation.
+#[test]
+fn an_eight_kilobyte_serve_cap_costs_twelve_times_its_size() {
+    let peak = serve_peak_bytes(8_000, BOARD_RESOURCE_SDU);
+    assert_eq!(peak, 97_036);
+    assert!(
+        peak > 12 * 8_000,
+        "the serve transient is more than twelve times the cap that bounds it"
+    );
+}
+
+/// The inverse the heap plan actually asks: given this much free heap,
+/// how big a cap can be served? Monotone and tight — one byte more than
+/// the answer does not fit.
+#[test]
+fn the_funded_cap_is_the_inverse_of_the_peak() {
+    for budget in [0usize, 880, 5_000, 20_000, 97_036, 200_000] {
+        let cap = serve_cap_for_peak(budget, BOARD_RESOURCE_SDU);
+        assert!(
+            serve_peak_bytes(cap, BOARD_RESOURCE_SDU) <= budget || cap == 0,
+            "budget {budget}: cap {cap} does not fit"
+        );
+        assert!(
+            serve_peak_bytes(cap + 1, BOARD_RESOURCE_SDU) > budget,
+            "budget {budget}: cap {cap} is not the largest that fits"
+        );
+    }
+}
+
+/// The answer to "what cap can today's plan honour": the T114's heap
+/// budget leaves 880 B unclaimed, and 880 B of transient buys a serve cap
+/// of under a hundred bytes -- less than one stored message. The plan as
+/// it stands funds no useful serve at all.
+///
+/// (`budget_slack`, `leviculum-nrf/src/heap_census.rs` -- 880 B is
+/// HEAP_SIZE 98 304 less the T114's node box 31 008, role 21 120,
+/// reserve 18 848, four BLE sessions at 3 948 and four links at 2 664.)
+#[test]
+fn todays_slack_funds_no_useful_serve_cap() {
+    let cap = serve_cap_for_peak(880, BOARD_RESOURCE_SDU);
+    assert!(
+        cap < 120,
+        "880 B of slack must not be read as affording a message-sized serve (got {cap})"
+    );
+}
