@@ -26,16 +26,17 @@ manifest := "python3 scripts/run-with-manifest.py --gate"
 # port/resource contention between concurrent integration-style tests
 # in the same binary.  Depends on build-integ-bins because the mvr
 # tests spawn the release lnsd/lncp binaries directly.
+[doc('Minimum-viable-reproduction tier: deterministic, under 5 s each')]
 mvr: build-integ-bins
     {{manifest}} mvr -- cargo test -p leviculum-std --test mvr -- --test-threads=1
 
-# Promote the most-recent auto-bug bundle to the coder bridge.
 # Run after a tier RED has emitted to $BRIDGE/auto-bug/instructions.md
 # and you want the coder to pick it up.  See scripts/_emit-auto-bug-bundle.sh.
 # BRIDGE defaults to ~/.local/state/leviculum (override LEVICULUM_BRIDGE).
 # The source bundle is left in place so a re-promotion (e.g. after a
 # stomped bridge) works without re-triggering the failing tier.
 # One shell block so BRIDGE persists across the recipe lines.
+[doc('Promote the most-recent auto-bug bundle to the coder bridge')]
 spawn-coder:
     @BRIDGE="${LEVICULUM_BRIDGE:-$HOME/.local/state/leviculum}"; \
     if [ ! -s "$BRIDGE/auto-bug/instructions.md" ]; then \
@@ -56,6 +57,7 @@ spawn-coder:
 # policy forbids. Cross-compiles the firmware, so the first run takes
 # minutes; SKIP_FIRMWARE=1 reuses an existing ELF while iterating on the
 # bundle itself. Output under target/lnflash/.
+[doc('Build the lnflash tarball a stranger can unpack and run')]
 lnflash-bundle:
     bash scripts/lnflash-bundle.sh
 
@@ -69,6 +71,7 @@ lnflash-bundle:
 # switch on from rotting (Codeberg #233).
 # First run compiles the embedded deps into leviculum-nrf/target
 # (minutes); warm runs are seconds.
+[doc('Lint and host-test the embedded firmware workspace')]
 lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
@@ -110,6 +113,7 @@ lint-nrf:
 # linker) and the Xtensa clang on PATH. leviculum-esp is its own cargo
 # workspace with its own rust-toolchain.toml, so the `esp` channel is
 # selected by entering the directory, not by a `+esp` on every line.
+[doc('Build and package the ESP32 firmware image (Heltec V4)')]
 build-esp32:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -137,6 +141,7 @@ build-esp32:
 # `main` frame (a by-value `NodeCore` materialised twice) did exactly that
 # and left ~13 KB of margin. Reads the `sub sp` immediates out of the linked
 # ELF, so it measures the shipped binary.
+[doc('Check the firmware stack frames against the SoftDevice RAM floor')]
 nrf-stack-frames:
     bash scripts/check-nrf-stack-frames.sh
 
@@ -149,6 +154,7 @@ nrf-stack-frames:
 # measured on the image as flashed and against the bounds the firmware itself
 # mounts. A link error is a cliff with no warning track.
 # Reads the linked ELFs nrf-stack-frames already built, so it costs seconds.
+[doc('Report the gap between the firmware image and the record store')]
 nrf-store-gap:
     bash scripts/check-nrf-store-gap.sh
 
@@ -159,6 +165,7 @@ nrf-store-gap:
 # peer connecting (Codeberg #354). Losing the feature again is invisible: the
 # firmware still builds, and the LNode-to-LNode bench negotiates an MTU small
 # enough to stay under 128. Asserted against cargo's resolved feature graph.
+[doc('Check the BLE event buffer is sized for our characteristics')]
 nrf-evt-max-size:
     bash scripts/check-nrf-evt-max-size.sh
 
@@ -171,6 +178,7 @@ nrf-evt-max-size:
 # other gate saw it: the name builder is pure and host-tested, both BSPs build,
 # clippy is clean. Text check by necessity (the bad value is a runtime
 # address); carries its own positive control.
+[doc('Check the GAP device name is a flash pointer, not a RAM one')]
 nrf-gap-device-name:
     bash scripts/check-nrf-gap-device-name.sh
 
@@ -186,6 +194,7 @@ nrf-gap-device-name:
 # down.) Numbers and scope in leviculum-nrf/reference-pins.toml; the upstream
 # half needs a Meshtastic checkout ($MESHTASTIC_TREE), names the revision it
 # read, and says so when there is none.
+[doc('Check the firmware pin maps against the reference variant headers')]
 nrf-board-pins:
     bash scripts/check-nrf-board-pins.sh
 
@@ -195,6 +204,7 @@ nrf-board-pins:
 # that write; this drives the refusal against fixture INFO_UF2.TXT files, so
 # the logic is covered without a board. That a real 6.1.1 board is refused
 # stays a rig check.
+[doc('Check that the flash runner refuses a wrong-SoftDevice board')]
 nrf-sd-guard:
     bash leviculum-nrf/tools/test-softdevice-guard.sh
 
@@ -203,6 +213,7 @@ nrf-sd-guard:
 # path, so one foreign board parked in its bootloader shadowed every other board
 # and left its mount behind to keep doing so (Codeberg #341). Driven against
 # fixture volume directories with stubbed mount/umount, so no board and no sudo.
+[doc('Check that the flash runner picks the right UF2 volume')]
 nrf-uf2-volumes:
     bash leviculum-nrf/tools/test-uf2-volumes.sh
 
@@ -213,6 +224,7 @@ nrf-uf2-volumes:
 # DFU and one running, it wrote the image to the first and named the second
 # (Codeberg #343, measured twice, once in each direction). Driven against
 # stubbed boards, each with a firmware stamp it reports when read.
+[doc('Check that the flash runner names the board it wrote')]
 nrf-fw-readback:
     bash leviculum-nrf/tools/test-fw-readback.sh
 
@@ -225,6 +237,7 @@ nrf-fw-readback:
 # no port is opened and nothing is written. ~0.5 s. Its --self-test puts the
 # S3 bootloader back at 0x1000 in a throwaway copy and requires the
 # assertions to go red.
+[doc('Check that the RNode flash offsets follow the board, not a constant')]
 rnode-chip-offsets:
     @bash scripts/check-rnode-chip-offsets.sh
     @bash scripts/check-rnode-chip-offsets.sh --self-test
@@ -243,6 +256,7 @@ rnode-chip-offsets:
 # repo-relative paths, which is what lets shellcheck resolve a `.` through
 # $SCRIPT_DIR. -x is what the ticket asks for and covers a future `source`
 # line whose directive somebody forgets.
+[doc('Shellcheck the flash-runner and CI shell scripts')]
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
@@ -284,6 +298,7 @@ nrf-shellcheck:
 # own per-scenario board reset — a real USB disconnect we ordered — was counted
 # as a device failure (Codeberg #65). Both are injected there as failures and
 # asserted not to fire.
+[doc('Drive the debug-port witness and device watchdog without a rig')]
 hw-witness:
     bash scripts/test-debug-witness.sh
     bash scripts/test-device-watchdog.sh
@@ -310,6 +325,7 @@ hw-witness:
 #   just fuzz --seconds 900      the budget a scheduled run wants
 #   just fuzz hdlc_deframe       one target
 # Exit 1 = a crash, input kept under the state dir; exit 2 = it could not run.
+[doc('Fuzz the parsers that eat untrusted bytes (60 s per target)')]
 fuzz *args:
     bash scripts/run-fuzz.sh {{args}}
 
@@ -321,10 +337,11 @@ fuzz *args:
 # runner concluded. ~15 s; skips with a named reason where nightly or
 # cargo-fuzz is absent, so it does not make the toolchain a push-path
 # dependency.
+[doc('Drive the fuzz runner against an injected crash and a missing tool')]
 fuzz-selftest:
     bash scripts/test-run-fuzz.sh
 
-# Rustdoc gate: broken intra-doc links fail instead of warning.
+[doc('Rustdoc gate: broken intra-doc links fail instead of warning')]
 doc-gate:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
@@ -337,6 +354,7 @@ doc-gate:
 # since. Also refuses a definition no heading uses and a date that is not a
 # real YYYY-MM-DD. ~20 ms, reads one file, no network, and self-tests each of
 # its five verdicts on fixtures first.
+[doc('Check every changelog heading against its link definition')]
 changelog-links:
     @bash scripts/check-changelog-links.sh
 
@@ -346,6 +364,7 @@ changelog-links:
 # lib.rs. Running the full suite in that config proves the shim changed no
 # core logic (a bare `tracing::x!` that slipped past the shim would either
 # fail to compile here or, worse, only on M0 — see m0-build-gate).
+[doc('Run the leviculum-core suite with the tracing feature off')]
 core-no-tracing:
     {{manifest}} core-no-tracing -- cargo test -p leviculum-core --no-default-features
 
@@ -353,6 +372,7 @@ core-no-tracing:
 # (atomic-less MCU, e.g. rp2040) with tracing off. tracing-core's CAS-based
 # callsite registry does not compile there, so the default build FAILS on
 # M0; --no-default-features must succeed. Keeps M0 support from rotting.
+[doc('Check that leviculum-core still cross-compiles for Cortex-M0')]
 m0-build-gate:
     rustup target add thumbv6m-none-eabi
     cargo build -p leviculum-core --target thumbv6m-none-eabi --no-default-features
@@ -362,6 +382,7 @@ m0-build-gate:
 # the crate yet, so no firmware build would catch a std leak here. Default
 # features off keeps `pow`/sha2 out, the configuration an embedded consumer
 # would use.
+[doc('Check that leviculum-lxmf still builds for the firmware triple')]
 lxmf-embedded-gate:
     rustup target add thumbv7em-none-eabihf
     cargo build -p leviculum-lxmf --target thumbv7em-none-eabihf --no-default-features
@@ -418,6 +439,7 @@ lxmf-embedded-gate:
 # 3.7 s of it the rest of the suite); cold, with the target already fetched,
 # ~80 s for the two i686 builds of the crate and its deps — once per host
 # per toolchain.
+[doc('Run the leviculum-core lib suite on a 32-bit usize')]
 i686-usize-gate:
     rustup target add i686-unknown-linux-musl
     CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
@@ -437,6 +459,7 @@ i686-usize-gate:
 # In a gate, not a `#[test]`, deliberately. The `reference_lock` test that
 # should have caught the LXMF drift was itself red and unobserved for the
 # whole five weeks; a test can be the thing that runs nowhere.
+[doc('Check the vendored references sit at the commit their gitlink names')]
 check-submodules:
     @bash scripts/check-submodule-pins.sh
 
@@ -449,6 +472,7 @@ check-submodules:
 # A gate rather than a #[test] for the same reason as check-submodules, plus a
 # mechanical one: shelling out to cargo from inside `cargo test` blocks on the
 # build-directory lock the outer invocation holds.
+[doc('Check the core-processor seam still refuses the forbidden moves')]
 check-processor-seam:
     @bash scripts/check-processor-compile-fail.sh
 
@@ -458,6 +482,7 @@ check-processor-seam:
 # nearly free here. No tier ran this suite before — `fast` runs `--lib` only
 # and `standard` names leviculum-std suites one by one — which is the
 # Guarantee-B-masking-C shape the concept page warns about.
+[doc('Check that path:line citations still point at what they claim')]
 citation-guard:
     {{manifest}} citation-guard -- cargo test -p leviculum-std --test doc_citations -- --nocapture
 
@@ -469,6 +494,7 @@ citation-guard:
 # pre-push path, where `.githooks/pre-push` runs `just fast`: the incident
 # this exists for was a trailer that reached a commit and was caught by a
 # human reading the message in the window between committing and pushing.
+[doc('Check that no commit carries a machine-authorship trailer')]
 check-trailers:
     @bash scripts/check-commit-trailers.sh
 
@@ -478,6 +504,7 @@ check-trailers:
 # nightly aborts in its freshness preflight naming a binary nothing built.
 # ~30 ms, reads two files, and self-tests its classifier on seven fixtures
 # first. Same family, same reasons, as check-submodules above.
+[doc('Check that only build-integ-bins lists the integration binaries')]
 check-integ-bin-list:
     @bash scripts/check-integ-bin-list.sh
 
@@ -490,6 +517,7 @@ check-integ-bin-list:
 # classifier on six fixtures first. Same family, same reasons, as
 # check-submodules above — and it is deliberately not pinned to a filename, so
 # renaming the pipeline is not a regression.
+[doc('Check that a forge workflow runs the CI gate on every push')]
 check-ci-pipeline:
     @bash scripts/check-ci-pipeline.sh
 
@@ -506,6 +534,7 @@ check-ci-pipeline:
 # that no pipeline names a secret nobody wrote down, which is where every
 # instance of this bug begins. ~20 ms of awk, self-tested on five fixtures
 # first, and red against HEAD~ of the commit that added it.
+[doc('Check that every pipeline secret is one somebody wrote down')]
 check-ci-secrets:
     @bash scripts/check-ci-secrets.sh
 
@@ -520,6 +549,7 @@ check-ci-secrets:
 # failing delete and an empty dist/ into the real script and asserts what the
 # release holds afterwards. ~0.4 s, no network: `curl` and `git` are fixtures
 # on PATH.
+[doc('Drive the nightly publish step against a fake forge')]
 publish-selftest:
     @bash scripts/test-publish-nightly.sh
 
@@ -538,6 +568,7 @@ publish-selftest:
 # installs, no cargo and no python3 among them. ~0.5 s, no network, no
 # build. Red against the pre-fix script with exactly the pipeline's own
 # error ("cargo: command not found").
+[doc('Drive the nightly .deb collection step against a fixture tree')]
 package-selftest:
     @bash scripts/test-collect-nightly-debs.sh
 
@@ -561,6 +592,7 @@ package-selftest:
 # --selftest is the positive control, and it is not optional here: the first
 # run of it passed one injected bug it was supposed to catch. ~0.1 s, no
 # network, no build; it reads Markdown and two shell scripts.
+[doc('Check that images, README table and release body name one set')]
 check-firmware-images:
     @bash scripts/check-firmware-images.sh
     @bash scripts/check-firmware-images.sh --selftest
@@ -581,6 +613,7 @@ check-firmware-images:
 # hardcoded download URL is exactly what this must never produce. The sender
 # is driven through its `--tar-only` hook, so the archive the receiver is
 # tested against is the real one. ~2 s, no network, no ssh, no build.
+[doc('Drive the site publish receiver against the uploads it must refuse')]
 site-publish-selftest:
     @bash scripts/test-site-publish.sh
 
@@ -596,6 +629,7 @@ site-publish-selftest:
 # crates and `cargo pkgid`. In `fast` for the same reason package-selftest is
 # — the pipeline step it covers runs only from cron, where a break is found
 # by nobody at 02:00 the next morning.
+[doc('Drive the .deb version stamper against a fixture workspace')]
 deb-stamp-selftest:
     @bash scripts/test-deb-stamp.sh
 
@@ -606,6 +640,7 @@ deb-stamp-selftest:
 # `cargo test --workspace --lib` fails outright. Three had accumulated
 # (lnomad, leviculum-micron, lnpnd) and the CI gate paid for a submodule fetch
 # to work around them. ~50 ms of grep, self-tested on five fixtures first.
+[doc('Check that the tree builds from a clone without submodules')]
 check-plain-clone:
     @bash scripts/check-plain-clone.sh
 
@@ -620,6 +655,7 @@ check-plain-clone:
 # given the tree, and it fails naming a file:line the author has open. The
 # behaviour itself is proved by `--test supervised_spawn` below; this is the
 # check that the proof still covers every site.
+[doc('Count bare process spawns against the supervised-spawn census')]
 check-supervised-spawns:
     @python3 scripts/check-supervised-spawns.py
 
@@ -629,8 +665,26 @@ check-supervised-spawns:
 # safe synchronous code -- and the seam documented the set as "roughly forty"
 # until this gate counted 58. Same shape and same reasons as the spawn census
 # above: a text scan, sub-second, no build, fails naming the method.
+[doc('Count the public methods that take the core lock')]
 check-core-lock-census:
     @python3 scripts/check-core-lock-census.py
+
+# Codeberg #301: `just --list` is the first thing a stranger reads, and until
+# this gate most of its lines were the tail of a comment block rather than a
+# description -- `ci-gate` introduced itself as "day one it would only teach
+# people to skip the gate". just keeps exactly ONE comment line per recipe
+# (`take_doc_comment` in its parser walks back over a newline and a single
+# `Item::Comment`), so a long block is not truncated to its summary, it is
+# truncated to whatever happens to be written last, and a blank line above the
+# recipe suppresses the description entirely. `[doc('...')]` takes precedence
+# over the comment, which is what makes the line a decision instead of an
+# accident; this gate requires one on every listed recipe and keeps it short
+# enough that the list stays scannable. ~0.2 s, reads one file, self-tests its
+# five verdicts on fixture justfiles first. Same family, same reasons, as
+# check-submodules above.
+[doc('Check that every listed recipe has an explicit description')]
+check-just-docs:
+    @python3 scripts/check-just-docs.py
 
 # The guards in .githooks/pre-push and the remedy their refusals print
 # (scripts/push-clean.sh), driven against scratch repositories (~0.3 s, no
@@ -648,11 +702,13 @@ check-core-lock-census:
 #
 # In `fast`, which is what the hook itself runs, so a guard broken by an edit
 # is caught by the next push rather than by the push it wrongly refuses.
+[doc('Drive the pre-push guards against scratch repositories')]
 prepush-guard:
     @bash scripts/check-prepush-guard.sh
 
 # Regenerate THIRD-PARTY-NOTICES from the two lockfiles (Codeberg #288).
 # Needs cargo-about; scripts/install-ci.sh installs the pinned version.
+[doc('Regenerate THIRD-PARTY-NOTICES from the two lockfiles')]
 notices:
     @python3 scripts/gen-notices.py
 
@@ -677,6 +733,7 @@ notices:
 # point at which the person who typed it is still there. `ci-gate` would catch
 # it too, but a night later and against a container that has neither the
 # firmware workspace fetched nor cargo-about installed.
+[doc('Check that THIRD-PARTY-NOTICES still matches the lockfiles')]
 notices-guard:
     @python3 scripts/gen-notices.py --check
 
@@ -686,6 +743,7 @@ notices-guard:
 # control where the same child — spawned without the fix — must survive. Both
 # arms are bounded and fail loudly rather than waiting, which is the mistake the
 # incident behind them was about.
+[doc('Prove a supervised child dies with its parent')]
 supervised-spawn:
     {{manifest}} supervised-spawn -- cargo test -p leviculum-std --test supervised_spawn
 
@@ -698,6 +756,7 @@ supervised-spawn:
 # ~0.2 s as a no-op — cheap enough for the push path. `--no-tests` declares
 # the empty manifest as intended, so the wrapper's executed-zero failure keeps
 # guarding the gates that do run tests.
+[doc('Compile every workspace lib, bin, example and test target')]
 check-all-targets:
     {{manifest}} check-all-targets --no-tests -- cargo check --workspace --all-targets
 
@@ -720,7 +779,8 @@ check-all-targets:
 # while every per-batch and pre-push run of this recipe stayed green. The
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+[doc('Tier 0 (~3.5 min): the gate every git push runs')]
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -773,6 +833,7 @@ fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline che
 # `clippy --all-targets` and no separate `cargo check`: clippy compiles what
 # check compiles, so the check line was a second pass over the same targets.
 # The lint findings that kept clippy off test code until 2026-08-18 are fixed.
+[doc('The gate the forge pipelines run, in their own container')]
 ci-gate:
     @bash scripts/check-plain-clone.sh
     cargo fmt --all -- --check
@@ -792,6 +853,7 @@ ci-gate:
 # bucket until 2026-07-27 (its node_integ end-to-end test never ran in CI).
 # lnomad/tests/ and leviculum-micron/tests/ are still uncovered, as are
 # several leviculum-std suites beyond the three named below.
+[doc('Tier 1 (~15 min): fast plus the integration suites')]
 standard: fast test-ffi verify-packaging
     {{manifest}} core-tests -- cargo test -p leviculum-core --tests
     # ~4 s: node_integ builds an in-process daemon + IPC + blog node, which
@@ -836,6 +898,7 @@ standard: fast test-ffi verify-packaging
 # guarantee holds for tier1/tier2 the same way run-tier3-hw.sh enforces
 # it for the hardware nightly. Deleting the binary does NOT work: cargo
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
+[doc('Build the release binaries periculum mounts into its containers')]
 build-integ-bins:
     find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src lnpnd/src lnmsg/src -name '*.rs' -exec touch {} +
     cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy --bin lxmf-node --bin lnpnd --bin lnmsg
@@ -890,10 +953,12 @@ build-integ-bins:
 # people switch off. The nightly's `timeout 3600` around all of `just complete`
 # stays the outer bound; this is the inner one, so an interactive cold run is
 # not cut off mid-build.
+[doc('Run every test in the workspace, selecting nothing by name')]
 complete:
     {{manifest}} workspace-all-targets --timeout 3600 -- cargo test --workspace --all-targets --no-fail-fast
     {{manifest}} workspace-doc -- cargo test --workspace --doc --no-fail-fast
 
+[doc('Tier 2: standard, complete and the periculum docker corpora')]
 extensive: standard complete build-integ-bins build-c-lnsd
     #!/usr/bin/env bash
     set -euo pipefail
@@ -921,6 +986,7 @@ extensive: standard complete build-integ-bins build-c-lnsd
 #
 # The scheduled nightly goes through scripts/run-tier3-hw.sh instead, which
 # adds the CI ledger, the repo sync and the USB device-vanish watchdog.
+[doc('Tier 3: extensive plus the LoRa hardware corpus')]
 nightly: extensive
     #!/usr/bin/env bash
     set -euo pipefail
@@ -947,6 +1013,7 @@ nightly: extensive
 # the crate has an rlib `cargo test` no longer builds the cdylib, and the
 # C-program harness needs libleviculum.so to link and run. The Python interop
 # tests skip cleanly if Python RNS is unavailable.
+[doc('Run the whole C API suite: Rust, C programs and Python interop')]
 test-ffi:
     cargo build -p leviculum-ffi --target x86_64-unknown-linux-gnu
     {{manifest}} ffi -- cargo test-ffi
@@ -963,6 +1030,7 @@ test-ffi:
 # checks the pure unsafe marshalling paths (buffer read(2), handle boxing,
 # char** aspects); it cannot run tokio or real I/O, so node/network tests are
 # excluded by filtering to identity/hex/destination.
+[doc('Run the C API under ASan, TSan and Miri')]
 sanitize-ffi:
     RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p leviculum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_unit --test ffi_integration --test ffi_property -- --test-threads=1
     RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=0 suppressions={{justfile_directory()}}/leviculum-ffi/tsan-suppressions.txt" cargo +nightly test -p leviculum-ffi -Zbuild-std --target x86_64-unknown-linux-gnu --test ffi_integration -- --test-threads=1
@@ -970,6 +1038,7 @@ sanitize-ffi:
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p leviculum-ffi --test ffi_unit hex
     MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p leviculum-ffi --test ffi_unit destination
 
+[doc('Build libleviculum as a cdylib and staticlib for C consumers')]
 build-ffi:
     cargo build-ffi
 
@@ -979,17 +1048,20 @@ build-ffi:
 # against it purely through pkg-config, both dynamically and statically.
 # Catches a renamed export breaking the header, a wrong .pc, a missing soname,
 # or a load failure. Part of Tier 1.
+[doc('Check libleviculum installs and links like a standard C library')]
 verify-packaging:
     bash scripts/verify-packaging.sh
 
 # Same end-to-end packaging check for the aarch64 cross build: cross-compiles
 # the consumer and runs it under qemu. Skips cleanly if the cross toolchain
 # (rustup target + gcc-aarch64-linux-gnu + qemu-user-static) is absent.
+[doc('Same packaging check for the aarch64 cross build')]
 verify-packaging-arm64:
     bash scripts/verify-packaging.sh aarch64-unknown-linux-gnu
 
 # Same for ARM64. Requires `sudo apt install gcc-aarch64-linux-gnu` and
 # `rustup target add aarch64-unknown-linux-gnu` on the build host.
+[doc('Same C API build for aarch64')]
 build-ffi-arm64:
     cargo build-ffi-arm64
 
@@ -997,6 +1069,7 @@ build-ffi-arm64:
 # libleviculum.a statically (glibc stays dynamic, matching the debian-slim
 # node container). Output: target/release/c-lnsd, the binary periculum mounts
 # for a node whose adapter is `c-lnsd`.
+[doc('Build the C daemon example against the static C API library')]
 build-c-lnsd: build-ffi
     T="${CARGO_TARGET_DIR:-target}"; \
     mkdir -p "$T/release"; \
@@ -1032,6 +1105,7 @@ _deb-stamp:
 # stalling the nightly release for eight days (see the script's header).
 # Output: target/debian/*_amd64.deb, hardlinked by cargo-deb under
 # target/<triple>/debian/ as well.
+[doc('Build the amd64 musl-static .debs')]
 build-deb-amd64: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh amd64
 
@@ -1042,12 +1116,14 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp
 # the zigbuild wrapper finds, or install a full Zig distribution (the
 # bare zig binary without its sibling lib/ fails at `zig cc` with "unable
 # to find zig installation directory").
+[doc('Build the arm64 musl-static .debs via cargo-zigbuild')]
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh arm64
 
 # Build every .deb in one go. _deb-stamp runs first (a dependency of each
 # child), so all six packages share one build-id and a consistent set of
 # per-package versions.
+[doc('Build every .deb, both architectures, on one shared build id')]
 build-deb: build-deb-amd64 build-deb-arm64
 
 # Structural check on the built .debs: metadata, per-package versions,
@@ -1062,6 +1138,7 @@ build-deb: build-deb-amd64 build-deb-arm64
 # packaging changes, together with a real install test in a systemd
 # container — the structural checks here cannot see a service that
 # installs cleanly and then fails to start.
+[doc('Check the built .debs structurally: metadata, layout, units')]
 verify-deb:
     @bash scripts/verify-deb-packaging.sh
 
@@ -1078,19 +1155,19 @@ _deb-prereqs:
     @echo "[_deb-prereqs] also ensure ziglang is available for arm64:"
     @echo "    pip install ziglang   (or install a full Zig distribution on PATH)"
 
-# Status of last runs across all tiers
+[doc('Status of last runs across all tiers')]
 status:
     @bash scripts/ci-status.sh
 
 # For other tiers: ls ~/.local/state/leviculum-ci/ and pick a file.
-# Tail the most recent Tier 1 log (live if a run is in progress).
+[doc('Tail the most recent Tier 1 log, live if a run is in progress')]
 logs:
     @bash -c 'LOG=$(ls -t ~/.local/state/leviculum-ci/tier1-*.log 2>/dev/null | head -1); \
         if [ -z "$LOG" ]; then echo "No Tier 1 log yet."; exit 1; fi; \
         echo "==> $LOG"; tail -f "$LOG"'
 
 # Idempotent; safe to re-run after pulling.
-# Install git hooks and systemd user timers for the 4-tier CI pipeline.
+[doc('Install the git hooks and systemd timers of the 4-tier CI pipeline')]
 install-ci:
     bash scripts/install-ci.sh
 
@@ -1100,18 +1177,19 @@ install-ci:
 # because that write is a soft brick: docs/src/concepts/lnode-flashing.md.
 # The firmware crate is outside the workspace (cross-compiled), so we
 # invoke cargo from its own directory.
-# Flash every attached T114 with the current firmware.
+[doc('Flash every attached T114 with the current firmware')]
 flash:
     cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 
-# SWD firmware debugging via the RPi Debug Probe (see docs/src/firmware/probe-debugging.md)
+# Wiring, gdb setup and the probe's own quirks: docs/src/firmware/probe-debugging.md
+[doc('SWD firmware debugging via the RPi Debug Probe')]
 probe *args:
     ./scripts/probe-debug.sh {{args}}
 
 # Useful for A/B testing (one T114 on new firmware, one on old).
 #   just flash-one /dev/ttyACM3
 #   just flash-one /dev/leviculum-transport
-# Flash a single T114 by port path or udev symlink.
+[doc('Flash a single T114 by port path or udev symlink')]
 flash-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} cargo run --release --bin t114 --features bsp-t114
 
@@ -1127,13 +1205,13 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 # First flash from Meshtastic / blank firmware needs a manual RESET
 # double-tap (the stock app has no 1200-baud-touch handler). Subsequent
 # flashes use the touch path automatically.
-# Flash every attached RAK4631 (WisMesh Pocket V2) with the current firmware.
+[doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
     cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
 
-# Flash a single RAK4631 by port path or udev symlink.
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
+[doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631
 
@@ -1141,6 +1219,7 @@ flash-rak4631-one PORT:
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
 # baseboard features (display, gnss, battery). This is the build the lnflash
 # bundle ships for this board (docs/src/concepts/board-support-scope.md).
+[doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
     cd leviculum-nrf && {{rak4631_env}} cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 
@@ -1155,11 +1234,11 @@ solarnode_env := 'LEVICULUM_USB_PID=0003 LEVICULUM_BOARD_NAME=SolarNode LEVICULU
 # The FIRST image goes onto the mass-storage volume by hand: stock firmware
 # has no 1200-baud-touch handler, so there is nothing for the runner to
 # touch. Once our firmware is on, this recipe works like the other two.
-# Flash every attached SenseCAP Solar Node P1-Pro with the current firmware.
+[doc('Flash every attached SenseCAP Solar Node P1-Pro with our firmware')]
 flash-solarnode:
     cd leviculum-nrf && {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
 
-# Flash a single SenseCAP Solar Node by port path or udev symlink.
+[doc('Flash a single SenseCAP Solar Node by port path or udev symlink')]
 flash-solarnode-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
 
@@ -1170,6 +1249,7 @@ flash-solarnode-one PORT:
 # uses the touch handler from src/usb.rs and this recipe is no longer needed.
 # Requires the meshtastic CLI on PATH (pip install meshtastic).
 # Usage: just dfu-rak4631 /dev/ttyACM0
+[doc('Put a stock-Meshtastic RAK4631 into its UF2 bootloader')]
 dfu-rak4631 PORT:
     meshtastic --port {{PORT}} --enter-dfu
 
@@ -1207,22 +1287,25 @@ rnode_flash := "ESPTOOL=" + esptool + " bash " + justfile_directory() / "scripts
 # One-time setup: the esptool these recipes drive. Pinned, and the same one
 # scripts/install-ci.sh puts on a CI host, so a board is not flashed by
 # whichever esptool a given machine happens to have.
+[doc('Install the pinned esptool the RNode recipes drive')]
 flash-rnode-setup:
     bash scripts/install-esptool.sh
 
-# Read-only device info: connectivity, firmware version, signature.
 #   just flash-rnode-info /dev/ttyACM6
+[doc('Read-only device info: connectivity, firmware version, signature')]
 flash-rnode-info PORT:
     {{rnodeconf}} --info {{PORT}}
 
 # Which chip is on the far end of this port. Read-only, and the answer the
 # other recipes derive their offsets from when BOARD is left at auto.
 #   just flash-rnode-chip /dev/ttyACM6
+[doc('Report which ESP32 chip is behind this port')]
 flash-rnode-chip PORT:
     {{rnode_flash}} chip --port {{PORT}}
 
 # Back up an RNode EEPROM (board model, signature, provisioning) before any
 # flash. Writes ~/.config/rnodeconf/eeprom<timestamp>.eeprom.
+[doc('Back up an RNode EEPROM before flashing it')]
 flash-rnode-backup PORT:
     {{rnodeconf}} --eeprom-backup {{PORT}}
 
@@ -1231,6 +1314,7 @@ flash-rnode-backup PORT:
 # images then serve as the flash source for flash-rnode.
 #   just flash-rnode-extract /dev/ttyACM6
 #   just flash-rnode-extract /dev/ttyACM6 heltec-v4
+[doc('Extract the signed RNode firmware off a validated device')]
 flash-rnode-extract PORT BOARD="auto":
     {{rnode_flash}} extract --port {{PORT}} --board {{BOARD}} --fw-dir {{rnode_fw}}
 
@@ -1239,6 +1323,7 @@ flash-rnode-extract PORT BOARD="auto":
 # flash-rnode-extract to have populated .rnode-fw/ first.
 #   just flash-rnode /dev/ttyACM6
 #   just flash-rnode /dev/ttyACM6 heltec-v4
+[doc('Flash an RNode with the extracted upstream firmware')]
 flash-rnode PORT BOARD="auto":
     {{rnode_flash}} write --port {{PORT}} --board {{BOARD}} --fw-dir {{rnode_fw}}
 
@@ -1246,6 +1331,7 @@ flash-rnode PORT BOARD="auto":
 # presumes the partition table it was cut with, an image presumes nothing.
 # Measured on the V4: 16 MB read in 102.8 s (1306 kbit/s), no retries.
 #   just flash-rnode-read-image /dev/ttyACM6 .rnode-fw/v4-full-16mb.bin heltec-v4
+[doc('Read the whole RNode flash into one image file')]
 flash-rnode-read-image PORT IMAGE BOARD="auto":
     {{rnode_flash}} read-image --port {{PORT}} --board {{BOARD}} --image {{IMAGE}}
 
@@ -1254,5 +1340,6 @@ flash-rnode-read-image PORT IMAGE BOARD="auto":
 # the point when restoring the board the image came off, and a mistake on
 # any other board. --flash-size keep: put back exactly what was read.
 #   just flash-rnode-write-image /dev/ttyACM6 .rnode-fw/v4-full-16mb.bin heltec-v4
+[doc('Write a full-flash image back, EEPROM and all')]
 flash-rnode-write-image PORT IMAGE BOARD="auto":
     {{rnode_flash}} write-image --port {{PORT}} --board {{BOARD}} --image {{IMAGE}}

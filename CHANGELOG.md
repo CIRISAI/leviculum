@@ -79,6 +79,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `just --list` now describes each recipe in one sentence instead of showing
+  the tail of its comment block: `ci-gate` introduced itself as "day one it
+  would only teach people to skip the gate" and `fast` as "sources, proof
+  against the kernel". just keeps exactly ONE comment line per recipe -- its
+  parser walks back over a newline and a single `Item::Comment`, so a block is
+  not summarised, it is cut to whatever stands last, and a blank line above
+  the recipe suppresses the description altogether. Every listed recipe now
+  carries a `[doc('...')]` attribute, which takes precedence over the comment,
+  so the long explanations stay where they are and the list reads as a list.
+  `just check-just-docs` (in `just fast`, ~0.2 s) keeps the next recipe from
+  losing its description, and refuses one too long to sit in the list
+  (Codeberg #301).
+
 - `lnstatus -j --tables` answers with table SIZES and no rows. The rows are
   asked for by name with the new `--table-rows` flag (`path_table`,
   `reverse_table`, `link_table`, `announce_table`, `announce_cache`,

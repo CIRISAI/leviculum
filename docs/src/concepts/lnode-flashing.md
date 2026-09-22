@@ -62,7 +62,7 @@ reset arrives while the flag is still live.
 
 The touch only exists if the running firmware implements it. Ours does.
 Stock Meshtastic does not, which is why a first flash away from
-Meshtastic needs the manual double-tap (`Justfile:1127`); for that case
+Meshtastic needs the manual double-tap (`Justfile:1205`); for that case
 Meshtastic offers its own admin command, wrapped as `just dfu-rak4631`.
 For Meshcore, microReticulum and RNode firmware on nRF we have not
 measured it.
