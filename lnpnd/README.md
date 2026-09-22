@@ -9,8 +9,11 @@ board-hosted — and syncs stored messages both ways.
 
 The daemon attaches to a Reticulum shared instance that is already running —
 `lnsd`, or Python's `rnsd` — the way `lnstatus` and `lncp` do. It does not
-start a Reticulum stack of its own, and exits if no daemon answers (the
-packaged service restarts it until one does).
+start a Reticulum stack of its own. The instance need not be running *yet*:
+at startup lnpnd waits up to a minute for the daemon's IPC socket, which is
+what gets it through a boot where both start together and the daemon binds
+its socket a few seconds later. After that minute it exits, and the packaged
+service restarts it until a daemon answers.
 
 ## Drop-in counterpart to lxmd
 

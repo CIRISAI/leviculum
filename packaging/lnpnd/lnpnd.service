@@ -1,18 +1,25 @@
 [Unit]
 Description=LXMF Propagation Node Daemon (store-and-forward mailbox on Reticulum)
 Documentation=https://codeberg.org/Lew_Palm/leviculum
-After=network.target lnsd.service
+After=network.target lnsd.service rnsd.service
 Wants=network.target
 
 # Deliberately After= without Requires=: lnpnd needs *a* Reticulum shared
 # instance, and lnsd is only one way to have one — the Python rnsd serves
 # just as well, and the leviculum package is a Recommends, not a Depends.
-# Ordering when lnsd is present, no hard coupling when it is not. If the
-# daemon is not up yet, lnpnd exits and Restart= below brings it back.
+# Ordering when either is present, no hard coupling when neither is. An
+# After= naming a unit that is not installed is simply not applied, so
+# listing both costs nothing on a host that runs only one of them.
 
-# Give up after ten failed starts in five minutes instead of retrying
-# forever; see lnsd.service for why a `failed` unit beats a silent flap.
-StartLimitIntervalSec=300
+# Give up after ten failed starts instead of retrying forever; see
+# lnsd.service for why a `failed` unit beats a silent flap. The window is
+# fifteen minutes rather than lnsd's five because a failing start here is
+# no longer quick: lnpnd waits up to a minute for the daemon's socket
+# before it fails (below), so ten failed cycles span about 70 s each and
+# would not fit in a five-minute window at all — the limit would have
+# stopped tripping and the unit would have flapped for the life of the
+# machine, which is the exact outcome these two lines exist to prevent.
+StartLimitIntervalSec=900
 StartLimitBurst=10
 
 [Service]
@@ -23,6 +30,15 @@ Group=lnpnd
 # daemon logs to stderr and journald captures it. --service (file
 # logging into the config directory) is for setups without a supervisor.
 ExecStart=/usr/bin/lnpnd --config /etc/lnpnd --data-dir /var/lib/lnpnd
+
+# Ordering alone does not get lnpnd a daemon: lnsd is Type=simple, so
+# systemd calls it started the moment it is exec'd, seconds before it binds
+# its IPC socket — and on a package install the two units are started in
+# separate transactions, which After= does not order at all. lnpnd
+# therefore waits on the socket itself for up to a minute before giving up
+# (the shape lblogd took for Codeberg #311). Restart= is the outer loop for
+# the case that outlasts that wait — a daemon down for an upgrade, or one
+# that never comes back.
 Restart=on-failure
 RestartSec=10
 

@@ -119,12 +119,20 @@ impl Drop for Reaped {
     }
 }
 
-/// Start the daemon against `config_dir` and give it back once it has
-/// exited, with everything it said on stderr.
+/// Start the daemon against `config_dir` and give back everything it said
+/// on stderr up to the moment it reached the shared instance.
 ///
-/// It is expected to fail: there is no shared instance by that name. The
-/// point is what it did *before* it found that out.
-fn run_daemon(config_dir: &Path) -> (std::process::ExitStatus, String) {
+/// It cannot get past that moment: there is no shared instance by that
+/// name. The point of the run is what it did *before* it found out.
+///
+/// The run is cut at the evidence rather than at the daemon's exit,
+/// because since lnpnd waits for the daemon's socket
+/// ([`lnpnd::DAEMON_WAIT`]) the exit is a minute behind the evidence, and
+/// two runs would spend two minutes asleep proving nothing further. That
+/// the wait is bounded and the start does fail at the end of it is held by
+/// `start_waits_for_daemon.rs`, which measures the same claim against a
+/// real socket in under a second.
+fn run_daemon(config_dir: &Path) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lnpnd"));
     cmd.arg("--config")
         .arg(config_dir)
@@ -134,53 +142,60 @@ fn run_daemon(config_dir: &Path) -> (std::process::ExitStatus, String) {
         .stderr(Stdio::piped());
     let mut child = Reaped(spawn_supervised(cmd).expect("the daemon binary runs"));
 
+    // Read incrementally into a buffer the poll loop below can inspect: the
+    // stop condition is a line, so the reader cannot be a `read_to_string`
+    // that only returns once the pipe closes.
     let mut stderr = child.0.stderr.take().expect("piped stderr");
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = std::sync::Arc::clone(&collected);
     let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock()
+                .expect("stderr buffer lock")
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
     });
 
-    // Generous, because this only has to outlast a connect to an abstract
+    let seen = |text: &str| mesh_failure_at(text).is_some();
+    // Generous, because this only has to outlast one connect to an abstract
     // socket nobody is bound to. A hang here is a finding, not a flake, so
     // the timeout kills and fails rather than retrying.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.0.try_wait().expect("the child is waitable") {
-            Some(status) => break Some(status),
-            None if Instant::now() >= deadline => break None,
-            None => std::thread::sleep(Duration::from_millis(20)),
+    loop {
+        let text = collected.lock().expect("stderr buffer lock").clone();
+        if seen(&text) {
+            break;
         }
-    };
-    let status = match status {
-        Some(status) => status,
-        None => {
-            // Killed here rather than left to `Drop`, because the reader
-            // thread joined below only finishes once the daemon's end of the
-            // stderr pipe is closed.
-            let _ = child.0.kill();
-            let _ = child.0.wait();
-            let text = reader.join().expect("the stderr reader finishes");
-            panic!("lnpnd did not exit within 30 s without a shared instance:\n{text}");
+        // An exit before the marker is its own failure, reported below
+        // against the text rather than swallowed here.
+        if child.0.try_wait().expect("the child is waitable").is_some() {
+            break;
         }
-    };
-    let text = reader.join().expect("the stderr reader finishes");
-    (status, text)
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Killed rather than left to `Drop`, because the reader thread joined
+    // below only finishes once the daemon's end of the stderr pipe closes.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    reader.join().expect("the stderr reader finishes");
+    let text = collected.lock().expect("stderr buffer lock").clone();
+    text
 }
 
-/// Where the daemon gave up for want of a shared instance, whichever of
-/// the two ways it can: the connect itself (`daemon`'s builder arm) or the
-/// node start behind it. Both are lnpnd's own wording in `main.rs`; the
-/// test wants the earlier of them, because that is the first moment the
-/// run could have touched the network.
+/// Where the daemon reported that it has no shared instance to join.
+///
+/// lnpnd's own wording in `main.rs`, used both for the wait it announces
+/// once and for the failure at the end of the wait; either way this is the
+/// first moment the run could have touched the network.
 fn mesh_failure_at(text: &str) -> Option<usize> {
-    [
-        "could not join the Reticulum shared instance",
-        "node start:",
-    ]
-    .iter()
-    .filter_map(|marker| text.find(marker))
-    .min()
+    text.find("no local Leviculum daemon reachable")
 }
 
 /// The metadata that decides whether `dpkg` starts the daemon. Read off
@@ -306,12 +321,7 @@ fn an_existing_identity_is_never_replaced() {
 fn the_daemon_reports_a_mint_before_it_joins_the_mesh() {
     let dir = tempfile::tempdir().expect("temp config dir");
 
-    let (status, first) = run_daemon(dir.path());
-    assert!(
-        !status.success(),
-        "without a shared instance the daemon exits non-zero; it did not, \
-         so this run proves nothing about the ordering:\n{first}"
-    );
+    let first = run_daemon(dir.path());
     assert!(
         first.contains(CREATED_EVENT),
         "the mint is logged even though the run never got as far as the \
@@ -335,10 +345,12 @@ fn the_daemon_reports_a_mint_before_it_joins_the_mesh() {
     let identity = dir.path().join("identity");
     let written = std::fs::read(&identity).expect("the first start wrote an identity");
 
-    let (status, second) = run_daemon(dir.path());
+    let second = run_daemon(dir.path());
     assert!(
-        !status.success(),
-        "the second run also has no daemon to join"
+        mesh_failure_at(&second).is_some(),
+        "the second run also has to reach the shared instance and find \
+         nothing there, or it says nothing about a restart. The daemon \
+         said:\n{second}"
     );
     assert!(
         !second.contains(CREATED_EVENT),

@@ -629,17 +629,23 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         .await
     {
         Ok(node) => node,
-        Err(error) => {
-            return failure(format!(
-                "could not join the Reticulum shared instance named '{instance}'.\n  \
-                 lnpnd talks to a daemon that is already running; start one with \
-                 `lnsd` (or Python's `rnsd`), or name another instance with \
-                 --instance / --rnsconfig.\n  The stack said: {error}"
-            ))
-        }
+        // Not the absent-daemon path: `build` only records the instance
+        // name, it dials nothing. What fails here is the node itself —
+        // storage that cannot be opened, a contradictory configuration.
+        Err(error) => return failure(format!("node: {error}")),
     };
-    if let Err(error) = node.start().await {
-        return failure(format!("node start: {error}"));
+    // Waiting rather than exiting: at boot the shared instance is started
+    // in the same transaction and has not bound its IPC socket yet, which
+    // cost every boot and every fresh install one failed unit on lblogd
+    // (Codeberg #311) and costs lnpnd the same. A daemon that never
+    // appears still fails the start, after `lnpnd::DAEMON_WAIT`.
+    if let Err(error) = lnpnd::start_waiting(&mut node, lnpnd::DAEMON_WAIT).await {
+        return failure(format!(
+            "could not join the Reticulum shared instance named '{instance}'.\n  \
+             lnpnd talks to a daemon that is already running; start one with \
+             `lnsd` (or Python's `rnsd`), or name another instance with \
+             --instance / --rnsconfig.\n  The stack said: {error}"
+        ));
     }
 
     // Surface the engine's events on stderr (and the structured log); the
