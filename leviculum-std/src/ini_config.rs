@@ -8,12 +8,67 @@
 //! - Boolean parsing: Yes/yes/True/true/1 → true, No/no/False/false/0 → false
 //!
 //! Only TCP interfaces are supported; unknown types are logged and skipped.
+//!
+//! A line that is neither of those is a parse ERROR, not something to skip:
+//! ConfigObj refuses such a file and rnsd exits 255 without starting
+//! (`RNS/Reticulum.py:330-333`). Skipping it is how a typo used to produce a
+//! daemon that runs on pure defaults and carries nothing.
 
 use std::collections::HashMap;
 
 use crate::config::{Config, InterfaceConfig, ReticulumConfig, SubinterfaceConfig};
 
+/// A section header and how deeply it nests: `[reticulum]` is depth 1,
+/// `[[Interface]]` depth 2, `[[[vport]]]` depth 3.
+struct SectionHeader<'a> {
+    depth: usize,
+    name: &'a str,
+}
+
+/// Recognise a ConfigObj section header, by the rules the reference actually
+/// applies (measured against `reference/Reticulum` 1.3.5's vendored ConfigObj
+/// on 2026-09-22, one file per case):
+///
+/// * `[reticulum] # comment` IS a header -- a comment may follow the brackets.
+/// * `[reticulum] junk` is NOT: `ParseError: Invalid line ('[reticulum] junk')`.
+/// * `[reticulum` and `[[iface]` are NOT: unbalanced brackets are ConfigObj's
+///   `ParseError` and `NestingError` respectively. Neither is a section whose
+///   name happens to carry a bracket.
+/// * `[reticulum = x` is NOT a header: ConfigObj matches it as the keyword
+///   `[reticulum`, and so does the caller, whose `key = value` branch runs
+///   next. Header first, keyword second, is ConfigObj's own order.
+///
+/// Returning `None` therefore does not mean "ignore this line" -- it means
+/// "this is not a header", and the caller either reads it as a key or refuses
+/// the file the way rnsd does.
+fn section_header(trimmed: &str) -> Option<SectionHeader<'_>> {
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    // A `#` opens a comment only once the brackets have closed; before that it
+    // belongs to the name (`[a#b]` is a section called `a#b` in ConfigObj).
+    let first_close = trimmed.find(']')?;
+    let body = match trimmed[first_close..].find('#') {
+        Some(offset) => trimmed[..first_close + offset].trim_end(),
+        None => trimmed,
+    };
+    let open = body.bytes().take_while(|b| *b == b'[').count();
+    let close = body.bytes().rev().take_while(|b| *b == b']').count();
+    // Unbalanced, or nothing but brackets (`[]`, `[[]]`): not a header.
+    if open != close || body.len() <= open + close {
+        return None;
+    }
+    Some(SectionHeader {
+        depth: open,
+        name: body[open..body.len() - close].trim(),
+    })
+}
+
 /// Parse a Python Reticulum INI config string into our `Config` struct.
+///
+/// Returns `Err` for a file ConfigObj would refuse. That is deliberate and it
+/// is the reference's behaviour, not a house rule: see the refusal at the end
+/// of the line loop.
 pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let mut reticulum = ReticulumConfig::default();
     let mut interfaces: HashMap<String, InterfaceConfig> = HashMap::new();
@@ -26,7 +81,9 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     // `subinterfaces` when the next header (of any depth) appears.
     let mut current_subinterface: Option<SubinterfaceConfig> = None;
 
-    for line in content.lines() {
+    for (number, line) in content.lines().enumerate() {
+        // Line numbers an operator can count to are 1-based, like ConfigObj's.
+        let number = number + 1;
         let trimmed = line.trim();
 
         // Skip empty lines and comments
@@ -34,50 +91,59 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
             continue;
         }
 
-        // Sub-subsection header: [[[name]]] (must check BEFORE [[..]], since a
-        // triple bracket also matches the double-bracket test). This is an
-        // RNodeMultiInterface subinterface, nested inside the current [[..]].
-        if trimmed.starts_with("[[[") && trimmed.ends_with("]]]") {
-            // Flush a previous subinterface into its parent interface.
-            flush_subinterface(&mut current_subinterface, &mut current_iface);
+        // A section header of any depth: `[reticulum]`, `[[Interface]]`, or the
+        // `[[[vport]]]` of an RNodeMultiInterface. Depth comes from the bracket
+        // count, and unbalanced brackets are not a header at all -- see
+        // [`section_header`].
+        if let Some(header) = section_header(trimmed) {
+            match header.depth {
+                3 => {
+                    // Flush a previous subinterface into its parent interface.
+                    flush_subinterface(&mut current_subinterface, &mut current_iface);
 
-            let name = trimmed[3..trimmed.len() - 3].trim().to_string();
-            current_subinterface = Some(SubinterfaceConfig {
-                name,
-                ..Default::default()
-            });
-            continue;
-        }
+                    current_subinterface = Some(SubinterfaceConfig {
+                        name: header.name.to_string(),
+                        ..Default::default()
+                    });
+                }
+                2 => {
+                    // Flush any pending subinterface, then the previous interface.
+                    flush_subinterface(&mut current_subinterface, &mut current_iface);
+                    if let Some((name, iface)) = current_iface.take() {
+                        interfaces.insert(name, iface);
+                    }
 
-        // Subsection header: [[name]] (must check before section)
-        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
-            // Flush any pending subinterface, then the previous interface.
-            flush_subinterface(&mut current_subinterface, &mut current_iface);
-            if let Some((name, iface)) = current_iface.take() {
-                interfaces.insert(name, iface);
+                    let name = header.name.to_string();
+                    current_subsection = Some(name.clone());
+                    current_iface = Some((
+                        name,
+                        InterfaceConfig {
+                            interface_type: String::new(),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                1 => {
+                    // Flush any pending subinterface, then the previous interface.
+                    flush_subinterface(&mut current_subinterface, &mut current_iface);
+                    if let Some((name, iface)) = current_iface.take() {
+                        interfaces.insert(name, iface);
+                    }
+                    current_section = header.name.to_string();
+                    current_subsection = None;
+                }
+                depth => {
+                    // ConfigObj nests arbitrarily deep; a Reticulum config has
+                    // exactly three levels, so a fourth is a bracket typo. We
+                    // say so instead of reading `[[[[vport]]]]` as a section
+                    // named `[vport]`, which is what the bracket-prefix test
+                    // this replaced did.
+                    return Err(format!(
+                        "Section nested {depth} deep ('{trimmed}') at line {number}. A Reticulum \
+                         config nests three at most: [section], [[interface]], [[[vport]]]."
+                    ));
+                }
             }
-
-            let name = trimmed[2..trimmed.len() - 2].trim().to_string();
-            current_subsection = Some(name.clone());
-            current_iface = Some((
-                name,
-                InterfaceConfig {
-                    interface_type: String::new(),
-                    ..Default::default()
-                },
-            ));
-            continue;
-        }
-
-        // Section header: [name]
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Flush any pending subinterface, then the previous interface.
-            flush_subinterface(&mut current_subinterface, &mut current_iface);
-            if let Some((name, iface)) = current_iface.take() {
-                interfaces.insert(name, iface);
-            }
-            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
-            current_subsection = None;
             continue;
         }
 
@@ -102,10 +168,44 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                 match current_section.as_str() {
                     "reticulum" => apply_reticulum_key(&mut reticulum, key, value),
                     "logging" => apply_logging_key(&mut reticulum, key, value),
-                    _ => {}
+                    // A key in a section nobody reads. Python keeps it in the
+                    // ConfigObj tree and rnsd never looks at it, so it is not
+                    // an error here either -- but a header typed `[reticulm]`
+                    // puts EVERY setting in this arm, and the daemon that
+                    // starts from it is a daemon running on defaults. Silence
+                    // is what makes that undiagnosable.
+                    "" => tracing::warn!(
+                        "config line {}: '{}' stands before any [section] and is ignored \
+                         (a [reticulum] or [interfaces] header is missing above it)",
+                        number,
+                        key,
+                    ),
+                    other => tracing::warn!(
+                        "config line {}: '{}' is in section '[{}]', which lnsd does not read, \
+                         and is ignored (did you mean [reticulum], [logging] or [interfaces]?)",
+                        number,
+                        key,
+                        other,
+                    ),
                 }
             }
+            continue;
         }
+
+        // Neither a section header nor a `key = value` pair. The reference
+        // refuses the whole file at exactly this point -- ConfigObj raises
+        // `Invalid line (...) (matched as neither section nor keyword)` and
+        // `RNS/Reticulum.py:330-333` turns that into two log lines and
+        // `RNS.panic()`, so rnsd exits 255 and never comes up (measured
+        // against reference/Reticulum 1.3.5, 2026-09-22).
+        //
+        // Swallowing the line instead is worse than a wrong default: the
+        // typo'd file below it is read as nothing at all, and lnsd starts,
+        // reports `active`, carries no traffic, and gives an operator no
+        // failure to find.
+        return Err(format!(
+            "Invalid line {number} ('{trimmed}'): matched as neither section nor keyword"
+        ));
     }
 
     // Flush the last subinterface, then the last interface.
@@ -3278,5 +3378,86 @@ loglevel = 4
         // supply the default further up.
         let config = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
         assert_eq!(config.reticulum.storage_path, None);
+    }
+
+    /// The file from the report that started this: an unclosed section header
+    /// and a line of noise. It used to parse to a default `Config` with zero
+    /// interfaces, and lnsd came up on it.
+    ///
+    /// The reference refuses it. Measured 2026-09-22, same bytes, same
+    /// location, `reference/Reticulum` 1.3.5:
+    ///
+    /// ```text
+    /// $ PYTHONPATH=reference/Reticulum python3 -u RNS/Utilities/rnsd.py --config /tmp/refcfg-a
+    /// [2026-09-22 14:32:11] [Error]    Could not parse the configuration at /tmp/refcfg-a/config
+    /// [2026-09-22 14:32:11] [Error]    Check your configuration file for errors!
+    /// $ echo $?
+    /// 255
+    /// ```
+    #[test]
+    fn unparsable_config_is_refused_like_rnsd_refuses_it() {
+        let err = parse_ini("[reticulum\nthis is not toml or ini at all = = =\n")
+            .expect_err("a file rnsd exits 255 on must not parse to a default config");
+        assert!(
+            err.contains("line 1") && err.contains("[reticulum"),
+            "the error has to name the offending line and its number: {err}"
+        );
+    }
+
+    /// Every bracket shape below was fed to the reference's own ConfigObj on
+    /// 2026-09-22 and refused -- `ParseError` for the unbalanced and the
+    /// trailing-junk lines, `NestingError` where the depth cannot be computed.
+    /// We refuse the same set, so no file rnsd would run on is refused here.
+    #[test]
+    fn lines_configobj_refuses_are_parse_errors_here() {
+        for line in [
+            "[reticulum",             // ParseError: invalid line
+            "reticulum]",             // ParseError: invalid line
+            "[reticulum] junk",       // ParseError: invalid line
+            "[reticulum]]",           // NestingError: cannot compute depth
+            "justaword",              // ParseError: invalid line
+            "[interfaces]\n[[iface]", // NestingError: cannot compute depth
+        ] {
+            assert!(
+                parse_ini(&format!("{line}\n")).is_err(),
+                "ConfigObj refuses {line:?}; so must we"
+            );
+        }
+    }
+
+    /// The other half of the same contract, and the one that matters for
+    /// compatibility: shapes ConfigObj ACCEPTS must still load. `[reticulum]
+    /// # comment` is a header (it used to be dropped on the floor here, since
+    /// the line does not end in `]`), and `[reticulum = x` is a keyword, not a
+    /// header -- ConfigObj reads it as the key `[reticulum`, so it must not
+    /// become a parse error now that unknown lines are fatal.
+    #[test]
+    fn lines_configobj_accepts_still_parse() {
+        let config = parse_ini(
+            "[reticulum] # the stack's own section\n  \
+               enable_transport = Yes\n\
+             [reticulum = x\n\
+             [interfaces]\n  \
+               [[Hub]] # a comment here too\n    \
+                 type = TCPClientInterface\n    \
+                 target_host = example.org\n    \
+                 target_port = 4242\n",
+        )
+        .expect("a file ConfigObj accepts must still load");
+        assert!(
+            config.reticulum.enable_transport,
+            "the trailing comment must not hide the section its keys belong to"
+        );
+        assert!(config.interfaces.contains_key("Hub"));
+    }
+
+    /// A fourth bracket level has no meaning in a Reticulum config, and the
+    /// bracket-prefix test this replaced read `[[[[vport]]]]` as a
+    /// subinterface named `[vport]`. Saying so beats inventing a name.
+    #[test]
+    fn a_fourth_section_level_is_refused_by_name() {
+        let err = parse_ini("[a]\n[[b]]\n[[[c]]]\n[[[[d]]]]\n")
+            .expect_err("depth 4 has no place to go in our config model");
+        assert!(err.contains("nested 4 deep"), "{err}");
     }
 }

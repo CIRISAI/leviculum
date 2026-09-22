@@ -40,3 +40,4 @@ mod rust_client_path_install_via_relay;
 mod rust_client_path_install_with_own_echo;
 mod shared_instance_client_survives_daemon_restart;
 mod udp_hostname_forward;
+mod unparsable_config_must_not_start_a_daemon;

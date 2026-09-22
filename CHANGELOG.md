@@ -227,6 +227,25 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A config file with a syntax error no longer starts a daemon that does
+  nothing. `[reticulum` with the bracket missing, and any other line that is
+  neither a section header nor a `key = value` pair, used to be skipped: the
+  file below it was read as nothing at all, `lnsd` came up on pure defaults,
+  logged `Node started with 0 interface(s)`, answered `systemctl is-active`
+  with `active`, and carried no traffic — a typo with no failure for anyone to
+  find. The reference decides this and refuses: the same file makes `rnsd`
+  1.3.5 log `Could not parse the configuration at <path>` and exit 255 without
+  starting (`RNS/Reticulum.py:330-333`, measured 2026-09-22), because
+  ConfigObj raises `Invalid line ... (matched as neither section nor
+  keyword)`. `lnsd` now refuses the same files, naming the line number and the
+  line, and the loader reports both the INI and the TOML verdict instead of
+  discarding the TOML one. Shapes ConfigObj accepts are unaffected, including
+  `[reticulum] # comment` (a header with a trailing comment, which the old
+  bracket test dropped on the floor) and `[reticulum = x` (a key, not a
+  header). A key that lands in no section, or in one `lnsd` does not read, is
+  still tolerated as Python tolerates it, but is now logged rather than
+  swallowed.
+
 - The citation guard now reads a reference table's signature as naming the
   citation beside it, so the densest citation shape in the book is
   drift-checked instead of existence-checked. A row like ``| `fn

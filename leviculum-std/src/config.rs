@@ -922,18 +922,38 @@ impl Config {
 
         // Explicit .toml extension → TOML only
         let mut config = if path.extension().is_some_and(|e| e == "toml") {
-            toml::from_str(&content)
-                .map_err(|e| Error::Config(format!("Failed to parse TOML config: {e}")))?
+            toml::from_str(&content).map_err(|e| {
+                Error::Config(format!(
+                    "Failed to parse TOML config {}: {e}",
+                    path.display()
+                ))
+            })?
         } else if content.contains("[[") {
             // Python INI configs use [[ for interface subsections.
             // TOML uses [[ for array-of-tables, which our configs never use.
-            crate::ini_config::parse_ini(&content)
-                .map_err(|e| Error::Config(format!("Failed to parse INI config: {e}")))?
+            crate::ini_config::parse_ini(&content).map_err(|e| {
+                Error::Config(format!(
+                    "Failed to parse INI config {}: {e}",
+                    path.display()
+                ))
+            })?
         } else {
-            // Default: try TOML first, fall back to INI
-            toml::from_str(&content).or_else(|_| {
-                crate::ini_config::parse_ini(&content)
-                    .map_err(|e| Error::Config(format!("Failed to parse config: {e}")))
+            // Default: try TOML first, fall back to INI.
+            //
+            // When BOTH fail the file is not a config in either format, and
+            // the operator needs both verdicts: the INI complaint alone reads
+            // as nonsense to someone who wrote TOML, and the TOML complaint
+            // alone reads as nonsense to someone who copied an rnsd config.
+            // Discarding the TOML error here (`or_else(|_| ...)`) was half of
+            // why a broken file used to reach the daemon silently.
+            toml::from_str(&content).or_else(|toml_err| {
+                crate::ini_config::parse_ini(&content).map_err(|ini_err| {
+                    Error::Config(format!(
+                        "Failed to parse config {}: not valid Reticulum INI ({ini_err}) \
+                         and not valid TOML ({toml_err})",
+                        path.display(),
+                    ))
+                })
             })?
         };
 
