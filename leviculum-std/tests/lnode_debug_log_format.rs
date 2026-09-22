@@ -61,6 +61,13 @@
 //! This lives in leviculum-std because the firmware crate cross-compiles to
 //! thumbv7em and cannot run host tests, and leviculum-std is the crate that
 //! owns host-side communication with a board.
+//!
+//! `just fast` does not execute this file: it ends at `cargo test --workspace
+//! --lib`, and its `check-all-targets` dependency (Codeberg #220) only
+//! *compiles* `tests/` targets, so an assertion here first runs in the landing
+//! gate's `cargo test --workspace`. A batch that changes what these tests pin
+//! — the firmware's log grammar, or the source invariants below — has to name
+//! `cargo test -p leviculum-std --test lnode_debug_log_format` itself.
 
 use std::path::{Path, PathBuf};
 
@@ -851,33 +858,17 @@ fn the_tx_defer_line_parses() {
     );
 }
 
-/// The firmware still emits the deferral line, from the one site that may
-/// defer, and in the grammar the parser above reads.
+/// The firmware still emits the deferral line, in the grammar the parser above
+/// reads.
 ///
-/// `site=` is deliberately absent from the line and that is what the second
-/// half pins: the bound is spent once per call, so "exactly one caller" is
-/// what makes the starvation argument hold, and a second `disarm_rx_for_tx`
-/// appearing in the loop would turn one frame's airtime into a wait that
-/// compounds. A capture cannot see that; this can.
+/// The starvation argument the line exists to support is a separate test, one
+/// screen down.
 #[test]
 fn the_firmware_still_emits_the_transmit_deferral_line() {
     let sx = nrf_source("sx1262.rs");
     assert!(
         sx.contains(r#""[SX_TX_DEFER] ""#),
         "leviculum-nrf/src/sx1262.rs no longer emits the `[SX_TX_DEFER] ` tag"
-    );
-    let lora = nrf_source("lora.rs");
-    assert_eq!(
-        lora.matches("disarm_rx_for_tx(").count(),
-        1,
-        "exactly one site in leviculum-nrf/src/lora.rs may defer a transmit; \
-         the bound is per call, so a second one compounds it"
-    );
-    // And that site is the idle select's outgoing arm, which is what the
-    // teardown table named.
-    assert!(
-        lora.contains("RxTeardownBy::Select"),
-        "the deferring site is no longer the idle select's outgoing arm"
     );
     let crate_src = {
         let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -905,6 +896,148 @@ fn the_firmware_still_emits_the_transmit_deferral_line() {
              anything else"
         );
     }
+}
+
+/// The index of `needle` in `src`, insisting there is exactly one.
+///
+/// The arm slicing below is only meaningful if the markers it cuts on are
+/// unique; a second `Either3::Second(` in the file would silently give this
+/// test the wrong body to look at.
+fn sole_index(src: &str, needle: &str) -> usize {
+    let mut found = src.match_indices(needle).map(|(i, _)| i);
+    let first = found.next().unwrap_or_else(|| {
+        panic!(
+            "leviculum-nrf/src/lora.rs no longer contains `{needle}`; the idle select \
+             whose arms carry the transmit deferral has moved, and this test cannot \
+             see the bound any more"
+        )
+    });
+    assert!(
+        found.next().is_none(),
+        "`{needle}` appears more than once in leviculum-nrf/src/lora.rs; this test \
+         slices the idle select's arms on it and can no longer tell them apart"
+    );
+    first
+}
+
+/// The `RxTeardownBy::` site each `disarm_rx_for_tx` call in `src` names, in
+/// source order.
+///
+/// A call whose site argument cannot be read is reported as `<unreadable>`
+/// rather than skipped: a site this test cannot name is still a site, and has
+/// to fail loudly instead of disappearing from the count.
+fn transmit_deferral_sites(src: &str) -> Vec<String> {
+    const CALL: &str = "disarm_rx_for_tx(";
+    const SITE: &str = "RxTeardownBy::";
+    let starts: Vec<usize> = src.match_indices(CALL).map(|(i, _)| i).collect();
+    let mut sites = Vec::with_capacity(starts.len());
+    for (n, &start) in starts.iter().enumerate() {
+        let call = &src[start..starts.get(n + 1).copied().unwrap_or(src.len())];
+        let name = call
+            .find(SITE)
+            .map(|at| &call[at + SITE.len()..])
+            .and_then(|tail| {
+                tail.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .filter(|name| !name.is_empty())
+            })
+            .unwrap_or("<unreadable>");
+        sites.push(name.to_string());
+    }
+    sites
+}
+
+/// What a future reader has to establish by hand before a third deferring site
+/// may land, because no scan of the source can establish it.
+const DEFERRAL_HAND_CHECK: &str = "A source scan sees a site's name and that it \
+    is spent once per arm; it cannot see the cadence that reaches it. Before a \
+    new deferring site lands, check by hand what actually bounds the wait: (a) \
+    the arm is entered only on an event produced outside this loop — a daemon \
+    dequeue, a host config push — and at that event's rate, never at the loop's \
+    own; (b) the call is reached at most once per entry, not from a loop and \
+    not twice on one path. The two sites below pass that check, so their waits \
+    add at most one maximum-size frame's airtime each and do not compound. If \
+    the new site passes it too, name it in ARMS and say here why its cadence is \
+    external; if it does not, it must not defer.";
+
+/// The transmit deferral is spent once per externally paced event, at the two
+/// arms that have one.
+///
+/// `site=` is deliberately absent from the `[SX_TX_DEFER]` line, so a capture
+/// cannot tell the deferring sites apart — this can. What the test pins is the
+/// invariant rather than a number: each site spends the bound once per entry
+/// into its arm, and each of those arms is fed by a channel the host or the
+/// daemon writes, not by this loop's own cadence. A third site is therefore
+/// not forbidden; it is required to arrive with that argument made, and this
+/// test says so by name when one appears.
+#[test]
+fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
+    let lora = nrf_source("lora.rs");
+
+    // The three arms of the idle `select3`, in source order, with the site
+    // each may defer at and what paces it. `Either3::First` is the reception
+    // itself: it is paced by the air and by this loop, so it may not defer at
+    // all — a wait there would be the spacing delay the guard is careful not
+    // to be.
+    const ARMS: [(&str, &[&str], &str); 3] = [
+        (
+            "Either3::First(",
+            &[],
+            "the reception that just ended, paced by the air and by this loop",
+        ),
+        (
+            "Either3::Second(",
+            &["Select"],
+            "the daemon's outgoing queue, paced by the host's traffic",
+        ),
+        (
+            "Either3::Third(",
+            &["Config"],
+            "the host's radio-config push, paced by the host's console",
+        ),
+    ];
+
+    // Both deferring arms take their event from a channel `receive()`, which
+    // is the externally-paced half of the argument, in the order ARMS lists.
+    let select_head = &lora[sole_index(&lora, "select3(")..sole_index(&lora, ARMS[0].0)];
+    let outgoing = select_head.find("outgoing_rx.receive()");
+    let config = select_head.find("config_rx.receive()");
+    assert!(
+        matches!((outgoing, config), (Some(o), Some(c)) if o < c),
+        "the idle select in leviculum-nrf/src/lora.rs no longer waits on \
+         `outgoing_rx.receive()` then `config_rx.receive()`; the deferring arms \
+         below are identified by that order, and whether their events are paced \
+         from outside this loop has to be re-argued. {DEFERRAL_HAND_CHECK}"
+    );
+
+    let mut accounted = 0;
+    for (n, (marker, want, paced_by)) in ARMS.iter().enumerate() {
+        let start = sole_index(&lora, marker);
+        let end = match ARMS.get(n + 1) {
+            Some((next, _, _)) => sole_index(&lora, next),
+            None => lora.len(),
+        };
+        let found = transmit_deferral_sites(&lora[start..end]);
+        accounted += found.len();
+        assert_eq!(
+            found.as_slice(),
+            *want,
+            "the transmit-deferral sites in the `{marker}` arm of \
+             leviculum-nrf/src/lora.rs changed: expected {want:?}, found {found:?}. \
+             That arm is {paced_by}. {DEFERRAL_HAND_CHECK}"
+        );
+    }
+
+    // And nothing defers outside those arms: a call in a helper, or in the
+    // transmit path proper, is spent at a cadence this test never looked at.
+    let all = transmit_deferral_sites(&lora);
+    assert_eq!(
+        all.len(),
+        accounted,
+        "leviculum-nrf/src/lora.rs defers a transmit outside the idle select's \
+         arms: {all:?} over the whole file against {accounted:?} inside the arms. \
+         {DEFERRAL_HAND_CHECK}"
+    );
 }
 
 /// Nothing a prober needs to address the board is written on the gated path
