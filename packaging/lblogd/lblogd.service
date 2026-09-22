@@ -11,6 +11,21 @@ Wants=network.target
 # After= naming a unit that is not installed is simply not applied, so
 # listing both costs nothing on a host that runs only one of them.
 
+# Give up after ten failed starts instead of retrying for ever; see
+# lnsd.service for why a `failed` unit beats a silent flap. The window is
+# fifteen minutes rather than lnsd's five because a failing start here is
+# not quick: lblogd re-dials the daemon socket for a minute before it
+# gives up (`DAEMON_WAIT` in lblogd/src/node.rs, and the Restart= comment
+# below), so one failed cycle is that minute plus RestartSec=10 — about
+# 70 s — and ten of them span about 700 s. Under the manager default
+# (DefaultStartLimitIntervalUSec=10s, DefaultStartLimitBurst=5) five such
+# cycles span some 350 s, so the limit never trips at all and the unit
+# flaps for the life of the machine against a daemon that is gone for
+# good. 900 s is the window ten cycles fit inside, which is what makes
+# the burst reachable.
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
 [Service]
 Type=simple
 User=lblogd
