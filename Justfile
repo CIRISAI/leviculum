@@ -633,6 +633,39 @@ site-publish-selftest:
 deb-stamp-selftest:
     @bash scripts/test-deb-stamp.sh
 
+# Codeberg #304: the pin in rust-toolchain.toml is raised deliberately at
+# release time, and nothing said when that was due. This prints how far it
+# has fallen behind current stable -- pinned version, newest release, and the
+# distance between them -- and exits 0 whatever the answer is.
+#
+# A report, not a gate, and the distinction is the whole issue: a check that
+# refuses once stable has moved goes red on the Rust release train's schedule
+# rather than on a change of ours, and the cheapest way to clear it is to
+# bump the pin without considering it, which is the drift the pin exists to
+# prevent. This repo has run that experiment once already -- the tier-2
+# staleness verdict that blocked every push for 46 days, recorded above the
+# tier-2 block in scripts/ci-status.sh.
+[doc('How far the pinned toolchain has fallen behind current stable')]
+toolchain-status:
+    @bash scripts/toolchain-distance.sh
+
+# The report above is consumed by the nightly status, where a non-zero exit
+# or a second line of output is a broken morning report rather than an error
+# anyone sees. So every case is pinned here against a fake `rustup`: the two
+# spellings `rustup check` uses, offline, no rustup at all, no `stable`
+# toolchain installed, a floating channel, a missing file -- each asserting
+# exit 0 and exactly one line.
+#
+# The load-bearing case is the parse: `rustup check` prints the INSTALLED
+# stable and the NEWEST release on one line, older first, and picking the
+# wrong one yields a plausible number that never moves. That case fails on
+# sight of the installed version. ~1 s, no network. In `fast` for the reason
+# deb-stamp-selftest is: its consumer runs from cron, where a break is found
+# by nobody the next morning.
+[doc('Selftest: the toolchain report never refuses and prints one line')]
+toolchain-status-selftest:
+    @bash scripts/test-toolchain-distance.sh
+
 # Codeberg #300: the tree must build from a clone without submodules, which is
 # what both forge pipelines and every contributor start from. An
 # `include_str!` into `reference/` is a compile-time dependency, so the crate
@@ -780,7 +813,7 @@ check-all-targets:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

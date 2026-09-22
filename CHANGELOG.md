@@ -5,9 +5,33 @@ All notable changes to this project will be documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Each release section opens with a `Toolchain:` line naming the pinned Rust
+version that built it, copied from `rust-toolchain.toml`. Raising that pin is
+a deliberate act at release time — published binaries and a measured embedded
+stack-frame margin are what it protects — and `just toolchain-status` says how
+far it has fallen behind current stable, as a report rather than a gate
+(Codeberg #304). Sections from 0.9.0 on carry the line; before the pin landed
+on 2026-08-18 the channel was `stable`, meaning whatever the building host had
+last installed, and there is no one version to name.
+
 ## [Unreleased]
 
+Toolchain: Rust 1.97.1
+
 ### Added
+
+- `just toolchain-status` says how far the pinned Rust toolchain has fallen
+  behind current stable: pinned version, newest stable release, and the
+  distance between them, on one line. Since the channel was pinned nothing
+  said when the bump was due, and a policy whose only home is a comment in
+  `rust-toolchain.toml` is what this project has decided not to rely on. It
+  is a report and never a refusal — a check that went red once stable moved
+  would go red on the Rust release train's schedule rather than on a change
+  of ours, and the cheapest way to clear it would be to bump the pin without
+  considering it, which is the drift the pin exists to prevent. Offline, no
+  rustup, no `stable` toolchain installed and a floating channel are printed
+  facts too, never errors, because the nightly status pastes this line and
+  cannot lose a run to a dead link (Codeberg #304).
 
 - `EVENT_CATALOG` now declares every structured event name the workspace
   emits, and a test holds it that way. Forty-one names were emitted but
@@ -297,6 +321,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Codeberg #186).
 
 ## [0.9.0] - 2026-09-18
+
+Toolchain: Rust 1.97.1
 
 ### Added
 

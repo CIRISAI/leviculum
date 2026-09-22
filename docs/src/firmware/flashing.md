@@ -227,7 +227,7 @@ debug info does not bloat what lands on the device.
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:1178-1179`)
+therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:1211-1212`)
 
 A plain build (no flash) is:
 
@@ -267,7 +267,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:1205-1207`, `Justfile:1245-1254`. See
+automatically. (`Justfile:1238-1240`, `Justfile:1278-1287`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -287,7 +287,7 @@ against mixed firmware versions. Use this as your default for T114s.
 cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:1180-1182`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:1213-1215`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -305,7 +305,7 @@ Expands to:
 cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:1189-1194`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:1222-1227`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -318,7 +318,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:1208-1210`)
+(`Justfile:1241-1243`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -337,7 +337,7 @@ cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:1212-1216`)
+(`Justfile:1245-1249`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -351,7 +351,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:1218-1224`; `rak-baseboard` aggregate
+(`Justfile:1251-1257`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:309`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -374,7 +374,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:1245-1254`)
+(`Justfile:1278-1287`)
 
 ## A note on disconnecting consumers
 

@@ -259,6 +259,17 @@ the substrate is plain files and standard git, an agent needs no
 project-specific API knowledge — the patterns are the ones every agent
 already knows.
 
+**Where this stands.** Nothing in the paragraph above is in this tree yet:
+no `AGENTS.md`, no `issues/` directory, no `scripts/new-issue.sh`, and no
+`scripts/nightly.sh` — that last one is the Component 3 design whose own
+*Where this stands* note records that its three properties landed on
+`.woodpecker/nightly.yml` instead. A contract written today would name that
+pipeline as what cuts releases. Said here because the sentence reads as a
+description of the repository and is a description of the workhorse.de
+design, and because the citation guard cannot catch it: it names files in
+prose rather than as `path:line` citations, so a reader is the only check
+there is.
+
 ## Rollout
 
 1. **Stand up (no announcement).** Provision workhorse.de: bare repo,
