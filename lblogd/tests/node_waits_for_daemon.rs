@@ -109,11 +109,19 @@ async fn start_waiting_still_fails_when_no_daemon_ever_appears() {
     let instance_name = format!("lblogd-311-absent-{}", std::process::id());
     let data_dir = tempfile::tempdir().expect("data dir");
 
+    // Two polls' worth, and written as a multiple of `node::DAEMON_POLL`
+    // rather than as a round number of its own: long enough that a wait
+    // which did not actually wait shows up in the clock, short enough not
+    // to cost the suite a minute. At the previous 250 ms poll this read
+    // 600 ms, and a one-second poll turns that into a wait that gives up
+    // before its first sleep — measured at 838 µs, which is exactly what
+    // the floor below is here to catch. The production bound is
+    // `node::DAEMON_WAIT`.
     let started = Instant::now();
     let result = BlogNode::start_waiting(
         blog_config(&instance_name, data_dir.path()),
         empty_content(),
-        Duration::from_millis(600),
+        Duration::from_millis(2500),
     )
     .await;
 
@@ -123,8 +131,9 @@ async fn start_waiting_still_fails_when_no_daemon_ever_appears() {
         "the failure must still name the absent daemon, got: {err}"
     );
     assert!(
-        started.elapsed() >= Duration::from_millis(500),
-        "it must have actually waited before giving up"
+        started.elapsed() >= Duration::from_millis(1500),
+        "it must have actually waited before giving up (took {:?})",
+        started.elapsed()
     );
     assert!(
         started.elapsed() < Duration::from_secs(10),

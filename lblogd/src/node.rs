@@ -123,10 +123,28 @@ pub const DAEMON_WAIT: Duration = Duration::from_secs(60);
 
 /// How often the daemon is re-dialled while waiting.
 ///
-/// Dialling a local socket that nobody listens on costs a failed `connect`
-/// syscall, so this is short enough that the wait adds no perceptible delay
-/// once the daemon is up.
-const DAEMON_POLL: Duration = Duration::from_millis(250);
+/// The dial itself is one failed `connect` syscall, but an attempt is a
+/// whole [`BlogNode::start`]: a fresh `ReticulumNode` built, the identity
+/// read off disk, the destination and one request handler per page
+/// registered. At 250 ms a full wait ran that 238 times — measured, `strace
+/// -e connect` on the real binary against an instance nobody serves, 0.20 s
+/// of CPU for the minute. At one second it runs 60 times, and the latency
+/// the boot race costs once the daemon does appear stays under a second,
+/// which is nothing against the `RestartSec=10` this wait exists to avoid.
+///
+/// One second is also `lnpnd`'s number, but the reason it has there does
+/// not apply here, and was checked rather than inherited: each attempt logs
+/// one INFO line from the driver below this crate ("Shared instance client
+/// mode — skipping config interfaces"), which for `lnpnd` is 240 lines per
+/// wait into the journal of a board with a small disk, repeated every
+/// `RestartSec` for as long as the daemon stays gone. `lblogd` installs no
+/// `tracing` subscriber at all, so that line is dropped in this process: a
+/// full wait here puts two lines on stderr and no driver INFO lines, at
+/// 250 ms as at one second, with `RUST_LOG=trace` as without (measured, all
+/// three). The two daemons are aligned on the work an attempt costs, not on
+/// a journal rate `lblogd` does not currently have — and should `lblogd`
+/// ever gain a subscriber, it gains it at 60 lines per wait, not 240.
+const DAEMON_POLL: Duration = Duration::from_secs(1);
 
 /// Whether a failed start failed *only* because no daemon is listening yet.
 ///
@@ -254,8 +272,8 @@ impl BlogNode {
                 return Err(err);
             }
             // Once, not per attempt: the point is that the journal says why
-            // the node is not serving yet, not that it says so four times a
-            // second.
+            // the node is not serving yet, not that it says so once a
+            // second for a minute.
             if !said_so {
                 eprintln!("lblogd: {err} — waiting up to {} s for it", wait.as_secs());
                 said_so = true;
