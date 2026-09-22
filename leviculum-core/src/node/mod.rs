@@ -50,6 +50,8 @@ mod link_management;
 #[cfg(test)]
 mod mvr_announce_hold;
 #[cfg(test)]
+mod mvr_announce_rebroadcast_redraw;
+#[cfg(test)]
 mod mvr_announce_rebroadcast_window;
 #[cfg(test)]
 mod mvr_app_proof_ingress_iface;

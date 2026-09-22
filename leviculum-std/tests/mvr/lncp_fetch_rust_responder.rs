@@ -1376,7 +1376,7 @@ fn run_fetch_for_bug26(
 /// 1 s-per-read latency proxy with a 64-byte buffer (roughly per-
 /// Reticulum-packet delay). Pre-fix behaviour on hardware (LoRa at
 /// Medium) was: the rtt-derived pending-request timer at
-/// `leviculum-core/src/node/mod.rs:1408` fired mid-transfer because
+/// `leviculum-core/src/node/mod.rs:1410` fired mid-transfer because
 /// the Response packet for `fetch_file` queues behind the resource
 /// data on slow links. Post-fix (`reset_pending_requests_on_link`
 /// called from `handle_resource_adv` / `handle_resource_data` in

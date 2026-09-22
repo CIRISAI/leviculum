@@ -22,7 +22,7 @@
 //! ## Ours
 //!
 //! `handle_announce` inserts the entry with `retransmit_at_ms = now +
-//! deterministic_jitter_ms(dest, announce_jitter_max_ms())`
+//! announce_wait_ms(dest, announce, draw, announce_jitter_max_ms())`
 //! (transport.rs, the `should_rebroadcast` arm), where
 //! `announce_jitter_max_ms()` floors at `PATHFINDER_RW_MS` (500 ms —
 //! the reference's window) and only grows above it for slow (LoRa)
@@ -31,9 +31,13 @@
 //! bound", and the reference's lower bound is 0) there is nothing to
 //! adopt — but until this file no test pinned the bounds, and an
 //! "optimisation" that re-broadcast immediately would have regressed
-//! silently. One deliberate difference stays on record: our jitter is
-//! deterministic per (identity, destination) where Python re-rolls per
-//! announce; the bounds are identical.
+//! silently. One deliberate difference stays on record: where Python calls
+//! `RNS.rand()`, ours is a hash — but it is drawn per scheduling EVENT like
+//! the reference's, over (identity, destination, announce, draw). It was a
+//! frozen function of (identity, destination) until 2026-09-22; what that
+//! cost, and the pins that hold the per-event property, are in
+//! `mvr_announce_rebroadcast_redraw`. The bounds this file pins are
+//! identical either way and are untouched by that change.
 //!
 //! Sans-I/O: 1 node, 2 mock interfaces, deterministic, sub-second.
 

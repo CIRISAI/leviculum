@@ -171,7 +171,7 @@ All are re-exported from `leviculum-core/src/lib.rs:123-143`.
 
 The sans-IO protocol engine, generic over an RNG `R: CryptoRngCore`, a clock
 `C: Clock`, and storage `S: Storage`. Defined at
-`leviculum-core/src/node/mod.rs:365`. It never performs I/O; every method that
+`leviculum-core/src/node/mod.rs:367`. It never performs I/O; every method that
 can produce output returns a [`TickOutput`](#core-tickoutput-and-action) the
 caller must dispatch.
 

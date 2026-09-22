@@ -3179,7 +3179,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         raw: &[u8],
     ) {
         let now = self.clock.now_ms();
-        let jitter = self.deterministic_jitter_ms(&dest_hash, self.announce_jitter_max_ms());
+        // Draw 0: this entry is scheduled once and never rescheduled from
+        // here, so the ordinal only has to be a fixed starting point.
+        let jitter = self.announce_wait_ms(&dest_hash, raw, 0, self.announce_jitter_max_ms());
         self.storage.set_announce(
             dest_hash,
             AnnounceEntry {
@@ -5411,8 +5413,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // of receipt, without the PATHFINDER_G grace.
                             // Subsequent reschedules below add PATHFINDER_G,
                             // matching Transport.py:590.
-                            let jitter = self
-                                .deterministic_jitter_ms(&dest_hash, self.announce_jitter_max_ms());
+                            // Draw 0 of this entry. The reschedule below
+                            // takes draw 1 from the same ceiling, which is
+                            // what stops the two from repeating.
+                            let jitter = self.announce_wait_ms(
+                                &dest_hash,
+                                raw,
+                                0,
+                                self.announce_jitter_max_ms(),
+                            );
                             Some(now + jitter)
                         } else {
                             None
@@ -7881,7 +7890,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Compute the announce jitter ceiling, in milliseconds, for the
-    /// `deterministic_jitter_ms` calls in the announce-retry path.
+    /// `announce_wait_ms` draws in the announce-retry path.
     /// Returns `max(PATHFINDER_RW_MS, JITTER_AIRTIME_FACTOR × worst_airtime)`
     /// across all registered interfaces. With no interfaces registered
     /// the floor `PATHFINDER_RW_MS` applies, preserving the legacy
@@ -8061,6 +8070,81 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             buf[i] = id_hash[i] ^ seed[i % seed.len()];
         }
         u64::from_le_bytes(buf) % max_ms
+    }
+
+    /// Draw the announce-rebroadcast wait for ONE scheduling event.
+    ///
+    /// The reference draws this wait fresh every time it schedules a
+    /// rebroadcast: `retransmit_timeout = now + (RNS.rand() *
+    /// Transport.PATHFINDER_RW)` (Transport.py:1873). Ours was
+    /// [`Self::deterministic_jitter_ms`] over the destination hash alone, a
+    /// pure function of (identity, destination) — the same number for every
+    /// announce of that destination for as long as both identities exist.
+    ///
+    /// Why that had to go, and it is not a delivery rate: averaged over all
+    /// (A, B, destination) triples a frozen wait and a fresh draw destroy
+    /// the same fraction of announces. What the freeze changed was the
+    /// distribution — the loss stopped being spread thinly over triples and
+    /// became a standing property of a few. And it did not stop at the first
+    /// try. A third-party announce is stored at `retries = 0`, and the
+    /// reschedule in [`Self::check_announce_rebroadcasts`] reads `retries`
+    /// BEFORE incrementing it, so its backoff factor is `1 << 0 == 1` and it
+    /// asks the SAME ceiling for a second number. On the old code that second
+    /// number was the same number: 261 schedule/reschedule pairs out of
+    /// archived emulated-medium runs, 0 redrawn beyond 5 ms, largest
+    /// |redraw| 0.89 ms, in periculum's
+    /// `emulated/announce_rebroadcast_lock_lnsd.toml`, whose header carries
+    /// the figures and the arithmetic behind them. So a
+    /// route that lost an announce to a colliding neighbour could not recover
+    /// it by retrying: the retransmission landed at the identical relative
+    /// offset and collided for exactly the same reason, as often as it was
+    /// tried. That is the Priority 1 argument, and it fails the deviation
+    /// rule's third clause.
+    ///
+    /// Two things are folded in, and BOTH are needed:
+    ///
+    /// * the announce's own packet hash, which makes the wait fresh for every
+    ///   announce. [`packet_hash`] is taken over the hashable part, which
+    ///   excludes hops, the transport id and the upper flag nibble
+    ///   (`packet::get_hashable_part`), so it is stable along the whole
+    ///   rebroadcast path: a firing clones `raw_packet` and never rewrites
+    ///   it, and the Type 1 → Type 2 conversion a relay applies does not move
+    ///   the hash either.
+    /// * `draw`, the ordinal of this scheduling event for that entry, which
+    ///   is what separates a schedule from ITS OWN reschedule. The packet
+    ///   hash cannot separate those two: they are draws for the same packet.
+    ///   Without the ordinal the locked retry — the half that matters — would
+    ///   have survived the fix.
+    ///
+    /// Reproducibility is kept, which is why this is not `RNS.rand()`: no
+    /// RNG, no clock, the wait is a pure function of (identity, destination,
+    /// announce, draw) and a test can recompute it. Decorrelation is kept:
+    /// [`Self::deterministic_jitter_ms`] still XORs this node's identity hash
+    /// in, and the per-event material is common to both neighbours, so it
+    /// cannot cancel the identity difference that keeps A off B.
+    ///
+    /// With an empty or unparseable `announce_raw` the event material
+    /// degenerates to a constant and the result is the old
+    /// (identity, destination) value — the floor, not a panic.
+    fn announce_wait_ms(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        announce_raw: &[u8],
+        draw: u8,
+        max_ms: u64,
+    ) -> u64 {
+        // One hash over (packet hash ‖ draw): the draw is an ordinal, and
+        // XOR-ing a small integer into a seed byte would move only that byte.
+        // Hashing it makes consecutive draws as unrelated as two announces.
+        let mut material = [0u8; 33];
+        material[..32].copy_from_slice(&packet_hash(announce_raw));
+        material[32] = draw;
+        let event = crate::crypto::sha256(&material);
+        let mut seed = [0u8; TRUNCATED_HASHBYTES];
+        for (out, (dest, ev)) in seed.iter_mut().zip(dest_hash.iter().zip(event.iter())) {
+            *out = dest ^ ev;
+        }
+        self.deterministic_jitter_ms(&seed, max_ms)
     }
 
     /// Compute a frequency (Hz) from a timestamp deque, mirroring Python's
@@ -9747,8 +9831,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 .map(|e| e.retries)
                 .unwrap_or(0);
             let backoff_factor = 1u64 << (retries.min(4) as u64);
-            let jitter = self.deterministic_jitter_ms(
+            // `retries` is read BEFORE the increment below, so retry 1 asks
+            // the unwidened ceiling (`1 << 0`) — the same one the first
+            // schedule used. The draw ordinal is therefore the only thing
+            // that separates the two, which is why it is `retries + 1` and
+            // not `retries`.
+            let jitter = self.announce_wait_ms(
                 &dest_hash,
+                &raw,
+                retries.saturating_add(1),
                 self.announce_jitter_max_ms() * backoff_factor,
             );
             if let Some(entry) = self.storage.get_announce_mut(&dest_hash) {
@@ -14010,7 +14101,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5520), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5529), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
