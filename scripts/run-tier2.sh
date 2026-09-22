@@ -14,6 +14,10 @@ FORCE=0
 if [ "${1:-}" = "--force" ] || [ "${LEVICULUM_TIER2_FORCE:-0}" = "1" ]; then
     FORCE=1
 fi
+# Resolved before the cd below: every later "$(dirname "$0")" would be
+# relative to the NEW working directory, which is only accidentally the same
+# one when the script was started by an absolute path.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR=~/.local/state/leviculum-ci
 mkdir -p "$LOG_DIR"
 # Per-execution log: timestamp + PID guarantees no overlap if two
@@ -28,7 +32,7 @@ cd "$(dirname "$0")/.." || exit 1
 # origin/master before any test work.  Skipped on developer-machine
 # installs where the marker is absent.
 if [ -f "$(git rev-parse --git-dir)/leviculum-ci-vm-mode-marker" ]; then
-    bash "$(dirname "$0")/_repo-sync.sh"
+    bash "$SCRIPT_DIR/_repo-sync.sh"
     echo "$(date -Iseconds) tier2 sync HEAD=$(git rev-parse --short HEAD)" >> "$RESULTS"
 fi
 
@@ -50,15 +54,30 @@ else
 fi
 
 MARKER="$LOG_DIR/lock-contention"
-if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 just extensive > "$LOG" 2>&1; then
+# shellcheck source=scripts/lock-contention.sh
+. "$SCRIPT_DIR/lock-contention.sh"
+
+# Test seam (scripts/test-lock-contention.sh only): replace the tier command
+# with a stub that writes a contention marker and fails, so the branch below
+# can be driven without a two-hour corpus run. Empty in production.
+TIER_CMD=( just extensive )
+if [ -n "${LEVICULUM_SELFTEST_TIER_CMD:-}" ]; then
+    TIER_CMD=( bash -c "$LEVICULUM_SELFTEST_TIER_CMD" )
+fi
+
+if CARGO_TARGET_DIR=~/.cache/leviculum-ci-target CARGO_INCREMENTAL=0 "${TIER_CMD[@]}" > "$LOG" 2>&1; then
     echo "$(date -Iseconds) tier2 GREEN $LOG" >> "$RESULTS"
-elif [ -f "$MARKER" ]; then
+elif lock_contention_take "$MARKER"; then
     # Another run held the scenario-runner lock when Tier 2 tried to
     # start. Not a failure — deferred. See periculum/src/lock.rs.
     # Lock-contention is NOT a RED — no bundle emit.
-    rm -f "$MARKER"
-    echo "$(date -Iseconds) tier2 SKIPPED lock-held $LOG" >> "$RESULTS"
+    #
+    # Which KIND of contention comes out of the marker, not out of its mere
+    # existence: a holder periculum could not call legitimate gets its own
+    # ledger token, so the one case worth acting on is greppable.
+    echo "[CI] lock contention: ${LOCK_DETAIL:-(no detail recorded)}" >> "$LOG"
+    echo "$(date -Iseconds) tier2 SKIPPED $(lock_contention_token) $(lock_contention_fields) $LOG" >> "$RESULTS"
 else
     echo "$(date -Iseconds) tier2 RED $LOG" >> "$RESULTS"
-    bash "$(dirname "$0")/_emit-auto-bug-bundle.sh" tier2 "$LOG" || true
+    bash "$SCRIPT_DIR/_emit-auto-bug-bundle.sh" tier2 "$LOG" || true
 fi

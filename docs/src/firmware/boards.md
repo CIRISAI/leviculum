@@ -399,8 +399,8 @@ The mapping from board to binary and features used by the flash recipes:
 | WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:1214`, `Justfile:1242`,
-`Justfile:1256`.)
+`just flash-rak4631-pocket` recipes: `Justfile:1231`, `Justfile:1259`,
+`Justfile:1273`.)
 
 ### What the `lnflash` bundle carries
 

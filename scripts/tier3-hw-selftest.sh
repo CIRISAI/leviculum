@@ -75,6 +75,33 @@ stub_no_json() {
     printf 'echo "stub periculum exit %s"; exit %s\n' "$rc" "$rc"
 }
 
+# A refused contender: periculum found the rig lock held, wrote the identified
+# marker (periculum #30/#31) and exited with a contention code -- 2 when the
+# holder looks like a legitimate overlap, 4 when it does not. No document.
+# Args: exit code, verdict tag, suspect flag, holder pid, holder age in secs.
+stub_contending() {
+    local rc="$1" verdict="$2" suspect="$3" pid="$4" age="$5"
+    cat <<EOF
+m="\$HOME/.local/state/leviculum-ci/lock-contention"
+mkdir -p "\$(dirname "\$m")"
+cat > "\$m" <<MARKER
+run=4242-1758500000000
+contender_pid=4242
+at=2026-09-22T03:37:00
+at_epoch_ms=1758500000000
+verdict=$verdict
+suspect=$suspect
+holder_run=$pid-1758400000000
+holder_pid=$pid
+holder_started=2026-09-21T03:37:00
+holder_age_secs=$age
+detail=pid $pid holds the lock, verdict $verdict
+MARKER
+echo "[leviculum] the rig lock is held by pid $pid"
+exit $rc
+EOF
+}
+
 FAILED=0
 
 # run_case -- <env assignments...>
@@ -287,6 +314,26 @@ echo "== Case 7: periculum exit 2 without a lock marker -> RED (harness error) =
 run_case LEVICULUM_SELFTEST_PERICULUM="$(stub_no_json 2)"
 assert_rc "$RC" 1 "harness error exits non-zero (RED)"
 assert_contains "$OUT" "periculum exited 2" "the cause is named in the log"
+
+echo "== Case 8: contention with a legitimate holder -> SKIPPED, holder named =="
+run_case LEVICULUM_SELFTEST_PERICULUM="$(stub_contending 2 running false 1234 600)"
+assert_rc "$RC" 0 "a lock overlap does not fail the tier"
+assert_contains "$OUT" "SKIPPED — another run held the runner lock" "the overlap is named as such"
+assert_contains "$OUT" "holder_pid=1234" "the holder the marker recorded reaches the log"
+assert_absent  "$OUT" "tier3 RED" "an overlap is never RED"
+
+echo "== Case 9: contention with a SUSPECT holder -> SKIPPED, but not the same words =="
+run_case LEVICULUM_SELFTEST_PERICULUM="$(stub_contending 4 suspected_wedge true 4321 90000)"
+assert_rc "$RC" 0 "a suspicion about the holder is still not this tier's failure"
+assert_contains "$OUT" "SUSPECTED WEDGE" "the banner says what is suspected"
+assert_contains "$OUT" "holder_pid=4321" "the suspected holder is named"
+assert_absent  "$OUT" "unknown code" "exit 4 is a documented contention code, not an unknown one"
+assert_absent  "$OUT" "another run held the runner lock" "a suspected wedge is not reported as a plain overlap"
+
+echo "== Case 10: a contention code with no marker -> RED (the channel broke) =="
+run_case LEVICULUM_SELFTEST_PERICULUM="$(stub_no_json 4)"
+assert_rc "$RC" 1 "a contention code periculum did not back with a marker is a harness fault"
+assert_contains "$OUT" "periculum exited 4" "the cause is named in the log"
 
 echo
 if (( FAILED == 0 )); then

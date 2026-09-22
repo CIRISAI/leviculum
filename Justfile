@@ -262,6 +262,8 @@ nrf-shellcheck:
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
+        scripts/run-tier2.sh scripts/run-tier3.sh \
+        scripts/lock-contention.sh scripts/test-lock-contention.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh \
         scripts/check-nrf-board-pins.sh \
@@ -633,6 +635,21 @@ site-publish-selftest:
 deb-stamp-selftest:
     @bash scripts/test-deb-stamp.sh
 
+# Codeberg #309: what the tier runners make of periculum's lock-contention
+# marker. The marker stopped being an empty flag file in periculum #30/#31 --
+# it carries the holder's verdict, pid and age -- and all three runners still
+# deleted it before reading a byte, so a suspected wedge (a holder past 24 h,
+# or one the kernel disagrees with) reached the ledger as the same
+# `SKIPPED lock-held` as a two-minute overlap.
+#
+# In `fast` for the reason deb-stamp-selftest is: these three scripts run from
+# cron and from nowhere else, so a break in them is found by nobody. ~1 s, no
+# build, no docker, no rig -- the tier command is stubbed through the runners'
+# selftest seam and notify-send is a fixture on PATH.
+[doc('Drive the tier runners against a stubbed lock-contention marker')]
+lock-contention-selftest:
+    @bash scripts/test-lock-contention.sh
+
 # Codeberg #304: the pin in rust-toolchain.toml is raised deliberately at
 # release time, and nothing said when that was due. This prints how far it
 # has fallen behind current stable -- pinned version, newest release, and the
@@ -813,7 +830,7 @@ check-all-targets:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

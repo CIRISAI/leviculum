@@ -144,7 +144,8 @@ minutes**. Subsequent runs are incremental, ~5-15 minutes.
 
 **Read this as history, not as behaviour.** `scripts/run-tier3.sh` calls
 `notify-send` on its verdict — `-u critical` for RED (sticky until
-dismissed), `-u normal` for GREEN and for a lock-held skip. It is the only
+dismissed), `-u normal` for GREEN and for a lock-held skip, `-u critical`
+again when the lock's holder is a suspected wedge. It is the only
 tier runner that ever did. It is also not the script the nightly starts:
 `leviculum-ci-nightly.service` runs `scripts/run-tier3-hw.sh`, which
 writes the ledger and notifies nobody. So no tier notifies today. Results
@@ -199,7 +200,7 @@ Location: `~/.local/state/leviculum-ci/`
 
 | File | Contents |
 |------|----------|
-| `last-results.txt` | one-line tally per run (`<iso-timestamp> <tier> GREEN/RED <log-path>`) |
+| `last-results.txt` | one-line tally per run (`<iso-timestamp> <tier> GREEN/RED <log-path>`, or `<tier> SKIPPED lock-held\|lock-suspect <verdict fields> <log-path>`) |
 | `tier1-YYYYMMDD-HHMMSS-PID.log` | full Tier 1 output (one file per run) |
 | `tier2-YYYYMMDD-HHMMSS-PID.log` | full Tier 2 output |
 | `nightly-YYYYMMDD-HHMMSS-PID.log` | full Tier 3 output |
@@ -268,9 +269,51 @@ pid, started time, cwd, optionally the test-name filter. Example:
 
 On-demand Tier 2 / scheduled Tier 3 runs that collide with a manual test
 drop a marker file at `~/.local/state/leviculum-ci/lock-contention`;
-the runner scripts observe the marker, classify the run as SKIPPED
-(not RED), send a `normal` (not `critical`) notification, and delete
-the marker. No false-alarm pages.
+the runner scripts read the marker, classify the run as SKIPPED
+(not RED), and delete it. No false-alarm pages.
+
+### Which kind of contention (Codeberg #309)
+
+The marker is not a flag: it carries periculum's verdict on the process
+holding the lock, plus that process's identity.
+
+| Field | Meaning |
+|-------|---------|
+| `verdict=` | `running`, `suspected_wedge`, `misrecorded`, `unattributable` |
+| `suspect=` | `true` for every verdict but `running` |
+| `holder_pid=`, `holder_age_secs=` | who is holding it, and for how long |
+| `detail=` | periculum's sentence about the holder, with what to inspect |
+
+A holder alive past 24 hours has by definition starved at least one
+nightly, and one whose recorded identity the kernel disagrees with is a
+bug shape nothing else can see. Both reach the ledger under their own
+token, so the case worth acting on is greppable:
+
+```
+<iso> tier3 SKIPPED lock-held    verdict=running         holder_pid=… holder_age_secs=… <log>
+<iso> tier3 SKIPPED lock-suspect verdict=suspected_wedge holder_pid=… holder_age_secs=… <log>
+```
+
+Neither is RED. The verdict is a heuristic over metadata — a genuinely
+enormous run looks like a wedge — and the contender never touches the
+lock, so a false accusation would cost somebody killing a healthy
+nightly. What changes is what the ledger says and, in
+`scripts/run-tier3.sh`, whether the notification is `normal` or
+`critical`.
+
+**The marker, not the exit code, is what the runners branch on.**
+periculum also carries the distinction in its exit status (2 for an
+overlap, 4 for a suspect holder), but `run-tier2.sh` and `run-tier3.sh`
+reach periculum through `just extensive` / `just nightly`, and the
+`nightly` recipe rewrites its status to 1 whenever an LNode's firmware
+could not be verified. The exit code is therefore a corroborating signal
+there, and it is also the only channel that cannot say WHO.
+`scripts/run-tier3-hw.sh` calls periculum directly and uses the codes for
+one decision only: 2 and 4 both mean "look at the marker".
+
+`scripts/test-lock-contention.sh` (`just lock-contention-selftest`) and
+the contention cases in `scripts/tier3-hw-selftest.sh` hold this against
+stubbed markers; neither needs a build, docker or the rig.
 
 ### Inspecting the lock
 

@@ -85,6 +85,8 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR=~/.local/state/leviculum-ci
 RESULTS="$LOG_DIR/last-results.txt"
 MARKER="$LOG_DIR/lock-contention"
+# shellcheck source=scripts/lock-contention.sh
+. "$REPO_DIR/scripts/lock-contention.sh"
 
 mkdir -p "$LOG_DIR"
 
@@ -428,8 +430,18 @@ fi
 # periculum exit codes (its CI contract):
 #   0  something ran, nothing RED
 #   1  at least one scenario RED
-#   2  usage error, malformed scenario, internal runner error, refused preflight
+#   2  usage error, malformed scenario, internal runner error, refused
+#      preflight -- OR contention with a holder that looks legitimate
 #   3  nothing ran (only SKIPPED_INFRA / UNSUPPORTED)
+#   4  contention with a holder that does NOT look legitimate (periculum
+#      EXIT_CONTENTION_SUSPECT). 4 and not 3: 3 already means "nothing ran"
+#      to this very case block, which would have filed a suspected wedge in
+#      the quietest arm there is.
+#
+# Which of the two contention codes it is does not decide anything here: the
+# marker does, because it is the only channel carrying the holder's identity
+# (scripts/lock-contention.sh says why it is the authority). The codes only
+# decide WHETHER to look at the marker.
 
 # Summary counters out of the JSON document, empty when it was never written
 # (exit 2 produces none).
@@ -453,19 +465,35 @@ RC=0
 case "$PERICULUM_RC" in
     0) ;;
     1) RC=1 ;;
-    2)
-        if [[ -f "$MARKER" ]]; then
+    2|4)
+        if lock_contention_take "$MARKER"; then
             # Lock-contention path mirrors run-tier3.sh: another process held
             # the runner lock when this fired. Treat as SKIPPED, not RED. The
             # marker file decouples skip-vs-fail from log-text grepping;
             # periculum drops it before printing, precisely for this consumer.
-            rm -f "$MARKER"
-            log "[CI_HW] SKIPPED — another run held the runner lock"
-            echo "$(date -Iseconds) tier3 SKIPPED lock-held $LOG" >> "$RESULTS"
+            #
+            # This is the nightly a human reads at 03:37, so it is the path
+            # where "which kind of holder" matters most: a suspected wedge
+            # named as a plain overlap is a starved nightly nobody goes
+            # looking for.
+            if lock_contention_is_suspect; then
+                log "[CI_HW] SKIPPED — SUSPECTED WEDGE on the runner lock ($(lock_contention_fields))"
+                log "[CI_HW] ${LOCK_DETAIL:-no detail recorded}"
+            else
+                log "[CI_HW] SKIPPED — another run held the runner lock ($(lock_contention_fields))"
+            fi
+            echo "$(date -Iseconds) tier3 SKIPPED $(lock_contention_token) $(lock_contention_fields) $LOG" >> "$RESULTS"
             exit 0
         fi
         RC=1
-        log "[CI_HW] RED — periculum exited 2 (usage, malformed scenario, internal runner error or refused preflight) — see $LOG"
+        if [[ "$PERICULUM_RC" == 4 ]]; then
+            # 4 is only ever contention, so no marker means the channel that
+            # decides skip-vs-RED did not write. Fail loudly rather than
+            # guess: a silent skip here is a nightly that never ran.
+            log "[CI_HW] RED — periculum exited 4 (lock contention with a suspect holder) but left no marker — see $LOG"
+        else
+            log "[CI_HW] RED — periculum exited 2 (usage, malformed scenario, internal runner error or refused preflight) — see $LOG"
+        fi
         ;;
     3)
         # Nothing ran: every scenario was SKIPPED_INFRA or UNSUPPORTED. That is
