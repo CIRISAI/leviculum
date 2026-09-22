@@ -65,7 +65,7 @@
 //! aged past 1000 lines while the guard called the file fine, because every
 //! row of it was bare.
 //!
-//! The comma spelling was admitted in 2026-08 after `lora.rs:1063` drifted
+//! The comma spelling was admitted in 2026-08 after `lora.rs:1061` drifted
 //! onto radio-init code inside a *regulatory* claim and this guard passed
 //! it. Adding it converted 75 book and 55 source citations from
 //! existence-checked to drift-checked without editing one of them, and
@@ -1229,7 +1229,7 @@ fn run_canary() {
     let correct = format!("canary_target.rs:{CANARY_SUBJECT_LINE}");
     // The drifted citations must be reported: this is the failure the guard
     // exists for, and the one that decays silently. Once per spelling --
-    // a comma-form drift that goes unreported is the `lora.rs:1063` case
+    // a comma-form drift that goes unreported is the `lora.rs:1061` case
     // over again, and a table-form one is Codeberg #307 over again, which is
     // what admitting each spelling was for.
     let drifts: Vec<&Failure> = failures

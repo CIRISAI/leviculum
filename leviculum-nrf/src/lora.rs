@@ -922,23 +922,12 @@ async fn transmit_all_frames(
 }
 
 // RX helper
-/// The classification fields of a received Reticulum packet, for the
-/// `[LORA] RX` line: the header flags byte and the first 4 bytes of the
-/// destination hash. `lnflash --summarize` classifies announce, data, path
-/// request and proof from exactly these two keys (`lnflash/src/summarize.rs`).
-/// The destination sits after flags(1)+hops(1), shifted 16 bytes further when
-/// the header-type bit says a transport id precedes it (packet layout in
-/// `leviculum-core/src/packet.rs`). `None` for a packet too short to carry
-/// the header its flags claim — that line keeps its old bare shape.
-fn classify_fields(data: &[u8]) -> Option<(u8, &[u8])> {
-    let flags = *data.first()?;
-    let dst_at = if flags & leviculum_core::packet::FLAG_HEADER_TYPE_MASK != 0 {
-        18
-    } else {
-        2
-    };
-    Some((flags, data.get(dst_at..dst_at + 4)?))
-}
+//
+// The classification fields of a received Reticulum packet — flags byte,
+// destination prefix and context byte — come from
+// `leviculum_core::packet::peek_wire_class`, which owns the offsets because
+// it owns the layout. This crate cross-compiles and runs no host tests; the
+// arithmetic is held by `packet.rs`'s own tests instead.
 
 /// Everything a reception has to pass through on its way to the core, as one
 /// [`FrameSink`](leviculum_rx_arming::FrameSink).
@@ -1001,19 +990,28 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
             );
         }
         if let Some(data) = self.reassembler.feed(frame, self.rx_timeout_count) {
-            match classify_fields(&data) {
-                Some((flags, dst)) => crate::log::log_fmt(
+            match leviculum_core::packet::peek_wire_class(&data) {
+                // `ctx=` is appended AFTER `dst=` on purpose: every existing
+                // consumer of this line (`lnflash --summarize`, the field
+                // captures) matches on the `flags=`/`dst=` keys, and
+                // appending leaves the shape they grep untouched. It is the
+                // byte that separates a relayed announce (`ctx=0x00`) from a
+                // path response carrying the same announce (`ctx=0x0b`) —
+                // the two have the same `flags=` and the same `dst=`, so
+                // until now a capture could not tell them apart at all.
+                Some(cls) => crate::log::log_fmt(
                     "[LORA] ",
                     format_args!(
-                        "RX {} bytes rssi={} snr={} flags=0x{:02x} dst={:02x}{:02x}{:02x}{:02x}",
+                        "RX {} bytes rssi={} snr={} flags=0x{:02x} dst={:02x}{:02x}{:02x}{:02x} ctx=0x{:02x}",
                         data.len(),
                         status.rssi,
                         status.snr,
-                        flags,
-                        dst[0],
-                        dst[1],
-                        dst[2],
-                        dst[3]
+                        cls.flags,
+                        cls.dest_prefix[0],
+                        cls.dest_prefix[1],
+                        cls.dest_prefix[2],
+                        cls.dest_prefix[3],
+                        cls.context
                     ),
                 ),
                 None => crate::log::log_fmt(

@@ -20,6 +20,17 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- The firmware's `[LORA] RX` line carries the **context byte**, `ctx=0x<hh>`,
+  appended after `dst=` so every existing consumer of the line reads
+  unchanged. It is the only field that separates a relayed announce
+  (`ctx=0x00`) from a path response carrying the same announce (`ctx=0x0b`):
+  the two have the same `flags=0x51` and the same `dst=`, and only the second
+  is the one the announce table excludes by design. A capture could not tell
+  them apart before. The field offsets moved to
+  `leviculum_core::packet::peek_wire_class`, next to the layout they depend on
+  and host-tested there, because `leviculum-nrf` cross-compiles and runs no
+  host tests of its own.
+
 - The nightly decides what may be published. `rnsd_interop` — whether we still
   interoperate with a Python-RNS peer — runs in neither forge pipeline and
   cannot: it needs the `reference/Reticulum` submodule, and both pipelines

@@ -16,9 +16,10 @@ use crate::constants::{HEADER_MAXSIZE, HEADER_MINSIZE, MDU, TRUNCATED_HASHBYTES}
 
 /// Bit mask for IFAC (Interface Access Code) flag (bit 7)
 const FLAG_IFAC_MASK: u8 = 0x80;
-/// Bit mask for header type flag (bit 6). Public because the firmware's
-/// `[LORA] RX` line locates the destination hash by this bit
-/// (`leviculum-nrf/src/lora.rs`), and the bit definition must not fork.
+/// Bit mask for header type flag (bit 6). Public because out-of-crate
+/// readers locate the destination hash by this bit; in-tree the firmware's
+/// `[LORA] RX` line goes through [`peek_wire_class`] instead, so the offset
+/// arithmetic that depends on this bit lives — and is tested — here.
 pub const FLAG_HEADER_TYPE_MASK: u8 = 0x40;
 /// Bit mask for context flag (bit 5)
 const FLAG_CONTEXT_MASK: u8 = 0x20;
@@ -460,6 +461,55 @@ impl Packet {
     }
 }
 
+/// The three header bytes a capture reader classifies a reception by, read
+/// straight off the wire without unpacking or allocating.
+///
+/// Exists for the firmware's `[LORA] RX` line, which has to say what kind of
+/// frame just came down before anything above it has looked at the packet.
+/// The offsets live here, next to [`FLAG_HEADER_TYPE_MASK`] and the layout
+/// they depend on, so the firmware cannot fork them — and so they are
+/// testable on the host, which `leviculum-nrf` (cross-compiled, no host
+/// tests) is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireClass {
+    /// The flags byte, verbatim.
+    pub flags: u8,
+    /// First four bytes of the destination hash — enough to correlate a
+    /// reception against the sender's own logs.
+    pub dest_prefix: [u8; 4],
+    /// The context byte, verbatim.
+    ///
+    /// The byte that separates a relayed announce (`0x00`) from a path
+    /// response carrying the same announce (`0x0B`, [`PacketContext::PathResponse`]).
+    /// Their flags bytes are identical, so without this the two shapes are
+    /// indistinguishable on a capture.
+    pub context: u8,
+}
+
+/// Read a frame's [`WireClass`], or `None` if it is too short to carry the
+/// header its own flags byte claims.
+///
+/// Total and allocation-free: every input either yields the three bytes or
+/// `None`. It does not validate anything beyond length — a frame whose flags
+/// claim a Type-2 header it does not have simply comes back `None`.
+pub fn peek_wire_class(raw: &[u8]) -> Option<WireClass> {
+    let flags = *raw.first()?;
+    // flags(1) + hops(1), then the transport id when the header type bit
+    // says one is present. Same arithmetic as `Packet::unpack`.
+    let dest_at = if flags & FLAG_HEADER_TYPE_MASK != 0 {
+        2 + TRUNCATED_HASHBYTES
+    } else {
+        2
+    };
+    let dest_prefix: [u8; 4] = raw.get(dest_at..dest_at + 4)?.try_into().ok()?;
+    let context = *raw.get(dest_at + TRUNCATED_HASHBYTES)?;
+    Some(WireClass {
+        flags,
+        dest_prefix,
+        context,
+    })
+}
+
 /// Compute the hashable part of a raw packet (matching Python Reticulum)
 ///
 /// The hashable part strips routing-specific information so that the hash
@@ -642,6 +692,83 @@ mod tests {
         let mut out = [0u8; MTU];
         let len = parsed.pack(&mut out).expect("repack");
         assert_eq!(&out[..len], &raw[..], "repack must be byte-identical");
+    }
+
+    /// What the firmware's `[LORA] RX` line reads off a frame, for both
+    /// header types and against the packer itself — the offsets are the part
+    /// that is silently wrong (18 vs 34) and the board runs no host tests.
+    #[test]
+    fn peek_wire_class_agrees_with_the_packer_for_both_header_types() {
+        for (header_type, transport_id) in [
+            (HeaderType::Type1, None),
+            (HeaderType::Type2, Some([0xb2; TRUNCATED_HASHBYTES])),
+        ] {
+            for context in [PacketContext::None, PacketContext::PathResponse] {
+                let mut destination_hash = [0u8; TRUNCATED_HASHBYTES];
+                destination_hash[..4].copy_from_slice(&[0xbb, 0x12, 0x4c, 0x3b]);
+                let packet = Packet {
+                    flags: PacketFlags {
+                        ifac_flag: false,
+                        header_type,
+                        context_flag: false,
+                        transport_type: TransportType::Transport,
+                        dest_type: DestinationType::Single,
+                        packet_type: PacketType::Announce,
+                    },
+                    hops: 1,
+                    transport_id,
+                    destination_hash,
+                    context,
+                    data: PacketData::Owned(alloc::vec![0x5a; 40]),
+                };
+                let mut buf = [0u8; MTU];
+                let len = packet.pack(&mut buf).expect("pack");
+
+                let seen = peek_wire_class(&buf[..len]).expect("a packed packet must classify");
+                assert_eq!(seen.flags, packet.flags.to_byte());
+                assert_eq!(seen.dest_prefix, [0xbb, 0x12, 0x4c, 0x3b]);
+                assert_eq!(
+                    seen.context,
+                    context.to_byte(),
+                    "the byte that separates a relayed announce from a path response"
+                );
+            }
+        }
+    }
+
+    /// The two announce shapes the board has to be able to tell apart carry
+    /// the SAME flags byte. This is why the context byte is on the line at
+    /// all; if this assertion ever fails, the line could have been read from
+    /// `flags=` alone.
+    #[test]
+    fn a_relayed_announce_and_a_path_response_share_a_flags_byte() {
+        let flags = PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type2,
+            context_flag: false,
+            transport_type: TransportType::Transport,
+            dest_type: DestinationType::Single,
+            packet_type: PacketType::Announce,
+        };
+        assert_eq!(flags.to_byte(), 0x51, "the field frame's flags byte");
+        assert_eq!(PacketContext::None.to_byte(), 0x00);
+        assert_eq!(PacketContext::PathResponse.to_byte(), 0x0B);
+    }
+
+    /// A frame too short to carry the header its flags claim classifies as
+    /// nothing rather than reading a neighbouring byte as the context. The
+    /// firmware falls back to the bare `RX <n> bytes` shape on `None`.
+    #[test]
+    fn peek_wire_class_refuses_a_frame_shorter_than_its_own_header() {
+        assert_eq!(peek_wire_class(&[]), None);
+        // Type-1 header (19 bytes) minus its context byte.
+        assert_eq!(peek_wire_class(&[0x11; HEADER_MINSIZE - 1]), None);
+        // Type-2 flags on a frame only long enough for a Type-1 header.
+        let mut short_type2 = [0x51u8; HEADER_MINSIZE];
+        short_type2[0] = 0x51;
+        assert_eq!(peek_wire_class(&short_type2), None);
+        // The shortest frame that does classify.
+        assert!(peek_wire_class(&[0x11; HEADER_MINSIZE]).is_some());
     }
 
     #[test]
