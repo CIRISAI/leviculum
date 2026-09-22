@@ -217,17 +217,14 @@ pub const fn resource_sdu(negotiated_mtu: u32) -> usize {
 ///    standard SDU and tens of kilobytes of index for one packet.
 ///  * **`ASSEMBLY_LIVE_COPIES * max_size`** — the transfer's bytes, counted
 ///    once per copy of them that is live at the same instant. The peak is
-///    inside `IncomingResource::assemble`, at the `assembled.clone()` that
-///    fills `assembled_with_metadata`: `self.parts` (still whole, nothing
-///    clears it), `stream`, `decrypted` (`truncate` does not release
-///    capacity), `assembled`, `hash_input` and the clone are all live
-///    together, and none is dropped before the function returns. Six.
+///    inside `IncomingResource::assemble`, and which copies reach it is
+///    enumerated at [`ASSEMBLY_LIVE_COPIES`].
 ///
-/// What is deliberately NOT in the sum: the allocator's per-block overhead
-/// (`n + 7` blocks at the peak), which belongs to whatever fragmentation
-/// reserve the binary keeps, and the decompression path, which allocates
-/// again from `data_size` — a binary that builds `leviculum-core` without
-/// `compression` cannot reach it, and one that does must budget it on top.
+/// What is deliberately NOT in the sum: the allocator's per-block overhead,
+/// which belongs to whatever fragmentation reserve the binary keeps, and the
+/// decompression path, which allocates again from `data_size` — a binary that
+/// builds `leviculum-core` without `compression` cannot reach it, and one
+/// that does must budget it on top.
 pub const fn incoming_peak_bytes(max_size: usize, sdu: usize) -> usize {
     if sdu == 0 {
         return 0;
@@ -240,10 +237,26 @@ pub const fn incoming_peak_bytes(max_size: usize, sdu: usize) -> usize {
 }
 
 /// How many whole copies of a transfer's bytes are live at the peak of
-/// `IncomingResource::assemble`. Enumerated at [`incoming_peak_bytes`],
-/// which is the only caller; a change to the assembly path that adds or
-/// drops a buffer changes this number and nothing else.
-pub const ASSEMBLY_LIVE_COPIES: usize = 6;
+/// `IncomingResource::assemble`. [`incoming_peak_bytes`] is the only caller;
+/// a change to the assembly path that adds or drops a buffer changes this
+/// number and nothing else.
+///
+/// Two, and where:
+///
+///  * the concatenation of the parts (`stream`), and
+///  * the buffer `Link::decrypt` writes its plaintext into (`decrypted`),
+///
+/// which are live together for the length of one decryption and are the only
+/// pair that ever is. `self.parts` is consumed part by part as `stream` is
+/// built, so it is gone before the decryption; the plaintext is carried
+/// forward in the buffer that already holds it rather than copied out of it;
+/// the hash is taken over a borrow (`full_hash_parts`); and the proof is
+/// reduced to its 32-byte digest instead of keeping the assembled bytes.
+///
+/// It was six until 2026-09-23 — parts, stream, decrypted, assembled,
+/// hash_input and a clone for the proof, none dropped before `assemble`
+/// returned.
+pub const ASSEMBLY_LIVE_COPIES: usize = 2;
 
 // Types
 /// Status of a resource transfer.

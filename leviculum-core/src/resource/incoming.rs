@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::constants::RESOURCE_HASHMAP_LEN;
-use crate::crypto::full_hash;
+use crate::crypto::full_hash_parts;
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
 use crate::msgpack;
@@ -87,8 +87,9 @@ pub(crate) struct IncomingResource {
     waiting_for_hmu: bool,
     link_mdu: usize,
     sdu: usize,
-    // For proof computation
-    assembled_with_metadata: Option<Vec<u8>>,
+    // For proof computation: the digest `build_proof` needs, not the bytes
+    // it is taken over (see `assemble`, step 5).
+    proof_hash: Option<[u8; 32]>,
     // Last REQ payload (for retransmission on timeout)
     last_req: Option<Vec<u8>>,
 }
@@ -104,14 +105,10 @@ impl IncomingResource {
         for part in self.parts.iter().flatten() {
             bytes += part.capacity();
         }
-        for buf in [
-            &self.request_id,
-            &self.assembled_with_metadata,
-            &self.last_req,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        // No term for the assembled data: since 2026-09-23 a concluded
+        // reassembly pins its 32-byte proof digest and not a copy of the
+        // transfer (`assemble`, step 5).
+        for buf in [&self.request_id, &self.last_req].into_iter().flatten() {
             bytes += buf.capacity();
         }
         bytes
@@ -218,7 +215,7 @@ impl IncomingResource {
             waiting_for_hmu: false,
             link_mdu,
             sdu,
-            assembled_with_metadata: None,
+            proof_hash: None,
             last_req: None,
         };
 
@@ -556,6 +553,19 @@ impl IncomingResource {
     /// Assemble the complete data from all received parts.
     ///
     /// Returns `(application_data, optional_metadata)`.
+    ///
+    /// # Allocation shape
+    ///
+    /// This is the peak of one reception, and on a board it is the peak of
+    /// the whole node: every buffer here is sized by a number the PEER
+    /// advertised, bounded only by the receiver's
+    /// `max_incoming_resource_size`. [`crate::resource::ASSEMBLY_LIVE_COPIES`]
+    /// states how many whole copies of the transfer are live at that peak and
+    /// the firmware heap budgets are computed from it, so the pairing of
+    /// buffers below is load-bearing rather than stylistic: `stream` and
+    /// `decrypted` are live together for the length of one decryption, and no
+    /// other pair ever is. What this function must NOT do — and what it did
+    /// until 2026-09-23 — is leave a buffer live past its last read.
     pub(crate) fn assemble(
         &mut self,
         link: &Link,
@@ -564,54 +574,80 @@ impl IncomingResource {
             return Err(ResourceError::InvalidRequest);
         }
 
-        // 1. Concatenate all parts
+        // 1. Concatenate all parts, consuming each as it is copied.
+        //
+        // Completeness is decided before the first part is taken, so a
+        // transfer that is short a part reports it having moved nothing —
+        // the same `HashMismatch` the borrowing loop returned. After that
+        // check every `take` hands the part's allocation to this scope,
+        // which drops it at the end of the iteration: by the decryption
+        // below `self.parts` holds only its spine. The resource is
+        // consumed by the caller on this path whether assembly succeeds or
+        // fails (`link_management.rs`, `ResourcePartResult::Assembling`),
+        // so nothing later reads a part back.
+        if self.parts.iter().any(|p| p.is_none()) {
+            return Err(ResourceError::HashMismatch);
+        }
         let mut stream = Vec::with_capacity(self.transfer_size as usize);
-        for part in &self.parts {
-            match part {
-                Some(data) => stream.extend_from_slice(data),
-                None => return Err(ResourceError::HashMismatch),
+        for part in self.parts.iter_mut() {
+            if let Some(data) = part.take() {
+                stream.extend_from_slice(&data);
             }
         }
 
-        // 2. Decrypt
+        // 2. Decrypt, then drop the ciphertext: this is the one instant two
+        // whole copies of the transfer are live, and `stream` has no reader
+        // after it.
         let mut decrypted = vec![0u8; stream.len()];
         let plaintext_len = link
             .decrypt(&stream, &mut decrypted)
             .map_err(|_| ResourceError::CryptoError)?;
+        drop(stream);
         decrypted.truncate(plaintext_len);
 
-        // 3. Strip LEADING wire_random bytes
+        // 3. Strip LEADING wire_random bytes.
+        //
+        // In place: a memmove inside the buffer already held, where
+        // `&decrypted[4..].to_vec()` was a second whole copy that outlived
+        // the first.
         if decrypted.len() < RESOURCE_RANDOM_HASH_SIZE {
             return Err(ResourceError::HashMismatch);
         }
-        let stripped = &decrypted[RESOURCE_RANDOM_HASH_SIZE..];
+        decrypted.drain(..RESOURCE_RANDOM_HASH_SIZE);
 
-        // 4. Decompress if needed
-        let assembled = if self.flags.compressed {
+        // 4. Decompress if needed. The compressed path is the one place a
+        // second buffer is unavoidable — it is sized by `data_size`, not by
+        // the transfer — so the plaintext is released as soon as it has been
+        // read out of.
+        let mut assembled = if self.flags.compressed {
             #[cfg(feature = "compression")]
             {
-                super::compression::bz2_decompress(stripped, self.data_size as usize)?
+                let out = super::compression::bz2_decompress(&decrypted, self.data_size as usize)?;
+                drop(decrypted);
+                out
             }
             #[cfg(not(feature = "compression"))]
             {
                 return Err(ResourceError::CompressionUnsupported);
             }
         } else {
-            stripped.to_vec()
+            decrypted
         };
 
-        // 5. Verify hash: full_hash(assembled + random_hash) == resource_hash
-        let mut hash_input = Vec::with_capacity(assembled.len() + RESOURCE_RANDOM_HASH_SIZE);
-        hash_input.extend_from_slice(&assembled);
-        hash_input.extend_from_slice(&self.random_hash);
-        let calculated = full_hash(&hash_input);
+        // 5. Verify hash: full_hash(assembled + random_hash) == resource_hash.
+        // SHA-256 is streaming, so the two pieces are fed in order instead of
+        // being concatenated into a third copy of the transfer.
+        let calculated = full_hash_parts(&[&assembled, &self.random_hash]);
         if calculated != self.resource_hash {
             self.status = ResourceStatus::Corrupt;
             return Err(ResourceError::HashMismatch);
         }
 
-        // Store assembled data (including metadata prefix) for proof computation
-        self.assembled_with_metadata = Some(assembled.clone());
+        // Reduce the assembled data (metadata prefix included) to the only
+        // thing the proof needs of it: its digest. Keeping the bytes kept a
+        // whole copy of the transfer alive from here until the resource was
+        // dropped, and `build_proof` then built a second one to hash.
+        self.proof_hash = Some(self.proof_hash_of(&assembled));
 
         // 6. Extract metadata if present (only in segment 1, per Python Resource.py:696)
         let (app_data, metadata) = if self.flags.has_metadata && self.segment_index == 1 {
@@ -625,8 +661,12 @@ impl IncomingResource {
                 return Err(ResourceError::HashMismatch);
             }
             let metadata = assembled[3..3 + meta_len].to_vec();
-            let data = assembled[3 + meta_len..].to_vec();
-            (data, Some(metadata))
+            // The application data is the tail of the buffer already held:
+            // dropping the header in place returns it without a copy, where
+            // `assembled[3 + meta_len..].to_vec()` made one the size of the
+            // transfer beside the one it read from.
+            assembled.drain(..3 + meta_len);
+            (assembled, Some(metadata))
         } else {
             (assembled, None)
         };
@@ -635,21 +675,28 @@ impl IncomingResource {
         Ok((app_data, metadata))
     }
 
+    /// The completion proof hash over the assembled plaintext, metadata
+    /// prefix included: `full_hash(assembled_with_metadata + h)`
+    /// (Resource.py:752-758).
+    ///
+    /// Named and separate because it is the formula, and the formula is what
+    /// `completion_proof_follows_reference_formula` pins; `assemble` is the
+    /// only production caller and calls it while the assembled bytes are
+    /// still live, which is the whole reason they need not be kept.
+    fn proof_hash_of(&self, assembled_with_metadata: &[u8]) -> [u8; 32] {
+        full_hash_parts(&[assembled_with_metadata, &self.resource_hash])
+    }
+
     /// Build the completion proof.
     ///
-    /// Must be called AFTER `assemble()` succeeds.
+    /// Must be called AFTER `assemble()` succeeds: the proof hash is taken
+    /// there, while the assembled bytes are live, and only the digest is
+    /// kept. `InvalidRequest` therefore still means exactly what it meant
+    /// when this read the bytes themselves — no successful assembly on this
+    /// resource.
     /// Returns the proof payload: `[32: resource_hash][32: proof_hash]`.
     pub(crate) fn build_proof(&self) -> Result<Vec<u8>, ResourceError> {
-        let assembled = self
-            .assembled_with_metadata
-            .as_ref()
-            .ok_or(ResourceError::InvalidRequest)?;
-
-        // proof = full_hash(assembled_with_metadata + resource_hash)
-        let mut proof_input = Vec::with_capacity(assembled.len() + 32);
-        proof_input.extend_from_slice(assembled);
-        proof_input.extend_from_slice(&self.resource_hash);
-        let proof_hash = full_hash(&proof_input);
+        let proof_hash = self.proof_hash.ok_or(ResourceError::InvalidRequest)?;
 
         let mut proof_data = Vec::with_capacity(64);
         proof_data.extend_from_slice(&self.resource_hash);
@@ -1581,7 +1628,9 @@ mod tests {
         .unwrap();
 
         let assembled = b"\x00\x00\x04METAactual data".to_vec();
-        incoming.assembled_with_metadata = Some(assembled.clone());
+        // What `assemble` stores at step 5, through the same function it
+        // calls: the digest, taken while the assembled bytes are still live.
+        incoming.proof_hash = Some(incoming.proof_hash_of(&assembled));
 
         let proof = incoming.build_proof().unwrap();
         assert_eq!(proof.len(), 64, "proof is h(32) + proof hash(32)");

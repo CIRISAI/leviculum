@@ -404,6 +404,31 @@ fn incoming_peak_formula_bounds_what_the_cap_buys() {
             measured[i],
         );
     }
+
+    // The slope, which is the same claim with the allowance taken out of it.
+    //
+    // Both assertions above carry the allowance, so a generous allowance
+    // buys slack at both caps at once — and the allowance is a judgement
+    // about buffers that do NOT grow with the cap, made in this file. The
+    // difference between the two measurements cancels everything
+    // cap-independent, allowance included, and leaves exactly the bytes the
+    // extra 6 KiB of cap bought. That is the number ASSEMBLY_LIVE_COPIES
+    // claims, so it is asserted against the formula's own difference and not
+    // against a figure written out here.
+    //
+    // At six live copies this reads 37 469 B for 6 144 B of extra cap; at
+    // two it reads 12 893 B, against a formula difference of 12 665 B.
+    let measured_growth = measured[1] - measured[0];
+    let formula_growth = formula[1] - formula[0];
+    assert!(
+        formula_growth + RECEPTION_ALLOWANCE >= measured_growth,
+        "{} B more cap cost the receiver {measured_growth} B more heap, where \
+         incoming_peak_bytes says {formula_growth} B: the assembly path holds more \
+         copies of the transfer than the {} ASSEMBLY_LIVE_COPIES names, and the \
+         difference is charged to every board's heap budget",
+        LARGE - SMALL,
+        ASSEMBLY_LIVE_COPIES,
+    );
 }
 
 // ---------------------------------------------------------------------------
