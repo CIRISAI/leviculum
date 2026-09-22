@@ -445,12 +445,30 @@ enum ConfigDelivery {
     Applied,
     /// A config whose bandwidth or coding rate has no SX1262 register code.
     Invalid,
-    /// The config channel would not take it within the grace period. On a
-    /// board whose boot held LoRa down this is the steady state: the task
-    /// that would drain the channel was never spawned, so the first config
-    /// parks in the depth-1 channel forever and every later one is
-    /// undeliverable.
+    /// The config channel would not take it within the grace period —
+    /// which, now that a boot without LoRa takes the [`Stored`] route
+    /// instead of the channel, means a spawned LoRa task has genuinely
+    /// stopped draining (a wedged radio, or a task that returned on an
+    /// init failure).
+    ///
+    /// [`Stored`]: ConfigDelivery::Stored
     Undeliverable,
+    /// This boot never spawned the LoRa task, so delivery and apply are
+    /// impossible until the next reset; the config went to flash instead
+    /// and the page write is confirmed. Acked, because the ack then makes
+    /// the one claim that is true and useful: a reboot comes back on this
+    /// config — which is exactly the contract the corpus prep relies on
+    /// (it pushes the channel one reboot early and resets afterwards;
+    /// periculum `runner.rs::push_lnode_radio_config`: "The ACK is the
+    /// frame's receipt and nothing more"). Until 2026-09-22 this state
+    /// fed the consumerless channel instead: the first config of the boot
+    /// wedged its one slot, every later one was refused, and a corpus run
+    /// lost all 26 LNode cells to `no_ack_after_3`.
+    Stored,
+    /// Same boot state as [`Stored`](ConfigDelivery::Stored), but the page
+    /// write failed or timed out: nothing will survive the reset, so the
+    /// answer must not claim otherwise.
+    StoreFailed,
     /// Handed to the LoRa task and persisted, but the apply was not
     /// confirmed inside [`CONFIG_APPLY_WITHIN`]. Answered as busy — the
     /// truthful answer at answer time, and a retryable one: the config is
@@ -463,9 +481,10 @@ enum ConfigDelivery {
 /// How long a radio config may wait for the LoRa task to drain the
 /// previous one before it is refused. A running LoRa task polls the
 /// channel every loop turn, so a live consumer clears it in milliseconds;
-/// only a consumer that does not exist (LoRa held down at boot) or is
-/// itself stuck runs the clock out. Well inside lnflash's 3.5 s answer
-/// window so the refusal still reaches the host.
+/// only a stuck consumer runs the clock out — the consumer that does not
+/// exist (LoRa held down at boot) no longer reaches this wait at all, it
+/// takes the stored route before the channel. Well inside lnflash's 3.5 s
+/// answer window so the refusal still reaches the host.
 const CONFIG_DELIVER_WITHIN: Duration = Duration::from_millis(500);
 
 /// How long a delivered config may wait for the LoRa task to confirm the
@@ -489,7 +508,10 @@ const CONFIG_APPLY_WITHIN: Duration = Duration::from_millis(1200);
 /// transport port deaf until the next reboot, with the write side and
 /// main loop running on as if nothing happened. Undeliverable is answered
 /// as busy, the same contract [`crate::lora::deliver_tx_spacing`] already
-/// has for its consumerless channel.
+/// has for its consumerless channel. The `lora=off` boot itself never
+/// reaches the channel any more: it is answered from the flash store
+/// (see [`ConfigDelivery::Stored`]), because feeding a consumerless slot
+/// is a wedge, not a delivery.
 async fn apply_radio_config(
     config_tx: &Sender<'static, CriticalSectionRawMutex, crate::lora::RadioConfig, 1>,
     wire: leviculum_core::rnode::RadioConfigWire,
@@ -498,6 +520,26 @@ async fn apply_radio_config(
         log("SER: invalid config frame");
         return ConfigDelivery::Invalid;
     };
+    if !crate::media::lora_booted() {
+        // No LoRa task this boot: the channel has no consumer, so a config
+        // fed to it would wedge its one slot for the rest of the boot, and
+        // an apply can never be confirmed. The truthful, useful answer is
+        // the stored one — persist, and ack only once the page write is
+        // confirmed, because the ack's whole claim is that a reboot comes
+        // back on this config (#358).
+        return match crate::telemetry::confirm(crate::radio_store::request_save_confirmed(&wire))
+            .await
+        {
+            envelope::Persist::Durable => {
+                log("SER: radio config stored, applies at next boot (lora not started)");
+                ConfigDelivery::Stored
+            }
+            envelope::Persist::Lost => {
+                log("SER: radio config store failed, refused (lora not started)");
+                ConfigDelivery::StoreFailed
+            }
+        };
+    }
     // Reset before the handoff, so an apply signalled after this point is
     // one that happened with this config already in the channel — a signal
     // latched from an earlier apply cannot be read as this one's.
@@ -658,16 +700,20 @@ async fn retic_serial_task(
                                     // The legacy contract: ACK on success,
                                     // silence on a config the driver cannot
                                     // take. Audible refusals begin with the
-                                    // envelope.
-                                    if apply_radio_config(&config_tx, wire).await
-                                        == ConfigDelivery::Applied
-                                        && !write_framed(
-                                            &mut tx,
-                                            &control,
-                                            &crate::lora::CONFIG_ACK,
-                                            &mut frame_buf,
-                                        )
-                                        .await
+                                    // envelope. Stored counts as success:
+                                    // for this sender the ack is the
+                                    // frame's receipt, and the reset it
+                                    // sends next is what applies the page.
+                                    if matches!(
+                                        apply_radio_config(&config_tx, wire).await,
+                                        ConfigDelivery::Applied | ConfigDelivery::Stored
+                                    ) && !write_framed(
+                                        &mut tx,
+                                        &control,
+                                        &crate::lora::CONFIG_ACK,
+                                        &mut frame_buf,
+                                    )
+                                    .await
                                     {
                                         log("SER: config ACK write failed");
                                     }
@@ -692,6 +738,17 @@ async fn retic_serial_task(
                                         ConfigDelivery::Unconfirmed => envelope::encode_refusal(
                                             envelope::TYPE_RADIO_CONFIG,
                                             envelope::REFUSE_BUSY,
+                                        ),
+                                        // On the page, and the page is the
+                                        // whole claim on a boot without a
+                                        // LoRa task: the reset this sender
+                                        // owes anyway is what applies it.
+                                        ConfigDelivery::Stored => {
+                                            envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
+                                        }
+                                        ConfigDelivery::StoreFailed => envelope::encode_refusal(
+                                            envelope::TYPE_RADIO_CONFIG,
+                                            envelope::REFUSE_PERSIST,
                                         ),
                                     };
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)

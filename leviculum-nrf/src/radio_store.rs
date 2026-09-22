@@ -36,11 +36,22 @@ use leviculum_core::radio_config_store::{
     decode_radio_config, encode_radio_config, ENCODED_SIZE_ALIGNED,
 };
 use leviculum_core::rnode::RadioConfigWire;
+use leviculum_persist_ack::{Persisted, SaveTicket};
 
 /// Pending save requests. Depth 1 and `try_send`: the serial task must never
 /// block on a flash write, and a superseded request is worthless anyway —
-/// the newest config is the one that must end up on the page.
-static PENDING: Channel<CriticalSectionRawMutex, RadioConfigWire, 1> = Channel::new();
+/// the newest config is the one that must end up on the page. Each request
+/// carries the [`SaveTicket`] its outcome is reported against; only
+/// [`request_save_confirmed`] callers wait on theirs.
+static PENDING: Channel<CriticalSectionRawMutex, (SaveTicket, RadioConfigWire), 1> = Channel::new();
+
+/// The #358 bookkeeping for this page, same construction as the telemetry
+/// records': the ticket names whose write finished, the slot's signal
+/// wakes the one waiter. Displacing a queued request orphans its ticket,
+/// which is safe here — the only confirmed caller is the serial task, and
+/// it is blocked in `confirm` until its own ticket settles, so a ticket
+/// that gets displaced is always an unconfirmed one nobody polls.
+static RADIO_PERSIST: crate::telemetry::PersistSlot = crate::telemetry::PersistSlot::new();
 
 /// Read the persisted radio configuration, or `None` if the page is blank,
 /// corrupt, or written by a different format version.
@@ -65,13 +76,32 @@ fn read_page(page: u32) -> [u8; ENCODED_SIZE_ALIGNED] {
 
 /// Ask the store task to persist `cfg`. Never blocks and never writes flash
 /// on the caller's stack; if a request is already queued it is replaced by
-/// this newer one.
+/// this newer one. Fire-and-forget: the caller's answer claims the running
+/// radio, not the page, so nothing waits on this write's outcome.
 pub fn request_save(cfg: &RadioConfigWire) {
+    let ticket = RADIO_PERSIST.issue().ticket();
     // Drop a stale queued request so the freshest config wins the slot.
-    if PENDING.try_send(*cfg).is_err() {
+    if PENDING.try_send((ticket, *cfg)).is_err() {
         let _ = PENDING.try_receive();
-        let _ = PENDING.try_send(*cfg);
+        let _ = PENDING.try_send((ticket, *cfg));
     }
+}
+
+/// Ask the store task to persist `cfg` and return the receipt the caller's
+/// answer must wait on ([`crate::telemetry::confirm`], Codeberg #358).
+///
+/// For the config a running LoRa task will apply, the ack claims the radio
+/// and [`request_save`] is enough. This is for the boot that has no LoRa
+/// task: the only truthful ack is "a reboot comes back on this config",
+/// and that claim is about the page, so it may only go out once the page
+/// write is confirmed.
+pub fn request_save_confirmed(cfg: &RadioConfigWire) -> crate::telemetry::PendingSave {
+    let save = RADIO_PERSIST.issue();
+    if PENDING.try_send((save.ticket(), *cfg)).is_err() {
+        let _ = PENDING.try_receive();
+        let _ = PENDING.try_send((save.ticket(), *cfg));
+    }
+    save
 }
 
 /// 4-byte-aligned page buffer. `sd_flash_write` writes whole 32-bit words
@@ -92,11 +122,12 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
     use embedded_storage_async::nor_flash::NorFlash;
 
     loop {
-        let cfg = PENDING.receive().await;
+        let (ticket, cfg) = PENDING.receive().await;
         let encoded = Aligned(encode_radio_config(&cfg));
 
         // Read-compare-write: an unchanged page is never erased. lnsd sends
         // the same config on every connect, so this is the common case.
+        // Durable all the same: the record IS on the page.
         if read_page(page) == encoded.0 {
             crate::log::log_fmt(
                 "[RADIO] ",
@@ -105,6 +136,7 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                     cfg.frequency_hz, cfg.sf
                 ),
             );
+            RADIO_PERSIST.finish(ticket, Persisted::Durable);
             continue;
         }
 
@@ -140,8 +172,10 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                     cfg.frequency_hz, cfg.bandwidth_hz, cfg.sf, cfg.cr, cfg.tx_power_dbm
                 ),
             );
+            RADIO_PERSIST.finish(ticket, Persisted::Durable);
         } else {
             crate::log::log_fmt("[RADIO] ", format_args!("persist gave up after retries"));
+            RADIO_PERSIST.finish(ticket, Persisted::Lost);
         }
     }
 }

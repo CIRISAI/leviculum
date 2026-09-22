@@ -17,7 +17,7 @@
 //!    same code the phone runs. Hypotheses 2 (signed-data assembly
 //!    mismatch) and 3 (ratchet/flags span) are refuted; there is also no
 //!    "telemetry app_data" announce variant in the firmware at all —
-//!    `leviculum-nrf/src/telemetry.rs:1853` emits a fixed display-name
+//!    `leviculum-nrf/src/telemetry.rs:1862` emits a fixed display-name
 //!    app_data, so the announce is always 186 B on the wire.
 //!
 //! 2. **Mechanism pinned** (`torn_ble_fragment_stream_glues_report_tail_onto_announce`):
@@ -27,7 +27,7 @@
 //!    186 = 177 + 9, 211 = 177 + 34, 259 = 177 + 82 — and the telemetry
 //!    reports of the two log windows were 211 B (no GNSS fix) and 259 B
 //!    (with position), sent immediately after the announce in the same
-//!    tick (`leviculum-nrf/src/telemetry.rs:1454` then `:583`). When
+//!    tick (`leviculum-nrf/src/telemetry.rs:1463` then `:583`). When
 //!    `PacketTx` (leviculum-nrf/ble-tx) aborts the announce on a
 //!    transient HVN drain stall after fragment 0 was already accepted,
 //!    the peer's reassembler is left holding a torn head; a reassembler
@@ -105,7 +105,7 @@ print("VERDICT=VALID" if ok else "VERDICT=INVALID")
 }
 
 /// The firmware's announce app_data, byte-for-byte
-/// (`leviculum-nrf/src/telemetry.rs:1853`): a `DeliveryAnnounce` with the
+/// (`leviculum-nrf/src/telemetry.rs:1862`): a `DeliveryAnnounce` with the
 /// derived `LNode-<8 hex>` display name, no stamp cost, no compression.
 fn firmware_app_data(identity: &Identity) -> Vec<u8> {
     let hash = identity.hash();
@@ -331,8 +331,8 @@ fn torn_ble_fragment_stream_glues_report_tail_onto_announce() {
     assert_eq!(announce_frags.len(), 2, "186 B is 2 fragments at MTU 185");
     assert_eq!(report_frags.len(), 2, "259 B is 2 fragments at MTU 185");
 
-    // The telemetry tick: announce first (telemetry.rs:1454), report
-    // right behind it (telemetry.rs:1547). One transient stall while the
+    // The telemetry tick: announce first (telemetry.rs:1463), report
+    // right behind it (telemetry.rs:1556). One transient stall while the
     // announce's second fragment waits for the queue to drain.
     let mut stalls = 1usize;
     let mut on_air = deliver(&announce_frags, &mut stalls);

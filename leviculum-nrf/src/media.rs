@@ -179,6 +179,16 @@ pub fn lora_active() -> bool {
     STATE.lora_active()
 }
 
+/// Whether this boot spawned the LoRa tasks at all — the predicate for
+/// "does the LoRa config channel have a consumer". A runtime `lora=off`
+/// gates the tasks without removing them, so this stays true; a boot on
+/// a `lora=off` profile never had them, and stays false however the
+/// profile is reconfigured afterwards (see
+/// [`leviculum_media_state::MediaState::lora_booted`]).
+pub fn lora_booted() -> bool {
+    STATE.lora_booted()
+}
+
 /// Whether BLE is carrying Reticulum traffic right now.
 pub fn ble_active() -> bool {
     STATE.ble_active()

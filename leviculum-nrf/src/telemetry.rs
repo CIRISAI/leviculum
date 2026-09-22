@@ -324,7 +324,7 @@ static PENDING_SAVE_PN: Channel<CriticalSectionRawMutex, (SaveTicket, StoredPnCo
 /// encodes is the whole of #358 and the firmware crate runs no host
 /// tests; what stays here is the part that needs Embassy — the wake-up
 /// and the bound on how long a client is made to wait.
-struct PersistSlot {
+pub(crate) struct PersistSlot {
     gate: PersistGate,
     /// Pulsed after every [`PersistGate::finish`]. One waiter at a time
     /// by construction: the serial task is the only caller of
@@ -333,21 +333,21 @@ struct PersistSlot {
 }
 
 impl PersistSlot {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             gate: PersistGate::new(),
             wake: Signal::new(),
         }
     }
 
-    fn issue(&'static self) -> PendingSave {
+    pub(crate) fn issue(&'static self) -> PendingSave {
         PendingSave {
             slot: self,
             ticket: self.gate.issue(),
         }
     }
 
-    fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
+    pub(crate) fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
         self.gate.finish(ticket, outcome);
         self.wake.signal(());
     }
@@ -370,6 +370,15 @@ static PN_PERSIST: PersistSlot = PersistSlot::new();
 pub struct PendingSave {
     slot: &'static PersistSlot,
     ticket: SaveTicket,
+}
+
+impl PendingSave {
+    /// The ticket this save's outcome is reported against — what a store
+    /// module sends alongside its value so its store task can `finish`
+    /// the right request ([`crate::radio_store`]).
+    pub(crate) fn ticket(&self) -> SaveTicket {
+        self.ticket
+    }
 }
 
 /// How long a caller waits for the store task before answering the frame

@@ -2069,6 +2069,7 @@ dependencies = [
  "clap",
  "critical-section",
  "dbus",
+ "embassy-sync",
  "futures",
  "hex",
  "hmac",

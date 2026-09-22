@@ -165,6 +165,24 @@ impl MediaState {
         self.booted_lora.load(Ordering::Relaxed) && self.configured_lora.load(Ordering::Relaxed)
     }
 
+    /// Whether this boot brought the LoRa carrier up at all — which is
+    /// whether its tasks exist, whatever the profile has been changed to
+    /// since.
+    ///
+    /// Not [`lora_active`](Self::lora_active): a carrier switched off at
+    /// runtime still has its tasks (they are gated, not gone), so a
+    /// handoff to them still has a consumer. The one state in which it
+    /// does not is a boot that never spawned them, and this is the
+    /// predicate that names it. A host frame whose only delivery is such
+    /// a handoff must consult this, not `configured` — the 2026-09-22
+    /// corpus run wedged all three LNodes on exactly that difference: the
+    /// cell had already configured `lora=on`, but the boot had not, and a
+    /// config fed to the channel of a task that was never spawned sat in
+    /// its one slot for the rest of the boot.
+    pub fn lora_booted(&self) -> bool {
+        self.booted_lora.load(Ordering::Relaxed)
+    }
+
     /// Whether BLE is carrying Reticulum traffic right now.
     pub fn ble_active(&self) -> bool {
         self.booted_ble.load(Ordering::Relaxed) && self.configured_ble.load(Ordering::Relaxed)
@@ -268,6 +286,11 @@ mod tests {
         ble: false,
     };
 
+    const BLE_ONLY: Carriers = Carriers {
+        lora: false,
+        ble: true,
+    };
+
     #[test]
     fn nothing_is_declared_before_the_profile_is_read() {
         let state = MediaState::new();
@@ -342,6 +365,41 @@ mod tests {
         held_down.set_configured(Carriers::BOTH);
         assert_eq!(held_down.configured(), Carriers::BOTH);
         assert_eq!(held_down.running(), LORA_ONLY);
+    }
+
+    /// The corpus-run sequence that wedged all three LNodes on
+    /// 2026-09-22: the board boots on a BLE cell's flash profile (no
+    /// LoRa tasks spawned), then a LoRa cell configures `lora=on` before
+    /// its reset. `configured` flips at once — but the boot has not
+    /// changed, and [`MediaState::lora_booted`] is the predicate that
+    /// must keep saying so, because it is what decides whether a radio
+    /// config has a task to be delivered to or must wait for the reboot.
+    #[test]
+    fn configuring_lora_on_does_not_make_an_unbooted_carrier_deliverable() {
+        let state = MediaState::new();
+        state.declare(BLE_ONLY);
+        state.note_boot_state(BLE_ONLY);
+        assert!(!state.lora_booted());
+        state.set_configured(LORA_ONLY);
+        assert_eq!(state.configured(), LORA_ONLY);
+        assert!(
+            !state.lora_booted(),
+            "a carrier configured on mid-boot still has no tasks; \
+             reading it as deliverable is the 26-cell wedge"
+        );
+    }
+
+    /// The other direction: a runtime `lora=off` gates the tasks, it
+    /// does not remove them, so delivery to them stays possible and the
+    /// booted predicate must keep saying yes.
+    #[test]
+    fn switching_lora_off_at_runtime_keeps_the_boot_fact() {
+        let state = MediaState::new();
+        state.declare(Carriers::BOTH);
+        state.note_boot_state(Carriers::BOTH);
+        state.set_configured(BLE_ONLY);
+        assert!(!state.lora_active());
+        assert!(state.lora_booted());
     }
 
     /// The persistent tail holds ~45 of these lines. A thousand dropped

@@ -100,6 +100,11 @@ critical-section = { version = "1", features = ["std"] }
 ignored = ["md-5", "dbus", "critical-section"]
 
 [dev-dependencies]
+# The exact channel type the LNode firmware hands radio configs to its LoRa
+# task through (`leviculum-nrf/src/usb.rs::apply_radio_config`). The mvr for
+# the 2026-09-22 corpus wedge reproduces that channel's consumerless
+# behaviour host-side; same version the firmware workspace pins.
+embassy-sync = "0.7"
 # `test-util` enables `#[tokio::test(start_paused = true)]`: the duty-lock
 # flow-control tests drive multi-second gate thresholds on virtual time
 # instead of sleeping through them.

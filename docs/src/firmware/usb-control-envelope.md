@@ -255,6 +255,19 @@ ack went out on channel delivery, measurably 1.1–18.9 s before the
 apply while the LoRa loop parked in single-mode RX, and even when the
 reconfig then failed.
 
+One boot state changes the promise: a board whose boot did not bring the
+LoRa carrier up (a `lora=off` media profile in flash) has no LoRa task,
+so no config can be delivered or applied before the next reset. There the
+ack means **a reboot comes back on this configuration** — the config goes
+to the flash store and the ack waits for the confirmed page write (#358);
+a failed write refuses with `0x06` (persist). This is the contract the
+test harness relies on when it pushes the scenario channel one reboot
+early and resets afterwards. Before 2026-09-22 such a boot fed the
+config to the taskless channel instead: the first one wedged its single
+slot for the rest of the boot, every later one was refused as busy, and
+one BLE-profiled boot cost a corpus run all 26 of its LNode cells
+(`SKIPPED_INFRA reason=lnode_radio_config_failed result=no_ack_after_3`).
+
 ### The media-profile frames
 
 ```text
