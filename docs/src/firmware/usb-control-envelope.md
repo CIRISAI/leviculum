@@ -240,6 +240,21 @@ setting. A sleep in front of the reset does not close it: the store task
 may be working an earlier queued write, and a constant cannot bound a
 queue.
 
+### What the RADIO_CONFIG answer means
+
+The same promise-shape on the radio path: a RADIO_CONFIG ack means **the
+radio is running this configuration** — the serial task waits until the
+LoRa task confirms the apply and the running config matches what was
+delivered, bounded at 1.2 s on top of the 500 ms delivery grace, inside
+the tightest host window (`lnsd`'s legacy sender waits 2 s per attempt).
+A config delivered but not yet confirmed — a retune deferring to a frame
+mid-air on a slow profile, or a reconfig that failed on the SPI bus —
+answers `busy`, and a retry after the apply lands is acked immediately
+because the running config already matches. Until this wait existed the
+ack went out on channel delivery, measurably 1.1–18.9 s before the
+apply while the LoRa loop parked in single-mode RX, and even when the
+reconfig then failed.
+
 ### The media-profile frames
 
 ```text

@@ -924,10 +924,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// holding a frame that is still arriving.
     ///
     /// [`disarm_rx`](Self::disarm_rx) with the deferral in front of it, and
-    /// the reason it is a separate method rather than a flag: exactly one
-    /// caller may defer. The bound is per call, so a second site reaching for
-    /// this would turn "one frame's airtime, once" into a wait that compounds,
-    /// and the starvation argument would stop holding. The sequence itself is
+    /// the reason it is a separate method rather than a flag: only a caller
+    /// that cannot re-enter its own wait may defer. The bound is per call, so
+    /// a site reaching for this from a loop would turn "one frame's airtime,
+    /// once" into a wait that compounds, and the starvation argument would
+    /// stop holding. Two sites qualify, and each passes through at most once
+    /// per event: the idle select's outgoing arm (once per key-up) and its
+    /// config arm (once per host config push, which arrives at host cadence,
+    /// not the loop's). The sequence itself is
     /// [`leviculum_rx_arming::stand_down_for_tx`], where a fake radio asserts
     /// it.
     ///

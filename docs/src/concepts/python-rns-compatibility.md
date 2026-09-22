@@ -147,7 +147,7 @@ whichever is lower (`rnode::resolve_tx_power` and
 `lawful_erp_dbm`, applied in both interface builders and in the
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum
-(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:296-332`), which
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:315-351`), which
 is the capped resolution's own result at that profile's 869.463 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the

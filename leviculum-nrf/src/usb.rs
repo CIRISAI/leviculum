@@ -437,7 +437,11 @@ async fn write_framed(
 /// What became of a host radio config (see [`apply_radio_config`]).
 #[derive(PartialEq)]
 enum ConfigDelivery {
-    /// Handed to the LoRa task and persisted.
+    /// Programmed into the radio — the LoRa task confirmed the apply — and
+    /// persisted. The only outcome the host may read as "the board is on
+    /// this PHY": the ack used to go out on delivery alone, which promised
+    /// an apply that measurably lagged it by up to 19 s while the LoRa loop
+    /// parked in single-mode RX.
     Applied,
     /// A config whose bandwidth or coding rate has no SX1262 register code.
     Invalid,
@@ -447,6 +451,13 @@ enum ConfigDelivery {
     /// parks in the depth-1 channel forever and every later one is
     /// undeliverable.
     Undeliverable,
+    /// Handed to the LoRa task and persisted, but the apply was not
+    /// confirmed inside [`CONFIG_APPLY_WITHIN`]. Answered as busy — the
+    /// truthful answer at answer time, and a retryable one: the config is
+    /// still queued (or the reconfig failed on the SPI bus), and a host
+    /// that re-sends after the apply lands is acked immediately because
+    /// the running config already matches.
+    Unconfirmed,
 }
 
 /// How long a radio config may wait for the LoRa task to drain the
@@ -456,6 +467,18 @@ enum ConfigDelivery {
 /// itself stuck runs the clock out. Well inside lnflash's 3.5 s answer
 /// window so the refusal still reaches the host.
 const CONFIG_DELIVER_WITHIN: Duration = Duration::from_millis(500);
+
+/// How long a delivered config may wait for the LoRa task to confirm the
+/// apply before the answer stops waiting and says so. Since the config is
+/// its own arm of the LoRa task's idle select, the ordinary apply is
+/// milliseconds; the one lawful delay is the retune deferring to a frame
+/// that is mid-air, bounded at one maximum-size frame's airtime at the live
+/// modulation (~730 ms at the SF8/125 kHz default). The budget covers that
+/// bound, while `CONFIG_DELIVER_WITHIN` plus this stays inside the
+/// tightest host answer window (lnsd's legacy sender waits 2 s per
+/// attempt); slower profiles whose deferral bound exceeds it (4.8 s at
+/// SF10/62.5 kHz) are answered busy and acked on the host's retry.
+const CONFIG_APPLY_WITHIN: Duration = Duration::from_millis(1200);
 
 /// Hand a parsed radio configuration to the LoRa task and persist it.
 ///
@@ -475,6 +498,10 @@ async fn apply_radio_config(
         log("SER: invalid config frame");
         return ConfigDelivery::Invalid;
     };
+    // Reset before the handoff, so an apply signalled after this point is
+    // one that happened with this config already in the channel — a signal
+    // latched from an earlier apply cannot be read as this one's.
+    crate::lora::config_applied().reset();
     if let Err(embassy_sync::channel::TrySendError::Full(cfg)) = config_tx.try_send(cfg) {
         // Full channel: give a live LoRa task one grace period to drain
         // the previous config before refusing. A timed-out `send` drops
@@ -488,12 +515,28 @@ async fn apply_radio_config(
         }
     }
     log("SER: radio config received");
-    // Persist what we just applied, so a reset comes back on the
+    // Persist what we just delivered, so a reset comes back on the
     // host's frequency instead of the compiled default.
     // Non-blocking: the store task does the read-compare-write and
     // skips flash entirely if nothing changed (lnsd re-sends this
     // frame on every connect).
     crate::radio_store::request_save(&wire);
+    // The answer states the radio, not the channel: wait until the running
+    // config IS the one delivered. The signal alone is not enough — it
+    // fires for every successful apply, and the one before ours (drained
+    // out of the full channel above) must not confirm ours — so each
+    // firing re-checks against the record the LoRa task publishes.
+    if with_timeout(CONFIG_APPLY_WITHIN, async {
+        while crate::lora::running_config() != Some(wire) {
+            crate::lora::config_applied().wait().await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        log("SER: radio config apply unconfirmed, answered busy");
+        return ConfigDelivery::Unconfirmed;
+    }
     ConfigDelivery::Applied
 }
 
@@ -639,6 +682,14 @@ async fn retic_serial_task(
                                             envelope::REFUSE_VALUE,
                                         ),
                                         ConfigDelivery::Undeliverable => envelope::encode_refusal(
+                                            envelope::TYPE_RADIO_CONFIG,
+                                            envelope::REFUSE_BUSY,
+                                        ),
+                                        // Delivered but not yet applied: busy
+                                        // is the truthful, retryable answer —
+                                        // an ack here would promise a PHY the
+                                        // radio is not on yet.
+                                        ConfigDelivery::Unconfirmed => envelope::encode_refusal(
                                             envelope::TYPE_RADIO_CONFIG,
                                             envelope::REFUSE_BUSY,
                                         ),

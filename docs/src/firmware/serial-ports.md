@@ -214,7 +214,7 @@ the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled
 `eu_medium` default (869.463 MHz, BW 125 kHz, SF8, CR4/5, 22 dBm;
-`leviculum-nrf/src/lora.rs:333-362`, `RadioConfig::eu_medium`) or the
+`leviculum-nrf/src/lora.rs:352-381`, `RadioConfig::eu_medium`) or the
 preset chosen at flash time. The values above are that default written
 out, so a Python-driven LNode and an `lnsd`-driven one land on the same
 channel. Changing the channel of a Python-driven board is a reflash

@@ -1057,8 +1057,9 @@ where
 /// It is spent **once per call**: there is no loop, no re-check, and no second
 /// deferral, so a channel that never goes quiet delays a transmit by that one
 /// bound and then keys up regardless. A caller that reached this in a loop
-/// would break that property, which is why exactly one site in the firmware
-/// calls it.
+/// would break that property, which is why the firmware's call sites — the
+/// idle select's outgoing arm and its config arm — each pass through at most
+/// once per event (one key-up, one host config push).
 ///
 /// The wait also ends early on the terminating IRQ, so the bound is an upper
 /// limit rather than a delay: a frame that completes in 40 ms costs 40 ms.

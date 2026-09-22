@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
 use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
@@ -141,10 +141,10 @@ static OUTGOING_BUDGET: QueueBudget = QueueBudget::new(LORA_QUEUE_SLOTS, LORA_QU
 
 /// Take one packet out of the outgoing queue, releasing its budget.
 ///
-/// Every dequeue goes through here or through the `Either::Second` arm of the
-/// idle select; a dequeue that forgets to release would leak the budget until
-/// the queue refused everything forever, so there is exactly one non-obvious
-/// place to get this right and it is spelled once.
+/// Every dequeue goes through here or through the `Either3::Second` arm of
+/// the idle select; a dequeue that forgets to release would leak the budget
+/// until the queue refused everything forever, so there is exactly one
+/// non-obvious place to get this right and it is spelled once.
 fn take_outgoing(
     outgoing_rx: &Receiver<'static, CriticalSectionRawMutex, Vec<u8>, LORA_QUEUE_SLOTS>,
 ) -> Option<Vec<u8>> {
@@ -172,6 +172,25 @@ pub fn channels() -> LoRaChannels {
 /// Get the sender for runtime radio config overrides (used by serial task).
 pub fn config_sender() -> Sender<'static, CriticalSectionRawMutex, RadioConfig, 1> {
     LORA_CONFIG.sender()
+}
+
+/// Fired each time a runtime config override has actually been programmed
+/// into the radio — the success arm of `configure_lora`, beside the
+/// `[LORA] active config:` line. Never fired for a reconfig that failed.
+///
+/// The LoRa task's half of the applied handshake: the serial task resets
+/// this before it delivers a config, then waits on it and compares
+/// [`running_config`] against what it delivered, so the answer to the host
+/// states a PHY the radio is on rather than one it has merely been
+/// promised. A bare event, not the config itself: [`RUNNING_CONFIG`] is
+/// already the one authoritative record of what is on the chip, and a
+/// second copy travelling through a signal could disagree with it.
+static CONFIG_APPLIED: embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> =
+    embassy_sync::signal::Signal::new();
+
+/// The applied-config signal, for the serial task's answer wait.
+pub fn config_applied() -> &'static embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> {
+    &CONFIG_APPLIED
 }
 
 /// Index of the LoRa carrier in the node's interface table — the one the
@@ -1216,6 +1235,50 @@ pub fn channel_seed() -> u32 {
     crate::rng::RawHwRng::new().next_u32()
 }
 
+/// Program a runtime config override into the radio and refresh every piece
+/// of loop state derived from it: the slot time, the channel-access PHY, the
+/// airtime limits, the published running config.
+///
+/// One implementation for the loop's two intake points — the top-of-turn
+/// `try_receive` and the idle select's config arm — so the set of derived
+/// state cannot drift between them. [`CONFIG_APPLIED`] fires only on the
+/// success arm: a reconfig that failed left the radio on the old PHY, and
+/// the serial task's answer to the host must not read as applied.
+async fn apply_runtime_config(
+    radio: &mut Radio,
+    new_cfg: RadioConfig,
+    config: &mut RadioConfig,
+    slot_ms: &mut u64,
+    access: &mut leviculum_channel_access::ChannelAccess,
+    airtime: &mut leviculum_core::rnode::AirtimeTracker,
+) {
+    match radio
+        .configure_lora(
+            new_cfg.frequency_hz,
+            new_cfg.sf,
+            new_cfg.bw,
+            new_cfg.cr,
+            new_cfg.tx_power_dbm,
+            new_cfg.preamble_len,
+        )
+        .await
+    {
+        Ok(programmed) => {
+            leviculum_log_line::facts::active_radio_config(
+                &mut FirmwareLog,
+                &active_facts(&new_cfg, &programmed),
+            );
+            *config = new_cfg;
+            publish_running_config(config);
+            *slot_ms = compute_slot_ms(config);
+            access.set_phy(config.bw_hz, config.sf, config.cr_denom);
+            apply_airtime_limits(airtime, config);
+            CONFIG_APPLIED.signal(());
+        }
+        Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
+    }
+}
+
 // LoRa async task
 //
 // `channel_seed` feeds the channel-access randomness (acquisition jitter,
@@ -1322,32 +1385,20 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             );
         }
 
-        // Check for runtime radio config override (test infrastructure)
+        // Check for a runtime radio config override. This intake serves the
+        // turns that come back from a bounded window (jitter, backoff, ack,
+        // hold, yield — all clamped to <=10 s); the turn that can park for a
+        // minute is the idle select below, where the config is its own arm.
         if let Ok(new_cfg) = config_rx.try_receive() {
-            match radio
-                .configure_lora(
-                    new_cfg.frequency_hz,
-                    new_cfg.sf,
-                    new_cfg.bw,
-                    new_cfg.cr,
-                    new_cfg.tx_power_dbm,
-                    new_cfg.preamble_len,
-                )
-                .await
-            {
-                Ok(programmed) => {
-                    leviculum_log_line::facts::active_radio_config(
-                        &mut FirmwareLog,
-                        &active_facts(&new_cfg, &programmed),
-                    );
-                    config = new_cfg;
-                    publish_running_config(&config);
-                    slot_ms = compute_slot_ms(&config);
-                    access.set_phy(config.bw_hz, config.sf, config.cr_denom);
-                    apply_airtime_limits(&mut airtime, &config);
-                }
-                Err(e) => crate::log::log_fmt("[LORA] ", format_args!("reconfig FAILED: {:?}", e)),
-            }
+            apply_runtime_config(
+                &mut radio,
+                new_cfg,
+                &mut config,
+                &mut slot_ms,
+                &mut access,
+                &mut airtime,
+            )
+            .await;
         }
 
         // Pick up a new packet to send if no TX is in flight. When
@@ -1693,7 +1744,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
         // detected. select yields to TX the instant the daemon has data, so
         // continuous RX does not starve path responses or announces.
         reassembler.check_timeout(rx_timeout_count, 10);
-        match select(
+        match select3(
             rx_once(
                 &mut radio,
                 &mut rx_buf,
@@ -1704,6 +1755,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 &mut rx_timeout_count,
             ),
             outgoing_rx.receive(),
+            config_rx.receive(),
         )
         .await
         {
@@ -1711,7 +1763,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // re-arms RX immediately; the only gap is this brief re-arm, taken
             // right after a reception. A reception here also means the peer is
             // being heard, so clear the empty-ack counter.
-            Either::First(received) => {
+            Either3::First(received) => {
                 if received {
                     consecutive_empty_acks = 0;
                 }
@@ -1747,7 +1799,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // the wait is conditional on a measured reception and on nothing
             // else, which is what keeps this from being a spacing delay.
             // radio_silent still drops outgoing instead of transmitting.
-            Either::Second(data) => {
+            Either3::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
@@ -1776,6 +1828,48 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     pending_tx = Some(data);
                     access.begin_packet();
                 }
+            }
+            // The host pushed a radio config. Until this arm existed the
+            // config sat in its channel while the select above parked in
+            // single-mode RX, whose only other exits are an inbound packet
+            // and the 60 s software bound in `await_rx` — measured on the
+            // bench as 1.1-18.9 s (median ~14.3 s) from `SER: radio config
+            // received` to `[LORA] active config:`, a window in which the
+            // board keeps operating on the PHY the host just told it to
+            // leave.
+            //
+            // The RX future was dropped, so the receiver is stood down the
+            // same way the outgoing arm stands it down: `disarm_rx_for_tx`,
+            // which holds the retune for a frame that is measurably
+            // mid-air — bounded at one maximum-size frame's airtime at the
+            // live modulation — and hands it up through the same sink,
+            // instead of ending a reception in progress for a retune that
+            // can afford to wait that bound. An idle window costs the plain
+            // standby it always did. `configure_lora`'s own teardown then
+            // finds nothing standing.
+            Either3::Third(new_cfg) => {
+                let mut sink = CoreHandoff {
+                    rx_start: embassy_time::Instant::now(),
+                    reassembler: &mut reassembler,
+                    incoming_tx: &incoming_tx,
+                    rx_timeout_count,
+                };
+                let _ = radio
+                    .disarm_rx_for_tx(
+                        leviculum_core::sx126x::RxTeardownBy::Config,
+                        &mut rx_buf,
+                        &mut sink,
+                    )
+                    .await;
+                apply_runtime_config(
+                    &mut radio,
+                    new_cfg,
+                    &mut config,
+                    &mut slot_ms,
+                    &mut access,
+                    &mut airtime,
+                )
+                .await;
             }
         }
     }
