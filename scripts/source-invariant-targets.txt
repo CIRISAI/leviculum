@@ -1,0 +1,191 @@
+# Verdicts for every `tests/` target in the workspace: does `just fast` run it?
+#
+# Codeberg #220 put a compile check of every target on the push path, and that
+# is where the push path stopped: `check-all-targets` proves each `tests/`
+# target BUILDS and nothing before `just standard` proves any of them PASSES.
+# On 2026-09-22 that cost 18 commits a landing gate and two red cycles, and the
+# break was attributed to a commit two batches old because no gate in between
+# had run the file.
+#
+# THE CLASS CRITERION
+# -------------------
+# A target is admissible to the `run` list iff all four hold:
+#
+#   1. The thing under test is a FILE IN THIS TREE -- a document, a config, a
+#      catalogue, a vendored artifact, the text of a source file. The target
+#      reads it and asserts a property of what it read. This is what makes the
+#      class worth the push path at all: such a target goes red from an edit
+#      that changes no code any other Tier-0 gate compiles, which is precisely
+#      the hole `--lib` gates cannot see.
+#   2. It starts no process.
+#   3. It opens no socket and touches no device.
+#   4. It finishes in milliseconds.
+#
+# A target whose subject is the CODE -- a golden render, a vector corpus, an
+# in-process protocol suite -- fails (1) even when it is fast and pure. That
+# boundary is deliberate: without it this list grows into `cargo test
+# --workspace`, which is a bill nobody has agreed to pay on every push.
+#
+# Where a target is close to the line it goes in `skip` with the reason. The
+# skip list is not the failure half, it is the honest half.
+#
+# WHAT ENFORCES THIS FILE
+# -----------------------
+# `scripts/check-source-invariant-census.py` (recipe: check-source-invariant-
+# census, in `just fast`) enumerates every `test`-kind target cargo knows about
+# and fails if any one of them has no verdict here, if a verdict names a target
+# that no longer exists, if a target is listed twice, or if an entry states no
+# reason. Adding a `tests/` file therefore fails the gate until somebody
+# decides which half it is in -- the shape `scripts/ignored-counts.txt` already
+# uses, and for the same reason: nobody has to remember, because forgetting is
+# what goes red.
+#
+# WHAT ENFORCES NOTHING
+# ---------------------
+# Nothing here checks that an admitted target actually MEETS the criterion. A
+# target that spawns a daemon, admitted to the `run` list, is run by `just
+# fast` and the gate stays green; it just costs what it costs. The only thing
+# standing between that and the push path is the one-line reason below, in a
+# diff, read by a person. Said plainly rather than papered over with a source
+# grep that a helper module would defeat.
+#
+# FORMAT
+#   <run|skip>  <package>  <target>  # <reason, one line>
+# Blank lines and whole-line `#` comments are ignored.
+
+# ---------------------------------------------------------------- run --------
+# Measured cost of the whole run list: see the `source-invariant-tests` recipe
+# header in the Justfile.
+
+run   leviculum-ffi   event_projection_coverage  # reads leviculum-core's sources for NodeEvent variants; every one must be projected or listed
+run   leviculum-ffi   fault_coverage             # reads tests/ for the LEV_ERR_*/LEV_EVENT_* codes; an untriggered code fails
+run   leviculum-ffi   guard_coverage             # reads leviculum-ffi/src/*.rs; every #[no_mangle] must run through catch_unwind
+run   leviculum-std   build_target_host_arch     # reads .cargo/config.toml and the two source-build documents for the host-triple override
+run   leviculum-std   doc_build_paths            # reads .cargo/config.toml and the docs that name where cargo puts the binaries
+run   leviculum-std   doc_radio_policy           # reads docs/src/**/*.md; no page may describe a radio-regulatory refusal
+run   leviculum-std   doc_security_policy        # reads SECURITY.md and the commit-trailer baseline the addresses come from
+run   leviculum-std   doc_self_hosted_infra      # reads the design record against the artifacts of it that now exist in the tree
+run   leviculum-std   lnode_debug_log_format     # reads the firmware sources for the debug-line shapes and the RX-defer sites
+run   leviculum-std   msgpack_single_decoder     # reads leviculum-core's sources; exactly one hand-rolled msgpack reader may exist
+run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
+
+# --------------------------------------------------------------- skip --------
+
+skip  lblogd          about_page                 # renders a blog from a temp dir: the subject is the renderer, not the tree
+skip  lblogd          end_to_end                 # in-process blog pipeline; subject is the code
+skip  lblogd          feed                       # in-process feed builder; subject is the code
+skip  lblogd          files_area                 # builds a files area in a temp dir; subject is the code
+skip  lblogd          golden_output              # golden render out of a temp dir; subject is the renderer
+skip  lblogd          micron_roundtrip           # micron encode/decode roundtrip; subject is the codec
+skip  lblogd          node_integ                 # tokio runtime, in-process daemon, IPC and a blog node
+skip  lblogd          node_waits_for_daemon      # tokio runtime and a startup race with sleeps
+skip  lblogd          page_identity              # in-process page identity derivation; subject is the code
+skip  lblogd          post_model                 # parses posts from a temp dir; subject is the parser
+skip  lblogd          render_html                # HTML renderer; subject is the renderer
+skip  lblogd          site_pages                 # spawns binaries under a tokio runtime
+skip  lblogd          source_offer               # tokio runtime plus temp-dir state
+skip  lblogd          visit_counter              # tokio runtime with sleeps over a temp-dir counter file
+skip  lblogd          watch_posts                # filesystem watcher: tokio runtime and sleeps
+skip  lblogd          web_plain                  # binds a TCP socket under a tokio runtime
+skip  leviculum-cli   client_tools               # spawns lnsd and the client tools
+skip  leviculum-cli   lnsd_instance_conflict     # spawns two daemons and waits for one to refuse
+skip  leviculum-cli   storage_path_from_config   # spawns lnsd against a temp-dir config
+skip  leviculum-core  compression_vectors        # reads a vector corpus, but the subject is the compressor
+skip  leviculum-core  embedded_eviction_alloc    # allocation behaviour under an embedded budget; subject is the code
+skip  leviculum-core  heap_census                # heap accounting; subject is the code
+skip  leviculum-core  heap_fragmentation         # allocator behaviour over long runs; subject is the code
+skip  leviculum-core  heap_leak                  # allocator behaviour; subject is the code
+skip  leviculum-core  heap_leak_mgmt             # allocator behaviour; subject is the code
+skip  leviculum-core  periculum_airtime_pins     # close to the line: fast and pure, but it pins arithmetic, not a file
+skip  leviculum-core  proptest_crypto            # property-based crypto: subject is the code, and seconds not milliseconds
+skip  leviculum-core  test_vectors               # reads the vector corpus, but the subject is the wire codec
+skip  leviculum-ffi   facade_core_processor      # tokio runtime plus a temp dir
+skip  leviculum-ffi   ffi_c_tests                # compiles and runs C programs against the cdylib
+skip  leviculum-ffi   ffi_faults                 # tokio runtime, sleeps, temp dirs
+skip  leviculum-ffi   ffi_integration            # drives a live node through the C API
+skip  leviculum-ffi   ffi_interop                # drives a live node through the C API
+skip  leviculum-ffi   ffi_property               # property-based FFI fuzzing; subject is the code
+skip  leviculum-ffi   ffi_unit                   # in-process FFI unit suite; subject is the code
+skip  leviculum-ffi   port_race                  # binds sockets to race two port allocations
+skip  leviculum-lxmf  announce_name_airtime      # airtime arithmetic; subject is the code
+skip  leviculum-lxmf  control_vectors            # vector corpus; subject is the codec
+skip  leviculum-lxmf  delivery_promise           # delivery state machine; subject is the code
+skip  leviculum-lxmf  direct_delivery_attempts   # delivery state machine; subject is the code
+skip  leviculum-lxmf  foreign_payload_encodings  # decodes foreign payloads; subject is the decoder
+skip  leviculum-lxmf  generated_field_pins       # pins generated field values; subject is the generator
+skip  leviculum-lxmf  inbound_link_promise       # link state machine; subject is the code
+skip  leviculum-lxmf  message_vectors            # vector corpus; subject is the codec
+skip  leviculum-lxmf  propagation_client         # propagation client logic; subject is the code
+skip  leviculum-lxmf  propagation_node           # propagation node logic; subject is the code
+skip  leviculum-lxmf  reference_lock             # reads the vendored Python snapshot, but shells out to git for the pinned head
+skip  leviculum-lxmf  stamp_cancellation         # stamp solver cancellation; subject is the code
+skip  leviculum-lxmf  stamp_vectors              # vector corpus; subject is the codec
+skip  leviculum-lxmf  subsecond_message_timestamps # timestamp arithmetic; subject is the code
+skip  leviculum-lxmf  telemetry_physical_link    # telemetry codec; subject is the code
+skip  leviculum-lxmf  telemetry_report           # reads a fixture, but the subject is the report builder
+skip  leviculum-lxmf  telemetry_report_alloc     # allocation behaviour of the report builder; subject is the code
+skip  leviculum-lxmf  telemetry_request          # telemetry request codec; subject is the code
+skip  leviculum-lxmf  telemetry_roundtrip        # telemetry roundtrip; subject is the codec
+skip  leviculum-lxmf  telemetry_vectors          # vector corpus; subject is the codec
+skip  leviculum-lxmf  timebase_jump              # clock-jump behaviour; subject is the code
+skip  leviculum-lxmf  wall_clock_producer        # reads a fixture, but the subject is the producer
+skip  leviculum-lxmf-node control_loopback       # tokio runtime, two nodes, sleeps
+skip  leviculum-lxmf-node deferred_resource_builds # tokio runtime and sleeps
+skip  leviculum-lxmf-node peering_loopback       # tokio runtime, two nodes, sleeps
+skip  leviculum-lxmf-node propagation_loopback   # tokio runtime, two nodes, sleeps
+skip  leviculum-lxmf-node stamped_upload_loopback # tokio runtime, two nodes, sleeps
+skip  leviculum-lxmf-node two_node_loopback      # tokio runtime, two nodes, sleeps
+skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
+skip  leviculum-proxy log_backpressure           # spawns the proxy binary
+skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
+skip  leviculum-std   cf_await_in_processor      # compile-fail fixture, empty without its feature; check-processor-seam owns it
+skip  leviculum-std   cf_dispatch_from_handle    # compile-fail fixture; check-processor-seam owns it
+skip  leviculum-std   cf_drop_dispatch_result    # compile-fail fixture; check-processor-seam owns it
+skip  leviculum-std   cf_stamp_in_processor      # compile-fail fixture; check-processor-seam owns it
+skip  leviculum-std   destination_lifecycle      # binds sockets under a tokio runtime
+skip  leviculum-std   discovery_autoconnect      # tokio runtime, discovery over real interfaces
+skip  leviculum-std   doc_citations              # in class, but already run by the citation-guard step of `just fast`
+skip  leviculum-std   event_log_callsite_filter  # in-process event-log filtering; subject is the code
+skip  leviculum-std   event_log_multiprocess     # spawns a second process to share the log
+skip  leviculum-std   event_log_rotation         # spawns processes, sleeps, rotates real files
+skip  leviculum-std   event_log_subscriber       # long in-process subscriber suite; seconds, and needs --test-threads=1
+skip  leviculum-std   identity_listing_rpc       # tokio runtime with an RPC endpoint
+skip  leviculum-std   jl_filter                  # spawns the jl binary
+skip  leviculum-std   jl_jldiff_docs             # spawns the jl and jldiff binaries
+skip  leviculum-std   jl_jldiff_edge_cases       # spawns the jl and jldiff binaries
+skip  leviculum-std   jl_jldiff_fixtures         # spawns the jl and jldiff binaries
+skip  leviculum-std   jl_jldiff_workflow         # spawns binaries and sleeps
+skip  leviculum-std   jldiff_compare             # spawns the jldiff binary
+skip  leviculum-std   log_stream_split           # spawns a process to split its streams
+skip  leviculum-std   lxmd_messagestore_takeover # spawns lxmd against a temp-dir store
+skip  leviculum-std   lxmf_rapid_identical_messages # in-process dedup behaviour; subject is the code
+skip  leviculum-std   manifest_tmp_race          # spawns racing manifest writers
+skip  leviculum-std   mvr                        # already run by the `mvr` step of `just fast`
+skip  leviculum-std   mvr_event_log_sink_stalls_transport # spawns a daemon and stalls its sink
+skip  leviculum-std   obs_ann_tx_drop_events     # drives the real emit sites in-process; subject is the code
+skip  leviculum-std   obs_event_node_name_whitespace # drives the real emit sites in-process; subject is the code
+skip  leviculum-std   obs_iface_name_whitespace  # drives the real emit sites in-process; subject is the code
+skip  leviculum-std   obs_outbound_route_events  # drives the real emit sites in-process; subject is the code
+skip  leviculum-std   port_alloc_multiprocess    # spawns processes to race port allocation
+skip  leviculum-std   public_node_config_acceptance # builds node configs in temp dirs; subject is the config builder
+skip  leviculum-std   rnsd_interop               # drives Python rnsd over sockets; Tier 1
+skip  leviculum-std   shared_instance_client_count # tokio runtime with a shared instance
+skip  leviculum-std   shared_instance_conflict   # tokio runtime with two competing instances
+skip  leviculum-std   supervised_spawn           # already run by the `supervised-spawn` step of `just fast`
+skip  lndecode        agrees_with_the_writer     # decoder/writer agreement; subject is the code
+skip  lndecode        cli                        # spawns the lndecode binary
+skip  lnflash         cli                        # spawns the lnflash binary against temp dirs
+skip  lnflash         vendored_softdevice        # close to the line: reads the vendored image, but half its subject is the parser
+skip  lnmsg           python_interop             # drives Python over sockets; Tier 1
+skip  lnmsg           send_cli                   # spawns the lnmsg binary
+skip  lnmsg           stamp_timing               # tokio runtime around the stamp solver
+skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
+skip  lnomad          image_layout               # layout arithmetic; subject is the code
+skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
+skip  lnpnd           control_permission         # binds sockets under a tokio runtime
+skip  lnpnd           event_log_analysis         # spawns the lnpnd binary over a temp-dir log
+skip  lnpnd           first_start_identity       # spawns the daemon and inspects what it wrote
+skip  lnpnd           lxmd_identity_takeover     # spawns the daemon against an lxmd identity
+skip  lnpnd           start_waits_for_daemon     # tokio runtime and a startup race with sleeps
+skip  lnpnd           status_default_budget      # tokio runtime with sleeps
+skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

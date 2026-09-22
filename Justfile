@@ -851,10 +851,57 @@ supervised-spawn:
 check-all-targets:
     {{manifest}} check-all-targets --no-tests -- cargo check --workspace --all-targets
 
+# The other half of #220. `check-all-targets` proves every `tests/` target
+# COMPILES; until this recipe nothing on the push path proved any of them
+# PASSES, and `just standard` is where that was first heard. On 2026-09-22 that
+# cost 18 commits a landing gate and two red cycles, and the break was
+# attributed to a commit two batches old.
+#
+# Not `cargo test --workspace` on the push path, and not a hardcoded file
+# either. What runs here is one declared class, stated in
+# scripts/source-invariant-targets.txt: the target's subject is a FILE IN THIS
+# TREE -- a document, a config, a catalogue, the text of a source file -- it
+# reads that file and asserts a property of what it read, and it starts no
+# process, opens no socket, touches no device and finishes in milliseconds.
+# Such a target goes red from an edit that compiles nothing, which is exactly
+# what a `--lib` gate cannot see. A target whose subject is the CODE stays out,
+# fast and pure or not; that boundary is what keeps this from becoming the
+# workspace run under another name.
+#
+# COST, measured on schneckenschreck 2026-09-22, 11 targets / 55 tests:
+#   warm  (every binary up to date)              1.9 s
+#   after a batch touched all 11 test sources    3.6 s
+#   first run on a tree that has just built the
+#     REST of `fast` (links the lnflash and
+#     leviculum-ffi test-profile dep trees,
+#     which no other Tier-0 step builds)        ~23 s, once
+# Of the warm 1.9 s, ~0.9 s is the three `cargo test` invocations and ~0.95 s
+# is the manifest wrapper -- hence ONE wrapper around the whole step rather
+# than one per package, which measured 3.9 s for the same 55 names.
+[doc('Run the tests/ targets that assert on files in this tree')]
+source-invariant-tests: check-source-invariant-census
+    {{manifest}} source-invariant -- python3 scripts/run-source-invariant-tests.py
+
+# The guard that keeps the list above from drifting: every `test`-kind target
+# cargo reports must carry a `run` or `skip` verdict with a stated reason, and
+# a target in neither fails naming the file. Same shape and same reason as the
+# ignored-tests census (#191c): a hand-picked run list covers the files it named
+# on the day it was written and nothing added afterwards, so the mechanism has
+# to be that FORGETTING is what goes red. ~0.05 s, one `cargo metadata`.
+#
+# It cannot check that an admitted target meets the class criterion -- a
+# spawned daemon behind a helper module is invisible to it. The criterion is
+# held by the one-line reason beside each entry, in a diff, read by a person.
+[doc('Check every tests/ target has a run-or-skip verdict')]
+check-source-invariant-census:
+    @python3 scripts/check-source-invariant-census.py
+
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
 # + fmt + clippy (host + nrf) + rustdoc gate + tracing-shim + M0
-# gates + a compile check of every workspace target (#220) + workspace lib
+# gates + a compile check of every workspace target (#220) + a RUN of the
+# `tests/` targets whose subject is a file in this tree (the other half of
+# #220) + workspace lib
 # tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
 # the third-party notice guard (#288) + the process-supervision pair (census
 # over the sources, proof against the kernel) + the release gate's two halves
@@ -873,7 +920,7 @@ check-all-targets:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
