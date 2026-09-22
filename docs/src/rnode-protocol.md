@@ -299,6 +299,32 @@ Byte  9:    noise_floor (unsigned, -157 offset)
 Byte  10:   interference (unsigned, -157 offset; 0xFF = no interference)
 ```
 
+When the device sends it, and why that dates the keying: the firmware
+calls `kiss_indicate_channel_stats()` as the last statement of
+`update_airtime()` (RNode_Firmware.ino:712), and `update_airtime()` is the
+last statement of both `flush_queue()` (:606) and `pop_queue()` (:644).
+So a CHTM frame follows every keyed burst -- after `LoRa->endPacket()`
+returned and `add_airtime()` (:751) folded that burst's airtime cost into
+the bins -- on top of the idle cadence of roughly one per second. A rise
+in `airtime_short` is therefore the modem's own receipt that it keyed:
+`airtime_bins` is written by `add_airtime()` alone, and `airtime` is their
+two-bin ratio (:698) over 15000 ms (Config.h:183), scaled by 100*100, so
+one raw unit is 1.5 ms of airtime.
+
+The arrival alone is not the receipt. `transmit()` with `radio_online`
+false answers `CMD_ERROR TXFAILED` and keys nothing, yet its caller still
+emits a CHTM, with `airtime_short` unmoved; a failed `endPacket()` (:744)
+answers MODEM_TIMEOUT + TXFAILED and hard-resets, so no CHTM follows at
+all. And the frame dates a burst, not a frame: below
+`LORA_GUARD_THRESHOLD_BPS` = 14 kbps (Config.h:89), which is every LoRa
+PHY we run, `flush_queue()` drains the whole queue before the single CHTM.
+AVR RNodes compile the frame out entirely.
+
+The interface logs each decoded CHTM as `LORA_CHTM iface=<n>
+airtime_short=<pct> airtime_long=<pct> channel_load_short=<pct>
+channel_load_long=<pct>`, on the same target and level as `LORA_TX`, so a
+capture that holds the handovers holds the keying account beside them.
+
 Note: For multi-interface (RNodeMultiInterface), CMD_STAT_CHTM is only
 8 bytes (no RSSI/noise_floor/interference fields):
 ```

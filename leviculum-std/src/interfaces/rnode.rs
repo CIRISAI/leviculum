@@ -636,10 +636,13 @@ where
 /// - BAT: `(state, percent)`.
 /// - TEMP: Celsius (`raw - 120`), clamped to `[-30, 90]`, else `None`.
 ///
+/// A `CMD_STAT_CHTM` frame additionally emits the `LORA_CHTM` trace event
+/// (see the emission site below); `name` is the interface name it carries.
+///
 /// Returns `true` if `command` was a recognised stat frame. Shared by the I/O
 /// task and unit tests so the parse/state path is exercised without a serial
 /// port.
-fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -> bool {
+fn apply_radio_stat(name: &str, counters: &InterfaceCounters, command: u8, payload: &[u8]) -> bool {
     match command {
         rnode::CMD_STAT_RSSI => {
             if let Some(rssi) = rnode::decode_rssi(payload) {
@@ -653,15 +656,67 @@ fn apply_radio_stat(counters: &InterfaceCounters, command: u8, payload: &[u8]) -
         }
         rnode::CMD_STAT_CHTM => {
             if let Some(cs) = rnode::decode_channel_stats(payload) {
+                let airtime_short = cs.airtime_short as f64 / 100.0;
+                let airtime_long = cs.airtime_long as f64 / 100.0;
+                let channel_load_short = cs.channel_load_short as f64 / 100.0;
+                let channel_load_long = cs.channel_load_long as f64 / 100.0;
                 counters.update_radio(|r| {
-                    r.airtime_short = cs.airtime_short as f64 / 100.0;
-                    r.airtime_long = cs.airtime_long as f64 / 100.0;
-                    r.channel_load_short = cs.channel_load_short as f64 / 100.0;
-                    r.channel_load_long = cs.channel_load_long as f64 / 100.0;
+                    r.airtime_short = airtime_short;
+                    r.airtime_long = airtime_long;
+                    r.channel_load_short = channel_load_short;
+                    r.channel_load_long = channel_load_long;
                     if let Some(nf) = cs.noise_floor {
                         r.noise_floor = Some(nf);
                     }
                 });
+                // The modem's own account of whether it keyed. `LORA_TX`
+                // dates the write to the serial port; between that write and
+                // the air sit the firmware's send queue and its CSMA, so a
+                // frame handed over and never keyed reads there as a
+                // handover. This event closes that gap from the modem's side,
+                // and it is the arrival plus the airtime delta that carries
+                // the answer, not the payload alone:
+                //
+                // * `kiss_indicate_channel_stats()` is the last statement of
+                //   `update_airtime()` (RNode_Firmware.ino:712), and
+                //   `update_airtime()` is the last statement of both
+                //   `flush_queue()` (:606) and `pop_queue()` (:644) — after
+                //   `transmit()` ran `LoRa->endPacket()` and `add_airtime()`
+                //   (:751) folded the just-keyed packet's airtime cost in. So
+                //   every keyed burst is followed by a CHTM frame carrying
+                //   its cost, on top of the ~1 s idle cadence.
+                // * A rise in `airtime_short` is the proof. `airtime_bins` is
+                //   written by `add_airtime()` alone, and `airtime` is their
+                //   two-bin ratio (:698) over 2*`AIRTIME_BINLEN_MS` = 15000 ms
+                //   (Config.h:183, 3*2500), scaled by 100*100 into the u16 on
+                //   the wire. One raw unit is therefore 1.5 ms of airtime,
+                //   far below any frame at any supported PHY.
+                // * Arrival alone is NOT the proof: `transmit()` with
+                //   `radio_online == false` answers `CMD_ERROR TXFAILED` and
+                //   keys nothing, yet its caller still emits a CHTM — with
+                //   `airtime_short` unmoved. A failed `endPacket()` (:744)
+                //   instead answers MODEM_TIMEOUT + TXFAILED and hard-resets,
+                //   so no CHTM follows at all.
+                //
+                // Two limits an analysis has to respect. This dates a BURST,
+                // not a frame: at every bitrate below
+                // LORA_GUARD_THRESHOLD_BPS = 14 kbps (Config.h:89) —
+                // which is every LoRa PHY we run — `should_flush` is true
+                // (:1644) and `flush_queue()` drains the whole queue before
+                // the single CHTM, whose airtime covers all of it. And the
+                // frame is ESP32/nRF52 only; an AVR RNode compiles
+                // `kiss_indicate_channel_stats()` to nothing and this event
+                // never appears for it.
+                //
+                // Same target and level as `LORA_TX` so a run that captures
+                // the handovers captures the keying beside them.
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_CHTM iface={name} airtime_short={airtime_short:.2} \
+                     airtime_long={airtime_long:.2} \
+                     channel_load_short={channel_load_short:.2} \
+                     channel_load_long={channel_load_long:.2}"
+                );
             }
         }
         rnode::CMD_STAT_BAT => {
@@ -1119,7 +1174,7 @@ where
                                     | rnode::CMD_STAT_CHTM
                                     | rnode::CMD_STAT_BAT
                                     | rnode::CMD_STAT_TEMP) => {
-                                        apply_radio_stat(&counters, cmd, &payload);
+                                        apply_radio_stat(&name, &counters, cmd, &payload);
                                     }
                                     _ => {
                                         tracing::trace!(
@@ -5559,7 +5614,12 @@ mod tests {
     #[test]
     fn apply_radio_stat_rssi_dbm() {
         let c = InterfaceCounters::new();
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_RSSI, &[100]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_RSSI,
+            &[100]
+        ));
         assert_eq!(c.radio_stats().unwrap().last_rssi, Some(-57));
     }
 
@@ -5569,10 +5629,20 @@ mod tests {
     fn apply_radio_stat_snr_scaled() {
         let c = InterfaceCounters::new();
         // 0x28 = 40 -> 10.0 dB
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_SNR, &[0x28]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_SNR,
+            &[0x28]
+        ));
         assert_eq!(c.radio_stats().unwrap().last_snr, Some(10.0));
         // 0xF0 = -16 (signed) -> -4.0 dB
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_SNR, &[0xF0]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_SNR,
+            &[0xF0]
+        ));
         assert_eq!(c.radio_stats().unwrap().last_snr, Some(-4.0));
     }
 
@@ -5592,7 +5662,12 @@ mod tests {
             100,  // noise_floor raw 100 -> -57 dBm
             0xFF, // interference none
         ];
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_CHTM, &payload));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_CHTM,
+            &payload
+        ));
         let r = c.radio_stats().unwrap();
         assert_eq!(r.airtime_short, 3.0);
         assert_eq!(r.airtime_long, 10.0);
@@ -5601,13 +5676,95 @@ mod tests {
         assert_eq!(r.noise_floor, Some(-57));
     }
 
+    /// A CHTM frame crossing the real KISS path emits `LORA_CHTM` on the
+    /// same target and level as `LORA_TX`, so a run that captures the
+    /// handovers captures the modem's keying account beside them.
+    ///
+    /// Why this is the keying evidence and `LORA_TX` is not: the firmware
+    /// sends CHTM at the end of `update_airtime()`
+    /// (RNode_Firmware.ino:712), which both `flush_queue()` (:606) and
+    /// `pop_queue()` (:644) call after `add_airtime()` (:751) folded the
+    /// airtime of the packet `LoRa->endPacket()` just keyed into the bins.
+    /// The trailing CMD_DATA frame is the barrier: one deframer processes
+    /// the stream in order, so a packet on `incoming_rx` proves the CHTM
+    /// before it was already handled.
+    #[tokio::test]
+    async fn chtm_frame_emits_lora_chtm_trace_event() {
+        let (buf, _guard) = capture_logs();
+        let (port, mut peer) = tokio::io::duplex(8192);
+        let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingPacket>(16);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingPacket>(16);
+        let counters = Arc::new(InterfaceCounters::new());
+        let task = tokio::spawn(async move {
+            rnode_io_task(
+                "test_rnode_chtm".to_string(),
+                port,
+                incoming_tx,
+                outgoing_rx,
+                counters,
+                /* flow_control = */ false,
+                test_channel_access(),
+                125_000,
+                7,
+                5,
+                /* drop_direct_ingress = */ false,
+            )
+            .await;
+        });
+
+        // Single-interface (11-byte) CHTM: airtime_short raw 300 -> 3.00 %,
+        // airtime_long 1000 -> 10.00 %, channel_load_short 200 -> 2.00 %,
+        // channel_load_long 600 -> 6.00 %.
+        let mut wire = Vec::new();
+        for (command, payload) in [
+            (
+                rnode::CMD_STAT_CHTM,
+                &[
+                    0x01, 0x2C, 0x03, 0xE8, 0x00, 0xC8, 0x02, 0x58, 0xC8, 100, 0xFF,
+                ][..],
+            ),
+            (rnode::CMD_DATA, &[0x00, 0x00, 0x01][..]),
+        ] {
+            kiss::frame(command, payload, &mut wire);
+            peer.write_all(&wire)
+                .await
+                .expect("write mocked KISS frame");
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), incoming_rx.recv())
+            .await
+            .expect("data frame within 2s")
+            .expect("incoming channel open");
+        drop(outgoing_tx);
+        drop(peer);
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+        let captured = buf.lock().unwrap();
+        let logs = String::from_utf8_lossy(&captured);
+        let events: Vec<&str> = logs.lines().filter(|l| l.contains("LORA_CHTM")).collect();
+        assert_eq!(events.len(), 1, "one LORA_CHTM event; logs:\n{logs}");
+        assert!(
+            events[0].contains(
+                "LORA_CHTM iface=test_rnode_chtm airtime_short=3.00 airtime_long=10.00 \
+                 channel_load_short=2.00 channel_load_long=6.00"
+            ),
+            "scalar keys, two decimals, one line: {}",
+            events[0]
+        );
+    }
+
     /// CMD_STAT_BAT payload is `[state, percent]`; percent is 0..=100. Matches
     /// Python `r_battery_state`/`r_battery_percent`.
     #[test]
     fn apply_radio_stat_battery() {
         let c = InterfaceCounters::new();
         // 0x02 = Charging, 85%
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_BAT, &[0x02, 85]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_BAT,
+            &[0x02, 85]
+        ));
         let r = c.radio_stats().unwrap();
         assert_eq!(r.battery_state, rnode::BatteryState::Charging);
         assert_eq!(r.battery_percent, 85);
@@ -5620,13 +5777,28 @@ mod tests {
     fn apply_radio_stat_temperature_clamped() {
         let c = InterfaceCounters::new();
         // 145 - 120 = 25 C (in range)
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[145]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_TEMP,
+            &[145]
+        ));
         assert_eq!(c.radio_stats().unwrap().cpu_temp, Some(25));
         // 250 - 120 = 130 C (> 90) -> None
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[250]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_TEMP,
+            &[250]
+        ));
         assert_eq!(c.radio_stats().unwrap().cpu_temp, None);
         // 80 - 120 = -40 C (< -30) -> None
-        assert!(apply_radio_stat(&c, rnode::CMD_STAT_TEMP, &[80]));
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_TEMP,
+            &[80]
+        ));
         assert_eq!(c.radio_stats().unwrap().cpu_temp, None);
     }
 
@@ -5634,7 +5806,12 @@ mod tests {
     #[test]
     fn apply_radio_stat_ignores_non_stat_command() {
         let c = InterfaceCounters::new();
-        assert!(!apply_radio_stat(&c, rnode::CMD_DATA, &[1, 2, 3]));
+        assert!(!apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_DATA,
+            &[1, 2, 3]
+        ));
         assert!(c.radio_stats().is_none());
     }
 
