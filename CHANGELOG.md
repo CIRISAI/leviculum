@@ -20,6 +20,38 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A board can now account for a SINGLE named packet it was asked to relay,
+  not only for aggregate counts. `leviculum-nrf/Cargo.toml` pulls
+  leviculum-core with `default-features = false`, so the `tracing` feature is
+  off and every `debug!`/`trace!` in the core is a no-op on firmware
+  (`leviculum-core/src/lib.rs:83-100`): the journey events `PKT_FORWARD`,
+  `PKT_DROP` and `DEDUP_DROP` that make a relay decision legible on `lnsd` do
+  not exist on a board at all. The periodic `[TRANSPORT]` counter line says
+  how many packets were forwarded or dropped in the last 30 s and never
+  which, so a forward, a no-path drop, a dedup hit and a hop-ceiling drop all
+  looked like the same silence on the debug port. Chasing #344 needed a 5.5 h
+  receiver log, a millisecond capture of three debug ports at once and packet
+  length arithmetic to establish something the board could have said in one
+  line. The new `NodeEvent::RelayDecided` reports that decision per packet and
+  the boards render it as one `PKT_RELAY outcome=<o> ph=<hex16> dst=<hex8>
+  hops=<n> iface_out=<n|none>` line. `ph=` is the full 8-byte journey
+  correlator, byte-identical to the `ph=` a peer's `lnsd` prints, so a board
+  capture and a host log stitch on one id instead of on counter correlation.
+  Scope is the ADDRESSED relay path and only that: a packet whose transport
+  header names another node emits nothing, because on a shared medium a relay
+  hears every packet routed via its neighbours and one line per reception is
+  the 99 %-noise problem the counter-only overheard path exists to avoid — the
+  absence of a line is therefore itself a reading, and it is pinned as a test
+  rather than left as an intention
+  (`leviculum-core/src/node/mvr_embedded_same_iface_relay.rs`). Nothing is
+  hashed for the event: every call site already holds the hash it correlates
+  on. Measured cost: `NodeEvent` and `TransportEvent` both stay 232 bytes, so
+  no event anywhere grows; the t114 release image gains 1016 B of flash and
+  **0 B of `.bss`**, which is the budget that rules out compiling the real
+  `tracing` crate in (the T114's stack margin is ~13 KiB and every `.bss` byte
+  comes out of it); one line is 114 bytes on the debug CDC at its widest and
+  nothing at all when no reader is attached. Refs #346.
+
 - A board that learns a path from an announce and passes it on to nobody now
   says so. That outcome is not a drop — the announce arrived, was validated,
   and the path is installed — so no counter moves and, until now, no line was

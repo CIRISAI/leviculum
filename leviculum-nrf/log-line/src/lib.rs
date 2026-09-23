@@ -239,6 +239,67 @@ impl core::fmt::Display for AnnounceLearnedNotRelayedBody {
     }
 }
 
+/// The body of the firmware's `PKT_RELAY` line, rendered from the core's
+/// `NodeEvent::RelayDecided` (Codeberg #346).
+///
+/// What this board did with ONE packet a neighbour addressed to it for relay:
+///
+/// ```text
+/// PKT_RELAY outcome=<o> ph=<16 hex> dst=<8 hex> hops=<n> iface_out=<n|none>
+/// ```
+///
+/// Off the boards the same decision is already readable as the journey events
+/// `PKT_FORWARD`, `PKT_DROP` and `DEDUP_DROP`. On a board none of them exists
+/// — the firmware builds leviculum-core without `tracing` — and the periodic
+/// `[TRANSPORT]` counter line can only say how many, never which. This line
+/// is the "which".
+///
+/// `ph` is the FULL 8-byte journey correlator, rendered exactly as
+/// `leviculum-core`'s `ph=` renders it, so a board line and a peer's `lnsd`
+/// log stitch on one id. `dest` is shortened to 4 bytes like
+/// [`LinkRefusedBody`]'s — a prefix of the 16-byte `dst=` the host events
+/// carry, so a grep for the short form still finds both.
+///
+/// **Absence of a line is itself a reading.** A packet nobody addressed to
+/// this board produces none: the overheard path is counter-only by design, so
+/// "no `PKT_RELAY` for a packet a peer says it sent" means the board either
+/// never heard it or was never named as its next hop — not that the relay
+/// silently swallowed it.
+pub struct RelayDecidedBody {
+    /// The outcome scalar, the core's own (`RelayOutcome::as_str`), passed
+    /// through as `&'static str` so this crate keeps no dependencies.
+    pub outcome: &'static str,
+    /// The journey correlator: the first 8 bytes of the packet hash.
+    pub ph: [u8; 8],
+    /// The destination the packet was for.
+    pub dest: [u8; 16],
+    /// The packet's hop count as it arrived.
+    pub hops: u8,
+    /// The interface it was handed to, or `None` when it reached none.
+    pub iface_out: Option<usize>,
+}
+
+impl core::fmt::Display for RelayDecidedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "outcome={} ph=", self.outcome)?;
+        for byte in &self.ph {
+            write!(f, "{byte:02x}")?;
+        }
+        f.write_str(" dst=")?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " hops={}", self.hops)?;
+        // A fixed key set: `none` rather than an omitted key, so a consumer
+        // that splits on `=` never has to tell a missing field from a
+        // truncated line.
+        match self.iface_out {
+            Some(idx) => write!(f, " iface_out={idx}"),
+            None => f.write_str(" iface_out=none"),
+        }
+    }
+}
+
 /// The uptime stamp of a captured line: its LAST `t=` field.
 ///
 /// `None` for a line that carries none — every line the current
@@ -387,6 +448,66 @@ mod tests {
             line("LINK_REFUSED ", format_args!("{body}"), 42),
             "LINK_REFUSED reason=budget links=5 max=5 dest=ab01cd23 t=42\r\n"
         );
+    }
+
+    #[test]
+    fn a_forwarded_relay_names_the_packet_and_the_interface_it_left_on() {
+        let mut dest = [0u8; 16];
+        dest[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let body = RelayDecidedBody {
+            outcome: "forwarded",
+            ph: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+            dest,
+            hops: 2,
+            iface_out: Some(0),
+        };
+        assert_eq!(
+            line("PKT_RELAY ", format_args!("{body}"), 1234),
+            "PKT_RELAY outcome=forwarded ph=0123456789abcdef dst=deadbeef hops=2 \
+iface_out=0 t=1234\r\n"
+        );
+    }
+
+    #[test]
+    fn a_relay_that_reached_no_interface_says_none_rather_than_dropping_the_key() {
+        // The failure this pins: a dropped key turns "reached no interface"
+        // into "the line was cut", and the two read the same in a capture.
+        let body = RelayDecidedBody {
+            outcome: "no-path",
+            ph: [0xaa; 8],
+            dest: [0x11; 16],
+            hops: 1,
+            iface_out: None,
+        };
+        let rendered = line("PKT_RELAY ", format_args!("{body}"), 7);
+        assert_eq!(
+            rendered,
+            "PKT_RELAY outcome=no-path ph=aaaaaaaaaaaaaaaa dst=11111111 hops=1 \
+iface_out=none t=7\r\n"
+        );
+        assert_eq!(rendered.matches('=').count(), 6);
+    }
+
+    #[test]
+    fn the_widest_relay_line_fits_the_firmware_log_buffer() {
+        // The widest body the four outcomes can produce, at the widest hop
+        // count and a two-digit interface index. It must leave room for the
+        // stamp inside one 256-byte log buffer, or `format_line` starts
+        // trading the body against the `t=` the capture is ordered by.
+        let body = RelayDecidedBody {
+            outcome: "forward-max-hops",
+            ph: [0xff; 8],
+            dest: [0xff; 16],
+            hops: u8::MAX,
+            iface_out: Some(99),
+        };
+        let rendered = line("PKT_RELAY ", format_args!("{body}"), u64::MAX);
+        assert!(
+            rendered.len() < 128,
+            "{} bytes: {rendered:?}",
+            rendered.len()
+        );
+        assert_eq!(parse_stamp(&rendered), Some(u64::MAX));
     }
 
     #[test]

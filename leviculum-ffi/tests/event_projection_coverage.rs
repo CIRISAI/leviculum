@@ -43,6 +43,13 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // the destination asks `lev_hops_to` — the path the announce carried is
     // installed either way.
     "AnnounceLearnedNotRelayed",
+    // What this node did with a packet it RELAYED for somebody else: pure
+    // instrumentation, and about no destination the application registered.
+    // A C application neither owns the packet nor can act on the outcome —
+    // the relay decision is already made when the event exists. It is
+    // rendered on the boards, where the journey events that say the same
+    // thing are compiled out, and read from a capture, not from an app.
+    "RelayDecided",
 ];
 
 /// Variants whose `destination_hash` is deliberately not projected into

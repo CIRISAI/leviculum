@@ -3857,6 +3857,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
 
+            TransportEvent::RelayDecided {
+                destination_hash,
+                packet_hash_prefix,
+                outcome,
+                hops,
+                interface_out,
+            } => {
+                self.events.push(NodeEvent::RelayDecided {
+                    destination_hash: DestinationHash::new(destination_hash),
+                    packet_hash_prefix,
+                    outcome,
+                    hops,
+                    interface_out,
+                });
+            }
+
             TransportEvent::PacketReceived {
                 destination_hash,
                 packet,

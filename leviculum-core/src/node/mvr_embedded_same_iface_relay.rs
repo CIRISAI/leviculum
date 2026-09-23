@@ -38,6 +38,22 @@
 //!   hardware. It must come out green: a red there means the rig is
 //!   miswired, not that the code is wrong.
 //!
+//! ## The #346 half: the board has to be able to SAY which of them happened
+//!
+//! The controls above separate the outcomes by COUNTER, which is what a host
+//! test can do and a board cannot: a counter step says one packet of some
+//! kind was dropped somewhere in the last 30 s. The cases below pin the other
+//! half — that the same decision is also reported per packet, as
+//! `NodeEvent::RelayDecided`, carrying the journey correlator `ph` so the
+//! board's line and the sender's own log name the SAME packet. They are what
+//! keeps the `PKT_RELAY` line the firmware renders honest.
+//!
+//! One of them is a control in the other direction: a packet addressed to
+//! ANOTHER transport node must emit no event at all. On a shared medium a
+//! relay hears every packet routed via its neighbours, and an event per
+//! reception would put the 99 %-noise problem on the debug port that the
+//! counter-only overheard path exists to avoid.
+//!
 //! Sans-I/O: no LoRa, no Docker, no Python, sub-second wall clock.
 
 extern crate std;
@@ -52,13 +68,15 @@ use crate::constants::{MTU, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationType, Direction};
 use crate::embedded_storage::EmbeddedStorage;
 use crate::identity::Identity;
+use crate::node::NodeEvent;
 use crate::node::{NodeCore, NodeCoreBuilder};
+use crate::packet::packet_hash;
 use crate::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
 };
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::Clock;
-use crate::transport::{Action, InterfaceId, TickOutput};
+use crate::transport::{Action, InterfaceId, RelayOutcome, TickOutput};
 
 /// The board under test: the firmware's exact type parameters bar the RNG and
 /// clock, which are the deterministic test doubles.
@@ -113,7 +131,7 @@ fn make_destination() -> (crate::DestinationHash, Vec<u8>) {
 /// Re-stamp a direct announce as one that reached us THROUGH `transport_id`
 /// at `wire_hops`. The receipt increment makes the stored path
 /// `wire_hops + 1`, and the transport header becomes the path's next hop
-/// (`transport.rs:4520`) — which is what `needs_relay()` needs.
+/// (`transport.rs:4638`) — which is what `needs_relay()` needs.
 fn announce_via(raw: &[u8], transport_id: [u8; TRUNCATED_HASHBYTES], wire_hops: u8) -> Vec<u8> {
     let mut packet = Packet::unpack(raw).unwrap();
     packet.flags.header_type = HeaderType::Type2;
@@ -238,7 +256,7 @@ fn embedded_transport_forwards_data_back_out_the_arrival_interface() {
     assert_eq!(
         packet.flags.header_type,
         HeaderType::Type2,
-        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:6928)"
+        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:7046)"
     );
     assert_eq!(
         packet.transport_id,
@@ -346,5 +364,184 @@ fn control_announce_is_relayed_on_the_same_single_interface() {
         "a transport node with ONE interface relays an announce back out on \
          it — the behaviour measured on the bench (12 relayed announces at \
          hops=2). If this is red the rig is miswired, not the code."
+    );
+}
+
+/// One reported relay decision, flattened to what these cases assert on.
+#[derive(Debug, PartialEq, Eq)]
+struct Decision {
+    outcome: RelayOutcome,
+    ph: [u8; 8],
+    dest: [u8; TRUNCATED_HASHBYTES],
+    iface_out: Option<usize>,
+}
+
+/// Every relay decision this output reported.
+fn relay_decisions(out: &TickOutput) -> Vec<Decision> {
+    out.events
+        .iter()
+        .filter_map(|event| match event {
+            NodeEvent::RelayDecided {
+                destination_hash,
+                packet_hash_prefix,
+                outcome,
+                interface_out,
+                ..
+            } => Some(Decision {
+                outcome: *outcome,
+                ph: *packet_hash_prefix,
+                dest: *destination_hash.as_bytes(),
+                iface_out: *interface_out,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The journey correlator of a packet as it went on the wire: the first 8
+/// bytes of its packet hash, which is what `ph=` is everywhere in this stack.
+fn ph_of(raw: &[u8]) -> [u8; 8] {
+    let mut ph = [0u8; 8];
+    ph.copy_from_slice(&packet_hash(raw)[..8]);
+    ph
+}
+
+/// #346: the forward the test above proves happens must also be REPORTABLE.
+/// A board builds leviculum-core without `tracing`, so `PKT_FORWARD` does not
+/// exist there and `[TRANSPORT] fwd=` can only say that some packet moved.
+#[test]
+fn a_forwarded_packet_is_reported_with_its_correlator_and_its_exit_interface() {
+    let (dest, announce_raw) = make_destination();
+    let mut node = make_node();
+    let lora = add_lora(&mut node);
+    let _ = node.handle_packet(InterfaceId(lora), &announce_via(&announce_raw, UPSTREAM, 1));
+
+    let own_id = *node.identity().hash();
+    let wire = data_via(own_id, &dest, 1);
+    let out = node.handle_packet(InterfaceId(lora), &wire);
+
+    let decisions = relay_decisions(&out);
+    assert_eq!(
+        decisions.len(),
+        1,
+        "exactly one relay decision per addressed packet; got {decisions:?}"
+    );
+    let decision = &decisions[0];
+    assert_eq!(
+        decision.outcome,
+        RelayOutcome::Forwarded,
+        "the packet was forwarded"
+    );
+    assert_eq!(
+        decision.ph,
+        ph_of(&wire),
+        "the correlator must be the packet's own `ph`, the one the sender's \
+         log and every journey event name it by — a board line that cannot be \
+         joined to the sender's line is back to counter correlation"
+    );
+    assert_eq!(
+        decision.dest,
+        *dest.as_bytes(),
+        "and the destination it was for"
+    );
+    assert_eq!(
+        decision.iface_out,
+        Some(lora),
+        "the interface it actually left on, which on this board is the one it \
+         arrived on"
+    );
+}
+
+/// #346: a packet addressed to us for a destination we hold no path to. The
+/// counter says `nopath=1`; only the event says which packet died.
+#[test]
+fn a_no_path_drop_names_the_packet_it_dropped() {
+    let (dest, _announce_raw) = make_destination();
+    let mut node = make_node();
+    let lora = add_lora(&mut node);
+    assert_eq!(node.path_count(), 0, "control must start with no path");
+
+    let own_id = *node.identity().hash();
+    let wire = data_via(own_id, &dest, 1);
+    let out = node.handle_packet(InterfaceId(lora), &wire);
+
+    assert_eq!(
+        relay_decisions(&out),
+        std::vec![Decision {
+            outcome: RelayOutcome::NoPath,
+            ph: ph_of(&wire),
+            dest: *dest.as_bytes(),
+            iface_out: None,
+        }],
+        "a drop that reached no interface reports `None`, not a guess"
+    );
+}
+
+/// #346: the second copy of a packet addressed to us. From outside, "the
+/// relay never heard it" and "the relay heard it twice and dropped the
+/// second" are the same silence; this is the line that separates them.
+#[test]
+fn a_duplicate_addressed_to_us_is_reported_as_a_duplicate() {
+    let (dest, announce_raw) = make_destination();
+    let mut node = make_node();
+    let lora = add_lora(&mut node);
+    let _ = node.handle_packet(InterfaceId(lora), &announce_via(&announce_raw, UPSTREAM, 1));
+
+    let own_id = *node.identity().hash();
+    let wire = data_via(own_id, &dest, 1);
+    let first = node.handle_packet(InterfaceId(lora), &wire);
+    assert_eq!(
+        relay_decisions(&first).first().map(|d| d.outcome),
+        Some(RelayOutcome::Forwarded),
+        "the first copy must be the forwarded one, or this is not measuring dedup"
+    );
+
+    let before = node.transport_stats();
+    let out = node.handle_packet(InterfaceId(lora), &wire);
+    let after = node.transport_stats();
+    assert_eq!(
+        after.drops_duplicate() - before.drops_duplicate(),
+        1,
+        "the second copy must die in dedup — the precondition of this test"
+    );
+    assert_eq!(
+        relay_decisions(&out),
+        std::vec![Decision {
+            outcome: RelayOutcome::Duplicate,
+            ph: ph_of(&wire),
+            dest: *dest.as_bytes(),
+            iface_out: None,
+        }],
+        "and it must say so, with the same correlator the forward carried"
+    );
+}
+
+/// #346, the control in the other direction: a packet addressed to ANOTHER
+/// transport node emits NO event. This is load-bearing — on a shared medium a
+/// relay hears every packet routed via its neighbours, and one line per
+/// reception would make the debug port useless exactly when it is needed.
+#[test]
+fn an_overheard_packet_emits_no_relay_decision_at_all() {
+    let (dest, announce_raw) = make_destination();
+    let mut node = make_node();
+    let lora = add_lora(&mut node);
+    let _ = node.handle_packet(InterfaceId(lora), &announce_via(&announce_raw, UPSTREAM, 1));
+
+    let foreign = [0xC3u8; TRUNCATED_HASHBYTES];
+    assert_ne!(&foreign, node.identity().hash(), "control must be foreign");
+
+    let before = node.transport_stats();
+    let out = node.handle_packet(InterfaceId(lora), &data_via(foreign, &dest, 1));
+    let after = node.transport_stats();
+
+    assert_eq!(
+        after.drops_overheard_transport_id() - before.drops_overheard_transport_id(),
+        1,
+        "the packet must really have been overheard — the precondition"
+    );
+    assert!(
+        relay_decisions(&out).is_empty(),
+        "the overheard path is counter-only by design; got {:?}",
+        relay_decisions(&out)
     );
 }

@@ -77,5 +77,34 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                 ),
             );
         }
+        // What this board did with ONE packet a neighbour addressed to it
+        // for relay (#346). Off-board the same decision is already legible
+        // as the journey events PKT_FORWARD / PKT_DROP / DEDUP_DROP; here
+        // they are compiled out, and the periodic `[TRANSPORT]` counter line
+        // can only say how many, never which. Only the ADDRESSED relay path
+        // reaches this — an overheard copy bound elsewhere stays on the
+        // counter, so the line cannot drown a shared-medium capture.
+        if let NodeEvent::RelayDecided {
+            destination_hash,
+            packet_hash_prefix,
+            outcome,
+            hops,
+            interface_out,
+        } = event
+        {
+            crate::log::log_fmt(
+                "PKT_RELAY ",
+                format_args!(
+                    "{}",
+                    leviculum_log_line::RelayDecidedBody {
+                        outcome: outcome.as_str(),
+                        ph: *packet_hash_prefix,
+                        dest: *destination_hash.as_bytes(),
+                        hops: *hops,
+                        iface_out: *interface_out,
+                    }
+                ),
+            );
+        }
     }
 }

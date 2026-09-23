@@ -11,7 +11,7 @@ use crate::announce::ReceivedAnnounce;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
-use crate::transport::{AnnounceTableClosed, DiscoveryWindow};
+use crate::transport::{AnnounceTableClosed, DiscoveryWindow, RelayOutcome, PKT_PH_BYTES};
 
 /// Why the driver destroyed frames bound to an interface (#25).
 ///
@@ -232,6 +232,36 @@ pub enum NodeEvent {
         /// Whether a discovery path request for this destination was open
         /// when the announce arrived.
         discovery: DiscoveryWindow,
+    },
+
+    /// What this node did with ONE packet a neighbour addressed to it for
+    /// relay (Codeberg #346).
+    ///
+    /// See
+    /// [`TransportEvent::RelayDecided`](crate::transport::TransportEvent::RelayDecided)
+    /// for the mechanism and for why the overheard, announce and broadcast
+    /// paths are deliberately NOT in scope.
+    ///
+    /// Like [`LinkRefused`](NodeEvent::LinkRefused) and
+    /// [`AnnounceLearnedNotRelayed`](NodeEvent::AnnounceLearnedNotRelayed) it
+    /// exists so the boards can see it: they build leviculum-core without
+    /// `tracing`, so the journey events that say the same thing off-board are
+    /// compiled out there. They render it as one `PKT_RELAY` line on the
+    /// debug CDC.
+    RelayDecided {
+        /// The destination the packet was for.
+        destination_hash: DestinationHash,
+        /// The first `PKT_PH_BYTES` of the packet hash — the same `ph`
+        /// correlator the journey events carry.
+        packet_hash_prefix: [u8; PKT_PH_BYTES],
+        /// What happened to it.
+        outcome: RelayOutcome,
+        /// The packet's hop count as it arrived.
+        hops: u8,
+        /// The interface it was handed to, for
+        /// [`RelayOutcome::Forwarded`]; `None` for every outcome that reached
+        /// no interface.
+        interface_out: Option<usize>,
     },
 
     // Proof Events
@@ -536,6 +566,9 @@ impl NodeEvent {
             | NodeEvent::LinkRefused { .. }
             // An announce that went nowhere is not link-borne at all.
             | NodeEvent::AnnounceLearnedNotRelayed { .. }
+            // A relay decision is about somebody else's packet in transit;
+            // this node terminates no link it names.
+            | NodeEvent::RelayDecided { .. }
             | NodeEvent::ControlPlaneOverflow { .. }
             | NodeEvent::CoreProcessorPanicked { .. }
             | NodeEvent::InterfaceDown(_)
@@ -587,7 +620,13 @@ impl NodeEvent {
             // occurrence of a repeating condition; classifying it CONTROL
             // would make a diagnostic compete with path discovery for the
             // control plane, which is the opposite of what it is for.
-            | NodeEvent::AnnounceLearnedNotRelayed { .. } => EventClass::Data,
+            | NodeEvent::AnnounceLearnedNotRelayed { .. }
+            // Same reasoning, and the volume argument on top: one of these
+            // accompanies every relayed packet, so a CONTROL classification
+            // would let pure instrumentation crowd out path discovery on the
+            // busiest node in the mesh. A lost one costs a reader one line of
+            // a repeating condition; the counters still total correctly.
+            | NodeEvent::RelayDecided { .. } => EventClass::Data,
 
             // Link lifecycle and identity — at most one per link, must not be
             // lost or links wedge. A refusal is the lifecycle event of a link
@@ -647,6 +686,7 @@ impl NodeEvent {
             NodeEvent::PathRequestReceived { .. } => "PathRequestReceived",
             NodeEvent::PathLost { .. } => "PathLost",
             NodeEvent::AnnounceLearnedNotRelayed { .. } => "AnnounceLearnedNotRelayed",
+            NodeEvent::RelayDecided { .. } => "RelayDecided",
             NodeEvent::PacketReceived { .. } => "PacketReceived",
             NodeEvent::PacketDeliveryConfirmed { .. } => "PacketDeliveryConfirmed",
             NodeEvent::DeliveryFailed { .. } => "DeliveryFailed",

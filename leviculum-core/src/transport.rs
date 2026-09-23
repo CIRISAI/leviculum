@@ -1754,6 +1754,50 @@ impl DiscoveryWindow {
     }
 }
 
+/// What a transport node did with ONE packet a neighbour addressed to it for
+/// relay.
+///
+/// The four outcomes an addressed packet can have once it reaches this node's
+/// relay path, and the set the `[TRANSPORT]` counter line
+/// (`leviculum-nrf/src/transport_stats.rs`) aggregates. Aggregates answer "how
+/// many"; this answers "this one, and why" — the question a board could not
+/// answer at all before (Codeberg #346).
+///
+/// Deliberately NOT a drop taxonomy: [`Forwarded`](RelayOutcome::Forwarded) is
+/// a success, and the three failing arms each already record their own
+/// [`DropReason`] at the same site. Nothing here counts anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RelayOutcome {
+    /// Handed to an interface, next hop rewritten. Pairs with
+    /// `TransportStats::packets_forwarded`.
+    Forwarded,
+    /// The path table held no entry for the destination
+    /// ([`DropReason::NoPath`]).
+    NoPath,
+    /// This copy was already in the packet-hash cache
+    /// ([`DropReason::Duplicate`]).
+    Duplicate,
+    /// The hop count had already reached the ceiling
+    /// ([`DropReason::ForwardMaxHops`]).
+    MaxHops,
+}
+
+impl RelayOutcome {
+    /// The scalar a structured log line carries. Stable: capture consumers
+    /// count these. Kebab-cased like [`DropReason::kebab`], so the three
+    /// failing arms read identically to the `reason=` of the journey
+    /// `PKT_DROP` emitted beside them off-board.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RelayOutcome::Forwarded => "forwarded",
+            RelayOutcome::NoPath => "no-path",
+            RelayOutcome::Duplicate => "duplicate",
+            RelayOutcome::MaxHops => "forward-max-hops",
+        }
+    }
+}
+
 /// Events emitted by Transport for the application to handle
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -1872,6 +1916,45 @@ pub enum TransportEvent {
         /// Whether anyone had a discovery path request open for this
         /// destination when the announce arrived.
         discovery: DiscoveryWindow,
+    },
+
+    /// What this node did with ONE packet a neighbour addressed to it for
+    /// relay (Codeberg #346).
+    ///
+    /// Off the boards this outcome is already readable: the journey events
+    /// `PKT_FORWARD`, `PKT_DROP` and `DEDUP_DROP` carry the same `ph` and the
+    /// same reason. On a board none of them exists — the firmware pulls
+    /// leviculum-core with `default-features = false`, so the `tracing`
+    /// feature is off and every `debug!`/`trace!` in the core compiles to a
+    /// no-op (`leviculum-core/src/lib.rs:83-100`). A relay that forwarded, one
+    /// that dropped with no path, one that deduped and one that hit the hop
+    /// ceiling looked identical from the debug port, and the periodic
+    /// `[TRANSPORT]` counter line can only say how many, never which.
+    ///
+    /// **Scope is the ADDRESSED relay path and nothing else.** The event is
+    /// emitted only for packets whose transport header names this node, i.e.
+    /// packets a neighbour explicitly asked it to carry. Overheard copies
+    /// bound elsewhere stay on the counter, as they must: on a shared medium a
+    /// transport node hears every packet routed via its neighbours, and an
+    /// event per reception is the 99 %-noise problem `record_drop` was kept
+    /// away from. Relayed announces and broadcasts are addressed to nobody and
+    /// are likewise out of scope here.
+    RelayDecided {
+        /// The destination the packet was for.
+        destination_hash: [u8; TRUNCATED_HASHBYTES],
+        /// The first [`PKT_PH_BYTES`] of the packet hash — the SAME
+        /// correlator the journey events carry as `ph`, so a board line and a
+        /// peer's `lnsd` log stitch on one id. Taken from a hash the call
+        /// site already holds; nothing is hashed for this event.
+        packet_hash_prefix: [u8; PKT_PH_BYTES],
+        /// What happened to it.
+        outcome: RelayOutcome,
+        /// The packet's hop count as it arrived, after the receipt increment.
+        hops: u8,
+        /// The interface it was handed to, for
+        /// [`RelayOutcome::Forwarded`]; `None` for every outcome that
+        /// reached no interface.
+        interface_out: Option<usize>,
     },
 }
 
@@ -3025,6 +3108,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 r#type = ?packet.flags.packet_type,
                 context = ?packet.context,
             );
+            // Codeberg #346, board half: a duplicate somebody addressed to US
+            // for relay is the one dedup case a capture cannot otherwise
+            // place — "the relay never heard it" and "the relay heard it
+            // twice and dropped the second" look the same from outside. The
+            // gate is what keeps this quiet: our own relayed echo returning
+            // on a shared medium carries the NEXT hop's id, never ours, and
+            // an announce is addressed to nobody at all, so neither reaches
+            // the event.
+            if packet.flags.packet_type != PacketType::Announce
+                && packet.transport_id == Some(*self.identity.hash())
+            {
+                self.push_relay_decision(&packet, &full_packet_hash, RelayOutcome::Duplicate, None);
+            }
             self.stats.record_drop(DropReason::Duplicate);
             return Ok(());
         }
@@ -3095,6 +3191,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             iface_in = %self.iface_name(iface_in),
             reason = reason.kebab(),
         );
+    }
+
+    /// Queue the [`TransportEvent::RelayDecided`] for one addressed packet.
+    ///
+    /// Pair it with the `stats` call at the site — this pushes an event and
+    /// counts nothing, so the counters stay the single source of totals. Only
+    /// the addressed relay path calls it; see the variant's doc for why the
+    /// overheard path must not.
+    fn push_relay_decision(
+        &mut self,
+        packet: &Packet,
+        ph: &[u8],
+        outcome: RelayOutcome,
+        interface_out: Option<usize>,
+    ) {
+        self.events.push(TransportEvent::RelayDecided {
+            destination_hash: packet.destination_hash,
+            packet_hash_prefix: ph8(ph),
+            outcome,
+            hops: packet.hops,
+            interface_out,
+        });
     }
 
     /// Record a drop decided ABOVE transport, at the node's destination layer,
@@ -4372,7 +4490,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2966. A destination with no cached
+    /// link-request path uses at transport.rs:3049. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7029,6 +7147,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface_in = %self.iface_name(source_interface_index),
                 reason = DropReason::NoPath.kebab(),
             );
+            // The board-visible half of the same statement (Codeberg #346):
+            // this packet named us as its next hop and we had nowhere to put
+            // it. `[TRANSPORT] nopath=` steps too, but only the event says
+            // WHICH packet, and for which destination.
+            self.push_relay_decision(&packet, &truncated_hash, RelayOutcome::NoPath, None);
             self.stats.record_drop(DropReason::NoPath);
             self.solicit_path_after_relay_no_path(&packet.destination_hash, source_interface_index);
             return Ok(());
@@ -7188,6 +7311,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface_in = %self.iface_name_opt(receiving_iface),
                 reason = DropReason::ForwardMaxHops.kebab(),
             );
+            self.push_relay_decision(packet, &ph, RelayOutcome::MaxHops, None);
             self.stats.record_drop(DropReason::ForwardMaxHops);
             return Ok(());
         }
@@ -7208,6 +7332,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
         );
 
+        // Same statement as PKT_FORWARD above, for the half of the fleet that
+        // compiles PKT_FORWARD away (Codeberg #346). It rides this function
+        // for the reason PKT_FORWARD does: every addressed single-interface
+        // relay passes through here AFTER the hop check, so a board line
+        // claims only forwards that were really handed to an interface.
+        self.push_relay_decision(packet, &ph, RelayOutcome::Forwarded, Some(target_iface));
         self.stats.packets_forwarded += 1;
         self.send_packet_on_interface(target_iface, packet, Some(ph), peer)
     }
@@ -9321,7 +9451,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1798`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1842`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14513,7 +14643,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5756), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5874), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -17706,10 +17836,28 @@ mod tests {
             // And it must not be mistaken for one of our own links: the
             // fall-through past the link table ends in the local-delivery
             // branch, which would hand a foreign link's data to the node.
-            assert_eq!(
-                transport.pending_events(),
-                0,
-                "Relayed link data must not be delivered locally"
+            //
+            // Asserted on the delivery event itself, not on the event COUNT.
+            // A relay now also REPORTS what it did with the packet it
+            // relayed (`RelayDecided`, Codeberg #346), so an empty-queue
+            // assertion would read that instrumentation as a local delivery
+            // and be red for the one behaviour it exists to confirm.
+            let events: alloc::vec::Vec<_> = transport.drain_events().collect();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, TransportEvent::PacketReceived { .. })),
+                "Relayed link data must not be delivered locally; got {events:?}"
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    TransportEvent::RelayDecided {
+                        outcome: RelayOutcome::Forwarded,
+                        ..
+                    }
+                )),
+                "and the relay must account for the packet it repeated; got {events:?}"
             );
         }
 
