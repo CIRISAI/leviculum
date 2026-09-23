@@ -13,6 +13,20 @@
 //!
 //! Each arm gets its own direct assertion; before this module the dispatch
 //! was only crossed incidentally by transfer round-trip tests.
+//!
+//! `AcceptNone`'s silence is a deliberate difference from `AcceptApp`'s
+//! rejection, not an oversight, and the two are pinned separately below.
+//! `AcceptNone` is the strategy for a link that takes no Resources at all --
+//! it has nothing to say about any one of them. `AcceptApp` is the strategy
+//! for a link that decides per advertisement, and a decision the sender never
+//! hears is worth nothing to it: `reject_resource` answers with a
+//! RESOURCE_RCL, which is what Python's `Resource.reject`
+//! (`reference/Reticulum/RNS/Resource.py:154-164`) puts on the wire in the
+//! same situation. An `lncp -l` that armed `AcceptNone` until an identity
+//! arrived swallowed the advertisement of every sender whose LINKIDENTIFY was
+//! lost, and that is why `Destination::set_resource_strategy` exists: a
+//! listener arms its decision before the link's first packet, not from the
+//! `LinkEstablished` event it may lose the race to.
 
 extern crate std;
 
@@ -25,6 +39,7 @@ use crate::destination::{Destination, DestinationType, Direction, ProofStrategy}
 use crate::identity::Identity;
 use crate::link::LinkId;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
+use crate::packet::PacketContext;
 use crate::resource::{ResourceError, ResourceStrategy};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::NoStorage;
@@ -58,11 +73,35 @@ fn deliver_all(target: &mut EndpointNode, iface: usize, packets: Vec<Vec<u8>>) -
     out
 }
 
+/// The context byte of each packet in `output`, as a peer would read it off
+/// the wire.
+fn contexts(output: &TickOutput) -> Vec<u8> {
+    action_data(output)
+        .iter()
+        .filter_map(|pkt| crate::packet::peek_wire_class(pkt).map(|w| w.context))
+        .collect()
+}
+
 /// Establish sender <-> receiver, set `strategy` on the receiver side, and
 /// deliver one application Resource ADV to the receiver. Returns the
 /// receiver's `TickOutput` for the ADV packet plus its link id.
 fn deliver_adv_with_strategy(
     strategy: ResourceStrategy,
+) -> (EndpointNode, crate::transport::TickOutput, LinkId) {
+    deliver_adv(Some(strategy), ResourceStrategy::AcceptNone)
+}
+
+/// As above, but the strategy is armed on the DESTINATION before the link
+/// exists, and the application never touches the link.
+fn deliver_adv_with_destination_strategy(
+    strategy: ResourceStrategy,
+) -> (EndpointNode, crate::transport::TickOutput, LinkId) {
+    deliver_adv(None, strategy)
+}
+
+fn deliver_adv(
+    link_strategy: Option<ResourceStrategy>,
+    destination_strategy: ResourceStrategy,
 ) -> (EndpointNode, crate::transport::TickOutput, LinkId) {
     let identity = Identity::generate(&mut OsRng);
     let signing_key = identity.ed25519_verifying().to_bytes();
@@ -77,6 +116,7 @@ fn deliver_adv_with_strategy(
     .unwrap();
     dest.set_accepts_links(true);
     dest.set_proof_strategy(ProofStrategy::All);
+    dest.set_resource_strategy(destination_strategy);
     let dest_hash = *dest.hash();
     receiver.register_destination(dest);
     let r_iface = add_iface(&mut receiver, "R_mesh");
@@ -105,9 +145,11 @@ fn deliver_adv_with_strategy(
     }
     let receiver_link = receiver_link.expect("receiver side must reach Active");
 
-    receiver
-        .set_resource_strategy(&receiver_link, strategy)
-        .expect("strategy applies to the active link");
+    if let Some(strategy) = link_strategy {
+        receiver
+            .set_resource_strategy(&receiver_link, strategy)
+            .expect("strategy applies to the active link");
+    }
 
     // A plain application resource: no request/response flags involved.
     let payload: Vec<u8> = (0..3000usize).map(|i| (i % 251) as u8).collect();
@@ -187,6 +229,63 @@ fn accept_app_defers_to_application() {
         )),
         "accept_resource must start the parked transfer.\nevents: {:?}",
         accept_out.events
+    );
+}
+
+/// `AcceptApp`'s rejection is not silent: `reject_resource` puts a
+/// RESOURCE_RCL on the link, which is the only thing that reaches the sender.
+/// Python's own receiver sends exactly that packet from `Resource.reject`
+/// (`RNS/Resource.py:154-164`); a sender that hears nothing instead waits out
+/// its advertisement retries.
+#[test]
+fn accept_app_rejection_sends_an_rcl() {
+    let (mut receiver, _adv_out, link) = deliver_adv_with_strategy(ResourceStrategy::AcceptApp);
+
+    let reject_out = receiver
+        .reject_resource(&link)
+        .expect("reject_resource consumes the parked ADV");
+    assert_eq!(
+        contexts(&reject_out),
+        std::vec![PacketContext::ResourceRcl.to_byte()],
+        "the rejection is one RCL packet and nothing else.\nactions: {:?}",
+        reject_out.actions
+    );
+    match receiver.reject_resource(&link) {
+        Err(ResourceError::NoPendingResource) => {}
+        Err(other) => panic!("expected NoPendingResource (nothing parked), got {other}"),
+        Ok(_) => panic!("a rejected ADV must not stay parked for a second rejection"),
+    }
+}
+
+/// A strategy armed on the destination is on the link before its first
+/// packet, so an advertisement that arrives while the application is still
+/// reacting to `LinkEstablished` is parked, not dropped.
+///
+/// This is what an `lncp -l` needs: a sender's LINKIDENTIFY and its
+/// advertisement leave back to back, and on a fast link the advertisement can
+/// reach the core before a `LinkEstablished` event has crossed the channel to
+/// the application.
+#[test]
+fn destination_strategy_is_armed_before_the_first_packet() {
+    let (mut receiver, adv_out, link) =
+        deliver_adv_with_destination_strategy(ResourceStrategy::AcceptApp);
+
+    assert!(
+        adv_out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ResourceAdvertised { .. })),
+        "the destination's AcceptApp must park the ADV although the application \
+         never configured the link.\nevents: {:?}",
+        adv_out.events
+    );
+    let reject_out = receiver
+        .reject_resource(&link)
+        .expect("the parked ADV is the destination-armed one");
+    assert_eq!(
+        contexts(&reject_out),
+        std::vec![PacketContext::ResourceRcl.to_byte()],
+        "and it can be rejected onto the wire like any other"
     );
 }
 

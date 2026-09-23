@@ -388,11 +388,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .ok_or(LinkError::DestinationNotRegistered)?;
         let identity = dest.identity().ok_or(LinkError::DestinationNotRegistered)?;
         let proof_strategy = dest.proof_strategy();
+        let resource_strategy = dest.resource_strategy();
 
         let now_ms = self.transport.clock().now_ms();
 
         let link = self.links.get_mut(link_id).ok_or(LinkError::NotFound)?;
         link.set_proof_strategy(proof_strategy);
+        // Armed here, not from the application's `LinkEstablished` handler: a
+        // peer's identify and advertisement leave back to back, and an
+        // application that answers the event still loses that race on a fast
+        // link (`Destination::set_resource_strategy`).
+        link.set_resource_strategy(resource_strategy);
         if let Some(sk) = identity.ed25519_signing_key() {
             link.set_dest_signing_key(sk.clone());
         }

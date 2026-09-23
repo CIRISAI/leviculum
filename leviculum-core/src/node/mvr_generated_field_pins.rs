@@ -956,7 +956,7 @@ fn data_proof_wire_carries_reference_packet_hash_and_signature() {
 ///
 /// We match: Transport emits `PathRequestReceived` and NodeCore regenerates
 /// via `dest.announce(None, ..)` (node/mod.rs Block A), where `None` falls
-/// back to the destination's default app data (destination.rs:1134-1143). Every
+/// back to the destination's default app data (destination.rs:1162-1171). Every
 /// expectation below is read from the response wire bytes and compared
 /// against values recomposed from the ORIGINAL announce's wire bytes.
 #[test]

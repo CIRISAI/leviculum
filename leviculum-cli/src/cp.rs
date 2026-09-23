@@ -375,6 +375,16 @@ pub async fn run_listen(
     )
     .map_err(|e| err(format!("destination error: {e}")))?;
     dest.set_accepts_links(true);
+    // Every incoming link takes its Resource decision from this loop, from the
+    // link's first packet on. rncp does the same thing
+    // (`client_link_established`, rncp.py:238-241) and decides per
+    // advertisement in `receive_resource_callback` (rncp.py:254-266). Arming
+    // it on the destination rather than on the `LinkEstablished` event is what
+    // makes it early enough: a sender's identify and advertisement leave back
+    // to back, so an advertisement can reach the core before the event has
+    // crossed the channel, and an `AcceptNone` link discards it silently
+    // (link_management.rs:2508-2513).
+    dest.set_resource_strategy(leviculum_core::resource::ResourceStrategy::AcceptApp);
     let dest_hash = *dest.hash();
     node.register_destination(dest);
 
@@ -411,6 +421,12 @@ pub async fn run_listen(
         None
     };
 
+    // Who each incoming link identified as, for the Resource decision below.
+    // A link with no entry has not identified; that is a rejection, not a
+    // silence.
+    let mut link_identities: std::collections::HashMap<LinkId, [u8; 16]> =
+        std::collections::HashMap::new();
+
     // Multi-segment accumulation buffer
     let mut segment_buffer: Vec<u8> = Vec::new();
     let mut segment_metadata: Option<Vec<u8>> = None;
@@ -428,17 +444,13 @@ pub async fn run_listen(
             event = events.recv() => {
                 match event {
                     Some(NodeEvent::LinkEstablished {
-                        link_id, is_initiator: false, ..
+                        link_id: _, is_initiator: false, ..
                     }) => {
                         // Incoming links are auto-accepted and proved by the core
                         // (Python parity); the responder just configures the link
-                        // here, there is no separate accept step.
-                        if no_auth {
-                            node.set_resource_strategy(
-                                &link_id,
-                                leviculum_core::resource::ResourceStrategy::AcceptAll,
-                            )?;
-                        }
+                        // here, there is no separate accept step. The Resource
+                        // strategy came with the destination, so nothing is set
+                        // per link.
                         if verbose > 0 {
                             eprintln!("Link established");
                         }
@@ -447,10 +459,7 @@ pub async fn run_listen(
                         if allowed_identities.is_empty()
                             || allowed_identities.contains(&identity_hash)
                         {
-                            node.set_resource_strategy(
-                                &link_id,
-                                leviculum_core::resource::ResourceStrategy::AcceptAll,
-                            )?;
+                            link_identities.insert(link_id, identity_hash);
                             if verbose > 0 {
                                 let hash_hex = crate::hex_encode(&identity_hash);
                                 eprintln!("Identity {} authorized", hash_hex);
@@ -461,6 +470,36 @@ pub async fn run_listen(
                                 eprintln!("Identity {} not allowed, tearing down link", hash_hex);
                             }
                             node.close_link(&link_id).await?;
+                        }
+                    }
+                    Some(NodeEvent::ResourceAdvertised { link_id, .. }) => {
+                        // rncp's receive_resource_callback (rncp.py:254-266) in
+                        // our shape: the sender's identity decides, and a sender
+                        // this link has not heard from is a no. Answering that
+                        // no is the point -- the RCL reaches the sender in one
+                        // RTT, where silence costs it every advertisement retry
+                        // it has (about 36 s at the 1.3 s RTT of the LoRa PHY
+                        // this runs on).
+                        let authorized = no_auth
+                            || link_identities.get(&link_id).is_some_and(|hash| {
+                                allowed_identities.is_empty()
+                                    || allowed_identities.contains(hash)
+                            });
+                        if authorized {
+                            if let Err(e) = node.accept_resource(&link_id).await {
+                                if verbose > 0 {
+                                    eprintln!("Cannot accept transfer: {e}");
+                                }
+                            }
+                        } else {
+                            if !quiet {
+                                eprintln!("Transfer offered by an unidentified sender, rejecting");
+                            }
+                            if let Err(e) = node.reject_resource(&link_id).await {
+                                if verbose > 0 {
+                                    eprintln!("Cannot reject transfer: {e}");
+                                }
+                            }
                         }
                     }
                     Some(NodeEvent::ResourceProgress {
@@ -545,6 +584,7 @@ pub async fn run_listen(
                         // Client tore down (rncp does this on success), so stop
                         // re-sending its fetch response.
                         fetch_responder.forget(&link_id);
+                        link_identities.remove(&link_id);
                         if verbose > 0 {
                             eprintln!("Link closed");
                         }

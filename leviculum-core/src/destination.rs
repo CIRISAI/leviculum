@@ -288,6 +288,9 @@ pub struct Destination {
     accepts_links: bool,
     /// Proof generation strategy for incoming packets
     proof_strategy: ProofStrategy,
+    /// Resource acceptance strategy every incoming link to this destination
+    /// starts with
+    resource_strategy: crate::resource::ResourceStrategy,
 
     // Ratchet State (for IN destinations)
     /// Retained ratchets for decryption (newest first)
@@ -399,6 +402,7 @@ impl Destination {
             // OFF switch is `set_accepts_links(false)`.
             accepts_links: true,
             proof_strategy: ProofStrategy::None,
+            resource_strategy: crate::resource::ResourceStrategy::AcceptNone,
             // Ratchet fields - not enabled by default
             ratchets: Vec::new(),
             ratchet_interval_ms: DEFAULT_INTERVAL_MS,
@@ -523,6 +527,30 @@ impl Destination {
     ///   - `ProofStrategy::All` - Automatically prove every packet
     pub fn set_proof_strategy(&mut self, strategy: ProofStrategy) {
         self.proof_strategy = strategy;
+    }
+
+    /// The Resource acceptance strategy incoming links to this destination
+    /// start with.
+    pub fn resource_strategy(&self) -> crate::resource::ResourceStrategy {
+        self.resource_strategy
+    }
+
+    /// Set the Resource acceptance strategy incoming links to this
+    /// destination start with.
+    ///
+    /// A link created by `send_establishment_proof` carries this from its
+    /// first packet on, which an application reacting to `LinkEstablished`
+    /// cannot do: the event crosses a channel, and a peer that sends its
+    /// identify and its advertisement back to back can reach the core first.
+    /// Python has no such gap — `client_link_established`
+    /// (`reference/Reticulum/RNS/Utilities/rncp.py:238-241`) runs inside the
+    /// establishment path — so this is where a listener that means
+    /// `ACCEPT_APP` on every incoming link says so.
+    ///
+    /// Default `AcceptNone`, which is what every destination that never calls
+    /// this keeps.
+    pub fn set_resource_strategy(&mut self, strategy: crate::resource::ResourceStrategy) {
+        self.resource_strategy = strategy;
     }
 
     /// The app data a bare `announce(None, ..)` emits for this destination.
