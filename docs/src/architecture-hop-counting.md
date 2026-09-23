@@ -245,6 +245,82 @@ The flag stays `false`-capable but `true`-default until an interop A/B and a liv
 check confirm the strict drop heals on the air as it does in the mvr; only then can `false` become
 the default.
 
+### Upstream changed its mind: 1.5.x re-balances instead of dropping (Codeberg #330)
+
+Everything above this line describes the reference as of 1.3.5, which is what
+`reference/Reticulum` is pinned to and therefore what every interop test in this tree
+measures against. RNS 1.5.x replaced the strict drop with a re-balance. The source facts,
+read against 1.5.2 (`ea98db4f`, 2026-08-29) — every Python line number in this section is
+1.5.2's and does NOT resolve inside the pinned `reference/Reticulum`, so the citation guard
+cannot check it; re-read them against a 1.5.x checkout, never the submodule:
+
+* `Transport.py:153` — `ALLOW_LINK_PATH_REBALANCE = True`, a class constant, no config surface.
+* **Relay site, `Transport.py:2614-2634`.** When `packet.hops != link_entry[IDX_LT_REM_HOPS]`
+  and the proof arrived on `IDX_LT_NH_IF`, the signature is validated *first*; if it is valid
+  and the entry is not yet `IDX_LT_VALIDATED`, the relay ADOPTS the measurement —
+  `link_entry[IDX_LT_REM_HOPS] = packet.hops` (`:2632`) and
+  `path_entry[IDX_PT_HOPS] = packet.hops` for the link's destination (`:2634`). Control then
+  falls into the unchanged `packet.hops == IDX_LT_REM_HOPS` forward arm, which now matches, so
+  the proof is forwarded **carrying its own true hop count**. The re-balance happens at most
+  once per link entry: the forward arm sets `IDX_LT_VALIDATED`, and the re-balance is gated on
+  that flag being unset. That gate, not a hop equality, is 1.5.x's loop breaker here.
+* **Terminus site, `Transport.py:2680-2707`.** For a pending link with
+  `packet.hops != link.expected_hops` and `status == PENDING`, the signature is validated
+  against `link_id + peer_pub + peer_sig_pub + signalling_bytes`; if valid and `link.rebalanced`
+  is unset, `link.expected_hops = packet.hops` (`:2704`) and the path entry's hops follow
+  (`:2707`). The unchanged `== expected_hops` check then matches and `validate_proof` runs.
+  `Link.py:267-268` adds the two fields; `Link.py:525` re-adopts `expected_hops` from the RTT
+  packet once the link is active.
+* **No third site.** The general link-table repeat arm is untouched, and LRPROOF is still
+  excluded from it. The MAPPING CAVEAT above still holds in 1.5.x: the reference has exactly
+  one relay path for proofs and no initiator-side LRPROOF forwarding.
+
+What that means for the three sites we have:
+
+1. **Cross-interface relay arm.** We already deliver — that is the #38 rewrite. The difference
+   is not delivery, it is bookkeeping: 1.5.x heals `remaining_hops` *and* the path entry and
+   then tells the truth on the wire; we heal neither and rewrite the wire instead. 1.5.x's
+   re-balance is the healing loop this page says the rewrite suppresses, reached without the
+   link having to fail first.
+2. **Terminus.** We have no hop gate at all. `handle_link_proof`
+   (`node/link_management.rs`) checks phase, state and signature, never a hop count, and
+   `expected_hops` does not exist anywhere in `leviculum-core`. So the half of #330 that reads
+   "links over asymmetric paths form on Python but not on us" does not describe our initiator:
+   ours accepts any hop count and always has. What ours does not do is 1.5.x's table healing.
+3. **Shared-medium arm.** This is the one place we drop where 1.5.x forwards. `NH_IF` and
+   `RCVD_IF` are the same interface there, so 1.5.x's `receiving_interface == IDX_LT_NH_IF`
+   test passes and the re-balance arm fires (source read, not measured). We drop the proof as
+   an echo, because on one medium the strict hop match is our only loop breaker — the
+   `lora_3node_relay` storm of 2026-08-12, pinned by `mvr_lrproof_echo_storm.rs`. Adopting
+   1.5.x here swaps that loop breaker for the `IDX_LT_VALIDATED` gate. That is a rig question,
+   not a desk one.
+
+**Why this is not a port.** Forwarding the proof with its true hop count is exactly what a
+1.3.5 initiator rejects: `Transport.py:2228` in the pinned reference gates on
+`packet.hops == link.expected_hops`. Adopting the relay site verbatim therefore re-opens #38
+against every 1.3.5 peer in the mesh, and `lrproof_hop_undercount_interop_tests.rs` — which
+drives a real Python initiator out of `reference/Reticulum` — passes today only because the
+relay rewrites the count down to the frozen value. Upstream can do this because it fixed both
+ends in the same release; we cannot assume both ends.
+
+So #330 is a choice between three behaviours, and rule 5 below no longer decides it on its own
+now that "the reference" names two generations that disagree:
+
+* **a) keep the rewrite** — links form for 1.3.5 and 1.5.x initiators alike, tables stay stale,
+  we keep lying about the count on the wire;
+* **b) adopt 1.5.x verbatim** — tables heal, the wire is honest, links through us stop forming
+  for 1.3.5 initiators over asymmetric paths;
+* **c) heal the tables, keep the rewrite** — correct the *path* entry from the proof's
+  measurement while still forwarding the frozen count, so the next link over that destination
+  freezes the right `remaining_hops` and the asymmetry drains within one link lifetime. Neither
+  reference does this, so it is a deviation-rule argument and needs the deviation-rule evidence.
+
+Deciding between them is a measurement, not a reading: the interop A/B this page already
+demands for the strict flag, run against both a 1.3.5 and a 1.5.x peer. The fixture for the
+relay half already exists — `mvr_hop_asymmetry.rs` builds the honest asymmetric topology and
+asserts both arms of `lrproof_rewrite_on_asymmetry` — so a fix pass starts from a working
+reproduction, not from scratch.
+
 ## Rules to obey
 
 1. Never doctor a hop count to make a check pass. The check exists to expose a disagreement, and
@@ -256,7 +332,8 @@ the default.
 4. Any change to hop counting is checked against the reference first, and lands behind a test that
    fails before the change and passes after it.
 5. When the reference and leviculum disagree about a compatibility relevant mechanism, the
-   reference is right.
+   reference is right. Where 1.3.5 and 1.5.x disagree with EACH OTHER, this rule names no
+   winner: see the 1.5.x re-balance section above before invoking it.
 
 ## Field evidence, 2026-07-10
 
