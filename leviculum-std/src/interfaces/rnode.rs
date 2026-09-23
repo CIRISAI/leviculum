@@ -4532,23 +4532,74 @@ mod tests {
     /// frames carry the right vport and that RX frames route to the right
     /// logical interface.
     async fn rnode_multi_firmware_stub(
-        mut peer: tokio::io::DuplexStream,
+        peer: tokio::io::DuplexStream,
         chip_types: Vec<u8>,
         freq_report: tokio::sync::mpsc::Sender<(u8, u32)>,
         data_report: tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
     ) {
+        rnode_multi_firmware_stub_scripted(peer, chip_types, freq_report, data_report, None).await
+    }
+
+    /// The firmware-queue model the multi-vport stub answers CMD_READY
+    /// queries from. Every vport feeds the one queue the modem owns, so the
+    /// model is one budget and one depth, not one per vport. `None` gives
+    /// the plain stub back: a modem that ignores the query entirely.
+    struct MultiStubFlow {
+        /// Frames the modem can still put on the air before its queue jams.
+        air_budget: usize,
+        /// The duty lock lifting: `send(n)` hands the modem n more slots.
+        resume_rx: mpsc::Receiver<usize>,
+        /// CMD_READY queries answered — proves the host asked rather than
+        /// waited for a READY the firmware never volunteers.
+        ready_queries: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// [`rnode_multi_firmware_stub`] plus the scripted CMD_READY query
+    /// protocol, the multi-vport twin of [`rnode_firmware_stub_scripted`].
+    /// A CMD_DATA frame beyond `air_budget` sits in the shared queue, and
+    /// while anything sits there a query is answered 0x00; `resume_rx`
+    /// refreshes the budget and drains it, announcing nothing — exactly
+    /// like the firmware, which reports queue state only when asked
+    /// (`RNode_Firmware.ino:1003-1008`).
+    async fn rnode_multi_firmware_stub_scripted(
+        mut peer: tokio::io::DuplexStream,
+        chip_types: Vec<u8>,
+        freq_report: tokio::sync::mpsc::Sender<(u8, u32)>,
+        data_report: tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
+        mut flow: Option<MultiStubFlow>,
+    ) {
         let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
         let mut buf = [0u8; 1024];
         let mut selected: u8 = 0;
+        // Frames held in the shared firmware queue. One-deep model, as in
+        // the single-radio stub: any held frame means the queue is full.
+        let mut queued: usize = 0;
         let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
             let mut one = Vec::new();
             kiss::frame(cmd, payload, &mut one);
             reply.extend_from_slice(&one);
         };
         loop {
-            let n = match peer.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
+            let n = tokio::select! {
+                read = peer.read(&mut buf) => match read {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                },
+                resumed = async {
+                    match flow {
+                        Some(ref mut f) => f.resume_rx.recv().await,
+                        None => std::future::pending::<Option<usize>>().await,
+                    }
+                } => {
+                    let Some(slots) = resumed else { return };
+                    let f = flow.as_mut().expect("resume arm is armed only with a flow model");
+                    f.air_budget += slots;
+                    while queued > 0 && f.air_budget > 0 {
+                        queued -= 1;
+                        f.air_budget -= 1;
+                    }
+                    continue;
+                }
             };
             let mut reply: Vec<u8> = Vec::new();
             for f in deframer.process(&buf[..n]) {
@@ -4587,9 +4638,32 @@ mod tests {
                     }
                     rnode::CMD_DATA => {
                         let _ = data_report.try_send((selected, payload.to_vec()));
+                        if let Some(fl) = flow.as_mut() {
+                            // Airtime or queue, whichever the budget allows.
+                            // No READY here: the firmware does not announce
+                            // TX completion.
+                            if fl.air_budget > 0 {
+                                fl.air_budget -= 1;
+                            } else {
+                                queued += 1;
+                            }
+                        }
                         // Echo the payload back tagged with the same vport, using
                         // the same SEL_INT + CMD_DATA framing the host uses.
                         reply.extend_from_slice(&rnode::build_vport_data_frame(selected, &payload));
+                    }
+                    rnode::CMD_READY => {
+                        // Answer the host's queue-state query, if this stub
+                        // was scripted to answer at all.
+                        if let Some(fl) = flow.as_mut() {
+                            fl.ready_queries
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            push(
+                                &mut reply,
+                                rnode::CMD_READY,
+                                &[if queued > 0 { 0x00 } else { 0x01 }],
+                            );
+                        }
                     }
                     // Drain the rest of the per-vport config commands silently.
                     _ => {}
@@ -5201,6 +5275,330 @@ mod tests {
 
         hub.abort();
         stub.abort();
+    }
+
+    /// Everything a multi-vport flow-control test needs (Codeberg #317):
+    /// two vports on one shared serial line, the hub under test, and a
+    /// scripted stub that models the single firmware queue both vports
+    /// feed. The vports carry deliberately different PHYs — vport 0 at
+    /// SF7/125 kHz is the slower packet, vport 1 at SF8/500 kHz the faster
+    /// — so a poll cadence seeded from the wrong vport is visible. Time is
+    /// `start_paused`, so the airtime-seeded cadence costs no wall clock.
+    struct MultiFlowHarness {
+        merged_tx: mpsc::Sender<TaggedOutgoing>,
+        /// `(vport, payload)` for every CMD_DATA the stub received.
+        data_rx: tokio::sync::mpsc::Receiver<(u8, Vec<u8>)>,
+        /// Lifts the duty lock: `send(n)` gives the modem n more air slots.
+        resume_tx: mpsc::Sender<usize>,
+        /// CMD_READY queries the stub has answered.
+        ready_queries: Arc<std::sync::atomic::AtomicUsize>,
+        hub: tokio::task::JoinHandle<()>,
+        stub: tokio::task::JoinHandle<()>,
+        /// Held so the hub's `incoming_tx.send` of the stub's echo never
+        /// fails mid-test and tears a vport down.
+        _incoming_rx: Vec<mpsc::Receiver<IncomingPacket>>,
+    }
+
+    impl Drop for MultiFlowHarness {
+        fn drop(&mut self) {
+            self.hub.abort();
+            self.stub.abort();
+        }
+    }
+
+    /// The two vports the flow-control harness runs, in `subint` order:
+    /// index 0 is vport 0 (sub-GHz, SF7/125 kHz), index 1 is vport 1
+    /// (2.4 GHz, SF8/500 kHz).
+    fn multi_flow_vports(
+        in0_tx: mpsc::Sender<IncomingPacket>,
+        in1_tx: mpsc::Sender<IncomingPacket>,
+    ) -> Vec<VportRuntime> {
+        vec![
+            VportRuntime {
+                id: InterfaceId(40),
+                name: "multi[low]".to_string(),
+                vport: 0,
+                radio: RadioParams {
+                    frequency: 865_600_000,
+                    bandwidth: 125_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in0_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+            VportRuntime {
+                id: InterfaceId(41),
+                name: "multi[high]".to_string(),
+                vport: 1,
+                radio: RadioParams {
+                    frequency: 2_400_000_000,
+                    bandwidth: 500_000,
+                    tx_power: 0,
+                    tx_power_derived: false,
+                    sf: 8,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                },
+                outgoing: true,
+                incoming_tx: in1_tx,
+                counters: Arc::new(InterfaceCounters::new()),
+            },
+        ]
+    }
+
+    /// Bring the harness up and return once both vports are configured, so
+    /// the shared io loop is running and every later frame is a TX under
+    /// test rather than a config echo.
+    async fn spawn_multi_flow_harness(flow_control: bool, air_budget: usize) -> MultiFlowHarness {
+        let (port, peer) = tokio::io::duplex(64 * 1024);
+        let (freq_tx, mut freq_rx) = tokio::sync::mpsc::channel::<(u8, u32)>(8);
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(256);
+        let (resume_tx, resume_rx) = mpsc::channel::<usize>(16);
+        let ready_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let stub = tokio::spawn(rnode_multi_firmware_stub_scripted(
+            peer,
+            vec![rnode::CHIP_SX127X, rnode::CHIP_SX128X],
+            freq_tx,
+            data_tx,
+            Some(MultiStubFlow {
+                air_budget,
+                resume_rx,
+                ready_queries: Arc::clone(&ready_queries),
+            }),
+        ));
+
+        let (in0_tx, in0_rx) = mpsc::channel::<IncomingPacket>(256);
+        let (in1_tx, in1_rx) = mpsc::channel::<IncomingPacket>(256);
+        let vports = multi_flow_vports(in0_tx, in1_tx);
+
+        let port_holder = std::sync::Mutex::new(Some(port));
+        let connect = move || {
+            let taken = port_holder.lock().unwrap().take();
+            async move { taken.ok_or(RNodeError::NotDetected) }
+        };
+        let (merged_tx, merged_rx) = mpsc::channel::<TaggedOutgoing>(64);
+        let hub = tokio::spawn(async move {
+            rnode_multi_reconnect_task(
+                "multi".to_string(),
+                connect,
+                vports,
+                merged_rx,
+                flow_control,
+                None,
+            )
+            .await;
+        });
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), freq_rx.recv())
+                .await
+                .expect("frequency config must be pushed within 5s")
+                .expect("freq channel open");
+        }
+
+        MultiFlowHarness {
+            merged_tx,
+            data_rx,
+            resume_tx,
+            ready_queries,
+            hub,
+            stub,
+            _incoming_rx: vec![in0_rx, in1_rx],
+        }
+    }
+
+    impl MultiFlowHarness {
+        async fn push(&self, subint: usize, payload: &[u8]) {
+            self.merged_tx
+                .send(TaggedOutgoing {
+                    subint,
+                    packet: OutgoingPacket {
+                        peer: None,
+                        data: payload.to_vec(),
+                        high_priority: false,
+                    },
+                })
+                .await
+                .expect("hub alive");
+        }
+
+        async fn expect_frame(&mut self, vport: u8, want: &[u8], ctx: &str) {
+            let (got_vport, got) =
+                tokio::time::timeout(Duration::from_secs(5), self.data_rx.recv())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("{ctx}: expected {want:?} on vport {vport}, stub saw nothing")
+                    })
+                    .expect("stub data channel open");
+            assert_eq!((got_vport, got.as_slice()), (vport, want), "{ctx}");
+        }
+
+        /// Assert the stub sees no CMD_DATA for `window`.
+        async fn expect_silence(&mut self, window: Duration, ctx: &str) {
+            if let Ok(Some(got)) = tokio::time::timeout(window, self.data_rx.recv()).await {
+                panic!("{ctx}: stub must see no CMD_DATA, saw {got:?}");
+            }
+        }
+
+        fn queries(&self) -> usize {
+            self.ready_queries
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Advance virtual time until the stub has answered `n` queries.
+        /// Bounded well below the fast vport's airtime, so a host that never
+        /// asks fails the assertion instead of hanging — and so the wait
+        /// itself cannot burn a re-query window.
+        async fn wait_for_queries(&self, n: usize) {
+            for _ in 0..50 {
+                if self.queries() >= n {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            panic!(
+                "stub answered {} CMD_READY queries, expected at least {n}",
+                self.queries()
+            );
+        }
+    }
+
+    /// The multi-vport twin of the reopen contract: the firmware answers
+    /// CMD_READY only when asked, so a hub that waits for a spontaneous
+    /// READY starves here. Budget 0 jams the shared queue on the first
+    /// frame; `resume` drains it silently, and only a query can learn that
+    /// there is room again. The second frame is pushed on the OTHER vport,
+    /// which pins the second half of the contract: one gate serves the
+    /// whole device, so vport 1 is released by the answer to the query
+    /// vport 0's TX provoked.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_flow_control_reopen_is_learned_by_query() {
+        let mut h = spawn_multi_flow_harness(true, 0).await;
+        h.push(0, b"first").await;
+        h.expect_frame(0, b"first", "cold-start frame ships ungated")
+            .await;
+
+        h.resume_tx.send(1).await.expect("stub alive");
+        h.push(1, b"second").await;
+        h.expect_frame(
+            1,
+            b"second",
+            "the shared gate must reopen via a CMD_READY query — the firmware never volunteers READY",
+        )
+        .await;
+        assert!(
+            h.queries() > 0,
+            "the reopen must have been learned through a CMD_READY query"
+        );
+    }
+
+    /// Lock semantics on the shared line: the stub airs three frames, the
+    /// fourth ships and jams the one firmware queue, and from then on the
+    /// 0x00 answers must hold everything host-side — whichever vport owns
+    /// the frame. The pushes alternate vports so a per-vport gate (which
+    /// the firmware has no room for: one queue, one modem) would leak the
+    /// held frames through the other vport. After the lock lifts, the held
+    /// frames drain in submission order with their vport tags intact.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_flow_control_duty_lock_holds_frames_host_side() {
+        let mut h = spawn_multi_flow_harness(true, 3).await;
+        let script: [(usize, &[u8]); 6] = [
+            (0, b"m1"),
+            (1, b"m2"),
+            (0, b"m3"),
+            (1, b"m4"),
+            (0, b"m5"),
+            (1, b"m6"),
+        ];
+        for (subint, payload) in script {
+            h.push(subint, payload).await;
+        }
+        for (subint, payload) in &script[..4] {
+            h.expect_frame(*subint as u8, payload, "pre-lock frames flow")
+                .await;
+        }
+        h.expect_silence(Duration::from_secs(5), "m5/m6 held under the lock")
+            .await;
+
+        h.resume_tx.send(1000).await.expect("stub alive");
+        h.expect_frame(0, b"m5", "held frames drain in order after release")
+            .await;
+        h.expect_frame(1, b"m6", "held frames drain in order after release")
+            .await;
+    }
+
+    /// One firmware queue, one poll cadence — and it must be priced at the
+    /// SLOWEST vport's packet airtime, the conservative bound on how fast
+    /// the shared queue can drain. Vport 1 (SF8/500 kHz) is the faster
+    /// radio here; a cadence seeded from it would re-query roughly twice as
+    /// often as the shared line can justify, on a line the modem also needs
+    /// for RX delivery.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_ready_poll_is_seeded_by_the_slowest_vport() {
+        let slow = ready_poll_initial(7, 5, 125_000);
+        let fast = ready_poll_initial(8, 5, 500_000);
+        assert!(
+            fast < slow,
+            "fixture: vport 1 must be the faster radio ({fast:?} vs {slow:?})"
+        );
+
+        let mut h = spawn_multi_flow_harness(true, 0).await;
+        h.push(0, b"seed").await;
+        h.expect_frame(0, b"seed", "cold-start frame ships ungated")
+            .await;
+        // Budget 0: the post-TX query is answered 0x00, the gate stays shut
+        // and the re-query timer is armed with the seed under test.
+        h.wait_for_queries(1).await;
+
+        tokio::time::sleep(fast + (slow - fast) / 2).await;
+        assert_eq!(
+            h.queries(),
+            1,
+            "a cadence seeded from the fast vport would have re-queried by now"
+        );
+
+        tokio::time::sleep(slow).await;
+        assert_eq!(
+            h.queries(),
+            2,
+            "past the slowest vport's airtime the hub must re-query"
+        );
+    }
+
+    /// Off means off on the shared line too: with `flow_control = false`
+    /// every frame ships in order even though the modelled firmware queue
+    /// is jammed from the first frame, and the hub puts no CMD_READY query
+    /// on the serial line at all. The default does not change.
+    #[tokio::test(start_paused = true)]
+    async fn test_multi_vport_flow_control_off_never_queries() {
+        let mut h = spawn_multi_flow_harness(false, 0).await;
+        let script: [(usize, &[u8]); 4] = [(0, b"n1"), (1, b"n2"), (0, b"n3"), (1, b"n4")];
+        for (subint, payload) in script {
+            h.push(subint, payload).await;
+        }
+        for (subint, payload) in &script {
+            h.expect_frame(
+                *subint as u8,
+                payload,
+                "flow_control=false ships every frame without READY",
+            )
+            .await;
+        }
+        // Give a wrongly-armed gate timer ample time to fire.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(
+            h.queries(),
+            0,
+            "flow_control off must put no CMD_READY query on the serial line"
+        );
     }
 
     /// A modem that answers nothing keeps the gate closed: with
