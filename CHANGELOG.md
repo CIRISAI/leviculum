@@ -202,6 +202,29 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- `lnstest selftest` sizes a single-packet drain window from the pacing the
+  sending interface applies, not from the frames' airtime alone. The RNode
+  interface holds each frame back until the modem can be finished with the
+  one before it, so a burst crosses the medium at that hold and not at the
+  bitrate. The window is now `frames x max(air, hold / 2) + (hold + air)`:
+  the hold is the frame's airtime plus twice the interface's reported band-1
+  jitter ceiling, which is the band-2 contention window a burst runs in
+  (`RNode_Firmware.ino:1603-1620`); the division is the two ends sending into
+  each other's holds; the last term is the tail deferral the final frame
+  waits out. The sizing line prints the formula and every term in it. On the
+  rig of 2026-09-23 the three ratchet cells delivered every frame on the air
+  and were still scored red, because the old window expired at 11.0 s on
+  bursts that completed in 11.8 to 12.0 s.
+
+- `lnstest selftest` stops counting at budget expiry instead of tearing its
+  clients down. The clients stay up for one hold plus one airtime, and what
+  arrives in that window is reported as `late=N` beside `outstanding=N`. The
+  delivery bar every verdict is computed from stays on what arrived inside
+  the budget, so a late frame neither flatters the bar nor reads as lost. The
+  old teardown let the far daemon decode a frame that was already on the air
+  and then drop it as "no path known", while the verdict printed no loss at
+  all.
+
 - `leviculum-core` has one msgpack decoder instead of four. It used to live
   under `resource/`, with a second full copy of the readers in
   `destination.rs` and a third and fourth copy of the map-length reader in

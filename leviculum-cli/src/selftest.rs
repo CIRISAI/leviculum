@@ -140,9 +140,21 @@ struct SelftestStats {
     sp_seen_seqs_a: BTreeSet<u64>,
     sp_seen_seqs_b: BTreeSet<u64>,
     sp_rtt_samples: Vec<u64>,
+    /// Single packets that landed after their phase's drain budget expired,
+    /// inside the grace window the tool keeps its clients up for. Counted in
+    /// `sp_recv_*` like any other receipt and subtracted back out of the
+    /// delivery bar, so a late frame neither flatters the bar nor reads as
+    /// lost.
+    sp_late: u64,
 }
 
 impl SelftestStats {
+    /// The single packets the drain budget covered — what the delivery bar
+    /// is computed from.
+    fn sp_in_budget_recv(&self) -> u64 {
+        (self.sp_recv_a + self.sp_recv_b).saturating_sub(self.sp_late)
+    }
+
     fn new() -> Self {
         Self {
             sent_a: 0,
@@ -180,6 +192,7 @@ impl SelftestStats {
             sp_seen_seqs_a: BTreeSet::new(),
             sp_seen_seqs_b: BTreeSet::new(),
             sp_rtt_samples: Vec::new(),
+            sp_late: 0,
         }
     }
 }
@@ -353,9 +366,16 @@ fn compute_link_verdict(stats: &SelftestStats, warnings: &[String]) -> Verdict {
     Verdict::Pass
 }
 
+/// The single-packet verdict, on the receipts the drain budget covered.
+///
+/// A frame that landed in the grace window after expiry is counted as late
+/// (`sp_late`) and stays out of the bar: the bar says what the link delivered
+/// inside the window the link's own figures priced, and a late frame that
+/// lifted a cell over its threshold would hide exactly the pacing problem the
+/// budget exists to expose.
 fn compute_sp_verdict(stats: &SelftestStats, warnings: &[String]) -> Verdict {
     let total_sent = stats.sp_sent_a + stats.sp_sent_b;
-    let total_recv = stats.sp_recv_a + stats.sp_recv_b;
+    let total_recv = stats.sp_in_budget_recv();
 
     // FAIL conditions, relaxed for unreliable single packets
     if total_sent > 0 && total_recv == 0 {
@@ -603,6 +623,10 @@ fn on_air_bytes(packed: usize, hops: Option<u8>) -> usize {
 /// carries the derivation and not just the number.
 struct DrainBudget {
     total: std::time::Duration,
+    /// How long the clients stay up past expiry, still counting — one hold
+    /// plus one airtime, the time a frame already handed to the modem needs
+    /// to reach the far side. Zero when nothing on-air was priced.
+    grace: std::time::Duration,
     detail: String,
 }
 
@@ -800,17 +824,82 @@ async fn daemon_link_sizing(config_dir: Option<&std::path::Path>) -> LinkSizing 
     }
 }
 
+/// What one frame costs the medium and its own sender, at the link
+/// `profile` describes.
+///
+/// Both terms are per frame, and both are the interface's own arithmetic seen
+/// from the outside: `tx_hold` in `leviculum-std/src/interfaces/rnode.rs`
+/// prices exactly this, one layer down, when it decides how long to hold the
+/// next frame back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FramePacing {
+    /// What the frame occupies on the air, preamble and header included.
+    air_ms: u64,
+    /// What the sending interface holds the NEXT frame back after handing
+    /// this one to the modem: the frame's own airtime plus the contention the
+    /// firmware runs before the frame behind it.
+    hold_ms: u64,
+}
+
+/// How many radios fill the medium while a phase drains.
+///
+/// Both ends of this tool send, and the hold is per side: while one side sits
+/// out its hold the other side's frame is on the air, so the medium carries a
+/// frame roughly every half hold. Measured on the rig 2026-09-23 (run 179):
+/// `LORA_TX_HOLD` paced each side at ~1.232 s per frame in all three ratchet
+/// cells, and the interleaved medium carried one frame every ~0.616 s.
+const INTERLEAVED_SENDERS: u64 = 2;
+
+/// The contention window a burst meets, as a multiple of the band-1 ceiling
+/// the interface reports as `tx_jitter_max`.
+///
+/// That ceiling is DIFS plus the widest of the 14 equally likely band-1 draws
+/// — 15 slots in all. The modem does not stay in band 1 under a burst:
+/// `update_csma_parameters` leaves it as soon as its own airtime share passes
+/// `CSMA_BAND_1_MAX_AIRTIME` = 7 % (`RNode_Firmware.ino:1603-1607`), and the
+/// next band's window is `cw_min = 15, cw_max = 29`
+/// (`RNode_Firmware.ino:1616-1617` with `CSMA_CW_PER_BAND_WINDOWS` = 15,
+/// `Config.h:110`), whose widest draw is 28 slots — 30 slots with DIFS,
+/// exactly twice the band-1 ceiling.
+///
+/// Measured, not assumed: run 179 reported `LORA_TX_HOLD held_ms=863` in band
+/// 1 and `held_ms=1223` in band 2 for the same 147-byte frame on a link whose
+/// band-1 ceiling is 360 ms, and 1223 = 863 + 360.
+///
+/// A phase that drives the medium harder still (band 3 or 4) is priced short
+/// by this, which is deliberate: the budget is meant to expire when the link
+/// genuinely fails to keep up, and what lands after it is counted and printed
+/// as late rather than thrown away ([`drain_single_packets`]).
+const BURST_CONTENTION_BANDS: u64 = 2;
+
+/// Price one frame at the link `profile` describes.
+fn frame_pacing(wire_bytes: usize, profile: leviculum_core::transport::LinkProfile) -> FramePacing {
+    let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
+    let air_ms = payload_ms * FRAME_OVERHEAD_PERMILLE / 1000;
+    let contention_ms = profile.tx_jitter_max_ms.unwrap_or(0) * BURST_CONTENTION_BANDS;
+    FramePacing {
+        air_ms,
+        hold_ms: air_ms + contention_ms,
+    }
+}
+
 /// Size the drain window for `frames` frames of `wire_bytes` each over the
 /// link `profile` describes.
 ///
-/// `air + handover`, where `air` is the frames' own on-air cost at the
-/// interface's reported bitrate and `handover` is the interface's own pre-TX
-/// jitter ceiling: on a shared half-duplex medium both peers enqueue their
-/// bursts within the same few hundred milliseconds, and whichever radio loses
-/// the contention waits out a jitter draw before its first frame goes out.
-/// That delay has no closed form, but the interface bounds it, so the bound
-/// is what we ask for — it moves with the radio settings, which a pasted
-/// constant does not.
+/// ```text
+/// window = frames x max(air, hold / senders) + (hold + air)
+/// ```
+///
+/// The first term is the medium's pace. A frame cannot cross faster than its
+/// own airtime, and it cannot follow the one before it faster than the
+/// sending interface's hold allows — the hold is what keeps the modem's queue
+/// at one frame, so that a won contest flushes one frame rather than a whole
+/// burst on a deaf radio. With both ends sending, one side's hold is served
+/// while the other side transmits, hence `senders`.
+///
+/// The second term is the tail deferral: the last frame of a burst still has
+/// to wait out the peer's hold before it is handed over, and then fly. Run
+/// 179 measured 1.7 to 2.6 s of it in the three ratchet cells.
 ///
 /// Falls back to `fallback` when the next hop reports no link profile: TCP,
 /// UDP and Local have no airtime to account for, and nothing measured here
@@ -826,31 +915,44 @@ fn drain_budget(
         _ => {
             return DrainBudget {
                 total: fallback,
+                grace: std::time::Duration::ZERO,
                 detail: format!(
-                    "no on-air bitrate to price airtime against; fixed {:.1}s",
+                    "no on-air bitrate to price airtime against; fixed {:.1}s, \
+                     and nothing priced to wait out past it",
                     fallback.as_secs_f64()
                 ),
             };
         }
     };
 
+    let pacing = frame_pacing(wire_bytes, profile);
     let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
-    let per_frame_ms = payload_ms * FRAME_OVERHEAD_PERMILLE / 1000;
-    let air_ms = per_frame_ms * frames;
-    let handover_ms = profile.tx_jitter_max_ms.unwrap_or(0);
+    let medium_ms = pacing.air_ms.max(pacing.hold_ms / INTERLEAVED_SENDERS);
+    let tail_ms = pacing.hold_ms + pacing.air_ms;
+    let total_ms = frames * medium_ms + tail_ms;
 
     DrainBudget {
-        total: std::time::Duration::from_millis(air_ms + handover_ms),
+        total: std::time::Duration::from_millis(total_ms),
+        // One more hold plus airtime: what a frame already handed over needs
+        // before it can be on the far side's radio, counted from expiry.
+        grace: std::time::Duration::from_millis(tail_ms),
         detail: format!(
-            "{frames} frames x {wire_bytes}B at {} bps = {:.1}s air \
-             (payload {:.1}s +{}% preamble/header/medium access) + {:.1}s handover \
-             (interface pre-TX jitter ceiling) = {:.1}s",
+            "{frames} frames x {wire_bytes}B at {} bps: air {:.2}s/frame \
+             (payload {:.2}s +{}% preamble/header), hold {:.2}s/frame \
+             (air + {}x the {:.2}s pre-TX jitter ceiling, the band a burst \
+             runs in); window = frames x max(air, hold/{}) + tail deferral \
+             (hold + air) = {frames} x {:.2}s + {:.2}s = {:.1}s",
             profile.bitrate_bps,
-            air_ms as f64 / 1000.0,
-            (payload_ms * frames) as f64 / 1000.0,
+            pacing.air_ms as f64 / 1000.0,
+            payload_ms as f64 / 1000.0,
             FRAME_OVERHEAD_PERMILLE / 10 - 100,
-            handover_ms as f64 / 1000.0,
-            (air_ms + handover_ms) as f64 / 1000.0,
+            pacing.hold_ms as f64 / 1000.0,
+            BURST_CONTENTION_BANDS,
+            profile.tx_jitter_max_ms.unwrap_or(0) as f64 / 1000.0,
+            INTERLEAVED_SENDERS,
+            medium_ms as f64 / 1000.0,
+            tail_ms as f64 / 1000.0,
+            total_ms as f64 / 1000.0,
         ),
     }
 }
@@ -869,8 +971,18 @@ fn drain_budget(
 /// they land, never retracted), so the budget errs toward waiting rather than
 /// toward cutting a train off.
 ///
-/// Prints the derivation, and on expiry says what the expiry means. Returns 0
-/// when everything drained.
+/// Expiry stops the counting, it does not end the run: the clients stay up
+/// for one more hold plus airtime, and whatever lands in that window is
+/// recorded as [`SelftestStats::sp_late`] — outside the delivery bar, because
+/// the budget is what the bar is measured against, but printed, because a
+/// frame that arrived 0.5 s late is not a frame that was lost. Tearing the
+/// clients down at expiry instead made the far daemon decode a frame that was
+/// already on the air and drop it as "no path known", while the verdict
+/// printed `lost=0` (run 179, 2026-09-23).
+///
+/// Prints the derivation, and on expiry says what the expiry means. Returns
+/// how many frames were still unaccounted for when the grace window closed,
+/// 0 when everything drained.
 async fn drain_single_packets(
     state: &SharedState,
     label: &str,
@@ -908,11 +1020,65 @@ async fn drain_single_packets(
                  bounds delivery from below, it is not a loss count",
                 budget.total.as_secs_f64(),
             );
-            return left;
+            return count_late_arrivals(state, label, expected, received, budget.grace).await;
         }
         let step = std::time::Duration::from_millis(100).min(deadline - now);
         tokio::time::sleep(step).await;
     }
+}
+
+/// Keep the clients up past the budget and count what still arrives:
+/// everything that lands from here on is late, not delivered.
+///
+/// `in_budget` is what the far sides had accounted for when the budget
+/// expired — the count the verdict's delivery bar is computed from. The
+/// arrivals of the grace window go to [`SelftestStats::sp_late`], which the
+/// bar subtracts back out and the results line prints.
+///
+/// Returns what is still unaccounted for when the window closes.
+async fn count_late_arrivals(
+    state: &SharedState,
+    label: &str,
+    expected: u64,
+    in_budget: u64,
+    grace: std::time::Duration,
+) -> u64 {
+    if grace.is_zero() {
+        println!(
+            "[selftest] {label}: no on-air pacing priced, so nothing to wait out past the \
+             budget — outstanding={} late=0",
+            expected.saturating_sub(in_budget)
+        );
+        return expected.saturating_sub(in_budget);
+    }
+    println!(
+        "[selftest] {label}: clients stay up {:.1}s past the budget (one hold + one airtime) — \
+         what lands now is counted as late, not as delivered",
+        grace.as_secs_f64()
+    );
+
+    let deadline = Instant::now() + grace;
+    let received = loop {
+        let received = {
+            let st = state.stats.lock().unwrap();
+            st.sp_recv_a + st.sp_recv_b
+        };
+        let now = Instant::now();
+        if received >= expected || now >= deadline {
+            break received;
+        }
+        let step = std::time::Duration::from_millis(100).min(deadline - now);
+        tokio::time::sleep(step).await;
+    };
+
+    let late = received.saturating_sub(in_budget);
+    state.stats.lock().unwrap().sp_late += late;
+    let outstanding = expected.saturating_sub(received);
+    println!(
+        "[selftest] {label}: grace window closed — outstanding={outstanding} late={late} \
+         (late frames arrived after the budget and are not in the delivery bar)"
+    );
+    outstanding
 }
 
 // Address Resolution
@@ -1685,6 +1851,7 @@ pub async fn run_selftest(
                 st.sp_send_fails_a = 0;
                 st.sp_send_fails_b = 0;
                 st.sp_corrupt = 0;
+                st.sp_late = 0;
             }
 
             let mut wire_bytes = 0usize;
@@ -1709,11 +1876,12 @@ pub async fn run_selftest(
             )
             .await;
 
-            let (total_sent, total_recv, corrupt) = {
+            let (total_sent, total_recv, late, corrupt) = {
                 let st = state.stats.lock().unwrap();
                 (
                     st.sp_sent_a + st.sp_sent_b,
-                    st.sp_recv_a + st.sp_recv_b,
+                    st.sp_in_budget_recv(),
+                    st.sp_late,
                     st.sp_corrupt,
                 )
             };
@@ -1733,7 +1901,7 @@ pub async fn run_selftest(
             };
 
             println!(
-                "[selftest] Ratchet {mode}: sent={total_sent} recv={total_recv} ({recv_pct:.1}%) corrupt={corrupt} — {verdict}"
+                "[selftest] Ratchet {mode}: sent={total_sent} recv={total_recv} ({recv_pct:.1}%) late={late} corrupt={corrupt} — {verdict}"
             );
             ratchet_verdict = Some(verdict);
         } else if run_bulk_transfer {
@@ -1752,6 +1920,7 @@ pub async fn run_selftest(
                 st.sp_send_fails_a = 0;
                 st.sp_send_fails_b = 0;
                 st.sp_corrupt = 0;
+                st.sp_late = 0;
             }
 
             for seq in 0..msg_count {
@@ -1766,11 +1935,12 @@ pub async fn run_selftest(
             // Wait for delivery
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
-            let (total_sent, total_recv, corrupt) = {
+            let (total_sent, total_recv, late, corrupt) = {
                 let st = state.stats.lock().unwrap();
                 (
                     st.sp_sent_a + st.sp_sent_b,
-                    st.sp_recv_a + st.sp_recv_b,
+                    st.sp_in_budget_recv(),
+                    st.sp_late,
                     st.sp_corrupt,
                 )
             };
@@ -1790,7 +1960,7 @@ pub async fn run_selftest(
             };
 
             println!(
-                "[selftest] Ratchet bulk-transfer: sent={total_sent} recv={total_recv} ({recv_pct:.1}%) corrupt={corrupt} — {verdict}"
+                "[selftest] Ratchet bulk-transfer: sent={total_sent} recv={total_recv} ({recv_pct:.1}%) late={late} corrupt={corrupt} — {verdict}"
             );
             ratchet_verdict = Some(verdict);
         } else if run_ratchet_rotation {
@@ -1810,6 +1980,7 @@ pub async fn run_selftest(
                 st.sp_send_fails_a = 0;
                 st.sp_send_fails_b = 0;
                 st.sp_corrupt = 0;
+                st.sp_late = 0;
             }
 
             // Pre-rotation exchange
@@ -1834,13 +2005,13 @@ pub async fn run_selftest(
             )
             .await;
 
-            let pre_recv = {
+            let (pre_recv, pre_late, pre_sent) = {
                 let st = state.stats.lock().unwrap();
-                st.sp_recv_a + st.sp_recv_b
-            };
-            let pre_sent = {
-                let st = state.stats.lock().unwrap();
-                st.sp_sent_a + st.sp_sent_b
+                (
+                    st.sp_in_budget_recv(),
+                    st.sp_late,
+                    st.sp_sent_a + st.sp_sent_b,
+                )
             };
 
             let pre_pct = if pre_sent > 0 {
@@ -1849,7 +2020,7 @@ pub async fn run_selftest(
                 0.0
             };
             println!(
-                "[selftest] Ratchet rotation: pre-rotation sent={pre_sent} recv={pre_recv} ({pre_pct:.1}%)"
+                "[selftest] Ratchet rotation: pre-rotation sent={pre_sent} recv={pre_recv} ({pre_pct:.1}%) late={pre_late}"
             );
 
             // Sleep to let ratchet interval expire (interval = 5s)
@@ -1895,6 +2066,7 @@ pub async fn run_selftest(
                     st.sp_send_fails_a = 0;
                     st.sp_send_fails_b = 0;
                     st.sp_corrupt = 0;
+                    st.sp_late = 0;
                 }
 
                 let mut wire_bytes = 0usize;
@@ -1921,11 +2093,12 @@ pub async fn run_selftest(
                 )
                 .await;
 
-                let (post_sent, post_recv, post_corrupt) = {
+                let (post_sent, post_recv, post_late, post_corrupt) = {
                     let st = state.stats.lock().unwrap();
                     (
                         st.sp_sent_a + st.sp_sent_b,
-                        st.sp_recv_a + st.sp_recv_b,
+                        st.sp_in_budget_recv(),
+                        st.sp_late,
                         st.sp_corrupt,
                     )
                 };
@@ -1947,7 +2120,7 @@ pub async fn run_selftest(
                     };
 
                 println!(
-                    "[selftest] Ratchet rotation: post-rotation sent={post_sent} recv={post_recv} ({post_pct:.1}%) corrupt={post_corrupt} — {verdict}"
+                    "[selftest] Ratchet rotation: post-rotation sent={post_sent} recv={post_recv} ({post_pct:.1}%) late={post_late} corrupt={post_corrupt} — {verdict}"
                 );
                 ratchet_verdict = Some(verdict);
             }
@@ -2060,7 +2233,8 @@ pub async fn run_selftest(
     if run_packet {
         let st = state.stats.lock().unwrap();
         let total_sent = st.sp_sent_a + st.sp_sent_b;
-        let total_recv = st.sp_recv_a + st.sp_recv_b;
+        let total_recv = st.sp_in_budget_recv();
+        let late = st.sp_late;
         let total_fails = st.sp_send_fails_a + st.sp_send_fails_b;
 
         let recv_pct = if total_sent > 0 {
@@ -2092,7 +2266,9 @@ pub async fn run_selftest(
 
         println!("[selftest] ──────────────────────────────────────────────────");
         println!("[selftest]  RESULTS — Single-Packet Phase");
-        println!("[selftest]  Messages:      sent={total_sent} recv={total_recv} ({recv_pct:.1}%)");
+        println!(
+            "[selftest]  Messages:      sent={total_sent} recv={total_recv} ({recv_pct:.1}%) late={late}"
+        );
         println!(
             "[selftest]  Integrity:     corrupt={corrupt} out_of_order={oo} duplicates={dupes}"
         );
@@ -2156,65 +2332,194 @@ mod tests {
     };
     const MEASURED_FRAME_BYTES: usize = 147;
 
+    /// The link the rig ran on the night of 2026-09-23 (run 179), the first
+    /// full corpus with the interface's post-TX hold (d6a158be): 2380 bps,
+    /// 147-byte frames, and a band-1 jitter ceiling of 360 ms — the
+    /// difference between the two `LORA_TX_HOLD` figures that run reported
+    /// for the same frame, 863 ms in band 1 and 1223 ms in band 2.
+    const HELD_LINK: LinkProfile = LinkProfile {
+        bitrate_bps: 2380,
+        tx_jitter_max_ms: Some(360),
+    };
+    /// What that run's `LORA_TX_HOLD` reported per frame once the burst had
+    /// pushed the modem out of band 1.
+    const HELD_LINK_BAND_2_HOLD_MS: u64 = 1_223;
+
+    /// The basic ratchet cell of run 179, as it was measured: every one of
+    /// its 18 outstanding frames was handed over, held, keyed and decoded by
+    /// the far modem, and the cell was still red — the burst completed in
+    /// 11.8 s against a budget of 11.0 s, which priced the frames' airtime
+    /// and a single handover but not the hold that paces every frame behind
+    /// the one on the air.
+    ///
+    /// The budget has to cover what the hold costs, or the tool reports its
+    /// own arithmetic as packet loss.
+    #[test]
+    fn the_budget_covers_a_burst_the_interface_holds() {
+        const MEASURED_COMPLETION: f64 = 11.8;
+        let budget = drain_budget(
+            18,
+            MEASURED_FRAME_BYTES,
+            Some(HELD_LINK),
+            std::time::Duration::from_secs(10),
+        );
+        assert!(
+            budget.total.as_secs_f64() >= MEASURED_COMPLETION,
+            "budget {:.1}s is under the {MEASURED_COMPLETION}s the same burst \
+             took on the rig (run 179, 2026-09-23): {}",
+            budget.total.as_secs_f64(),
+            budget.detail
+        );
+        assert!(
+            budget.total.as_secs_f64() <= MEASURED_COMPLETION * 1.5,
+            "budget {:.1}s pads the measured {MEASURED_COMPLETION}s by more \
+             than half: {}",
+            budget.total.as_secs_f64(),
+            budget.detail
+        );
+    }
+
+    /// The hold the tool prices has to be the hold the interface applies.
+    ///
+    /// Run 179 reported `LORA_TX_HOLD held_ms=863` in band 1 and
+    /// `held_ms=1223` in band 2 for the same 147-byte frame on this link,
+    /// whose reported band-1 ceiling is 360 ms. A budget priced at the band-1
+    /// figure is 30 % short of the pace the burst actually ran at, which is
+    /// the whole of the arithmetic the three ratchet cells died on.
+    #[test]
+    fn the_priced_hold_covers_the_band_a_burst_runs_in() {
+        let pacing = frame_pacing(MEASURED_FRAME_BYTES, HELD_LINK);
+        assert!(
+            pacing.hold_ms >= HELD_LINK_BAND_2_HOLD_MS,
+            "priced hold {}ms is under the {}ms the interface reported for \
+             the same frame in band 2",
+            pacing.hold_ms,
+            HELD_LINK_BAND_2_HOLD_MS
+        );
+        // Band 3 is the next one up; pricing that far ahead would pad every
+        // budget by another 12 slots per frame.
+        assert!(
+            pacing.hold_ms < HELD_LINK_BAND_2_HOLD_MS * 3 / 2,
+            "priced hold {}ms reaches past the band the measurement found",
+            pacing.hold_ms
+        );
+    }
+
+    /// The grace window past expiry is the same quantity as the tail
+    /// deferral: one hold plus one airtime, the time a frame already handed
+    /// to the modem needs to reach the far side. A link with nothing on the
+    /// air gets none, because there is nothing to wait out.
+    #[test]
+    fn expiry_is_followed_by_a_priced_grace_window() {
+        let budget = drain_budget(
+            18,
+            MEASURED_FRAME_BYTES,
+            Some(HELD_LINK),
+            std::time::Duration::from_secs(10),
+        );
+        let pacing = frame_pacing(MEASURED_FRAME_BYTES, HELD_LINK);
+        assert_eq!(
+            budget.grace,
+            std::time::Duration::from_millis(pacing.hold_ms + pacing.air_ms)
+        );
+        assert_eq!(
+            drain_budget(18, 147, None, std::time::Duration::from_secs(10)).grace,
+            std::time::Duration::ZERO,
+            "no on-air pricing, nothing priced to wait out"
+        );
+    }
+
+    /// A frame that lands after the budget expired is late, not delivered.
+    ///
+    /// The verdict's bar is what the link managed inside the window its own
+    /// figures priced. Counting the grace window's arrivals into it would let
+    /// a cell pass on frames that arrived after the tool stopped waiting —
+    /// which is the same blindness as the teardown that dropped them, one
+    /// sign flipped.
+    #[test]
+    fn late_arrivals_stay_out_of_the_delivery_bar() {
+        let mut stats = SelftestStats::new();
+        stats.sp_sent_a = 10;
+        stats.sp_sent_b = 10;
+        stats.sp_recv_a = 10;
+        stats.sp_recv_b = 10;
+        assert_eq!(stats.sp_in_budget_recv(), 20);
+        assert_eq!(compute_sp_verdict(&stats, &[]), Verdict::Pass);
+
+        stats.sp_late = 12;
+        assert_eq!(
+            stats.sp_in_budget_recv(),
+            8,
+            "the bar is the receipts the budget covered"
+        );
+        assert_eq!(
+            compute_sp_verdict(&stats, &[]),
+            Verdict::Fail,
+            "8 of 20 inside the budget is 40 %, whatever arrived after it"
+        );
+    }
+
+    /// The sizing line has to carry the formula, not just the number: a
+    /// budget whose derivation is not in the log cannot be checked against
+    /// the run it sized.
+    #[test]
+    fn the_sizing_line_states_what_it_priced() {
+        let budget = drain_budget(
+            18,
+            MEASURED_FRAME_BYTES,
+            Some(HELD_LINK),
+            std::time::Duration::from_secs(10),
+        );
+        for term in [
+            "air ",
+            "hold ",
+            "jitter ceiling",
+            "tail deferral",
+            "2380 bps",
+        ] {
+            assert!(
+                budget.detail.contains(term),
+                "sizing line is missing `{term}`: {}",
+                budget.detail
+            );
+        }
+    }
+
     /// Regression for the ratchet-rotation window: the fixed 5 s sleep gave
     /// the pre-rotation burst a 6.0 s window where 7.5-7.7 s was needed, so
     /// exactly the five frames of whichever radio transmitted second were
     /// counted as lost, in run after run.
     ///
-    /// The window the phase now gets is its 1.0 s send loop (5 rounds x
-    /// 200 ms) plus a budget for whatever the far sides have not accounted
-    /// for when the loop ends. Both bounds of that budget are checked: the
-    /// worst case, where nothing landed during the loop, must still be close
-    /// to the requirement — a budget that clears everything cannot fail when
-    /// the next window bug arrives.
+    /// Re-based on run 179 (2026-09-23), the first full corpus with the
+    /// interface's post-TX hold: on that link the same 10-frame exchange
+    /// completed in 6.16 s against a 5.7 s budget, and the cell went red with
+    /// every frame accounted for on the air. The pre-hold figures this test
+    /// used to carry (7.5-7.7 s on the Codeberg #190 link) are not comparable
+    /// — nothing held a frame back on that link, so a burst crossed it at the
+    /// modem's own pace.
     #[test]
     fn rotation_window_clears_the_measured_requirement_without_padding_it() {
-        const SEND_LOOP: f64 = 1.0;
+        const MEASURED_COMPLETION: f64 = 6.16;
         for outstanding in [8, 9, 10] {
             let budget = drain_budget(
                 outstanding,
                 MEASURED_FRAME_BYTES,
-                Some(MEASURED_LINK),
+                Some(HELD_LINK),
                 std::time::Duration::from_secs(5),
             );
-            let window = SEND_LOOP + budget.total.as_secs_f64();
+            let window = budget.total.as_secs_f64();
             assert!(
-                window >= 7.7,
+                window >= MEASURED_COMPLETION,
                 "window {window:.2}s ({outstanding} outstanding) is under the \
-                 7.5-7.7s measured on this link"
+                 {MEASURED_COMPLETION}s this exchange took on the rig: {}",
+                budget.detail
             );
             assert!(
-                window <= 10.0,
-                "window {window:.2}s ({outstanding} outstanding) pads the 7.7s \
-                 requirement by more than the stated margin"
-            );
-        }
-    }
-
-    /// Same for the basic/enforced burst: 20 frames against a fixed 10 s
-    /// sleep inside a 12.0 s window, where 11.7-12.8 s was needed. That one
-    /// was marginal rather than deterministic, which is why it read as
-    /// 15-18 of 20 instead of a clean half.
-    #[test]
-    fn basic_burst_window_clears_the_measured_requirement() {
-        const SEND_LOOP: f64 = 2.0;
-        for outstanding in [16, 18, 20] {
-            let budget = drain_budget(
-                outstanding,
-                MEASURED_FRAME_BYTES,
-                Some(MEASURED_LINK),
-                std::time::Duration::from_secs(10),
-            );
-            let window = SEND_LOOP + budget.total.as_secs_f64();
-            assert!(
-                window >= 12.8,
-                "window {window:.2}s ({outstanding} outstanding) is under the \
-                 11.7-12.8s measured on this link"
-            );
-            assert!(
-                window <= 17.0,
-                "window {window:.2}s ({outstanding} outstanding) is padded past \
-                 the margin"
+                window <= MEASURED_COMPLETION * 1.6,
+                "window {window:.2}s ({outstanding} outstanding) pads the \
+                 {MEASURED_COMPLETION}s requirement by more than the stated \
+                 margin: {}",
+                budget.detail
             );
         }
     }
@@ -2277,7 +2582,9 @@ mod tests {
     }
 
     /// An interface that does not jitter its transmissions contributes no
-    /// handover term rather than a made-up one.
+    /// contention term rather than a made-up one: its hold is the frame's own
+    /// airtime and nothing else, which leaves the frames' airtime pacing the
+    /// medium (10 x 516 ms) and one tail deferral of hold + air behind it.
     #[test]
     fn budget_without_a_jitter_ceiling_is_airtime_only() {
         let budget = drain_budget(
@@ -2289,7 +2596,12 @@ mod tests {
             }),
             std::time::Duration::from_secs(5),
         );
-        assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+        assert_eq!(
+            budget.total,
+            std::time::Duration::from_millis(5_160 + 2 * 516),
+            "{}",
+            budget.detail
+        );
     }
 
     /// The frame the budget prices must be the frame that crosses the air.
@@ -2315,8 +2627,11 @@ mod tests {
         );
         assert_eq!(on_air_bytes(131, None), 131, "no path, nothing to add");
 
-        // And the difference is the one that mattered: the 20-frame burst's
-        // budget has to grow by about a second.
+        // And the difference is the one that mattered: the 18-frame burst's
+        // budget has to grow with it. Half a second rather than the full one
+        // it was before the hold was priced — the medium term now moves at
+        // half a frame's airtime, because the hold that paces it is shared
+        // between the two senders.
         let priced_short = drain_budget(
             18,
             131,
@@ -2331,8 +2646,8 @@ mod tests {
         );
         let gained = priced_right.total - priced_short.total;
         assert!(
-            gained >= std::time::Duration::from_millis(900),
-            "pricing the on-air frame must recover the ~1s the truncated \
+            gained >= std::time::Duration::from_millis(600),
+            "pricing the on-air frame must recover the window the truncated \
              measurement lost, gained {gained:?}"
         );
     }
@@ -2410,14 +2725,20 @@ mod tests {
             "the log must say the handover went unaccounted: {origin}"
         );
         // And the budget that comes out of it is the airtime alone — derived,
-        // not the fixed fallback.
+        // not the fixed fallback: the frames' own airtime pacing the medium
+        // plus one tail deferral, with no contention term anywhere in it.
         let budget = drain_budget(
             10,
             MEASURED_FRAME_BYTES,
             Some(profile),
             std::time::Duration::from_secs(5),
         );
-        assert_eq!(budget.total, std::time::Duration::from_millis(5_160));
+        assert_eq!(
+            budget.total,
+            std::time::Duration::from_millis(5_160 + 2 * 516),
+            "{}",
+            budget.detail
+        );
     }
 
     /// No radio on the far side of the RPC at all: a reason, and the caller
