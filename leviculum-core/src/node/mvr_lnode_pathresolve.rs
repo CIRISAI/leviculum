@@ -177,6 +177,7 @@ fn bound_for(output: &TickOutput, on_iface: usize) -> Vec<Vec<u8>> {
                 data,
                 exclude_iface,
                 exclude_ifaces,
+                ..
             } => {
                 let excluded = exclude_iface.map(|i| i.0) == Some(on_iface)
                     || exclude_ifaces.iter().any(|i| i.0 == on_iface);

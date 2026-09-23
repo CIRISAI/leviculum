@@ -58,7 +58,7 @@ pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 /// id as msgpack `bin8` (two header bytes plus its payload). Both the
 /// single-packet path and the Resource path pack exactly this frame, and
 /// since #384 both compute its length before building it rather than
-/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1640`).
+/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1642`).
 pub const RESPONSE_FRAME_BYTES: usize = 1 + 2 + 16;
 
 /// Bookkeeping heap each part of an outgoing Resource costs beyond its
@@ -103,7 +103,7 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///    (`encode`, `leviculum-lxmf/src/propagation.rs:483`.)
 /// 2. **`wrapped`, F** — `send_response_resource` frames the response
 ///    into an exactly-sized block and holds it until the call returns
-///    (`send_response_resource`, `leviculum-core/src/node/mod.rs:1851`).
+///    (`send_response_resource`, `leviculum-core/src/node/mod.rs:1853`).
 /// 3. **`plaintext`, F + 4** — `reserve_exact(4 + len)`, the wire random
 ///    prepended to the payload. Without a compressor linked (the firmware
 ///    drops bz2) the payload IS `wrapped`, read straight through.
@@ -125,7 +125,7 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///   refuse still paid one full framed copy. That copy was the 5 446 B a
 ///   T114 died in. It now compares a computed length and allocates
 ///   nothing on the refusal (`send_response`,
-///   `leviculum-core/src/node/mod.rs:1640`).
+///   `leviculum-core/src/node/mod.rs:1642`).
 /// * `combined` — the Resource constructor copied its whole payload into
 ///   a private buffer. With no metadata to prepend, which is every
 ///   resource this role serves, it borrows the caller's bytes instead

@@ -280,6 +280,7 @@ impl Mesh {
                     data,
                     exclude_iface,
                     exclude_ifaces,
+                    ..
                 } => {
                     for i in 0..iface_count {
                         let id = InterfaceId(i);

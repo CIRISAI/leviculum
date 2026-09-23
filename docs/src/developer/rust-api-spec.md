@@ -171,7 +171,7 @@ All are re-exported from `leviculum-core/src/lib.rs:123-143`.
 
 The sans-IO protocol engine, generic over an RNG `R: CryptoRngCore`, a clock
 `C: Clock`, and storage `S: Storage`. Defined at
-`leviculum-core/src/node/mod.rs:369`. It never performs I/O; every method that
+`leviculum-core/src/node/mod.rs:371`. It never performs I/O; every method that
 can produce output returns a [`TickOutput`](#core-tickoutput-and-action) the
 caller must dispatch.
 
@@ -262,7 +262,7 @@ The three abstractions you implement to run the core on a platform. Defined in
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
 | `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:280` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:835`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:865`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`, `heapless`-backed

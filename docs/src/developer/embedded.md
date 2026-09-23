@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:288`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:305`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -49,7 +49,7 @@ The three entry points (signatures in the
 - `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1032`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1306`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:1308`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
 - `next_deadline()` (`leviculum-core/src/node/mod.rs:2385`). The earliest timer
@@ -125,7 +125,7 @@ Three things to notice:
    broadcast-exclusion stay consistent.
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice to
-   `dispatch_actions` (`leviculum-core/src/transport.rs:452`). Broadcast
+   `dispatch_actions` (`leviculum-core/src/transport.rs:469`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,
@@ -191,7 +191,7 @@ impl Clock for EmbassyClock {
 ```
 
 `now_secs`, `has_elapsed`, and `deadline` have default implementations
-(`leviculum-core/src/traits.rs:402-414`); you only provide `now_ms`. It must be
+(`leviculum-core/src/traits.rs:432-444`); you only provide `now_ms`. It must be
 monotonic.
 
 ### `Interface`
@@ -224,7 +224,7 @@ impl Interface for MyRadio {
 ```
 
 A constrained medium (LoRa) overrides `next_slot_ms`
-(`leviculum-core/src/traits.rs:335`) to report the next airtime-fit time, so the
+(`leviculum-core/src/traits.rs:365`) to report the next airtime-fit time, so the
 core schedules retries against capacity without knowing any radio physics — the
 [interface-isolation rule](choosing-a-layer.md). For a fast link the default
 ("always ready") is correct.
@@ -241,10 +241,10 @@ a single-peer interface implements nothing.
 ### `Storage`
 
 Key-value persistence for the path table, link table, announce caches,
-identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:431`). It
+identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:461`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:835`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:865`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:84`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

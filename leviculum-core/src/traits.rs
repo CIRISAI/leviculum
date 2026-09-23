@@ -324,6 +324,36 @@ pub trait Interface {
         self.try_send_prioritized(data, high_priority)
     }
 
+    /// Try to broadcast on every link of this interface EXCEPT the one
+    /// that carries `peer` (Codeberg #422).
+    ///
+    /// The counterpart of [`Self::try_send_to_peer`] for a broadcast: not
+    /// "deliver these bytes to that peer" but "that peer already heard
+    /// these bytes, serve whoever did not". `peer` is the same identity
+    /// as there, the one an inbound packet was stamped with by
+    /// `Transport::process_incoming_from_peer`.
+    ///
+    /// The core reaches this method when a `Broadcast` action names both
+    /// an excluded interface and the ingress peer behind it. It is the
+    /// interface, not the core, that decides what the exclusion costs:
+    /// for a single-link interface (TCP, serial, LoRa's shared air) the
+    /// excluded peer IS the whole interface, since everything reachable
+    /// there heard the packet on the medium it arrived on — so the
+    /// default implementation sends NOTHING and reports success, which
+    /// is bit-for-bit the behaviour of skipping the interface outright.
+    /// Only an interface that multiplexes several point-to-point links
+    /// into one id overrides it, because only there is "the interface it
+    /// came in on" wider than "what actually heard it".
+    fn try_send_excluding_peer(
+        &mut self,
+        data: &[u8],
+        peer: &[u8; TRUNCATED_HASHBYTES],
+        high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        let _ = (data, peer, high_priority);
+        Ok(())
+    }
+
     /// Wall-clock time (ms) at which this interface will next accept a
     /// packet of the given size.
     ///

@@ -91,6 +91,8 @@ mod mvr_hop_asymmetry;
 mod mvr_identify_relay;
 #[cfg(test)]
 mod mvr_inert_announce_retire;
+#[cfg(test)]
+mod mvr_ingress_link_exclusion;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]

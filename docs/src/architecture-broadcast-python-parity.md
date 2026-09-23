@@ -285,13 +285,13 @@ in `path_table` is routed to a single specific interface via
 path-response is specifically addressed to the path-requester
 rather than broadcast. In our Rust code the answering site stamps
 the requesting interface onto the announce-table entry it inserts —
-`target_interface` (`transport.rs:9268`) — and the retry scheduler
+`target_interface` (`transport.rs:9345`) — and the retry scheduler
 hands an entry carrying one to that interface alone instead of
-broadcasting it: `target_iface` (`transport.rs:9903-9912`).
+broadcasting it: `target_iface` (`transport.rs:9998-10007`).
 
 (Re-read 2026-09-23. The citation this paragraph carried was
 written backwards, 4336 down to 4286, and pointed at neither site:
-4286 sits inside `announce_table_entries` (`transport.rs:4106`), an
+4286 sits inside `announce_table_entries` (`transport.rs:4164`), an
 RPC export. The only non-test `target_interface: Some(...)` in the
 file is the one cited above.)
 
@@ -470,22 +470,22 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 
 | Mechanism | Python reference | Rust today | Status | Notes |
 |---|---|---|---|---|
-| Self-announce one-shot | `Destination.py:322`, `Packet.py:294` | one emission per call: `send_on_all_interfaces` (`transport.rs:3206`) | ✓ | History: the 3 extra retries this row recorded were removed by B3, 08128e97 (2026-04-15) |
+| Self-announce one-shot | `Destination.py:322`, `Packet.py:294` | one emission per call: `send_on_all_interfaces` (`transport.rs:3257`) | ✓ | History: the 3 extra retries this row recorded were removed by B3, 08128e97 (2026-04-15) |
 | Self-announce on-wire count | 1 | 1 for an ordinary destination; 2 for a management destination | ≈ | B3 brought it to 1; 2d9234da (2026-09-01) gave management destinations the reference's local-client second emission — declared deviation, see section 13 |
-| Self-announce fanout | all interfaces (MODE_FULL assumed) | no exclusion argument | ✓ | `send_on_all_interfaces` (`transport.rs:3206`) |
+| Self-announce fanout | all interfaces (MODE_FULL assumed) | no exclusion argument | ✓ | `send_on_all_interfaces` (`transport.rs:3257`) |
 | Received-announce rebroadcast count | 2 (non-local-client), 1 (local-client) | 2 and 1: the insert picks the start value from the source, `retries` (`transport.rs:5498-5502`) | ✓ | History: B2, 79ac5204 (2026-04-15), dropped `PATHFINDER_RETRIES` to 1 and reordered the init |
 | Received-announce fanout | all interfaces; echo dedup'd on RX | `send_on_all_interfaces` (no exclude) | ✓ | Matches Python. B1 verified by `test_announces_forwarded_through_transport`. |
-| Packet-hash dedup on RX | `Transport.py:1227` | `has_packet_hash` (`transport.rs:2957`) | ✓ | Identical semantics, rolling window |
+| Packet-hash dedup on RX | `Transport.py:1227` | `has_packet_hash` (`transport.rs:3002`) | ✓ | Identical semantics, rolling window |
 | `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `PATHFINDER_G_MS` (`constants.rs:126`) |
 | `PATHFINDER_RW` jitter | 0.5 s | 500 ms (+ optional airtime factor) | ≈ | Option α permitted timing divergence |
-| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `LOCAL_REBROADCASTS_MAX` (`constants.rs:142`); enforced in the retry loop, `local_rebroadcasts` (`transport.rs:9734`), and on a duplicate arrival, `local_rebroadcasts` (`transport.rs:5154`) |
-| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:322`); state in `InterfaceAnnounceCap` (`transport.rs:571-578`), holdoff at `allowed_at_ms` (`transport.rs:10087-10099`) |
+| `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `LOCAL_REBROADCASTS_MAX` (`constants.rs:142`); enforced in the retry loop, `local_rebroadcasts` (`transport.rs:9829`), and on a duplicate arrival, `local_rebroadcasts` (`transport.rs:5212`) |
+| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:322`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10182-10194`) |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `MGMT_ANNOUNCE_INTERVAL_MS` (`constants.rs:159`); `check_mgmt_announces` (`node/mod.rs:2253-2345`) |
 | mgmt-announce initial 15 s trick | `Transport.py:283` | `schedule_initial_mgmt_announce` (`node/mod.rs:2239-2245`) with `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (`node/mod.rs:201`) | ≈ | Verified by B4 audit; Rust adds a per-node draw on top, `MGMT_ANNOUNCE_INITIAL_JITTER_MS` (`node/mod.rs:220`) |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2771-2809` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
-| Path-response targeted | targeted-transport branch, section 5 | `target_iface` (`transport.rs:9903-9912`) | ✓ | Preserved |
+| Path-response targeted | targeted-transport branch, section 5 | `target_iface` (`transport.rs:9998-10007`) | ✓ | Preserved |
 | Interface modes (FULL/ROAMING/…) | 5 modes | none (all = FULL) | ⚠ | Documented gap; separate task |
 | `block_rebroadcasts` | per-entry flag | `AnnounceEntry.block_rebroadcasts` | ✓ | Verified by B7 audit |
 
@@ -529,8 +529,8 @@ cite now holds unrelated code. Where the mechanism lives today:
 - the insert picks the start value from the source of the
   announce — `PATHFINDER_RETRIES` for a local client,
   `0` otherwise — at `retries` (`transport.rs:5498-5502`);
-- the two guards are `PATHFINDER_RETRIES` (`transport.rs:9733`)
-  and `local_rebroadcasts` (`transport.rs:9734`), in
+- the two guards are `PATHFINDER_RETRIES` (`transport.rs:9828`)
+  and `local_rebroadcasts` (`transport.rs:9829`), in
   `check_announce_rebroadcasts`;
 - `PATHFINDER_RETRIES` (`constants.rs:115`) is 1.
 
@@ -540,10 +540,10 @@ cite now holds unrelated code. Where the mechanism lives today:
 catch the self-echo, and does it play well with Python peers?
 
 **Resolution**: yes. Outgoing broadcasts go through
-`send_on_all_interfaces` (`transport.rs:3206`), which calls
+`send_on_all_interfaces` (`transport.rs:3257`), which calls
 `self.storage.add_packet_hash()` before emitting the
 `Action::Broadcast`. The check that reads that set on arrival is
-`has_packet_hash` (`transport.rs:2957`), in `process_incoming`. The only edge case is the
+`has_packet_hash` (`transport.rs:3002`), in `process_incoming`. The only edge case is the
 dedup window rollover at `HASHLIST_MAXSIZE = 1 000 000` entries —
 a packet that is ~1M packets old could theoretically come back.
 Not a concern in practice for single-day bench runs.
@@ -580,8 +580,8 @@ as they would be through a Python relay.
 ### Management announces get a second emission (2026-09-01)
 
 **Decision**: a management destination's announce is emitted once
-by `send_on_all_interfaces` (`transport.rs:3206`) and then once more
-by `schedule_own_announce_retry` (`transport.rs:3271`), which inserts
+by `send_on_all_interfaces` (`transport.rs:3257`) and then once more
+by `schedule_own_announce_retry` (`transport.rs:3328`), which inserts
 an announce-table entry at `retries = PATHFINDER_RETRIES` so the
 scheduler fires it exactly once and retires it. Landed as 2d9234da.
 
@@ -596,7 +596,7 @@ absorbs the duplicate, and the P1 gain was measured on the residual
 `ble_lora_transport` reds of 2026-09-01. The retry is cancelled as
 soon as a neighbour is heard passing the announce on, so a healthy
 mesh pays nothing. Full argument and citations in the doc comment on
-`schedule_own_announce_retry` (`transport.rs:3271`).
+`schedule_own_announce_retry` (`transport.rs:3328`).
 
 **Scope**: management destinations only. An ordinary
 `Destination.announce()` is still one-shot, matching Python exactly.

@@ -279,6 +279,23 @@ pub enum Action {
         data: Vec<u8>,
         /// Interface to skip (typically the one the packet arrived on)
         exclude_iface: Option<InterfaceId>,
+        /// The peer link behind `exclude_iface` these bytes actually
+        /// arrived on, when the interface named one (Codeberg #422).
+        ///
+        /// Pairs with `exclude_iface` and is meaningless without it: it
+        /// narrows that ONE exclusion from "the interface it came in on"
+        /// to "what actually heard it". A broadcast medium is the same
+        /// set either way, which is why the default
+        /// [`Interface::try_send_excluding_peer`](crate::traits::Interface::try_send_excluding_peer)
+        /// sends nothing; an interface that multiplexes several
+        /// point-to-point links into one id serves every link but this
+        /// one. `None` keeps the whole interface excluded, which is the
+        /// state of every packet no multi-peer interface stamped.
+        ///
+        /// Not extended to `exclude_ifaces`: those are withheld by a
+        /// propagation-mode rule (#91), not by having heard the packet,
+        /// so there is no link to spare there.
+        exclude_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         /// Additional interfaces to skip (Codeberg #91: interfaces whose
         /// Reticulum mode withholds this announce, e.g. access-point or a
         /// roaming/boundary interface whose next-hop rule blocks it). Empty in
@@ -520,18 +537,26 @@ pub fn dispatch_actions(
                 data,
                 exclude_iface,
                 exclude_ifaces,
+                exclude_peer,
             } => {
                 for iface_obj in interfaces.iter_mut() {
-                    if Some(iface_obj.id()) == exclude_iface {
-                        continue;
-                    }
+                    // The ingress interface. Excluded whole unless the
+                    // action also names the link the bytes arrived on, in
+                    // which case the interface itself decides which of its
+                    // links that spares (Codeberg #422).
+                    let ingress = Some(iface_obj.id()) == exclude_iface;
+                    let spare_one_link = match (ingress, exclude_peer.as_ref()) {
+                        (true, None) => continue,
+                        (true, Some(peer)) => Some(peer),
+                        (false, _) => None,
+                    };
                     if exclude_ifaces.contains(&iface_obj.id()) {
                         continue;
                     }
                     let iface_idx = iface_obj.id().0;
-                    let result = match ifac_configs.get(&iface_idx) {
+                    let wrapped = match ifac_configs.get(&iface_idx) {
                         Some(cfg) => match cfg.apply_ifac(&data) {
-                            Ok(wrapped) => iface_obj.try_send_prioritized(&wrapped, false),
+                            Ok(wrapped) => Some(wrapped),
                             Err(e) => {
                                 crate::tracing::warn!(
                                     "IFAC apply failed on iface {}: {:?}",
@@ -541,9 +566,14 @@ pub fn dispatch_actions(
                                 continue;
                             }
                         },
-                        None => iface_obj.try_send_prioritized(&data, false),
+                        None => None,
                     };
+                    let bytes = wrapped.as_deref().unwrap_or(&data);
                     // Broadcast = announce rebroadcasts → normal priority
+                    let result = match spare_one_link {
+                        Some(peer) => iface_obj.try_send_excluding_peer(bytes, peer, false),
+                        None => iface_obj.try_send_prioritized(bytes, false),
+                    };
                     if let Err(e) = result {
                         errors.push((iface_obj.id(), e));
                     }
@@ -1994,6 +2024,20 @@ pub struct Transport<C: Clock, S: Storage> {
     /// cycle and removed with the entry when the response fires.
     peer_link_reoriginations: BTreeSet<[u8; TRUNCATED_HASHBYTES]>,
 
+    /// The peer link a pending discovery's request arrived on, beside
+    /// the interface the storage entry names (Codeberg #422).
+    ///
+    /// Kept here rather than in the `Storage` entry because it is a
+    /// property of the live discovery, not of anything persisted: the
+    /// retry broadcast has to exclude the same LINK the first pass
+    /// excluded, or the six retries at 5 s repeat the first pass's
+    /// mistake. Bounded by the discovery table, pruned against it on
+    /// every retry cycle and removed with the entry when the response
+    /// fires — exactly like `peer_link_reoriginations`. Absent for every
+    /// request that arrived without a named link, which is every
+    /// broadcast medium.
+    discovery_request_peers: BTreeMap<[u8; TRUNCATED_HASHBYTES], [u8; TRUNCATED_HASHBYTES]>,
+
     /// The peer link the packet currently being processed arrived
     /// through, as reported by a multi-peer interface (Codeberg #365).
     /// Set for the duration of one `process_incoming_from_peer` call
@@ -2240,6 +2284,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             offline_interfaces: BTreeSet::new(),
             interface_peer_counts: BTreeMap::new(),
             peer_link_reoriginations: BTreeSet::new(),
+            discovery_request_peers: BTreeMap::new(),
             ingress_peer: None,
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
@@ -3128,10 +3173,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// this sans-I/O core does not know, so the single PKT_TX carries
     /// `iface=bcast` — the journey stitches by `ph`, and the receiving
     /// nodes' PKT_RX events name the real interfaces.
+    ///
+    /// `exclude_peer` narrows `exclude_iface` to the link the packet
+    /// arrived on, for an interface that named one (Codeberg #422); it
+    /// is ignored without an excluded interface to narrow.
     fn push_broadcast(
         &mut self,
         data: Vec<u8>,
         exclude_iface: Option<InterfaceId>,
+        exclude_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         exclude_ifaces: Vec<InterfaceId>,
         ph: Option<[u8; PKT_PH_BYTES]>,
     ) {
@@ -3150,6 +3200,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             data,
             exclude_iface,
             exclude_ifaces,
+            exclude_peer,
         });
     }
 
@@ -3232,7 +3283,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         };
 
-        self.push_broadcast(data.to_vec(), None, exclude_ifaces, Some(ph8(&cache_hash)));
+        self.push_broadcast(
+            data.to_vec(),
+            None,
+            None,
+            exclude_ifaces,
+            Some(ph8(&cache_hash)),
+        );
     }
 
     /// Give an announce this node just originated for one of its OWN
@@ -3739,6 +3796,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_set_bytes(&self.offline_interfaces)
             + hc::btree_map_bytes(&self.interface_peer_counts)
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
+            + hc::btree_map_bytes(&self.discovery_request_peers)
             + hc::btree_map_bytes(&self.interface_modes)
             + hc::btree_map_bytes(&self.interface_kinds)
             + hc::btree_map_bytes(&self.interface_ingress_control)
@@ -4314,7 +4372,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:2921. A destination with no cached
+    /// link-request path uses at transport.rs:2966. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -5080,7 +5138,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1134 ran in the
+        // Gate on the already-incremented hops (transport.rs:1164 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7193,7 +7251,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface_out = "bcast",
                 next_hop = ?packet.transport_id.as_ref().map(|h| alloc::format!("{}", HexShort(&h[..]))),
             );
-            self.send_on_all_interfaces_except(except_index, &buf[..len], Some(full_hash));
+            // The ingress LINK, not just the ingress interface (Codeberg
+            // #422): a multi-link interface's other links did not hear
+            // this packet, so they are relay targets like any other.
+            let except_peer = self.ingress_peer;
+            self.send_on_all_interfaces_except(
+                except_index,
+                except_peer,
+                &buf[..len],
+                Some(full_hash),
+            );
             self.stats.packets_forwarded += 1;
         }
     }
@@ -7243,6 +7310,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
             self.push_broadcast(
                 buf[..len].to_vec(),
+                None,
                 None,
                 exclude_ifaces,
                 Some(ph8(&seed_hash)),
@@ -8818,17 +8886,25 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     fn send_on_all_interfaces_except(
         &mut self,
         except_index: usize,
+        except_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         data: &[u8],
         known_hash: Option<[u8; 32]>,
     ) {
-        self.send_on_all_interfaces_except_many(except_index, &[], data, known_hash)
+        self.send_on_all_interfaces_except_many(except_index, except_peer, &[], data, known_hash)
     }
 
     /// As [`Self::send_on_all_interfaces_except`], but skipping further
     /// interfaces as well (the egress-limited ones, Codeberg #172).
+    ///
+    /// `except_peer` is the peer link these bytes arrived on behind
+    /// `except_index`, when the interface named one (Codeberg #422). It
+    /// narrows that one exclusion from the interface to the link: the
+    /// requestor's own link stays silent, its siblings on the same
+    /// interface — which heard nothing — are served.
     fn send_on_all_interfaces_except_many(
         &mut self,
         except_index: usize,
+        except_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         also_except: &[usize],
         data: &[u8],
         known_hash: Option<[u8; 32]>,
@@ -8842,6 +8918,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.push_broadcast(
             data.to_vec(),
             Some(InterfaceId(except_index)),
+            except_peer,
             also_except.iter().map(|&i| InterfaceId(i)).collect(),
             Some(ph8(&cache_hash)),
         );
@@ -9215,7 +9292,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:1768`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:1798`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -9396,6 +9473,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                                 interface_index,
                                 now + DISCOVERY_TIMEOUT_MS,
                             );
+                            // The link the request came in on, so the
+                            // retries exclude what the first pass
+                            // excluded (Codeberg #422).
+                            match self.ingress_peer {
+                                Some(peer) => {
+                                    self.discovery_request_peers.insert(requested_hash, peer);
+                                }
+                                None => {
+                                    self.discovery_request_peers.remove(&requested_hash);
+                                }
+                            }
                         }
                         crate::tracing::debug!(
                                 "Attempting to discover unknown path to <{}> on behalf of path request on {}",
@@ -9429,8 +9517,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     }
 
                     if active_discovery {
+                        // Excluded: the requestor's LINK, not every link of
+                        // the interface it reached us on (Codeberg #422).
+                        // On the board the host's BLE link and the
+                        // neighbour board's are one `InterfaceId`, and the
+                        // neighbour is exactly who can answer.
+                        let except_peer = self.ingress_peer;
                         self.send_on_all_interfaces_except_many(
                             interface_index,
+                            except_peer,
                             &egress_limited,
                             &buf[..len],
                             None,
@@ -10374,10 +10469,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // discovery table.
         let Self {
             peer_link_reoriginations,
+            discovery_request_peers,
             storage,
             ..
         } = self;
         peer_link_reoriginations.retain(|d| storage.get_discovery_path_request(d).is_some());
+        discovery_request_peers.retain(|d, _| storage.get_discovery_path_request(d).is_some());
 
         let dest_hashes = self.storage.discovery_path_request_dest_hashes();
         if dest_hashes.is_empty() {
@@ -10397,6 +10494,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     Some(entry) => entry,
                     None => continue,
                 };
+            // The link that asked, when one was named (Codeberg #422).
+            let requesting_peer = self.discovery_request_peers.get(&dest_hash).copied();
 
             if now >= timeout_ms {
                 continue; // expired, will be cleaned up by expire_discovery_path_requests
@@ -10450,6 +10549,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 let egress_limited = self.egress_limited_path_request_ifaces(requesting_iface);
                 self.send_on_all_interfaces_except_many(
                     requesting_iface,
+                    requesting_peer,
                     &egress_limited,
                     &buf[..len],
                     None,
@@ -10488,6 +10588,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Expired, clean up
             self.storage.remove_discovery_path_request(dest_hash);
             self.peer_link_reoriginations.remove(dest_hash);
+            self.discovery_request_peers.remove(dest_hash);
             return;
         }
 
@@ -10514,6 +10615,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         self.storage.remove_discovery_path_request(dest_hash);
         self.peer_link_reoriginations.remove(dest_hash);
+        self.discovery_request_peers.remove(dest_hash);
         // Deliberate deviation from Python: Python lets entries expire after
         // 15s (no removal on delivery), which can cause duplicate PATH_RESPONSE
         // packets if a second matching announce arrives within the timeout.
@@ -10697,11 +10799,13 @@ mod tests {
                 data: vec![10, 20],
                 exclude_iface: None,
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             };
             let action_with_exclude = Action::Broadcast {
                 data: vec![10, 20],
                 exclude_iface: Some(InterfaceId(2)),
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             };
 
             assert_ne!(action_no_exclude, action_with_exclude);
@@ -10711,6 +10815,7 @@ mod tests {
                 data: vec![10, 20],
                 exclude_iface: None,
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             };
             assert_eq!(action_no_exclude, action_no_exclude2);
         }
@@ -10726,6 +10831,7 @@ mod tests {
                 data: vec![1],
                 exclude_iface: None,
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             };
             assert_ne!(send, broadcast);
         }
@@ -10766,6 +10872,7 @@ mod tests {
                         data: vec![2],
                         exclude_iface: None,
                         exclude_ifaces: Vec::new(),
+                        exclude_peer: None,
                     },
                 ],
                 events: Vec::new(),
@@ -14264,7 +14371,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5692), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5750), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -15127,7 +15234,7 @@ mod tests {
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
             let _idx2 = transport.register_interface(Box::new(MockInterface::new("if2", 3)));
 
-            transport.send_on_all_interfaces_except(1, b"test data", None);
+            transport.send_on_all_interfaces_except(1, None, b"test data", None);
 
             // We can't easily inspect MockInterface sent data through the trait,
             // but we can verify no panic and basic operation works
@@ -18547,6 +18654,7 @@ mod tests {
                     data: data.to_vec(),
                     exclude_iface: None,
                     exclude_ifaces: Vec::new(),
+                    exclude_peer: None,
                 }
             );
         }
@@ -18559,7 +18667,7 @@ mod tests {
             let _idx2 = transport.register_interface(Box::new(MockInterface::new("if2", 3)));
 
             let data = b"selective broadcast";
-            transport.send_on_all_interfaces_except(1, data, None);
+            transport.send_on_all_interfaces_except(1, None, data, None);
 
             let actions = transport.drain_actions();
             assert_eq!(actions.len(), 1);
@@ -18569,6 +18677,7 @@ mod tests {
                     data: data.to_vec(),
                     exclude_iface: Some(InterfaceId(1)),
                     exclude_ifaces: Vec::new(),
+                    exclude_peer: None,
                 }
             );
         }
@@ -18809,7 +18918,7 @@ mod tests {
             transport.send_on_interface(idx0, b"unicast").unwrap();
             transport.send_on_all_interfaces(b"broadcast");
             transport.send_on_interface(idx1, b"unicast2").unwrap();
-            transport.send_on_all_interfaces_except(0, b"selective", None);
+            transport.send_on_all_interfaces_except(0, None, b"selective", None);
 
             let actions = transport.drain_actions();
             assert_eq!(actions.len(), 4);
@@ -18828,6 +18937,7 @@ mod tests {
                     data: b"broadcast".to_vec(),
                     exclude_iface: None,
                     exclude_ifaces: Vec::new(),
+                    exclude_peer: None,
                 }
             );
             assert_eq!(
@@ -18844,6 +18954,7 @@ mod tests {
                     data: b"selective".to_vec(),
                     exclude_iface: Some(InterfaceId(0)),
                     exclude_ifaces: Vec::new(),
+                    exclude_peer: None,
                 }
             );
         }
@@ -19850,7 +19961,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1134) before
+        // The inbound path increments hops once (transport.rs:1164) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -28873,6 +28984,7 @@ mod tests {
                 data: vec![1, 2, 3],
                 exclude_iface: None,
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             }];
 
             let no_ifac = BTreeMap::new();
@@ -29420,6 +29532,7 @@ mod tests {
                 data: raw.clone(),
                 exclude_iface: None,
                 exclude_ifaces: Vec::new(),
+                exclude_peer: None,
             }];
 
             let result = dispatch_actions(&mut interfaces, actions, &ifac_configs);

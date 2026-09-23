@@ -188,6 +188,7 @@ fn emissions_reaching(
                 data,
                 exclude_iface,
                 exclude_ifaces,
+                ..
             } if exclude_iface.map(|e| e.0) != Some(iface)
                 && !exclude_ifaces.iter().any(|e| e.0 == iface) =>
             {

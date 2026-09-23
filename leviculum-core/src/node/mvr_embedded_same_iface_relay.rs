@@ -113,7 +113,7 @@ fn make_destination() -> (crate::DestinationHash, Vec<u8>) {
 /// Re-stamp a direct announce as one that reached us THROUGH `transport_id`
 /// at `wire_hops`. The receipt increment makes the stored path
 /// `wire_hops + 1`, and the transport header becomes the path's next hop
-/// (`transport.rs:4462`) — which is what `needs_relay()` needs.
+/// (`transport.rs:4520`) — which is what `needs_relay()` needs.
 fn announce_via(raw: &[u8], transport_id: [u8; TRUNCATED_HASHBYTES], wire_hops: u8) -> Vec<u8> {
     let mut packet = Packet::unpack(raw).unwrap();
     packet.flags.header_type = HeaderType::Type2;
@@ -238,7 +238,7 @@ fn embedded_transport_forwards_data_back_out_the_arrival_interface() {
     assert_eq!(
         packet.flags.header_type,
         HeaderType::Type2,
-        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:6864)"
+        "a relay with a next hop keeps the transport header (`needs_relay`, transport.rs:6922)"
     );
     assert_eq!(
         packet.transport_id,

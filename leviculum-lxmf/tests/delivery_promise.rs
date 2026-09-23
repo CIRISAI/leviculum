@@ -99,6 +99,7 @@ fn on_air(out: &TickOutput) -> Vec<Vec<u8>> {
                 data,
                 exclude_iface,
                 exclude_ifaces,
+                ..
             } => (*exclude_iface != Some(LORA_IFACE) && !exclude_ifaces.contains(&LORA_IFACE))
                 .then(|| data.clone()),
         })
