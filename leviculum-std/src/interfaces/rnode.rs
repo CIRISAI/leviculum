@@ -815,6 +815,41 @@ fn apply_radio_stat(name: &str, counters: &InterfaceCounters, command: u8, paylo
                 // `kiss_indicate_channel_stats()` to nothing and this event
                 // never appears for it.
                 //
+                // THE OTHER HALF OF THE EVENT reads the RECEIVE side, and it
+                // is a different kind of number: the two `airtime_*` fields
+                // are the modem's own account of what it keyed, the two
+                // `channel_load_*` fields are a measurement of the air.
+                // `check_modem_status()` samples `LoRa->dcd()` every
+                // STATUS_INTERVAL_MS = 3 ms into a DCD_SAMPLES = 2500 ring
+                // (Config.h:176,178) and recomputes `local_channel_util`
+                // from it once a second (UTIL_UPDATE_INTERVAL, :180;
+                // RNode_Firmware.ino:1451-1458), so it is the busy fraction
+                // of the last 7500 ms. `kiss_indicate_channel_stats()`
+                // scales it by 100*100 into the u16 (Utilities.h:963), so
+                // one raw unit is 0.01 % and the SMALLEST possible busy
+                // reading — a single DCD sample, 1/2500 — is 0.04 %, four
+                // units, which the two-decimal format below keeps.
+                //
+                // That resolution is what lets a zero here be read as a
+                // negative rather than a rounding artifact, which is the
+                // receive-side half of the evidence in
+                // `tests/mvr/sender_modem_counts_a_frame_the_far_modem_
+                // never_hears.rs`: a frame the far modem never heard, while
+                // the sending modem's `airtime_short` rose by that frame's
+                // own cost. That file owns the arithmetic and the two reds
+                // it was argued from; what belongs here is only the unit.
+                //
+                // Two limits, the mirror of the ones above.
+                // `total_channel_util = local_channel_util + airtime`
+                // (:1459) and is clamped at 1.0 (:1460), so on a modem that
+                // is itself keying this field is NOT a clean reading of the
+                // air — subtract `airtime_short` first, and on a loaded
+                // channel the clamp has already discarded the remainder.
+                // And `dcd()` is preamble/header detection, not an energy
+                // threshold: interference that never resolves into a LoRa
+                // preamble moves `noise_floor` and `interference_detected`
+                // (:1401,1415) and leaves this at zero.
+                //
                 // Same target and level as `LORA_TX` so a run that captures
                 // the handovers captures the keying beside them.
                 tracing::debug!(
@@ -5978,6 +6013,84 @@ mod tests {
         assert_eq!(r.channel_load_short, 2.0);
         assert_eq!(r.channel_load_long, 6.0);
         assert_eq!(r.noise_floor, Some(-57));
+    }
+
+    /// `channel_load_short=0.00` has to be a NEGATIVE, not a rounding
+    /// artifact, because that is what a lost-frame analysis reads it as: a
+    /// receiving modem that saw no preamble while its peer charged itself
+    /// for the frame (leviculum#24, and
+    /// `bench_single_pair_slow_ca_rnode_only` on 2026-09-23).
+    ///
+    /// The firmware's smallest possible busy reading is ONE DCD sample of
+    /// the 2500-sample ring (Config.h:178), which
+    /// `kiss_indicate_channel_stats()` scales by 100*100 (Utilities.h:963)
+    /// into raw 4 = 0.04 %. Decode and format both have to keep it: an
+    /// integer-percent field, or one decimal, would print that as 0.00 and
+    /// silently turn "heard something" into "heard nothing".
+    #[test]
+    fn apply_radio_stat_chtm_keeps_a_single_dcd_sample_out_of_zero() {
+        let (buf, _guard) = capture_logs();
+        let c = InterfaceCounters::new();
+        // Same 11-byte single-interface shape as above; only the two
+        // channel-load fields carry the case. Airtime is left at zero so
+        // the modem under test is the LISTENING one: `total_channel_util`
+        // is `local_channel_util + airtime`, so a keying modem's reading
+        // would not be a clean measurement of the air.
+        let chtm = |load_short: u16| {
+            let s = load_short.to_be_bytes();
+            [
+                0x00, 0x00, // airtime_short  = 0
+                0x00, 0x00, // airtime_long   = 0
+                s[0], s[1], // channel_load_short
+                0x00, 0x00, // channel_load_long = 0
+                0xC8, // current_rssi raw 200
+                100,  // noise_floor raw 100
+                0xFF, // interference none
+            ]
+        };
+
+        // One DCD sample busy: 1/2500 -> raw 4 -> 0.04 %.
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_CHTM,
+            &chtm(4)
+        ));
+        assert_eq!(c.radio_stats().unwrap().channel_load_short, 0.04);
+
+        // A whole frame busy: 1.95 s at SF10/BW125/CR4/8 is 651 of 2500
+        // samples -> 26.04 %, the reading the receiver of a delivered frame
+        // shows.
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_CHTM,
+            &chtm(2604)
+        ));
+        assert_eq!(c.radio_stats().unwrap().channel_load_short, 26.04);
+
+        // A silent ring, the reading the analysis treats as proof of no
+        // preamble.
+        assert!(apply_radio_stat(
+            "test_rnode",
+            &c,
+            rnode::CMD_STAT_CHTM,
+            &chtm(0)
+        ));
+        assert_eq!(c.radio_stats().unwrap().channel_load_short, 0.0);
+
+        let captured = buf.lock().unwrap();
+        let logs = String::from_utf8_lossy(&captured);
+        let loads: Vec<&str> = logs
+            .lines()
+            .filter_map(|l| l.split("channel_load_short=").nth(1))
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        assert_eq!(
+            loads,
+            ["0.04", "26.04", "0.00"],
+            "the event has to separate one busy sample from a silent ring; logs:\n{logs}"
+        );
     }
 
     /// A CHTM frame crossing the real KISS path emits `LORA_CHTM` on the
