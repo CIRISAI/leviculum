@@ -76,7 +76,19 @@
 //! the difference that one of the two contenders here is a frame WE hold, so
 //! a spacing change can act on it at all.
 //!
-//! No fix is attempted here, and the numbers below say why one cannot be
+//! NARROWED, NOT CLOSED, 2026-09-23. `interfaces/rnode.rs::tx_hold` now
+//! holds the next frame for the previous one's airtime plus the firmware's
+//! DIFS and its longest contention draw — 501 ms at this cell's PHY, not the
+//! 971 ms the search below found. That is deliberate: the hold is priced to
+//! empty the MODEM's queue, so every frame gets its own CSMA contest instead
+//! of riding a flush (Codeberg #36), and it says nothing about the far end's
+//! answer window, which opens at the end of our airtime and closes after a
+//! draw we cannot see. `the_hold_narrows_the_census_without_closing_it`
+//! below measures what is left: 42.2 % of triples, against 68.6 % before
+//! the hold and 17.8 % under the wider `compute_spacing_ms`. The mvr for the hold itself is
+//! `one_frame_in_the_modem_at_a_time`.
+//!
+//! No fix was attempted here, and the numbers below say why one could not be
 //! picked from a desk: the airtime-aware spacing that already exists and has
 //! no caller (`rnode::compute_spacing_ms`, wired in c2eba153 and reverted in
 //! 12f99a02) narrows the census from 68.6 % to 17.8 % but does not close it,
@@ -257,6 +269,55 @@ fn the_census_does_not_hinge_on_that_16_ms() {
         (low, high),
         (134, 146),
         "64 % to 70 % of draw pairs contend across the whole range"
+    );
+}
+
+/// The spacing the post-TX hold actually imposes, and what it leaves.
+///
+/// The hold is `airtime + DIFS + longest draw`, all three at the running
+/// PHY (`interfaces/rnode.rs::tx_hold`). It is shorter than
+/// `compute_spacing_ms` by that function's flat 100 ms margin and longer by
+/// nothing, so the census it leaves is the honest bound on what the hold
+/// buys against #374 — as opposed to what it buys against #36, which is the
+/// whole of it: with the hold running, the modem's queue never holds two
+/// frames, so no frame can leave inside another's preamble because the
+/// firmware flushed them together.
+#[test]
+fn the_hold_narrows_the_census_without_closing_it() {
+    let slot = jitter_slot_ms(BW, SF, CR);
+    // Exactly the terms `tx_hold` sums, derived here rather than imported:
+    // the interface is a different crate's private function, and a second
+    // copy of the arithmetic that agrees is the point.
+    let hold = air(PROBE_BYTES) + JITTER_DIFS_SLOTS * slot + (JITTER_CW_SLOTS as u64 - 1) * slot;
+    assert_eq!(hold, 501);
+    assert!(
+        hold < compute_spacing_ms(PROBE_BYTES, BW, SF, CR, preamble()),
+        "the hold is the same shape without the flat margin"
+    );
+
+    let mut total = 0;
+    let mut contending = 0;
+    for m in 0..modem_cw_slots() {
+        let first_frame_air_end = CSMA_DIFS_MS + m * slot + air(PROBE_BYTES);
+        let queued_at = hold.saturating_sub(first_frame_air_end);
+        let (sub_total, sub_contending) = census(FAR_END_OVERHEAD_MS, queued_at);
+        total += sub_total;
+        contending += sub_contending;
+    }
+    println!(
+        "HOLD_CENSUS hold_ms={hold} triples={total} contending={contending} \
+         pct={:.1}",
+        100.0 * contending as f64 / total as f64
+    );
+    assert_eq!(
+        (total, contending),
+        (3150, 1328),
+        "42.2 % of triples still contend — MORE than the 17.8 % the wider \
+         `compute_spacing_ms` leaves, because the hold is 148 ms shorter. \
+         The hold is priced to empty the modem's queue, not to clear the far \
+         end's answer window, and what it leaves is what the rig series \
+         measures: our second frame still draws against the answer to our \
+         first, it just no longer leaves deaf behind it"
     );
 }
 

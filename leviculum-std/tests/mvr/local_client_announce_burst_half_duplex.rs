@@ -33,9 +33,17 @@
 //! airtime it ends up spending on them. Codeberg #187 is one instance:
 //! an announce queued behind a priority link request went to serial 51 ms
 //! after it, and the proof coming back was lost along with the announce —
-//! both directions, one collision. The airtime-aware alternative
-//! (`leviculum_core::rnode::compute_spacing_ms`) exists and has no caller;
-//! wiring it in is Bug #25, attempted in c2eba153 and reverted in 12f99a02.
+//! both directions, one collision. An airtime-aware spacing is what closed
+//! it, on 2026-09-23: `interfaces/rnode.rs::tx_hold` holds the next frame
+//! for the previous one's airtime plus the firmware's DIFS and its longest
+//! contention draw, computed per frame from the running PHY and the modem's
+//! own reported CSMA figures. (Not
+//! `leviculum_core::rnode::compute_spacing_ms`, which assumes a fixed 24 ms
+//! slot and adds a flat margin; that one still has no caller, and wiring it
+//! in was Bug #25, attempted in c2eba153 and reverted in 12f99a02.) The
+//! floor this test asserts is therefore far below what the interface now
+//! spaces by, which is the direction that keeps it honest: it still fails if
+//! the spacing disappears.
 //!
 //! "Leave back to back" is what this paragraph said until 2026-09-23, and
 //! the hardware has since said otherwise: in `bench_single_pair_fast` of the
@@ -259,8 +267,12 @@ async fn a_registration_burst_reaches_a_half_duplex_radio_spaced_out() {
     }
 
     // Long enough for the first frame's acquisition wait (48..360 ms at
-    // SF7/125 kHz) plus CLIENTS × 50 ms of spacing, with room to spare.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // SF7/125 kHz) plus CLIENTS post-TX holds, with room to spare. Since
+    // 2026-09-23 a hold is the frame's own airtime plus DIFS plus the widest
+    // contention draw — ~650 ms for an announce at this PHY, so the burst
+    // needs ~3 s and the window is three times that. It used to be 4 s
+    // against 5 × 50 ms of spacing.
+    tokio::time::sleep(Duration::from_secs(9)).await;
 
     // Take the timestamps and let the stub's lock go before anything else
     // is awaited: what is analysed below is a snapshot, not live state.

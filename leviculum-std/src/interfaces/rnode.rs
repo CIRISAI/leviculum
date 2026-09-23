@@ -266,6 +266,113 @@ fn ready_poll_initial(sf: u8, cr: u8, bandwidth_hz: u32) -> Duration {
     Duration::from_millis(airtime_ms.max(1)).min(READY_POLL_MAX)
 }
 
+/// What the firmware on the other end of this connection has said about its
+/// own channel access, as it said it.
+///
+/// Both figures are unsolicited and both are reported before the first frame
+/// can be handed over, which is what lets the post-TX hold be priced from the
+/// modem's own numbers rather than from ours:
+///
+/// * `CMD_STAT_PHYPRM` carries `csma_slot_time_ms` and `csma_difs_ms`.
+///   `updateBitrate()` recomputes both from the modulation and then calls
+///   `setPreamble()`, whose last statement is `kiss_indicate_phy_stats()`
+///   (`Utilities.h:1226-1228,1243-1258`), so every radio configuration —
+///   including the one this interface performs at bring-up — reports them.
+/// * `CMD_STAT_CSMA` carries the contention band and its window. It is sent
+///   only when the band CHANGES (`RNode_Firmware.ino:1614-1618`, inside the
+///   `new_cw_band != cw_band` branch), so a run that stays in band 1
+///   throughout never sends one and `cw_max` stays `None`.
+///
+/// A `None` field means the modem has not said, and the hold falls back to
+/// the same reference derivation [`ChannelAccess`] draws its own waits from.
+#[derive(Debug, Clone, Copy, Default)]
+struct FirmwareCsma {
+    /// `csma_slot_ms` — 12 symbol times, clamped (`Utilities.h:1247-1249`).
+    slot_ms: Option<u64>,
+    /// `difs_ms` = `CSMA_SIFS_MS + 2 * csma_slot_ms` (`Utilities.h:1250`).
+    difs_ms: Option<u64>,
+    /// `cw_max`, the EXCLUSIVE upper bound of `random(cw_min, cw_max)`
+    /// (`RNode_Firmware.ino:1625`, Arduino `random`).
+    cw_max: Option<u8>,
+}
+
+/// The wait one handed-over frame imposes before the next may follow it, and
+/// the three terms it is made of — each term is an event field, so a census
+/// can check the arithmetic rather than trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TxHold {
+    held_ms: u64,
+    airtime_ms: u64,
+    difs_ms: u64,
+    cw_ms: u64,
+}
+
+/// How long the host must hold the next frame after handing one to the modem,
+/// so the modem's queue never holds more than one frame.
+///
+/// The RNode firmware runs its CSMA once per queue drain and then flushes
+/// everything it holds with no carrier sense between frames (`tx_queue_handler`
+/// → `flush_queue()`, `RNode_Firmware.ino:1623-1645`), so every frame that is
+/// already in the modem's queue when the contest is won goes on the air deaf.
+/// Two nodes that fill their queues in the same medium-free window therefore
+/// destroy each other's bursts wholesale rather than one frame at a time —
+/// `sent=10 recv=4` on `lora_ratchet_rotation`, 2026-09-23. The firmware sends
+/// no TX-done, so the host cannot observe the frame leaving the air; it prices
+/// it instead, from what it already knows:
+///
+/// ```text
+/// hold = airtime(frame at the running PHY) + DIFS + longest contention draw
+/// ```
+///
+/// The last two terms are the firmware's own, taken from its stat frames where
+/// it has sent them ([`FirmwareCsma`]) and otherwise derived the way
+/// [`ChannelAccess`] derives the wait it draws. The result is the instant the
+/// modem can at the earliest be finished with the frame it holds: airtime for
+/// the frame itself, and DIFS plus the widest window for the contest the
+/// firmware runs before the NEXT one. A frame handed over then finds an empty
+/// queue and gets its own CSMA contest.
+///
+/// This is not [`rnode::compute_spacing_ms`], which computes the same shape
+/// from constants that assume a 24 ms slot and adds a fixed 100 ms margin.
+/// The slot is a function of the modulation (6 ms above 30 kbps, up to 100 ms
+/// at SF12), and the modem reports the value it is actually using.
+///
+/// Nothing here asks what the frame contains: a packet is a packet, and the
+/// only input from the frame is its length on the air.
+fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsma) -> TxHold {
+    let airtime_ms = rnode::airtime_ms_with_preamble(
+        frame_len,
+        bandwidth_hz,
+        sf,
+        cr,
+        rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
+    );
+    let slot_ms = csma
+        .slot_ms
+        .unwrap_or_else(|| jitter_slot_ms(bandwidth_hz, sf, cr));
+    let difs_ms = csma.difs_ms.unwrap_or(JITTER_DIFS_SLOTS * slot_ms);
+    // `random(cw_min, cw_max)` is upper-exclusive, so the longest draw is
+    // `cw_max - 1` slots. Unreported, the band-1 window this interface's own
+    // policy uses applies (`JITTER_CW_SLOTS` equally likely draws, the widest
+    // being the last), which is the same figure `compute_jitter_max_ms`
+    // reports as this interface's jitter ceiling.
+    let cw_slots = csma
+        .cw_max
+        .map(|m| (m as u64).saturating_sub(1))
+        .unwrap_or(JITTER_CW_SLOTS as u64 - 1);
+    let cw_ms = cw_slots * slot_ms;
+    TxHold {
+        // The serial floor still binds underneath: a PHY whose airtime is not
+        // computable (bandwidth 0 — `airtime_ms_with_preamble` returns 0)
+        // must not turn into a hold of zero, which would hand the modem a
+        // whole burst at serial speed.
+        held_ms: (airtime_ms + difs_ms + cw_ms).max(rnode::MIN_SPACING_MS),
+        airtime_ms,
+        difs_ms,
+        cw_ms,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Configuration (includes detection)
 // ---------------------------------------------------------------------------
@@ -901,9 +1008,12 @@ fn deregister_vport(
 /// acquires an idle channel first serves the randomised wait
 /// [`ChannelAccess`] draws for it (DIFS plus a contention window, the
 /// reference firmware's band-1 draw); every further frame of the same burst
-/// owes nothing and follows at the fixed [`rnode::MIN_SPACING_MS`] serial
-/// spacing. What a frame CONTAINS never enters into it — see the enqueue
-/// branch. RNode firmware CSMA handles radio-level collision avoidance on top.
+/// owes no draw of its own, but follows only once the frame before it has
+/// left the air ([`tx_hold`]), so the modem's queue never holds more than one
+/// frame and the firmware's CSMA runs for every frame instead of once per
+/// burst. What a frame CONTAINS never enters into either wait — see the
+/// enqueue branch. RNode firmware CSMA handles radio-level collision
+/// avoidance on top.
 #[allow(clippy::too_many_arguments)]
 async fn rnode_io_task<S>(
     name: String,
@@ -934,9 +1044,13 @@ where
     let mut timer_ready = false;
     // What `send_timer` is currently spending, when it is spending an
     // acquisition wait: the policy is told what was served once it elapses.
-    // Zero while the timer is the post-TX spacing, which is not a wait the
+    // Zero while the timer is the post-TX hold, which is not a wait the
     // acquisition owes.
     let mut jitter_armed_ms: u64 = 0;
+    // What the modem has said about its own channel access, filled in from
+    // the stat frames it sends unsolicited. Read once per handover, to price
+    // the hold the next frame serves (see [`tx_hold`]).
+    let mut fw_csma = FirmwareCsma::default();
 
     // Gate 2 reopen state: CMD_READY is a query protocol, not a courtesy.
     // After every TX (flow_control on) the gate closes and we ask the
@@ -1122,11 +1236,15 @@ where
                                     // `leviculum_std::interfaces::rnode::csma_probe`
                                     // tracing target let the debugger correlate
                                     // firmware CSMA state with on-air TX behaviour.
-                                    // Measurement-only; no TX-path change.
+                                    // They are no longer measurement-only: the two
+                                    // figures the modem reports about its own contest
+                                    // are what the post-TX hold is priced from
+                                    // (`FirmwareCsma`, `tx_hold`).
                                     rnode::CMD_STAT_CSMA if payload.len() >= 3 => {
                                         let cw_band = payload[0];
                                         let cw_min = payload[1];
                                         let cw_max = payload[2];
+                                        fw_csma.cw_max = Some(cw_max);
                                         tracing::debug!(
                                             target: "leviculum_std::interfaces::rnode::csma_probe",
                                             "CSMA_STAT iface={name} cw_band={cw_band} \
@@ -1153,6 +1271,16 @@ where
                                                 u16::from_be_bytes([payload[8], payload[9]]);
                                             let csma_difs_ms =
                                                 u16::from_be_bytes([payload[10], payload[11]]);
+                                            // A modem that reports a zero slot or
+                                            // DIFS has not configured its radio yet;
+                                            // taking those would price the hold at
+                                            // the airtime alone.
+                                            if csma_slot_time_ms > 0 {
+                                                fw_csma.slot_ms = Some(csma_slot_time_ms as u64);
+                                            }
+                                            if csma_difs_ms > 0 {
+                                                fw_csma.difs_ms = Some(csma_difs_ms as u64);
+                                            }
                                             tracing::debug!(
                                                 target: "leviculum_std::interfaces::rnode::csma_probe",
                                                 "CSMA_PHY iface={name} symbol_time_ms={symbol_time_ms:.3} \
@@ -1476,15 +1604,23 @@ where
                     ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
                 }
 
-                // Schedule spacing timer after every TX. The flush() above
-                // ensures the firmware has received this frame before we proceed.
-                // MIN_SPACING_MS gives the firmware time to move the frame from
-                // its serial buffer into the TX queue. The firmware's own CSMA
-                // handles radio-level collision avoidance, we don't simulate
-                // airtime in software.
+                // Hold the next frame until this one has left the air. The
+                // flush() above means the firmware has the frame; from here
+                // the host is blind — the firmware sends no TX-done — so the
+                // wait is priced from the PHY and the modem's own CSMA
+                // figures rather than observed (see `tx_hold` for why a
+                // modem that holds two frames sends the second one deaf).
+                // What the frame CONTAINS does not enter into it; only how
+                // long it occupies the air.
                 {
+                    let hold = tx_hold(queued.payload_len as u32, bandwidth_hz, sf, cr, &fw_csma);
+                    tracing::debug!(
+                        target: "leviculum_std::interfaces::rnode::tx_trace",
+                        "LORA_TX_HOLD iface={name} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
+                        hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                    );
                     send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                        rnode::MIN_SPACING_MS,
+                        hold.held_ms,
                     ))));
                 }
             } else {
@@ -1550,11 +1686,25 @@ async fn rnode_reconnect_task<S, C, Fut>(
 {
     let radio = &ctx.radio;
     let bitrate_bps = rnode::compute_bitrate(radio.sf, radio.cr, radio.bandwidth);
+    // What a full-size frame costs the next one behind it, at this PHY and
+    // before the modem has reported its own CSMA figures — the ceiling of the
+    // post-TX hold, stated where the bitrate is stated.
+    let max_hold = tx_hold(
+        rnode::HW_MTU as u32,
+        radio.bandwidth,
+        radio.sf,
+        radio.cr,
+        &FirmwareCsma::default(),
+    );
     tracing::debug!(
-        "{}: bitrate={} bps, min_spacing={}ms, jitter_max={}ms (DIFS + contention window)",
+        "{}: bitrate={} bps, tx_hold(mtu)={}ms (airtime {}ms + DIFS {}ms + cw {}ms), \
+         jitter_max={}ms (DIFS + contention window)",
         ctx.name,
         bitrate_bps,
-        rnode::MIN_SPACING_MS,
+        max_hold.held_ms,
+        max_hold.airtime_ms,
+        max_hold.difs_ms,
+        max_hold.cw_ms,
         ctx.jitter_max_ms,
     );
     let mut has_connected_before = false;
@@ -2536,8 +2686,28 @@ async fn rnode_multi_io_task<S>(
                     ready_query_timer = Some(Box::pin(tokio::time::sleep(ready_poll)));
                     ready_poll = (ready_poll * 2).min(READY_POLL_MAX);
                 }
+                // One firmware queue serves every vport, and it is flushed
+                // whole once its CSMA contest is won, so the single-radio
+                // rule applies unchanged here: hold the next frame — whatever
+                // vport it belongs to — until this one has left the air. The
+                // hold is priced at the PHY of the vport that just
+                // transmitted, which is the radio the air-time was spent on.
+                // This task parses no stat frames, so the CSMA terms are the
+                // reference derivation rather than the modem's own report.
+                let hold = tx_hold(
+                    data.len() as u32,
+                    v.radio.bandwidth,
+                    v.radio.sf,
+                    v.radio.cr,
+                    &FirmwareCsma::default(),
+                );
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX_HOLD iface={} held_ms={} airtime_ms={} difs_ms={} cw_ms={}",
+                    v.name, hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+                );
                 send_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                    rnode::MIN_SPACING_MS,
+                    hold.held_ms,
                 ))));
             }
             // Nothing queued: leave `timer_ready` set so the next packet ships
@@ -3289,6 +3459,107 @@ mod tests {
         access
     }
 
+    /// The hold is the frame's own airtime plus the contest the firmware
+    /// runs before the next frame, and every term comes from the running PHY
+    /// — none of it is a constant chosen for one modulation.
+    ///
+    /// The corpus PHYs are checked at one frame length so the numbers are
+    /// comparable. What separates them is the airtime, which spans a factor
+    /// of 16 across the corpus (167 ms at SF7/250 to 2673 ms at SF10/125 for
+    /// an announce-sized frame), and at SF10 the slot as well: 12 symbols are
+    /// 98 ms there against the 24 ms floor every SF7 cell clamps up to. A
+    /// hold built on the fixed 24 ms slot `rnode::compute_spacing_ms`
+    /// assumes would under-price SF10's contest by a second.
+    #[test]
+    fn the_hold_is_the_frames_airtime_plus_the_firmwares_contest() {
+        // One announce-sized frame, the population the corpus cells put on
+        // the air most (`rnode::ANNOUNCE_CAP_REFERENCE_BYTES`).
+        let len = rnode::ANNOUNCE_CAP_REFERENCE_BYTES as u32;
+        let none = FirmwareCsma::default();
+
+        for (label, bw, sf, cr) in [
+            ("lora_ratchet_rotation SF7/62.5", 62_500u32, 7u8, 5u8),
+            ("bench_single_pair_medium SF7/125", 125_000, 7, 5),
+            ("bench_single_pair_fast SF7/250", 250_000, 7, 5),
+            ("bench_single_pair_slow SF10/125", 125_000, 10, 8),
+        ] {
+            let hold = tx_hold(len, bw, sf, cr, &none);
+            let slot = jitter_slot_ms(bw, sf, cr);
+            println!(
+                "TX_HOLD phy={label} len={len} held_ms={} airtime_ms={} difs_ms={} \
+                 cw_ms={} slot_ms={slot}",
+                hold.held_ms, hold.airtime_ms, hold.difs_ms, hold.cw_ms
+            );
+            assert_eq!(
+                hold.held_ms,
+                hold.airtime_ms + hold.difs_ms + hold.cw_ms,
+                "{label}: the hold is the sum of its three terms"
+            );
+            assert_eq!(
+                hold.difs_ms,
+                JITTER_DIFS_SLOTS * slot,
+                "{label}: DIFS is two slots of THIS modulation"
+            );
+            assert_eq!(
+                hold.cw_ms,
+                (JITTER_CW_SLOTS as u64 - 1) * slot,
+                "{label}: the contention term is the widest draw of THIS \
+                 modulation"
+            );
+            assert!(
+                hold.airtime_ms > rnode::airtime_ms_with_preamble(len, bw, sf, cr, 8),
+                "{label}: the airtime must charge the preamble the firmware \
+                 derives, not the modem default of 8 symbols"
+            );
+        }
+    }
+
+    /// Where the modem has reported its own CSMA figures, they are what the
+    /// hold is priced from — ours are the fallback, not the authority.
+    #[test]
+    fn a_reported_contention_window_overrides_the_derived_one() {
+        let len = 100;
+        let (bw, sf, cr) = (62_500u32, 7u8, 5u8);
+        let derived = tx_hold(len, bw, sf, cr, &FirmwareCsma::default());
+
+        // What a band-3 firmware reports: `cw_min = 30, cw_max = 44`
+        // (`RNode_Firmware.ino:1616-1617`), and a slot of its own.
+        let reported = FirmwareCsma {
+            slot_ms: Some(30),
+            difs_ms: Some(60),
+            cw_max: Some(45),
+        };
+        let hold = tx_hold(len, bw, sf, cr, &reported);
+        assert_eq!(hold.difs_ms, 60, "the reported DIFS is used as reported");
+        assert_eq!(
+            hold.cw_ms,
+            44 * 30,
+            "`random(cw_min, cw_max)` is upper-exclusive, so the longest draw \
+             is cw_max - 1 slots of the reported slot time"
+        );
+        assert_eq!(hold.airtime_ms, derived.airtime_ms, "the PHY is unchanged");
+        assert!(
+            hold.held_ms > derived.held_ms,
+            "a wider reported window must widen the hold: {} vs {}",
+            hold.held_ms,
+            derived.held_ms
+        );
+    }
+
+    /// A PHY whose airtime cannot be computed must still leave the serial
+    /// floor standing: a hold of zero would hand the modem a whole burst at
+    /// 115200 baud, which is the defect this hold exists to prevent.
+    #[test]
+    fn an_uncomputable_phy_still_holds_the_serial_floor() {
+        let hold = tx_hold(100, 0, 7, 5, &FirmwareCsma::default());
+        assert_eq!(hold.airtime_ms, 0, "airtime is not computable at bw 0");
+        assert!(
+            hold.held_ms >= rnode::MIN_SPACING_MS,
+            "the serial floor must bind, got {}ms",
+            hold.held_ms
+        );
+    }
+
     /// A directed packet waits for the channel like any other, and a burst
     /// behind it waits for nothing (Codeberg #347).
     ///
@@ -3305,9 +3576,9 @@ mod tests {
     ///
     /// * acquisition — the first directed frame leaves at exactly the draw
     ///   [`ChannelAccess`] makes for this seed at the bench PHY;
-    /// * burst continuation — the two frames queued behind it leave one
-    ///   [`rnode::MIN_SPACING_MS`] apart, owing no second wait, which is why
-    ///   this costs far less than a wait per packet;
+    /// * burst continuation — the two frames queued behind it owe no draw of
+    ///   their own, and leave one [`tx_hold`] apart, the wait that keeps the
+    ///   modem's queue at one frame;
     /// * release — a frame handed over after the queue drained is a new
     ///   acquisition and owes a fresh draw again.
     ///
@@ -3393,18 +3664,25 @@ mod tests {
              the policy drew ({first_wait}ms), not skip it because of what it \
              carries"
         );
+        // No draw of their own — but each one waits out the frame before it,
+        // at that frame's own length. Derived from the same PHY the io task
+        // runs, never typed.
+        // "one" and "two" are the frames whose airtime the second and third
+        // handover wait out; both are 3 bytes, so one figure covers both.
+        let hold = tx_hold(3, 125_000, 7, 5, &FirmwareCsma::default()).held_ms;
         assert_eq!(
             at[1] - at[0],
-            rnode::MIN_SPACING_MS,
-            "the second frame of the burst owes no wait, only the serial spacing"
+            hold,
+            "the second frame of the burst owes no draw, but must not reach \
+             the modem before the first has left the air"
         );
         assert_eq!(
             at[2] - at[1],
-            rnode::MIN_SPACING_MS,
-            "the third frame of the burst owes no wait either"
+            hold,
+            "the third frame of the burst waits out the second the same way"
         );
 
-        // The queue has drained: the spacing timer after the last frame finds
+        // The queue has drained: the hold after the last frame finds
         // nothing to send and hands the channel back. What comes after is a
         // new acquisition, and the policy draws for it again — the oracle
         // walks the same three calls the io task made.
@@ -3469,11 +3747,11 @@ mod tests {
     ///   wait for an announce's jitter" — is the type-awareness #347
     ///   removed, and it puts the jumper on the air phase-locked to whatever
     ///   the peer is about to send.
-    /// * the jumped frame follows at exactly [`rnode::MIN_SPACING_MS`].
-    ///   That is the serial-queue floor and nothing more: one acquisition
-    ///   can hand the modem a burst, which is why a burst is deaf to the
-    ///   answer to its own first frame, and why the size of the acquisition
-    ///   wait is the only thing separating our burst from the peer's reply.
+    /// * the jumped frame follows only once the jumper has left the air
+    ///   ([`tx_hold`]). Until 2026-09-23 it followed at the serial floor,
+    ///   which let one acquisition hand the modem a burst — that is why a
+    ///   burst was deaf to the answer to its own first frame, and it is the
+    ///   defect this hold closes.
     ///
     /// Paused time and the fixed seed, so both figures are equalities.
     #[tokio::test(start_paused = true)]
@@ -3564,11 +3842,20 @@ mod tests {
              already running ({wait}ms), not key the radio on arrival because \
              of what it carries"
         );
+        let hold = tx_hold(
+            b"linkrequest".len() as u32,
+            125_000,
+            7,
+            5,
+            &FirmwareCsma::default(),
+        )
+        .held_ms;
         assert_eq!(
             at[1] - at[0],
-            rnode::MIN_SPACING_MS,
-            "the jumped frame follows inside the same acquisition, at the \
-             serial spacing and no wait of its own"
+            hold,
+            "the jumped frame follows inside the same acquisition, owing no \
+             draw of its own — but not before the frame that jumped it has \
+             left the air"
         );
 
         drop(outgoing_tx);
@@ -4149,9 +4436,12 @@ mod tests {
                 .expect("send to io task");
         }
 
-        // 3 × MIN_SPACING_MS (50ms) + jitter (~1ms) + serial latency.
-        // 1s is generous; the io task should drain all three within ~150ms.
-        let frames = drain_kiss_frames(&mut peer, Duration::from_secs(1)).await;
+        // Two holds at this PHY (~0.4 s each for a 5-byte frame at
+        // SF7/125 kHz), the acquisition draw (≤ 90 ms on the fast policy
+        // `test_channel_access` runs) and serial latency. Wall clock, so the
+        // window is generous; what is asserted is that all three arrive, not
+        // when.
+        let frames = drain_kiss_frames(&mut peer, Duration::from_secs(5)).await;
         let data_frames: Vec<&Vec<u8>> = frames
             .iter()
             .filter(|(c, _)| *c == rnode::CMD_DATA)

@@ -144,6 +144,7 @@ mod lncp_fetch_rust_responder;
 mod local_client_announce_burst_half_duplex;
 mod lxmf_opportunistic_fallback_threshold;
 mod media_silence_restore_signal;
+mod one_frame_in_the_modem_at_a_time;
 mod pn_offer_outgrows_the_link_mdu;
 mod pn_serve_cap_bounds_one_fetch;
 mod pn_serve_peak_outgrows_the_board_heap;
