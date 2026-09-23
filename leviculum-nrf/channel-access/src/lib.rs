@@ -36,8 +36,17 @@
 //!   contention window of `random(cw_min, cw_max)` slots
 //!   (RNode_Firmware.ino:1625-1627, Arduino `random` upper-exclusive);
 //!   at ≤ 7 % channel airtime the band-1 window is `cw_min = 0`,
-//!   `cw_max = 14` (Config.h:108-111, RNode_Firmware.ino:1614-1617), so
-//!   the idle-channel draw is uniform over 0..=13 slots;
+//!   `cw_max = band * CSMA_CW_PER_BAND_WINDOWS - 1` = 14
+//!   (Config.h:108-111, RNode_Firmware.ino:1614-1617), so the
+//!   idle-channel draw is uniform over 0..=13 slots. The reference
+//!   reaches that value only by transiting a band: `cw_max` is
+//!   *declared* as `CSMA_CW_PER_BAND_WINDOWS` itself, 15
+//!   (Config.h:127), and `update_csma_parameters` rewrites it only when
+//!   the band CHANGES (RNode_Firmware.ino:1614), which band 1 never
+//!   does from boot. A reference board therefore draws over 15 slots
+//!   until its first excursion above 7 % airtime and over 14 after it.
+//!   We mirror the post-excursion window; the difference is one slot,
+//!   and which of the two is the right target is open on Codeberg #347;
 //! * the slot is 12 symbol times, clamped to at most 100 ms and at least
 //!   24 ms — or 6 ms when the modulation runs faster than 30 kbps
 //!   (Config.h:104-107, Utilities.h:1244-1252, bitrate Utilities.h:1237);
@@ -321,6 +330,51 @@ mod tests {
         // symbol 0.064 ms, 12 symbols = 0.768 ms -> fast floor 6 ms
         // (Config.h:105-106).
         assert_eq!(jitter_slot_ms(500_000, 5, 5), 6);
+    }
+
+    #[test]
+    fn the_widest_acquisition_wait_is_a_function_of_the_modulation() {
+        // The table `docs/src/concepts/csma-transmit-window.md` quotes for
+        // question 1 of Codeberg #347, pinned where it is computed rather
+        // than transcribed into prose that cannot go red. Each row is
+        // DIFS plus the widest draw, i.e. the ceiling a caller sizes a
+        // delivery window with; the mean is DIFS plus half the window.
+        //
+        // The span the rows cover is the argument: 90 ms at SF5/500 kHz
+        // against 1500 ms at SF12/125 kHz, a factor of 16 that no
+        // millisecond constant tracks. A change to the slot derivation,
+        // the DIFS width or the number of draws moves at least one row.
+        let widest = |bw, sf, cr| {
+            (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw, sf, cr)
+        };
+        let narrowest = |bw, sf, cr| JITTER_DIFS_SLOTS * jitter_slot_ms(bw, sf, cr);
+
+        // SF7 and SF8 at 125 kHz sit on the 24 ms slot floor together, so
+        // the bench PHY and the project default draw the same window.
+        assert_eq!((narrowest(125_000, 7, 5), widest(125_000, 7, 5)), (48, 360));
+        assert_eq!((narrowest(125_000, 8, 5), widest(125_000, 8, 5)), (48, 360));
+        // Between the clamps the window tracks the symbol time.
+        assert_eq!((narrowest(125_000, 9, 5), widest(125_000, 9, 5)), (98, 735));
+        assert_eq!(
+            (narrowest(125_000, 10, 5), widest(125_000, 10, 5)),
+            (196, 1470)
+        );
+        // At SF12 the slot ceiling binds, so the window stops growing.
+        assert_eq!(
+            (narrowest(125_000, 12, 5), widest(125_000, 12, 5)),
+            (200, 1500)
+        );
+        // Above 30 kbps the fast floor binds instead.
+        assert_eq!((narrowest(500_000, 5, 5), widest(500_000, 5, 5)), (12, 90));
+
+        // The reference's own inter-frame gap, measured off the air during
+        // Codeberg #344, had a median of 205 ms over 81 gaps at the bench
+        // PHY. The window's median draw is DIFS plus half of 13 slots,
+        // which is what that measurement is a measurement OF: a model that
+        // missed it by a slot would put this at 180 or 228.
+        let median_ms = JITTER_DIFS_SLOTS * jitter_slot_ms(125_000, 7, 5)
+            + (JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(125_000, 7, 5) / 2;
+        assert_eq!(median_ms, 204);
     }
 
     #[test]

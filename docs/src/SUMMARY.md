@@ -30,6 +30,7 @@
 - [An LXMF propagation node on a board](concepts/propagation-node-on-a-board.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)
+- [The randomised pre-transmit window](concepts/csma-transmit-window.md)
 - [Self-hosted infrastructure](concepts/self-hosted-infrastructure.md)
 - [Licensing and third-party notices](concepts/licensing-and-notices.md)
 
