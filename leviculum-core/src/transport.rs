@@ -1942,7 +1942,7 @@ pub enum TransportEvent {
     RelayDecided {
         /// The destination the packet was for.
         destination_hash: [u8; TRUNCATED_HASHBYTES],
-        /// The first [`PKT_PH_BYTES`] of the packet hash — the SAME
+        /// The first `PKT_PH_BYTES` of the packet hash — the SAME
         /// correlator the journey events carry as `ph`, so a board line and a
         /// peer's `lnsd` log stitch on one id. Taken from a hash the call
         /// site already holds; nothing is hashed for this event.
