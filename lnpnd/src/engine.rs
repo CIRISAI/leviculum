@@ -43,8 +43,8 @@ use leviculum_lxmf::peering::{PeerStore, PeeringConfig, OFFER_REQUEST_PATH};
 use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::{
-    Eviction, EvictionReason, GetOutcome, Message, PropagationNode, PropagationNodeConfig,
-    PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
+    Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationNode,
+    PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
 };
 
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
@@ -795,29 +795,24 @@ impl<S: PropagationStore> Engine<S> {
                 });
                 self.respond(core, link_id, request_id, &response, out);
             }
-            Ok(GetOutcome::Fetch {
-                response,
-                served,
-                served_bytes,
-                purged,
-            }) => {
+            Ok(GetOutcome::Fetch { plan, purged }) => {
                 tracing::debug!(
                     event = "PN_GET",
                     dst = full_hex(&mailbox),
                     form = "fetch",
-                    count = served.len(),
-                    bytes = served_bytes,
+                    count = plan.count(),
+                    bytes = plan.served_bytes(),
                     purged = purged.len(),
                 );
                 self.emit(EngineEvent::Served {
                     form: "fetch",
-                    count: served.len(),
+                    count: plan.count(),
                 });
                 // The stats' clients bucket
                 // (`client_propagation_messages_served`,
                 // `reference/LXMF/LXMF/LXMRouter.py:1555`).
-                ready.client_served += served.len() as u64;
-                self.respond(core, link_id, request_id, &response, out);
+                ready.client_served += plan.count() as u64;
+                self.respond_fetch(core, ready, link_id, request_id, &plan, out);
             }
             Err(error) => {
                 // The reference answers a request it could not process with
@@ -826,6 +821,43 @@ impl<S: PropagationStore> Engine<S> {
                 tracing::debug!("lnpnd: /get failed: {error}");
                 self.respond(core, link_id, request_id, &[0xC0], out);
             }
+        }
+    }
+
+    /// Answer a fetch: one data packet when the response fits one, a
+    /// STREAMED response resource when it does not (Codeberg #384 B2).
+    ///
+    /// The fork is on the length the plan already knows, not on a
+    /// `PayloadTooLarge` the framing has to be built to discover: below
+    /// the MDU the bytes are a few hundred and materialising them is the
+    /// cheaper answer, above it the resource reads the records out of the
+    /// store as the parts are cut and the response never exists as a
+    /// buffer. `lnpnd` runs on hosts with heap to spare, but it runs the
+    /// same code path the board does, which is how the board's path stays
+    /// tested by every host run.
+    fn respond_fetch(
+        &self,
+        core: &mut StdNodeCoreRef<'_>,
+        ready: &Ready<S>,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        plan: &FetchPlan,
+        out: &mut TickOutput,
+    ) {
+        if core.response_fits_packet(link_id, plan.encoded_len()) {
+            match ready.node.encode_fetch(plan) {
+                Ok(response) => self.respond(core, link_id, request_id, &response, out),
+                Err(error) => {
+                    tracing::warn!("lnpnd: fetch response could not be built: {error}");
+                    self.respond(core, link_id, request_id, &[0xC0], out);
+                }
+            }
+            return;
+        }
+        let mut source = ready.node.fetch_source(plan);
+        match core.send_response_resource_from_source(link_id, request_id, &mut source) {
+            Ok((_, send)) => out.merge(send),
+            Err(error) => tracing::warn!("lnpnd: streamed response resource failed: {error}"),
         }
     }
 

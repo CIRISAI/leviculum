@@ -11,6 +11,7 @@
 
 mod common;
 
+use leviculum_core::resource::ResourceSource as _;
 use leviculum_lxmf::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PN},
     CooperativeStamper, GetOutcome, MemoryPropagationStore, MessageGetRequest, PropagationNode,
@@ -216,13 +217,28 @@ fn the_get_exchange_matches_the_reference_handler_byte_for_byte() {
         .handle_get(&fetch.encode().unwrap(), &mailbox, FIXED_TIMESTAMP)
         .unwrap();
     match fetched {
-        GetOutcome::Fetch {
-            response, served, ..
-        } => {
-            assert_eq!(served, vec![small_tid]);
+        GetOutcome::Fetch { plan, .. } => {
+            assert_eq!(plan.served_ids(), vec![small_tid]);
+            let golden = hex_bytes("VEC-PN-GET-EXCHANGE", "fetch_response_hex");
+            assert_eq!(node.encode_fetch(&plan).unwrap(), golden);
+            assert_eq!(plan.encoded_len(), golden.len());
+            // And the STREAMED form, record by record out of the store,
+            // is the same bytes (#384 B2). This is the one place in the
+            // suite where the part cutter's framing is held against
+            // Python's own output rather than against our encoder.
+            let mut source = node.fetch_source(&plan);
+            let mut streamed = Vec::new();
+            let mut buf = [0u8; 7];
+            loop {
+                let read = source.read(&mut buf).unwrap();
+                if read == 0 {
+                    break;
+                }
+                streamed.extend_from_slice(&buf[..read]);
+            }
             assert_eq!(
-                response,
-                hex_bytes("VEC-PN-GET-EXCHANGE", "fetch_response_hex")
+                streamed, golden,
+                "the streamed fetch must be the reference's own bytes"
             );
         }
         other => panic!("{other:?}"),
@@ -235,12 +251,10 @@ fn the_get_exchange_matches_the_reference_handler_byte_for_byte() {
         .handle_get(&ack.encode().unwrap(), &mailbox, FIXED_TIMESTAMP)
         .unwrap();
     match acked {
-        GetOutcome::Fetch {
-            response, purged, ..
-        } => {
+        GetOutcome::Fetch { plan, purged } => {
             assert_eq!(purged, vec![small_tid]);
             assert_eq!(
-                response,
+                node.encode_fetch(&plan).unwrap(),
                 hex_bytes("VEC-PN-GET-EXCHANGE", "ack_response_hex")
             );
         }

@@ -1,4 +1,5 @@
-//! mvr: a fetch the heap plan does not fund is served in part, not died in.
+//! mvr: the field's whole mailbox is served in ONE fetch, out of the
+//! store, on the heap the board actually had.
 //!
 //! **The named failure mode:** a client lists 24 messages, asks for all
 //! 24, and the board dies building the answer. Its own record from the
@@ -14,35 +15,41 @@
 //! [HEAP] HEAP_BUDGET_UNFUNDED serve=48922 slack=784 deficit=48138
 //! ```
 //!
-//! The 5 450 B is term 3 of [`serve_peak_bytes`], the resource path's
-//! `plaintext` (`RESOURCE_RANDOM_HASH_SIZE + response + frame`, and
-//! `5450 = 4 + 5427 + 19`) — one term further along the path than the
-//! 5 446 B `packed` copy the same board died in on 2026-09-22, which
-//! #384 B1 removed. The serve did not get smaller than the heap; it got
-//! smaller than it was.
+//! The 5 450 B was the resource path's `plaintext` copy
+//! (`RESOURCE_RANDOM_HASH_SIZE + response + frame`, and
+//! `5450 = 4 + 5427 + 19`) — one of four whole copies of the answer the
+//! path held before it had cut a single part.
+//!
+//! **Two orders, two different answers.** #384 B1 removed four copies
+//! and B2/order 141 bounded what was left: a fetch the heap could not
+//! fund was served in part, nine messages of the 24, and the rest next
+//! round. That was correct and it was not the feature — a propagation
+//! node whose client needs three syncs to collect one evening's mail is
+//! a node the field notices. **This order removes the materialisation
+//! instead of the mail**: the role hands over a [`FetchPlan`] and the
+//! resource builder reads the records out of the store as it cuts the
+//! parts, so the only whole copy that ever exists is the transfer
+//! itself.
 //!
 //! **What this test fixes in place:** the free heap at the moment the
-//! census measured it, [`FREE_AT_PANIC`], and the largest response that
-//! fits it ([`serve_cap_for_peak`]). A fetch for the full 24 is served
-//! down to that cap; what does not fit stays stored, is purged by
-//! nothing, and is served on the next round.
+//! census measured it ([`FREE_AT_PANIC`]), and what it funds under each
+//! model. The same 24-message fetch that modelled at 33 238 B of
+//! transient — 2 858 B more than the board had, which is the panic in
+//! arithmetic — models at 11 875 B streamed and MEASURES at 7 154 B
+//! through the real path
+//! (`a_streamed_serve_holds_only_the_transfer`,
+//! `pn_serve_peak_outgrows_the_board_heap.rs`). The cap the live heap
+//! funds goes from 2 540 B (nine messages) to 7 256 B (all 24, with room
+//! for two more), and the free heap a single-sync drain needs falls from
+//! 54 848 B to 28 928 B — below the 30 380 B the board had.
 //!
-//! Red before the bound existed: the role served all 24, a 5 427 B
-//! response whose modelled transient is 33 238 B — 2 858 B more than the
-//! heap the board had, which is the panic, in arithmetic.
-//!
-//! **Three tests, three rules.** The first fixes the MODEL's inverse:
-//! given a heap, what response does it fund. The second fixes what the
-//! board actually serves to, which is that number less a margin for
-//! what can arrive while the serve runs
-//! ([`BOARD_SERVE_MARGIN_BYTES`], #388 order 138) — 2 540 B and nine
-//! messages where the bare model says 4 954 B and eighteen. Do not read
-//! the first test's 18 as a promise about a board: the margin-free cap
-//! is measured overrunning the same heap in
-//! `pn_serve_cap_survives_a_shrinking_heap`. The third fixes what the
-//! bound costs the CLIENT, which is the half a periculum cell asserts:
-//! the reference router performs exactly one fetch per sync, so a
-//! mailbox deeper than one cap needs as many syncs as it holds caps.
+//! **Four tests, four rules.** The first is the field case: the board's
+//! own heap, the field's own mailbox, one round. The second fixes the
+//! MODEL's inverse on a mailbox deeper than any cap, because "serve what
+//! fits and keep the rest" has to keep working for the mailbox that is
+//! bigger than the heap however big the heap gets. The third fixes the
+//! boot floor and the live raise. The fourth fixes what the bound costs
+//! the CLIENT, which is the half a periculum cell asserts.
 //!
 //! **What it cannot prove:** that a real board survives it. Only a board
 //! can, and only the rig can run one; what this fixes is the size of
@@ -52,8 +59,9 @@ use leviculum_lxmf::propagation::{
     MessageGetRequest, MessageListResponse, PropagationUpload, TransferLimit, TransientId,
 };
 use leviculum_lxmf::propagation_node::{
-    serve_cap_for_live_heap, serve_cap_for_peak, serve_largest_block_bytes, serve_peak_bytes,
-    GetOutcome, PropagationNode, PropagationNodeConfig, UploadOutcome,
+    serve_buffered_peak_bytes, serve_cap_for_live_heap, serve_cap_for_peak,
+    serve_largest_block_bytes, serve_peak_bytes, FetchPlan, GetOutcome, PropagationNode,
+    PropagationNodeConfig, UploadOutcome,
 };
 use leviculum_lxmf::propagation_store::MemoryPropagationStore;
 
@@ -69,26 +77,30 @@ const FREE_AT_PANIC: usize = 30_380;
 /// a serve is one allocation and only this figure prices it.
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=784`
-/// → `serve_cap=88`, `heap_census::budget_serve_cap`,
-/// `leviculum-nrf`): 88 B, less than one stored message, so a board held
-/// to it lists 24 messages and serves none of them.
-const BOOT_CAP: usize = 88;
+/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=808`
+/// → `serve_cap=222`, `heap_census::budget_serve_cap`,
+/// `leviculum-nrf`): 222 B, about the smallest LXMF message the store
+/// takes and well under a field one, so a board held to it lists 24
+/// messages and serves none of them. It was 88 B before the serve was
+/// streamed; the floor moved a little, and it is still not what makes
+/// the board serve.
+const BOOT_CAP: usize = 222;
 
 /// Heap the board keeps clear of the serve because it can be claimed
 /// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
 /// `leviculum-nrf/src/heap_census.rs`): one inbound sync batch at
 /// `BOARD_SYNC_LIMIT_KB` (8 000 B), one queued upload at
 /// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
-/// `budget_per_link()` — 2 688 B on the T114's own boot line
-/// (`HEAP_BUDGET links=4 ble_links=4 per_link=2688 …`, same capture).
-/// All three can coexist, so they are summed.
+/// `budget_per_link()` — 2 680 B in this tree (the 2026-09-23 boot line
+/// printed 2 688; #384 B2 shrank `Link` by the joined-ciphertext copy
+/// `OutgoingResource` kept beside its parts). All three can coexist, so
+/// they are summed.
 ///
 /// Mirrored here as a literal for the same reason
 /// [`BOARD_RESOURCE_SDU`] is: `leviculum-nrf` is a thumbv7em crate this
 /// host cannot link. The firmware computes it from those three
 /// constants; what this test pins is the rule, at the board's numbers.
-const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_688;
+const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_680;
 
 /// The link SDU the serve transient is sized against on a board
 /// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/src/pn.rs`): Reticulum's
@@ -103,6 +115,19 @@ const BOARD_SYNC_LIMIT_KB: u64 = 8;
 /// The field shape: 24 stored messages, 224 B of servable body each.
 const FIELD_MESSAGES: u8 = 24;
 const FIELD_BODY_BYTES: usize = 224;
+
+/// A mailbox deeper than any cap this heap funds, for the two tests
+/// about what happens when the mail does NOT fit. 80 messages against a
+/// margin-free cap of 14 296 B (52 messages) and a margined one of
+/// 7 256 B (26): both bite, and the difference between them is
+/// measurable. The field's own 24 no longer are — which is the point of
+/// this order and the reason these two tests stopped using them.
+const DEEP_MAILBOX_MESSAGES: u8 = 80;
+
+/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`),
+/// mirrored as a literal for the reason [`BOARD_RESOURCE_SDU`] is: that
+/// crate is thumbv7em and this host cannot link it.
+const BOARD_HEAP_BYTES: usize = 96 * 1024;
 
 /// One stored message of exactly [`FIELD_BODY_BYTES`] servable bytes,
 /// incompressible for the same reason as in
@@ -121,18 +146,30 @@ fn upload(seed: u8) -> Vec<u8> {
     PropagationUpload::single(1_700_000_000.0, lxmf_data, [0xEE; 32]).encode()
 }
 
-/// A node holding the field's 24 messages for one mailbox, serving to
-/// `cap` accounted bytes per fetch.
-fn field_node(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
+/// A node holding `messages` messages for one mailbox, serving to `cap`
+/// accounted bytes per fetch, announcing `sync_limit_kb`.
+///
+/// The announced limit is a parameter because it is a SECOND bound on
+/// the same accounted sum, and the two tests below are about different
+/// ones: the field case runs at the board's own 8 KB announcement (which
+/// does not bite — 24 messages account to 6 552 B), while the
+/// deeper-than-the-cap case has to raise it, or the announced limit
+/// would be what bounds the round and the serve cap would never be
+/// measured.
+fn mailbox_node(
+    cap: usize,
+    messages: u8,
+    sync_limit_kb: u64,
+) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
     let mut role = PropagationNode::new(
-        MemoryPropagationStore::new(64 * 1024),
+        MemoryPropagationStore::new(256 * 1024),
         PropagationNodeConfig {
-            sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+            sync_limit_kb,
             serve_cap_bytes: Some(cap),
             ..PropagationNodeConfig::default()
         },
     );
-    let stored: Vec<TransientId> = (0..FIELD_MESSAGES)
+    let stored: Vec<TransientId> = (0..messages)
         .map(
             |seed| match role.handle_upload(&upload(seed), 0, |_, _| None) {
                 UploadOutcome::Accepted { transient_id, .. } => transient_id,
@@ -143,20 +180,23 @@ fn field_node(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Vec<Trans
     (role, stored)
 }
 
-/// Serve one fetch for every id in `stored` and report what came back.
+/// The field's node: [`FIELD_MESSAGES`] messages, serving to `cap`.
+fn field_node(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
+    mailbox_node(cap, FIELD_MESSAGES, BOARD_SYNC_LIMIT_KB)
+}
+
+/// Serve one fetch for every id in `stored` and report the plan.
 fn fetch_all(
     role: &mut PropagationNode<MemoryPropagationStore>,
     stored: &[TransientId],
-) -> (Vec<u8>, Vec<TransientId>) {
-    let GetOutcome::Fetch {
-        response, served, ..
-    } = role
+) -> FetchPlan {
+    let GetOutcome::Fetch { plan, .. } = role
         .handle_get(&fetch_for(stored), &[7u8; 16], 0)
         .expect("the fetch is well formed")
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
-    (response, served)
+    plan
 }
 
 /// The client's request: every id it was just listed, with a transfer
@@ -172,69 +212,184 @@ fn fetch_for(wants: &[TransientId]) -> Vec<u8> {
     .expect("the fetch is well formed")
 }
 
+/// The reference client's list request: no `wants`, no `haves`
+/// (`message_list_response` is the callback for it,
+/// `reference/LXMF/LXMF/LXMRouter.py:1562`).
+fn list_request() -> Vec<u8> {
+    MessageGetRequest {
+        wants: None,
+        haves: None,
+        transfer_limit_kb: None,
+    }
+    .encode()
+    .expect("the list request is well formed")
+}
+
+/// **The field case, and the red this order removes.** On the heap the
+/// T114 actually stood on, the field's whole 24-message mailbox is
+/// served in ONE fetch — where the same heap, the same messages and the
+/// same margin funded nine before the response was streamed out of the
+/// store.
+///
+/// The before and the after are computed side by side rather than taken
+/// on trust: [`serve_buffered_peak_bytes`] is the pre-B2 model, kept
+/// exact, so both numbers come from one run.
+#[test]
+fn the_field_mailbox_drains_in_one_fetch_where_the_buffered_serve_managed_nine() {
+    let live_cap = serve_cap_for_live_heap(
+        BOOT_CAP,
+        FREE_AT_PANIC,
+        LARGEST_AT_PANIC,
+        BOARD_SERVE_MARGIN_BYTES,
+        BOARD_RESOURCE_SDU,
+    );
+    assert_eq!(
+        live_cap, 7_256,
+        "the heap the board had funds 7 256 B of fetch response"
+    );
+
+    let (mut role, stored) = field_node(live_cap);
+    let plan = fetch_all(&mut role, &stored);
+    let peak = serve_peak_bytes(plan.encoded_len(), BOARD_RESOURCE_SDU);
+    let block = serve_largest_block_bytes(plan.encoded_len(), BOARD_RESOURCE_SDU);
+    let buffered = serve_buffered_peak_bytes(plan.encoded_len(), BOARD_RESOURCE_SDU);
+    let budget = FREE_AT_PANIC - BOARD_SERVE_MARGIN_BYTES;
+
+    eprintln!(
+        "SERVE_ONE_ROUND live_cap={live_cap} margin={BOARD_SERVE_MARGIN_BYTES} \
+free={FREE_AT_PANIC} largest={LARGEST_AT_PANIC} served={} of {FIELD_MESSAGES} \
+response={} peak={peak} buffered_peak={buffered} block={block} budget={budget}",
+        plan.count(),
+        plan.encoded_len(),
+    );
+
+    // The feature: one round, the whole mailbox.
+    assert_eq!(
+        plan.count(),
+        usize::from(FIELD_MESSAGES),
+        "the field's mailbox must drain in one fetch"
+    );
+    assert_eq!(
+        plan.served_bytes(),
+        (usize::from(FIELD_MESSAGES) * FIELD_BODY_BYTES) as u64
+    );
+    assert_eq!(
+        plan.encoded_len(),
+        5_427,
+        "the encoded response is the board's own PN_GET figure"
+    );
+
+    // The red, as arithmetic: the same response through the buffered
+    // path costs more than the whole heap the board had, never mind the
+    // margin. That is the 2026-09-23 panic.
+    assert_eq!(buffered, 33_238);
+    assert!(
+        buffered > FREE_AT_PANIC,
+        "the buffered serve of this response ({buffered} B) must not fit \
+         the {FREE_AT_PANIC} B the board had -- it is why it died"
+    );
+
+    // The green: streamed, it fits with the margin still unspent.
+    assert_eq!(peak, 11_875);
+    assert!(
+        peak + BOARD_SERVE_MARGIN_BYTES <= FREE_AT_PANIC,
+        "a {} B response costs {peak} B of transient; with \
+         {BOARD_SERVE_MARGIN_BYTES} B of concurrent arrivals that is \
+         {} B against {FREE_AT_PANIC} B of heap",
+        plan.encoded_len(),
+        peak + BOARD_SERVE_MARGIN_BYTES
+    );
+    assert!(
+        block + BOARD_SERVE_MARGIN_BYTES <= LARGEST_AT_PANIC,
+        "the serve's largest single allocation is {block} B; the \
+         allocator can hand out {LARGEST_AT_PANIC} B and the margin \
+         claims {BOARD_SERVE_MARGIN_BYTES} B of it"
+    );
+
+    // And the client's confirmation empties the store, so the round is
+    // a drain and not a peek.
+    let confirm = MessageGetRequest {
+        wants: None,
+        haves: Some(plan.served_ids()),
+        transfer_limit_kb: None,
+    }
+    .encode()
+    .expect("the confirmation is well formed");
+    let GetOutcome::Fetch { purged, .. } = role
+        .handle_get(&confirm, &[7u8; 16], 0)
+        .expect("the confirmation is well formed")
+    else {
+        panic!("a haves-only request is a fetch outcome");
+    };
+    assert_eq!(purged.len(), usize::from(FIELD_MESSAGES));
+    assert!(role.store().is_empty());
+}
+
+/// A mailbox deeper than the cap is still served in part and finished
+/// next round. The cap got much bigger; the rule did not change, and a
+/// node that serves everything it is asked for is a node waiting for a
+/// mailbox one message deeper than its heap.
 #[test]
 fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
     let cap = serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU);
-    let (mut role, stored) = field_node(cap);
+    let (mut role, stored) = mailbox_node(cap, DEEP_MAILBOX_MESSAGES, 64);
     let mailbox = [7u8; 16];
 
-    // Round one: the client asks for all 24.
-    let GetOutcome::Fetch {
-        response,
-        served,
-        served_bytes,
-        purged,
-    } = role
+    // Round one: the client asks for all of them.
+    let GetOutcome::Fetch { plan, purged } = role
         .handle_get(&fetch_for(&stored), &mailbox, 0)
         .expect("the fetch is well formed")
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
+    let served = plan.served_ids();
 
     eprintln!(
-        "SERVE_CAP free={FREE_AT_PANIC} cap={cap} served={} of {FIELD_MESSAGES} \
-response={} peak={}",
+        "SERVE_CAP free={FREE_AT_PANIC} cap={cap} served={} of \
+{DEEP_MAILBOX_MESSAGES} response={} peak={}",
         served.len(),
-        response.len(),
-        serve_peak_bytes(response.len(), BOARD_RESOURCE_SDU)
+        plan.encoded_len(),
+        serve_peak_bytes(plan.encoded_len(), BOARD_RESOURCE_SDU)
     );
 
     // The bound, on the wire: the response the node ships fits the cap
-    // its heap plan funds. Before the bound this was 5 427 B against a
-    // 4 954 B cap.
+    // its heap plan funds.
     assert!(
-        response.len() <= cap,
+        plan.encoded_len() <= cap,
         "served {} B against a funded cap of {cap} B",
-        response.len()
+        plan.encoded_len()
     );
 
     // The bound, in the heap: the transient that response costs fits the
-    // heap the board had. Before the bound the same 24 messages modelled
-    // at 33 238 B against 30 380 B of free heap -- the panic.
-    let peak = serve_peak_bytes(response.len(), BOARD_RESOURCE_SDU);
+    // heap the board had.
+    let peak = serve_peak_bytes(plan.encoded_len(), BOARD_RESOURCE_SDU);
     assert!(
         peak <= FREE_AT_PANIC,
-        "a {} B response costs {peak} B of transient, against {FREE_AT_PANIC} B of heap",
-        response.len()
+        "a {} B response costs {peak} B of transient, against \
+         {FREE_AT_PANIC} B of heap",
+        plan.encoded_len()
     );
 
     // Bounded serving, not refusal: it served what it could, and it is
-    // not one message.
+    // neither one message nor all of them.
     assert!(
-        served.len() > 1 && served.len() < usize::from(FIELD_MESSAGES),
-        "a bounded serve is a subset, not all and not nothing: {} of {FIELD_MESSAGES}",
+        served.len() > 1 && served.len() < usize::from(DEEP_MAILBOX_MESSAGES),
+        "a bounded serve is a subset, not all and not nothing: {} of \
+         {DEEP_MAILBOX_MESSAGES}",
         served.len()
     );
-    assert_eq!(served_bytes, (served.len() * FIELD_BODY_BYTES) as u64);
+    assert_eq!(
+        plan.served_bytes(),
+        (served.len() * FIELD_BODY_BYTES) as u64
+    );
 
     // Nothing was purged -- not what was served, and not what was not.
     // Deletion is the client's `haves` confirmation and nothing else
-    // (`reference/LXMF/LXMF/LXMRouter.py:1622-1638`), so a round that
-    // serves 18 of 24 loses none of the 24.
+    // (`reference/LXMF/LXMF/LXMRouter.py:1622-1638`).
     assert!(purged.is_empty(), "a fetch must purge nothing by itself");
     assert_eq!(
         role.store().len(),
-        usize::from(FIELD_MESSAGES),
+        usize::from(DEEP_MAILBOX_MESSAGES),
         "every message the round did not serve must still be in the store"
     );
 
@@ -267,39 +422,22 @@ response={} peak={}",
         .filter(|id| !served.contains(id))
         .collect();
     let GetOutcome::List { count, .. } = role
-        .handle_get(
-            &MessageGetRequest {
-                wants: None,
-                haves: None,
-                transfer_limit_kb: None,
-            }
-            .encode()
-            .expect("the list request is well formed"),
-            &mailbox,
-            0,
-        )
+        .handle_get(&list_request(), &mailbox, 0)
         .expect("the list request is well formed")
     else {
         panic!("an empty request is the list form");
     };
     assert_eq!(count, rest.len(), "the next list offers exactly the rest");
 
-    let GetOutcome::Fetch {
-        served: served_two, ..
-    } = role
-        .handle_get(&fetch_for(&rest), &mailbox, 0)
-        .expect("the fetch is well formed")
-    else {
-        panic!("a fetch request must produce a fetch outcome");
-    };
+    let plan_two = fetch_all(&mut role, &rest);
     assert_eq!(
-        served_two.len(),
+        plan_two.count(),
         rest.len(),
-        "two rounds must deliver all {FIELD_MESSAGES}"
+        "two rounds must deliver all {DEEP_MAILBOX_MESSAGES}"
     );
     assert_eq!(
-        served.len() + served_two.len(),
-        usize::from(FIELD_MESSAGES),
+        served.len() + plan_two.count(),
+        usize::from(DEEP_MAILBOX_MESSAGES),
         "nothing served twice, nothing lost"
     );
 }
@@ -308,38 +446,36 @@ response={} peak={}",
 /// plan feared — and the margin is what keeps that from being the panic
 /// again.
 ///
-/// Order 137 left the cap at the boot plan's worst case: every term at
-/// its maximum at once, 784 B of slack, 88 B of funded response. A
-/// stored message is 256 B stamped, so a board held to 88 B lists 24
-/// messages and serves **none** of them — which is what this test's
-/// first half measures, and it is the red this order removes.
+/// The boot plan is every term at its maximum at once: 808 B of slack,
+/// 222 B of funded response. A stored field message is 256 B stamped, so
+/// a board held to the floor lists 24 messages and serves **none** of
+/// them, which is what this test's first half measures. The heap that
+/// board actually stood on funds 7 256 B — the whole mailbox.
 ///
-/// The heap that board actually stood on six seconds before it died was
-/// [`FREE_AT_PANIC`] free with [`LARGEST_AT_PANIC`] in one block. Under
-/// the serve-peak model, less [`BOARD_SERVE_MARGIN_BYTES`] for what can
-/// still arrive mid-serve, that funds 2 540 B — nine of the 24.
-///
-/// **Nine, not eighteen.** 4 954 B (18 messages) is what the same heap
-/// funds with no margin at all, and the second half of
-/// `a_serve_survives_the_heap_shrinking_under_it` measures what that
-/// costs: 24 974 B of serve transient plus 14 688 B of margin is
-/// 39 662 B against 30 380 B of heap, i.e. the same panic one arrival
-/// later. The margin is the difference between a cap that fits the
-/// instant it was computed and one that fits the instant it is spent.
+/// **7 256, not 14 296.** The margin-free cap is what the same heap
+/// funds with nothing left over, and
+/// `pn_serve_cap_survives_a_shrinking_heap` measures what spending it
+/// costs: the serve fits the instant it is computed and overruns the
+/// heap the instant anything arrives.
 #[test]
 fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
-    // Today's rule: the boot plan's worst case, and nothing else.
+    // The floor: the boot plan's worst case, and nothing else.
     let (mut booted, stored) = field_node(BOOT_CAP);
-    let (boot_response, boot_served) = fetch_all(&mut booted, &stored);
+    let boot_plan = fetch_all(&mut booted, &stored);
     assert!(
-        boot_served.is_empty() && boot_response.len() < 8,
-        "an 88 B cap cannot fit a 256 B message: served {} in {} B",
-        boot_served.len(),
-        boot_response.len()
+        boot_plan.is_empty() && boot_plan.encoded_len() < 8,
+        "a 222 B cap cannot fit a 256 B message: served {} in {} B",
+        boot_plan.count(),
+        boot_plan.encoded_len()
+    );
+    assert_eq!(
+        booted.encode_fetch(&boot_plan).unwrap().len(),
+        boot_plan.encoded_len(),
+        "an empty serve is still a well-formed, measured response"
     );
 
-    // The rule this order asks for: the larger of that floor and what
-    // the live census funds, margin first.
+    // The rule: the larger of that floor and what the live census funds,
+    // margin first.
     let live_cap = serve_cap_for_live_heap(
         BOOT_CAP,
         FREE_AT_PANIC,
@@ -348,68 +484,47 @@ fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
         BOARD_RESOURCE_SDU,
     );
     let (mut live, stored) = field_node(live_cap);
-    let (response, served) = fetch_all(&mut live, &stored);
-    let peak = serve_peak_bytes(response.len(), BOARD_RESOURCE_SDU);
-    let block = serve_largest_block_bytes(response.len(), BOARD_RESOURCE_SDU);
+    let plan = fetch_all(&mut live, &stored);
 
     // The firmware's own line, at the board's own numbers
     // (`SERVE_CAP`, `Engine::read_serve_cap`, `leviculum-nrf/src/pn.rs`).
     eprintln!(
         "SERVE_CAP boot_cap={BOOT_CAP} live_cap={live_cap} \
 margin={BOARD_SERVE_MARGIN_BYTES} largest={LARGEST_AT_PANIC} free={FREE_AT_PANIC} \
-served={} of {FIELD_MESSAGES} response={} peak={peak} block={block}",
-        served.len(),
-        response.len(),
+served={} of {FIELD_MESSAGES} response={}",
+        plan.count(),
+        plan.encoded_len(),
     );
 
+    assert_eq!(live_cap, 7_256);
     assert_eq!(
-        live_cap, 2_540,
-        "the heap the board had funds 2 540 B of fetch response"
-    );
-    assert_eq!(
-        served.len(),
-        9,
-        "2 540 B of accounted cap is 24 B of preamble plus nine 256 B \
-         messages at 16 B of overhead each (24 + 9·272 = 2 472, and a \
-         tenth would be 2 744)"
-    );
-
-    // The margin is what the serve must survive: every byte it holds
-    // live, plus everything that can arrive while it holds them, inside
-    // the heap the census measured.
-    assert!(
-        peak + BOARD_SERVE_MARGIN_BYTES <= FREE_AT_PANIC,
-        "a {} B response costs {peak} B of transient; with \
-         {BOARD_SERVE_MARGIN_BYTES} B of concurrent arrivals that is \
-         {} B against {FREE_AT_PANIC} B of heap",
-        response.len(),
-        peak + BOARD_SERVE_MARGIN_BYTES
+        plan.count(),
+        usize::from(FIELD_MESSAGES),
+        "7 256 B of accounted cap is 24 B of preamble and 24 messages at \
+         272 B each (24 + 24Â·272 = 6 552, and a 27th would be 7 368)"
     );
     assert!(
-        block + BOARD_SERVE_MARGIN_BYTES <= LARGEST_AT_PANIC,
-        "the serve's largest single allocation is {block} B; the \
-         allocator can hand out {LARGEST_AT_PANIC} B and the margin \
-         claims {BOARD_SERVE_MARGIN_BYTES} B of it"
+        live_cap < serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU),
+        "the margined cap must be strictly below what the bare heap funds"
     );
 
-    // And it is a serve, not a refusal: nine now, the rest next round,
-    // the store intact -- the same contract the first test pins at the
-    // unmargined cap.
+    // And it is a serve, not a refusal: the store keeps everything until
+    // the client confirms.
     assert_eq!(
         live.store().len(),
         usize::from(FIELD_MESSAGES),
-        "a bounded serve keeps every message it did not ship"
+        "a fetch keeps every message until its confirmation"
     );
 }
 
-/// One client sync drains one serve cap, and the hardware cell asks for
-/// twenty-four in one.
+/// One client sync drains one serve cap, and since this order that is
+/// the field's whole mailbox.
 ///
-/// The bound the two tests above pin is a bound on ONE fetch. What a
-/// stock client sees is a bound on one SYNC, and they are the same
-/// number because the reference router issues exactly one fetch per
-/// sync: `message_list_response` builds `wants` from the list and sends
-/// a single `MESSAGE_GET_PATH`
+/// The bound the tests above pin is a bound on ONE fetch. What a stock
+/// client sees is a bound on one SYNC, and they are the same number
+/// because the reference router issues exactly one fetch per sync:
+/// `message_list_response` builds `wants` from the list and sends a
+/// single `MESSAGE_GET_PATH`
 /// (`reference/LXMF/LXMF/LXMRouter.py:1576-1596`), and
 /// `message_get_response` ingests whatever came back, confirms it with a
 /// `[None, haves]` request, declares `PR_COMPLETE` and reports
@@ -424,24 +539,12 @@ served={} of {FIELD_MESSAGES} response={} peak={peak} block={block}",
 /// call to `request_messages_from_propagation_node`
 /// (`reference/LXMF/LXMF/LXMRouter.py:502`), one fetch, one count. On
 /// the 648650a3 firmware the board died in that fetch and the client
-/// reported `sync_failed_state_0xf2` (`PR_TRANSFER_FAILED`). With the
-/// bound in place it will not die — and it will not answer 24 either.
-/// The cell's step is the thing to change, to as many syncs as the
-/// mailbox holds caps, and this test is the number to change it to.
-///
-/// **What it would take to be one sync**, so the alternative is priced
-/// rather than dismissed. [`free_heap_for_one_sync`] searches for the
-/// free heap at which one fetch does serve all 24: **54 848 B**, against
-/// the 30 380 B the T114 had ([`FREE_AT_PANIC`]) and the 96 KiB
-/// [`BOARD_HEAP_BYTES`] it has in total. So it is inside the heap and
-/// nowhere near the moment — the board would have to be holding 24 468 B
-/// less than it was while still holding the role, the store adapters and
-/// its links, and the margin would still be spent the instant anything
-/// arrived. That is a capacity decision for the Lead
-/// (`SERVE_RESERVE_BYTES`, `leviculum-nrf/src/pn.rs`), not something a
-/// re-measurement will produce.
+/// reported `sync_failed_state_0xf2` (`PR_TRANSFER_FAILED`). Under order
+/// 141's bound it would have answered 9 and the cell's step would have
+/// had to change. It does not have to now: the cell's `expect_count =
+/// 24` is the number this test measures.
 #[test]
-fn one_client_sync_drains_one_serve_cap_and_the_field_needs_three() {
+fn one_client_sync_drains_the_whole_field_mailbox() {
     let live_cap = serve_cap_for_live_heap(
         BOOT_CAP,
         FREE_AT_PANIC,
@@ -474,12 +577,13 @@ fn one_client_sync_drains_one_serve_cap_and_the_field_needs_three() {
             panic!("the node must list ids, not an error");
         };
 
-        let GetOutcome::Fetch { served, .. } = role
+        let GetOutcome::Fetch { plan, .. } = role
             .handle_get(&fetch_for(&listed), &mailbox, 0)
             .expect("the fetch is well formed")
         else {
             panic!("a fetch request must produce a fetch outcome");
         };
+        let served = plan.served_ids();
         assert!(
             !served.is_empty(),
             "a sync that serves nothing never terminates: cap {live_cap} B"
@@ -515,38 +619,35 @@ one_sync_needs_free={:?}",
     );
 
     // What the cell's `expect_count = 24` is compared against: the first
-    // sync's count, which is the cap's nine and not the field's 24.
+    // sync's count, which is now the whole field.
     assert_eq!(
-        syncs[0], 9,
-        "one sync returns one cap's worth; periculum's \
+        syncs,
+        vec![usize::from(FIELD_MESSAGES)],
+        "one sync must drain the field; periculum's \
          lora_pn_board_offer_past_the_link step 14 expects {FIELD_MESSAGES}"
     );
-    assert_eq!(syncs, vec![9, 9, 6], "three syncs drain the field");
     assert_eq!(drained, usize::from(FIELD_MESSAGES));
     assert!(
         role.store().is_empty(),
         "the confirmed syncs purged the whole mailbox"
     );
 
-    // And what one sync would have cost, as a number rather than a
-    // dismissal: well beyond the heap the board stood on, inside the heap
-    // it owns.
+    // And how much heap a single-sync drain actually needs, as a number
+    // rather than a claim: below what the board had, where the buffered
+    // serve needed 54 848 B — nearly twice it, and more than half the
+    // board's entire heap.
     let needed = free_heap_for_one_sync().expect("the search must converge");
-    assert!(
-        needed > FREE_AT_PANIC && needed < BOARD_HEAP_BYTES,
-        "one sync serves all {FIELD_MESSAGES} at {needed} B free; the board \
-         had {FREE_AT_PANIC} B of a {BOARD_HEAP_BYTES} B heap"
-    );
     assert_eq!(
-        needed, 54_848,
+        needed, 28_928,
         "the free heap a single-sync drain of {FIELD_MESSAGES} needs"
     );
+    assert!(
+        needed <= FREE_AT_PANIC,
+        "one sync serves all {FIELD_MESSAGES} at {needed} B free; the board \
+         had {FREE_AT_PANIC} B of a {BOARD_HEAP_BYTES} B heap, and the \
+         buffered serve needed 54 848 B"
+    );
 }
-
-/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`),
-/// mirrored as a literal for the reason [`BOARD_RESOURCE_SDU`] is: that
-/// crate is thumbv7em and this host cannot link it.
-const BOARD_HEAP_BYTES: usize = 96 * 1024;
 
 /// The least free heap at which one fetch serves all [`FIELD_MESSAGES`],
 /// searched rather than derived: [`serve_cap_for_live_heap`] is monotone
@@ -562,25 +663,6 @@ fn free_heap_for_one_sync() -> Option<usize> {
             BOARD_RESOURCE_SDU,
         );
         let (mut role, stored) = field_node(cap);
-        let GetOutcome::Fetch { served, .. } = role
-            .handle_get(&fetch_for(&stored), &[7u8; 16], 0)
-            .expect("the fetch is well formed")
-        else {
-            panic!("a fetch request must produce a fetch outcome");
-        };
-        served.len() == usize::from(FIELD_MESSAGES)
+        fetch_all(&mut role, &stored).count() == usize::from(FIELD_MESSAGES)
     })
-}
-
-/// The reference client's list request: no `wants`, no `haves`
-/// (`message_list_response` is the callback for it,
-/// `reference/LXMF/LXMF/LXMRouter.py:1562`).
-fn list_request() -> Vec<u8> {
-    MessageGetRequest {
-        wants: None,
-        haves: None,
-        transfer_limit_kb: None,
-    }
-    .encode()
-    .expect("the list request is well formed")
 }

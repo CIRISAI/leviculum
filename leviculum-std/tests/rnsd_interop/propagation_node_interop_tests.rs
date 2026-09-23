@@ -218,21 +218,36 @@ impl PnHost {
                 let name_hash = Destination::compute_name_hash("lxmf", &["delivery"]);
                 let mailbox =
                     *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes();
-                let response = match self.role.handle_get(data, &mailbox, unix_secs()) {
-                    Ok(GetOutcome::List { response, .. })
-                    | Ok(GetOutcome::Fetch { response, .. }) => response,
-                    Err(error) => panic!("/get failed: {error:?}"),
-                };
-                let sent = match self.node.send_response(link_id, request_id, &response) {
-                    Ok(output) => output,
-                    Err(RequestError::PayloadTooLarge) => {
-                        let (_, output) = self
-                            .node
-                            .send_response_resource(link_id, request_id, &response)
-                            .expect("response resource");
-                        output
+                // The same fork `lnpnd` and the firmware take: a list
+                // (or a short fetch) goes out as bytes, a fetch past the
+                // link MDU is STREAMED out of the store as a response
+                // Resource (#384 B2). Driving the real branch here is
+                // the point of this file -- the counterpart is a genuine
+                // Python client, and it is the only thing that can say
+                // the streamed bytes are the bytes it expected.
+                let sent = match self.role.handle_get(data, &mailbox, unix_secs()) {
+                    Ok(GetOutcome::List { response, .. }) => {
+                        self.send_bytes(link_id, request_id, &response)
                     }
-                    Err(error) => panic!("response failed: {error:?}"),
+                    Ok(GetOutcome::Fetch { plan, .. }) => {
+                        if self.node.response_fits_packet(link_id, plan.encoded_len()) {
+                            let response =
+                                self.role.encode_fetch(&plan).expect("the plan is servable");
+                            self.send_bytes(link_id, request_id, &response)
+                        } else {
+                            let mut source = self.role.fetch_source(&plan);
+                            let (_, output) = self
+                                .node
+                                .send_response_resource_from_source(
+                                    link_id,
+                                    request_id,
+                                    &mut source,
+                                )
+                                .expect("streamed response resource");
+                            output
+                        }
+                    }
+                    Err(error) => panic!("/get failed: {error:?}"),
                 };
                 Some(sent)
             }
@@ -241,6 +256,27 @@ impl PnHost {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// A response small enough to own: one data packet, or a buffered
+    /// response Resource if the link refuses it.
+    fn send_bytes(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response: &[u8],
+    ) -> TickOutput {
+        match self.node.send_response(link_id, request_id, response) {
+            Ok(output) => output,
+            Err(RequestError::PayloadTooLarge) => {
+                let (_, output) = self
+                    .node
+                    .send_response_resource(link_id, request_id, response)
+                    .expect("response resource");
+                output
+            }
+            Err(error) => panic!("response failed: {error:?}"),
         }
     }
 
@@ -595,6 +631,185 @@ async fn a_python_client_collects_a_capped_mailbox_over_several_rounds() {
     assert!(
         emptied,
         "the store must be empty after the last confirmed fetch, {} left",
+        host.role.store().len()
+    );
+    assert_eq!(
+        host.accepted.len(),
+        MESSAGES,
+        "exactly {MESSAGES} distinct uploads accepted"
+    );
+}
+
+/// **The field case against a real Python client: a 24-message mailbox
+/// drains in ONE sync.**
+///
+/// The sibling above measures what a capped serve costs the client —
+/// several rounds, each `PR_COMPLETE`, nothing lost. This one measures
+/// the thing the cap was hiding: with the response streamed out of the
+/// store (#384 B2), the board's own live cap funds the field's whole
+/// mailbox in one fetch, and `request_messages_from_propagation_node`
+/// issues exactly one fetch per sync
+/// (`reference/LXMF/LXMF/LXMRouter.py:1576-1643`), so "one sync" and
+/// "one fetch" are the same claim.
+///
+/// Why it has to be measured against the real `LXMRouter` rather than
+/// argued: 24 bodies are 5 427 B of msgpack, far past any link MDU, so
+/// this is the STREAMED response Resource path end to end — our part
+/// cutter reading records out of the store, Python's `Resource`
+/// receiver reassembling them, its `full_hash` check on the result, and
+/// its `message_get_response` ingesting 24 messages out of one
+/// response. A part cutter that framed the msgpack even one byte
+/// differently from `MessageGetResponse::encode` fails here and
+/// nowhere else in this suite.
+///
+/// The cap is set to what the T114's own heap funded on 2026-09-23
+/// (`serve_cap_for_live_heap` at `free=30380`, 7 256 B —
+/// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`) rather
+/// than left unbounded, so what this measures is the BOARD's bound,
+/// driven by a real client, on a host that can run one.
+#[tokio::test]
+async fn a_python_client_drains_a_full_field_mailbox_in_one_sync() {
+    /// The periculum cell's mailbox depth
+    /// (`lora_pn_board_offer_past_the_link`, `expect_count = 24`).
+    const MESSAGES: usize = 24;
+    /// What the T114's live heap funded on 2026-09-23 under the
+    /// streamed serve.
+    const BOARD_LIVE_SERVE_CAP: usize = 7_256;
+
+    let hub = TestDaemon::start().await.expect("start hub daemon");
+    let recipient = TestDaemon::start().await.expect("start recipient daemon");
+    recipient
+        .add_client_interface("127.0.0.1", hub.rns_port(), Some("ToHub"))
+        .await
+        .expect("connect recipient to hub");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    hub.lxmf_init("py-sender", None).await.expect("sender init");
+    let recipient_info = recipient
+        .lxmf_init("py-recipient", None)
+        .await
+        .expect("recipient init");
+    recipient.lxmf_announce().await.expect("recipient announce");
+
+    let mut host = PnHost::new(&hub).await;
+    host.role.set_serve_cap_bytes(Some(BOARD_LIVE_SERVE_CAP));
+    let pn_hash_hex = hex::encode(host.destination_hash.as_bytes());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        host.announce().await;
+        host.pump_until(Duration::from_secs(2), |_| false).await;
+        let sender_ok = hub.lxmf_set_propagation_node(&pn_hash_hex).await.is_ok();
+        let recipient_ok = recipient
+            .lxmf_set_propagation_node(&pn_hash_hex)
+            .await
+            .is_ok();
+        if sender_ok && recipient_ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python clients must learn our propagation announce"
+        );
+    }
+
+    for index in 0..MESSAGES {
+        let content = format!("field mailbox message {index}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match hub
+                .lxmf_send(
+                    &recipient_info.delivery_hash,
+                    "propagated",
+                    content.as_bytes(),
+                    b"pn field",
+                    None,
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    host.pump_until(Duration::from_millis(500), |_| false).await;
+                }
+                Err(e) => panic!("sender could not address the recipient: {e:?}"),
+            }
+        }
+        let stored = host
+            .pump_until(Duration::from_secs(30), |h| {
+                h.role.store().len() == index + 1
+            })
+            .await;
+        assert!(stored, "upload {index} must be appended to our store");
+    }
+
+    // The premise, asserted rather than assumed: this mailbox accounts
+    // to less than the board's cap, so one fetch may serve all of it,
+    // and it is far past any link MDU, so it goes out streamed.
+    let mut accounted = 24usize;
+    let mut largest = 0usize;
+    host.role
+        .store()
+        .for_each(&mut |meta: &StoredMessage| {
+            accounted += meta.size as usize + 16;
+            largest = largest.max(meta.size as usize);
+        })
+        .expect("the store can be walked");
+    assert!(
+        accounted <= BOARD_LIVE_SERVE_CAP,
+        "{MESSAGES} messages account to {accounted} B, past the board's \
+         {BOARD_LIVE_SERVE_CAP} B cap -- this test would measure a capped \
+         serve, which its sibling already does"
+    );
+
+    // One sync. Not "the first of several".
+    recipient
+        .lxmf_request_from_propagation_node()
+        .await
+        .expect("recipient sync");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let received = loop {
+        let received = recipient.lxmf_get_received().await.expect("received");
+        if received.len() >= MESSAGES {
+            break received;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "one sync must deliver all {MESSAGES}: {} so far",
+            received.len()
+        );
+        host.pump_until(Duration::from_millis(300), |_| false).await;
+    };
+
+    let (state, last_result) = recipient
+        .lxmf_propagation_transfer_state()
+        .await
+        .expect("transfer state");
+    assert_eq!(state, 0x07, "PR_COMPLETE after the one sync");
+    assert_eq!(
+        last_result,
+        Some(MESSAGES as u64),
+        "the client reports what that ONE fetch returned \
+         (`propagation_transfer_last_result`, LXMRouter.py:1643)"
+    );
+
+    assert_eq!(received.len(), MESSAGES, "every message must arrive");
+    let mut contents: Vec<String> = received
+        .iter()
+        .map(|message| String::from_utf8_lossy(&message.content).into_owned())
+        .collect();
+    contents.sort();
+    let mut expected: Vec<String> = (0..MESSAGES)
+        .map(|index| format!("field mailbox message {index}"))
+        .collect();
+    expected.sort();
+    assert_eq!(contents, expected, "nothing lost, nothing duplicated");
+
+    let emptied = host
+        .pump_until(Duration::from_secs(20), |h| h.role.store().is_empty())
+        .await;
+    assert!(
+        emptied,
+        "the store must be empty after the confirmed fetch, {} left",
         host.role.store().len()
     );
     assert_eq!(

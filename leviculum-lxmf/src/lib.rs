@@ -90,8 +90,8 @@ pub use propagation_client::{
     PROPAGATION_ASPECT,
 };
 pub use propagation_node::{
-    Eviction, EvictionReason, GetError, GetOutcome, PropagationNode, PropagationNodeConfig,
-    UploadOutcome, MESSAGE_EXPIRY_SECS, PN_META_NAME,
+    Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PropagationNode,
+    PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS, PN_META_NAME,
 };
 pub use propagation_store::{MemoryPropagationStore, PropagationStore, StoredMessage};
 pub use router::{

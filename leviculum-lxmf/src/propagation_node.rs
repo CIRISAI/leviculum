@@ -27,7 +27,7 @@
 use alloc::vec::Vec;
 
 use leviculum_core::constants::RESOURCE_HASHMAP_LEN;
-use leviculum_core::resource::RESOURCE_RANDOM_HASH_SIZE;
+use leviculum_core::resource::{ResourceSource, SourceError, RESOURCE_RANDOM_HASH_SIZE};
 
 use crate::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE},
@@ -75,16 +75,14 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///
 /// This is the term the board's role budget was missing (#384): the serve
 /// cap bounds the *wire* response, but the path from stored bodies to an
-/// advertised Resource materialises that response several more times, and
-/// all but one of those copies are live simultaneously. On a 96 KiB heap
-/// the difference between "8 KB fits" and "8 KB costs 49 KB" is the whole
-/// question.
+/// advertised Resource also holds working copies, and what a heap plan
+/// has to fund is all of them at once, not the response.
 ///
 /// # Why the encoded response is bounded by the cap
 ///
 /// The serve loop accounts 24 B up front and `body + 16` per served
 /// message, where `body` is the *stamped* length, and stops strictly below
-/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:900`).
+/// the cap (`plan_fetch`, `leviculum-lxmf/src/propagation_node.rs`).
 /// What ships is the unstamped body, `STAMP_SIZE` (32 B) shorter, inside
 /// `msgpack [bin, ...]`: at most 5 B of array header and 5 B of `bin`
 /// header per message. Each accounted term therefore dominates its wire
@@ -93,76 +91,101 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 /// bounds it. Same dominance argument the inbound sync limit already
 /// rests on, in the other direction.
 ///
-/// # The copies, in the order they appear
+/// # The copies, in the order they appear (B2)
 ///
 /// With `R = cap_bytes` and `F = R + RESPONSE_FRAME_BYTES`:
 ///
-/// 1. **`response`, ≤ 2R** — `MessageGetResponse::encode` extends a
-///    `Vec::new()`, so its block is the next power of two at or above the
-///    length. It is owned by the caller and live for the whole path below.
-///    (`encode`, `leviculum-lxmf/src/propagation.rs:483`.)
-/// 2. **`wrapped`, F** — `send_response_resource` frames the response
-///    into an exactly-sized block and holds it until the call returns
-///    (`send_response_resource`, `leviculum-core/src/node/mod.rs:1853`).
-/// 3. **`plaintext`, F + 4** — `reserve_exact(4 + len)`, the wire random
-///    prepended to the payload. Without a compressor linked (the firmware
-///    drops bz2) the payload IS `wrapped`, read straight through.
-/// 4. **`encrypted`, `Link::encrypted_size(plaintext)`** — IV, padding to
-///    the next 16, HMAC.
-/// 5. **`parts`, ≈ `encrypted`** — `encrypted` re-split into one owned
-///    block per part, plus [`PART_BOOKKEEPING_BYTES`] each.
+/// 1. **one stored body, ≤ R** — the record the source is reading
+///    through. `PropagationStore::read_body` hands out a whole record and
+///    the serve holds exactly one at a time
+///    ([`FetchSource`]). Bounded by the cap because a message whose
+///    accounted size does not fit the cap is never planned, so every
+///    served body is `≤ R − 40`.
+/// 2. **one part's scratch, `resource_sdu`** — the buffer the resource
+///    builder reads the source into and encrypts out of
+///    (`new_response_from_source`,
+///    `leviculum-core/src/resource/outgoing.rs`).
+/// 3. **`parts`, the transfer** — the encrypted stream, one owned block
+///    per part, plus [`PART_BOOKKEEPING_BYTES`] each. This IS the
+///    resource; it is live until the receiver proves it, and nothing can
+///    remove it short of refusing to serve.
 ///
-/// All five are live together at the end of the constructor: that instant
-/// is the peak, and it is what this function sums.
+/// All three are live together while the last part is being cut: that
+/// instant is the peak, and it is what this function sums.
 ///
-/// # What the path no longer spends (#384, B1)
+/// # What the path no longer spends (#384, B2)
 ///
-/// Four response-sized copies that earlier revisions of this model had to
-/// carry are gone, and the numbers here moved with them:
+/// Four whole-response copies the earlier model had to carry are gone,
+/// and the numbers here moved with them:
 ///
-/// * `packed` — `NodeCore::send_response` framed the response *before* it
-///   compared the result with the link MDU, so a response it was going to
-///   refuse still paid one full framed copy. That copy was the 5 446 B a
-///   T114 died in. It now compares a computed length and allocates
-///   nothing on the refusal (`send_response`,
-///   `leviculum-core/src/node/mod.rs:1642`).
-/// * `combined` — the Resource constructor copied its whole payload into
-///   a private buffer. With no metadata to prepend, which is every
-///   resource this role serves, it borrows the caller's bytes instead
-///   (`new_with_flags`, `leviculum-core/src/resource/outgoing.rs:431`).
-///   The metadata branch (`send_file_response`) still builds one buffer,
-///   now sized exactly rather than grown to the next power of two.
-/// * `data_to_encrypt` — `combined.clone()` whenever compression was off
-///   or did not win, i.e. unconditionally on a board. The plaintext is
-///   assembled from the payload directly.
-/// * `hash_input` / `proof_input` — two more full copies built only to be
-///   hashed once each. SHA-256 is streaming, so the two digests are now
-///   fed the same bytes in two pieces (`full_hash_parts`).
-///
-/// Term 2 also shrank from 2F to F: it was grown by extension from
-/// `Vec::new()` and is now `with_capacity`.
+/// * `response`, ≤ 2R — `MessageGetResponse::encode` grew a `Vec` to hold
+///   every served body before the resource path had copied anything. The
+///   role now returns a [`FetchPlan`] — ids and lengths — and writes the
+///   msgpack framing around records read at part-cut time
+///   ([`PropagationNode::fetch_source`]).
+/// * `wrapped`, F — the `[request_id, response]` frame as a second
+///   buffer. It is 19 bytes of prefix on the source now
+///   (`PrefixSource`, `leviculum-core/src/resource/source.rs`).
+/// * `plaintext`, F + 4 — the wire random prepended to the payload. The
+///   token encryption is streaming, so the plaintext exists one AES block
+///   at a time (`TokenEncryptor`, `leviculum-core/src/crypto/token.rs`).
+/// * `encrypted` ≈ F — the joined ciphertext, whose only reader was the
+///   part slicing and, afterwards, its own length. The parts ARE the
+///   ciphertext; `OutgoingResource` keeps the length.
 ///
 /// The single-packet path is not modelled separately because it cannot
-/// exceed this: on it, `response` is the same block, `packed` is one
-/// exactly-framed copy, and nothing is split into parts.
+/// exceed this: a response that fits one data packet is under the link
+/// MDU (`response_fits_packet`, `leviculum-core/src/node/mod.rs`), a few
+/// hundred bytes, and is materialised precisely because that is cheaper
+/// than streaming it.
 ///
 /// # What is NOT in here
 ///
-/// The allocator's own per-block header. `embedded-alloc`'s `LlffHeap`
-/// carries one per live block, so a board pays more than this sum, most
-/// visibly on the part blocks. This is a lower bound on the board's cost
-/// and an exact bound on requested bytes.
+/// The allocator's own per-block header, as before — `embedded-alloc`'s
+/// `LlffHeap` carries one per live block, so a board pays more than this
+/// sum, most visibly on the part blocks. And the cached advertisement
+/// packet, whose hashmap segment is at most `HASHMAP_MAX_LEN × 4` bytes;
+/// it was outside the pre-B2 model too, so the before/after comparison
+/// is like for like. This is a lower bound on the board's cost and an
+/// exact bound on requested bytes.
 pub const fn serve_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
     let framed = cap_bytes + RESPONSE_FRAME_BYTES;
-    // Term 1: the encoded response, grown by extension.
-    let response = 2 * cap_bytes;
-    // Term 2: the framed copy the resource is built from, sized exactly.
-    let wrapped = framed;
-    // Term 3.
+    let sdu = if resource_sdu == 0 { 1 } else { resource_sdu };
+    // Term 1: the one stored body the source holds while it streams it.
+    let body = cap_bytes;
+    // Term 2: the builder's read/encrypt scratch, one part wide and never
+    // wider than the payload (`new_response_from_source`,
+    // `leviculum-core/src/resource/outgoing.rs`).
+    let scratch = if sdu < framed { sdu } else { framed };
+    // Term 3: the transfer itself. The token is IV + PKCS7 padding to the
+    // next whole block + HMAC over the wire random and the framed
+    // response (`token_len`, `leviculum-core/src/crypto/token.rs`).
     let plaintext = RESOURCE_RANDOM_HASH_SIZE + framed;
-    // Term 4: IV + padding to the next 16 + HMAC, as Link::encrypted_size.
+    let transfer = 16 + (plaintext / 16 + 1) * 16 + 32;
+    let part_count = transfer.div_ceil(sdu);
+    let parts = transfer + part_count * PART_BOOKKEEPING_BYTES;
+    body + scratch + parts
+}
+
+/// The pre-B2 serve peak: what the same fetch cost while the response was
+/// built as a buffer and copied four more times on its way to the wire
+/// (`serve_peak_bytes` as of 0efc7c86).
+///
+/// Kept, and kept exact, because it is the number every heap measurement
+/// before 2026-09-23 was read against — the T114's 33 238 B transient
+/// against 30 380 B of free heap, the 54 848 B a single-sync drain of 24
+/// messages needed. A model that silently replaced those makes the
+/// board's own logs unreadable; this one lets a test state the before and
+/// the after in the same breath
+/// (`pn_serve_cap_bounds_one_fetch.rs`).
+///
+/// Nothing in production calls it. It is a measurement, not a policy.
+pub const fn serve_buffered_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
+    let framed = cap_bytes + RESPONSE_FRAME_BYTES;
+    let response = 2 * cap_bytes;
+    let wrapped = framed;
+    let plaintext = RESOURCE_RANDOM_HASH_SIZE + framed;
     let encrypted = 16 + (plaintext / 16 + 1) * 16 + 32;
-    // Term 5: the same bytes again, one block per part.
     let sdu = if resource_sdu == 0 { 1 } else { resource_sdu };
     let part_count = encrypted.div_ceil(sdu);
     let parts = encrypted + part_count * PART_BOOKKEEPING_BYTES;
@@ -176,39 +199,31 @@ pub const fn serve_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
 /// in 4 KB pieces funds none of the copies below, and the census line
 /// says so directly (`largest=` beside `free=`,
 /// `leviculum-nrf/src/heap_census.rs`; the field failure it was built
-/// for refused 340 B with 4 760 B free). Of the five terms
-/// [`serve_peak_bytes`] sums, four are one allocation each and the
-/// fifth (`parts`) is one block per part:
+/// for refused 340 B with 4 760 B free).
 ///
-/// * `response` = 2·cap — grown by extension, so the block is the next
-///   power of two at or above the length, and the largest of them all
-///   once the cap is past a few hundred bytes;
-/// * `wrapped` and `plaintext` — one framed copy each;
-/// * `encrypted` — the padded copy, 48 B of IV and HMAC above
-///   `plaintext`;
-/// * one part — a slice of `encrypted` at most `resource_sdu` long,
-///   plus [`PART_BOOKKEEPING_BYTES`]. It is the largest block of all
-///   below a cap of about 250 B, which is exactly where a board whose
-///   boot plan funds 88 B lives, so leaving it out would understate the
-///   block the smallest serves ask for.
+/// Since B2 the streamed serve asks for exactly three shapes of block,
+/// and the largest of them is the answer:
+///
+/// * **one stored body**, up to `cap_bytes` — the whole record
+///   `read_body` hands back. On the field's 24 × 256 B mailbox this is
+///   256 B; on a mailbox holding one message the size of the whole cap
+///   it is the cap. It is the largest block of all above a few hundred
+///   bytes of cap, which is why the streamed serve's block bound tracks
+///   the cap rather than the response.
+/// * **the read/encrypt scratch**, `resource_sdu`.
+/// * **one part**, at most `resource_sdu` plus
+///   [`PART_BOOKKEEPING_BYTES`].
 pub const fn serve_largest_block_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
     let framed = cap_bytes + RESPONSE_FRAME_BYTES;
-    let response = 2 * cap_bytes;
+    let sdu = if resource_sdu == 0 { 1 } else { resource_sdu };
+    let scratch = if sdu < framed { sdu } else { framed };
     let plaintext = RESOURCE_RANDOM_HASH_SIZE + framed;
-    let encrypted = 16 + (plaintext / 16 + 1) * 16 + 32;
-    let part_payload = if encrypted < resource_sdu {
-        encrypted
-    } else {
-        resource_sdu
-    };
+    let transfer = 16 + (plaintext / 16 + 1) * 16 + 32;
+    let part_payload = if transfer < sdu { transfer } else { sdu };
     let part = part_payload + PART_BOOKKEEPING_BYTES;
-    // `wrapped` is `framed`, which `plaintext` exceeds by construction.
-    let mut largest = response;
-    if plaintext > largest {
-        largest = plaintext;
-    }
-    if encrypted > largest {
-        largest = encrypted;
+    let mut largest = cap_bytes;
+    if scratch > largest {
+        largest = scratch;
     }
     if part > largest {
         largest = part;
@@ -216,14 +231,6 @@ pub const fn serve_largest_block_bytes(cap_bytes: usize, resource_sdu: usize) ->
     largest
 }
 
-/// The largest serve cap whose [`serve_peak_bytes`] still fits
-/// `budget_bytes` — the inverse a heap plan asks for: "given this much
-/// free heap, how big may the cap be?". Zero when the budget does not
-/// afford even a one-byte response.
-///
-/// Binary search rather than a closed form because
-/// [`serve_peak_bytes`] rounds twice (the encryption padding and the part
-/// count); it is monotone in `cap_bytes`, which is all a search needs.
 pub const fn serve_cap_for_peak(budget_bytes: usize, resource_sdu: usize) -> usize {
     serve_cap_for_heap(budget_bytes, usize::MAX, resource_sdu)
 }
@@ -473,25 +480,219 @@ impl core::fmt::Display for GetError {
 
 impl core::error::Error for GetError {}
 
-/// A `/get` answered. `response` is the exact msgpack the request response
-/// must carry.
+/// What one fetch will serve, decided in full before a byte of it exists
+/// (Codeberg #384 B2).
+///
+/// The role used to answer a fetch with the response bytes. It answers
+/// with this instead: the ids it chose, each served body's length, and the
+/// exact length of the msgpack the caller will ship. Everything the
+/// protocol decides — who is served, in what order, what is purged — is
+/// decided here, under the cap, against one directory snapshot; the bytes
+/// are read from the store later, one record at a time, by
+/// [`PropagationNode::fetch_source`].
+///
+/// **Why the split matters and is not cosmetic.** A store write that lands
+/// between the plan and the stream cannot change what is served: the plan
+/// is the answer, and a record that vanished under it fails the build
+/// rather than shortening the response (a resource whose parts disagree
+/// with its advertisement is worse than no resource). And the plan is the
+/// bound: [`serve_peak_bytes`] prices a serve whose only whole copy is the
+/// transfer, which is only true because no step between the plan and the
+/// wire holds the response.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FetchPlan {
+    /// The served messages in wire order: transient id and the length of
+    /// the body as it ships, i.e. stamped length less [`STAMP_SIZE`].
+    served: Vec<(TransientId, u32)>,
+    /// Length of `msgpack [bin, ...]` over exactly those bodies.
+    encoded_len: usize,
+    served_bytes: u64,
+}
+
+impl FetchPlan {
+    /// How many messages this fetch serves.
+    pub fn count(&self) -> usize {
+        self.served.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.served.is_empty()
+    }
+
+    /// The served ids, in wire order — what the caller reports and what a
+    /// client confirms back as `haves`.
+    pub fn served_ids(&self) -> Vec<TransientId> {
+        self.served.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// Servable bytes, stamps already stripped: the `bytes=` of the
+    /// `PN_GET` line and the stats' served counter.
+    pub fn served_bytes(&self) -> u64 {
+        self.served_bytes
+    }
+
+    /// The exact length of the msgpack response, known before it is built
+    /// — the number the caller compares against the link MDU to decide
+    /// packet or resource
+    /// (`response_fits_packet`, `leviculum-core/src/node/mod.rs`).
+    pub fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+}
+
+/// A `/get` answered.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GetOutcome {
     /// The list form (`wants` and `haves` both absent,
-    /// `reference/LXMF/LXMF/LXMRouter.py:1491-1504`).
+    /// `reference/LXMF/LXMF/LXMRouter.py:1491-1504`). Short by
+    /// construction — 32 B per id, bounded by the mailbox — so it stays
+    /// bytes.
     List { response: Vec<u8>, count: usize },
     /// The fetch/acknowledge form: `purged` were deleted on the client's
-    /// explicit confirmation, `served` go out in `response` with their
-    /// stamps stripped.
+    /// explicit confirmation, `plan` says what goes out with stamps
+    /// stripped.
     Fetch {
-        response: Vec<u8>,
-        served: Vec<TransientId>,
-        served_bytes: u64,
+        plan: FetchPlan,
         purged: Vec<TransientId>,
     },
 }
 
-/// The propagation-node role over one [`PropagationStore`].
+/// The fetch response as a byte stream read out of the store
+/// (Codeberg #384 B2).
+///
+/// It is the msgpack `[bin, …]` of [`MessageGetResponse::Messages`], byte
+/// for byte — `a_streamed_fetch_is_the_encoded_fetch` holds the two
+/// against each other — produced without the array ever existing: the
+/// array header, then per planned message its `bin` header and its body,
+/// read from the store when the part cutter asks for it and dropped when
+/// the next one is asked for.
+///
+/// One record is live at a time. That is the whole of what the streamed
+/// serve costs beyond the transfer itself, and it is term 1 of
+/// [`serve_peak_bytes`].
+pub struct FetchSource<'a, S> {
+    store: &'a S,
+    plan: &'a FetchPlan,
+    /// The `[` of the array: `msgpack::array_header_len` bytes.
+    array_header: Vec<u8>,
+    array_pos: usize,
+    index: usize,
+    /// `bin` header of the record being streamed.
+    record_header: Vec<u8>,
+    record_pos: usize,
+    /// The record being streamed, stamp already stripped. The one body
+    /// copy a streamed serve holds.
+    body: Option<Vec<u8>>,
+    body_pos: usize,
+}
+
+impl<'a, S: PropagationStore> FetchSource<'a, S> {
+    fn new(store: &'a S, plan: &'a FetchPlan) -> Self {
+        let mut array_header = Vec::new();
+        msgpack::array(&mut array_header, plan.served.len());
+        Self {
+            store,
+            plan,
+            array_header,
+            array_pos: 0,
+            index: 0,
+            record_header: Vec::new(),
+            record_pos: 0,
+            body: None,
+            body_pos: 0,
+        }
+    }
+
+    /// Pull the record at `index` out of the store and frame it.
+    ///
+    /// A record that is gone, or whose length is not the one the plan
+    /// measured, fails the whole build: the advertisement is computed from
+    /// the plan's total, so a short record would ship parts that do not
+    /// hash to what was advertised, and the receiver only finds out after
+    /// paying for every one of them.
+    fn load(&mut self) -> Result<(), SourceError> {
+        let (transient_id, servable) = self.plan.served[self.index];
+        let mut body = self
+            .store
+            .read_body(&transient_id)
+            .map_err(|_| SourceError::Unavailable)?
+            .ok_or(SourceError::Unavailable)?;
+        if body.len() != servable as usize + STAMP_SIZE {
+            return Err(SourceError::LengthChanged);
+        }
+        // Strip the propagation stamp in place (`:1549` strips
+        // `STAMP_SIZE` from the tail) — a truncation, not a copy.
+        body.truncate(servable as usize);
+        self.record_header.clear();
+        msgpack::bin_header(&mut self.record_header, body.len());
+        self.record_pos = 0;
+        self.body_pos = 0;
+        self.body = Some(body);
+        Ok(())
+    }
+}
+
+impl<S: PropagationStore> ResourceSource for FetchSource<'_, S> {
+    fn total_len(&self) -> usize {
+        self.plan.encoded_len
+    }
+
+    fn rewind(&mut self) -> Result<(), SourceError> {
+        self.array_pos = 0;
+        self.index = 0;
+        self.record_header.clear();
+        self.record_pos = 0;
+        self.body = None;
+        self.body_pos = 0;
+        Ok(())
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, SourceError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.array_pos < self.array_header.len() {
+                let take = core::cmp::min(buf.len(), self.array_header.len() - self.array_pos);
+                buf[..take]
+                    .copy_from_slice(&self.array_header[self.array_pos..self.array_pos + take]);
+                self.array_pos += take;
+                return Ok(take);
+            }
+            if self.index >= self.plan.served.len() {
+                return Ok(0);
+            }
+            if self.body.is_none() {
+                self.load()?;
+            }
+            if self.record_pos < self.record_header.len() {
+                let take = core::cmp::min(buf.len(), self.record_header.len() - self.record_pos);
+                buf[..take]
+                    .copy_from_slice(&self.record_header[self.record_pos..self.record_pos + take]);
+                self.record_pos += take;
+                return Ok(take);
+            }
+            let finished = match &self.body {
+                Some(body) if self.body_pos < body.len() => {
+                    let take = core::cmp::min(buf.len(), body.len() - self.body_pos);
+                    buf[..take].copy_from_slice(&body[self.body_pos..self.body_pos + take]);
+                    self.body_pos += take;
+                    return Ok(take);
+                }
+                _ => true,
+            };
+            if finished {
+                self.index += 1;
+                self.body = None;
+                self.body_pos = 0;
+                self.record_pos = 0;
+                self.record_header.clear();
+            }
+        }
+    }
+}
+
+/// The propagation-node role over one [`PropagationStore`]./// The propagation-node role over one [`PropagationStore`].
 pub struct PropagationNode<S> {
     store: S,
     config: PropagationNodeConfig,
@@ -826,13 +1027,15 @@ impl<S: PropagationStore> PropagationNode<S> {
             return Ok(GetOutcome::List { response, count });
         }
 
-        // One directory pass for the whole request; membership below is
-        // asked of this snapshot rather than of the store per ID.
-        let mut owned: alloc::collections::BTreeSet<TransientId> =
-            alloc::collections::BTreeSet::new();
+        // One directory pass for the whole request: ids AND stored
+        // lengths, so nothing below this line has to read a body to
+        // decide anything. Until B2 the serve read every candidate body
+        // just to measure it (#384).
+        let mut owned: alloc::collections::BTreeMap<TransientId, u32> =
+            alloc::collections::BTreeMap::new();
         self.store.for_each(&mut |meta: &StoredMessage| {
             if &meta.destination_hash == remote_delivery_hash {
-                owned.insert(meta.transient_id);
+                owned.insert(meta.transient_id, meta.size);
             }
         })?;
 
@@ -845,8 +1048,11 @@ impl<S: PropagationStore> PropagationNode<S> {
         let mut purged = Vec::new();
         if let Some(haves) = &request.haves {
             for transient_id in haves {
-                if owned.contains(transient_id) && self.store.purge(transient_id).unwrap_or(false) {
+                if owned.contains_key(transient_id)
+                    && self.store.purge(transient_id).unwrap_or(false)
+                {
                     purged.push(*transient_id);
+                    owned.remove(transient_id);
                 }
             }
         }
@@ -866,12 +1072,11 @@ impl<S: PropagationStore> PropagationNode<S> {
         let our_limit = (self.config.sync_limit_kb * 1000) as f64;
         // A third cap, tighter than both when a node's heap plan funds
         // less than it announces (`serve_cap_bytes`): serving a response
-        // costs several times its length ([`serve_peak_bytes`]), and a
-        // board that answers past what that plan funds dies in the
-        // transient instead of answering. It bounds the same accounted
-        // sum the other two bound, so the three compose by `min` and the
-        // dominance argument at [`serve_peak_bytes`] carries over
-        // unchanged.
+        // costs more than its length ([`serve_peak_bytes`]), and a board
+        // that answers past what that plan funds dies in the transient
+        // instead of answering. It bounds the same accounted sum the other
+        // two bound, so the three compose by `min` and the dominance
+        // argument at [`serve_peak_bytes`] carries over unchanged.
         let our_limit = match self.config.serve_cap_bytes {
             Some(funded) => our_limit.min(funded as f64),
             None => our_limit,
@@ -882,22 +1087,23 @@ impl<S: PropagationStore> PropagationNode<S> {
         let per_message_overhead = 16.0;
         let mut cumulative_size = 24.0;
 
-        let mut served = Vec::new();
-        let mut bodies = Vec::new();
+        let mut served: Vec<(TransientId, u32)> = Vec::new();
         let mut served_bytes = 0u64;
+        let mut payload_bytes = 0usize;
         if let Some(wants) = &request.wants {
             for transient_id in wants {
-                if !owned.contains(transient_id) || purged.contains(transient_id) {
+                let Some(&stored_size) = owned.get(transient_id) else {
                     // Gone or never ours to give: skipped silently, the
                     // response is simply shorter (:1535 membership test; the
                     // concept paper's §1 records that absence has no error).
                     continue;
-                }
-                let Some(body) = self.store.read_body(transient_id)? else {
-                    continue;
                 };
-                let lxm_size = body.len() as f64;
-                let next_size = cumulative_size + lxm_size + per_message_overhead;
+                let stored_size = stored_size as usize;
+                if stored_size < STAMP_SIZE {
+                    // Not a body this role wrote; nothing servable in it.
+                    continue;
+                }
+                let next_size = cumulative_size + stored_size as f64 + per_message_overhead;
                 if next_size > limit {
                     // Too big for this round; the reference keeps scanning
                     // rather than stopping (:1547 `pass`).
@@ -906,10 +1112,14 @@ impl<S: PropagationStore> PropagationNode<S> {
                 cumulative_size = next_size;
                 // Serve the message without its propagation stamp
                 // (:1549 strips `STAMP_SIZE` from the tail).
-                let unstamped = body[..body.len() - STAMP_SIZE].to_vec();
-                served_bytes += unstamped.len() as u64;
-                served.push(*transient_id);
-                bodies.push(unstamped);
+                let servable = stored_size - STAMP_SIZE;
+                served_bytes += servable as u64;
+                payload_bytes += msgpack::bin_header_len(servable) + servable;
+                served.push((*transient_id, servable as u32));
+                // Serving the same id twice would ship the body twice and
+                // break the plan's one-pass arithmetic; a `wants` list may
+                // legally repeat one.
+                owned.remove(transient_id);
             }
         }
 
@@ -920,16 +1130,47 @@ impl<S: PropagationStore> PropagationNode<S> {
             self.processed.insert(*transient_id, now_secs);
         }
 
-        let response = MessageGetResponse::Messages(bodies).encode()?;
+        let encoded_len = msgpack::array_header_len(served.len()) + payload_bytes;
         Ok(GetOutcome::Fetch {
-            response,
-            served,
-            served_bytes,
+            plan: FetchPlan {
+                served,
+                encoded_len,
+                served_bytes,
+            },
             purged,
         })
     }
 
-    /// Periodic maintenance: purge expired messages
+    /// The bytes [`FetchPlan`] describes, materialised.
+    ///
+    /// The single-packet path needs them — a response under the link MDU
+    /// is a few hundred bytes and one `Vec` is cheaper than a resource —
+    /// and so does every test that wants to read what was served. The
+    /// streamed path
+    /// ([`fetch_source`](Self::fetch_source)) never calls it; that is the
+    /// whole point of #384 B2.
+    pub fn encode_fetch(&self, plan: &FetchPlan) -> Result<Vec<u8>, GetError> {
+        let mut bodies = Vec::with_capacity(plan.served.len());
+        for (transient_id, servable) in &plan.served {
+            let mut body = self.store.read_body(transient_id)?.unwrap_or_default();
+            if body.len() != *servable as usize + STAMP_SIZE {
+                return Err(GetError::Store(StorageError::NotFound));
+            }
+            body.truncate(*servable as usize);
+            bodies.push(body);
+        }
+        Ok(MessageGetResponse::Messages(bodies).encode()?)
+    }
+
+    /// The bytes [`FetchPlan`] describes, as a stream read out of the
+    /// store one record at a time — what a board hands to
+    /// `send_response_resource_from_source`
+    /// (`leviculum-core/src/node/mod.rs`).
+    pub fn fetch_source<'a>(&'a self, plan: &'a FetchPlan) -> FetchSource<'a, S> {
+        FetchSource::new(&self.store, plan)
+    }
+
+    /// Periodic maintenance: purge expired messages    /// Periodic maintenance: purge expired messages
     /// (`clean_message_store`, `reference/LXMF/LXMF/LXMRouter.py:1156-1160`)
     /// and prune the processed-ID cache
     /// (`clean_transient_id_caches`, `:1011`).

@@ -32,12 +32,18 @@
 //! nothing):
 //!
 //! ```text
-//! response 5 427 B      before        after
-//!   single-packet refusal  5 465 B       0 B
-//!   resource-path peak    51 662 B  29 842 B
+//! response 5 427 B        before B1   after B1   after B2
+//!   single-packet refusal    5 465 B        0 B        0 B
+//!   buffered-path peak      51 662 B   29 842 B   19 901 B
+//!   streamed-path peak             -          -    7 154 B
 //!   modelled at the 8 KB cap
-//!                         97 036 B  48 922 B
+//!                           97 036 B   48 922 B   17 264 B
 //! ```
+//!
+//! (B2's effect on the BUFFERED column is the joined ciphertext
+//! `OutgoingResource` used to keep beside its parts; its effect on the
+//! serve is the streamed column, measured by
+//! `a_streamed_serve_holds_only_the_transfer` below.)
 //!
 //! The refusal is the headline: `send_response` compares a computed
 //! length against the MDU now, so the allocation the board actually died
@@ -59,7 +65,8 @@ use leviculum_lxmf::propagation::{
     MessageGetRequest, PropagationUpload, TransferLimit, TransientId,
 };
 use leviculum_lxmf::propagation_node::{
-    serve_peak_bytes, GetOutcome, PropagationNode, PropagationNodeConfig, RESPONSE_FRAME_BYTES,
+    serve_buffered_peak_bytes, serve_peak_bytes, FetchPlan, GetOutcome, PropagationNode,
+    PropagationNodeConfig, RESPONSE_FRAME_BYTES,
 };
 use leviculum_lxmf::propagation_store::MemoryPropagationStore;
 use rand_core::OsRng;
@@ -185,8 +192,11 @@ fn upload(seed: u8) -> Vec<u8> {
     PropagationUpload::single(1_700_000_000.0, lxmf_data, [0xEE; 32]).encode()
 }
 
-/// The field fetch, served out of a real store through the real codec.
-fn field_fetch_response() -> Vec<u8> {
+/// The field fetch, planned out of a real store: the role and the plan,
+/// so the response can be measured either way -- materialised through
+/// the codec ([`PropagationNode::encode_fetch`]) or streamed record by
+/// record ([`PropagationNode::fetch_source`]).
+fn field_fetch_plan() -> (PropagationNode<MemoryPropagationStore>, FetchPlan) {
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(64 * 1024),
         PropagationNodeConfig {
@@ -209,19 +219,26 @@ fn field_fetch_response() -> Vec<u8> {
         haves: None,
         transfer_limit_kb: Some(TransferLimit::Integer(1000)),
     };
-    let GetOutcome::Fetch {
-        response,
-        served,
-        served_bytes,
-        ..
-    } = role
+    let GetOutcome::Fetch { plan, .. } = role
         .handle_get(&fetch.encode().unwrap(), &[7; 16], 0)
         .expect("the fetch is well formed")
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
-    assert_eq!(served.len(), usize::from(FIELD_MESSAGES));
-    assert_eq!(served_bytes, 5376, "the board's own PN_GET bytes= figure");
+    assert_eq!(plan.count(), usize::from(FIELD_MESSAGES));
+    assert_eq!(
+        plan.served_bytes(),
+        5376,
+        "the board's own PN_GET bytes= figure"
+    );
+    (role, plan)
+}
+
+/// The same fetch, materialised -- what the buffered path ships.
+fn field_fetch_response() -> Vec<u8> {
+    let (role, plan) = field_fetch_plan();
+    let response = role.encode_fetch(&plan).expect("the plan is servable");
+    assert_eq!(response.len(), plan.encoded_len());
     response
 }
 
@@ -325,8 +342,8 @@ fn one_fetch_serve_holds_many_copies_of_its_own_response() {
 
     let cap = (BOARD_SYNC_LIMIT_KB * 1000) as usize;
     let sdu = leviculum_core::resource::resource_sdu(500);
-    let modelled_here = serve_peak_bytes(response.len(), sdu);
-    let modelled_at_cap = serve_peak_bytes(cap, sdu);
+    let modelled_here = serve_buffered_peak_bytes(response.len(), sdu);
+    let modelled_at_cap = serve_buffered_peak_bytes(cap, sdu);
 
     eprintln!(
         "SERVE_PEAK response={} framed={framed} refusal={peak_refusal} \
@@ -350,22 +367,115 @@ modelled_here={modelled_here} modelled_at_cap={modelled_at_cap}",
          {board_peak} B -- too loose to size a 96 KiB heap with"
     );
 
-    // The finding, as one number, and the fix, as the other. A response
-    // an 8 KB cap was supposed to bound still costs the heap multiples
-    // of its own length -- five copies is what the resource path is
-    // structurally worth until it streams (#384 B2). But it must cost
-    // well under the nine times it cost before B1, or the copies this
+    // The finding, as one number. A response an 8 KB cap was supposed
+    // to bound still costs the heap multiples of its own length on the
+    // BUFFERED path -- that is what the path is structurally worth, and
+    // it is why the propagation serve stopped using it (#384 B2, and
+    // `a_streamed_serve_holds_only_the_transfer` below). It must stay
+    // well under the nine times it cost before B1, or the copies that
     // batch removed have quietly come back.
     assert!(
-        board_peak >= 4 * response.len(),
+        board_peak >= 3 * response.len(),
         "serving a {} B response cost only {board_peak} B of transient; \
          the finding is that it costs multiples of it",
         response.len()
     );
     assert!(
-        board_peak <= 6 * response.len(),
-        "serving a {} B response cost {board_peak} B -- more than six \
-         times it, so a copy B1 removed is back on the path",
+        board_peak <= 5 * response.len(),
+        "serving a {} B response cost {board_peak} B -- more than five \
+         times it, so a copy B1 or B2 removed is back on the path",
         response.len()
+    );
+}
+
+/// **The B2 measurement: the streamed serve holds no copy of its own
+/// response.** Same field fetch, same link, same allocator probe — only
+/// the path differs: the role hands over a [`FetchPlan`] and
+/// `NodeCore::send_response_resource_from_source` reads the records out
+/// of the store as it cuts the parts.
+///
+/// This is the number that decides whether the field's 24-message
+/// mailbox drains in one round on a board, so it is measured through the
+/// real path rather than argued from the model, and compared with the
+/// model in both directions.
+#[test]
+fn a_streamed_serve_holds_only_the_transfer() {
+    let (role, plan) = field_fetch_plan();
+    let request_id = [0x5Au8; 16];
+    let sdu = leviculum_core::resource::resource_sdu(500);
+    let cap = (BOARD_SYNC_LIMIT_KB * 1000) as usize;
+
+    // What the same answer costs when it is built as bytes first, on
+    // this host, for the comparison this test exists to make.
+    let buffered_peak = {
+        let response = role.encode_fetch(&plan).expect("the plan is servable");
+        let mut serving = established_pair();
+        let probe = alloc_probe::Probe::armed();
+        let _ = serving
+            .serving
+            .send_response_resource(&serving.link_id, &request_id, &response)
+            .expect("the resource path must take it");
+        probe.peak() + response.capacity()
+    };
+
+    let mut serving = established_pair();
+    let (streamed_peak, largest_block) = {
+        let mut source = role.fetch_source(&plan);
+        let probe = alloc_probe::Probe::armed();
+        let _ = serving
+            .serving
+            .send_response_resource_from_source(&serving.link_id, &request_id, &mut source)
+            .expect("the streamed resource path must take it");
+        (probe.peak(), alloc_probe::largest_block())
+    };
+
+    let modelled_here = serve_peak_bytes(plan.encoded_len(), sdu);
+    let modelled_at_cap = serve_peak_bytes(cap, sdu);
+    let buffered_at_cap = serve_buffered_peak_bytes(cap, sdu);
+
+    eprintln!(
+        "SERVE_PEAK_STREAMED response={} streamed_peak={streamed_peak} \
+buffered_peak={buffered_peak} largest_block={largest_block} \
+modelled_here={modelled_here} modelled_at_cap={modelled_at_cap} \
+buffered_at_cap={buffered_at_cap}",
+        plan.encoded_len()
+    );
+
+    // The model must BOUND what runs, or the board's heap budget is
+    // describing something other than the code.
+    assert!(
+        streamed_peak <= modelled_here,
+        "measured {streamed_peak} B exceeds the modelled {modelled_here} B -- \
+         the streamed serve holds something the heap budget does not know about"
+    );
+    // And it must not be vacuous.
+    assert!(
+        modelled_here <= 2 * streamed_peak,
+        "modelled {modelled_here} B is more than twice the measured \
+         {streamed_peak} B -- too loose to size a 96 KiB heap with"
+    );
+
+    // The finding, as one number: streaming the response out of the
+    // store costs the heap LESS than the response it is serving, where
+    // building it as bytes cost multiples of it.
+    assert!(
+        streamed_peak * 2 < buffered_peak,
+        "streaming must more than halve the transient: {streamed_peak} B \
+         against {buffered_peak} B buffered"
+    );
+    assert!(
+        streamed_peak < 3 * plan.encoded_len(),
+        "a streamed {} B response cost {streamed_peak} B of transient -- \
+         a whole copy of it has come back onto the path",
+        plan.encoded_len()
+    );
+
+    // Nothing board-side was filtered out by the block ceiling: the
+    // streamed path links no compressor at all, so every block it makes
+    // is counted.
+    assert!(
+        largest_block < alloc_probe::BLOCK_CEILING_BYTES,
+        "a counted allocation ({largest_block} B) reached the ceiling \
+         that is supposed to exclude only host-only scratch"
     );
 }

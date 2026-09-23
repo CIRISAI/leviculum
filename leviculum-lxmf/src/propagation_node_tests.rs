@@ -178,14 +178,11 @@ fn fetch_serves_unstamped_bodies_and_deletes_only_on_confirmation() {
         .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap();
     match outcome {
-        GetOutcome::Fetch {
-            response,
-            served,
-            purged,
-            ..
-        } => {
-            assert_eq!(served, vec![transient_id]);
+        GetOutcome::Fetch { plan, purged } => {
+            assert_eq!(plan.served_ids(), vec![transient_id]);
             assert!(purged.is_empty());
+            let response = node.encode_fetch(&plan).unwrap();
+            assert_eq!(response.len(), plan.encoded_len());
             match MessageGetResponse::decode(&response).unwrap() {
                 MessageGetResponse::Messages(bodies) => {
                     assert_eq!(bodies, vec![stored[..stored.len() - STAMP_SIZE].to_vec()]);
@@ -203,8 +200,8 @@ fn fetch_serves_unstamped_bodies_and_deletes_only_on_confirmation() {
         .handle_get(&acknowledge.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap();
     match outcome {
-        GetOutcome::Fetch { served, purged, .. } => {
-            assert!(served.is_empty());
+        GetOutcome::Fetch { plan, purged } => {
+            assert!(plan.is_empty());
             assert_eq!(purged, vec![transient_id]);
         }
         other => panic!("{other:?}"),
@@ -235,8 +232,8 @@ fn a_stranger_cannot_fetch_or_purge_someone_elses_mail() {
         .handle_get(&steal.encode().unwrap(), &[9; DESTINATION_LENGTH], 0)
         .unwrap();
     match outcome {
-        GetOutcome::Fetch { served, purged, .. } => {
-            assert!(served.is_empty(), "wrong mailbox must not be served");
+        GetOutcome::Fetch { plan, purged } => {
+            assert!(plan.is_empty(), "wrong mailbox must not be served");
             assert!(purged.is_empty(), "wrong mailbox must not purge");
         }
         other => panic!("{other:?}"),
@@ -263,7 +260,7 @@ fn the_transfer_limit_bounds_one_response_and_skips_rather_than_stops() {
         .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap();
     match outcome {
-        GetOutcome::Fetch { served, .. } => assert_eq!(served, vec![small]),
+        GetOutcome::Fetch { plan, .. } => assert_eq!(plan.served_ids(), vec![small]),
         other => panic!("{other:?}"),
     }
 }
@@ -422,21 +419,21 @@ fn the_field_fetch_frames_the_allocation_that_killed_the_board() {
     let outcome = node
         .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap();
-    let GetOutcome::Fetch {
-        response,
-        served,
-        served_bytes,
-        ..
-    } = outcome
-    else {
+    let GetOutcome::Fetch { plan, .. } = outcome else {
         panic!("a fetch request must produce a fetch outcome");
     };
+    let response = node.encode_fetch(&plan).unwrap();
 
     // The cap did not bite: the board's own PN_GET line said count=24
     // bytes=5376, and so does this.
-    assert_eq!(served.len(), 24, "all 24 must pass the 8 KB cap");
-    assert_eq!(served_bytes, 5376);
+    assert_eq!(plan.count(), 24, "all 24 must pass the 8 KB cap");
+    assert_eq!(plan.served_bytes(), 5376);
     assert_eq!(response.len(), 5427, "the encoded MessageGetResponse");
+    assert_eq!(
+        plan.encoded_len(),
+        response.len(),
+        "the plan must predict the encoded length before it is built"
+    );
     assert_eq!(
         response.len() + RESPONSE_FRAME_BYTES,
         5446,
@@ -474,12 +471,14 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
             haves: None,
             transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
         };
-        let GetOutcome::Fetch { response, .. } = node
+        let GetOutcome::Fetch { plan, .. } = node
             .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
             .unwrap()
         else {
             panic!("a fetch request must produce a fetch outcome");
         };
+        let response = node.encode_fetch(&plan).unwrap();
+        assert_eq!(plan.encoded_len(), response.len());
         let cap = (sync_limit_kb * 1000) as usize;
         assert!(
             response.len() <= cap,
@@ -492,26 +491,37 @@ fn the_encoded_response_never_outgrows_the_accounted_cap() {
 /// What the serve path costs the heap, at the cap the boards announce.
 ///
 /// The number is asserted rather than described because it is the term
-/// the board's role budget has to carry: an 8 KB announced serve limit
-/// buys a 48 922 B transient -- six times the cap, and half of the
-/// board's entire 96 KiB heap, before a single other allocation.
+/// the board's role budget has to carry. Three revisions of it:
 ///
-/// It was 97 036 B, twelve times the cap, until #384 B1 removed the four
-/// copies the path made for nothing (`packed`, `combined`,
-/// `data_to_encrypt`, and the two hash scratch buffers). Half the term
-/// is gone; the term is still larger than the heap can spare, which is
-/// why the boot line still reports a deficit rather than a fit.
+/// * **97 036 B** before #384 B1 — twelve times the cap, with four whole
+///   response copies made for nothing (`packed`, `combined`,
+///   `data_to_encrypt`, two hash scratch buffers).
+/// * **48 922 B** after B1 — six times the cap, and half the board's
+///   entire 96 KiB heap before any other allocation.
+/// * **17 264 B** after B2, which is what this asserts: the response is
+///   streamed out of the store into the resource parts, so the only
+///   whole copy left is the transfer itself, and the cost is a bit over
+///   twice the cap rather than six times it.
+///
+/// The old model is kept exact beside the new one
+/// ([`serve_buffered_peak_bytes`]) so the board's own logs from before
+/// 2026-09-23 stay readable against it.
 #[test]
-fn an_eight_kilobyte_serve_cap_costs_six_times_its_size() {
+fn a_streamed_eight_kilobyte_serve_cap_costs_twice_its_size_not_six_times() {
     let peak = serve_peak_bytes(8_000, BOARD_RESOURCE_SDU);
-    assert_eq!(peak, 48_922);
+    assert_eq!(peak, 17_264);
     assert!(
-        peak > 6 * 8_000,
-        "the serve transient is more than six times the cap that bounds it"
+        peak < 3 * 8_000,
+        "a streamed serve must cost less than three times the cap that bounds it"
     );
+
+    // The path this replaced, still computable, so the before and the
+    // after are one comparison rather than two commits apart.
+    let buffered = serve_buffered_peak_bytes(8_000, BOARD_RESOURCE_SDU);
+    assert_eq!(buffered, 48_922);
     assert!(
-        peak < 97_036,
-        "B1 must not have grown the transient it was ordered to shrink"
+        peak * 2 < buffered,
+        "B2 must more than halve the transient again: {peak} against {buffered}"
     );
 }
 
@@ -520,7 +530,7 @@ fn an_eight_kilobyte_serve_cap_costs_six_times_its_size() {
 /// the answer does not fit.
 #[test]
 fn the_funded_cap_is_the_inverse_of_the_peak() {
-    for budget in [0usize, 880, 5_000, 20_000, 48_922, 200_000] {
+    for budget in [0usize, 880, 5_000, 20_000, 17_264, 48_922, 200_000] {
         let cap = serve_cap_for_peak(budget, BOARD_RESOURCE_SDU);
         assert!(
             serve_peak_bytes(cap, BOARD_RESOURCE_SDU) <= budget || cap == 0,
@@ -534,28 +544,37 @@ fn the_funded_cap_is_the_inverse_of_the_peak() {
 }
 
 /// The answer to "what cap can today's plan honour": the T114's heap
-/// budget leaves 880 B unclaimed, and 880 B of transient buys a serve cap
-/// of 104 bytes -- less than one stored message. Halving the per-byte
-/// cost (#384 B1) doubled the affordable cap and it is still nothing:
-/// the plan as it stands funds no useful serve at all.
+/// budget leaves 784 B unclaimed, and under the streamed serve 784 B of
+/// transient buys a cap of 216 B — the smallest LXMF message the store
+/// takes, and nothing like a field one.
+///
+/// It was 88 B before #384 B2 and 104 B with B1's copies removed. The
+/// point of the number is unchanged: the BOOT plan funds nothing useful
+/// on this board, and what makes the board serve is reading the live
+/// heap instead ([`serve_cap_for_live_heap`],
+/// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`).
 ///
 /// (`budget_slack`, `leviculum-nrf/src/heap_census.rs` -- 784 B is
 /// HEAP_SIZE 98 304 less the T114's node box 31 008, role 21 120,
 /// reserve 18 848, four BLE sessions at 3 948 and four links at 2 664.
 /// The board printed exactly that on 2026-09-23, six seconds before it
-/// died serving a fetch; a const probe of this tree's own
-/// `budget_serve_cap` on the T114's `NodeCore` prints 784 and 88.)
+/// died serving a fetch.)
 #[test]
-fn todays_slack_funds_no_useful_serve_cap() {
+fn todays_slack_funds_no_field_message() {
     let cap = serve_cap_for_peak(784, BOARD_RESOURCE_SDU);
     assert_eq!(
-        cap, 88,
+        cap, 216,
         "the T114's own boot slack must fund the cap its boot line prints"
     );
+    // A field message is 224 B of body and a 32 B stamp, accounted with
+    // 24 B up front and 16 B of per-message overhead.
     assert!(
-        cap < crate::constants::LXMF_OVERHEAD,
-        "784 B of slack must not be read as affording a message-sized serve (got {cap})"
+        cap < 24 + 224 + STAMP_SIZE + 16,
+        "784 B of slack must not be read as affording a field-sized serve (got {cap})"
     );
+    // It is exactly the inverse of the peak, one byte either side.
+    assert!(serve_peak_bytes(cap, BOARD_RESOURCE_SDU) <= 784);
+    assert!(serve_peak_bytes(cap + 1, BOARD_RESOURCE_SDU) > 784);
 }
 
 /// The bound the funded cap buys: a fetch past it is answered with a
@@ -589,20 +608,16 @@ fn a_funded_cap_serves_a_subset_and_keeps_the_rest() {
         haves: None,
         transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
     };
-    let GetOutcome::Fetch {
-        response,
-        served,
-        purged,
-        ..
-    } = node
+    let GetOutcome::Fetch { plan, purged } = node
         .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap()
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
+    let served = plan.served_ids();
 
     assert_eq!(served.len(), 3, "the cap funds three of the eight");
-    assert!(response.len() <= cap, "the response must fit the cap");
+    assert!(plan.encoded_len() <= cap, "the response must fit the cap");
     assert!(purged.is_empty(), "a fetch purges nothing by itself");
     assert_eq!(node.store().len(), 8, "the five unserved are still stored");
 
@@ -618,19 +633,149 @@ fn a_funded_cap_serves_a_subset_and_keeps_the_rest() {
         haves: None,
         transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
     };
-    let GetOutcome::Fetch {
-        served: served_two, ..
-    } = node
+    let GetOutcome::Fetch { plan, .. } = node
         .handle_get(&second.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap()
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
+    let served_two = plan.served_ids();
     assert_eq!(served_two.len(), 3, "the next round serves the next three");
     assert!(
         served_two.iter().all(|id| !served.contains(id)),
         "no message is served twice"
     );
+}
+
+/// **The streamed fetch IS the encoded fetch.** The bytes a board reads
+/// out of its store, record by record, as the resource parts are cut are
+/// the same bytes `MessageGetResponse::encode` would have produced —
+/// which is what makes #384 B2 a heap change and not a wire change.
+///
+/// Read sizes are varied because the resource builder reads through a
+/// scratch buffer sized from the link's SDU, and the source must not care:
+/// a source whose framing depended on the read size would serve different
+/// bytes on a BLE link than on LoRa.
+#[test]
+fn a_streamed_fetch_is_the_encoded_fetch() {
+    use leviculum_core::resource::ResourceSource;
+
+    // Body sizes chosen to straddle msgpack's bin8/bin16 boundary (255),
+    // so the streamed `bin` header has to pick the same form the encoder
+    // does, and array counts either side of fixarray's 16.
+    for (count, body) in [
+        (1usize, 120usize),
+        (5, 300),
+        (16, 113),
+        (20, 255),
+        (20, 256),
+    ] {
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(256 * 1024),
+            PropagationNodeConfig {
+                sync_limit_kb: 64,
+                ..PropagationNodeConfig::default()
+            },
+        );
+        let wants: Vec<TransientId> = (0..count as u8)
+            .map(|seed| {
+                accepted_id(&node.handle_upload(&envelope_sized(7, seed, body), 0, no_validation))
+            })
+            .collect();
+        let fetch = MessageGetRequest {
+            wants: Some(wants),
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+        };
+        let GetOutcome::Fetch { plan, .. } = node
+            .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+            .unwrap()
+        else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        assert_eq!(plan.count(), count, "the whole mailbox must fit the cap");
+
+        let encoded = node.encode_fetch(&plan).unwrap();
+        assert_eq!(
+            plan.encoded_len(),
+            encoded.len(),
+            "the plan's length must be the encoded length ({count} x {body} B)"
+        );
+
+        for chunk in [1usize, 7, 64, 464, 4096] {
+            let mut source = node.fetch_source(&plan);
+            assert_eq!(source.total_len(), encoded.len());
+            let mut streamed = Vec::new();
+            let mut buf = alloc::vec![0u8; chunk];
+            loop {
+                let read = source.read(&mut buf).unwrap();
+                if read == 0 {
+                    break;
+                }
+                streamed.extend_from_slice(&buf[..read]);
+            }
+            assert_eq!(
+                streamed, encoded,
+                "streamed fetch differs from the encoded one \
+                 ({count} x {body} B, reads of {chunk})"
+            );
+            // And it is repeatable: the resource builder reads it twice.
+            source.rewind().unwrap();
+            let mut second = Vec::new();
+            loop {
+                let read = source.read(&mut buf).unwrap();
+                if read == 0 {
+                    break;
+                }
+                second.extend_from_slice(&buf[..read]);
+            }
+            assert_eq!(second, encoded, "the second pass must repeat the first");
+        }
+    }
+}
+
+/// A record that disappears between the plan and the stream fails the
+/// build instead of shortening the response.
+///
+/// It cannot happen through the role's own verbs — the plan and the
+/// stream run inside one synchronous serve, and deletion only happens in
+/// `handle_get` — but the store is a trait and a board's log reclaims
+/// pages on its own schedule. A short read would ship parts that do not
+/// hash to the advertisement, which the receiver only discovers after
+/// paying for every one of them.
+#[test]
+fn a_record_purged_under_a_plan_fails_the_stream() {
+    use leviculum_core::resource::{ResourceSource, SourceError};
+
+    let mut node = node(64 * 1024);
+    let wants: Vec<TransientId> = (0..3u8)
+        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, no_validation)))
+        .collect();
+    let fetch = MessageGetRequest {
+        wants: Some(wants.clone()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+    };
+    let GetOutcome::Fetch { plan, .. } = node
+        .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.count(), 3);
+
+    node.store_mut().purge(&wants[1]).unwrap();
+
+    let mut source = node.fetch_source(&plan);
+    let mut buf = alloc::vec![0u8; 64];
+    let error = loop {
+        match source.read(&mut buf) {
+            Ok(0) => panic!("a stream over a purged record must not reach the end"),
+            Ok(_) => continue,
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(error, SourceError::Unavailable);
 }
 
 /// The board's honest number today is 88 B, which serves nothing. What
@@ -655,19 +800,15 @@ fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
         haves: None,
         transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
     };
-    let GetOutcome::Fetch {
-        response,
-        served,
-        served_bytes,
-        purged,
-    } = node
+    let GetOutcome::Fetch { plan, purged } = node
         .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
         .unwrap()
     else {
         panic!("a fetch request must produce a fetch outcome");
     };
-    assert!(served.is_empty(), "88 B funds no message");
-    assert_eq!(served_bytes, 0);
+    let response = node.encode_fetch(&plan).unwrap();
+    assert!(plan.is_empty(), "88 B funds no message");
+    assert_eq!(plan.served_bytes(), 0);
     assert!(purged.is_empty());
     assert_eq!(node.store().len(), 4, "nothing served is nothing lost");
     // A well-formed, decodable empty answer -- not an error, not nil.

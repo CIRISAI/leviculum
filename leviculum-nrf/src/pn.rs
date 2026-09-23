@@ -378,26 +378,30 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_S
 ///
 /// ```text
 /// reserve + slack   funded fetch response   messages of 224 B
-///        784 B                      88 B                    0
-///      5 000 B                     787 B                    2
-///     20 000 B                   3 245 B                   11
-///     30 380 B                   4 954 B                   18
-///     48 922 B                   8 000 B     the full announced cap
+///        808 B                     222 B                    0
+///      5 000 B                   2 128 B                    7
+///     17 264 B                   8 000 B     the full announced cap
+///     20 000 B                   9 304 B                   34
+///     30 380 B                  14 296 B                   52
 /// ```
 ///
 /// (30 380 B is what the T114 had free when the 24-message fetch of
-/// 2026-09-23 killed it; 18 of those 24 would have fitted.)
+/// 2026-09-23 killed it. Under the buffered serve it funded 4 954 B and
+/// 18 of those 24; since #384 B2 streamed the response out of the store
+/// it funds 14 296 B, and the whole announced 8 KB cap costs 17 264 B
+/// instead of 48 922.)
 ///
-/// And what it costs: the slack is 784 B and one endpoint link is
-/// [`crate::heap_census::budget_per_link`] ≈ 2 664 B, so the first
-/// useful cap would have to come out of the four links the budget
-/// affords — and [`crate::ble::MAX_LINKS`] is also four, asserted at
-/// boot and at compile time. **At four claimable BLE sessions there is
-/// no link to sell, so the honest funded cap today is 88 B: the board
-/// serves nothing.** A useful cap needs a fixed term to shrink (the node
-/// box, the 8 KB inbound sync batch, the 6 KiB fragmentation reserve) or
-/// the serve path to stop materialising its response five times (#384
-/// B2, streaming out of the store), not a bigger number here.
+/// And what it costs: the slack is 808 B and one endpoint link is
+/// [`crate::heap_census::budget_per_link`] ≈ 2 680 B, so raising this
+/// still has to come out of the four links the budget affords — and
+/// [`crate::ble::MAX_LINKS`] is also four, asserted at boot and at
+/// compile time. **At four claimable BLE sessions there is no link to
+/// sell, so the BOOT-funded cap is 222 B.** What makes the board serve
+/// is not this number but the live one
+/// ([`crate::heap_census::live_serve_cap`]): the heap the T114 actually
+/// stood on funds 7 256 B after the margin, which is all 24 of the
+/// field's messages in one fetch. Raising this reserve would buy a
+/// bigger floor, not a bigger serve, and it would cost a link.
 pub const SERVE_RESERVE_BYTES: usize = 0;
 
 /// Peak heap this board holds live AT ONCE while it serves one `/get`
@@ -424,11 +428,11 @@ pub const SERVE_RESERVE_BYTES: usize = 0;
 /// it describes, and is pinned by a measured mvr
 /// (`one_fetch_serve_holds_many_copies_of_its_own_response`,
 /// `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`),
-/// which counts requested bytes through the real path and measured
-/// 29 842 B live for that same 5 427 B response (51 662 B before #384 B1
-/// removed the copies the path made for nothing). The cap bounds the
-/// WIRE response; the path still materialises it five times over and
-/// holds all five together.
+/// which counts requested bytes through the real path. It measured
+/// 51 662 B live for that 5 427 B response before #384 B1, 29 842 B
+/// after it, and since B2 streamed the response out of the store the
+/// path holds no whole copy of it at all: the transfer, one record and
+/// one part's scratch.
 ///
 /// **[`ROLE_BUDGET_BYTES`] below funds [`SERVE_RESERVE_BYTES`] of this,
 /// which is zero, and that is the open decision, not an oversight** —
@@ -469,29 +473,28 @@ pub const SERVE_PEAK_BYTES: usize =
 /// The arithmetic, at today's constants on a T114:
 ///
 /// * announced serve cap `BOARD_SYNC_LIMIT_KB` = 8 KB;
-/// * [`SERVE_PEAK_BYTES`] at that cap = **48 922 B**, six times the
-///   cap, because the serve path still materialises the response five
-///   times between the store and the resource advertisement (it was
-///   97 036 B and a dozen copies before #384 B1);
+/// * [`SERVE_PEAK_BYTES`] at that cap = **17 264 B**, a bit over twice
+///   the cap (97 036 B before #384 B1, 48 922 B after it; B2 streamed
+///   the response out of the store and the four whole copies between
+///   the store and the advertisement stopped existing);
 /// * what the plan leaves for it = [`SERVE_RESERVE_BYTES`] plus
-///   [`crate::heap_census::budget_slack`], **784 B** on the T114 that
-///   died (its own boot line, 2026-09-23) — the remainder after
-///   `max_endpoint_links` floors its division, and it cannot grow
-///   without taking a link away from [`crate::ble::MAX_LINKS`];
-/// * deficit = **48 138 B**, on a 96 KiB heap — halved by B1, and still
-///   half the heap;
-/// * so the funded fetch response,
-///   [`crate::heap_census::budget_serve_cap`], is **88 B** — less than
-///   one stored message. The board lists its mail and serves none of
-///   it, which is a finding to put in front of the Lead, and is what
-///   `serve_cap=` on the boot line exists to say. It is not a crash,
-///   and nothing in the store is lost to it.
+///   [`crate::heap_census::budget_slack`], **808 B** on the T114 — the
+///   remainder after `max_endpoint_links` floors its division, and it
+///   cannot grow without taking a link away from
+///   [`crate::ble::MAX_LINKS`];
+/// * deficit against the full announced cap = **16 456 B**;
+/// * so the BOOT-funded fetch response,
+///   [`crate::heap_census::budget_serve_cap`], is **222 B** — about one
+///   minimal message, and that is what `serve_cap=` on the boot line
+///   says. It is a floor, not the serve: every `/get` re-reads the cap
+///   from the heap the board HAS
+///   ([`crate::heap_census::live_serve_cap`]), and the 30 380 B that
+///   T114 stood on funds 7 256 B after the margin — all 24 of the
+///   field's messages in one fetch, where the buffered path funded nine.
 ///
-/// Funding a useful cap means taking bytes from a term above, from the
-/// reserve, from the link count, or from what is left of the
-/// materialisation (streaming the response out of the store, #384 B2,
-/// is the next order and is not in these numbers). That is a capacity
-/// decision about the board's headline feature and it is the Lead's;
+/// Funding a bigger FLOOR still means taking bytes from a term above,
+/// from the link count, or from the reserve, and it would not change
+/// what the board serves in the field. That decision is the Lead's;
 /// [`SERVE_RESERVE_BYTES`] is where it is made, and the boot line
 /// reports the gap (`HEAP_BUDGET … serve= slack= serve_cap=`, and the
 /// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
@@ -2472,14 +2475,15 @@ impl Engine {
     /// feared (#388, order 138).
     ///
     /// The boot cap is a floor: it is the plan's own worst case, every
-    /// term at its maximum at once, and on a T114 that funds 88 B —
-    /// less than one stored message, so the board lists its mail and
-    /// serves none of it. The heap it actually stands on when a client
-    /// fetches is usually much larger (30 380 B free when the
-    /// 2026-09-23 fetch killed it), and
+    /// term at its maximum at once, and on a T114 that funds 222 B —
+    /// about one minimal message and nothing like a field one. The heap
+    /// it actually stands on when a client fetches is much larger
+    /// (30 380 B free when the 2026-09-23 fetch killed it), and
     /// [`crate::heap_census::live_serve_cap`] says what that funds,
     /// after [`crate::heap_census::SERVE_MARGIN_BYTES`] is taken off for
-    /// what can still arrive while the serve is in flight.
+    /// what can still arrive while the serve is in flight: **7 256 B**,
+    /// which is the field's whole 24-message mailbox in one fetch since
+    /// #384 B2 streamed the response out of the store.
     ///
     /// Read here, once per `/get`, and not cached: the point of the
     /// number is that it moves. Both census figures are read together —
@@ -2629,12 +2633,7 @@ impl Engine {
                         );
                         self.respond(node, &link_id, &request_id, &response, out);
                     }
-                    Ok(GetOutcome::Fetch {
-                        response,
-                        served,
-                        served_bytes,
-                        purged,
-                    }) => {
+                    Ok(GetOutcome::Fetch { plan, purged }) => {
                         // The purges the client confirmed go to flash
                         // before the response claims anything.
                         let _ = self.flush(node).await;
@@ -2643,12 +2642,12 @@ impl Engine {
                             format_args!(
                                 "dst={} form=fetch count={} bytes={} purged={}",
                                 Hex(&mailbox),
-                                served.len(),
-                                served_bytes,
+                                plan.count(),
+                                plan.served_bytes(),
                                 purged.len()
                             ),
                         );
-                        self.respond(node, &link_id, &request_id, &response, out);
+                        self.respond_fetch(node, &link_id, &request_id, &plan, out);
                     }
                     Err(_) => {
                         // msgpack nil, the reference's answer to a
@@ -2832,6 +2831,49 @@ impl Engine {
                 self.drop_link_state(&link_id);
                 out.merge(node.close_link(&link_id));
             }
+        }
+    }
+
+    /// Answer a fetch: one data packet when the response fits one, a
+    /// STREAMED response resource when it does not (Codeberg #384 B2).
+    ///
+    /// This is the line the board died on, twice. Building the response
+    /// as bytes cost a copy of it, a framed copy, a plaintext copy and a
+    /// ciphertext copy before the parts existed, all four live together;
+    /// the T114's `PANIC_PMRT` names the third of them (5 450 B). Here
+    /// the role hands over a plan and the resource builder reads the
+    /// records out of flash as it cuts the parts, so the only whole copy
+    /// is the transfer.
+    ///
+    /// Under the link MDU nothing streams: a few hundred bytes as one
+    /// `Vec` is cheaper than a resource, and it is the same branch
+    /// `lnpnd` takes, so both run one code path.
+    fn respond_fetch<R, C, S>(
+        &self,
+        node: &mut NodeCore<R, C, S>,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        plan: &leviculum_lxmf::FetchPlan,
+        out: &mut TickOutput,
+    ) where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        if node.response_fits_packet(link_id, plan.encoded_len()) {
+            match self.role.encode_fetch(plan) {
+                Ok(response) => self.respond(node, link_id, request_id, &response, out),
+                // msgpack nil, the reference's answer to a request it
+                // could not process.
+                Err(_) => self.respond(node, link_id, request_id, &[0xC0], out),
+            }
+            return;
+        }
+        let mut source = self.role.fetch_source(plan);
+        if let Ok((_, send)) =
+            node.send_response_resource_from_source(link_id, request_id, &mut source)
+        {
+            out.merge(send);
         }
     }
 
