@@ -1,7 +1,7 @@
 //! Python-compatible known_destinations persistence
 //!
 //! Format: msgpack map {dest_hash(16 bytes) → [timestamp(f64), packet_hash(32 bytes),
-//! public_key(64 bytes), app_data(bytes or nil)]}
+//! public_key(64 bytes), app_data(bytes or nil), use_state(int or f64)]}
 //!
 //! Python ref: `remember` (Identity.py:101-113), `save_known_destinations`
 //! (Identity.py:177-239), `load_known_destinations` (Identity.py:242-265)
@@ -10,14 +10,16 @@ use std::collections::BTreeMap;
 
 use crate::error::{Error, Result};
 use leviculum_core::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
-pub(crate) use leviculum_core::known_destinations::{KnownDestEntry, PACKET_HASH_LEN};
+pub(crate) use leviculum_core::known_destinations::{
+    KnownDestEntry, KnownDestUseState, PACKET_HASH_LEN,
+};
 
 pub(crate) const KNOWN_DESTINATIONS_FILE: &str = "known_destinations";
 
 /// Decode a known_destinations msgpack blob into entries.
 ///
 /// Python format: msgpack map where keys are 16-byte binary (dest hashes)
-/// and values are arrays: [f64, bin32, bin64, bin_or_nil].
+/// and values are arrays: [f64, bin32, bin64, bin_or_nil, int_or_f64].
 pub(crate) fn decode_known_destinations(
     data: &[u8],
 ) -> Result<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>> {
@@ -41,8 +43,9 @@ pub(crate) fn decode_known_destinations(
         };
 
         // Value: array of at least 4 elements. rnsd writes 5-element values
-        // `[ts, packet_hash, pubkey, app_data, 0]` (Identity.py:107); accept
-        // those, reading the first four fields and ignoring trailing elements.
+        // `[ts, packet_hash, pubkey, app_data, use_state]` (Identity.py:107);
+        // a shorter one is a pre-#321 file of ours, which the reference's own
+        // loader fills up with a `0` use-state (Identity.py:252-254).
         let arr = match val.as_array() {
             Some(a) if a.len() >= 4 => a,
             _ => continue,
@@ -85,6 +88,18 @@ pub(crate) fn decode_known_destinations(
             _ => None,
         };
 
+        // [4] use_state: the cull field (Codeberg #321). Absent in files we
+        // wrote before this, and in that case never-used, exactly as the
+        // reference reads them.
+        let use_state = match arr.get(4) {
+            Some(rmpv::Value::Integer(i)) => {
+                KnownDestUseState::from_seconds(i.as_f64().unwrap_or(0.0))
+            }
+            Some(rmpv::Value::F64(f)) => KnownDestUseState::from_seconds(*f),
+            Some(rmpv::Value::F32(f)) => KnownDestUseState::from_seconds(*f as f64),
+            _ => KnownDestUseState::NeverUsed,
+        };
+
         entries.insert(
             key_bytes,
             KnownDestEntry {
@@ -92,6 +107,7 @@ pub(crate) fn decode_known_destinations(
                 packet_hash,
                 public_key,
                 app_data,
+                use_state,
             },
         );
     }
@@ -117,6 +133,14 @@ pub(crate) fn encode_known_destinations(
                 match &entry.app_data {
                     Some(data) => Value::Binary(data.clone()),
                     None => Value::Nil,
+                },
+                // The fifth element, in the same msgpack types the reference
+                // writes: integers for the two sentinels, a float for a
+                // `time.time()` stamp (Identity.py:107, 272, 281).
+                match entry.use_state {
+                    KnownDestUseState::NeverUsed => Value::from(0i64),
+                    KnownDestUseState::Retained => Value::from(-1i64),
+                    KnownDestUseState::Used(secs) => Value::F64(secs),
                 },
             ]);
             (key, val)
@@ -201,6 +225,7 @@ mod tests {
                     } else {
                         Some(app_data.to_vec())
                     },
+                    use_state: KnownDestUseState::default(),
                 },
             );
         }
@@ -221,6 +246,7 @@ mod tests {
                         packet_hash: vec![0u8; PACKET_HASH_LEN],
                         public_key: identity.public_key_bytes(),
                         app_data: None,
+                        use_state: KnownDestUseState::default(),
                     });
             }
         }
@@ -247,6 +273,7 @@ mod tests {
                 packet_hash: vec![0xBB; PACKET_HASH_LEN],
                 public_key: identity.public_key_bytes(),
                 app_data: Some(b"test_app".to_vec()),
+                use_state: KnownDestUseState::default(),
             },
         );
 
@@ -273,6 +300,7 @@ mod tests {
                 packet_hash: vec![0; PACKET_HASH_LEN],
                 public_key: identity.public_key_bytes(),
                 app_data: None,
+                use_state: KnownDestUseState::default(),
             },
         );
 
@@ -296,6 +324,7 @@ mod tests {
                 packet_hash: vec![0; PACKET_HASH_LEN],
                 public_key: id1.public_key_bytes(),
                 app_data: None,
+                use_state: KnownDestUseState::default(),
             },
         );
         entries.insert(
@@ -305,6 +334,7 @@ mod tests {
                 packet_hash: vec![0; PACKET_HASH_LEN],
                 public_key: id2.public_key_bytes(),
                 app_data: None,
+                use_state: KnownDestUseState::default(),
             },
         );
 
@@ -376,9 +406,8 @@ mod tests {
     }
 
     /// rnsd writes 5-element values `[ts, packet_hash, pubkey, app_data, 0]`
-    /// (Identity.py:107). The decoder must accept them, reading the first four
-    /// fields and ignoring the trailing element, so a warm rnsd identity cache
-    /// survives a swap to lnsd.
+    /// (Identity.py:107). The decoder must accept them, reading all five
+    /// fields, so a warm rnsd identity cache survives a swap to lnsd.
     #[test]
     fn test_decode_rnsd_five_element_entry() {
         use rmpv::Value;
@@ -404,6 +433,81 @@ mod tests {
         assert_eq!(entry.public_key, pubkey);
         assert_eq!(entry.packet_hash, vec![0x22; PACKET_HASH_LEN]);
         assert_eq!(entry.app_data, Some(b"app".to_vec()));
+        assert_eq!(entry.use_state, KnownDestUseState::NeverUsed);
+    }
+
+    /// Codeberg #321: the fifth element is what the reference's cull reads
+    /// (Identity.py:336-366), so all three of its states have to come back out
+    /// of a round-trip through us unchanged. Before this, the encoder emitted
+    /// four elements and a pin Python had set was silently downgraded to
+    /// "never used" — an ordinary cull candidate, ratchet file included.
+    #[test]
+    fn test_use_state_round_trips() {
+        let cases = [
+            ([0x51; TRUNCATED_HASHBYTES], KnownDestUseState::NeverUsed),
+            ([0x52; TRUNCATED_HASHBYTES], KnownDestUseState::Retained),
+            (
+                [0x53; TRUNCATED_HASHBYTES],
+                KnownDestUseState::Used(1_756_000_000.0),
+            ),
+        ];
+
+        let mut entries = BTreeMap::new();
+        for (hash, use_state) in cases {
+            let identity = Identity::generate(&mut rand_core::OsRng);
+            entries.insert(
+                hash,
+                KnownDestEntry {
+                    timestamp: 1708300000.0,
+                    packet_hash: vec![0; PACKET_HASH_LEN],
+                    public_key: identity.public_key_bytes(),
+                    app_data: None,
+                    use_state,
+                },
+            );
+        }
+
+        let decoded =
+            decode_known_destinations(&encode_known_destinations(&entries).unwrap()).unwrap();
+        for (hash, use_state) in cases {
+            assert_eq!(
+                decoded[&hash].use_state, use_state,
+                "use-state must survive a round-trip through our own codec"
+            );
+        }
+    }
+
+    /// The sentinels go out as the msgpack types the reference writes: the
+    /// integers `0` and `-1` (Identity.py:107, 281), a float for a recency
+    /// stamp (:271). A `rnsd` reading the file back compares them with
+    /// `> 0` / `== 0` / `== -1` (Identity.py:336-348).
+    #[test]
+    fn test_use_state_is_encoded_in_pythons_types() {
+        let fifth = |use_state| {
+            let hash = [0x61; TRUNCATED_HASHBYTES];
+            let identity = Identity::generate(&mut rand_core::OsRng);
+            let mut entries = BTreeMap::new();
+            entries.insert(
+                hash,
+                KnownDestEntry {
+                    timestamp: 1708300000.0,
+                    packet_hash: vec![0; PACKET_HASH_LEN],
+                    public_key: identity.public_key_bytes(),
+                    app_data: None,
+                    use_state,
+                },
+            );
+            let encoded = encode_known_destinations(&entries).unwrap();
+            let value = rmpv::decode::read_value(&mut &encoded[..]).unwrap();
+            value.as_map().unwrap()[0].1.as_array().unwrap()[4].clone()
+        };
+
+        assert_eq!(fifth(KnownDestUseState::NeverUsed), rmpv::Value::from(0i64));
+        assert_eq!(fifth(KnownDestUseState::Retained), rmpv::Value::from(-1i64));
+        assert_eq!(
+            fifth(KnownDestUseState::Used(1_756_000_000.0)),
+            rmpv::Value::F64(1_756_000_000.0)
+        );
     }
 
     /// A canonical 4-element entry (our own encoding) must still decode.
@@ -429,6 +533,12 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[&hash].public_key, pubkey);
         assert_eq!(decoded[&hash].app_data, None);
+        assert_eq!(
+            decoded[&hash].use_state,
+            KnownDestUseState::NeverUsed,
+            "a short entry reads as never-used, as the reference's loader \
+             fills it (Identity.py:252-254)"
+        );
     }
 
     #[test]

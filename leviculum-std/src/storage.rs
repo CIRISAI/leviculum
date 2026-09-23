@@ -28,7 +28,7 @@ use crate::error::{Error, Result};
 use crate::file_known_destinations_store::FileKnownDestinationsStore;
 use crate::file_packet_hash_store::FilePacketHashStore;
 use crate::file_ratchet_store::FileRatchetStore;
-use crate::known_destinations::{KnownDestEntry, PACKET_HASH_LEN};
+use crate::known_destinations::{KnownDestEntry, KnownDestUseState, PACKET_HASH_LEN};
 use leviculum_core::known_destinations::KnownDestinationsStore;
 use leviculum_core::packet_hash_store::PacketHashStore;
 use leviculum_core::ratchet_store::RatchetStore;
@@ -507,6 +507,13 @@ impl Storage {
                         packet_hash: vec![0u8; PACKET_HASH_LEN],
                         public_key: identity.public_key_bytes(),
                         app_data: announced,
+                        // Freshly remembered, so never used — the value
+                        // `Identity.remember` writes (Identity.py:107). An
+                        // entry that already existed keeps whatever use-state
+                        // came off disk: `and_modify` above touches only the
+                        // fields a new announce refreshes, as `remember` does
+                        // for a known destination (Identity.py:108-113).
+                        use_state: KnownDestUseState::default(),
                     });
             }
             Some((self.identities_gen, self.known_dest_entries.clone()))
@@ -1362,6 +1369,7 @@ mod tests {
                 packet_hash: vec![0; 32],
                 public_key: id.public_key_bytes(),
                 app_data: None,
+                use_state: KnownDestUseState::default(),
             },
         );
         let encoded = encode_known_destinations(&entries).unwrap();
@@ -1488,6 +1496,7 @@ mod tests {
                     packet_hash: vec![0xAB; PACKET_HASH_LEN],
                     public_key: id.public_key_bytes(),
                     app_data: app_data.clone(),
+                    use_state: KnownDestUseState::default(),
                 },
             );
 

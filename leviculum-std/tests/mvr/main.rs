@@ -206,6 +206,7 @@ mod recall_survives_a_restart;
 mod reliable_channel_delivery_backpressure;
 mod resource_consecutive_push_window_policy;
 mod responder_close_delivery;
+mod retained_mark_survives_a_daemon_swap;
 mod rust_client_path_install_from_python;
 mod rust_client_path_install_loop_race;
 mod rust_client_path_install_via_relay;
