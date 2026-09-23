@@ -134,6 +134,7 @@ pub mod alloc_probe {
 static COUNTING: alloc_probe::Counting = alloc_probe::Counting;
 
 mod announce_emission_unix_time;
+mod burst_continuation_contends_inside_its_own_answer;
 mod client_wait_for_path_request_fallback;
 mod core_lock_reentrancy;
 mod core_processor_seam;
