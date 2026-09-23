@@ -58,8 +58,10 @@ use crate::transport::Action;
 
 /// Deterministic xorshift64* RNG so each "daemon" is a fixed, replayable
 /// node. Not cryptographically strong — test-only, the `CryptoRng` marker
-/// is required by `NodeCore`'s bound.
-struct SeededRng(u64);
+/// is required by `NodeCore`'s bound. Shared with
+/// `mvr_relay_endpoint_announce_loss`, which builds the same shape of
+/// co-started daemon and must draw the same announce jitter.
+pub(super) struct SeededRng(pub(super) u64);
 
 impl RngCore for SeededRng {
     fn next_u32(&mut self) -> u32 {

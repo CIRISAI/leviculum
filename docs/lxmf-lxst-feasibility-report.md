@@ -92,9 +92,9 @@ This section is the foundation; everything else is judged against it.
   in `core/src`.
 - The application boundary is `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`
   (`node/mod.rs:139`):
-  - inbound bytes: `handle_packet(iface, &[u8]) -> TickOutput` (`node/mod.rs:1028`)
-  - maintenance tick: `handle_timeout() -> TickOutput` (`node/mod.rs:1120`)
-  - scheduling hint: `next_deadline() -> Option<u64>` (`node/mod.rs:1151`)
+  - inbound bytes: `handle_packet(iface, &[u8]) -> TickOutput` (`node/mod.rs:1030`)
+  - maintenance tick: `handle_timeout() -> TickOutput` (`node/mod.rs:1122`)
+  - scheduling hint: `next_deadline() -> Option<u64>` (`node/mod.rs:1153`)
   - every send method returns `TickOutput` instead of doing I/O.
 - `TickOutput { actions: Vec<Action>, events: Vec<NodeEvent> }` (`transport.rs:145`);
   `Action = SendPacket{iface,data} | Broadcast{data,exclude_iface}`
@@ -114,12 +114,12 @@ This section is the foundation; everything else is judged against it.
 |------|--------------------|-----------|
 | Identity: sign / verify / hash / encrypt / decrypt | Yes, public, no_std | `identity.rs:190,202,155,310,382` |
 | Destination: construct, hash, announce, encrypt-to-dest (ratchet-aware) | Yes, public | `destination.rs:285,334,752,674,640` |
-| Send single addressed packet | Yes via `NodeCore::send_single_packet` | `node/mod.rs:469` |
+| Send single addressed packet | Yes via `NodeCore::send_single_packet` | `node/mod.rs:471` |
 | Receive inbound (events, not callbacks) | Yes via `NodeEvent::PacketReceived` etc. | `event.rs:59,24` |
 | Announce / learn peers | Yes; `ReceivedAnnounce` exposes keys, app_data, ratchet, to_identity | `announce.rs:263` |
-| Link: connect / accept / send / identify / close | Yes via NodeCore orchestration | `link_management.rs:185,276,449`, `node/mod.rs:574` |
+| Link: connect / accept / send / identify / close | Yes via NodeCore orchestration | `link_management.rs:185,276,449`, `node/mod.rs:576` |
 | Link inbound (request/established/message/closed) | Yes via events | `event.rs:84,94,105,121` |
-| Resource: send / accept / progress / complete | Yes via `NodeCore::send_resource` etc. | `node/mod.rs:852,898` |
+| Resource: send / accept / progress / complete | Yes via `NodeCore::send_resource` etc. | `node/mod.rs:854,900` |
 
 ### 2.3 Gaps in the core API we will hit
 
@@ -141,7 +141,7 @@ This section is the foundation; everything else is judged against it.
    **Priority-1 wire-compatibility concern** for large LXMF messages. LXMF must
    require `leviculum-core/compression`. `libbz2-rs-sys` is no_std-friendly.
 6. **`remember_identity` precondition.** `send_single_packet` needs the peer
-   identity remembered first (`node/mod.rs:369`); LXMF learns it from announces.
+   identity remembered first (`node/mod.rs:371`); LXMF learns it from announces.
 
 None of these is a structural blocker. (3) and (5) are the two that touch
 `leviculum-core` itself and should be decided before LXMF coding starts.
