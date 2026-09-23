@@ -625,8 +625,9 @@ pub enum ConfigError {
     TxPowerOutOfRange,
     SpreadingFactorOutOfRange,
     /// SF5 or SF6: a spreading factor the modem modulates but the driver
-    /// cannot carrier-sense at, because no `cadDetPeak` for it is published
-    /// in anything this tree holds ([`crate::sx126x::cad_params`]).
+    /// cannot carrier-sense at, because this tree carries no `cadDetPeak` for
+    /// it and nothing it holds publishes one ([`crate::sx126x::cad_params`],
+    /// whose shipped rows start at SF7 and are themselves unsourced).
     SpreadingFactorWithoutCarrierDetect,
     CodingRateOutOfRange,
 }

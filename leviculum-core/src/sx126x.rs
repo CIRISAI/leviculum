@@ -296,7 +296,7 @@ impl CadParams {
 }
 
 /// `cadSymbolNum`/`cadDetPeak` for `sf`, or `None` for a spreading factor
-/// this tree has no published values for.
+/// this tree carries no threshold for.
 ///
 /// # Why a `None` and not a fallback
 ///
@@ -312,25 +312,44 @@ impl CadParams {
 /// is turned into one an operator sees before the radio is configured rather
 /// than after it is on the air.
 ///
-/// # The values
+/// # Where the `cadDetPeak` column comes from: nowhere that can be read
 ///
-/// SF7-SF12 are the reference RNode firmware's and were measured against it
-/// on the rig; they are what every archived LNode capture was taken with. The
-/// SX1262 datasheet's recommended-settings table is the source (cited in this
-/// tree as "Table 13-81" since the driver was written), but **the datasheet
-/// itself is not in the tree** — `docs/src/sx1262-datasheet-reference.md` is
-/// a driver-development extract that stops short of the CAD tables, and
-/// `reference/RNode_Firmware` never programs `SetCadParams` at all. So the
-/// SF5 and SF6 entries cannot be added by reading anything available here,
-/// and they are not invented: at those spreading factors the symbol is short
-/// and the correlation peak sits elsewhere again, so interpolating from SF7
-/// would be a number with the shape of a measurement and none of the
-/// authority.
+/// It arrived whole in `579e99c6` (2026-04-13) under a citation to
+/// "datasheet Table 13-81" and has not changed a byte since, and that
+/// citation checks out against nothing this tree holds. The revision we
+/// work from is Rev 2.2, Dec 2024 (`docs/src/sx1262-datasheet-reference.md`),
+/// and that extract stops before `SetCadParams` (§13.4.7) entirely, so the
+/// table it names cannot be looked up here. Its numbering argues against the
+/// number as well: the extract records Table 13-76 for the §13.5.1 status
+/// byte and the driver cites Table 13-77 for §13.5.3 `GetPacketStatus`, which
+/// puts a 13-81 inside the §13.5.x status and RSSI commands — past CAD, not
+/// in it. The reference firmware is not the source either: it defines
+/// `OP_CAD_PARAMS` (`reference/RNode_Firmware/sx126x.cpp:43`) and never sends
+/// the command, so it holds no thresholds to have been taken from. Codeberg
+/// #351 adds that where Semtech does publish such a ladder — an earlier
+/// revision, and the SX1268 — this one sits two spreading-factor steps off
+/// it.
 ///
-/// `cadSymbolNum` is not from the table. From SF10 up the airtime of a frame
-/// is seconds and a 4-symbol window usually lands in the middle of a peer's
-/// transmission without seeing its preamble, so those listen over 8; the
-/// thresholds are unchanged by that choice.
+/// What the column has instead of a source is service: every archived LNode
+/// capture since it landed was taken with it, and the rig link listens before
+/// it keys on it and works. In a carrier-sense path that outranks an untested
+/// table, which is why it is still here — not because it can be read off
+/// anything. Settling it against the published ladder is an A/B at the
+/// spreading factors we use, and it needs a scenario that can see carrier
+/// sense at all — a node transmitting into another's airtime by design, the
+/// one #276 is missing. Open on #351; until it runs, no reader should take
+/// these six bytes for documented values.
+///
+/// That is also why SF5 and SF6 are `None` rather than interpolated. With the
+/// shipped rows themselves unsourced there is nothing to interpolate from,
+/// and at those spreading factors the symbol is short and the correlation
+/// peak sits elsewhere again, so a derived seventh row would have the shape
+/// of a measurement and none of the authority.
+///
+/// `cadSymbolNum` is the column that was measured. From SF10 up the airtime
+/// of a frame is seconds and a 4-symbol window usually lands in the middle of
+/// a peer's transmission without seeing its preamble, so those listen over 8
+/// (`3b45877`, on the rig); the thresholds were unchanged by that work.
 pub fn cad_params(sf: u8) -> Option<CadParams> {
     let (symbol_num, detection_peak) = match sf {
         7 | 8 => (0x02, 0x16),
@@ -1553,8 +1572,13 @@ mod tests {
     /// handed unlisted spreading factors the SF7/SF8 pair, and a test that
     /// computed the expected value the way the code does would have passed
     /// against it.
+    ///
+    /// What is pinned here is what shipped, not what a datasheet says: the
+    /// `cadDetPeak` column has no readable source (Codeberg #351), so this is
+    /// the record of which six bytes every capture and every rig run was taken
+    /// under. The A/B on #351 may replace them; nothing else may.
     #[test]
-    fn each_spreading_factor_has_the_detection_pair_it_was_measured_with() {
+    fn each_spreading_factor_has_the_detection_pair_its_captures_were_taken_with() {
         for (sf, symbol_num, detection_peak) in [
             (7u8, 0x02u8, 0x16u8),
             (8, 0x02, 0x16),
