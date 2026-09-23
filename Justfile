@@ -1064,7 +1064,7 @@ standard: fast test-ffi verify-packaging
 [doc('Build the release binaries periculum mounts into its containers')]
 build-integ-bins:
     find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src lnpnd/src lnmsg/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lora-proxy --bin lxmf-node --bin lnpnd --bin lnmsg
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnprobe --bin lnpath --bin lora-proxy --bin lxmf-node --bin lnpnd --bin lnmsg
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.
