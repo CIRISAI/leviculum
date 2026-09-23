@@ -32,6 +32,12 @@ use super::{LinkStats, NodeCore};
 #[derive(Debug, Clone)]
 pub(super) struct LinkRetryState {
     pub remaining: u8,
+    /// How many link requests this establishment has put on the air so far,
+    /// counting the one `connect()` sent as attempt 1. Carried across the
+    /// re-key so the death line can state how much of the budget was spent
+    /// (Codeberg #327: a field log that showed one request and a death, with
+    /// no way to tell that two more requests had gone out unlogged).
+    pub attempt: u8,
 }
 
 /// Outcome of trying to advance a split outgoing resource transfer after a
@@ -309,8 +315,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // each hop is an independent loss opportunity. A 3-hop path has 3×
         // the chance of losing the request or proof compared to 1-hop.
         let retries = core::cmp::max(LINK_REQUEST_MAX_RETRIES, hops);
-        self.link_retry_state
-            .insert(link_id, LinkRetryState { remaining: retries });
+        self.link_retry_state.insert(
+            link_id,
+            LinkRetryState {
+                remaining: retries,
+                attempt: 1,
+            },
+        );
 
         // Register link_id as a local destination so that the returning
         // LRPROOF (and subsequent data packets) are delivered to us.
@@ -333,12 +344,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // pinpoint which handshake packet is lost on a cold lossy path.
         crate::tracing::debug!(
             target: "leviculum_core::link",
-            "LINK_REQUEST_TX link={} dest={} t_ms={} hops={} routed={}",
+            "LINK_REQUEST_TX link={} dest={} t_ms={} hops={} routed={} attempt=1 retries_left={}",
             HexShort(link_id.as_bytes()),
             HexShort(dest_hash.as_bytes()),
             now_ms,
             hops,
             was_routed,
+            retries,
         );
 
         let output = self.process_events_and_actions();
@@ -3230,8 +3242,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         self.transport.register_destination(*new_link_id.as_bytes());
 
                         // Rebind retry bookkeeping and caller-visible ids.
+                        let mut attempt = 0;
                         if let Some(mut retry) = self.link_retry_state.remove(&link_id) {
                             retry.remaining -= 1;
+                            retry.attempt = retry.attempt.saturating_add(1);
+                            attempt = retry.attempt;
                             self.link_retry_state.insert(new_link_id, retry);
                         }
                         for target in self.link_id_aliases.values_mut() {
@@ -3253,6 +3268,30 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         if !was_routed {
                             self.transport.send_on_all_interfaces(&packet);
                         }
+
+                        // Same target as LINK_REQUEST_TX, because a hardware
+                        // run enables `leviculum_core::link` and nothing
+                        // deeper: the "retrying with fresh keys" line above
+                        // sits on this module's target, which every field
+                        // RUST_LOG drops to `info`. Without this line the only
+                        // trace a retransmit leaves in a field log is that the
+                        // id on LINK_DIED is not the id on LINK_REQUEST_TX —
+                        // the re-key — and #327 shows what that costs: a cell
+                        // whose three spent attempts were read as one request
+                        // that never got an answer. `prev` chains the attempt
+                        // back to the request it replaces.
+                        crate::tracing::debug!(
+                            target: "leviculum_core::link",
+                            "LINK_REQUEST_RETX link={} prev={} dest={} t_ms={} hops={} routed={} attempt={} retries_left={}",
+                            HexShort(new_link_id.as_bytes()),
+                            HexShort(link_id.as_bytes()),
+                            HexShort(&dest_hash_bytes),
+                            now_ms,
+                            hops,
+                            was_routed,
+                            attempt,
+                            retries_left - 1,
+                        );
                         continue;
                     }
                 }
@@ -3263,13 +3302,25 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 "Link <{}> establishment timed out (no retries left)",
                 HexShort(link_id.as_bytes())
             );
+            // `attempts` is how many link requests this establishment spent,
+            // `threshold_ms` the timeout of the LAST one only (each retry
+            // re-rolls its jitter). Reading elapsed against threshold without
+            // it invites the #327 mistake: 40021 ms against a 13476 ms
+            // threshold is not one attempt that waited three times too long,
+            // it is three attempts that each timed out.
+            let attempts = self
+                .link_retry_state
+                .get(&link_id)
+                .map(|r| r.attempt)
+                .unwrap_or(1);
             if let Some(l) = self.links.get(&link_id) {
                 crate::tracing::debug!(
                     target: "leviculum_core::link",
-                    "LINK_DIED link={} reason=other detail=handshake_timeout elapsed_since_activity_ms={} threshold_ms={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
+                    "LINK_DIED link={} reason=other detail=handshake_timeout elapsed_since_activity_ms={} threshold_ms={} attempts={} rtt_ms={} keepalives_sent={} keepalives_acked={}",
                     HexShort(link_id.as_bytes()),
                     now_ms.saturating_sub(l.last_inbound_secs().saturating_mul(MS_PER_SECOND)),
                     l.establishment_timeout_ms(),
+                    attempts,
                     l.rtt_ms(),
                     l.keepalives_sent(),
                     l.keepalives_acked(),

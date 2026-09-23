@@ -708,3 +708,116 @@ fn establishment_field_zero_retransmit_log_is_filter_artifact() {
         "field filter must also hide the 'no retries left' line (same target).\n--- logs ---\n{field_logs}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// (field observability) The same run, read the way a hardware log is read.
+// ----------------------------------------------------------------------------
+
+/// Value of a `key=value` token in one structured event line, or `None` when
+/// the key is absent. Token-exact: `link` does not match `link_id=`.
+fn event_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// First captured line carrying `marker`.
+fn line_with<'a>(logs: &'a str, marker: &str) -> Option<&'a str> {
+    logs.lines().find(|line| line.contains(marker))
+}
+
+/// Codeberg #327. The cell `lora_4node_contention_rust` went red in vollauf3
+/// (2026-08-22) with a field log that carried, for the whole gamma -> delta
+/// establishment, exactly two `leviculum_core::link` lines:
+///
+/// ```text
+/// 09:01:02.127 LINK_REQUEST_TX link=35537a12... dest=11711ac8... t_ms=201 hops=1 routed=true
+/// 09:01:41.947 LINK_DIED link=29cfc7d7... reason=other detail=handshake_timeout \
+///              elapsed_since_activity_ms=40021 threshold_ms=13476 ...
+/// ```
+///
+/// which the issue read as "one LinkRequest went out routed, no proof came
+/// back" — a single-packet loss. That reading is wrong, and the log said so
+/// only in a detail nobody is obliged to notice: **the id that died is not the
+/// id that was sent**. The re-key on each establishment retry gives every
+/// retransmit a new link id (Codeberg #66), so `29cfc7d7` is the THIRD request
+/// of that handshake, and 40021 ms against a 13476 ms per-attempt threshold is
+/// three attempts spent, not one attempt waiting. The retransmits themselves
+/// were invisible: their diagnostics sit on `leviculum_core::node::
+/// link_management`, which every field `RUST_LOG` drops to `info` — the
+/// artifact `establishment_field_zero_retransmit_log_is_filter_artifact`
+/// above characterises.
+///
+/// This test pins the cure. Under the VERBATIM field filter the identical
+/// persistent-loss run now yields a readable attempt chain: one
+/// `LINK_REQUEST_TX`, one `LINK_REQUEST_RETX` per retry whose `prev` names the
+/// request it replaces, and a `LINK_DIED` carrying `attempts=`. A reader who
+/// only greps `leviculum_core::link` can count the attempts and see the
+/// re-key, instead of inferring a single-packet loss that never happened.
+///
+/// It does NOT claim the contention red is fixed: what makes three attempts
+/// over 40 s fail on a shared channel is a medium question and needs the rig.
+#[test]
+fn establishment_retransmits_are_countable_under_field_rust_log() {
+    let (died, logs) = with_field_filtered_logs(drive_persistent_proof_loss_to_death);
+    assert!(
+        died,
+        "field filter: persistent proof loss must still reach the death path.\n--- logs ---\n{logs}"
+    );
+
+    // hops == 1 for this direct link -> budget == max(LINK_REQUEST_MAX_RETRIES, 1).
+    let expected_retransmits = core::cmp::max(LINK_REQUEST_MAX_RETRIES as usize, 1);
+    let retx: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("LINK_REQUEST_RETX"))
+        .collect();
+    assert_eq!(
+        retx.len(),
+        expected_retransmits,
+        "the field filter must now show every establishment retransmit \
+         ({expected_retransmits} expected).\n--- logs ---\n{logs}"
+    );
+
+    // The chain is walkable from the first request to the death: each RETX
+    // names its predecessor, so a reader reconstructs the re-key sequence the
+    // vollauf3 log left implicit.
+    let tx = line_with(&logs, "LINK_REQUEST_TX").expect("field filter must keep LINK_REQUEST_TX");
+    let first_id = event_field(tx, "link").expect("LINK_REQUEST_TX must carry link=");
+    let mut current = first_id;
+    for (index, line) in retx.iter().enumerate() {
+        assert_eq!(
+            event_field(line, "prev"),
+            Some(current),
+            "retransmit {index} must chain to the request it replaces.\n--- logs ---\n{logs}"
+        );
+        let want_attempt = std::format!("{}", index + 2);
+        assert_eq!(
+            event_field(line, "attempt"),
+            Some(want_attempt.as_str()),
+            "retransmit {index} must be numbered from the connect attempt.\n--- logs ---\n{logs}"
+        );
+        current = event_field(line, "link").expect("LINK_REQUEST_RETX must carry link=");
+    }
+
+    let died_line = line_with(&logs, "LINK_DIED").expect("field filter must keep LINK_DIED");
+    assert_eq!(
+        event_field(died_line, "link"),
+        Some(current),
+        "the link that dies is the LAST retransmit, not the first request.\n--- logs ---\n{logs}"
+    );
+    let want_attempts = std::format!("{}", expected_retransmits + 1);
+    assert_eq!(
+        event_field(died_line, "attempts"),
+        Some(want_attempts.as_str()),
+        "LINK_DIED must state how many requests the establishment spent — the \
+         number #327 had to be reconstructed from the id mismatch.\n--- logs ---\n{logs}"
+    );
+
+    // The vollauf3 shape itself: TX id != DIED id. Kept as an assertion so a
+    // future change that stops re-keying retries has to come past this test
+    // and past the reading of the field logs that depends on it.
+    assert_ne!(
+        first_id, current,
+        "a retried establishment dies under a re-keyed id (Codeberg #66); \
+         that mismatch is the vollauf3 signature.\n--- logs ---\n{logs}"
+    );
+}
