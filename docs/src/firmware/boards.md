@@ -243,12 +243,30 @@ and `BatteryScale::for_divider` derives a 20 µs window from them; the
 dividers are inside the default and their sampling is unchanged.
 
 What the divider does *not* settle is the pack's cell topology, and
-nothing in this firmware guesses it. What it does settle is a bound: at
-10 660 mV of full scale this board cannot see a series pack above two
-cells, since 3S sits above the range and would put more than the ADC's
-3.6 V on the pin. A reading above 9 V is rejected as implausible and the
-board says `[WARN] [BAT] implausible first reading` rather than
-publishing a percentage.
+nothing in this firmware guesses it: the cell count is classified from the
+board's own first reading, never read out of a constant. What the divider
+does settle is a bound: at 10 660 mV of full scale this board cannot see a
+series pack above two cells, since 3S sits above the range and would put
+more than the ADC's 3.6 V on the pin. A reading above 9 V is rejected as
+implausible and the board says `[WARN] [BAT] implausible first reading`
+rather than publishing a percentage.
+
+**The topology itself is settled, and it is 1S4P.** It is a hardware fact
+rather than a firmware one, so it lives in the board file's
+`BATTERY_DIVIDER` doc with its sources, and it is worth stating here
+because a reader who only knows "four 18650s" will guess 2S2P — the two
+give the same ~49 Wh, so the energy figure cannot decide it. The charger
+can. The divider hangs on the XIAO's `VBAT` net, whose charger on the
+module's own schematic is `U2 BQ25100`, a linear charger for one cell at a
+fixed 4.2 V; the carrier charges the same net through a second single-cell
+part, the `CN3165` Seeed names as this product's charging management chip,
+also fixed at 4.2 V, from a 5 V Type-C or 5 V solar input with nothing on
+the board that steps up. So the four cells are in parallel: 13.4 Ah at one
+cell's voltage. The rig unit reads `pack_mv=4123..4154` with `cells=1S`
+across eleven captures, which is where a 1S pack held by a 4.2 V charger
+sits. A plausible reading on this board is therefore
+`pack_band_mv(1)` = 2500..4330 mV, and a test that expects 6000..8660 from
+it is asserting a pack this product does not have.
 
 The bootloader cannot tell these apart. `nRF52840-SeeedXiao-v1` names the
 MCU module, and a DIY XIAO with an entirely different radio wired to the

@@ -256,6 +256,52 @@ pub const ADC_CTRL_ACTIVE: Level = Level::Low;
 /// so `leviculum_battery_scale::BatteryScale::for_divider` derives 20 µs
 /// from these numbers rather than a constant being written down here.
 /// A multiplier could not have carried that.
+///
+/// # What is on the other side of it: one cell, four of them in parallel
+///
+/// The divider hangs on the XIAO module's `VBAT` net, and the part that
+/// charges that net is a single-cell one. On the module's own schematic
+/// (Seeed EAGLE sheet 1/1, title `Seeed Studio XIAO nRF52840 v1.1`,
+/// grid A5-A6, published as
+/// `files.seeedstudio.com/wiki/XIAO-BLE/Seeed-Studio-XIAO-nRF52840-Sense-v1.1.pdf`)
+/// `U2 BQ25100` takes `IN` from `VBUS` and puts `OUT` on `VBAT`, which
+/// is also the `BAT`/`GND` battery pads; from that node `1M 1%` runs to
+/// `P0.31_AIN7_BAT` and `510k 1%` on to `P0.14_READ_BAT`, which is these
+/// two resistors and the polarity [`ADC_CTRL_ACTIVE`] states, in the
+/// schematic's own words beside them: *"Set P0.14 to output Sink only to
+/// enable BAT voltage read;"*. The bq2510x is a 250 mA linear charger
+/// for **one** cell with its charge voltage fixed at 4.2 V. (That sheet
+/// is the plain XIAO nRF52840 rather than the Plus this carrier fits;
+/// the Plus is corroborated part-for-part by the sibling variant that
+/// also names the resistors, `seeed_xiao_nrf52840_kit/variant.h:201-206`
+/// — `R17=1M, R18=510k`, `ADC_CTRL VBAT_ENABLE`, `ADC_CTRL_ENABLED LOW`,
+/// `BQ25101 ~CHG`.)
+///
+/// The carrier charges the same net through a second single-cell part:
+/// Seeed's hardware overview for this product names the *"Charging
+/// Management Chip"* as `CN3165 (0.99A)`, a solar-input linear charger
+/// whose regulation voltage is internally fixed at 4.2 V, and gives the
+/// only two supplies as *"Type-C: 5V 1A"* and *"Solar power supply: 5V
+/// 1A"*. Nothing on the board steps up, so no series pack can be
+/// charged here at all.
+///
+/// Therefore the four cells the P1-Pro ships with — Seeed: *"4 x 18650
+/// lithium (NMC) batteries (3350mAh each)"* — are **1S4P**: 13.4 Ah at
+/// one cell's voltage, which is the ~49 Wh of #233. The same 49 Wh is
+/// also what 2S2P would give, so the energy figure does not decide this
+/// and the charger does. Measured on the rig unit, eleven captures
+/// between 2026-09-18 and 2026-09-23: `[BAT] init pack_mv=` 4123 to
+/// 4154, `cells=1S`, holding just under the CN3165's 4.2 V on USB.
+///
+/// This stays prose and does NOT become a constant. `battery.rs`
+/// classifies the pack from its own first reading and is given no cell
+/// count to trust, which is the property that catches a divider that
+/// never settled; a number here would be a second source of truth for
+/// the same question. What it is for is the reader deciding what a
+/// plausible reading on this board looks like: the band a 1S
+/// classification implies is `leviculum_battery_scale::pack_band_mv(1)`,
+/// 2500 to 4330 mV, and anything asserting a 2S window against this
+/// board is asserting a pack the product does not have.
 pub const BATTERY_DIVIDER: leviculum_battery_scale::Divider =
     leviculum_battery_scale::Divider::new(1_000_000, 510_000);
 
