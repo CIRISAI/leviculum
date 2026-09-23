@@ -3610,6 +3610,20 @@ mod tests {
     ///   — while putting every node in the mesh on the same draw, which is
     ///   the 2026-09-17 air again by another route.
     ///
+    /// ONE SLOT IS NOT A CLEARANCE, and the first bullet must not be read as
+    /// one. It says the two ends do not key TOGETHER; whether the second
+    /// frame is clear of the first is a question about the PHY, which this
+    /// test does not hold. At the corpus's own bench PHY (BW250/SF7/CR5) a
+    /// slot is 24 ms and a 115-byte frame holds the channel 118 ms, so a
+    /// one-slot separation leaves the pair overlapping for four fifths of
+    /// its airtime — and 106 of the 196 equally likely draw pairs overlap at
+    /// all. That is measured air, not arithmetic: on 2026-09-22
+    /// `bench_dual_pair_fast_rnode_only` lost both its reds to one such
+    /// pair, two proofs keyed 4.2 ms apart and neither received
+    /// (bench log `hw-vollauf4-b74027aa.log`, VERDICT line 722). The figures and the count are
+    /// pinned in
+    /// `tests/mvr/two_responders_overlap_inside_one_airtime.rs`.
+    ///
     /// The cell's own PHY and paused time, so the figures are equalities.
     #[tokio::test(start_paused = true)]
     async fn two_peers_released_by_the_same_event_do_not_key_together() {
