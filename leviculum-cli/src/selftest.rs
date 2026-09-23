@@ -644,6 +644,46 @@ fn link_sizing(
     }
 }
 
+/// Read a radio row's on-air `bitrate`, in either shape a daemon serves it.
+///
+/// `lnsd` serves the key as an integer (`rpc/handlers.rs`, `pickle_int`).
+/// `rnsd` serves whatever Python computed, and `RNodeInterface.updateBitrate`
+/// is float arithmetic (RNodeInterface.py:694) reported unrounded
+/// (Reticulum.py:1423): 3125.0 on the default SF8/CR5/125 kHz PHY, 2734.375 on
+/// SF7/CR5 at 62.5 kHz. Reading only the integer shape made every `rnsd` row
+/// bitrate-less, so the same phase ran a derived budget against our daemon and
+/// the fixed fallback against Python's — a budget that differs by daemon is a
+/// config difference smuggled into a comparison that is supposed to differ
+/// only in the stack under test.
+///
+/// A fractional rate is floored, never rounded up: an over-stated bitrate
+/// prices the air short, and cutting a train off is the failure this whole
+/// derivation exists to remove, while waiting a fraction of a frame too long
+/// costs nothing. Rates below 1 bps, non-finite ones and anything past
+/// `u32::MAX` are not a link: the caller skips the row and says so.
+///
+/// Returns the rate and the shape it arrived in, so the sizing line names the
+/// daemon shape that fed it.
+fn radio_bitrate_bps(iface: &serde_json::Value) -> Option<(u32, String)> {
+    let raw = iface.get("bitrate")?;
+    if let Some(bps) = raw.as_u64() {
+        if bps == 0 || bps > u32::MAX as u64 {
+            return None;
+        }
+        return Some((bps as u32, "reported as an integer".to_string()));
+    }
+    let bps = raw.as_f64()?;
+    if !bps.is_finite() || bps < 1.0 || bps > u32::MAX as f64 {
+        return None;
+    }
+    let shape = if bps.fract() == 0.0 {
+        format!("reported as the float {bps:?}")
+    } else {
+        format!("floored from the float {bps:?}")
+    };
+    Some((bps as u32, shape))
+}
+
 /// Read a link profile out of an `interface_stats` payload.
 ///
 /// The payload is the shared-instance dict `rnsd` serves too, so this reads
@@ -651,7 +691,8 @@ fn link_sizing(
 ///
 /// - `bitrate` on a radio row is the interface's own on-air rate on both
 ///   stacks (Python `RNodeInterface.updateBitrate`, RNodeInterface.py:693-696,
-///   reported through Reticulum.py:1421-1423).
+///   reported through Reticulum.py:1421-1423). The two stacks serve it in
+///   different shapes, and [`radio_bitrate_bps`] reads both.
 /// - `tx_jitter_max` is ours alone (Codeberg #190). A payload without it —
 ///   from `rnsd`, or from an `lnsd` older than this change — yields a profile
 ///   with no handover term rather than an error: the frames' own airtime is
@@ -672,18 +713,15 @@ fn link_profile_from_interface_stats(
         .and_then(|v| v.as_array())
         .ok_or_else(|| "payload carries no `interfaces` array".to_string())?;
 
-    let mut best: Option<(u32, Option<u64>, String)> = None;
+    let mut best: Option<(u32, Option<u64>, String, String)> = None;
     for iface in interfaces {
         // A radio row, by the key both stacks gate on the radio itself.
         if iface.get("airtime_short").is_none() {
             continue;
         }
-        let Some(bitrate) = iface.get("bitrate").and_then(|v| v.as_u64()) else {
+        let Some((bitrate, shape)) = radio_bitrate_bps(iface) else {
             continue;
         };
-        if bitrate == 0 || bitrate > u32::MAX as u64 {
-            continue;
-        }
         // Seconds on the wire, milliseconds in the profile. Absent on any
         // daemon that does not report a pre-TX contention bound.
         let jitter_ms = iface
@@ -696,19 +734,20 @@ fn link_profile_from_interface_stats(
             .and_then(|v| v.as_str())
             .unwrap_or("<unnamed>")
             .to_string();
-        let bitrate = bitrate as u32;
-        if best.as_ref().is_none_or(|(b, _, _)| bitrate < *b) {
-            best = Some((bitrate, jitter_ms, name));
+        if best.as_ref().is_none_or(|(b, _, _, _)| bitrate < *b) {
+            best = Some((bitrate, jitter_ms, name, shape));
         }
     }
 
-    let Some((bitrate_bps, tx_jitter_max_ms, name)) = best else {
+    let Some((bitrate_bps, tx_jitter_max_ms, name, shape)) = best else {
         return Err("the daemon reports no radio interface with a usable bitrate".to_string());
     };
     let origin = match tx_jitter_max_ms {
-        Some(ms) => format!("the daemon's `{name}` ({bitrate_bps} bps, jitter ceiling {ms} ms)"),
+        Some(ms) => {
+            format!("the daemon's `{name}` ({bitrate_bps} bps {shape}, jitter ceiling {ms} ms)")
+        }
         None => format!(
-            "the daemon's `{name}` ({bitrate_bps} bps; it reports no pre-TX jitter \
+            "the daemon's `{name}` ({bitrate_bps} bps {shape}; it reports no pre-TX jitter \
              ceiling, so the handover goes unaccounted)"
         ),
     };
@@ -2428,6 +2467,111 @@ mod tests {
             }),
         )]);
         assert!(link_profile_from_interface_stats(&stats).is_err());
+    }
+
+    /// The shape `rnsd` actually serves. Python computes the RNode's on-air
+    /// rate in float arithmetic (`RNodeInterface.updateBitrate`,
+    /// RNodeInterface.py:694 — 2734.375 bps on SF7/CR5 at 62.5 kHz, 3125.0 on
+    /// the SF8/CR5/125 kHz default) and serialises it unrounded
+    /// (Reticulum.py:1423), while `lnsd` serves the same key as an integer
+    /// (`rpc/handlers.rs`, `pickle_int`). Reading only the integer shape left
+    /// every `rnsd` row bitrate-less, so the same phase ran a derived budget
+    /// against our daemon and the fixed fallback against Python's: a budget
+    /// that differs by daemon is a config difference smuggled into a stack
+    /// comparison the A/B contract says must differ only in the stack.
+    #[test]
+    fn a_float_bitrate_sizes_the_window_the_integer_of_that_value_does() {
+        for (float_bitrate, integer_bitrate) in [
+            (serde_json::json!(2734.375), serde_json::json!(2734u64)),
+            (serde_json::json!(3125.0), serde_json::json!(3125u64)),
+        ] {
+            let row = |bitrate: serde_json::Value| {
+                stats_with(vec![iface_row(
+                    "RNodeInterface[radio]",
+                    serde_json::json!({
+                        "type": "RNodeInterface",
+                        "bitrate": bitrate,
+                        "airtime_short": 0.0,
+                        "tx_jitter_max": 2.926,
+                    }),
+                )])
+            };
+            let (from_float, origin) = link_profile_from_interface_stats(&row(
+                float_bitrate.clone()
+            ))
+            .unwrap_or_else(|e| panic!("rnsd serves {float_bitrate} and it must read: {e}"));
+            let (from_integer, _) =
+                link_profile_from_interface_stats(&row(integer_bitrate.clone()))
+                    .expect("the integer shape reads");
+            assert_eq!(
+                from_float, from_integer,
+                "{float_bitrate} and {integer_bitrate} describe the same air"
+            );
+            let budget = |profile| {
+                drain_budget(
+                    24,
+                    MEASURED_FRAME_BYTES,
+                    Some(profile),
+                    std::time::Duration::from_secs(5),
+                )
+                .total
+            };
+            assert_eq!(
+                budget(from_float),
+                budget(from_integer),
+                "the drain window must not depend on which daemon served the rate"
+            );
+            // And the line says which shape it read, so a log can be checked
+            // afterwards against the daemon that produced it.
+            assert!(
+                origin.contains(&float_bitrate.to_string()),
+                "the sizing line must name the float it came from: {origin}"
+            );
+        }
+    }
+
+    /// A fractional rate is floored, never rounded up: an over-stated bitrate
+    /// prices the air short, and cutting a train off is the failure this
+    /// derivation exists to remove. Waiting a few milliseconds too long is not.
+    #[test]
+    fn a_fractional_bitrate_is_floored_not_rounded_up() {
+        let stats = stats_with(vec![iface_row(
+            "RNodeInterface[radio]",
+            serde_json::json!({
+                "type": "RNodeInterface",
+                "bitrate": 5468.75,
+                "airtime_short": 0.0,
+            }),
+        )]);
+        let (profile, _) =
+            link_profile_from_interface_stats(&stats).expect("a radio row is present");
+        assert_eq!(profile.bitrate_bps, 5468);
+    }
+
+    /// Float shapes that are not a rate are skipped like their integer twins:
+    /// zero and negative divide into nonsense, and the fallback exists for it.
+    #[test]
+    fn a_radio_row_with_an_unusable_float_bitrate_is_skipped() {
+        for bitrate in [
+            serde_json::json!(0.0),
+            serde_json::json!(-3125.0),
+            serde_json::json!(0.4),
+            serde_json::json!(serde_json::Value::Null),
+            serde_json::json!("3125"),
+        ] {
+            let stats = stats_with(vec![iface_row(
+                "RNodeInterface[radio]",
+                serde_json::json!({
+                    "type": "RNodeInterface",
+                    "bitrate": bitrate,
+                    "airtime_short": 0.0,
+                }),
+            )]);
+            assert!(
+                link_profile_from_interface_stats(&stats).is_err(),
+                "{bitrate} is not an on-air rate"
+            );
+        }
     }
 
     /// Two radios: the burst is bounded by the slowest air it has to cross, so
