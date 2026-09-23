@@ -628,7 +628,7 @@ pub enum Effect {
     /// Persist the model's bookmarks to disk (the IO shell writes the TOML).
     SaveBookmarks,
     /// Turn identifying to `dest` on or off (the IO shell calls
-    /// [`Session::set_identify`], which persists the decision and drops the
+    /// [`Session::set_identify`], which persists the decision and closes the
     /// reused link). Always emitted BEFORE the accompanying reload's
     /// [`Navigate`](Effect::Navigate), so the fresh link is built under the new
     /// decision.
@@ -5845,7 +5845,7 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
                     handle.abort();
                 }
                 *generation = generation.wrapping_add(1);
-                if let Err(err) = session.lock().await.set_identify(&dest, on) {
+                if let Err(err) = session.lock().await.set_identify(&dest, on).await {
                     model.set_toast(
                         ToastKind::Error,
                         format!("could not save identify decision: {err}"),

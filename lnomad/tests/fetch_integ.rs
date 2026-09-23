@@ -16,12 +16,13 @@
 //! cover the large `is_response` Resource path and byte-identity with Python.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use leviculum_core::RequestPolicy;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{
-    Destination, DestinationType, Direction, NodeEvent, ProofStrategy, ReticulumNode,
+    Destination, DestinationType, Direction, LinkId, NodeEvent, ProofStrategy, ReticulumNode,
 };
 
 use lnomad::browser::{print_once, BrowserOptions};
@@ -66,10 +67,26 @@ fn msgpack_bin(data: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// The responder's view of link lifecycle: every link it saw established, and
+/// every link it saw closed, in order. This is the only place the *peer's*
+/// behaviour is observable — a client that never closes leaves `closed` empty
+/// no matter what its own bookkeeping says.
+#[derive(Default)]
+struct LinkLog {
+    established: Vec<LinkId>,
+    closed: Vec<LinkId>,
+}
+
 /// A Rust node that serves NomadNet-style pages: `/page/small.mu` (a fixed page)
 /// and `/page/echo.mu` (echoes the request data). Runs its own reply loop.
+///
+/// It hosts TWO destinations with the same page handlers, so a test can make a
+/// session navigate from one node to another without a second daemon hop, and
+/// watch both links from a single event stream.
 struct PageResponder {
     dest_hex: String,
+    dest_hex_b: String,
+    links: Arc<Mutex<LinkLog>>,
     task: tokio::task::JoinHandle<()>,
     _storage: tempfile::TempDir,
 }
@@ -86,42 +103,69 @@ impl PageResponder {
         let events = node.take_event_receiver().expect("responder events");
         node.start().await.expect("start responder");
 
-        let identity = leviculum_std::generate_identity();
-        let mut dest = Destination::new(
-            Some(identity),
-            Direction::In,
-            DestinationType::Single,
-            "nomadnetwork",
-            &["node"],
-        )
-        .expect("responder destination");
-        dest.set_accepts_links(true);
-        dest.set_proof_strategy(ProofStrategy::All);
-        let dest_hash = *dest.hash();
-        let dest_hex = hex::encode(dest_hash.as_bytes());
-        node.register_destination(dest);
-        node.register_request_handler(dest_hash, "/page/small.mu", RequestPolicy::AllowAll);
-        node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
-        node.register_request_handler(dest_hash, "/page/echo.mu", RequestPolicy::AllowAll);
-        node.register_request_handler(dest_hash, "/page/whoami.mu", RequestPolicy::AllowAll);
-        node.register_request_handler(dest_hash, "/file/hello.bin", RequestPolicy::AllowAll);
-        node.register_request_handler(dest_hash, "/file/big.bin", RequestPolicy::AllowAll);
-        node.announce_destination(&dest_hash, Some(b"lnomad-page-node"))
-            .await
-            .expect("responder announce");
+        let dest_hex = register_node_destination(&mut node).await;
+        let dest_hex_b = register_node_destination(&mut node).await;
 
-        let task = tokio::spawn(reply_loop(node, events));
+        let links = Arc::new(Mutex::new(LinkLog::default()));
+        let task = tokio::spawn(reply_loop(node, events, links.clone()));
         PageResponder {
             dest_hex,
+            dest_hex_b,
+            links,
             task,
             _storage: storage,
         }
     }
 }
 
-/// Drain the responder's events, answering each page request.
-async fn reply_loop(node: ReticulumNode, mut events: leviculum_std::EventReceiver) {
+/// Register one NomadNet-style node destination with the full page/file handler
+/// set on `node`, announce it, and return its hash as hex. Each call mints a
+/// fresh identity, so the two destinations of one responder have distinct
+/// hashes and a session treats them as two different nodes.
+async fn register_node_destination(node: &mut ReticulumNode) -> String {
+    let identity = leviculum_std::generate_identity();
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "nomadnetwork",
+        &["node"],
+    )
+    .expect("responder destination");
+    dest.set_accepts_links(true);
+    dest.set_proof_strategy(ProofStrategy::All);
+    let dest_hash = *dest.hash();
+    let dest_hex = hex::encode(dest_hash.as_bytes());
+    node.register_destination(dest);
+    node.register_request_handler(dest_hash, "/page/small.mu", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/page/large.mu", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/page/echo.mu", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/page/whoami.mu", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/file/hello.bin", RequestPolicy::AllowAll);
+    node.register_request_handler(dest_hash, "/file/big.bin", RequestPolicy::AllowAll);
+    node.announce_destination(&dest_hash, Some(b"lnomad-page-node"))
+        .await
+        .expect("responder announce");
+    dest_hex
+}
+
+/// Drain the responder's events, answering each page request and recording
+/// every link establish/close it observes.
+async fn reply_loop(
+    node: ReticulumNode,
+    mut events: leviculum_std::EventReceiver,
+    links: Arc<Mutex<LinkLog>>,
+) {
     while let Some(event) = events.recv().await {
+        match &event {
+            NodeEvent::LinkEstablished { link_id, .. } => {
+                links.lock().expect("link log").established.push(*link_id);
+            }
+            NodeEvent::LinkClosed { link_id, .. } => {
+                links.lock().expect("link log").closed.push(*link_id);
+            }
+            _ => {}
+        }
         if let NodeEvent::RequestReceived {
             link_id,
             request_id,
@@ -376,7 +420,10 @@ async fn identified_fetch_reveals_fingerprint_to_server() {
 
     // Opt in: the fetch identifies on the fresh link before the request, so
     // the responder's handler sees lnomad's identity as `remote_identity`.
-    session.set_identify(&dest, true).expect("persist identify");
+    session
+        .set_identify(&dest, true)
+        .await
+        .expect("persist identify");
     assert!(session.is_identifying(&dest));
     let observed = session
         .fetch(&target, Duration::from_secs(20))
@@ -394,6 +441,7 @@ async fn identified_fetch_reveals_fingerprint_to_server() {
     // the old link reused, it would still return the fingerprint.
     session
         .set_identify(&dest, false)
+        .await
         .expect("persist identify");
     assert!(!session.is_identifying(&dest));
     let observed = session
@@ -533,6 +581,170 @@ async fn unregistered_path_times_out_cleanly() {
     );
 
     session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+/// Poll the responder's link log until `pred` holds or `budget` runs out, and
+/// return a snapshot either way. A close travels client -> daemon -> responder,
+/// so it is never visible the instant the client call returns; failing the
+/// assertion on the snapshot (not in here) keeps the failure message useful.
+async fn await_link_log(
+    links: &Arc<Mutex<LinkLog>>,
+    budget: Duration,
+    pred: impl Fn(&LinkLog) -> bool,
+) -> (Vec<LinkId>, Vec<LinkId>) {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        {
+            let log = links.lock().expect("link log");
+            if pred(&log) || tokio::time::Instant::now() >= deadline {
+                return (log.established.clone(), log.closed.clone());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Minimal reproducer for #322: browsing from one node to another must close
+/// the link to the node being left. Before the fix the session merely forgot
+/// it, so the responder saw two links established and none closed, and the
+/// abandoned link kept exchanging keepalives for the life of the process.
+#[tokio::test]
+async fn switching_destination_closes_the_link_to_the_previous_one() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+    let dest_hex_b = responder.dest_hex_b.clone();
+
+    let target_a = parse_url(&format!("{dest_hex}:/page/small.mu"), None).expect("parse url a");
+    session
+        .fetch(&target_a, Duration::from_secs(20))
+        .await
+        .expect("fetch page on node a");
+    let (established, _) = await_link_log(&responder.links, Duration::from_secs(5), |log| {
+        !log.established.is_empty()
+    })
+    .await;
+    assert_eq!(
+        established.len(),
+        1,
+        "the first fetch must establish exactly one link"
+    );
+    let first_link = established[0];
+
+    // Navigate to the other node. This is the ordinary switch, nothing
+    // exceptional: no error, no cancellation, no identify change.
+    let target_b = parse_url(&format!("{dest_hex_b}:/page/small.mu"), None).expect("parse url b");
+    session
+        .fetch(&target_b, Duration::from_secs(20))
+        .await
+        .expect("fetch page on node b");
+
+    let (established, closed) = await_link_log(&responder.links, Duration::from_secs(10), |log| {
+        log.closed.contains(&first_link)
+    })
+    .await;
+    assert_eq!(
+        established.len(),
+        2,
+        "the switch must build a second link, saw {established:?}"
+    );
+    assert!(
+        closed.contains(&first_link),
+        "link {first_link} to the node we left must be closed, closed links: {closed:?}"
+    );
+
+    session.close().await.expect("close session");
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+/// Closing the session closes the link it still holds, so quitting the browser
+/// does not leave the last-visited node keepaliving a peer that is gone.
+#[tokio::test]
+async fn closing_the_session_closes_its_link() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+
+    let target = parse_url(&format!("{dest_hex}:/page/small.mu"), None).expect("parse url");
+    session
+        .fetch(&target, Duration::from_secs(20))
+        .await
+        .expect("fetch page");
+    session.close().await.expect("close session");
+
+    let (established, closed) = await_link_log(&responder.links, Duration::from_secs(10), |log| {
+        !log.closed.is_empty()
+    })
+    .await;
+    assert_eq!(established.len(), 1, "one fetch, one link");
+    assert_eq!(
+        closed, established,
+        "the link held at close time must be closed"
+    );
+
+    responder.task.abort();
+    daemon.stop().await.expect("stop daemon");
+}
+
+/// The TUI aborts the in-flight fetch task on every navigation, so a fetch can
+/// be cancelled at any await inside link setup. Whichever await it lands on,
+/// the session must still own the link it built and close it later: no link the
+/// responder saw established may outlive the session.
+///
+/// The cancellation deadlines are swept rather than pinned to one value on
+/// purpose — the point is that the invariant holds wherever the cut falls, and
+/// the assertion is on the invariant, not on where it fell.
+#[tokio::test]
+async fn cancelled_link_setup_leaves_no_link_behind() {
+    let (mut daemon, responder, mut session, _daemon_storage, _app_dir, dest_hex) = setup().await;
+    let dest_hex_b = responder.dest_hex_b.clone();
+
+    let target_a = parse_url(&format!("{dest_hex}:/page/small.mu"), None).expect("parse url a");
+    let target_b = parse_url(&format!("{dest_hex_b}:/page/small.mu"), None).expect("parse url b");
+
+    // Learn both paths first, so the cancellations below land in link setup
+    // rather than in path discovery.
+    session
+        .fetch(&target_a, Duration::from_secs(20))
+        .await
+        .expect("fetch page on node a");
+    session
+        .fetch(&target_b, Duration::from_secs(20))
+        .await
+        .expect("fetch page on node b");
+
+    for cut in [1u64, 2, 3, 5, 8, 13, 21, 34, 55] {
+        // Alternate destinations so each attempt has to build a fresh link.
+        let target = if cut % 2 == 0 { &target_a } else { &target_b };
+        let _ = tokio::time::timeout(
+            Duration::from_millis(cut),
+            session.fetch(target, Duration::from_secs(20)),
+        )
+        .await;
+    }
+
+    // A clean fetch afterwards proves the session is still usable, and closes
+    // whatever the last cancellation left owned.
+    session
+        .fetch(&target_a, Duration::from_secs(20))
+        .await
+        .expect("fetch after cancellations");
+    session.close().await.expect("close session");
+
+    let (established, closed) = await_link_log(&responder.links, Duration::from_secs(15), |log| {
+        log.established.len() == log.closed.len() && !log.established.is_empty()
+    })
+    .await;
+    assert!(
+        established.len() >= 2,
+        "the test must actually have built links, saw {established:?}"
+    );
+    for link in &established {
+        assert!(
+            closed.contains(link),
+            "link {link} was established but never closed; established {established:?}, closed {closed:?}"
+        );
+    }
+
     responder.task.abort();
     daemon.stop().await.expect("stop daemon");
 }

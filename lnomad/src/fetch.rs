@@ -74,16 +74,29 @@ pub enum FetchError {
     Node(String),
 }
 
-/// The current reused link: which destination it reaches and its id.
+/// The link the session currently owns: which destination it reaches, its id,
+/// and whether it finished setup.
+///
+/// Ownership is recorded the moment the core link exists, not once setup
+/// succeeded. The TUI aborts the in-flight fetch task on every navigation, so
+/// `ensure_link` can be cancelled at any await it contains; a link built but
+/// not yet recorded would then be one nobody knows about any more, keepalived
+/// by the core until the process exits. `ready` is what keeps such a
+/// half-built link from being reused as though it were established and
+/// identified.
 struct CurrentLink {
     dest_hash: [u8; 16],
     link_id: leviculum_std::LinkId,
+    ready: bool,
 }
 
 /// A connected fetch session over a shared instance.
 ///
 /// Owns the connected node and its event stream, and reuses a single [`Link`]
 /// across fetches to the same destination the way the reference browser does.
+/// A session holds at most one link at a time: switching destination, giving
+/// up on a half-built link, or closing the session closes the one it held, so
+/// a browsing run leaves no keepalived leftovers on the shared medium.
 ///
 /// [`Link`]: leviculum_std::LinkHandle
 pub struct Session {
@@ -193,16 +206,15 @@ impl Session {
     /// Identify is one-way: an established link cannot be un-identified, and a
     /// reused anonymous link cannot retroactively cover an earlier request. So
     /// when the decision for the currently reused destination changes, the
-    /// reused link is dropped and the next fetch builds a fresh one under the
+    /// reused link is closed and the next fetch builds a fresh one under the
     /// new decision.
-    pub fn set_identify(&mut self, dest: &[u8; 16], on: bool) -> std::io::Result<()> {
+    pub async fn set_identify(&mut self, dest: &[u8; 16], on: bool) -> std::io::Result<()> {
         if !self.identify.set(dest, on) {
             return Ok(());
         }
-        if let Some(current) = &self.current {
-            if current.dest_hash == *dest {
-                self.current = None;
-            }
+        let switching = matches!(&self.current, Some(current) if current.dest_hash == *dest);
+        if switching {
+            self.close_current_link().await;
         }
         self.identify.save()
     }
@@ -384,11 +396,18 @@ impl Session {
         timeout: Duration,
     ) -> Result<leviculum_std::LinkId, FetchError> {
         if let Some(current) = &self.current {
-            if current.dest_hash == *dest && self.node.link_mdu(&current.link_id).is_some() {
+            if current.ready
+                && current.dest_hash == *dest
+                && self.node.link_mdu(&current.link_id).is_some()
+            {
                 return Ok(current.link_id);
             }
         }
-        self.current = None;
+        // Whatever we were holding is not what this fetch needs. Hand it back to
+        // the peer instead of leaving it to keepalive forever: on LoRa that
+        // airtime is spent on a shared medium, and the responder is a foreign
+        // node that has no way of knowing we are gone.
+        self.close_current_link().await;
 
         let dest_hash = DestinationHash::new(*dest);
 
@@ -422,22 +441,49 @@ impl Session {
             .map_err(|_| FetchError::LinkFailed)?;
         let link_id = *handle.link_id();
 
-        self.wait_for_link_established(link_id, timeout).await?;
+        // The core link exists from here on, so record ownership here and not
+        // once setup succeeded: every await below is a point this task can be
+        // aborted at, and an unrecorded link is one nothing will ever close.
+        self.current = Some(CurrentLink {
+            dest_hash: *dest,
+            link_id,
+            ready: false,
+        });
+
+        if let Err(err) = self.wait_for_link_established(link_id, timeout).await {
+            self.close_current_link().await;
+            return Err(err);
+        }
 
         // Identify on the fresh link before any request goes out, so the
         // responder has `remote_identity` when it generates the page.
         if self.identify.contains(dest) {
-            self.node
-                .identify_link(&link_id, &self.identity)
-                .await
-                .map_err(|e| FetchError::Node(e.to_string()))?;
+            if let Err(err) = self.node.identify_link(&link_id, &self.identity).await {
+                self.close_current_link().await;
+                return Err(FetchError::Node(err.to_string()));
+            }
         }
 
-        self.current = Some(CurrentLink {
-            dest_hash: *dest,
-            link_id,
-        });
+        if let Some(current) = &mut self.current {
+            current.ready = true;
+        }
         Ok(link_id)
+    }
+
+    /// Close the link the session currently owns, if any, and forget it.
+    ///
+    /// Best effort: a link the peer already tore down is gone from the core
+    /// link table and `close_link` is a no-op on it, and a node on its way down
+    /// cannot dispatch anything either — neither is worth failing a fetch over.
+    /// The record is cleared only after the close has been handed to the node,
+    /// so an abort landing on that await leaves the link still owned and the
+    /// next call closes it (a repeated close is the same no-op).
+    async fn close_current_link(&mut self) {
+        let Some(link_id) = self.current.as_ref().map(|current| current.link_id) else {
+            return;
+        };
+        let _ = self.node.close_link(&link_id).await;
+        self.current = None;
     }
 
     /// Wait for the initiator-side `LinkEstablished` for `link_id`, or a clean
@@ -512,8 +558,10 @@ impl Session {
         }
     }
 
-    /// Stop the node and tear down the connection.
+    /// Close any link still held, then stop the node and tear down the
+    /// connection.
     pub async fn close(mut self) -> Result<(), FetchError> {
+        self.close_current_link().await;
         self.node
             .stop()
             .await

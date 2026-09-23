@@ -258,6 +258,21 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- `lnomad` now closes the link to a node it leaves. A browsing session reuses
+  one link per destination, but on every switch it only forgot the old one:
+  nothing in the crate ever called `close_link`, so the abandoned link stayed
+  established and kept exchanging keepalives for the life of the process, and
+  an ordinary walk across five nodes left five of them. On LoRa that airtime
+  is spent on a shared medium, and the peer is a foreign NomadNet node with no
+  way of knowing the browser has gone. The same leak came from the other two
+  ends of a link's life: turning identify off dropped the link it invalidated,
+  and quitting the browser stopped the node without closing what it held. Both
+  close now. The TUI aborts the in-flight fetch task on every navigation, so
+  link setup can be cancelled at any await it contains; the session therefore
+  records ownership of a link the moment the core link exists rather than once
+  setup succeeded, and a half-built link is never reused as though it were
+  established and identified (Codeberg #322).
+
 - A path request now crosses a board between two links of one BLE interface.
   The exclusion a re-originated broadcast carries used to name the interface
   the request arrived on, which is right for a shared medium, where every peer

@@ -88,9 +88,9 @@ anything else for a messenger, and the answer is yes.
 `AppEvent::NodeDiscovered` (`lnomad/src/tui.rs:1264`) arrives from
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
-(`set_announce_sink`, `lnomad/src/fetch.rs:213-215`, wiring comment at
+(`set_announce_sink`, `lnomad/src/fetch.rs:225-227`, wiring comment at
 `lnomad/src/tui.rs:5995-5998`), a non-blocking unbounded send on every
-recorded announce (`note_announce`, `lnomad/src/fetch.rs:355-378`), a
+recorded announce (`note_announce`, `lnomad/src/fetch.rs:369-389`), a
 dedicated background task parked on the shared session in 250 ms lock
 slices (`spawn_discovery`, `lnomad/src/tui.rs:5721-5762`), and a
 `tokio::select!` arm that folds the result into the model
