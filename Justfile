@@ -760,6 +760,27 @@ check-supervised-spawns:
 check-core-lock-census:
     @python3 scripts/check-core-lock-census.py
 
+# Codeberg #191c's census, moved forward to the push gate. `just standard`
+# already counts the #[ignore]d tests, but from the BUILT test binaries --
+# `--ignored --list` on every one of them -- so it cannot run here: Tier 0
+# links no test binary and must not start. This counts the same bucket from
+# the sources against the same scripts/ignored-counts.txt, ~0.2 s, no build.
+#
+# What it buys: on 2026-09-23 commit 82425837 added an #[ignore]d reference arm
+# to rnsd_interop behind a `just fast` gate, which ran no census at all; the
+# land gate found it an hour in, with 30 commits queued behind it, and the
+# author had had no way to see it. The two counts agree unit for unit today,
+# 48 across 9 units.
+#
+# One way it can differ from the binary count, stated here and in the script's
+# header: a cfg-gated test. `#[cfg(feature = "x")] #[test] #[ignore]` is a line
+# of source either way, so this counts it always and the binary census counts
+# it only when that cfg is on. Where they disagree the binary one is right and
+# the pin follows it. Accepted: the case this gate is for is the ordinary one.
+[doc('Count #[ignore] in the sources against the pinned census')]
+check-ignored-source:
+    @python3 scripts/check-ignored-counts-source.py
+
 # Codeberg #301: `just --list` is the first thing a stranger reads, and until
 # this gate most of its lines were the tail of a comment block rather than a
 # description -- `ci-gate` introduced itself as "day one it would only teach
@@ -904,7 +925,9 @@ check-source-invariant-census:
 # #220) + workspace lib
 # tests + the core suite on a 32-bit `usize` (#303) + the citation guard +
 # the third-party notice guard (#288) + the process-supervision pair (census
-# over the sources, proof against the kernel) + the release gate's two halves
+# over the sources, proof against the kernel) + the #[ignore]d census counted
+# from the sources (#191c, the binary count of it is in `standard`)
+# + the release gate's two halves
 # (#312: the nightly green-ref signal, and the wiring that keeps a red
 # rnsd_interop out of the publish step).
 #
@@ -920,7 +943,7 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
