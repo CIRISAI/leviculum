@@ -1,7 +1,8 @@
 //! Citation guard (Guarantee C): a reference to something outside the text
-//! must still point at what it claims. Covers `docs/src/**/*.md` and the
+//! must still point at what it claims. Covers `docs/src/**/*.md`, the
 //! Rust sources and tests of `leviculum-core`, `leviculum-lxmf`,
-//! `leviculum-lxmf-node` and `leviculum-std`; and every concept document
+//! `leviculum-lxmf-node` and `leviculum-std`, and the gate scripts under
+//! `scripts/` together with the `Justfile`; and every concept document
 //! must be reachable from `docs/src/SUMMARY.md`.
 //!
 //! The concept documents are binding policy, and a wrong citation gets
@@ -17,11 +18,16 @@
 //! in front of, so this is the map.
 //!
 //! **1. A `path:line` citation — resolved.** Per citation:
+//! - the line spec reads forwards: a range whose end precedes its start is
+//!   refused before anything is resolved, because no state of the tree can
+//!   make it right and [`repaired`] will not rewrite one;
 //! - the cited file exists in the repo and has at least the cited number
 //!   of lines (catches deletions and renames);
 //! - where the citation *names what it points at* — a backticked
 //!   identifier attached to it, see below — that identifier occurs within
-//!   `WINDOW` lines of the cited span (catches drift).
+//!   `WINDOW` lines of the cited span (catches drift). In a `Justfile` the
+//!   name has to be *defined* at the cited line, not merely occur there:
+//!   see [`defines_recipe`].
 //!
 //! A bare citation that names nothing only gets the existence check. Both
 //! kinds are counted and printed so the coverage is visible: run with
@@ -125,7 +131,14 @@ const WINDOW: usize = 8;
 /// rule started porting Columba functions line by line: a citation that
 /// names the Kotlin file and line is what lets the next reader check the
 /// port against the real thing instead of against a transcription.
-const EXTERNAL_PREFIXES: &[&str] = &["periculum/", "ble-reticulum/", "columba/"];
+const EXTERNAL_PREFIXES: &[&str] = &[
+    "periculum/",
+    "ble-reticulum/",
+    "columba/",
+    // A crates.io dependency, cited by the nRF gate scripts. Its source is
+    // under `~/.cargo`, never in this tree, so it can only be counted.
+    "nrf-softdevice/",
+];
 
 /// The vendored references. A citation into one of these that is not
 /// checked out fails differently from a citation that has drifted.
@@ -282,10 +295,17 @@ fn cite_regex(corpus: Corpus) -> Regex {
 /// ``ident` (` and `` `ident`, ``. Whitespace (including line breaks) may
 /// sit between; nothing else may. A trailing `()` (function spelling) is
 /// stripped.
-fn ident_regexes() -> [Regex; 2] {
+fn ident_regexes() -> [Regex; 4] {
     [
         Regex::new(r"`([A-Za-z0-9_:.]+)(?:\(\))?`\s*\(\s*$").unwrap(),
         Regex::new(r"`([A-Za-z0-9_:.]+)(?:\(\))?`\s*,\s*$").unwrap(),
+        // A recipe is named `just <recipe>`, never by the bare token: the
+        // corpus writes ``just standard` (`Justfile:<line>`)` -- spelled
+        // without a line here, because this file is scanned as corpus and a
+        // real one would be read as a citation. Hyphens are in because
+        // recipe names use them and Rust identifiers do not.
+        Regex::new(r"`just\s+([A-Za-z0-9_-]+)`\s*\(\s*$").unwrap(),
+        Regex::new(r"`just\s+([A-Za-z0-9_-]+)`\s*,\s*$").unwrap(),
     ]
 }
 
@@ -294,6 +314,28 @@ fn ident_regexes() -> [Regex; 2] {
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
+}
+
+/// Whether a Justfile line *declares* the recipe `name`.
+///
+/// A plain substring search is the wrong test for a Justfile and produces a
+/// false green, which is how the `run-status-parity.sh` citation survived:
+/// it named Justfile line 857, the comment above 857 read "failed `just
+/// standard`", so `standard` occurred within `WINDOW` of the cited line
+/// while the recipe itself sat 140 lines further down. A recipe header is the only line that can be a definition — it
+/// starts at column 0 (bodies are indented, comments start with `#`) and
+/// the name is followed by its parameters and a colon.
+fn defines_recipe(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix(name) else {
+        return false;
+    };
+    if !rest.contains(':') {
+        return false;
+    }
+    let head = rest.split(':').next().unwrap_or_default();
+    // `standard:` -> ""; `flash board:` -> " board"; `standard-extra:` ->
+    // "-extra", a different recipe whose name merely starts with this one.
+    head.is_empty() || head.starts_with(char::is_whitespace)
 }
 
 /// Whether `token` can be the name of a code item.
@@ -327,7 +369,7 @@ fn signature_regexes() -> [Regex; 2] {
 
 /// Everything needed to decide what a citation names, built once per scan.
 struct Naming {
-    idents: [Regex; 2],
+    idents: [Regex; 4],
     citation_shaped: Regex,
     /// `[0]` finds the backticked spans of a line, `[1]` the `fn` name
     /// inside one.
@@ -498,6 +540,28 @@ fn source_citations(root: &Path, crates: &[&str]) -> Vec<Citation> {
     scan(root, &rs, Corpus::Source)
 }
 
+/// Every citation in the gate scripts and in the `Justfile`.
+///
+/// Until 2026-09-23 the corpus was the book plus four crates of Rust, so a
+/// citation written in a shell script was not checked at all --
+/// `scripts/run-status-parity.sh` pointed at Justfile line 857 for a recipe
+/// that lives at 997, and 857 is a live line (a comment), so nothing
+/// anywhere said so. The
+/// scripts spell citations bare, in `#` comments, exactly like Rust
+/// comments do, so they are scanned as `Corpus::Source`.
+fn script_citations(root: &Path) -> Vec<Citation> {
+    let mut files = Vec::new();
+    walk(&root.join("scripts"), SKIP_DIRS, &mut files);
+    files.retain(|p| p.extension().is_some_and(|e| e == "sh"));
+    files.push(root.join("Justfile"));
+    files.sort();
+    assert!(
+        files.len() > 1,
+        "no shell scripts under scripts/ -- wrong repo root?"
+    );
+    scan(root, &files, Corpus::Source)
+}
+
 /// Distance in lines from `line` to the nearest edge of `span` (0 when
 /// inside).
 fn span_distance(line: usize, span: (usize, usize)) -> usize {
@@ -555,6 +619,10 @@ enum FailureKind {
     /// The file is there and long enough, but the cited identifier is not
     /// near the cited line.
     Drift,
+    /// The citation's own line spec runs backwards (`a-b` with `a > b`).
+    /// Nothing about the tree can make this right, so it is refused where
+    /// it is written rather than resolved.
+    Inverted,
 }
 
 struct Failure {
@@ -678,6 +746,26 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
         }
         let where_ = format!("{}:{}: {}", c.doc.display(), c.doc_line, c.raw);
 
+        // Refused on the way in, before anything is resolved: a backwards
+        // range cannot be repaired later. `repaired()` declines to emit one,
+        // so once the anchors under an inverted citation move it is reported
+        // as undecidable drift with no suggestion, forever. Three of them
+        // reached `docs/src/architecture-broadcast-python-parity.md` that
+        // way. The endpoints are the author's to re-read, not ours to swap:
+        // two of those three named code that had moved as well.
+        if let Some(&(a, b)) = c.spans.iter().find(|&&(a, b)| a > b) {
+            failures.push(Failure {
+                kind: FailureKind::Inverted,
+                message: format!(
+                    "{where_}\n    the line spec runs backwards ({a}-{b}): a range ends \
+                     after it starts.\n    Re-read the span and write the endpoints in \
+                     order -- do not simply swap them, an inverted range is usually a \
+                     citation nobody has read since the code under it moved."
+                ),
+            });
+            continue;
+        }
+
         if let Some(sub) = named_submodule(&c.path) {
             if absent.contains(sub) {
                 failures.push(Failure {
@@ -743,10 +831,19 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
             // `Type::method` / `module.attr` cite the item; the source
             // line contains the last segment.
             let needle = ident.rsplit(&[':', '.'][..]).next().unwrap();
+            // A Justfile has one kind of definition and it is not a
+            // substring: see [`defines_recipe`].
+            let is_justfile = Path::new(cand).file_name().is_some_and(|f| f == "Justfile");
             let hits: Vec<usize> = lines
                 .iter()
                 .enumerate()
-                .filter(|(_, l)| l.contains(needle))
+                .filter(|(_, l)| {
+                    if is_justfile {
+                        defines_recipe(l, needle)
+                    } else {
+                        l.contains(needle)
+                    }
+                })
                 .map(|(i, _)| i + 1)
                 .collect();
             let resolved = hits.iter().any(|&h| {
@@ -781,13 +878,18 @@ fn check(root: &Path, citations: &[Citation]) -> (Counts, Vec<Failure>) {
             let nearest = hits
                 .iter()
                 .min_by_key(|&&h| c.spans.iter().map(|&s| span_distance(h, s)).min().unwrap());
+            let what = if is_justfile {
+                format!("recipe `{needle}`")
+            } else {
+                format!("`{needle}`")
+            };
             candidate_notes.push(match nearest {
                 Some(&n) => format!(
-                    "    `{needle}` not within {WINDOW} lines of the cited span in {cand}\n    cited line {cited_first}: {}\n    nearest `{needle}`: line {n}: {}",
+                    "    {what} not within {WINDOW} lines of the cited span in {cand}\n    cited line {cited_first}: {}\n    nearest {what}: line {n}: {}",
                     lines[cited_first - 1].trim(),
                     lines[n - 1].trim()
                 ),
-                None => format!("    `{needle}` does not occur anywhere in {cand}"),
+                None => format!("    {what} does not occur anywhere in {cand}"),
             });
         }
         if !passed {
@@ -1406,6 +1508,159 @@ fn githook_citations_match_without_loosening_the_pattern() {
     );
 }
 
+/// A line spec that runs backwards is refused where it is written.
+///
+/// The positive control for the check `check` does before it resolves
+/// anything. Both directions on one fixture: the forwards range must stay
+/// quiet, the backwards one must be reported, and neither depends on the
+/// cited file being short -- the target here is long enough for both.
+///
+/// Why this is worth a check of its own rather than "the author will
+/// notice": `repaired()` refuses to emit an inverted span, so once the
+/// anchors under such a citation move, the drift report says only "not all
+/// of this citation's endpoints could be placed" and offers nothing. The
+/// citation then survives every gate until somebody reads it. Three did,
+/// in one page, for months.
+#[test]
+fn an_inverted_line_spec_is_refused_where_it_is_written() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    let target: String = (1..=60).map(|i| format!("// line {i}\n")).collect();
+    fs::write(root.join("target.rs"), &target).unwrap();
+
+    let docs = root.join("docs/src");
+    fs::create_dir_all(&docs).unwrap();
+    // Built, not spelled out: a literal citation here is scanned as part of
+    // the corpus this file guards.
+    fs::write(
+        docs.join("ranges.md"),
+        format!(
+            "Forwards `target.rs:{}-{}` is fine; backwards `target.rs:{}-{}` is not.\n",
+            10, 20, 20, 10
+        ),
+    )
+    .unwrap();
+
+    let citations = scan(root, &[docs.join("ranges.md")], Corpus::Book);
+    assert_eq!(
+        citations.len(),
+        2,
+        "the fixture's two range citations were not both parsed"
+    );
+
+    let (_, failures) = check(root, &citations);
+    let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly the backwards range: {}",
+        messages.join("\n\n")
+    );
+    assert_eq!(failures[0].kind, FailureKind::Inverted);
+    assert!(
+        failures[0].message.contains("20-10"),
+        "the report names the wrong span: {}",
+        failures[0].message
+    );
+}
+
+/// A `Justfile:<n>` citation that names a recipe must land on the recipe's
+/// definition, not on prose that mentions it.
+///
+/// This is the shape `scripts/run-status-parity.sh` carried: the cited line
+/// was a comment, the line above it mentioned the recipe by name, and the
+/// recipe sat 140 lines further down. Existence-checking passes it (the
+/// line is live), and so does a substring search for the name (the mention
+/// is one line away). Only a definition check sees it.
+#[test]
+fn a_justfile_citation_lands_on_the_recipe_and_not_on_a_mention_of_it() {
+    // The predicate on its own, which is the whole difference: the mention
+    // is not a definition, the header is, and a longer name that merely
+    // starts with this one is not.
+    assert!(!defines_recipe(
+        "# the gate has failed `just standard` on every sha since.",
+        "standard"
+    ));
+    assert!(!defines_recipe("    cargo test standard", "standard"));
+    assert!(!defines_recipe("standard-extra: fast", "standard"));
+    assert!(defines_recipe(
+        "standard: fast test-ffi verify-packaging",
+        "standard"
+    ));
+    assert!(defines_recipe("flash board='t114': fast", "flash"));
+
+    // `just <recipe>` is what names a recipe; the bare token is not a
+    // citation subject anywhere in the corpus.
+    let naming = Naming::new(Corpus::Book);
+    assert_eq!(
+        attached_ident("the pin failed `just standard` (", &naming).as_deref(),
+        Some("standard")
+    );
+    assert_eq!(
+        attached_ident("`just flash-rak4631-pocket`, ", &naming).as_deref(),
+        Some("flash-rak4631-pocket")
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    let mention = 11;
+    let cited = 12;
+    let recipe = 53;
+    let mut justfile = String::new();
+    for _ in 1..mention {
+        justfile.push_str("# padding\n");
+    }
+    justfile.push_str("# the gate has failed `just standard` on every sha since.\n");
+    justfile.push_str("# cost 18 commits a landing gate and two red cycles.\n");
+    for _ in (cited + 1)..recipe {
+        justfile.push_str("# padding\n");
+    }
+    justfile.push_str("standard: fast test-ffi verify-packaging\n");
+    justfile.push_str("    cargo test --workspace\n");
+    fs::write(root.join("Justfile"), &justfile).unwrap();
+
+    let docs = root.join("docs/src");
+    fs::create_dir_all(&docs).unwrap();
+    let doc = docs.join("gates.md");
+    let cite = |line: usize| format!("The pin failed `just standard` (`Justfile:{line}`).\n");
+
+    fs::write(&doc, cite(cited)).unwrap();
+    let citations = scan(root, std::slice::from_ref(&doc), Corpus::Book);
+    assert_eq!(citations.len(), 1, "the fixture citation was not parsed");
+    assert_eq!(
+        citations[0].ident.as_deref(),
+        Some("standard"),
+        "`just standard` did not name the citation beside it"
+    );
+    let (_, failures) = check(root, &citations);
+    assert_eq!(
+        failures.len(),
+        1,
+        "a citation onto a comment that merely mentions the recipe was accepted"
+    );
+    assert_eq!(failures[0].kind, FailureKind::Drift);
+    assert!(
+        failures[0].message.contains("recipe `standard`")
+            && failures[0].message.contains(&format!("line {recipe}")),
+        "the report does not point at the recipe's definition: {}",
+        failures[0].message
+    );
+
+    // The other direction, so a check that stops firing is visible: the
+    // citation that does land on the definition must stay quiet.
+    fs::write(&doc, cite(recipe)).unwrap();
+    let citations = scan(root, &[doc], Corpus::Book);
+    let (_, failures) = check(root, &citations);
+    let messages: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
+    assert!(
+        failures.is_empty(),
+        "the citation onto the recipe header was reported: {}",
+        messages.join("\n\n")
+    );
+}
+
 /// Both spellings that attach a name to a citation are seen, and nothing
 /// else became a name with them.
 ///
@@ -1592,6 +1847,35 @@ fn source_citations_resolve() {
     );
 
     report("source", &failures);
+}
+
+#[test]
+fn script_citations_resolve() {
+    let root = repo_root();
+    let citations = script_citations(&root);
+    let (counts, failures) = check(&root, &citations);
+
+    println!(
+        "script citations (scripts/*.sh, Justfile): {} total, {} identifier-checked, \
+         {} bare (existence/length only), {} external (unchecked)",
+        counts.total(),
+        counts.with_ident,
+        counts.bare,
+        counts.external
+    );
+    report_offsets("script", &counts);
+
+    // Same tripwire role as the floors on the other two corpora, one order of
+    // magnitude down: this corpus is small by nature (5 citations at
+    // introduction), so the floor only has to catch "the walk stopped
+    // returning files".
+    assert!(
+        counts.total() >= 3,
+        "only {} script citations parsed -- parser rot?",
+        counts.total()
+    );
+
+    report("script", &failures);
 }
 
 #[test]

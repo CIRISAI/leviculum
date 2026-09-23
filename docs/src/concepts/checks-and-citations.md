@@ -22,7 +22,7 @@ person what to do. This one is about the cases where the person forgot.
 | 14 further ignored tests in `rnsd_interop` executed by nothing (#189) | **B** |
 | scenario steps across the corpus produced a delivery figure no step asserted; GREEN at 70-90 % (#188, Periculum #25) | **neither** — scenario steps |
 | the status-parity volume guard compared one interface, so a whole-inventory divergence stayed green (#177) | **A**, only if the author's negative control covers the whole inventory rather than the one interface they compared |
-| drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:8`), sixteen across the whole book on the guard's first automated run | **C** |
+| drifted `file:line` citations — six across five concept documents in the 2026-07 manual audit (`leviculum-std/tests/doc_citations.rs:9`), sixteen across the whole book on the guard's first automated run | **C** |
 | `reference/LXMF` sat twelve commits behind its gitlink for five weeks; every LXMF citation meant something other than it said | **C**, and the red `reference_lock` test that should have said so was itself unobserved — a **B** failure masking a **C** failure |
 | a `Co-Authored-By:` naming a model reached a periculum commit on 2026-08-07, against a rule the same author had cited correctly hours earlier (#205) | **neither** — a commit message, which all three explicitly do not reach |
 | `PROCESSOR_TICK_BUDGET` justified the only number in a public API constant with "the number comes off `docs/…/core-lock-budget.md`" and then named 126.6 ms; that figure occurred exactly once in the tree, in that comment (#200) | **C**, only since the figure check below — a prose attribution carries no line and no identifier, so the resolver never saw it |
@@ -971,9 +971,24 @@ rule delivered early, at the moment it is cheapest to obey.
 ## Where this stands
 
 Codeberg is the source of truth for what is built. At the time of
-writing: C covers `docs/src/**` and the Rust sources of `leviculum-core`,
-`leviculum-lxmf` and `leviculum-std`, and its submodule check runs first
-in `just fast`; its bump path is unbuilt. Prose attributions in Rust doc
+writing: C covers `docs/src/**`, the Rust sources of `leviculum-core`,
+`leviculum-lxmf`, `leviculum-lxmf-node` and `leviculum-std`, and (since
+2026-09-23) the gate scripts under `scripts/` and the `Justfile`, and its
+submodule check runs first in `just fast`; its bump path is unbuilt.
+
+Two shapes it refused to see until 2026-09-23, both found by reading
+rather than by a red gate. A **backwards line spec** (`a-b` with `a > b`)
+resolved like any other range, because the length check only looks at the
+larger endpoint — while `repaired()` declines to rewrite one, so the
+citation became unrepairable the moment its anchors moved and the drift
+report had nothing to offer. It is now refused where it is written. And a
+citation into the **`Justfile`** was existence-checked only: the corpus
+that could have named a recipe did not include shell scripts, and a
+substring search for a recipe name is not a definition check — the
+mention of `just standard` in a comment sat one line from the wrong cited
+line, inside `WINDOW`, while the recipe was 140 lines away. A Justfile
+citation that names a recipe (the ``just <recipe>`` spelling) now has to
+land on the recipe's header. Prose attributions in Rust doc
 comments are checked for decimal figures and for nothing else. Its
 commit-trailer step runs on every push to either repository, and checks
 one line shape and no claim. B emits manifests from every
