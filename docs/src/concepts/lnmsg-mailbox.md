@@ -194,7 +194,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:229-231`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1463-1466`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1474-1477`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

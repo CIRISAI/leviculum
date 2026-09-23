@@ -186,7 +186,7 @@ router does exactly that: it keeps the `(emission_secs, now_ms)` pair
 of the last tick and, when the calendar advances by more than the
 stopwatch says it should have, shifts every stored stamp by the
 difference (`LxmfRouter::anchor_wall_clock`,
-`leviculum-lxmf/src/router.rs:1889`, Codeberg #186). The ages the
+`leviculum-lxmf/src/router.rs:1900`, Codeberg #186). The ages the
 cache encodes are then preserved exactly across the re-anchor, and
 real elapsed time still expires entries.
 

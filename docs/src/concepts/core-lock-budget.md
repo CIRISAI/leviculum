@@ -57,7 +57,7 @@ the measurement. Both harnesses are `#[ignore]`d and print every number
 below:
 `measure_send_lock_costs` (`leviculum-lxmf/src/node.rs:2589`) for the
 send tables, `measure_deferred_tick_costs`
-(`leviculum-lxmf/tests/direct_delivery_attempts.rs:1484`) for the tick
+(`leviculum-lxmf/tests/direct_delivery_attempts.rs:1560`) for the tick
 table.
 
 Every column names the bytes it was given, because the cost being
