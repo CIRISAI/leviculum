@@ -73,7 +73,17 @@
 # observed group, not the unobserved one: run-status-parity.sh runs it by
 # name in `just standard`, and its EXPECTED moved to 4 in the same commit
 # as this line. 898723d4 moved neither pin.
-22   -p leviculum-std --test rnsd_interop
+#
+# 22 -> 23 (2026-09-23): python_rncp_sender_fails_on_the_same_dropped_identify,
+# the reference arm of #131, added by 82425837. It cannot be routed into a
+# tier: it measures the REFERENCE rather than guarding our code -- it asserts
+# that Python's `rncp` fails the same dropped identify our sender now recovers
+# from, so a tier running it would gate us on a limitation of the reference --
+# and it needs 150 s of a Python sender that never concludes. It is run instead
+# by name, `cargo test -p leviculum-std --test rnsd_interop
+# python_rncp_sender_fails_on_the_same_dropped_identify -- --ignored`, whenever
+# the identify-loss fix direction is revisited.
+23   -p leviculum-std --test rnsd_interop
 
 # measure_propagation_stamp_at_cost_13 is a proof-of-work timing sample, not
 # an assertion: its runtime is a coin-flip distribution and only means
