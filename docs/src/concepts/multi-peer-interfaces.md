@@ -79,14 +79,32 @@ that identity rides out with the packet. With a hint the planner picks
 one link; without one (an announce, a path request) it floods, which is
 what a broadcast domain owes its peers.
 
+Since Codeberg #422 there is a third statement, and it is the one that
+makes a board a relay between two of its own links: a broadcast the
+core is re-sending carries the peer it ARRIVED from
+(`exclude_peer`, `leviculum-core/src/transport.rs:298`), and the
+interface serves every link but that one
+(`try_send_excluding_peer`, `leviculum-core/src/traits.rs:347`). The
+default implementation sends nothing, which is exactly what excluding
+the whole interface did, so every single-link carrier is unchanged and
+so is lnsd's BLE interface, whose peripheral role notifies its
+subscribed centrals as one group and cannot address a subset of them.
+The firmware implements it (`try_send_excluding_peer`,
+`leviculum-nrf/src/ble/mod.rs:720`), where the decision is a pure
+function of the registry (`TxAim`,
+`leviculum-nrf/ble-tx/src/registry.rs:809`). Without it a path request
+from the phone died at the board: one `InterfaceId` covered both links,
+so excluding the arrival interface silenced the neighbour board that
+was the only node able to answer.
+
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
 `leviculum-nrf/src/bin/t114.rs:244`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:618`), with the
+itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:652`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:85`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
-`leviculum-nrf/src/ble/mod.rs:510`; `LINK_OUT`,
+`leviculum-nrf/src/ble/mod.rs:511`; `LINK_OUT`,
 `leviculum-nrf/src/ble/mod.rs:474`).
 
 **The receive side is already peer-aware on both stacks.** The board
@@ -289,7 +307,7 @@ fan-out — an announce emits one action per entry in the routing map
 (`interface_names`, `leviculum-core/src/transport.rs:10234`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
-`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:510`).
+`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:511`).
 Same peak, moved one layer up.
 
 ### Which machinery is per medium, and which is per link

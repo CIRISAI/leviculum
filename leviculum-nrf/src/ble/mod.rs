@@ -85,7 +85,7 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::signal::Signal;
-use leviculum_ble_tx::{DrainRouter, DEVICE_NAME_LEN};
+use leviculum_ble_tx::{DrainRouter, TxAim, DEVICE_NAME_LEN};
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use nrf_softdevice::{raw, SocEvent, Softdevice};
@@ -266,11 +266,12 @@ type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
 /// announce identity differs from the link identity (Columba).
 type InboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
 
-/// An outbound packet with the core's #376 delivery hint: the 16-byte
-/// identity of the peer these bytes are for, or `None` for a broadcast
-/// (an announce, a path request, anything the core did not address at a
-/// named peer). [`tx_fanout_task`] turns the hint into links.
-type OutboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
+/// An outbound packet with what the core said about its links: the
+/// peer these bytes are FOR (the #376 delivery hint), the peer that
+/// already HEARD them (the #422 ingress link of a broadcast), or
+/// neither. [`tx_fanout_task`] turns the statement into links; see
+/// [`leviculum_ble_tx::TxAim`].
+type OutboundQueue = Channel<CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH>;
 
 // Channels between the BLE tasks and the binaries' main loop.
 static BLE_INCOMING: InboundQueue = Channel::new();
@@ -509,13 +510,13 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
 #[embassy_executor::task]
 async fn tx_fanout_task() -> ! {
     loop {
-        let (peer, packet) = BLE_OUTGOING.receive().await;
+        let (aim, packet) = BLE_OUTGOING.receive().await;
         OUTGOING_HELD.sub(packet.capacity());
-        match columba::plan_fanout(peer.as_ref()) {
-            // `Route` and `NoLink` are only reachable with a hint, so
-            // the peer is Some in both arms.
+        match columba::plan_fanout(aim) {
+            // `Route` and `NoLink` are only reachable from `Peer`, so
+            // the peer is known in both arms.
             leviculum_ble_tx::TxFanout::Route(slot) => {
-                let hint = peer.unwrap_or_default();
+                let hint = aim_peer(aim);
                 let Some(handle) = HVN_DRAIN.handle_at(slot) else {
                     // The registry named a slot the drain table no longer
                     // claims: the link died between the two reads. Same
@@ -538,24 +539,57 @@ async fn tx_fanout_task() -> ! {
                 );
                 queue_on_link(slot, packet);
             }
-            leviculum_ble_tx::TxFanout::NoLink => {
-                log_route_miss(&peer.unwrap_or_default(), packet.len())
-            }
+            leviculum_ble_tx::TxFanout::NoLink => log_route_miss(&aim_peer(aim), packet.len()),
             leviculum_ble_tx::TxFanout::Flood => {
-                let mut links = 0usize;
-                for (index, _) in LINK_OUT.iter().enumerate() {
-                    if HVN_DRAIN.handle_at(index).is_none() {
-                        continue;
-                    }
-                    links += 1;
-                    queue_on_link(index, packet.clone());
-                }
+                let links = flood(&packet, leviculum_ble_tx::SlotMask::EMPTY);
                 crate::log::log_fmt(
                     "[BLE ] ",
                     format_args!("BLE_TX_FLOOD links={} len={}", links, packet.len()),
                 );
             }
+            // The #422 ingress link: every live link but the one these
+            // bytes came in on. The count is of links actually served,
+            // so a flood of 1 out of 2 links reads as such.
+            leviculum_ble_tx::TxFanout::FloodExcept(mask) => {
+                let excluded = aim_peer(aim);
+                let links = flood(&packet, mask);
+                crate::log::log_fmt(
+                    "[BLE ] ",
+                    format_args!(
+                        "BLE_TX_FLOOD links={} len={} excl_link={:02x}{:02x}{:02x}{:02x}",
+                        links,
+                        packet.len(),
+                        excluded[0],
+                        excluded[1],
+                        excluded[2],
+                        excluded[3]
+                    ),
+                );
+            }
         }
+    }
+}
+
+/// Copy one packet onto every live link the mask does not skip,
+/// answering how many got it.
+fn flood(packet: &[u8], mask: leviculum_ble_tx::SlotMask) -> usize {
+    let mut links = 0usize;
+    for (index, _) in LINK_OUT.iter().enumerate() {
+        if HVN_DRAIN.handle_at(index).is_none() || mask.skips(index) {
+            continue;
+        }
+        links += 1;
+        queue_on_link(index, packet.to_vec());
+    }
+    links
+}
+
+/// The peer an aim names, or zeroes for a plain flood (which names
+/// none). Only used for logging and for the miss line.
+fn aim_peer(aim: leviculum_ble_tx::TxAim) -> [u8; 16] {
+    match aim {
+        leviculum_ble_tx::TxAim::Flood => [0u8; 16],
+        leviculum_ble_tx::TxAim::Peer(peer) | leviculum_ble_tx::TxAim::FloodExcept(peer) => peer,
     }
 }
 
@@ -597,9 +631,9 @@ pub static BLE_TX_ROUTE_MISSES: core::sync::atomic::AtomicU32 =
 
 pub struct BleChannels {
     pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
-    /// The outbound side carries the #376 delivery hint alongside the
-    /// bytes; see [`OutboundQueue`].
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
+    /// The outbound side carries the core's link statement alongside
+    /// the bytes; see [`OutboundQueue`].
+    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>,
     /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
     /// `handle_interface_peer_lost` and `Up` to
     /// `handle_interface_peer_up`. See [`BLE_PEER_EVENTS`] for why both
@@ -616,16 +650,14 @@ pub fn channels() -> BleChannels {
 }
 
 pub struct BleInterface {
-    sender: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
+    sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>,
     /// The carrier-off drop run — see the LoRa interface for why these
     /// are counted rather than logged one line per packet.
     drops: leviculum_media_state::DropRun,
 }
 
 impl BleInterface {
-    pub fn new(
-        sender: Sender<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
-    ) -> Self {
+    pub fn new(sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>) -> Self {
         Self {
             sender,
             drops: leviculum_media_state::DropRun::new(),
@@ -666,7 +698,7 @@ impl Interface for BleInterface {
         crate::media::ble_active() && HVN_DRAIN.claimed() > 0
     }
     fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.try_send_to_peer(data, None, false)
+        self.queue(TxAim::Flood, data)
     }
     /// The #376 delivery hint, carried to [`tx_fanout_task`]: this
     /// interface holds several point-to-point links, so a routed packet
@@ -678,6 +710,27 @@ impl Interface for BleInterface {
         peer: Option<&[u8; 16]>,
         _high_priority: bool,
     ) -> Result<(), InterfaceError> {
+        self.queue(peer.map_or(TxAim::Flood, |peer| TxAim::Peer(*peer)), data)
+    }
+    /// The #422 ingress link: these bytes arrived on `peer`'s link, so
+    /// every OTHER link of this interface is a relay target. Excluding
+    /// the whole interface, which is what the core does for a
+    /// single-link medium, is what kept a path request from crossing
+    /// the board between the host's link and the neighbour board's.
+    fn try_send_excluding_peer(
+        &mut self,
+        data: &[u8],
+        peer: &[u8; 16],
+        _high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        self.queue(TxAim::FloodExcept(*peer), data)
+    }
+}
+
+impl BleInterface {
+    /// Hand one packet plus the core's link statement to
+    /// [`tx_fanout_task`].
+    fn queue(&mut self, aim: TxAim, data: &[u8]) -> Result<(), InterfaceError> {
         // The media profile, applied at the interface — see the LoRa
         // interface for why this is `Ok` and not `BufferFull`.
         if !crate::media::ble_active() {
@@ -694,7 +747,7 @@ impl Interface for BleInterface {
         // frees the copy right here and is not counted.
         let bytes = data.len();
         self.sender
-            .try_send((peer.copied(), data.to_vec()))
+            .try_send((aim, data.to_vec()))
             .map(|()| OUTGOING_HELD.add(bytes))
             .map_err(|_| {
                 // Codeberg #344: same silence as the other two. A phone that

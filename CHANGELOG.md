@@ -258,6 +258,21 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A path request now crosses a board between two links of one BLE interface.
+  The exclusion a re-originated broadcast carries used to name the interface
+  the request arrived on, which is right for a shared medium, where every peer
+  on the segment already heard it, and wrong for BLE, where one interface
+  multiplexes several point-to-point links and the other links heard nothing.
+  A board between a host and a neighbour board therefore answered a path
+  request for a destination only the neighbour knew with silence, six retries
+  long, and a node that had just restarted could not recover its paths through
+  the board beside it. The broadcast now names the LINK it arrived on beside
+  the interface, and each interface decides what that means for itself: a
+  single-link carrier excludes itself exactly as before, a multi-link one
+  excludes the one link. Wire format and semantics are unchanged; a Python
+  peer sees the ordinary path request it would have seen from a per-peer
+  sub-interface (Codeberg #422).
+
 - A config file with a syntax error no longer starts a daemon that does
   nothing. `[reticulum` with the bracket missing, and any other line that is
   neither a section header nor a `key = value` pair, used to be skipped: the

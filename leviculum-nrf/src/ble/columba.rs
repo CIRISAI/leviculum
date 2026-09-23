@@ -1503,12 +1503,12 @@ pub(crate) fn live_peer_count() -> usize {
     LIVE_PEERS.lock(|peers| peers.borrow().peer_count())
 }
 
-/// Map the core's #376 delivery hint onto a link slot — the fan-out's
-/// one question to the registry. The rule and its peer-gone decision are
-/// host-tested in [`leviculum_ble_tx::plan_fanout`]; this is the lock
-/// around the firmware's single registry instance.
-pub(crate) fn plan_fanout(peer: Option<&[u8; 16]>) -> leviculum_ble_tx::TxFanout {
-    LIVE_PEERS.lock(|peers| leviculum_ble_tx::plan_fanout(&peers.borrow(), peer))
+/// Map the core's link statement onto link slots — the fan-out's one
+/// question to the registry. The rules and their peer-gone decisions
+/// are host-tested in [`leviculum_ble_tx::plan_fanout`]; this is the
+/// lock around the firmware's single registry instance.
+pub(crate) fn plan_fanout(aim: leviculum_ble_tx::TxAim) -> leviculum_ble_tx::TxFanout {
+    LIVE_PEERS.lock(|peers| leviculum_ble_tx::plan_fanout(&peers.borrow(), aim))
 }
 
 /// The Columba service from the client side — the same three

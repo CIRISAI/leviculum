@@ -762,6 +762,20 @@ impl<const N: usize> PeerRegistry<N> {
         self.slots.iter().position(|id| id.as_ref() == Some(peer))
     }
 
+    /// EVERY slot this peer holds, as a mask (Codeberg #422).
+    ///
+    /// [`slot_for`](Self::slot_for) answers "where do I send to it",
+    /// where the first live link is as good as any. This answers "what
+    /// did it already hear", and during a displacement's hand-over the
+    /// answer can be two slots wide.
+    pub fn slots_of(&self, peer: &[u8; 16]) -> SlotMask {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| id.as_ref() == Some(peer))
+            .fold(SlotMask::EMPTY, |mask, (index, _)| mask.with(index))
+    }
+
     /// The number of DISTINCT live peer identities (Codeberg #365) —
     /// the value the main loop mirrors into the core as the
     /// interface's peer count. Distinct, not per-slot: during a
@@ -782,7 +796,63 @@ impl<const N: usize> PeerRegistry<N> {
     }
 }
 
-/// What the core's #376 delivery hint made of one outbound packet
+/// What the core said about one outbound packet's links, the input of
+/// [`plan_fanout`].
+///
+/// Two different statements, both about peers and neither about BLE:
+/// "these bytes are FOR that peer" (the #376 delivery hint) and "that
+/// peer already HEARD these bytes" (the #422 ingress link of a
+/// broadcast). The core never learns what a connection handle is; it
+/// names the peer identity this interface itself reported on peer-up,
+/// and the mapping to links happens here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAim {
+    /// Every live link: an announce, a path request from a medium with
+    /// no link of its own, anything the core neither addressed nor
+    /// received on a named link.
+    Flood,
+    /// Addressed at one peer (Codeberg #376).
+    Peer([u8; 16]),
+    /// A broadcast that arrived on this peer's link (Codeberg #422):
+    /// every OTHER live link, because they heard nothing. This is what
+    /// keeps a path request crossing a board between two links of the
+    /// one BLE interface.
+    FloodExcept([u8; 16]),
+}
+
+/// The link slots a [`TxFanout::FloodExcept`] leaves out.
+///
+/// A set, not one index: during a displacement's hand-over (#376) one
+/// peer briefly holds two slots, and the packet it already heard must
+/// not come back on its second link either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlotMask(u32);
+
+impl SlotMask {
+    /// The mask that skips nothing.
+    pub const EMPTY: SlotMask = SlotMask(0);
+
+    /// Add `slot` to the set. Slots at or above 32 cannot be
+    /// represented and are ignored; `MAX_LINKS` is 4 on every board we
+    /// build, and the static assert in the firmware keeps it there.
+    pub fn with(self, slot: usize) -> Self {
+        match u32::try_from(slot) {
+            Ok(bit) if bit < u32::BITS => SlotMask(self.0 | (1 << bit)),
+            _ => self,
+        }
+    }
+
+    /// Is this slot skipped?
+    #[must_use]
+    pub fn skips(self, slot: usize) -> bool {
+        match u32::try_from(slot) {
+            Ok(bit) if bit < u32::BITS => self.0 & (1 << bit) != 0,
+            _ => false,
+        }
+    }
+}
+
+/// What the core's delivery statement made of one outbound packet
 /// (`leviculum_nrf::ble::tx_fanout_task`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxFanout {
@@ -809,23 +879,31 @@ pub enum TxFanout {
     /// routed afresh — over another interface or after a fresh path
     /// request — instead of sprayed at links that cannot deliver it.
     NoLink,
+    /// A broadcast that arrived on one of these links (Codeberg #422):
+    /// every live link except the masked ones.
+    ///
+    /// No `NoLink` counterpart: a peer whose link has since died
+    /// excludes nothing, and the remaining links still never heard the
+    /// packet, so the honest answer is an empty mask rather than a
+    /// drop. That is the opposite decision from [`Self::NoLink`] for
+    /// the opposite reason: a hint says who the bytes are FOR, this
+    /// says who they are NOT for.
+    FloodExcept(SlotMask),
 }
 
-/// Map the core's delivery hint onto this interface's links (see
+/// Map the core's delivery statement onto this interface's links (see
 /// [`TxFanout`]).
 ///
 /// Pure, so the decision is host-tested; the firmware's fan-out task
 /// supplies the registry and executes the answer.
-pub fn plan_fanout<const N: usize>(
-    registry: &PeerRegistry<N>,
-    peer: Option<&[u8; 16]>,
-) -> TxFanout {
-    match peer {
-        None => TxFanout::Flood,
-        Some(peer) => match registry.slot_for(peer) {
+pub fn plan_fanout<const N: usize>(registry: &PeerRegistry<N>, aim: TxAim) -> TxFanout {
+    match aim {
+        TxAim::Flood => TxFanout::Flood,
+        TxAim::Peer(peer) => match registry.slot_for(&peer) {
             Some(slot) => TxFanout::Route(slot),
             None => TxFanout::NoLink,
         },
+        TxAim::FloodExcept(peer) => TxFanout::FloodExcept(registry.slots_of(&peer)),
     }
 }
 
@@ -1582,10 +1660,10 @@ mod tests {
     #[test]
     fn a_packet_without_a_hint_floods_every_live_link() {
         let mut reg = PeerRegistry::<4>::new();
-        assert_eq!(plan_fanout(&reg, None), TxFanout::Flood, "no links");
+        assert_eq!(plan_fanout(&reg, TxAim::Flood), TxFanout::Flood, "no links");
         reg.link_up(0, A, Origin::Incoming, 517, 0);
         reg.link_up(1, B, Origin::Incoming, 517, 0);
-        assert_eq!(plan_fanout(&reg, None), TxFanout::Flood);
+        assert_eq!(plan_fanout(&reg, TxAim::Flood), TxFanout::Flood);
     }
 
     /// With a hint the packet goes on the hinted peer's link and on no
@@ -1595,8 +1673,8 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 517, 0);
         reg.link_up(2, B, Origin::Incoming, 517, 0);
-        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(0));
-        assert_eq!(plan_fanout(&reg, Some(&B)), TxFanout::Route(2));
+        assert_eq!(plan_fanout(&reg, TxAim::Peer(A)), TxFanout::Route(0));
+        assert_eq!(plan_fanout(&reg, TxAim::Peer(B)), TxFanout::Route(2));
     }
 
     /// A peer holding two links (the displacement hand-over window) is
@@ -1607,7 +1685,7 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(1, A, Origin::Incoming, 517, 0);
         reg.link_up(3, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
-        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::Route(1));
+        assert_eq!(plan_fanout(&reg, TxAim::Peer(A)), TxFanout::Route(1));
     }
 
     /// The peer walked out between the core's routing decision and this
@@ -1617,13 +1695,58 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, B, Origin::Incoming, 517, 0);
         assert_eq!(
-            plan_fanout(&reg, Some(&A)),
+            plan_fanout(&reg, TxAim::Peer(A)),
             TxFanout::NoLink,
             "A is gone; B's link is not a route to A"
         );
         // And with nothing live at all it is still a drop, not a flood.
         reg.link_down(0);
-        assert_eq!(plan_fanout(&reg, Some(&A)), TxFanout::NoLink);
+        assert_eq!(plan_fanout(&reg, TxAim::Peer(A)), TxFanout::NoLink);
+    }
+
+    /// The #422 shape: a broadcast that arrived on one link goes to
+    /// every OTHER live link. Without it a path request from the phone
+    /// never reaches the board next to it, because both links are one
+    /// `InterfaceId`.
+    #[test]
+    fn a_broadcast_skips_the_link_it_arrived_on() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, A, Origin::Incoming, 517, 0);
+        reg.link_up(2, B, Origin::Incoming, 517, 0);
+        let TxFanout::FloodExcept(mask) = plan_fanout(&reg, TxAim::FloodExcept(A)) else {
+            panic!("an ingress link excludes, it does not route");
+        };
+        assert!(mask.skips(0), "A's link heard it already");
+        assert!(!mask.skips(2), "B's link heard nothing");
+    }
+
+    /// A peer mid-displacement holds two slots, and the packet it
+    /// already heard must not return on the second one either.
+    #[test]
+    fn a_broadcast_skips_every_link_of_the_peer_it_arrived_on() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(1, A, Origin::Incoming, 517, 0);
+        reg.link_up(3, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
+        reg.link_up(2, B, Origin::Incoming, 517, 0);
+        let TxFanout::FloodExcept(mask) = plan_fanout(&reg, TxAim::FloodExcept(A)) else {
+            panic!("an ingress link excludes, it does not route");
+        };
+        assert!(mask.skips(1) && mask.skips(3), "both of A's links");
+        assert!(!mask.skips(2));
+    }
+
+    /// The opposite decision from `NoLink`, for the opposite reason: a
+    /// peer whose link died excludes nothing, and the links that are
+    /// still up never heard the packet, so they are still served.
+    #[test]
+    fn an_ingress_link_that_is_gone_excludes_nothing() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.link_up(0, B, Origin::Incoming, 517, 0);
+        assert_eq!(
+            plan_fanout(&reg, TxAim::FloodExcept(A)),
+            TxFanout::FloodExcept(SlotMask::EMPTY),
+            "A is gone; B still never heard this packet"
+        );
     }
 
     /// The peer's LAST link died: `slot_for` must not keep naming the

@@ -1148,11 +1148,32 @@ async fn main(spawner: Spawner) {
                             }
                             Action::Broadcast {
                                 exclude_iface,
+                                exclude_peer,
                                 data,
                                 ..
                             } => {
                                 let excl = exclude_iface.map(|i| i.0 as i16).unwrap_or(-1);
-                                info!("ACT Broadcast excl={} len={}", excl, data.len());
+                                // The LINK the exclusion spares, when the
+                                // interface named one (#422): `excl=2
+                                // excl_link=-` is the whole BLE interface
+                                // silenced, which is the shape the rig cell
+                                // died of.
+                                match exclude_peer {
+                                    Some(peer) => info!(
+                                        "ACT Broadcast excl={} excl_link={:02x}{:02x}{:02x}{:02x} len={}",
+                                        excl,
+                                        peer[0],
+                                        peer[1],
+                                        peer[2],
+                                        peer[3],
+                                        data.len()
+                                    ),
+                                    None => info!(
+                                        "ACT Broadcast excl={} excl_link=- len={}",
+                                        excl,
+                                        data.len()
+                                    ),
+                                }
                             }
                         }
                     }
