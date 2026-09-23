@@ -70,6 +70,8 @@ mod mvr_board_announce_uplink;
 #[cfg(test)]
 mod mvr_board_radio_pathresolve;
 #[cfg(test)]
+mod mvr_client_hosted_report_drop;
+#[cfg(test)]
 mod mvr_default_announce_app_data;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;

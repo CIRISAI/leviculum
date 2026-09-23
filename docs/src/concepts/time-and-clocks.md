@@ -107,7 +107,7 @@ unix-seconds value for wire fields that peers compare across our
 process lifetimes: announce emission timestamps, built by
 `generate_random_hash` (`leviculum-core/src/announce.rs:156`), and
 request timestamps
-(`leviculum-core/src/node/mod.rs:1427`, `:1154`, Codeberg #164). Any
+(`leviculum-core/src/node/mod.rs:1429`, `:1154`, Codeberg #164). Any
 new wire field with cross-lifetime semantics draws from it too —
 never from the monotonic `Clock::now_ms`, which is a timer, not a
 calendar.
@@ -343,7 +343,7 @@ costs, when it is unavailable, what it guarantees.
 > **Rustdoc debt, paid in #247.** Two doc comments in the tree stated
 > a different order and were corrected by the issue that implemented
 > this ranking: the rustdoc of `set_wall_time_unix_secs`
-> (`leviculum-core/src/node/mod.rs:902`, and on the transport at
+> (`leviculum-core/src/node/mod.rs:904`, and on the transport at
 > `transport.rs:3826`) said a platform wall clock always takes
 > precedence over an injection — the reverse of arms 2 and 3 — and its
 > `NodeCore::emission_secs` (`leviculum-core/src/node/mod.rs:3498`) rustdoc
