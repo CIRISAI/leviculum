@@ -434,7 +434,7 @@ restarts, and must not pretend to.
   benchmark exists in the crate and none was run for this document, so any
   UI estimate of mining time must be measured first, not guessed. There is
   no cancellation and no deadline: `generate` loops until it succeeds
-  (`leviculum-lxmf/src/stamp.rs:249-260`), and `StampError::Cancelled`
+  (`leviculum-lxmf/src/stamp.rs:356-367`), and `StampError::Cancelled`
   exists but is never constructed (`leviculum-lxmf/src/stamp.rs:25`).
 
 ### Fields with constants but no codec
@@ -765,7 +765,7 @@ not a list of open work.
    (`leviculum-lxmf/src/router.rs:2045-2062`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
-   (`leviculum-lxmf/src/stamp.rs:249-260`) and `StampError::Cancelled` is
+   (`leviculum-lxmf/src/stamp.rs:356-367`) and `StampError::Cancelled` is
    declared but never constructed (`leviculum-lxmf/src/stamp.rs:25`). A
    user who starts a message to a high-cost peer and changes their mind has
    no way out.

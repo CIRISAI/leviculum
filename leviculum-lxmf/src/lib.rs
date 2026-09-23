@@ -100,5 +100,6 @@ pub use router::{
 };
 #[cfg(feature = "pow")]
 pub use stamp::{
-    CooperativeStamper, CooperativeYield, StampCancel, StampError, StampExecutor, Yield,
+    CooperativeStamper, CooperativeYield, StampCancel, StampError, StampExecutor, WorkblockStream,
+    Yield,
 };

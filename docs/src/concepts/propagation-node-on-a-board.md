@@ -575,14 +575,14 @@ Two things follow.
 
 **The reference materialises the 250 KiB workblock in RAM. We do not
 have to, and already do not.** `workblock_hasher`
-(`leviculum-lxmf/src/stamp.rs:196`) streams the HKDF blocks straight
+(`leviculum-lxmf/src/stamp.rs:310`) streams the HKDF blocks straight
 into the digest and keeps one 256-byte block. The RAM objection to
 stamp validation is already solved in our tree; only the CPU cost
 remains.
 
 **At an advertised cost of 0 the cost is not incurred at all.** Our
 validator short-circuits before the workblock when the cost is zero
-(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:266`), and the firmware
+(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:373`), and the firmware
 already runs this way for delivery stamps: the LXMF dependency is
 pulled with default features off, so the node "advertises a zero stamp
 cost and mines nothing" (`leviculum-nrf/Cargo.toml:31`).

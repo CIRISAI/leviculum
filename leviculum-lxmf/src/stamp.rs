@@ -156,6 +156,115 @@ pub trait StampExecutor {
     ) -> Pin<Box<dyn Future<Output = Result<Option<u16>, StampError>> + 'a>>;
 }
 
+/// The stamp workblock's SHA-256 expansion, advanced in slices the caller
+/// chooses rather than in one call the caller cannot leave.
+///
+/// # Why this is a type and not a loop
+///
+/// `CooperativeStamper::workblock_hasher` expands the whole workblock in one
+/// `await`, yielding to the *executor* every `yield_every` rounds. On a host
+/// that is enough: the yield lets the runtime's other tasks run. On a board it
+/// is not, because the caller that matters is a single main loop, and a yield
+/// inside its `await` does not take that loop back to its `select`. The loop's
+/// channels — the LoRa task's blocking hand-off among them — are not serviced
+/// for as long as the expansion runs, which at 1000 PN rounds is 3.7 s on an
+/// nRF52840 (`ble_pn_board_upload`, 2026-09-16).
+///
+/// A caller that owns a loop therefore owns the stream: it advances a bounded
+/// number of rounds, returns to its loop, and comes back. The expansion itself
+/// is the same arithmetic either way — `workblock_hasher` drives this type, so
+/// there is one implementation and not two.
+///
+/// # What it holds
+///
+/// One `Sha256` state and one 256-byte HKDF block per [`advance`] call. Never
+/// the workblock: a suspended stream costs the hasher state and nothing that
+/// scales with `rounds`, which is what makes parking one across main-loop
+/// turns affordable on a 96 KiB heap.
+///
+/// [`advance`]: WorkblockStream::advance
+#[cfg(feature = "pow")]
+pub struct WorkblockStream {
+    hasher: Sha256,
+    done: usize,
+    rounds: usize,
+}
+
+#[cfg(feature = "pow")]
+impl WorkblockStream {
+    /// A stream that will expand `rounds` rounds. A stream of 0 rounds is
+    /// complete on arrival.
+    pub fn new(rounds: usize) -> Self {
+        Self {
+            hasher: Sha256::new(),
+            done: 0,
+            rounds,
+        }
+    }
+
+    /// Rounds expanded so far.
+    pub fn rounds_done(&self) -> usize {
+        self.done
+    }
+
+    /// Rounds this stream was built for.
+    pub fn rounds_total(&self) -> usize {
+        self.rounds
+    }
+
+    /// Whether every round has been expanded.
+    pub fn is_complete(&self) -> bool {
+        self.done >= self.rounds
+    }
+
+    /// Expand up to `slice` further rounds and return how many were done.
+    /// Returns 0 once complete, so a caller that loops on it terminates.
+    ///
+    /// `material` must be the same on every call for one stream; the rounds
+    /// are a function of it and of the round index, and mixing two materials
+    /// into one hasher yields a digest that belongs to neither.
+    pub fn advance(&mut self, material: &[u8], slice: usize) -> usize {
+        let end = self.rounds.min(self.done.saturating_add(slice));
+        let mut block = [0u8; 256];
+        for n in self.done..end {
+            let mut encoded = Vec::new();
+            msgpack::uint(&mut encoded, n as u64);
+            let mut salt_input = Vec::with_capacity(material.len() + encoded.len());
+            salt_input.extend_from_slice(material);
+            salt_input.extend_from_slice(&encoded);
+            let salt = full_hash(&salt_input);
+            derive_key(material, Some(&salt), None, &mut block);
+            self.hasher.update(block);
+        }
+        let did = end - self.done;
+        self.done = end;
+        did
+    }
+
+    /// The stamp's value against the expansion so far — meaningful only once
+    /// [`is_complete`](Self::is_complete) holds. The reference's `stamp_value`
+    /// (`reference/LXMF/LXMF/LXStamper.py:62-71`).
+    pub fn value(&self, stamp: &[u8; 32]) -> u16 {
+        digest_value(&digest_from_base(&self.hasher, stamp))
+    }
+
+    /// The stamp's value if it clears `cost`, `None` if it does not —
+    /// meaningful only once [`is_complete`](Self::is_complete) holds. The
+    /// completed-stream twin of [`CooperativeStamper::validate_stamp`].
+    pub fn validated(&self, stamp: &[u8; 32], cost: u8) -> Option<u16> {
+        if cost == 0 {
+            return Some(0);
+        }
+        let digest = digest_from_base(&self.hasher, stamp);
+        digest_valid(&digest, cost).then(|| digest_value(&digest))
+    }
+
+    /// The SHA-256 state, for a caller that wants the base digest itself.
+    pub fn into_hasher(self) -> Sha256 {
+        self.hasher
+    }
+}
+
 #[cfg(feature = "pow")]
 pub struct CooperativeStamper<R, Y> {
     pub rng: R,
@@ -193,23 +302,21 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
     /// Build the SHA-256 state for `workblock` without retaining the workblock.
     /// A production delivery stamp therefore uses constant workspace (one
     /// 256-byte HKDF block) instead of the Python implementation's 768 KB.
+    ///
+    /// Drives [`WorkblockStream`] so the expansion exists once: a caller that
+    /// can await runs it here, a caller that cannot owns the stream and
+    /// advances it itself. The yield points are unchanged — one after every
+    /// `yield_every`-th completed round, the trailing partial chunk excepted.
     async fn workblock_hasher(&mut self, material: &[u8], rounds: usize) -> Sha256 {
-        let mut hasher = Sha256::new();
-        let mut block = [0u8; 256];
-        for n in 0..rounds {
-            let mut encoded = Vec::new();
-            msgpack::uint(&mut encoded, n as u64);
-            let mut salt_input = Vec::with_capacity(material.len() + encoded.len());
-            salt_input.extend_from_slice(material);
-            salt_input.extend_from_slice(&encoded);
-            let salt = full_hash(&salt_input);
-            derive_key(material, Some(&salt), None, &mut block);
-            hasher.update(block);
-            if (n + 1).is_multiple_of(self.yield_every.max(1)) {
+        let every = self.yield_every.max(1);
+        let mut stream = WorkblockStream::new(rounds);
+        while !stream.is_complete() {
+            stream.advance(material, every);
+            if stream.rounds_done().is_multiple_of(every) {
                 self.scheduler.yield_now().await;
             }
         }
-        hasher
+        stream.into_hasher()
     }
     /// Mine a stamp for `material` at `cost`, or give it back when `cancel`
     /// fires.
