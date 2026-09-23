@@ -40,6 +40,44 @@ pub fn full_hash_parts(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// [`full_hash_parts`] when the leading part is not a slice but a stream.
+///
+/// The resource advertisement needs two digests over the same payload —
+/// `full_hash(data + random_hash)` and `full_hash(data + resource_hash)`
+/// (`reference/Reticulum/RNS/Resource.py:441,443`) — and a payload read from a
+/// store is expensive to read twice and impossible to hold. So the payload
+/// is fed once and the two short tails are appended to a CLONE of the
+/// state: SHA-256's state is the whole of what it remembers, so a clone
+/// finalised with a different tail is exactly the digest of that
+/// concatenation.
+#[derive(Clone)]
+pub struct StreamHasher(Sha256);
+
+impl StreamHasher {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    /// Feed the next bytes of the payload.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// The digest of everything fed so far followed by `tail`, leaving
+    /// this hasher usable for another tail.
+    pub fn finish_with(&self, tail: &[u8]) -> [u8; 32] {
+        let mut hasher = self.0.clone();
+        hasher.update(tail);
+        hasher.finalize().into()
+    }
+}
+
+impl Default for StreamHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Compute truncated hash (first 16 bytes of SHA-256)
 /// Used for destination addresses
 pub fn truncated_hash(data: &[u8]) -> [u8; TRUNCATED_HASHBYTES] {
@@ -52,6 +90,26 @@ pub fn truncated_hash(data: &[u8]) -> [u8; TRUNCATED_HASHBYTES] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A streamed payload with a tail is the digest of the concatenation,
+    /// at every split of the payload — the property both resource digests
+    /// rest on.
+    #[test]
+    fn a_stream_hasher_with_a_tail_is_full_hash_of_the_concatenation() {
+        let payload: alloc::vec::Vec<u8> = (0..500u32).map(|i| (i * 13) as u8).collect();
+        let tail = [9u8; 4];
+        let mut joined = payload.clone();
+        joined.extend_from_slice(&tail);
+        for chunk in [1usize, 3, 64, 500, 4096] {
+            let mut hasher = StreamHasher::new();
+            for piece in payload.chunks(chunk) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish_with(&tail), full_hash(&joined));
+            // Reusable: a second tail sees the same payload state.
+            assert_eq!(hasher.finish_with(&tail), full_hash(&joined));
+        }
+    }
 
     #[test]
     fn test_sha256_empty() {

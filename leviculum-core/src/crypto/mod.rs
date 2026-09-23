@@ -17,10 +17,10 @@ mod hmac_impl;
 mod token;
 
 pub use aes_cbc::{aes256_cbc_decrypt, aes256_cbc_encrypt};
-pub use hashes::{full_hash, full_hash_parts, sha256, sha512, truncated_hash};
+pub use hashes::{full_hash, full_hash_parts, sha256, sha512, truncated_hash, StreamHasher};
 pub use hkdf_impl::derive_key;
 pub use hmac_impl::{hmac_sha256, verify_hmac};
-pub use token::{decrypt_token, encrypt_token, TokenError};
+pub use token::{decrypt_token, encrypt_token, token_len, TokenEncryptor, TokenError, TokenSink};
 
 // Re-export key types from dalek crates
 pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};

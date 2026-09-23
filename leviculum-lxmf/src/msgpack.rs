@@ -53,6 +53,42 @@ pub fn map(out: &mut Vec<u8>, n: usize) {
 pub fn bin(out: &mut Vec<u8>, v: &[u8]) {
     let _ = rmp::encode::write_bin(out, v);
 }
+/// The `bin` header for `len` payload bytes, without the payload.
+///
+/// A response the propagation node streams out of its store writes the
+/// header when the record is read, not when the response is assembled
+/// (#384 B2), so the two have to be separable. `rmp` picks the shortest
+/// form; so does this, and [`bin_header_len`] predicts which.
+pub fn bin_header(out: &mut Vec<u8>, len: usize) {
+    let _ = rmp::encode::write_bin_len(out, len as u32);
+}
+
+/// Bytes [`bin_header`] writes for a payload of `len`.
+///
+/// Needed before a byte is produced: the resource advertisement carries
+/// the total length, and a streamed response has to compute it from the
+/// store's directory rather than from a finished buffer.
+pub const fn bin_header_len(len: usize) -> usize {
+    if len < 256 {
+        2
+    } else if len < 65_536 {
+        3
+    } else {
+        5
+    }
+}
+
+/// Bytes [`array()`] writes for `n` elements.
+pub const fn array_header_len(n: usize) -> usize {
+    if n < 16 {
+        1
+    } else if n < 65_536 {
+        3
+    } else {
+        5
+    }
+}
+
 pub fn string(out: &mut Vec<u8>, value: &str) {
     let _ = rmp::encode::write_str(out, value);
 }
@@ -463,5 +499,31 @@ mod tests {
         buf.push(0x90);
         let mut pos = 0;
         assert_eq!(raw(&buf, &mut pos).err(), Some(Error::Depth));
+    }
+
+    /// The predicted header lengths are the written header lengths, at
+    /// every form boundary `rmp` switches on. A streamed response's total
+    /// length is computed from these before a byte exists, so a
+    /// one-byte disagreement would advertise a resource of the wrong size.
+    #[test]
+    fn header_lengths_predict_what_the_writers_write() {
+        for len in [0usize, 1, 255, 256, 65_535, 65_536, 100_000] {
+            let mut out = alloc::vec::Vec::new();
+            bin_header(&mut out, len);
+            assert_eq!(out.len(), bin_header_len(len), "bin header for {len}");
+        }
+        for n in [0usize, 1, 15, 16, 65_535, 65_536] {
+            let mut out = alloc::vec::Vec::new();
+            array(&mut out, n);
+            assert_eq!(out.len(), array_header_len(n), "array header for {n}");
+        }
+        // And the split header/payload writing is the one-shot writer.
+        let payload = alloc::vec![7u8; 300];
+        let mut joined = alloc::vec::Vec::new();
+        bin(&mut joined, &payload);
+        let mut split = alloc::vec::Vec::new();
+        bin_header(&mut split, payload.len());
+        split.extend_from_slice(&payload);
+        assert_eq!(joined, split);
     }
 }

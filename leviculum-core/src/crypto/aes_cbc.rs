@@ -3,7 +3,7 @@
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
 
-type Aes256CbcEnc = Encryptor<aes::Aes256>;
+pub(super) type Aes256CbcEnc = Encryptor<aes::Aes256>;
 type Aes256CbcDec = Decryptor<aes::Aes256>;
 
 use crate::constants::{AES256_KEY_SIZE, AES_BLOCK_SIZE};

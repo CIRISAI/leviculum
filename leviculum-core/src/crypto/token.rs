@@ -9,8 +9,11 @@
 
 use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE, TOKEN_HMAC_KEY_SIZE, TOKEN_KEY_SIZE};
 
-use super::aes_cbc::{aes256_cbc_decrypt, aes256_cbc_encrypt, AesError};
-use super::hmac_impl::{hmac_sha256, verify_hmac};
+use aes::cipher::{BlockEncryptMut, KeyIvInit};
+
+use super::aes_cbc::{aes256_cbc_decrypt, aes256_cbc_encrypt, Aes256CbcEnc, AesError};
+use super::hmac_impl::{hmac_sha256, verify_hmac, HmacSha256};
+use hmac::Mac;
 
 /// Token encryption/decryption error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +97,126 @@ pub fn encrypt_token(
     Ok(hmac_input_len + HMAC_SIZE)
 }
 
+/// Where a streaming token encryption puts the bytes it produces.
+///
+/// The point of [`TokenEncryptor`] is that the token never exists as one
+/// buffer, so it cannot be returned; it is handed out in pieces, in wire
+/// order, and the sink decides what they become. The propagation node's
+/// serve path makes them resource parts
+/// (`OutgoingResource::new_response_from_source`,
+/// `leviculum-core/src/resource/outgoing.rs`); a test makes them a `Vec`
+/// and compares it with [`encrypt_token`].
+pub trait TokenSink {
+    /// Take the next bytes of the token. Called in wire order, never out
+    /// of it, and the concatenation of every call is the token.
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl TokenSink for alloc::vec::Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// The exact length [`encrypt_token`] writes for `plaintext_len` bytes:
+/// IV, the PKCS7-padded ciphertext (always at least one whole pad block),
+/// and the HMAC.
+///
+/// A streaming encryption has to know this before it produces a byte —
+/// the resource advertisement carries the transfer size, and it is built
+/// from this number rather than from a finished buffer.
+pub const fn token_len(plaintext_len: usize) -> usize {
+    AES_BLOCK_SIZE + ((plaintext_len / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE + HMAC_SIZE
+}
+
+/// [`encrypt_token`] as a stream: the same token, byte for byte, emitted
+/// into a [`TokenSink`] as the plaintext arrives instead of read out of
+/// one buffer at the end.
+///
+/// Both halves of the token construction are streaming primitives
+/// already — CBC chains block by block and HMAC-SHA256 is a Merkle
+/// tree — so this holds exactly one AES block of plaintext at a time
+/// and nothing else. What it buys is the propagation node's serve: a
+/// board that answers a mailbox fetch can encrypt a response straight
+/// into the resource parts without ever holding the response, its
+/// plaintext and its ciphertext at once (#384).
+///
+/// Identical output to [`encrypt_token`] is not an aspiration but the
+/// contract: `token_stream_matches_one_shot` drives both with the same
+/// key, IV and bytes at every chunking and compares them.
+pub struct TokenEncryptor {
+    cipher: Aes256CbcEnc,
+    mac: HmacSha256,
+    /// Plaintext bytes not yet part of a whole block.
+    block: [u8; AES_BLOCK_SIZE],
+    filled: usize,
+}
+
+impl TokenEncryptor {
+    /// Start a token under `key` (64 bytes: 32 HMAC, 32 AES) and `iv`,
+    /// emitting the IV — the token's first field, and the first bytes
+    /// the HMAC covers — into `sink` immediately.
+    pub fn new(key: &[u8], iv: &[u8], sink: &mut impl TokenSink) -> Result<Self, TokenError> {
+        if key.len() != TOKEN_KEY_SIZE {
+            return Err(TokenError::InvalidKeyLength);
+        }
+        if iv.len() != AES_BLOCK_SIZE {
+            // Same reason as `encrypt_token`: an invalid IV is reported
+            // as a decryption failure rather than as its own shape.
+            return Err(TokenError::DecryptionFailed);
+        }
+        let hmac_key = &key[..TOKEN_HMAC_KEY_SIZE];
+        let aes_key = &key[TOKEN_HMAC_KEY_SIZE..];
+        let cipher =
+            Aes256CbcEnc::new_from_slices(aes_key, iv).map_err(|_| TokenError::InvalidKeyLength)?;
+        let mut mac =
+            HmacSha256::new_from_slice(hmac_key).map_err(|_| TokenError::InvalidKeyLength)?;
+        mac.update(iv);
+        sink.put(iv);
+        Ok(Self {
+            cipher,
+            mac,
+            block: [0u8; AES_BLOCK_SIZE],
+            filled: 0,
+        })
+    }
+
+    /// Feed the next plaintext bytes. Every whole block they complete is
+    /// encrypted and emitted; the remainder waits for the next call or
+    /// for [`finish`](Self::finish).
+    pub fn update(&mut self, plaintext: &[u8], sink: &mut impl TokenSink) {
+        let mut rest = plaintext;
+        while !rest.is_empty() {
+            let take = core::cmp::min(AES_BLOCK_SIZE - self.filled, rest.len());
+            self.block[self.filled..self.filled + take].copy_from_slice(&rest[..take]);
+            self.filled += take;
+            rest = &rest[take..];
+            if self.filled == AES_BLOCK_SIZE {
+                self.emit_block(sink);
+            }
+        }
+    }
+
+    /// Close the token: PKCS7 padding (always a whole block when the
+    /// plaintext is block-aligned, as `pkcs7_pad` does), then the HMAC
+    /// over IV and ciphertext.
+    pub fn finish(mut self, sink: &mut impl TokenSink) {
+        let padding = AES_BLOCK_SIZE - self.filled;
+        self.block[self.filled..].fill(padding as u8);
+        self.filled = AES_BLOCK_SIZE;
+        self.emit_block(sink);
+        let hmac: [u8; HMAC_SIZE] = self.mac.finalize().into_bytes().into();
+        sink.put(&hmac);
+    }
+
+    fn emit_block(&mut self, sink: &mut impl TokenSink) {
+        self.cipher.encrypt_block_mut((&mut self.block[..]).into());
+        self.mac.update(&self.block);
+        sink.put(&self.block);
+        self.filled = 0;
+    }
+}
+
 /// Decrypt a token
 ///
 /// The key must be 64 bytes (32 HMAC + 32 AES).
@@ -133,6 +256,7 @@ pub fn decrypt_token(key: &[u8], token: &[u8], output: &mut [u8]) -> Result<usiz
 mod tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     fn make_key() -> [u8; 64] {
         let mut key = [0u8; 64];
@@ -206,6 +330,64 @@ mod tests {
             &reference_token,
             "our token bytes must match the Python-RNS reference token"
         );
+    }
+
+    /// The streaming encryptor is the one-shot one, byte for byte, at
+    /// every chunking of the plaintext — the contract the propagation
+    /// node's serve path rests on, since the receiver decrypts what
+    /// [`encrypt_token`] would have produced and nothing else.
+    ///
+    /// Chunk sizes deliberately straddle the block: 1 and 15 never fill
+    /// a block on their own, 16 and 32 always do, 7 and 1000 land
+    /// unaligned, and `usize::MAX` is the degenerate single call. The
+    /// plaintext lengths cover empty, sub-block, exactly block-aligned
+    /// (the case that costs a whole extra pad block) and multi-block.
+    #[test]
+    fn token_stream_matches_one_shot() {
+        let key = make_key();
+        let iv = [0x42u8; 16];
+        for plain_len in [0usize, 1, 15, 16, 17, 31, 32, 63, 64, 1000] {
+            let plaintext: Vec<u8> = (0..plain_len).map(|i| (i * 7 + 3) as u8).collect();
+            let mut one_shot = vec![0u8; token_len(plain_len)];
+            let written = encrypt_token(&key, &iv, &plaintext, &mut one_shot).unwrap();
+            assert_eq!(
+                written,
+                token_len(plain_len),
+                "token_len must predict what encrypt_token writes"
+            );
+            for chunk in [1usize, 7, 15, 16, 32, 1000, usize::MAX] {
+                let mut streamed: Vec<u8> = Vec::new();
+                let mut enc = TokenEncryptor::new(&key, &iv, &mut streamed).unwrap();
+                for piece in plaintext.chunks(chunk.min(plaintext.len().max(1))) {
+                    enc.update(piece, &mut streamed);
+                }
+                enc.finish(&mut streamed);
+                assert_eq!(
+                    streamed, one_shot,
+                    "streamed token must equal the one-shot token \
+                     (plaintext {plain_len} B, chunks of {chunk})"
+                );
+            }
+        }
+    }
+
+    /// The streamed token is also decryptable by our own reader, which
+    /// is the property a receiver actually exercises.
+    #[test]
+    fn token_stream_decrypts() {
+        let key = make_key();
+        let iv = [0x11u8; 16];
+        let plaintext = b"a streamed propagation response";
+        let mut streamed: Vec<u8> = Vec::new();
+        let mut enc = TokenEncryptor::new(&key, &iv, &mut streamed).unwrap();
+        for piece in plaintext.chunks(5) {
+            enc.update(piece, &mut streamed);
+        }
+        enc.finish(&mut streamed);
+
+        let mut out = vec![0u8; streamed.len()];
+        let len = decrypt_token(&key, &streamed, &mut out).unwrap();
+        assert_eq!(&out[..len], plaintext);
     }
 
     #[test]
