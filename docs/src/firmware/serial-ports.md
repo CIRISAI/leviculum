@@ -209,7 +209,7 @@ For a RAK4631 / WisMesh Pocket V2 the only change is the port
 
 **Who applies the LoRa keys.** Under `lnsd` the five LoRa keys are sent
 to the board as a radio-config frame at interface startup
-(`leviculum-std/src/interfaces/serial.rs:476`), so the config decides
+(`leviculum-std/src/interfaces/serial.rs:496`), so the config decides
 the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled

@@ -381,6 +381,53 @@ pub fn ldro_enabled(bw_hz: u32, sf: u8) -> bool {
     (1u64 << sf) / bw_khz > 16
 }
 
+/// The ten signal bandwidths an SX1262 can be programmed to, in the Hz the
+/// chip's own register table names (datasheet Table 14-47).
+///
+/// These are the values `RadioConfig::from_wire_config`
+/// (`leviculum-nrf/src/lora.rs`) has a register code for, and the only ones
+/// `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs`) ever returns.
+pub const BANDWIDTHS_HZ: [u32; 10] = [
+    7_810, 10_420, 15_630, 20_830, 31_250, 41_670, 62_500, 125_000, 250_000, 500_000,
+];
+
+/// Map a configured bandwidth onto the SX1262 register table, or `None` for
+/// one no LoRa modem offers.
+///
+/// Five of the ten bandwidths carry two spellings of the same register. The
+/// SX127x table Python-RNS and RNode_Firmware use (Arduino-LoRa
+/// `setSignalBandwidth`: 7800, 10400, 15600, 20800, 41700) rounds where the
+/// SX1262 datasheet rounds differently (7810, 10420, 15630, 20830, 41670);
+/// the other five agree to the Hz. Both spellings of a pair therefore name
+/// one physical bandwidth, and the difference between them — at most 30 Hz,
+/// under 0.3 % — is below what either part can resolve.
+///
+/// It is not below what a parser resolves. `from_wire_config` matches the
+/// SX1262 spelling exactly and returns `None` for the other, and the legacy
+/// radio-config contract answers a config it cannot take with silence
+/// (`leviculum-nrf/src/usb.rs`), so an RNode-spelled bandwidth reaches an
+/// LNode as nothing at all: the board keeps the PHY it had, and the host
+/// keeps pricing airtime for the one it asked for (L-0007). Canonicalising
+/// on the way out is the #349 resolution applied to bandwidth — a request the
+/// part can honour is honoured as near as it allows, and the substitution is
+/// stated — rather than refusing a value that every RNS config file in the
+/// world spells that way.
+pub fn canonical_bandwidth_hz(bw_hz: u32) -> Option<u32> {
+    match bw_hz {
+        7_800 | 7_810 => Some(7_810),
+        10_400 | 10_420 => Some(10_420),
+        15_600 | 15_630 => Some(15_630),
+        20_800 | 20_830 => Some(20_830),
+        31_250 => Some(31_250),
+        41_670 | 41_700 => Some(41_670),
+        62_500 => Some(62_500),
+        125_000 => Some(125_000),
+        250_000 => Some(250_000),
+        500_000 => Some(500_000),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transmit power (Codeberg #349)
 // ---------------------------------------------------------------------------
@@ -1355,6 +1402,61 @@ mod tests {
         assert!(!ldro_enabled(125_000, 11), "SF11/BW125 is reference-OFF");
         assert!(!ldro_enabled(250_000, 12), "SF12/BW250 is reference-OFF");
         assert!(ldro_enabled(7_810, 7), "SF7/BW7.81k is reference-ON");
+    }
+
+    /// Every member of the chip's own table is a fixed point: canonicalising
+    /// a value that is already canonical must not move it.
+    #[test]
+    fn canonical_bandwidths_are_fixed_points() {
+        for bw in BANDWIDTHS_HZ {
+            assert_eq!(canonical_bandwidth_hz(bw), Some(bw), "BW{bw} moved");
+        }
+    }
+
+    /// The five RNode/SX127x spellings land on their SX1262 twin. These are
+    /// the pairs `ldro_matches_the_reference_decision_on_the_whole_code_table`
+    /// lists side by side; the mapping is the same pairing, used in the other
+    /// direction.
+    #[test]
+    fn rnode_spellings_map_onto_their_sx1262_twin() {
+        assert_eq!(canonical_bandwidth_hz(7_800), Some(7_810));
+        assert_eq!(canonical_bandwidth_hz(10_400), Some(10_420));
+        assert_eq!(canonical_bandwidth_hz(15_600), Some(15_630));
+        assert_eq!(canonical_bandwidth_hz(20_800), Some(20_830));
+        assert_eq!(canonical_bandwidth_hz(41_700), Some(41_670));
+    }
+
+    /// The drift guard L-0007 is about, in the direction that costs a board:
+    /// everything [`crate::rnode::validate_config`] lets through has to have
+    /// an SX1262 register code, or the host is again accepting a bandwidth an
+    /// LNode refuses in silence. Driven over the domain rather than a list,
+    /// so a value added to the validator alone fails here.
+    ///
+    /// The converse does not hold and is not asserted: `validate_config`
+    /// refuses the five SX1262 spellings, which is a loud, named config error
+    /// rather than a silent PHY mismatch, and widening it would have to come
+    /// with the matching RNode-side canonicalisation — an RNode echoes the
+    /// SX127x spelling back and `validate_radio_config` compares the echo for
+    /// equality.
+    #[test]
+    fn everything_the_host_accepts_has_a_register_code() {
+        for bw in (0u32..=600_000).step_by(10) {
+            if crate::rnode::validate_config(868_000_000, bw, 17, 8, 5).is_ok() {
+                assert!(
+                    canonical_bandwidth_hz(bw).is_some(),
+                    "BW{bw} passes validate_config but has no SX1262 register code"
+                );
+            }
+        }
+    }
+
+    /// Nothing outside the two tables is invented — including the neighbours
+    /// of a legitimate value, where a tolerance-based match would drift.
+    #[test]
+    fn unknown_bandwidths_have_no_canonical_form() {
+        for bw in [0u32, 1, 7_805, 41_680, 100_000, 124_999, 1_000_000] {
+            assert_eq!(canonical_bandwidth_hz(bw), None, "BW{bw} was invented");
+        }
     }
 
     /// Unconfigured (bw 0) and sub-kHz values report no LDRO instead of

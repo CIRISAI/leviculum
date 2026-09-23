@@ -296,7 +296,27 @@ pub(crate) fn serial_radio_config(
     cfg: &crate::config::InterfaceConfig,
 ) -> Option<SerialRadioConfig> {
     let frequency = cfg.frequency?;
-    let bandwidth = cfg.bandwidth.unwrap_or(125_000);
+    let requested_bandwidth = cfg.bandwidth.unwrap_or(125_000);
+    // A SerialInterface radio block is an LNode, and every LNode is an
+    // SX1262, so the bandwidth that goes on the wire is spelled the way that
+    // chip's register table spells it. Five of the ten bandwidths have a
+    // second, SX127x spelling that Python-RNS and RNode_Firmware use and that
+    // `validate_config` accepts; the board's parser matches exactly, and its
+    // answer to a config it cannot take is silence, so leaving the RNode
+    // spelling on the wire loses the config without a word (L-0007). An
+    // unmappable value is left alone for the builder's `validate_config` to
+    // refuse by name.
+    let bandwidth = leviculum_core::sx126x::canonical_bandwidth_hz(requested_bandwidth)
+        .unwrap_or(requested_bandwidth);
+    if bandwidth != requested_bandwidth {
+        tracing::info!(
+            "SerialInterface: bandwidth {} Hz is the SX127x spelling of the SX1262's {} Hz — \
+             the same register on both parts; programming {} Hz, which the LNode accepts",
+            requested_bandwidth,
+            bandwidth,
+            bandwidth
+        );
+    }
     let spreading_factor = cfg.spreading_factor.unwrap_or(8);
     let coding_rate = cfg.coding_rate.unwrap_or(5);
     Some(SerialRadioConfig {
@@ -550,9 +570,25 @@ async fn send_radio_config(
                                 && data[..] == RADIO_CONFIG_ACK[..]
                             {
                                 tracing::info!("Serial {}: radio config ACK received", name);
-                                // Update the host-side airtime bucket to price
-                                // subsequent charges under the newly-applied
-                                // radio profile.
+                                // Confirm the host-side airtime bucket against
+                                // the profile the board has just said it
+                                // adopted. These are the values
+                                // `spawn_serial_interface` already built the
+                                // bucket from, so on this path the call moves
+                                // nothing: the ACK is a bare receipt, it
+                                // carries no PHY of its own, and there is no
+                                // other production caller of
+                                // `update_radio_params`. The bucket is
+                                // therefore priced at the REQUESTED profile
+                                // whether or not the board adopted it — the
+                                // half of L-0007 that stays open (Refs #334).
+                                // Closing it needs the running profile off the
+                                // board itself: the firmware already answers a
+                                // `TYPE_RADIO_REPORT` with its live config
+                                // (`leviculum-nrf/src/usb.rs`, #349), which
+                                // this legacy sender does not ask for, and a
+                                // board that answers neither has to be priced
+                                // by a policy nobody has chosen yet.
                                 if let Some(credit) = credit {
                                     credit.lock_recover().update_radio_params(
                                         config.bandwidth,
@@ -665,9 +701,21 @@ async fn serial_reconnect_task(
                 // Send radio config if configured (test infrastructure)
                 if let Some(ref radio_cfg) = config.radio_config {
                     if !send_radio_config(&mut port, radio_cfg, &name, credit.as_ref()).await {
+                        // Not "the board uses defaults": an LNode restores its
+                        // stored config at boot (`leviculum-nrf/src/radio_store.rs`),
+                        // so after silence it is on whatever it was last given,
+                        // which the host has no way to name. Say what is known
+                        // and what it costs, because the airtime bucket goes on
+                        // pricing the profile that was asked for (L-0007).
                         tracing::warn!(
-                            "Serial {}: radio config not acknowledged, T114 uses defaults",
-                            name
+                            "Serial {}: radio config not acknowledged after 3 attempts — \
+                             the board is running an unknown profile (its stored one, not \
+                             necessarily the compiled default), while airtime here is still \
+                             priced at the requested SF{}/BW{}/CR4:{}",
+                            name,
+                            radio_cfg.spreading_factor,
+                            radio_cfg.bandwidth,
+                            radio_cfg.coding_rate
                         );
                     }
                 }
@@ -1322,6 +1370,70 @@ mod tests {
         // that means unlimited says so, and the host does not second-guess.
         assert_eq!(at(869_525_000, Some(5.0)), 500);
         assert_eq!(at(869_525_000, Some(0.0)), 0);
+    }
+
+    /// The ten bandwidths `RadioConfig::from_wire_config`
+    /// (`leviculum-nrf/src/lora.rs`) has an SX1262 register code for, and the
+    /// only ones `bw_code_to_hz` (`leviculum-nrf/src/sx1262.rs:206`) ever
+    /// returns. Written out here rather than imported so this test states the
+    /// firmware's acceptance set independently of whatever the host computes.
+    const FIRMWARE_ACCEPTS_HZ: [u32; 10] = [
+        7_810, 10_420, 15_630, 20_830, 31_250, 41_670, 62_500, 125_000, 250_000, 500_000,
+    ];
+
+    /// L-0007, the door: five of the ten LoRa bandwidths are spelled
+    /// differently by the SX127x/Arduino-LoRa table Python-RNS and
+    /// RNode_Firmware use than by the SX1262 register table our own firmware
+    /// decodes. `validate_config` accepts the RNode spelling, so a
+    /// `SerialInterface` block naming one builds, spawns, and puts a value on
+    /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
+    /// legacy contract for a config the driver cannot take is silence
+    /// (`leviculum-nrf/src/usb.rs:736-757`), so the board stays on the PHY it
+    /// already had while the host's airtime bucket goes on pricing every
+    /// frame at the bandwidth it asked for.
+    #[test]
+    fn rnode_spelled_bandwidths_reach_the_wire_as_codes_the_board_accepts() {
+        for rnode_spelling in [7_800u32, 10_400, 15_600, 20_800, 41_700] {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(rnode_spelling),
+                ..Default::default()
+            };
+            // The host lets it through: this is the block an operator writes
+            // after copying a working rnsd config across.
+            assert!(
+                leviculum_core::rnode::validate_config(869_525_000, rnode_spelling, 17, 8, 5)
+                    .is_ok(),
+                "{rnode_spelling} Hz is a bandwidth the host accepts"
+            );
+            let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+            assert!(
+                FIRMWARE_ACCEPTS_HZ.contains(&radio.bandwidth),
+                "bandwidth {rnode_spelling} Hz reaches the wire as {} Hz, \
+                 which the LNode firmware refuses without a word",
+                radio.bandwidth
+            );
+        }
+    }
+
+    /// The five that already agree are not moved: a config naming one of them
+    /// has to arrive at the modem as itself, or the substitution introduced
+    /// for the other five has become a rewrite of every bandwidth.
+    #[test]
+    fn agreeing_bandwidths_pass_through_unchanged() {
+        for agreed in [31_250u32, 62_500, 125_000, 250_000, 500_000] {
+            let cfg = crate::config::InterfaceConfig {
+                interface_type: "SerialInterface".to_string(),
+                port: Some("/dev/ttyACM0".to_string()),
+                frequency: Some(869_525_000),
+                bandwidth: Some(agreed),
+                ..Default::default()
+            };
+            let radio = serial_radio_config(&cfg).expect("frequency present → radio config");
+            assert_eq!(radio.bandwidth, agreed);
+        }
     }
 
     /// The whole point of the key: a `preamble_symbols` written in a config
