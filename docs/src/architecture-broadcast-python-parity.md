@@ -12,6 +12,23 @@ for on-wire packet counts, packet types, and protocol semantics.
 Timing may diverge — jitter-window shape and interface pacing are
 free — as long as the counts and types stay identical.
 
+**State of the citations (2026-09-23).** Every Rust-side citation on
+this page was re-resolved in that pass and is current. The Python side
+was only spot-checked, and the vendored `RNS/` tree has moved under it
+since the page was written: the checks that were made are corrected in
+place below, but **the line numbers into `Transport.py`, `Packet.py`,
+`Destination.py`, `Interface.py` and `Reticulum.py` that are not
+mentioned here have not been re-established** and must be treated as
+stale until someone walks them. Confirmed still correct: the constants
+at `Transport.py:68`, `:69`, `:70` and `:83`, the dedup storage at
+`:106`, `:107` and `:175`, the retry loop at `:576-591`,
+`Transport.request_path` at `:2771`, and the management-announce
+citations `:193`, `:194`, `:283` and `:963`. Corrected below: the
+dedup check site, `packet_hashlist_prev`, the `PATHFINDER_RW`
+constant, the announce-table insert and its local-client special case,
+and the `outbound`/`inbound` entry points. Everything else on the
+Python side is unverified. Section 14 says why this is its own task.
+
 ## 1. Overview: what can appear on the wire
 
 Python-Reticulum emits five distinct packet classes that can be
@@ -45,7 +62,8 @@ call on the same packet raises `IOError` (Packet.py guard).
 ### Fan-out across interfaces
 
 Inside `Transport.outbound()` at
-`reference/Reticulum/RNS/Transport.py:1025-1167`: for broadcast
+`reference/Reticulum/RNS/Transport.py:1092` (the interior line numbers
+in this section are unverified, see the banner above): for broadcast
 packets (the "else" branch after the targeted-path and
 transport-id branches), the code iterates `Transport.interfaces`
 (line 1027) and transmits on each. There is **no
@@ -69,9 +87,9 @@ call, via one-shot `Packet.send()`. Count = 1.**
 
 ### Reception
 
-`Transport.inbound(data, interface)` at `Transport.py:1179+` is
+`Transport.inbound(raw, interface)` at `Transport.py:1389` is
 the entry point for everything received on an interface. The
-packet-hash dedup check at line 1227 is:
+packet-hash dedup check at line 1376 is:
 
 ```python
 if not packet.packet_hash in Transport.packet_hashlist and
@@ -80,7 +98,7 @@ if not packet.packet_hash in Transport.packet_hashlist and
 ```
 
 `Transport.packet_hashlist` at `Transport.py:106` is `set()`.
-`Transport.packet_hashlist_prev` at line 100 is the rolling
+`Transport.packet_hashlist_prev` at line 107 is the rolling
 previous window used to keep the dedup memory constant-bounded.
 A duplicate return here bails out of `inbound()` before any
 announce-specific handling. This is the only mechanism that
@@ -90,21 +108,21 @@ for the broadcast-back-to-source echo pattern that B1 relies on.
 ### Insertion into announce_table
 
 For announces (`packet.packet_type == ANNOUNCE`) that pass dedup,
-the code path at `Transport.py:1867-1908` initialises an
+the code path at `Transport.py:1866-1908` initialises an
 `announce_table` entry:
 
 ```python
-retries            = 0                                # line 1722
-local_rebroadcasts = 0                                # line 1724
-block_rebroadcasts = False                            # line 1725
-attached_interface = None                             # line 1726
-retransmit_timeout = now + (RNS.rand() * PATHFINDER_RW)  # line 1728
+retries            = 0                                # line 1866
+local_rebroadcasts = 0                                # line 1868
+block_rebroadcasts = False                            # line 1869
+attached_interface = None                             # line 1870
+retransmit_timeout = now + (RNS.rand() * PATHFINDER_RW)  # line 1872
 ```
 
-`PATHFINDER_RW = 0.5` (seconds) at line 69, so the first
+`PATHFINDER_RW = 0.5` (seconds) at line 70, so the first
 retransmission is scheduled within 0–500 ms of receipt.
 
-Line 1748-1752 is the special case for announces that arrived
+Line 1891-1895 is the special case for announces that arrived
 **from a local client** (shared-instance peer over the local
 socket):
 
@@ -199,7 +217,7 @@ Each fire builds a new announce packet (lines 540-561), calls
 filtering and bandwidth-cap logic. The receiving interface is
 implicitly included in the `for interface in Transport.interfaces`
 loop (no exclusion check). Echoes are absorbed by the
-packet_hashlist check at line 1227 when they arrive back.
+packet_hashlist check at line 1376 when they arrive back.
 
 ### Block-rebroadcasts path
 
@@ -320,7 +338,7 @@ broadcast parity directly, but enumerated here for completeness.**
 | Storage | `set()` | `Transport.py:106` |
 | Previous-window storage | `set()` | `Transport.py:107` |
 | Max size | 1 000 000 entries | `Transport.py:175` |
-| Check site | line 1227 | `Transport.py` |
+| Check site | line 1376 | `Transport.py` |
 | Rotation | half-cleared when reaches `hashlist_maxsize/2` | approximate, see cull job |
 
 The dedup check is the **only** mechanism that prevents the
