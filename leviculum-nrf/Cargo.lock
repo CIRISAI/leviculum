@@ -1025,6 +1025,7 @@ dependencies = [
  "leviculum-rx-arming",
  "leviculum-screen",
  "leviculum-sd-policy",
+ "leviculum-settle-budget",
  "leviculum-telemetry-policy",
  "leviculum-tx-spacing",
  "nmea0183",
@@ -1079,6 +1080,13 @@ dependencies = [
 [[package]]
 name = "leviculum-sd-policy"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-settle-budget"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-store-spike"

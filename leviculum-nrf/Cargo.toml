@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "settle-budget"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -48,6 +48,11 @@ leviculum-ble-tx = { path = "ble-tx" }
 # clock gate withholds it. Shared verbatim with `lnsd`, so the policy the
 # desk measures on a board is the policy the daemon runs.
 leviculum-announce-policy = { path = "announce-policy" }
+# How long one propagation-engine settle pass may keep the main loop away
+# from its radio (#425). The firmware reads GRIND_SLICE_ROUNDS from here, so
+# the slice the board runs and the frame-airtime budget the crate's tests pin
+# it against cannot drift apart.
+leviculum-settle-budget = { path = "settle-budget" }
 # Pure two-bound admission (slots and bytes) for the outbound LoRa queue,
 # host-testable like sd-policy/ble-tx (#344). Not in leviculum-core: that
 # crate must build for thumbv6m, which has no atomic CAS.

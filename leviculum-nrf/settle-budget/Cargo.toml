@@ -1,0 +1,16 @@
+[package]
+name = "leviculum-settle-budget"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "How long one propagation-engine settle pass may keep the main loop away from its radio, host-testable"
+
+[dependencies]
+
+[dev-dependencies]
+# Only the tests need it, and only for one function: the budget is the
+# airtime of the frame this defect lost, DERIVED from the same formula the
+# firmware charges its own transmissions with, never a number copied into
+# this crate where it would drift away from the radio.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

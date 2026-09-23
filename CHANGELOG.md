@@ -313,6 +313,23 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board running the propagation role no longer goes deaf while it validates
+  the mail it has just accepted. Every accepted upload and every synced message
+  walks the 1000-round propagation stamp workblock, which costs 3655 to 3727 ms
+  on an nRF52840, and the engine awaited the whole of it inside one pass of the
+  firmware's single main loop. For that span the loop is not in its `select`,
+  and the LoRa task's four-slot hand-off channel has a blocking producer, so a
+  receive window that comes down is never re-armed: the rig measured
+  `SX_RX_ARM site=ack dark_ms=10284` and later `dark_ms=17870` on a board
+  draining a ten-message sync batch, and a client's link request crossed the
+  air unheard in that window. The validator's cooperative yield does not cover
+  it, because the task that has to run is the main loop itself. The workblock
+  is now expanded 20 rounds at a time and parked between passes, so the loop is
+  away for 74.5 ms rather than 3.7 s and the receiver stays armed while a stamp
+  grinds. The new `leviculum-nrf/settle-budget` crate pins the bound, one
+  frame's airtime at the PHY the propagation cells run, and `PN_STAMP` now
+  carries `slices=` so a capture says the slicing ran (Codeberg #425).
+
 - `lnomad` now closes the link to a node it leaves. A browsing session reuses
   one link per destination, but on every switch it only forgot the old one:
   nothing in the crate ever called `close_link`, so the abandoned link stayed

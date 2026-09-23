@@ -17,8 +17,10 @@
 //! * [`Engine::settle`] — asynchronous, and the only place the engine
 //!   awaits. Runs the due periodic jobs (announce, maintenance, sync
 //!   scheduling, stats), processes **at most one** queued work item —
-//!   which is what bounds how long the main loop is away from its
-//!   channels — and flushes the store adapters' queued writes through
+//!   and, when that item is gated by a propagation stamp, at most one
+//!   [`GRIND_SLICE_ROUNDS`]-round SLICE of its workblock, which is what
+//!   bounds how long the main loop is away from its channels — and
+//!   flushes the store adapters' queued writes through
 //!   [`crate::record_store::pn_execute`], one channel round trip per op.
 //!   The wire action a write gates (the upload proof, the `/get`
 //!   response) is sent only after its flush reported durable: "persist
@@ -31,15 +33,35 @@
 //! At the default announced cost of 13, every accepted upload and every
 //! synced message walks the 1000-round PN workblock — about 41 000
 //! SHA-256 compressions, 2.62 MB hashed (concept page §2) — through the
-//! streaming validator with a cooperative yield every 64 rounds. The
-//! engine validates **one message per settle pass** and reports every
-//! validation as `PN_STAMP ms=<n>`, so the first rig run measures what
-//! this page cannot: the wall-clock cost on the nRF52840. An inbound
-//! sync batch is therefore drained incrementally — between messages the
-//! main loop returns to its channels — and while one is draining, new
-//! `/offer`s are answered `ERROR_THROTTLED` exactly as the reference
-//! throttles during sequential validation
+//! streaming validator. The engine validates **one message at a time**,
+//! a slice of its workblock per settle pass, and reports every finished
+//! validation as `PN_STAMP ms=<n> slices=<n>`. An inbound sync batch is
+//! therefore drained incrementally — between slices the main loop
+//! returns to its channels — and while one is draining, new `/offer`s
+//! are answered `ERROR_THROTTLED` exactly as the reference throttles
+//! during sequential validation
 //! (`reference/LXMF/LXMF/LXMRouter.py:2273`).
+//!
+//! ## Why a slice and not a yield (leviculum#425)
+//!
+//! Until 2026-09-24 a settle pass awaited the WHOLE workblock. The
+//! validator yields cooperatively every 64 rounds, which on a host is
+//! enough — the runtime's other tasks run — and on this board is not,
+//! because the task that has to run is this one. The LoRa task hands
+//! received frames up through a four-slot channel whose send BLOCKS
+//! (`crate::lora`), and nothing but this loop's own `select` drains it;
+//! a loop that is away for 3.7 s therefore leaves the LoRa task parked
+//! in the hand-off with no receive window standing. The 2026-09-23 night
+//! run measured it: `SX_RX_ARM site=ack dark_ms=10284`, later
+//! `dark_ms=17870`, on a board validating ten synced stamps back to
+//! back, and one client link request on the air that it never received
+//! — the role's core promise broken by the role's own work.
+//!
+//! So the workblock is parked between passes
+//! ([`leviculum_lxmf::WorkblockStream`]) instead of being awaited
+//! through. The slice is sized against one frame's airtime at the PHY
+//! the propagation cells run, in `leviculum-settle-budget`, which is
+//! also where the before and after numbers are pinned.
 //!
 //! That measurement is in: **3655-3667 ms**, four samples, one board,
 //! `ble_pn_board_upload` on 2026-09-16 (firmware `5349cecd`). The cost
@@ -180,7 +202,8 @@ use leviculum_lxmf::propagation_node::serve_peak_bytes;
 use leviculum_lxmf::propagation_store::StoredMessage;
 use leviculum_lxmf::{
     CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode,
-    PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, MESSAGE_GET_PATH,
+    PropagationNodeConfig, PropagationStore, StampCancel, UploadOutcome, WorkblockStream,
+    MESSAGE_GET_PATH,
 };
 use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
 use leviculum_record_log::SECTOR_SIZE;
@@ -526,6 +549,31 @@ const ACTIVE_GAP_MS: u64 = 1_000;
 /// How soon the loop should call back while work is queued.
 const WORK_POLL_MS: u64 = 25;
 
+/// Workblock rounds one settle pass expands before it parks the stream and
+/// gives the main loop back.
+///
+/// The whole 1000-round propagation workblock costs 3655-3727 ms on this core
+/// (`PN_STAMP ms=`), and for every one of those milliseconds the loop is not
+/// in its `select`, so nothing drains the LoRa task's four-slot hand-off and
+/// the receiver goes dark behind it (`SX_RX_ARM site=ack dark_ms=10284`,
+/// 2026-09-23). Twenty rounds is 74.5 ms of that, which with the loop's own
+/// turn leaves the board away for less than the 166 ms a link request spends
+/// on the air at the PHY the propagation cells run — the sizing is
+/// `leviculum_settle_budget::slice_rounds_for`, and the crate's tests are
+/// where both numbers are pinned. Read from there rather than restated, so a
+/// slice that stops fitting the budget makes that crate red instead of making
+/// this line quietly wrong.
+const GRIND_SLICE_ROUNDS: usize = leviculum_settle_budget::GRIND_SLICE_ROUNDS as usize;
+
+/// How soon the loop should call back while a stamp grind is parked: now.
+///
+/// [`WORK_POLL_MS`] would add 25 ms of sleep to each of the fifty slices a
+/// workblock takes, turning a 3.7 s validation into a 5 s one for no gain —
+/// the loop is CPU-bound here, not waiting for anything. Zero means the timer
+/// arm is already due when the `select` is entered, so every arm is polled
+/// once (the hand-off among them) and the loop comes straight back.
+const GRIND_POLL_MS: u64 = 0;
+
 /// The `lxmf.propagation` destination hash a remote identity owns — who a
 /// link's peer IS in the peer table. The same derivation the peer's own
 /// announce carries, so a remote recognised over a link and a remote heard
@@ -762,6 +810,35 @@ impl EngineHeapCensus {
     }
 }
 
+/// A stamp validation parked between settle passes.
+///
+/// The engine holds at most one, and holds it only across the passes one
+/// message's workblock takes. What it costs the heap is the SHA-256 state and
+/// the two 32-byte arrays below — never a workblock, which the streaming
+/// expansion does not materialise, and never two, which is why a parked grind
+/// does not widen the `[HEAP]` line's peak.
+struct Grind {
+    /// The stamp material: the message's transient id. Kept so a resumed
+    /// slice does not re-decode the upload it came out of.
+    material: TransientId,
+    stamp: [u8; STAMP_SIZE],
+    stream: WorkblockStream,
+    started: embassy_time::Instant,
+    /// Settle passes this grind has taken, reported as `slices=` so a capture
+    /// says whether the slicing ran at all.
+    slices: u32,
+}
+
+/// What one slice of [`Engine::validate_step`] leaves the caller with.
+enum ValidateStep {
+    /// The workblock is not expanded yet. The caller must put its work item
+    /// back untouched and return to the loop; the next pass resumes here.
+    Parked,
+    /// The stamp's value, or `None` for a stamp that does not clear the
+    /// announced cost or an upload that would not decode.
+    Done(Option<u16>),
+}
+
 pub struct Engine {
     role: PropagationNode<PnStore<FlashRegion>>,
     peers: PeerTable,
@@ -789,6 +866,10 @@ pub struct Engine {
     /// Records active delivery skipped as too large for one packet —
     /// left for `/get`, never retried actively.
     too_large: Vec<TransientId>,
+    /// The stamp validation parked between settle passes, if one is. At most
+    /// one: the engine validates one message at a time either way, and the
+    /// slicing changed how long one takes, not how many run.
+    grind: Option<Grind>,
     /// What the BOOT plan funds one fetch to serve
     /// ([`crate::heap_census::budget_serve_cap`] of this node's own box)
     /// — the floor the serve-time reading is taken against, kept here so
@@ -912,6 +993,7 @@ impl Engine {
             active: None,
             next_active_at_ms: 0,
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
+            grind: None,
             serve_boot_cap,
         })
     }
@@ -969,6 +1051,14 @@ impl Engine {
 
     /// When the loop should call [`Engine::settle`] again.
     pub fn next_deadline_ms(&self, now_ms: u64) -> u64 {
+        if self.grind.is_some() {
+            // A parked stamp grind is the one thing the loop owes itself
+            // immediately: it is CPU-bound, waiting on nothing, and the fifty
+            // slices a workblock takes must not each buy a `WORK_POLL_MS`
+            // sleep. Due now means the `select` polls every arm once — the
+            // LoRa hand-off among them — and returns here.
+            return now_ms.saturating_add(GRIND_POLL_MS);
+        }
         if !self.work.is_empty()
             || self.sync_batch.is_some()
             || self.role.store().pending_ops() > 0
@@ -1900,6 +1990,12 @@ impl Engine {
     }
 
     fn conclude_sync_batch(&mut self) {
+        // A batch can end while one of its messages has a half-expanded
+        // workblock parked — a link that closed under it, or a peer that
+        // ignored the throttle. The stream belongs to THAT message; resuming
+        // it against the next one would judge a stamp by another message's
+        // workblock, so it is abandoned here rather than inherited.
+        self.abandon_grind("batch_concluded");
         if let Some(batch) = self.sync_batch.take() {
             crate::log::log_fmt(
                 "PN_SYNC ",
@@ -2018,9 +2114,14 @@ impl Engine {
     // The asynchronous half
     // -----------------------------------------------------------------
 
-    /// Run due periodic jobs, process at most one queued work item, and
-    /// flush the store adapters. The only awaiting entry point; call
-    /// from a main-loop arm (never inside a `select`).
+    /// Run due periodic jobs, process at most one queued work item — and
+    /// at most one slice of that item's stamp workblock — and flush the
+    /// store adapters. The only awaiting entry point; call from a
+    /// main-loop arm (never inside a `select`).
+    ///
+    /// The pass is bounded on purpose: for as long as it runs, the loop that
+    /// called it is not in its `select`, and nothing drains the LoRa task's
+    /// blocking hand-off. See the module docs, §Why a slice and not a yield.
     pub async fn settle<R, C, S>(&mut self, node: &mut NodeCore<R, C, S>) -> TickOutput
     where
         R: CryptoRngCore,
@@ -2037,7 +2138,14 @@ impl Engine {
         self.tick_sync(node, now_ms, &mut out);
 
         if let Some(work) = self.work.pop_front() {
-            self.perform(node, work, &mut out).await;
+            // A work item whose stamp grind is only part-expanded comes back
+            // out of `perform` untouched and goes to the FRONT: the next pass
+            // is owed the same item, and a queue that reordered under a parked
+            // grind would resume one message's workblock against another
+            // message's stamp.
+            if let Some(unfinished) = self.perform(node, work, &mut out).await {
+                self.work.push_front(unfinished);
+            }
         } else if self.sync_batch.is_some() {
             self.perform_sync_step(node, &mut out).await;
         }
@@ -2431,43 +2539,105 @@ impl Engine {
     // Work processing (the awaiting parts)
     // -----------------------------------------------------------------
 
-    /// Validate one stamp with the streaming validator, reporting the
-    /// wall-clock cost as `PN_STAMP ms=` — the number instruction item 3
-    /// wants measured on this hardware.
-    async fn validate(
-        &mut self,
-        transient_id: &TransientId,
-        stamp: &[u8; STAMP_SIZE],
-    ) -> Option<u16> {
+    /// Drop a parked stamp grind, because what it belongs to is gone.
+    ///
+    /// The only correctness rule the slicing adds: a parked stream may be
+    /// resumed by the pass that comes back for the SAME message, and by
+    /// nothing else. The work queue keeps that on its own — only
+    /// [`Engine::settle`] ever pops it, and it puts an unfinished item back at
+    /// the front — so the sync batch is the one place that has to say so.
+    fn abandon_grind(&mut self, reason: &'static str) {
+        if let Some(grind) = self.grind.take() {
+            crate::log::log_fmt(
+                "PN_STAMP ",
+                format_args!(
+                    "abandoned rounds={}/{} slices={} reason={}",
+                    grind.stream.rounds_done(),
+                    grind.stream.rounds_total(),
+                    grind.slices,
+                    reason
+                ),
+            );
+        }
+    }
+
+    /// Expand one [`GRIND_SLICE_ROUNDS`]-round slice of the stamp workblock
+    /// that gates the current work item, and report the wall-clock cost as
+    /// `PN_STAMP ms=` when the last slice lands.
+    ///
+    /// # Why this returns instead of awaiting
+    ///
+    /// The whole workblock is 3.7 s on this core, and `settle` is called
+    /// inline from the binaries' single main loop. Awaiting it keeps that loop
+    /// out of its `select` for the whole 3.7 s, which is not merely slow: the
+    /// LoRa task hands received frames up through a four-slot channel whose
+    /// send BLOCKS (`crate::lora`), so a loop that is away long enough leaves
+    /// that task parked in the hand-off with no receive window standing. The
+    /// 2026-09-23 night run measured the consequence — `SX_RX_ARM site=ack
+    /// dark_ms=10284` and `dark_ms=17870` on a board that was validating ten
+    /// synced stamps back to back, and a client link request lost to it.
+    ///
+    /// The cooperative yield inside the validator does not help here, and that
+    /// is worth saying plainly because it looks like it should: it yields to
+    /// the EXECUTOR, which lets other tasks run, but the task that has to run
+    /// is this one — nothing else drains the hand-off. Only returning to the
+    /// loop drains it. So the workblock is expanded a slice at a time, the
+    /// stream is parked in [`Engine::grind`], and the caller puts its work
+    /// item back and comes round again.
+    ///
+    /// `material` is called only when no grind is in flight, so resuming a
+    /// stamp costs no re-decode of the upload it came out of.
+    fn validate_step<F>(&mut self, material: F) -> ValidateStep
+    where
+        F: FnOnce() -> Option<(TransientId, [u8; STAMP_SIZE])>,
+    {
         let min_cost = self.role.min_accepted_cost();
         let compute = self.role.compute_stamp_value();
         if min_cost == 0 && !compute {
-            return Some(0);
+            // No workblock is walked at all, exactly as before: nothing to
+            // slice, and no pass to spend.
+            return ValidateStep::Done(Some(0));
         }
-        let started = embassy_time::Instant::now();
-        let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+        if self.grind.is_none() {
+            let Some((id, stamp)) = material() else {
+                return ValidateStep::Done(None);
+            };
+            self.grind = Some(Grind {
+                material: id,
+                stamp,
+                stream: WorkblockStream::new(WORKBLOCK_EXPAND_ROUNDS_PN),
+                started: embassy_time::Instant::now(),
+                slices: 0,
+            });
+        }
+        let Some(grind) = self.grind.as_mut() else {
+            // Unreachable: the branch above either set it or returned.
+            return ValidateStep::Done(None);
+        };
+        grind.slices += 1;
+        grind.stream.advance(&grind.material, GRIND_SLICE_ROUNDS);
+        if !grind.stream.is_complete() {
+            return ValidateStep::Parked;
+        }
+        let Some(grind) = self.grind.take() else {
+            return ValidateStep::Done(None);
+        };
         let result = if min_cost == 0 {
-            Some(
-                stamper
-                    .measure_stamp(transient_id, stamp, WORKBLOCK_EXPAND_ROUNDS_PN)
-                    .await,
-            )
+            Some(grind.stream.value(&grind.stamp))
         } else {
-            stamper
-                .validate_stamp(transient_id, stamp, min_cost, WORKBLOCK_EXPAND_ROUNDS_PN)
-                .await
-                .unwrap_or(None)
+            grind.stream.validated(&grind.stamp, min_cost)
         };
         crate::log::log_fmt(
             "PN_STAMP ",
             format_args!(
-                "ms={} min_cost={} valid={}",
-                started.elapsed().as_millis(),
+                "ms={} slices={} min_cost={} valid={}",
+                grind.started.elapsed().as_millis(),
+                grind.slices,
                 min_cost,
                 result.is_some() as u8
             ),
         );
-        result
+        ValidateStep::Done(result)
     }
 
     /// Re-bound what the next fetch may serve, from the heap this board
@@ -2515,12 +2685,15 @@ impl Engine {
         );
     }
 
+    /// `Some(work)` gives the item back unperformed: its stamp grind needs
+    /// more settle passes, and the caller owes it the front of the queue.
     async fn perform<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
         work: Work,
         out: &mut TickOutput,
-    ) where
+    ) -> Option<Work>
+    where
         R: CryptoRngCore,
         C: Clock,
         S: Storage,
@@ -2532,25 +2705,39 @@ impl Engine {
                 proof,
                 via,
             } => {
-                // Item 6: the envelope timestamp is a phone's clock.
+                // The stamp first, and before anything with a side effect:
+                // this arm is re-entered once per slice until the workblock is
+                // expanded, so everything ahead of the grind would run fifty
+                // times over. `validate_step` only calls the closure on the
+                // first slice, so the decode is paid once too.
+                let precomputed = match self.validate_step(|| {
+                    leviculum_lxmf::propagation::PropagationUpload::decode(&data)
+                        .ok()
+                        .map(|upload| (*upload.transient_id(), *upload.propagation_stamp()))
+                }) {
+                    ValidateStep::Parked => {
+                        return Some(Work::Upload {
+                            link_id,
+                            data,
+                            proof,
+                            via,
+                        })
+                    }
+                    // An upload that would not decode yields no value, which
+                    // is what a failed decode always amounted to here: the two
+                    // cases the old `Option<Option<u16>>` kept apart were
+                    // flattened into one at its single use, and the role's own
+                    // parser names the outcome below either way.
+                    ValidateStep::Done(value) => value,
+                };
+                // Item 6: the envelope timestamp is a phone's clock. After the
+                // grind, so it is seeded once per upload and not once per
+                // slice.
                 if let Ok(envelope) = PeerSyncEnvelope::decode(&data) {
                     self.seed_clock(node, envelope.timestamp as u64, "upload");
                 }
-                // Validate outside the role call: the validator awaits,
-                // the role's closure cannot.
-                let precomputed =
-                    match leviculum_lxmf::propagation::PropagationUpload::decode(&data) {
-                        Ok(upload) => {
-                            let transient_id = *upload.transient_id();
-                            let stamp = *upload.propagation_stamp();
-                            Some(self.validate(&transient_id, &stamp).await)
-                        }
-                        Err(_) => None,
-                    };
                 let now = node.emission_secs();
-                let outcome = self
-                    .role
-                    .handle_upload(&data, now, |_, _| precomputed.flatten());
+                let outcome = self.role.handle_upload(&data, now, |_, _| precomputed);
                 match outcome {
                     UploadOutcome::Accepted {
                         transient_id,
@@ -2614,7 +2801,7 @@ impl Engine {
                         .encode()
                         .unwrap_or_default();
                     self.respond(node, &link_id, &request_id, &response, out);
-                    return;
+                    return None;
                 };
                 let name_hash = Destination::compute_name_hash(APP_NAME, &["delivery"]);
                 let mailbox =
@@ -2665,6 +2852,11 @@ impl Engine {
                 self.respond(node, &link_id, &request_id, &response, out);
             }
         }
+        // Only an upload's stamp parks. `/get` walks no workblock, and the
+        // peering stamp an `/offer` checks is the 25-round workblock — forty
+        // times cheaper, ~93 ms on this core, already inside the frame the
+        // slicing is sized against, so it stays one await.
+        None
     }
 
     /// Answer one inbound `/offer`
@@ -2764,11 +2956,24 @@ impl Engine {
         // The same acceptance path as a client upload
         // (`reference/LXMF/LXMF/LXMRouter.py:2430-2436`).
         let precomputed = if message.len() > STAMP_SIZE {
-            let (unstamped, stamp_bytes) = message.split_at(message.len() - STAMP_SIZE);
-            let transient_id = leviculum_core::crypto::full_hash(unstamped);
-            let mut stamp = [0u8; STAMP_SIZE];
-            stamp.copy_from_slice(stamp_bytes);
-            Some(self.validate(&transient_id, &stamp).await)
+            match self.validate_step(|| {
+                let (unstamped, stamp_bytes) = message.split_at(message.len() - STAMP_SIZE);
+                let transient_id = leviculum_core::crypto::full_hash(unstamped);
+                let mut stamp = [0u8; STAMP_SIZE];
+                stamp.copy_from_slice(stamp_bytes);
+                Some((transient_id, stamp))
+            }) {
+                // The grind wants more passes: the message goes back to the
+                // FRONT of the batch so the next pass resumes the same
+                // workblock, and nothing below runs on a stamp not yet judged.
+                ValidateStep::Parked => {
+                    if let Some(batch) = self.sync_batch.as_mut() {
+                        batch.messages.push_front(message);
+                    }
+                    return;
+                }
+                ValidateStep::Done(value) => Some(value),
+            }
         } else {
             None
         };
