@@ -156,6 +156,7 @@ mod rust_client_path_install_from_python;
 mod rust_client_path_install_loop_race;
 mod rust_client_path_install_via_relay;
 mod rust_client_path_install_with_own_echo;
+mod sender_modem_counts_a_frame_the_far_modem_never_hears;
 mod shared_instance_client_survives_daemon_restart;
 mod two_responders_overlap_inside_one_airtime;
 mod udp_hostname_forward;
