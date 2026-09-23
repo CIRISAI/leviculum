@@ -328,7 +328,7 @@ const BOARD_REMOTE_PEERING_COST_MAX: u8 = 18;
 /// Per-transfer (upload) limit announced in field 3, kilobytes of 1000
 /// (`propagation_transfer_limit`, `reference/LXMF/LXMF/LXMPeer.py:370`).
 /// The crate default, stated here because the heap budget below sums it.
-const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
+pub const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
 
 /// Per-sync limit announced in field 4, kilobytes of 1000 (#388).
 ///
@@ -339,7 +339,7 @@ const BOARD_TRANSFER_LIMIT_KB: u64 = 4;
 /// the resource layer anyway. 8 keeps the announced limit truthful AND
 /// bounds the sync batch (`pn_batch=`) at a size the boot `HEAP_BUDGET`
 /// can carry; a peer with more queued simply syncs in more rounds.
-const BOARD_SYNC_LIMIT_KB: u64 = 8;
+pub const BOARD_SYNC_LIMIT_KB: u64 = 8;
 
 // The announced sync limit must stay receivable, or it is a lie peers
 // pay for with a dead resource transfer. The limit bounds the WIRE
@@ -786,6 +786,11 @@ pub struct Engine {
     /// Records active delivery skipped as too large for one packet —
     /// left for `/get`, never retried actively.
     too_large: Vec<TransientId>,
+    /// What the BOOT plan funds one fetch to serve
+    /// ([`crate::heap_census::budget_serve_cap`] of this node's own box)
+    /// — the floor the serve-time reading is taken against, kept here so
+    /// the generic `NodeCore` size is measured once, at construction.
+    serve_boot_cap: usize,
 }
 
 impl Engine {
@@ -833,6 +838,8 @@ impl Engine {
         let pages = region.len / SECTOR_SIZE;
         let store = PnStore::new(region, pages);
         let name = crate::name::mesh_name(&identity_hash);
+        let serve_boot_cap =
+            crate::heap_census::budget_serve_cap(core::mem::size_of::<NodeCore<R, C, S>>());
         let role_config = PropagationNodeConfig {
             stamp_cost: config.stamp_cost,
             peering_cost: config.peering_cost,
@@ -846,10 +853,10 @@ impl Engine {
             // this generic's own size, so the printed number and the
             // enforced one are one expression. Below the announced sync
             // limit whenever the plan funds less than it announces,
-            // which is today, on every board.
-            serve_cap_bytes: Some(crate::heap_census::budget_serve_cap(core::mem::size_of::<
-                NodeCore<R, C, S>,
-            >())),
+            // which is today, on every board. It is the FLOOR: every
+            // `/get` re-reads it against the heap the board has at that
+            // moment (`SERVE_CAP`, `answer_get_work`).
+            serve_cap_bytes: Some(serve_boot_cap),
             ..PropagationNodeConfig::default()
         };
         let mut role = PropagationNode::new(store, role_config);
@@ -902,6 +909,7 @@ impl Engine {
             active: None,
             next_active_at_ms: 0,
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
+            serve_boot_cap,
         })
     }
 
@@ -2459,6 +2467,50 @@ impl Engine {
         result
     }
 
+    /// Re-bound what the next fetch may serve, from the heap this board
+    /// HAS at this moment rather than the worst case its boot plan
+    /// feared (#388, order 138).
+    ///
+    /// The boot cap is a floor: it is the plan's own worst case, every
+    /// term at its maximum at once, and on a T114 that funds 88 B —
+    /// less than one stored message, so the board lists its mail and
+    /// serves none of it. The heap it actually stands on when a client
+    /// fetches is usually much larger (30 380 B free when the
+    /// 2026-09-23 fetch killed it), and
+    /// [`crate::heap_census::live_serve_cap`] says what that funds,
+    /// after [`crate::heap_census::SERVE_MARGIN_BYTES`] is taken off for
+    /// what can still arrive while the serve is in flight.
+    ///
+    /// Read here, once per `/get`, and not cached: the point of the
+    /// number is that it moves. Both census figures are read together —
+    /// `free` for the summed model, `largest` for the terms that are one
+    /// allocation, because a heap with the bytes in pieces funds no
+    /// serve. The `largest=` probe is the census's own
+    /// ([`crate::heap_census::largest_free_block`]), ~12 alloc/free
+    /// pairs with no await between claim and release.
+    ///
+    /// The `SERVE_CAP` line is the evidence for the next post-mortem:
+    /// `live_cap=` is what this fetch may ship, and `free=`/`largest=`
+    /// beside `margin=` are every input it was computed from, so the
+    /// arithmetic can be re-run from a capture.
+    fn read_serve_cap(&mut self) {
+        let (_, free) = crate::heap_stats();
+        let largest = crate::heap_census::largest_free_block();
+        let live_cap = crate::heap_census::live_serve_cap(self.serve_boot_cap, free, largest);
+        self.role.set_serve_cap_bytes(Some(live_cap));
+        crate::log::log_fmt(
+            "SERVE_CAP ",
+            format_args!(
+                "boot_cap={} live_cap={} margin={} largest={} free={}",
+                self.serve_boot_cap,
+                live_cap,
+                crate::heap_census::SERVE_MARGIN_BYTES,
+                largest,
+                free
+            ),
+        );
+    }
+
     async fn perform<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -2564,6 +2616,7 @@ impl Engine {
                 let mailbox =
                     *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes();
                 let now = node.emission_secs();
+                self.read_serve_cap();
                 match self.role.handle_get(&data, &mailbox, now) {
                     Ok(GetOutcome::List { response, count }) => {
                         crate::log::log_fmt(

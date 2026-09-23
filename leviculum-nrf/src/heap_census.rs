@@ -53,7 +53,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::{Duration, Instant};
 use leviculum_core::node::NodeCore;
 use leviculum_core::traits::{Clock, Storage};
-use leviculum_lxmf::propagation_node::serve_cap_for_peak;
+use leviculum_lxmf::propagation_node::{serve_cap_for_live_heap, serve_cap_for_peak};
 use rand_core::CryptoRngCore;
 
 /// How often the census line is emitted unasked. Coarser than `[HEAP]`
@@ -210,10 +210,14 @@ pub const fn budget_slack(node_box: usize) -> usize {
 }
 
 /// The largest fetch response this plan funds — `serve_cap=` on the boot
-/// line, and the bound the role is configured with
+/// line, and the FLOOR the role is configured with
 /// (`PropagationNodeConfig::serve_cap_bytes`, set in
 /// [`crate::pn::Engine::new`] from this same arithmetic, so the printed
-/// number and the enforced one cannot drift).
+/// number and the enforced one cannot drift). A floor since #388 order
+/// 138 and not the last word: every `/get` re-reads the cap from the
+/// heap the board has at that moment ([`live_serve_cap`]), which is the
+/// difference between listing 24 messages and serving none of them and
+/// serving nine of them.
 ///
 /// The inverse of [`crate::pn::SERVE_PEAK_BYTES`]'s model
 /// ([`serve_cap_for_peak`]), asked of the heap the plan actually leaves
@@ -236,6 +240,81 @@ pub const fn budget_slack(node_box: usize) -> usize {
 pub const fn budget_serve_cap(node_box: usize) -> usize {
     serve_cap_for_peak(
         budget_slack(node_box) + crate::pn::SERVE_RESERVE_BYTES,
+        crate::pn::SERVE_RESOURCE_SDU,
+    )
+}
+
+/// Heap kept clear of the serve transient because it can be claimed
+/// WHILE the serve is in flight — the margin of
+/// [`serve_cap_for_live_heap`], and the reason a live reading of the
+/// free heap is not simply spent.
+///
+/// Serving one `/get` is not atomic: the cap is read when the request
+/// is taken off the work queue, and the path then holds five copies of
+/// its answer live (`serve_peak_bytes`, `leviculum-lxmf`) across
+/// several awaits. Anything the board admits during that window
+/// allocates beside those copies. The margin is the sum of the
+/// transients the census already prices and the engine can start in
+/// that window, each at the size its own announce or budget bounds it
+/// to:
+///
+/// ```text
+///   BOARD_SYNC_LIMIT_KB · 1000       8 000 B   one inbound sync batch
+/// + BOARD_TRANSFER_LIMIT_KB · 1000   4 000 B   one queued upload
+/// + budget_per_link()                2 688 B   one more endpoint link
+/// =                                 14 688 B
+/// ```
+///
+/// All three can coexist: the batch arrives from a peer over one link,
+/// the upload from a phone over another, and a third peer may connect
+/// while both are in progress — which is the [`crate::ble::MAX_LINKS`]
+/// = 4 shape the field boards run in. They are summed rather than
+/// maximised for that reason.
+///
+/// What is NOT in it: anything the board holds ACROSS the window rather
+/// than claiming inside it (the node box, the peer table, the store
+/// adapters). Those are already spent when the free heap is read, so
+/// counting them again would charge the serve twice.
+pub const SERVE_MARGIN_BYTES: usize = crate::pn::BOARD_SYNC_LIMIT_KB as usize * 1000
+    + crate::pn::BOARD_TRANSFER_LIMIT_KB as usize * 1000
+    + budget_per_link();
+
+// Pinned because the host-side mvrs mirror this number as a literal:
+// `leviculum-nrf` is a thumbv7em crate they cannot link, so drift
+// between the rule as the firmware computes it and the rule as they
+// pin it would be silent
+// (`BOARD_SERVE_MARGIN_BYTES`,
+// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs` and
+// `…/pn_serve_cap_survives_a_shrinking_heap.rs`). Shrinking `Link` or
+// moving an announced limit legitimately moves this: move the mvrs'
+// literal and their expected served counts with it, and say what the
+// board serves now.
+const _: () = assert!(SERVE_MARGIN_BYTES == 14_688);
+
+/// The cap one fetch may serve to, from the heap the board HAS rather
+/// than the heap its boot plan feared (#388, order 138).
+///
+/// [`budget_serve_cap`] is a worst case: every term of the plan at its
+/// maximum at once, which on a T114 leaves 784 B of slack and funds an
+/// 88 B response — less than one stored message, so the board lists its
+/// mail and serves none of it. The heap that board actually had when it
+/// died was 30 380 B free (`[HEAP_CENSUS] … free=30380 largest=30320`,
+/// `lora_pn_board_offer_past_the_link`, 2026-09-23 08:08 UTC), and that
+/// funds 2 540 B — nine of the 24 messages it was refusing to serve.
+///
+/// `free` and `largest` are the census's own two figures and both bind:
+/// the summed model must fit the bytes, and every term that is one
+/// allocation must fit the largest block the allocator can still hand
+/// out. A heap with the bytes in pieces funds no serve, and only
+/// `largest=` can say so.
+///
+/// [`SERVE_MARGIN_BYTES`] comes off both before either is spent.
+pub fn live_serve_cap(boot_cap: usize, free: usize, largest: usize) -> usize {
+    serve_cap_for_live_heap(
+        boot_cap,
+        free,
+        largest,
+        SERVE_MARGIN_BYTES,
         crate::pn::SERVE_RESOURCE_SDU,
     )
 }
@@ -339,7 +418,7 @@ pub fn log_budget_and_assert(node_box: usize) {
 /// against a 96 KiB pool, each an O(free-list) walk. Runs without an
 /// await between alloc and free, so the claim is invisible to every
 /// other task on the executor.
-fn largest_free_block() -> usize {
+pub fn largest_free_block() -> usize {
     use alloc::alloc::{alloc, dealloc, Layout};
     let (_, free) = crate::heap_stats();
     let mut lo = 0usize;
