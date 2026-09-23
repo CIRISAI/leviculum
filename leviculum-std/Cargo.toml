@@ -117,6 +117,10 @@ tempfile = "3"
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
 lnomad = { path = "../lnomad" }
+# The `lncp` transfer logic, driven directly by the interop suite so the test
+# exercises the tool's own push loop rather than a copy of it. Dev-only cycle,
+# same shape as lnomad above.
+leviculum-cli = { path = "../leviculum-cli" }
 
 # The Columba BLE interface (`interfaces::ble`) is LINUX-ONLY: bluer talks to
 # BlueZ over D-Bus, and libdbus-sys has no macOS or Windows build. Declared as

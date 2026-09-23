@@ -13,31 +13,14 @@ use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::{Destination, DestinationType, Direction};
 
-mod cp;
+// The transfer logic and the hex helpers live in this crate's lib target, so
+// the interop suite can drive the very code path this binary runs.
+use leviculum_cli::{cp, hex_decode, hex_encode};
+
 // Config-dir-derived daemon access (instance name, storage path). lncp uses
 // a subset, like the other client binaries.
 #[allow(dead_code)]
 mod daemon_rpc;
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err("hex string has odd length".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "lncp", version = env!("LEVICULUM_VERSION"), about = "Reticulum File Transfer Utility")]

@@ -2077,6 +2077,7 @@ dependencies = [
  "leviculum-announce-policy",
  "leviculum-ble-tx",
  "leviculum-channel-access",
+ "leviculum-cli",
  "leviculum-core",
  "leviculum-lxmf",
  "libc",
