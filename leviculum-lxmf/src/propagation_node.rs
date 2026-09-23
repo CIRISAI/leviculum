@@ -84,7 +84,7 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///
 /// The serve loop accounts 24 B up front and `body + 16` per served
 /// message, where `body` is the *stamped* length, and stops strictly below
-/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:789`).
+/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:900`).
 /// What ships is the unstamped body, `STAMP_SIZE` (32 B) shorter, inside
 /// `msgpack [bin, ...]`: at most 5 B of array header and 5 B of `bin`
 /// header per message. Each accounted term therefore dominates its wire
@@ -169,6 +169,53 @@ pub const fn serve_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
     response + wrapped + plaintext + encrypted + parts
 }
 
+/// The largest SINGLE allocation the serve path asks for at `cap_bytes`
+/// — [`serve_peak_bytes`] prices bytes, this prices the biggest block.
+///
+/// A bump allocator hands out blocks, not bytes: a heap with 30 KB free
+/// in 4 KB pieces funds none of the copies below, and the census line
+/// says so directly (`largest=` beside `free=`,
+/// `leviculum-nrf/src/heap_census.rs`; the field failure it was built
+/// for refused 340 B with 4 760 B free). Of the five terms
+/// [`serve_peak_bytes`] sums, four are one allocation each and the
+/// fifth (`parts`) is one block per part:
+///
+/// * `response` = 2·cap — grown by extension, so the block is the next
+///   power of two at or above the length, and the largest of them all
+///   once the cap is past a few hundred bytes;
+/// * `wrapped` and `plaintext` — one framed copy each;
+/// * `encrypted` — the padded copy, 48 B of IV and HMAC above
+///   `plaintext`;
+/// * one part — a slice of `encrypted` at most `resource_sdu` long,
+///   plus [`PART_BOOKKEEPING_BYTES`]. It is the largest block of all
+///   below a cap of about 250 B, which is exactly where a board whose
+///   boot plan funds 88 B lives, so leaving it out would understate the
+///   block the smallest serves ask for.
+pub const fn serve_largest_block_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
+    let framed = cap_bytes + RESPONSE_FRAME_BYTES;
+    let response = 2 * cap_bytes;
+    let plaintext = RESOURCE_RANDOM_HASH_SIZE + framed;
+    let encrypted = 16 + (plaintext / 16 + 1) * 16 + 32;
+    let part_payload = if encrypted < resource_sdu {
+        encrypted
+    } else {
+        resource_sdu
+    };
+    let part = part_payload + PART_BOOKKEEPING_BYTES;
+    // `wrapped` is `framed`, which `plaintext` exceeds by construction.
+    let mut largest = response;
+    if plaintext > largest {
+        largest = plaintext;
+    }
+    if encrypted > largest {
+        largest = encrypted;
+    }
+    if part > largest {
+        largest = part;
+    }
+    largest
+}
+
 /// The largest serve cap whose [`serve_peak_bytes`] still fits
 /// `budget_bytes` — the inverse a heap plan asks for: "given this much
 /// free heap, how big may the cap be?". Zero when the budget does not
@@ -178,17 +225,78 @@ pub const fn serve_peak_bytes(cap_bytes: usize, resource_sdu: usize) -> usize {
 /// [`serve_peak_bytes`] rounds twice (the encryption padding and the part
 /// count); it is monotone in `cap_bytes`, which is all a search needs.
 pub const fn serve_cap_for_peak(budget_bytes: usize, resource_sdu: usize) -> usize {
+    serve_cap_for_heap(budget_bytes, usize::MAX, resource_sdu)
+}
+
+/// The largest serve cap a heap of `free_bytes` free, whose largest
+/// single block is `largest_bytes`, funds: every term of
+/// [`serve_peak_bytes`] summed fits `free_bytes`, AND the largest term
+/// that is one allocation ([`serve_largest_block_bytes`]) fits
+/// `largest_bytes`.
+///
+/// Two budgets because a heap has two: a fragmented one can have the
+/// bytes and still refuse the block. Both conditions are monotone in
+/// `cap_bytes`, so one search satisfies both.
+///
+/// [`serve_cap_for_peak`] is this with no block bound — the shape a boot
+/// plan asks in, where the heap is not yet cut up by anything.
+pub const fn serve_cap_for_heap(
+    free_bytes: usize,
+    largest_bytes: usize,
+    resource_sdu: usize,
+) -> usize {
     let mut low = 0usize;
-    let mut high = budget_bytes;
+    let mut high = free_bytes;
     while low < high {
         let mid = low + (high - low).div_ceil(2);
-        if serve_peak_bytes(mid, resource_sdu) <= budget_bytes {
+        if serve_peak_bytes(mid, resource_sdu) <= free_bytes
+            && serve_largest_block_bytes(mid, resource_sdu) <= largest_bytes
+        {
             low = mid;
         } else {
             high = mid - 1;
         }
     }
     low
+}
+
+/// The cap one fetch may serve to, read at serve time from the heap the
+/// node actually has: the larger of `boot_cap` — what the boot plan
+/// funds, which is a worst case with every term at its maximum at once —
+/// and what the live heap funds under the same model, less
+/// `margin_bytes` of room for what can still arrive while the serve is
+/// in flight.
+///
+/// The margin is not optional politeness: the serve is not atomic, and
+/// the transients its caller already prices (an inbound sync batch, an
+/// upload, one more endpoint link) can start between the moment the cap
+/// is read and the moment the serve path holds all five of its copies
+/// live. Sizing to the whole free heap hands that window a panic. The
+/// caller owns the number, because only the caller knows which
+/// transients its own configuration admits
+/// (`heap_census::SERVE_MARGIN_BYTES`, `leviculum-nrf`).
+///
+/// The boot cap is a floor rather than a competitor: the plan reserved
+/// that much for serving before anything else could claim it, so a live
+/// reading below it means the reading is missing what the plan already
+/// holds, not that the plan was wrong.
+pub const fn serve_cap_for_live_heap(
+    boot_cap: usize,
+    free_bytes: usize,
+    largest_bytes: usize,
+    margin_bytes: usize,
+    resource_sdu: usize,
+) -> usize {
+    let funded = serve_cap_for_heap(
+        free_bytes.saturating_sub(margin_bytes),
+        largest_bytes.saturating_sub(margin_bytes),
+        resource_sdu,
+    );
+    if funded > boot_cap {
+        funded
+    } else {
+        boot_cap
+    }
 }
 
 /// Configuration of the role. The numeric defaults are the concept paper's
@@ -237,7 +345,10 @@ pub struct PropagationNodeConfig {
     /// `None` on a host, where the announced sync limit is the only
     /// bound. A board sets it to what its heap plan funds
     /// ([`serve_cap_for_peak`] of its boot budget's slack,
-    /// `heap_census::budget_serve_cap`, `leviculum-nrf`): serving a fetch
+    /// `heap_census::budget_serve_cap`, `leviculum-nrf`) and raises it
+    /// per `/get` to what the live heap funds
+    /// ([`serve_cap_for_live_heap`], through [`PropagationNode::set_serve_cap_bytes`]):
+    /// serving a fetch
     /// costs several times the response it ships
     /// ([`serve_peak_bytes`]), and a T114 died in exactly that transient
     /// on 2026-09-23 while answering a 24-message fetch it had already

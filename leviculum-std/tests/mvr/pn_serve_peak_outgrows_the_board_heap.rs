@@ -79,7 +79,7 @@ const FIELD_MESSAGES: u8 = 24;
 const FIELD_BODY_BYTES: usize = 224;
 
 #[derive(Clone, Copy)]
-struct FixedClock;
+pub(crate) struct FixedClock;
 
 impl Clock for FixedClock {
     fn now_ms(&self) -> u64 {
@@ -91,7 +91,7 @@ impl Clock for FixedClock {
     }
 }
 
-type TestNode = NodeCore<OsRng, FixedClock, MemoryStorage>;
+pub(crate) type TestNode = NodeCore<OsRng, FixedClock, MemoryStorage>;
 
 fn one_packet(output: &TickOutput) -> Vec<u8> {
     let mut all: Vec<Vec<u8>> = output
@@ -107,12 +107,17 @@ fn one_packet(output: &TickOutput) -> Vec<u8> {
 
 /// The serving node and the client that fetched from it, with one
 /// established link and `/get` served on the serving node's destination.
-struct Pair {
-    serving: TestNode,
-    link_id: leviculum_core::LinkId,
+///
+/// `pub(crate)` for `pn_serve_cap_survives_a_shrinking_heap`, which
+/// measures the same serve path from the other end — what it costs
+/// while the heap moves under it. One builder, so the two measurements
+/// cannot drift onto different links.
+pub(crate) struct Pair {
+    pub(crate) serving: TestNode,
+    pub(crate) link_id: leviculum_core::LinkId,
 }
 
-fn established_pair() -> Pair {
+pub(crate) fn established_pair() -> Pair {
     let serving_identity = Identity::generate(&mut OsRng);
     let signing_key = serving_identity.ed25519_verifying().to_bytes();
     let mut serving =

@@ -31,6 +31,16 @@
 //! response whose modelled transient is 33 238 B — 2 858 B more than the
 //! heap the board had, which is the panic, in arithmetic.
 //!
+//! **Two tests, two rules.** The first fixes the MODEL's inverse: given
+//! a heap, what response does it fund. The second fixes what the board
+//! actually serves to, which is that number less a margin for what can
+//! arrive while the serve runs
+//! ([`BOARD_SERVE_MARGIN_BYTES`], #388 order 138) — 2 540 B and nine
+//! messages where the bare model says 4 954 B and eighteen. Do not read
+//! the first test's 18 as a promise about a board: the margin-free cap
+//! is measured overrunning the same heap in
+//! `pn_serve_cap_survives_a_shrinking_heap`.
+//!
 //! **What it cannot prove:** that a real board survives it. Only a board
 //! can, and only the rig can run one; what this fixes is the size of
 //! what the board is allowed to try.
@@ -39,8 +49,8 @@ use leviculum_lxmf::propagation::{
     MessageGetRequest, PropagationUpload, TransferLimit, TransientId,
 };
 use leviculum_lxmf::propagation_node::{
-    serve_cap_for_peak, serve_peak_bytes, GetOutcome, PropagationNode, PropagationNodeConfig,
-    UploadOutcome,
+    serve_cap_for_live_heap, serve_cap_for_peak, serve_largest_block_bytes, serve_peak_bytes,
+    GetOutcome, PropagationNode, PropagationNodeConfig, UploadOutcome,
 };
 use leviculum_lxmf::propagation_store::MemoryPropagationStore;
 
@@ -48,6 +58,34 @@ use leviculum_lxmf::propagation_store::MemoryPropagationStore;
 /// 08:08 UTC, six seconds before the fetch that killed it
 /// (`[HEAP_CENSUS] … free=30380`).
 const FREE_AT_PANIC: usize = 30_380;
+
+/// The largest single block that same allocator could still hand out at
+/// that instant (`[HEAP_CENSUS] … largest=30320`). 60 B below `free`:
+/// the T114's heap was barely fragmented, and the bound that bites here
+/// is the summed one. It is read anyway, because the term that decides
+/// a serve is one allocation and only this figure prices it.
+const LARGEST_AT_PANIC: usize = 30_320;
+
+/// What the BOOT plan funds on that same board (`HEAP_BUDGET … slack=784`
+/// → `serve_cap=88`, `heap_census::budget_serve_cap`,
+/// `leviculum-nrf`): 88 B, less than one stored message, so a board held
+/// to it lists 24 messages and serves none of them.
+const BOOT_CAP: usize = 88;
+
+/// Heap the board keeps clear of the serve because it can be claimed
+/// WHILE the serve is in flight (`SERVE_MARGIN_BYTES`,
+/// `leviculum-nrf/src/heap_census.rs`): one inbound sync batch at
+/// `BOARD_SYNC_LIMIT_KB` (8 000 B), one queued upload at
+/// `BOARD_TRANSFER_LIMIT_KB` (4 000 B), and one more endpoint link at
+/// `budget_per_link()` — 2 688 B on the T114's own boot line
+/// (`HEAP_BUDGET links=4 ble_links=4 per_link=2688 …`, same capture).
+/// All three can coexist, so they are summed.
+///
+/// Mirrored here as a literal for the same reason
+/// [`BOARD_RESOURCE_SDU`] is: `leviculum-nrf` is a thumbv7em crate this
+/// host cannot link. The firmware computes it from those three
+/// constants; what this test pins is the rule, at the board's numbers.
+const BOARD_SERVE_MARGIN_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000 + 4 * 1000 + 2_688;
 
 /// The link SDU the serve transient is sized against on a board
 /// (`SERVE_RESOURCE_SDU`, `leviculum-nrf/src/pn.rs`): Reticulum's
@@ -80,14 +118,9 @@ fn upload(seed: u8) -> Vec<u8> {
     PropagationUpload::single(1_700_000_000.0, lxmf_data, [0xEE; 32]).encode()
 }
 
-/// A node holding the field's 24 messages for one mailbox, capped at
-/// what a `FREE_AT_PANIC`-sized heap funds.
-fn field_node() -> (
-    PropagationNode<MemoryPropagationStore>,
-    Vec<TransientId>,
-    usize,
-) {
-    let cap = serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU);
+/// A node holding the field's 24 messages for one mailbox, serving to
+/// `cap` accounted bytes per fetch.
+fn field_node(cap: usize) -> (PropagationNode<MemoryPropagationStore>, Vec<TransientId>) {
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(64 * 1024),
         PropagationNodeConfig {
@@ -104,7 +137,23 @@ fn field_node() -> (
             },
         )
         .collect();
-    (role, stored, cap)
+    (role, stored)
+}
+
+/// Serve one fetch for every id in `stored` and report what came back.
+fn fetch_all(
+    role: &mut PropagationNode<MemoryPropagationStore>,
+    stored: &[TransientId],
+) -> (Vec<u8>, Vec<TransientId>) {
+    let GetOutcome::Fetch {
+        response, served, ..
+    } = role
+        .handle_get(&fetch_for(stored), &[7u8; 16], 0)
+        .expect("the fetch is well formed")
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    (response, served)
 }
 
 /// The client's request: every id it was just listed, with a transfer
@@ -122,7 +171,8 @@ fn fetch_for(wants: &[TransientId]) -> Vec<u8> {
 
 #[test]
 fn a_fetch_past_the_funded_cap_is_served_in_part_and_finished_next_round() {
-    let (mut role, stored, cap) = field_node();
+    let cap = serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU);
+    let (mut role, stored) = field_node(cap);
     let mailbox = [7u8; 16];
 
     // Round one: the client asks for all 24.
@@ -248,5 +298,103 @@ response={} peak={}",
         served.len() + served_two.len(),
         usize::from(FIELD_MESSAGES),
         "nothing served twice, nothing lost"
+    );
+}
+
+/// The cap the board serves to is the heap it HAS, not the heap its boot
+/// plan feared — and the margin is what keeps that from being the panic
+/// again.
+///
+/// Order 137 left the cap at the boot plan's worst case: every term at
+/// its maximum at once, 784 B of slack, 88 B of funded response. A
+/// stored message is 256 B stamped, so a board held to 88 B lists 24
+/// messages and serves **none** of them — which is what this test's
+/// first half measures, and it is the red this order removes.
+///
+/// The heap that board actually stood on six seconds before it died was
+/// [`FREE_AT_PANIC`] free with [`LARGEST_AT_PANIC`] in one block. Under
+/// the serve-peak model, less [`BOARD_SERVE_MARGIN_BYTES`] for what can
+/// still arrive mid-serve, that funds 2 540 B — nine of the 24.
+///
+/// **Nine, not eighteen.** 4 954 B (18 messages) is what the same heap
+/// funds with no margin at all, and the second half of
+/// `a_serve_survives_the_heap_shrinking_under_it` measures what that
+/// costs: 24 974 B of serve transient plus 14 688 B of margin is
+/// 39 662 B against 30 380 B of heap, i.e. the same panic one arrival
+/// later. The margin is the difference between a cap that fits the
+/// instant it was computed and one that fits the instant it is spent.
+#[test]
+fn a_boot_cap_below_one_message_is_raised_by_the_heap_the_board_has() {
+    // Today's rule: the boot plan's worst case, and nothing else.
+    let (mut booted, stored) = field_node(BOOT_CAP);
+    let (boot_response, boot_served) = fetch_all(&mut booted, &stored);
+    assert!(
+        boot_served.is_empty() && boot_response.len() < 8,
+        "an 88 B cap cannot fit a 256 B message: served {} in {} B",
+        boot_served.len(),
+        boot_response.len()
+    );
+
+    // The rule this order asks for: the larger of that floor and what
+    // the live census funds, margin first.
+    let live_cap = serve_cap_for_live_heap(
+        BOOT_CAP,
+        FREE_AT_PANIC,
+        LARGEST_AT_PANIC,
+        BOARD_SERVE_MARGIN_BYTES,
+        BOARD_RESOURCE_SDU,
+    );
+    let (mut live, stored) = field_node(live_cap);
+    let (response, served) = fetch_all(&mut live, &stored);
+    let peak = serve_peak_bytes(response.len(), BOARD_RESOURCE_SDU);
+    let block = serve_largest_block_bytes(response.len(), BOARD_RESOURCE_SDU);
+
+    // The firmware's own line, at the board's own numbers
+    // (`SERVE_CAP`, `Engine::read_serve_cap`, `leviculum-nrf/src/pn.rs`).
+    eprintln!(
+        "SERVE_CAP boot_cap={BOOT_CAP} live_cap={live_cap} \
+margin={BOARD_SERVE_MARGIN_BYTES} largest={LARGEST_AT_PANIC} free={FREE_AT_PANIC} \
+served={} of {FIELD_MESSAGES} response={} peak={peak} block={block}",
+        served.len(),
+        response.len(),
+    );
+
+    assert_eq!(
+        live_cap, 2_540,
+        "the heap the board had funds 2 540 B of fetch response"
+    );
+    assert_eq!(
+        served.len(),
+        9,
+        "2 540 B of accounted cap is 24 B of preamble plus nine 256 B \
+         messages at 16 B of overhead each (24 + 9·272 = 2 472, and a \
+         tenth would be 2 744)"
+    );
+
+    // The margin is what the serve must survive: every byte it holds
+    // live, plus everything that can arrive while it holds them, inside
+    // the heap the census measured.
+    assert!(
+        peak + BOARD_SERVE_MARGIN_BYTES <= FREE_AT_PANIC,
+        "a {} B response costs {peak} B of transient; with \
+         {BOARD_SERVE_MARGIN_BYTES} B of concurrent arrivals that is \
+         {} B against {FREE_AT_PANIC} B of heap",
+        response.len(),
+        peak + BOARD_SERVE_MARGIN_BYTES
+    );
+    assert!(
+        block + BOARD_SERVE_MARGIN_BYTES <= LARGEST_AT_PANIC,
+        "the serve's largest single allocation is {block} B; the \
+         allocator can hand out {LARGEST_AT_PANIC} B and the margin \
+         claims {BOARD_SERVE_MARGIN_BYTES} B of it"
+    );
+
+    // And it is a serve, not a refusal: nine now, the rest next round,
+    // the store intact -- the same contract the first test pins at the
+    // unmargined cap.
+    assert_eq!(
+        live.store().len(),
+        usize::from(FIELD_MESSAGES),
+        "a bounded serve keeps every message it did not ship"
     );
 }
