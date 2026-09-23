@@ -3439,6 +3439,66 @@ mod tests {
         assert!(!responder.should_send_keepalive(2000));
     }
 
+    /// #331 finding 1. RNS 1.5.x widened the keepalive gate in the link
+    /// watchdog from `now >= last_inbound + keepalive` to
+    /// `... or now >= last_outbound + keepalive` (1.5.2 `Link.py:749`, against
+    /// `Link.py:792` in the pinned 1.3.5 reference). The gap it closes is a
+    /// receiving-but-silent initiator: with data arriving, 1.3.5's
+    /// `last_inbound` stays fresh, the branch is never entered, no keepalive
+    /// is ever sent, and the DESTINATION's own `last_inbound` ages until it
+    /// tears the link down as stale — which a destination of either
+    /// generation does, since the stale test is still `last_inbound`-only on
+    /// both.
+    ///
+    /// We are not in that gap, and this test is why: our gate is
+    /// `last_keepalive` alone, so an initiator emits a keepalive every
+    /// interval no matter what traffic is or is not flowing. That is a
+    /// superset of BOTH Python gates, so the finding cannot reach us — but it
+    /// is a superset by accident of a simpler rule, and a future "only send a
+    /// keepalive when the link is idle" optimisation would walk straight into
+    /// the 1.3.5 bug. If that optimisation is ever written, this test goes red
+    /// first.
+    #[test]
+    fn silent_initiator_keeps_sending_keepalives_while_inbound_is_fresh() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut initiator = Link::new_outgoing(dest_hash, &mut OsRng);
+        initiator.set_state(LinkState::Active);
+        initiator.mark_established(1000);
+        initiator.set_timing_for_test(10, initiator.stale_time_secs(), 1000);
+
+        // The scenario the finding names: the destination transmits, we
+        // receive, we send nothing of our own. Inbound is always fresh.
+        let mut now = 1000u64;
+        let mut sent = 0u32;
+        let mut last_sent_at = 1000u64;
+        let mut widest_gap = 0u64;
+        for _ in 0..30 {
+            now += 1;
+            initiator.record_inbound(now);
+            if initiator.should_send_keepalive(now) {
+                initiator.record_keepalive_sent(now);
+                widest_gap = widest_gap.max(now - last_sent_at);
+                last_sent_at = now;
+                sent += 1;
+            }
+        }
+
+        // 30 seconds of one-way inbound at a 10 s keepalive: three of them.
+        // The count matters, not just "nonzero" — it is what keeps the peer's
+        // `last_inbound` inside its stale window.
+        assert_eq!(
+            sent, 3,
+            "a silent initiator must still keepalive once per interval, or a \
+             destination of any RNS generation tears the link down as stale"
+        );
+        assert_eq!(initiator.keepalives_sent(), 3);
+        assert!(
+            widest_gap < initiator.stale_time_secs(),
+            "widest keepalive gap {widest_gap}s must stay inside the peer's stale window of {}s",
+            initiator.stale_time_secs()
+        );
+    }
+
     #[test]
     fn test_is_stale_and_should_close() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);

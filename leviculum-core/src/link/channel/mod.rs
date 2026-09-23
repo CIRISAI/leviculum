@@ -1021,7 +1021,8 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::MDU;
+    use crate::constants::{MDU, STREAM_DATA_HEADER_SIZE};
+    use crate::link::channel::buffer::RawChannelReader;
     use alloc::vec;
 
     /// Test message implementation
@@ -1094,6 +1095,68 @@ mod tests {
         assert_eq!(envelope.msgtype, TestMessage::MSGTYPE);
         assert_eq!(envelope.sequence, 0);
         assert_eq!(envelope.data, vec![1, 2, 3]);
+    }
+
+    /// #331 finding 2. RNS 1.5.x sizes stream chunks from `channel.mdu -
+    /// StreamDataMessage.HEADER_LEN` where 1.3.5 used `- OVERHEAD`
+    /// (1.3.5 `Buffer.py:229` with `OVERHEAD = 2 + 6` at `:56`). The six bytes
+    /// are the channel envelope header, which `channel.mdu` has already
+    /// subtracted, so 1.3.5 charged them twice and 1.5.x stopped: a 1.5.x peer
+    /// puts six more payload bytes in every chunk, and its envelope lands on
+    /// the link MDU exactly rather than six below it.
+    ///
+    /// Two things have to hold for us to take that, and this test pins both.
+    /// Our reader has no length gate at all — `RawChannelReader::receive`
+    /// appends whatever arrives — so the binding check is the envelope guard
+    /// in `send_raw`, which is the same `len > mdu` comparison the RX side
+    /// would face if it ever grew one. Feeding the largest chunk 1.5.x can
+    /// build through it proves the boundary is inclusive, not off by one.
+    #[test]
+    fn a_1_5_x_sized_stream_chunk_fits_the_channel_and_reads_back_whole() {
+        let mut sender = Channel::new();
+        let link_mdu = MDU;
+        let channel_mdu = sender.mdu(link_mdu);
+
+        // 1.5.x sizing: channel MDU less the two-byte stream header only.
+        let payload_len = channel_mdu - STREAM_DATA_HEADER_SIZE;
+        assert_eq!(
+            payload_len,
+            max_data_len(channel_mdu),
+            "our writer already sizes chunks the way 1.5.x does, so the \
+             larger chunk is not new traffic to us — only newly observable"
+        );
+        let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+        let msg = StreamDataMessage::new(7, payload.clone(), true, false);
+        assert_eq!(
+            msg.pack().len(),
+            channel_mdu,
+            "the packed stream message fills the channel MDU exactly"
+        );
+
+        let packed = sender
+            .send_system(&msg, link_mdu, 1000, 100)
+            .expect("the largest 1.5.x chunk must pass the envelope guard");
+        assert_eq!(
+            packed.len(),
+            link_mdu,
+            "and its envelope lands on the link MDU exactly, not above it"
+        );
+
+        let mut receiver = Channel::new();
+        let envelope = match receiver.receive(&packed, [0u8; 32]).unwrap() {
+            ReceiveOutcome::Delivered(envelope) => envelope,
+            other => panic!("expected delivery, got {other:?}"),
+        };
+        let decoded: StreamDataMessage = envelope.unpack_message().unwrap();
+
+        let mut reader = RawChannelReader::new(7);
+        assert!(reader.receive(&decoded));
+        assert!(reader.is_eof());
+        assert_eq!(
+            reader.read_all(),
+            payload,
+            "every byte of the larger chunk has to survive reassembly"
+        );
     }
 
     #[test]

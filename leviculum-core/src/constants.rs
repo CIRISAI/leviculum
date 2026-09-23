@@ -106,6 +106,17 @@ pub const RATCHET_INTERVAL_SECS: u64 = 60 * 30; // 30 minutes
 
 /// Transport constants
 pub const PATHFINDER_MAX_HOPS: u8 = 128;
+/// Highest hop count that may appear in a hop byte we put on the wire.
+///
+/// Python 1.5.x refuses the value above this at both ends: `Packet.unpack`
+/// raises `ValueError` on a received hop byte of `PATHFINDER_M` or more
+/// (1.5.2 `Packet.py:248`, absent in the pinned 1.3.5 reference), and
+/// `Transport.outbound` returns without transmitting when `packet.hops >
+/// PATHFINDER_M-1` (1.5.2 `Transport.py:1356`, likewise absent in 1.3.5).
+/// `PATHFINDER_MAX_HOPS` is that `PATHFINDER_M`, so a packet stamped with it
+/// is unparseable to a 1.5.x neighbour and the last stampable value is one
+/// below.
+pub const PATHFINDER_MAX_WIRE_HOPS: u8 = PATHFINDER_MAX_HOPS - 1;
 /// Matches Python's PATHFINDER_R (reference/Reticulum/RNS/Transport.py:67).
 /// Upper bound on the retries counter in the announce retry scheduler.
 /// Combined with LOCAL_REBROADCASTS_MAX=2 this makes a received

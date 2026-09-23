@@ -47,8 +47,8 @@ use crate::constants::{
     EMISSION_SANITY_FLOOR_SECS, EMISSION_TIMESTAMP_MAX_SECS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
     JITTER_AIRTIME_FACTOR, LINK_TIMEOUT_MS, LOCAL_CLIENT_DEST_EXPIRY_MS, LOCAL_REBROADCASTS_MAX,
     MAX_QUEUED_ANNOUNCES_PER_INTERFACE, MAX_RANDOM_BLOBS, MS_PER_SECOND, MTU,
-    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_RETRIES,
-    PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS,
+    PATHFINDER_EXPIRY_SECS, PATHFINDER_G_MS, PATHFINDER_MAX_HOPS, PATHFINDER_MAX_WIRE_HOPS,
+    PATHFINDER_RETRIES, PATHFINDER_RW_MS, PATH_REQUEST_GRACE_MS, PATH_REQUEST_MIN_INTERVAL_MS,
     PENDING_LOCAL_PR_EXPIRY_MS, RATCHET_SIZE, RECEIPT_TIMEOUT_DEFAULT_MS, REVERSE_TABLE_EXPIRY_MS,
     TRUNCATED_HASHBYTES, UNKNOWN_BITRATE_ASSUMPTION_BPS,
 };
@@ -5633,7 +5633,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Convert to Header2 with the daemon's own transport_id and receipt-incremented
             // hops. The client uses transport_id to construct outbound Header2 packets.            // if we forward raw network bytes, the client sets the relay's transport_id
             // instead of ours, and our transport_id filter rejects the client's packets.
-            if self.has_local_clients() {
+            // `hop_ceiling()` guards this hand-off as it guards the mesh
+            // forwards: the shared-instance socket carries the same hop byte,
+            // and a 1.5.x client on the other end of it raises on 128 exactly
+            // as a 1.5.x neighbour on the air does (1.5.2 `Packet.py:248`).
+            // The drop is not counted — the mesh forward of the same announce
+            // accounts it, and counting both would double one event.
+            if self.has_local_clients() && packet.hops <= self.hop_ceiling() {
                 if let Ok(mut local_announce) = Packet::unpack(raw) {
                     local_announce.hops = packet.hops;
                     local_announce.flags.header_type = HeaderType::Type2;
@@ -7162,12 +7168,12 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         ph: [u8; PKT_PH_BYTES],
         peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
-        if packet.hops > self.config.max_hops {
+        if packet.hops > self.hop_ceiling() {
             crate::tracing::debug!(
                 "Dropped packet on {}, max hops exceeded (hops={}, max={})",
                 self.iface_name(target_iface),
                 packet.hops,
-                self.config.max_hops
+                self.hop_ceiling()
             );
             crate::tracing::debug!(
                 target: PKT_EVENT_TARGET,
@@ -7215,10 +7221,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         packet: &mut Packet,
         full_hash: [u8; 32],
     ) {
-        if packet.hops > self.config.max_hops {
+        if packet.hops > self.hop_ceiling() {
             crate::tracing::debug!(
                 hops = packet.hops,
-                max_hops = self.config.max_hops,
+                max_hops = self.hop_ceiling(),
                 "Dropped broadcast packet, max hops exceeded"
             );
             crate::tracing::debug!(
@@ -7272,10 +7278,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Self-heard echoes are dropped on arrival by the packet_hashlist dedup
     /// in process_incoming, seeded here before the broadcast is emitted.
     fn forward_on_all(&mut self, packet: &mut Packet) {
-        if packet.hops > self.config.max_hops {
+        if packet.hops > self.hop_ceiling() {
             crate::tracing::debug!(
                 hops = packet.hops,
-                max_hops = self.config.max_hops,
+                max_hops = self.hop_ceiling(),
                 "Dropped broadcast packet, max hops exceeded"
             );
             self.stats.record_drop(DropReason::ForwardMaxHops);
@@ -8062,6 +8068,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             hops = hops.saturating_sub(1);
         }
         hops
+    }
+
+    /// The highest hop count we will stamp on a packet we hand to an interface.
+    ///
+    /// Two ceilings, and the lower one binds. `config.max_hops` is the
+    /// reachability limit an operator can lower. `PATHFINDER_MAX_WIRE_HOPS` is
+    /// not negotiable: a 1.5.x neighbour raises on a hop byte of
+    /// `PATHFINDER_M` or above before it looks at anything else in the header
+    /// (1.5.2 `Packet.py:248`), so a packet we stamp with 128 is not a packet
+    /// that travels one hop too far, it is a packet that neighbour cannot read
+    /// at all. Our own receipt increment makes 128 reachable — a relayed
+    /// packet arriving with a wire byte of 127 becomes `hops = 128` — which is
+    /// why the emit gates ask this and not `config.max_hops` directly.
+    ///
+    /// Receipt is deliberately untouched: we still accept and deliver a hop
+    /// byte 1.5.x would refuse, because being liberal in what we accept costs
+    /// a 1.3.5 peer nothing, while being liberal in what we emit costs a 1.5.x
+    /// peer the packet.
+    fn hop_ceiling(&self) -> u8 {
+        self.config.max_hops.min(PATHFINDER_MAX_WIRE_HOPS)
     }
 
     /// Test-only: flip `config.enable_transport` on a constructed
@@ -9996,39 +10022,55 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 };
 
                 if let Some(target_iface) = target {
-                    // Path response: send only to the requesting interface
-                    let size = parsed.packed_size();
-                    let mut buf = alloc::vec![0u8; size];
-                    if let Ok(len) = parsed.pack(&mut buf) {
+                    // Path response: send only to the requesting interface.
+                    // The broadcast arm below gates on `hop_ceiling()` inside
+                    // `forward_on_all` / `broadcast_announce_with_caps`; this
+                    // arm reaches an interface directly, so it asks here. The
+                    // receipt gate admits a stored announce at exactly
+                    // `max_hops`, so the one value this sheds is the one a
+                    // 1.5.x requester could not have parsed anyway.
+                    if parsed.hops > self.hop_ceiling() {
                         crate::tracing::debug!(
-                            "Sending targeted path response for <{}> to iface:{} ({} bytes)",
-                            HexShort(&dest_hash),
-                            target_iface,
-                            len
-                        );
-                        // No #376 hint: the announce entry records the
-                        // requesting INTERFACE, never the peer behind it, and
-                        // a path response is announce-shaped anyway — every
-                        // live link is the right audience. Deliberate, not
-                        // pending: the requester's peer could be stamped on
-                        // the announce entry, but addressing the response at
-                        // it would WITHHOLD a path from the other peers on
-                        // the same carrier, which is a delivery regression,
-                        // not a duplicate saved.
-                        self.push_packet(target_iface, buf[..len].to_vec(), None, None);
-                        // Python records sent_announce() at transmit time for
-                        // every announce, including targeted path responses
-                        // (Transport.py:1323), so they count toward
-                        // outgoing_announce_frequency (Codeberg #67 Stage 2a).
-                        self.record_outgoing_announce(target_iface);
-                        // OBS-1: the node actually (re)transmitted this announce
-                        // on a specific interface (targeted path response).
-                        crate::tracing::debug!(
-                            event = "ANN_TX",
-                            dst = %HexShort(&dest_hash),
+                            dest = %HexShort(&dest_hash),
                             hops = parsed.hops,
-                            iface = %self.iface_name(target_iface),
+                            max_hops = self.hop_ceiling(),
+                            "Dropped targeted path response, max hops exceeded"
                         );
+                        self.stats.record_drop(DropReason::ForwardMaxHops);
+                    } else {
+                        let size = parsed.packed_size();
+                        let mut buf = alloc::vec![0u8; size];
+                        if let Ok(len) = parsed.pack(&mut buf) {
+                            crate::tracing::debug!(
+                                "Sending targeted path response for <{}> to iface:{} ({} bytes)",
+                                HexShort(&dest_hash),
+                                target_iface,
+                                len
+                            );
+                            // No #376 hint: the announce entry records the
+                            // requesting INTERFACE, never the peer behind it, and
+                            // a path response is announce-shaped anyway — every
+                            // live link is the right audience. Deliberate, not
+                            // pending: the requester's peer could be stamped on
+                            // the announce entry, but addressing the response at
+                            // it would WITHHOLD a path from the other peers on
+                            // the same carrier, which is a delivery regression,
+                            // not a duplicate saved.
+                            self.push_packet(target_iface, buf[..len].to_vec(), None, None);
+                            // Python records sent_announce() at transmit time for
+                            // every announce, including targeted path responses
+                            // (Transport.py:1323), so they count toward
+                            // outgoing_announce_frequency (Codeberg #67 Stage 2a).
+                            self.record_outgoing_announce(target_iface);
+                            // OBS-1: the node actually (re)transmitted this announce
+                            // on a specific interface (targeted path response).
+                            crate::tracing::debug!(
+                                event = "ANN_TX",
+                                dst = %HexShort(&dest_hash),
+                                hops = parsed.hops,
+                                iface = %self.iface_name(target_iface),
+                            );
+                        }
                     }
                 } else {
                     // Apply ANNOUNCE_CAP to retries that forward a relayed
@@ -10124,7 +10166,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Capped interfaces that already got a SendPacket may also receive the Broadcast;
     /// the driver should deduplicate if this matters for the link type.
     fn broadcast_announce_with_caps(&mut self, packet: &mut Packet) {
-        if packet.hops > self.config.max_hops {
+        if packet.hops > self.hop_ceiling() {
             self.stats.record_drop(DropReason::ForwardMaxHops);
             return;
         }
@@ -13974,6 +14016,103 @@ mod tests {
             );
         }
 
+        /// #331 finding 3: the hop byte we stamp on a relayed packet must stay
+        /// parseable to a 1.5.x neighbour. 1.5.2 `Packet.unpack` raises
+        /// `ValueError` on a received hop byte of `PATHFINDER_M` (128) or above
+        /// (`Packet.py:248`) before it reads the header type, so such a packet
+        /// is not over-ranged, it is unreadable; `Transport.outbound` refuses
+        /// to emit one in the first place (`Transport.py:1356`). Neither check
+        /// exists in the pinned 1.3.5 reference, which is why this was silent.
+        ///
+        /// Our receipt increment reaches the forbidden value from a legal one:
+        /// a relay arriving with wire hops 127 becomes `hops = 128`, and the
+        /// old gate (`hops > max_hops`, max_hops = 128) let it through and
+        /// stamped 128 on the wire. RED before `hop_ceiling()`: this asserts
+        /// no forward, and the pre-fix build forwards with `fwd[1] == 128`.
+        #[test]
+        fn forward_never_stamps_a_hop_byte_a_1_5_x_peer_cannot_parse() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let t2 = announce_as_type2(&raw, [0x5Au8; TRUNCATED_HASHBYTES], 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            // The last hop byte a 1.5.x peer parses is 127. Receipt makes it
+            // 128, which is the first one it does not.
+            let wire_in = type2_data_to(
+                *transport.identity.hash(),
+                dest_hash,
+                PATHFINDER_MAX_WIRE_HOPS,
+                b"at-the-ceiling",
+            );
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            let emitted: Vec<u8> = actions
+                .iter()
+                .map(|a| match a {
+                    Action::SendPacket { data, .. } => data.clone(),
+                    Action::Broadcast { data, .. } => data.clone(),
+                })
+                .next()
+                .unwrap_or_default();
+            assert!(
+                emitted.is_empty(),
+                "forwarded a hop byte of {} — 1.5.2 Packet.py:248 refuses it",
+                emitted.get(1).copied().unwrap_or(0),
+            );
+            assert_eq!(
+                transport.stats().drops_forward_max_hops(),
+                1,
+                "the drop must be accounted as forward-max-hops"
+            );
+        }
+
+        /// The other side of the ceiling: one below it still relays. Without
+        /// this the fix above could be a blanket "stop forwarding" and still
+        /// look green.
+        #[test]
+        fn forward_still_relays_one_below_the_wire_hop_ceiling() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let (raw, dest_hash) = make_announce_raw(0, PacketContext::None);
+            let t2 = announce_as_type2(&raw, [0x5Au8; TRUNCATED_HASHBYTES], 2);
+            transport.process_incoming(0, &t2).unwrap();
+            transport.drain_actions();
+            transport.drain_events();
+
+            let wire_in = type2_data_to(
+                *transport.identity.hash(),
+                dest_hash,
+                PATHFINDER_MAX_WIRE_HOPS - 1,
+                b"below-the-ceiling",
+            );
+            transport.process_incoming(1, &wire_in).unwrap();
+            let actions = transport.drain_actions();
+            let emitted = actions
+                .iter()
+                .map(|a| match a {
+                    Action::SendPacket { data, .. } => data.clone(),
+                    Action::Broadcast { data, .. } => data.clone(),
+                })
+                .next()
+                .expect("a packet one below the ceiling must still be relayed");
+            assert_eq!(
+                emitted[1], PATHFINDER_MAX_WIRE_HOPS,
+                "the relay stamps the receipt-incremented count, and it is the highest 1.5.x parses"
+            );
+            assert_eq!(
+                transport.stats().drops_forward_max_hops(),
+                0,
+                "nothing below the ceiling may be accounted as a hop drop"
+            );
+        }
+
         /// #159 tranche 3: pin the hop byte of a plain announce rebroadcast.
         /// The reference stores the receipt-incremented count when the
         /// announce is queued (Transport.py:1868) and stamps exactly that
@@ -14371,7 +14510,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5750), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5756), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

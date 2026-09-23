@@ -101,9 +101,9 @@ arms a wildcard still covers, replaces match guards with `true` and
 `false`, and deletes fields from struct literals that have a base
 expression. It does not substitute literals and does not mutate consts —
 where this project's semantics live: `PATHFINDER_RETRIES`
-(`leviculum-core/src/constants.rs:115`). The #192 defect was
+(`leviculum-core/src/constants.rs:126`). The #192 defect was
 `retries: 0` where `PATHFINDER_RETRIES` belonged, and the fixed site
-writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:9341`)
+writes `PATHFINDER_RETRIES` (`leviculum-core/src/transport.rs:9367`)
 into a literal that spells every field out — so not even the
 field-deletion operator reaches it, and no operator substitutes one
 const for another.

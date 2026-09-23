@@ -84,6 +84,7 @@
 - [Hop counting](architecture-hop-counting.md)
 - [Announce dedup and path replacement](protocol-notes/announce-dedup-and-path-replacement.md)
 - [When a transport node repeats a data packet](protocol-notes/when-a-transport-node-repeats-a-data-packet.md)
+- [Four things RNS 1.5.x changed](protocol-notes/rns-1-5-x-audit.md)
 - [Testing quick reference](development-testing.md)
 - [CI pipeline](development-ci.md)
 - [Soak and endurance](soak-and-endurance.md)

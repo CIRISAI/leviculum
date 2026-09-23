@@ -81,7 +81,7 @@ A path learned from a path response therefore inherits the responder's STORED co
 measured one. Staleness propagates through this channel.
 
 leviculum matches this as of 2026-07-10 (D3, fixed on branch `path-response-hops`). When a transport
-node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6609`)
+node answers a path request from a network peer (`handle_path_request` case 2b, `transport.rs:6615`)
 it now emits `self.storage.get_path(&requested_hash).map(|p| p.hops)`, the receipt-incremented stored
 count, exactly as `:2956` does. It previously emitted `cached_packet.hops`, the AS-RECEIVED wire byte
 (`set_announce_cache` stores the raw pre-increment buffer; the receipt increment at `transport.rs:1903`
@@ -178,16 +178,16 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 | Receipt increment | `:1498` | `transport.rs:1847` | matches |
 | IPC exception, instance side | `:1523` | `transport.rs:1750` | matches |
 | IPC exception, client side | `:1525` | `transport.rs:1750` (else-arm of the `has_local_clients` gate) | matches — **fixed 2026-07-10 (D2, commit `06aadaff`); was absent** |
-| Announce rebroadcast | `:2050` | `transport.rs:6584` | matches |
+| Announce rebroadcast | `:2050` | `transport.rs:6590` | matches |
 | Path table store | `:1909`, `:2055` | `transport.rs:3319` | matches |
 | Path acceptance | `:1806`, `:2412` | `transport.rs:3415` (`should_update`) | matches |
-| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6609` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
+| Path-response hop emission | `:2997` (`packet.hops = path_table[dst][IDX_PT_HOPS]`), `:618` | `transport.rs:6615` (case 2b emits the stored path-table count) | matches — **fixed 2026-07-10 (D3, commit `path-response-hops`); previously emitted `cached_packet.hops` = the pre-increment wire byte (`stored - 1`)** |
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:4085`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
-| Healing, no path | `:737` | `transport.rs:7037` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7287` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
-| Healing, destination direct | `:753` | `transport.rs:7048` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7306` | matches |
+| Healing, no path | `:737` | `transport.rs:7043` | matches |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7293` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, destination direct | `:753` | `transport.rs:7054` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7312` | matches |
 
 ### The deliberate deviation, and its cost
 
@@ -320,6 +320,18 @@ demands for the strict flag, run against both a 1.3.5 and a 1.5.x peer. The fixt
 relay half already exists — `mvr_hop_asymmetry.rs` builds the honest asymmetric topology and
 asserts both arms of `lrproof_rewrite_on_asymmetry` — so a fix pass starts from a working
 reproduction, not from scratch.
+
+## The ceiling, and what 1.5.x does at it
+
+`PATHFINDER_M` is 128. In 1.3.5 that is a reachability limit and nothing else: a hop byte of 128 or
+more is parsed, delivered and forwarded, and only the announce gate at `Transport.py:1750` cares.
+In 1.5.x it is also a parse limit — `Packet.py:248` raises on a received hop byte of 128 or above
+and `Transport.py:1356` refuses to emit one — so the same byte that merely travels too far on a
+1.3.5 peer is unreadable to a 1.5.x one. Our receipt increment can reach it from a legal wire
+value, which is why the emit gates ask `Transport::hop_ceiling()` rather than `config.max_hops`.
+Receipt stays liberal. The walk is in
+[Four things RNS 1.5.x changed](protocol-notes/rns-1-5-x-audit.md), which also records what
+`local_hops_delta` does to the meaning of `hops == 0`.
 
 ## Rules to obey
 

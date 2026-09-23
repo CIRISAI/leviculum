@@ -191,7 +191,7 @@ is `InterfaceConfig` (`config.rs:242-520`).
 | `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:615`)) |
 | `enabled` | bool | `true` | Bring this interface up; the legacy spelling `interface_enabled` is honoured too. (`enabled` (`ini_config.rs:616`); `InterfaceConfig::enabled` (`config.rs:334-336`)) |
 | `outgoing` | bool | `true` | Allow sending outgoing packets. (`outgoing` (`ini_config.rs:620`); `InterfaceConfig::outgoing` (`config.rs:385-387`)) |
-| `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:324-327`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:673-679`); `InterfaceConfig::bitrate` (`config.rs:388-393`)) |
+| `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:335-338`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:673-679`); `InterfaceConfig::bitrate` (`config.rs:388-393`)) |
 | `buffer_size` | usize | per type | Channel buffer size. (`buffer_size` (`ini_config.rs:724`); `InterfaceConfig::buffer_size` (`config.rs:526-528`)) |
 
 ### TCP server (`TCPServerInterface`)
