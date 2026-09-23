@@ -30,11 +30,13 @@ pub(crate) mod compression;
 pub(crate) mod hashmap;
 pub(crate) mod incoming;
 pub(crate) mod outgoing;
+pub mod source;
 pub mod window;
 
 pub use outgoing::{
     prepare_resource_send, PreparedResourceSend, ResourceCryptParams, ResourceSendParams,
 };
+pub use source::{PrefixSource, ResourceSource, SliceSource, SourceError};
 pub use window::{RateSample, WindowPolicy};
 
 use crate::constants::{
@@ -371,6 +373,18 @@ pub enum ResourceError {
     /// so the prepared ciphertext is no longer decryptable by the peer.
     /// Retryable: re-run params -> prepare -> commit against the fresh state.
     LinkStateChanged,
+    /// A streamed payload ([`source::ResourceSource`]) could not be read,
+    /// or did not yield the length it promised. The build is abandoned
+    /// before anything is advertised: a resource whose parts disagree
+    /// with its advertisement costs the receiver the whole transfer
+    /// before it can tell.
+    SourceFailed(source::SourceError),
+}
+
+impl From<source::SourceError> for ResourceError {
+    fn from(error: source::SourceError) -> Self {
+        Self::SourceFailed(error)
+    }
 }
 
 impl core::fmt::Display for ResourceError {
@@ -394,6 +408,7 @@ impl core::fmt::Display for ResourceError {
             Self::InvalidProof => write!(f, "invalid resource proof"),
             Self::InvalidRequest => write!(f, "invalid resource request"),
             Self::ResourceTooLarge => write!(f, "resource exceeds size limit"),
+            Self::SourceFailed(error) => write!(f, "resource source failed: {error}"),
             Self::LinkStateChanged => {
                 write!(f, "link state changed during off-lock resource build")
             }

@@ -26,7 +26,7 @@ anything with the same profile:
 | phase | lock | code |
 | --- | --- | --- |
 | `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1363` |
-| `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:106` |
+| `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
 | `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1398` |
 
 Commit re-validates what could have changed while the build ran
@@ -103,9 +103,9 @@ pass and was not re-measured here.
 ### The segment boundary sits under the 1 MiB row
 
 `RESOURCE_MAX_EFFICIENT_SIZE` is 1 048 575 bytes
-(`leviculum-core/src/resource/mod.rs:59`) and the split is decided on
+(`leviculum-core/src/resource/mod.rs:61`) and the split is decided on
 the *packed, uncompressed* length
-(`leviculum-core/src/resource/outgoing.rs:123`), so a 1 MiB body is
+(`leviculum-core/src/resource/outgoing.rs:106`), so a 1 MiB body is
 above it in every payload class — the compression ratio does not move
 the boundary. The 1 MiB row therefore measures **segment 1 of a
 two-segment transfer**, not a whole one. Segments 2..N are built on the

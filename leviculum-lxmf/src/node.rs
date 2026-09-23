@@ -2600,7 +2600,7 @@ mod tests {
     /// The 1 MiB row is segment 1 of a two-segment transfer: the split
     /// boundary is `RESOURCE_MAX_EFFICIENT_SIZE` (1 048 575 B) applied to the
     /// *packed, uncompressed* length (`leviculum-core/src/resource/
-    /// outgoing.rs:123`), which a 1 MiB body exceeds in every payload class.
+    /// outgoing.rs:106`), which a 1 MiB body exceeds in every payload class.
     /// Segments 2..N are built on the receive path, under the caller's lock.
     #[test]
     #[ignore]

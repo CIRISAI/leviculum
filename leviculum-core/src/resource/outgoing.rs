@@ -11,12 +11,13 @@ use rand_core::CryptoRngCore;
 #[cfg(feature = "compression")]
 use crate::constants::RESOURCE_AUTO_COMPRESS_MAX;
 use crate::constants::{RESOURCE_HASHMAP_LEN, RESOURCE_WINDOW_MAX_FAST};
-use crate::crypto::full_hash_parts;
+use crate::crypto::{full_hash_parts, token_len, StreamHasher, TokenEncryptor, TokenSink};
 use crate::hex_fmt::HexFmt;
 use crate::link::Link;
 use crate::msgpack;
 use crate::packet::PacketContext;
 use crate::resource::hashmap::map_hash;
+use crate::resource::source::{ResourceSource, SourceError};
 use crate::resource::{
     resource_sdu, ResourceAdvertisement, ResourceError, ResourceFlags, ResourceStatus,
     COLLISION_GUARD_SIZE, HASHMAP_IS_EXHAUSTED, HASHMAP_MAX_LEN, PART_TIMEOUT_FACTOR_AFTER_RTT,
@@ -47,24 +48,6 @@ pub struct ResourceCryptParams {
     pub(crate) negotiated_mtu: u32,
     pub(crate) mdu: usize,
     pub(crate) token_key: Option<[u8; 64]>,
-}
-
-impl ResourceCryptParams {
-    /// Token-encrypt `plaintext` exactly as [`Link::encrypt`] would: fresh IV
-    /// from `rng`, then `encrypt_token` under the captured link key.
-    pub(crate) fn encrypt(
-        &self,
-        plaintext: &[u8],
-        output: &mut [u8],
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<usize, crate::link::LinkError> {
-        use crate::link::LinkError;
-        let token_key = self.token_key.as_ref().ok_or(LinkError::InvalidState)?;
-        let mut iv = [0u8; 16];
-        rng.fill_bytes(&mut iv);
-        crate::crypto::encrypt_token(token_key, &iv, plaintext, output)
-            .map_err(|_| LinkError::KeyExchangeFailed)
-    }
 }
 
 /// Everything [`prepare_resource_send`] needs, snapshotted under the node lock
@@ -197,6 +180,112 @@ impl SegmentParams {
     }
 }
 
+/// The part cutter both build paths share (#384 B2).
+///
+/// A resource's parts are the encrypted wire stream sliced at `sdu`
+/// boundaries — nothing more. Until B2 that slicing read a joined
+/// ciphertext buffer, which meant the whole stream had to exist twice: as
+/// the buffer and as the parts. Here the slicing IS the encryption's sink,
+/// so the only copy is the parts, and the owned-buffer path and the
+/// streamed-source path produce the same blocks because they run the same
+/// cutter over the same bytes.
+struct PartCutter {
+    sdu: usize,
+    parts: Vec<Vec<u8>>,
+}
+
+impl PartCutter {
+    fn new(sdu: usize, transfer_size: usize) -> Self {
+        let sdu = sdu.max(1);
+        Self {
+            sdu,
+            parts: Vec::with_capacity(transfer_size.div_ceil(sdu).max(1)),
+        }
+    }
+
+    fn finish(self) -> Vec<Vec<u8>> {
+        self.parts
+    }
+}
+
+impl TokenSink for PartCutter {
+    fn put(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let open = match self.parts.last() {
+                Some(part) if part.len() < self.sdu => self.sdu - part.len(),
+                _ => {
+                    self.parts.push(Vec::with_capacity(self.sdu));
+                    self.sdu
+                }
+            };
+            let take = core::cmp::min(open, rest.len());
+            if let Some(part) = self.parts.last_mut() {
+                part.extend_from_slice(&rest[..take]);
+            }
+            rest = &rest[take..];
+        }
+    }
+}
+
+/// Map every part under `random_hash`, or `None` if two parts inside the
+/// collision guard window map to the same key — the caller re-salts.
+///
+/// Python keeps the same guard window and the same "regenerate `r` and
+/// start over" answer (`reference/Reticulum/RNS/Resource.py:452-465`); a
+/// duplicate map hash would make the receiver request one part and get
+/// another forever.
+fn map_parts(
+    parts: &[Vec<u8>],
+    random_hash: &[u8; RESOURCE_RANDOM_HASH_SIZE],
+) -> Option<Vec<[u8; RESOURCE_HASHMAP_LEN]>> {
+    let mut entries = Vec::with_capacity(parts.len());
+    let mut collision_guard: Vec<[u8; RESOURCE_HASHMAP_LEN]> = Vec::new();
+    for part in parts {
+        let mh = map_hash(part, random_hash);
+        if collision_guard.contains(&mh) {
+            return None;
+        }
+        collision_guard.push(mh);
+        if collision_guard.len() > COLLISION_GUARD_SIZE {
+            collision_guard.remove(0);
+        }
+        entries.push(mh);
+    }
+    Some(entries)
+}
+
+/// Drive `source` to its end through `scratch`, handing every chunk to
+/// `sink`, and check it yielded exactly what it promised.
+///
+/// The length check is the only defence a streamed build has against a
+/// store that changed under it: the advertisement is built from
+/// [`ResourceSource::total_len`], so a short or long pass would ship
+/// parts that do not hash to what was advertised and the receiver would
+/// pay for the whole transfer before calling it corrupt.
+fn read_all(
+    source: &mut dyn ResourceSource,
+    scratch: &mut [u8],
+    sink: &mut dyn FnMut(&[u8]),
+) -> Result<(), SourceError> {
+    let mut seen = 0usize;
+    loop {
+        let read = source.read(scratch)?;
+        if read == 0 {
+            break;
+        }
+        seen += read;
+        if seen > source.total_len() {
+            return Err(SourceError::LengthChanged);
+        }
+        sink(&scratch[..read]);
+    }
+    if seen != source.total_len() {
+        return Err(SourceError::LengthChanged);
+    }
+    Ok(())
+}
+
 /// Result of polling an outgoing resource for timeout.
 #[derive(Debug)]
 pub(crate) enum ResourcePollResult {
@@ -225,7 +314,12 @@ pub(crate) struct OutgoingResource {
     resource_hash: [u8; 32],
     original_hash: [u8; 32],
     random_hash: [u8; RESOURCE_RANDOM_HASH_SIZE],
-    encrypted_data: Vec<u8>,
+    /// Length of the encrypted wire stream — the advertisement's `t`
+    /// field. Until #384 B2 this was the stream ITSELF, a second whole
+    /// copy beside `parts`, whose only reader was this length
+    /// (`transfer_size`). The parts are the stream, cut; nothing needed
+    /// it joined.
+    transfer_size: usize,
     expected_proof: [u8; 32],
     uncompressed_size: u64,
     parts: Vec<Vec<u8>>,
@@ -260,8 +354,7 @@ impl OutgoingResource {
     /// the hashmap, and the cached advertisement packet.
     pub(crate) fn heap_bytes(&self) -> usize {
         use core::mem::size_of;
-        let mut bytes = self.encrypted_data.capacity()
-            + self.parts.capacity() * size_of::<Vec<u8>>()
+        let mut bytes = self.parts.capacity() * size_of::<Vec<u8>>()
             + self.hashmap.capacity() * RESOURCE_HASHMAP_LEN
             + self.sent_mask.capacity()
             + self.adv_packet.capacity();
@@ -392,6 +485,180 @@ impl OutgoingResource {
         )
     }
 
+    /// A response Resource whose payload is STREAMED from `source`
+    /// instead of owned (Codeberg #384 B2).
+    ///
+    /// The path this exists for is a propagation node answering a mailbox
+    /// fetch. Its payload is a msgpack framing around records that are
+    /// already durable in the store; building it as a buffer costs the
+    /// board a response-sized copy before the resource path has copied
+    /// anything, and on a T114 that copy was the allocation the serve died
+    /// in. Here the records are read at part-cut time and the parts are
+    /// the only whole copy that ever exists.
+    ///
+    /// # Two passes, and why
+    ///
+    /// * **Pass one** hashes the payload: the advertisement carries
+    ///   `full_hash(data + random_hash)` and the proof is
+    ///   `full_hash(data + hash)`
+    ///   (`reference/Reticulum/RNS/Resource.py:441,443`), both over the
+    ///   plain payload, whose length and byte order differ from the
+    ///   ciphertext's. [`StreamHasher`] takes it once and finalises twice.
+    /// * **Pass two** encrypts it and cuts the parts, through the same
+    ///   [`PartCutter`] the owned-buffer path uses.
+    ///
+    /// The source must yield the same bytes both times; that is its
+    /// contract ([`ResourceSource`]), and a length that disagrees with
+    /// [`ResourceSource::total_len`] is refused rather than advertised.
+    ///
+    /// # What it deliberately does not do
+    ///
+    /// * **No metadata.** The metadata block is a prefix of the hashed
+    ///   payload, and no streamed caller has any: the response wrapper is
+    ///   a [`PrefixSource`](crate::resource::source::PrefixSource) around
+    ///   the payload, not a metadata block.
+    /// * **No compression.** bz2 needs the whole input in RAM, which is
+    ///   the copy this constructor exists to avoid, and the firmware links
+    ///   no compressor at all. Wire-compatible either way: the
+    ///   advertisement's compressed flag says which it is, and LXMF bodies
+    ///   are ciphertext, so `bz2_compress` almost never wins the
+    ///   `squeezed.len() < combined.len()` test on this payload anyway.
+    /// * **No segmentation.** A response past
+    ///   [`RESOURCE_MAX_EFFICIENT_SIZE`] is refused here as it is on the
+    ///   owned path (`ensure_single_segment_internal_resource_size`,
+    ///   `leviculum-core/src/node/mod.rs`); a serve cap that large does
+    ///   not fit any heap this path was written for.
+    pub(crate) fn new_response_from_source(
+        source: &mut dyn ResourceSource,
+        request_id: &[u8],
+        crypt: &ResourceCryptParams,
+        rng: &mut impl CryptoRngCore,
+        now_ms: u64,
+    ) -> Result<Self, ResourceError> {
+        if !crypt.active {
+            return Err(ResourceError::LinkNotActive);
+        }
+        let token_key = crypt.token_key.ok_or(ResourceError::LinkNotActive)?;
+        let sdu = resource_sdu(crypt.negotiated_mtu);
+        let link_mdu = crypt.mdu;
+        let total_len = source.total_len();
+
+        // One scratch buffer, reused by both passes, at most one part
+        // wide and never wider than the payload itself. This is the whole
+        // per-part transient the streamed serve costs beyond the parts,
+        // and it is term 2 of `serve_peak_bytes`
+        // (`leviculum-lxmf/src/propagation_node.rs`), which prices it
+        // with the same `min`.
+        let mut scratch = vec![0u8; core::cmp::min(sdu.max(1), total_len.max(16))];
+
+        // Pass one: the payload digest, with the two tails appended to
+        // clones of the same state.
+        let mut hasher = StreamHasher::new();
+        source.rewind()?;
+        read_all(source, &mut scratch, &mut |chunk| hasher.update(chunk))?;
+
+        // The rng draw order matches the owned path exactly — wire random,
+        // IV, verification random — so the two paths are comparable byte
+        // for byte under one seeded generator.
+        let mut wire_random = [0u8; RESOURCE_RANDOM_HASH_SIZE];
+        rng.fill_bytes(&mut wire_random);
+        let mut iv = [0u8; 16];
+        rng.fill_bytes(&mut iv);
+
+        // Pass two: encrypt into the parts.
+        let transfer_size = token_len(RESOURCE_RANDOM_HASH_SIZE + total_len);
+        let mut cutter = PartCutter::new(sdu, transfer_size);
+        let mut encryptor = TokenEncryptor::new(&token_key, &iv, &mut cutter)
+            .map_err(|_| ResourceError::CryptoError)?;
+        encryptor.update(&wire_random, &mut cutter);
+        source.rewind()?;
+        read_all(source, &mut scratch, &mut |chunk| {
+            encryptor.update(chunk, &mut cutter)
+        })?;
+        encryptor.finish(&mut cutter);
+        let parts = cutter.finish();
+        drop(scratch);
+
+        let mut random_hash = [0u8; RESOURCE_RANDOM_HASH_SIZE];
+        rng.fill_bytes(&mut random_hash);
+        let mut resource_hash = hasher.finish_with(&random_hash);
+        let mut expected_proof = hasher.finish_with(&resource_hash);
+
+        let hashmap = loop {
+            match map_parts(&parts, &random_hash) {
+                Some(entries) => break entries,
+                None => {
+                    rng.fill_bytes(&mut random_hash);
+                    resource_hash = hasher.finish_with(&random_hash);
+                    expected_proof = hasher.finish_with(&resource_hash);
+                }
+            }
+        };
+
+        let num_parts = parts.len() as u32;
+        let total_hashmap_segments = if HASHMAP_MAX_LEN == 0 {
+            1
+        } else {
+            hashmap.len().div_ceil(HASHMAP_MAX_LEN) as u32
+        };
+        let first_segment_end = core::cmp::min(HASHMAP_MAX_LEN, hashmap.len());
+        let mut hashmap_data = Vec::with_capacity(first_segment_end * RESOURCE_HASHMAP_LEN);
+        for entry in &hashmap[..first_segment_end] {
+            hashmap_data.extend_from_slice(entry);
+        }
+
+        let flags = ResourceFlags {
+            encrypted: true,
+            compressed: false,
+            split: false,
+            is_request: false,
+            is_response: true,
+            has_metadata: false,
+        };
+        let adv = ResourceAdvertisement {
+            transfer_size: transfer_size as u64,
+            data_size: total_len as u64,
+            num_parts,
+            resource_hash,
+            random_hash,
+            original_hash: resource_hash,
+            segment_index: 1,
+            total_segments: 1,
+            request_id: Some(request_id.to_vec()),
+            flags,
+            hashmap_data,
+        };
+        let adv_packet = adv.pack();
+
+        let sent_mask = vec![false; parts.len()];
+        Ok(Self {
+            status: ResourceStatus::Advertised,
+            flags,
+            resource_hash,
+            original_hash: resource_hash,
+            random_hash,
+            transfer_size,
+            expected_proof,
+            uncompressed_size: total_len as u64,
+            parts,
+            hashmap,
+            num_parts,
+            sent_mask,
+            receiver_min_consecutive_height: 0,
+            total_hashmap_segments,
+            window: crate::constants::RESOURCE_WINDOW_INITIAL,
+            req_received: false,
+            retries: 0,
+            adv_retries: 0,
+            last_activity_ms: now_ms,
+            advertisement_timeout_ms: None,
+            request_id: Some(request_id.to_vec()),
+            adv_packet,
+            link_mdu,
+            sdu,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_flags(
         data: &[u8],
@@ -450,13 +717,19 @@ impl OutgoingResource {
         let mut wire_random = [0u8; RESOURCE_RANDOM_HASH_SIZE];
         rng.fill_bytes(&mut wire_random);
 
-        // Build plaintext: wire_random + (bz2 payload, or `combined` itself).
-        // The uncompressed branch used to `combined.clone()` into a
-        // `data_to_encrypt` buffer whose only reader was this copy. The
-        // firmware links no bz2, so on a board that clone was unconditional
-        // (#384); the compressed branch keeps its buffer only until the
-        // plaintext is assembled and drops it at the end of this block.
-        let mut plaintext = Vec::new();
+        // Encrypt straight into the parts: wire_random + (bz2 payload, or
+        // `combined` itself) goes through a streaming token encryption
+        // whose sink is the part cutter, so neither the assembled
+        // plaintext nor the joined ciphertext ever exists (#384 B2). Two
+        // more response-sized buffers the board was paying for stopped
+        // existing here; the bytes are byte-for-byte what `encrypt_token`
+        // would have produced (`token_stream_matches_one_shot`,
+        // `leviculum-core/src/crypto/token.rs`).
+        let token_key = crypt.token_key.ok_or(ResourceError::LinkNotActive)?;
+        let mut iv = [0u8; 16];
+        rng.fill_bytes(&mut iv);
+
+        let squeezed_payload;
         let compressed = {
             #[cfg(feature = "compression")]
             let squeezed = if auto_compress && combined.len() <= RESOURCE_AUTO_COMPRESS_MAX {
@@ -473,20 +746,20 @@ impl OutgoingResource {
                 None
             };
 
-            let payload: &[u8] = squeezed.as_deref().unwrap_or(combined);
-            plaintext.reserve_exact(RESOURCE_RANDOM_HASH_SIZE + payload.len());
-            plaintext.extend_from_slice(&wire_random);
-            plaintext.extend_from_slice(payload);
-            squeezed.is_some()
+            let was_compressed = squeezed.is_some();
+            squeezed_payload = squeezed;
+            was_compressed
         };
+        let payload: &[u8] = squeezed_payload.as_deref().unwrap_or(combined);
 
-        // Encrypt via link
-        let enc_size = Link::encrypted_size(plaintext.len());
-        let mut encrypted = vec![0u8; enc_size];
-        let written = crypt
-            .encrypt(&plaintext, &mut encrypted, rng)
+        let transfer_size = token_len(RESOURCE_RANDOM_HASH_SIZE + payload.len());
+        let mut cutter = PartCutter::new(sdu, transfer_size);
+        let mut encryptor = TokenEncryptor::new(&token_key, &iv, &mut cutter)
             .map_err(|_| ResourceError::CryptoError)?;
-        encrypted.truncate(written);
+        encryptor.update(&wire_random, &mut cutter);
+        encryptor.update(payload, &mut cutter);
+        encryptor.finish(&mut cutter);
+        let parts = cutter.finish();
 
         // Generate verification random_hash (stored, sent in ADV "r" field)
         let mut random_hash = [0u8; RESOURCE_RANDOM_HASH_SIZE];
@@ -501,53 +774,21 @@ impl OutgoingResource {
         // expected_proof = full_hash(combined + resource_hash), precomputed
         let mut expected_proof = full_hash_parts(&[combined, &resource_hash]);
 
-        // Segment encrypted data into parts
-        let num_parts = if encrypted.is_empty() {
-            1
-        } else {
-            encrypted.len().div_ceil(sdu) as u32
-        };
+        let num_parts = parts.len() as u32;
 
-        let guard_size = COLLISION_GUARD_SIZE;
-        let hashmap_max = HASHMAP_MAX_LEN;
-
-        // Build parts and hashmap, retrying if hash collisions occur
-        let (parts, hashmap) = loop {
-            let mut parts = Vec::with_capacity(num_parts as usize);
-            let mut hashmap_entries = Vec::with_capacity(num_parts as usize);
-            let mut collision_guard: Vec<[u8; RESOURCE_HASHMAP_LEN]> = Vec::new();
-            let mut collision_found = false;
-
-            for i in 0..num_parts as usize {
-                let start = i * sdu;
-                let end = core::cmp::min(start + sdu, encrypted.len());
-                let part_data = &encrypted[start..end];
-
-                let mh = map_hash(part_data, &random_hash);
-
-                if collision_guard.contains(&mh) {
-                    // Collision, regenerate random_hash and retry
+        // Map the parts, re-salting on a collision. The parts themselves do
+        // not depend on `random_hash` — only the map hashes do — so a
+        // collision re-rolls the salt and re-maps what is already cut
+        // instead of re-encrypting the payload, which a streamed source
+        // could not be asked for a third time anyway.
+        let hashmap = loop {
+            match map_parts(&parts, &random_hash) {
+                Some(entries) => break entries,
+                None => {
                     rng.fill_bytes(&mut random_hash);
-
-                    // Recompute resource_hash and expected_proof with new random_hash
                     resource_hash = full_hash_parts(&[combined, &random_hash]);
                     expected_proof = full_hash_parts(&[combined, &resource_hash]);
-
-                    collision_found = true;
-                    break;
                 }
-
-                collision_guard.push(mh);
-                if collision_guard.len() > guard_size {
-                    collision_guard.remove(0);
-                }
-
-                hashmap_entries.push(mh);
-                parts.push(part_data.to_vec());
-            }
-
-            if !collision_found {
-                break (parts, hashmap_entries);
             }
         };
 
@@ -569,14 +810,14 @@ impl OutgoingResource {
         let adv_data_size = seg.total_data_size.unwrap_or(uncompressed_size);
 
         // Calculate hashmap segments
-        let total_hashmap_segments = if hashmap_max == 0 {
+        let total_hashmap_segments = if HASHMAP_MAX_LEN == 0 {
             1
         } else {
-            hashmap.len().div_ceil(hashmap_max) as u32
+            hashmap.len().div_ceil(HASHMAP_MAX_LEN) as u32
         };
 
         // Build first hashmap segment for advertisement
-        let first_segment_end = core::cmp::min(hashmap_max, hashmap.len());
+        let first_segment_end = core::cmp::min(HASHMAP_MAX_LEN, hashmap.len());
         let mut hashmap_data = Vec::with_capacity(first_segment_end * RESOURCE_HASHMAP_LEN);
         for entry in &hashmap[..first_segment_end] {
             hashmap_data.extend_from_slice(entry);
@@ -596,7 +837,7 @@ impl OutgoingResource {
 
         // Build and cache advertisement
         let adv = ResourceAdvertisement {
-            transfer_size: encrypted.len() as u64,
+            transfer_size: transfer_size as u64,
             data_size: adv_data_size,
             num_parts,
             resource_hash,
@@ -617,7 +858,7 @@ impl OutgoingResource {
             resource_hash,
             original_hash,
             random_hash,
-            encrypted_data: encrypted,
+            transfer_size,
             expected_proof,
             uncompressed_size,
             parts,
@@ -1087,7 +1328,18 @@ impl OutgoingResource {
     }
 
     pub(crate) fn transfer_size(&self) -> u64 {
-        self.encrypted_data.len() as u64
+        self.transfer_size as u64
+    }
+
+    /// The encrypted wire stream, rejoined from the parts. Tests only:
+    /// production never needs it whole, which is the point of #384 B2.
+    #[cfg(test)]
+    pub(crate) fn encrypted_stream(&self) -> Vec<u8> {
+        let mut joined = Vec::with_capacity(self.transfer_size);
+        for part in &self.parts {
+            joined.extend_from_slice(part);
+        }
+        joined
     }
 
     #[allow(dead_code)] // Resource accessor API — see Codeberg issues #27/#28
@@ -1320,6 +1572,148 @@ mod tests {
         resp.set_state(crate::link::LinkState::Active);
 
         (initiator, resp)
+    }
+
+    /// A deterministic generator, so the owned-buffer path and the
+    /// streamed-source path can be driven with the SAME wire random, IV
+    /// and verification random and compared byte for byte. Both paths
+    /// draw in that order and no other, which is the property this
+    /// makes testable.
+    struct FixedRng(u64);
+
+    impl rand_core::RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                let word = self.next_u64().to_le_bytes();
+                let take = chunk.len();
+                chunk.copy_from_slice(&word[..take]);
+            }
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl rand_core::CryptoRng for FixedRng {}
+
+    /// **The two paths are one path.** A source and a buffer holding the
+    /// same bytes produce byte-identical advertisements and byte-identical
+    /// parts — the contract #384 B2 rests on, since every resource user
+    /// but the propagation node's serve keeps the owned buffer and the
+    /// receiver must not be able to tell which built what.
+    ///
+    /// Read sizes are varied because the streamed path's part cutting is
+    /// driven by whatever the source hands it, and a cutter that depended
+    /// on the read size would produce different parts for the same bytes.
+    #[test]
+    fn a_source_and_a_buffer_build_the_same_resource() {
+        use crate::resource::source::SliceSource;
+
+        let (link, _) = make_test_link();
+        let request_id = [0x5Au8; 16];
+        // Lengths around the part boundary (sdu 464) and the AES block.
+        for len in [0usize, 1, 15, 16, 463, 464, 465, 1000, 3000] {
+            let data: Vec<u8> = (0..len as u32).map(|i| (i * 37 % 251) as u8).collect();
+
+            let owned = OutgoingResource::new_with_flags(
+                &data,
+                None,
+                Some(&request_id),
+                &link.resource_crypt_params(),
+                false,
+                &mut FixedRng(0x2545_F491_4F6C_DD1D),
+                7_000,
+                true,
+                None,
+                SegmentParams::single(),
+            )
+            .unwrap();
+
+            let mut source = SliceSource::new(&data);
+            let streamed = OutgoingResource::new_response_from_source(
+                &mut source,
+                &request_id,
+                &link.resource_crypt_params(),
+                &mut FixedRng(0x2545_F491_4F6C_DD1D),
+                7_000,
+            )
+            .unwrap();
+
+            assert_eq!(
+                owned.adv_packet(),
+                streamed.adv_packet(),
+                "advertisement must not reveal which path built it ({len} B)"
+            );
+            assert_eq!(owned.parts, streamed.parts, "parts differ at {len} B");
+            assert_eq!(
+                owned.hashmap, streamed.hashmap,
+                "hashmap differs at {len} B"
+            );
+            assert_eq!(owned.expected_proof, streamed.expected_proof);
+            assert_eq!(owned.transfer_size(), streamed.transfer_size());
+            assert_eq!(streamed.uncompressed_size, len as u64);
+        }
+    }
+
+    /// A source that lies about its length is refused, not advertised.
+    #[test]
+    fn a_source_shorter_than_it_promised_fails_the_build() {
+        struct ShortSource {
+            promised: usize,
+            given: usize,
+            position: usize,
+        }
+        impl crate::resource::source::ResourceSource for ShortSource {
+            fn total_len(&self) -> usize {
+                self.promised
+            }
+            fn rewind(&mut self) -> Result<(), crate::resource::source::SourceError> {
+                self.position = 0;
+                Ok(())
+            }
+            fn read(
+                &mut self,
+                buf: &mut [u8],
+            ) -> Result<usize, crate::resource::source::SourceError> {
+                let take = core::cmp::min(buf.len(), self.given - self.position);
+                buf[..take].fill(0x7E);
+                self.position += take;
+                Ok(take)
+            }
+        }
+
+        let (link, _) = make_test_link();
+        let mut source = ShortSource {
+            promised: 500,
+            given: 400,
+            position: 0,
+        };
+        let built = OutgoingResource::new_response_from_source(
+            &mut source,
+            &[0x11u8; 16],
+            &link.resource_crypt_params(),
+            &mut rand_core::OsRng,
+            0,
+        );
+        assert!(
+            matches!(
+                built.as_ref().err(),
+                Some(ResourceError::SourceFailed(
+                    crate::resource::source::SourceError::LengthChanged
+                ))
+            ),
+            "a source that yields 400 of a promised 500 B must not be advertised"
+        );
     }
 
     #[test]
@@ -2060,8 +2454,9 @@ mod tests {
         let adv = ResourceAdvertisement::unpack(res.adv_packet()).unwrap();
 
         // Decrypt the wire stream the way the receiver does.
-        let mut buf = vec![0u8; res.encrypted_data.len()];
-        let n = peer.decrypt(&res.encrypted_data, &mut buf).unwrap();
+        let stream = res.encrypted_stream();
+        let mut buf = vec![0u8; stream.len()];
+        let n = peer.decrypt(&stream, &mut buf).unwrap();
         buf.truncate(n);
         let plaintext = &buf[RESOURCE_RANDOM_HASH_SIZE..]; // strip wire random
 
@@ -2099,16 +2494,16 @@ mod tests {
             - crate::constants::IFAC_MIN_SIZE;
         assert_eq!(sdu, 464);
         assert_eq!(res.sdu(), sdu, "sender sdu must match the receiver formula");
-        assert_eq!(adv.transfer_size as usize, res.encrypted_data.len());
+        assert_eq!(adv.transfer_size as usize, stream.len());
         let expected_parts = (adv.transfer_size as usize).div_ceil(sdu);
         assert_eq!(adv.num_parts as usize, expected_parts);
         assert_eq!(res.parts.len(), expected_parts);
         for (i, part) in res.parts.iter().enumerate() {
             let start = i * sdu;
-            let end = core::cmp::min(start + sdu, res.encrypted_data.len());
+            let end = core::cmp::min(start + sdu, stream.len());
             assert_eq!(
                 part[..],
-                res.encrypted_data[start..end],
+                stream[start..end],
                 "part {i} must be the sdu-aligned slice of the encrypted stream"
             );
         }

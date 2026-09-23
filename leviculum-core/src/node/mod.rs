@@ -1904,6 +1904,110 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok((resource_hash, self.process_events_and_actions()))
     }
 
+    /// Whether a response of `response_len` bytes still fits ONE data
+    /// packet on this link, i.e. whether [`send_response`](Self::send_response)
+    /// would take it.
+    ///
+    /// The framing is the same arithmetic `send_response` does — fixarray(2),
+    /// `bin(request_id)`, the payload — computed rather than built, for the
+    /// same reason it is computed there (#384 B1). A caller that can produce
+    /// its response either as bytes or as a stream asks this FIRST, because
+    /// the two answers cost very differently: below the MDU the bytes are a
+    /// few hundred and materialising them is free, above it the stream is
+    /// the whole point. `false` for a link that is gone or not active, which
+    /// is the answer that sends nothing.
+    pub fn response_fits_packet(&self, link_id: &LinkId, response_len: usize) -> bool {
+        let link_id = self.resolve_link_id(link_id);
+        let Some(link) = self.links.get(&link_id) else {
+            return false;
+        };
+        if !link.is_active() {
+            return false;
+        }
+        let framed_len = 1 + crate::msgpack::bin_len(TRUNCATED_HASHBYTES) + response_len;
+        framed_len <= link.mdu()
+    }
+
+    /// [`send_response_resource`](Self::send_response_resource) with the
+    /// response STREAMED rather than owned (Codeberg #384 B2).
+    ///
+    /// Identical on the wire — the same `[request_id, response]` frame, the
+    /// same response flag, the same advertisement — and identical in the
+    /// heap only in what the resource itself costs. What it does not cost is
+    /// the response as a buffer, that buffer framed, the framed buffer as
+    /// plaintext, and the plaintext encrypted: four copies of the answer,
+    /// live together, which is what a propagation node's mailbox fetch died
+    /// in on a T114 (the mvr is
+    /// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`).
+    ///
+    /// The frame is a [`PrefixSource`](crate::resource::PrefixSource) rather
+    /// than a concatenation, so the
+    /// 19 frame bytes are the only bytes this call owns.
+    pub fn send_response_resource_from_source(
+        &mut self,
+        link_id: &LinkId,
+        request_id: &[u8; TRUNCATED_HASHBYTES],
+        response: &mut dyn crate::resource::ResourceSource,
+    ) -> Result<([u8; 32], crate::transport::TickOutput), crate::resource::ResourceError> {
+        use crate::msgpack::{write_bin, write_fixarray_header};
+        use crate::packet::PacketContext;
+        use crate::resource::outgoing::OutgoingResource;
+        use crate::resource::{PrefixSource, ResourceError};
+
+        let now_ms = self.transport.clock().now_ms();
+        let link_id = &self.resolve_link_id(link_id);
+
+        let mut prefix = Vec::with_capacity(1 + crate::msgpack::bin_len(request_id.len()));
+        write_fixarray_header(&mut prefix, 2);
+        write_bin(&mut prefix, request_id);
+        let framed_len = prefix.len() + response.total_len();
+        ensure_single_segment_internal_resource_size(framed_len)?;
+
+        let link = self
+            .links
+            .get(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        if link.has_outgoing_resource() {
+            return Err(ResourceError::TransferInProgress);
+        }
+
+        let mut framed = PrefixSource::new(prefix, response);
+        let outgoing = OutgoingResource::new_response_from_source(
+            &mut framed,
+            request_id,
+            &link.resource_crypt_params(),
+            &mut self.rng,
+            now_ms,
+        )?;
+        let resource_hash = *outgoing.resource_hash();
+        let adv_bytes = outgoing.adv_packet().to_vec();
+
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or(ResourceError::InvalidRequest)?;
+        link.set_outgoing_resource(outgoing);
+
+        match link.build_data_packet_with_context(
+            &adv_bytes,
+            PacketContext::ResourceAdv,
+            &mut self.rng,
+        ) {
+            Ok(pkt) => {
+                self.route_link_packet(link_id, &pkt);
+            }
+            Err(e) => {
+                if let Some(link) = self.links.get_mut(link_id) {
+                    link.clear_outgoing_resource();
+                }
+                crate::tracing::debug!("Failed to build streamed response resource ADV: {e}");
+                return Err(ResourceError::InvalidRequest);
+            }
+        }
+
+        Ok((resource_hash, self.process_events_and_actions()))
+    }
+
     /// Send a file-style request response: a response Resource carrying the
     /// RAW response bytes plus a msgpack-encoded metadata value, with NO
     /// `[request_id, response]` wrapper.
