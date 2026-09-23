@@ -29,13 +29,23 @@
 //! (`lora_lncp_proof_retry`, run hardware_20260803T184800+0200): host TX
 //! to peer RX is ~400 ms for an 86-byte frame, ~750 ms for 167 bytes and
 //! ~1150 ms for 183 bytes. Two frames written 50 ms apart therefore both
-//! sit in the firmware queue and leave back to back, and the sender stays
-//! deaf for their combined airtime. Codeberg #187 is one instance:
+//! sit in the firmware queue, and the sender stays deaf for whatever
+//! airtime it ends up spending on them. Codeberg #187 is one instance:
 //! an announce queued behind a priority link request went to serial 51 ms
 //! after it, and the proof coming back was lost along with the announce —
 //! both directions, one collision. The airtime-aware alternative
 //! (`leviculum_core::rnode::compute_spacing_ms`) exists and has no caller;
 //! wiring it in is Bug #25, attempted in c2eba153 and reverted in 12f99a02.
+//!
+//! "Leave back to back" is what this paragraph said until 2026-09-23, and
+//! the hardware has since said otherwise: in `bench_single_pair_fast` of the
+//! 2026-09-22 full run the far end listened through the 152 ms after the
+//! first frame's airtime ended and heard nothing, so the firmware does
+//! contend for the second frame rather than flushing it. That makes the
+//! defect worse rather than better — the contention it runs is released by
+//! the end of OUR frame, which is the same event that releases the far end's
+//! answer, so the two draw against each other. The census is in
+//! `burst_continuation_contends_inside_its_own_answer` (Codeberg #374).
 //!
 //! ## Topology
 //!
