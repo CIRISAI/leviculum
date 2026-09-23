@@ -359,7 +359,46 @@ const _: () = assert!(BOARD_SYNC_LIMIT_KB as usize * 1000 <= crate::MAX_INCOMING
 /// smallest negotiated MTU (500) less the resource per-part overhead.
 /// The smallest SDU is the worst case, because it makes the most parts
 /// and therefore the most per-part bookkeeping.
-const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_OVERHEAD;
+pub const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_OVERHEAD;
+
+/// Heap the plan sets aside for ANSWERING a `/get` — the one term of the
+/// budget that pays for what the board sends rather than what it holds,
+/// and **the capacity decision, as a number the Lead can move.**
+///
+/// Zero today, which is not an oversight: every other term of
+/// [`ROLE_BUDGET_BYTES`] is already spent, and the arithmetic below says
+/// what raising this costs. It is in the role's sum, so raising it comes
+/// out of [`crate::heap_census::max_endpoint_links`] automatically — the
+/// budget cannot be told to fund a serve without being told where from,
+/// and a configuration that overdraws refuses at compile time.
+///
+/// What it buys, at today's SDU (via
+/// [`leviculum_lxmf::propagation_node::serve_cap_for_peak`], the inverse
+/// of [`SERVE_PEAK_BYTES`]'s model):
+///
+/// ```text
+/// reserve + slack   funded fetch response   messages of 224 B
+///        784 B                      88 B                    0
+///      5 000 B                     787 B                    2
+///     20 000 B                   3 245 B                   11
+///     30 380 B                   4 954 B                   18
+///     48 922 B                   8 000 B     the full announced cap
+/// ```
+///
+/// (30 380 B is what the T114 had free when the 24-message fetch of
+/// 2026-09-23 killed it; 18 of those 24 would have fitted.)
+///
+/// And what it costs: the slack is 784 B and one endpoint link is
+/// [`crate::heap_census::budget_per_link`] ≈ 2 664 B, so the first
+/// useful cap would have to come out of the four links the budget
+/// affords — and [`crate::ble::MAX_LINKS`] is also four, asserted at
+/// boot and at compile time. **At four claimable BLE sessions there is
+/// no link to sell, so the honest funded cap today is 88 B: the board
+/// serves nothing.** A useful cap needs a fixed term to shrink (the node
+/// box, the 8 KB inbound sync batch, the 6 KiB fragmentation reserve) or
+/// the serve path to stop materialising its response five times (#384
+/// B2, streaming out of the store), not a bigger number here.
+pub const SERVE_RESERVE_BYTES: usize = 0;
 
 /// Peak heap this board holds live AT ONCE while it serves one `/get`
 /// fetch at the announced [`BOARD_SYNC_LIMIT_KB`] — the term the role
@@ -391,8 +430,12 @@ const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_SDU_O
 /// WIRE response; the path still materialises it five times over and
 /// holds all five together.
 ///
-/// **This term is NOT in [`ROLE_BUDGET_BYTES`] below, and that is the
-/// open decision, not an oversight** — see the arithmetic there.
+/// **[`ROLE_BUDGET_BYTES`] below funds [`SERVE_RESERVE_BYTES`] of this,
+/// which is zero, and that is the open decision, not an oversight** —
+/// see the arithmetic there. What the plan does fund is the bound the
+/// serve is held to ([`crate::heap_census::budget_serve_cap`]), so the
+/// board answers with what it can afford instead of attempting this
+/// number.
 pub const SERVE_PEAK_BYTES: usize =
     serve_peak_bytes(BOARD_SYNC_LIMIT_KB as usize * 1000, SERVE_RESOURCE_SDU);
 
@@ -411,38 +454,51 @@ pub const SERVE_PEAK_BYTES: usize =
 ///   (`pn_out`), the per-link maps, the role's duplicate cache and the
 ///   store adapters' queued writes (`pn_flush`).
 ///
-/// A fourth term exists and is NOT in this sum: the OUTBOUND serve
-/// transient, [`SERVE_PEAK_BYTES`]. Every term above bounds something
-/// the board *receives* or *holds*; nothing here bounded what it costs
-/// to *answer* a `/get`, and answering one is what killed a T114 on
-/// 2026-09-22. The arithmetic, at today's constants on a T114:
+/// * [`SERVE_RESERVE_BYTES`] — what the plan sets aside for ANSWERING a
+///   `/get`, the one term that pays for what the board sends. **Zero
+///   today**, and the boot line says what that funds
+///   (`HEAP_BUDGET … serve_cap=`).
+///
+/// The fourth term is in this sum since #388/#384 and is zero, which is
+/// a different statement from the one it replaced: the transient exists,
+/// the plan funds none of it, and the serve is now BOUNDED by what the
+/// plan funds instead of attempting the announced cap and dying in it.
+/// Every other term above bounds something the board *receives* or
+/// *holds*; nothing bounded what it costs to *answer* a `/get`, and
+/// answering one killed a T114 on 2026-09-22 and again on 2026-09-23.
+/// The arithmetic, at today's constants on a T114:
 ///
 /// * announced serve cap `BOARD_SYNC_LIMIT_KB` = 8 KB;
 /// * [`SERVE_PEAK_BYTES`] at that cap = **48 922 B**, six times the
 ///   cap, because the serve path still materialises the response five
 ///   times between the store and the resource advertisement (it was
 ///   97 036 B and a dozen copies before #384 B1);
-/// * what the plan leaves unclaimed for it =
-///   [`crate::heap_census::budget_slack`], **880 B** on a T114 — the
-///   remainder after `max_endpoint_links` floors its division, and it
-///   cannot grow without taking a link away from
-///   [`crate::ble::MAX_LINKS`];
-/// * deficit = **48 042 B**, on a 96 KiB heap — halved by B1, and still
-///   half the heap.
+/// * what the plan leaves for it = [`SERVE_RESERVE_BYTES`] plus
+///   [`crate::heap_census::budget_slack`], **784 B** on the T114 that
+///   died (its own boot line, 2026-09-23) — the remainder after
+///   `max_endpoint_links` floors its division, and it cannot grow
+///   without taking a link away from [`crate::ble::MAX_LINKS`];
+/// * deficit = **48 138 B**, on a 96 KiB heap — halved by B1, and still
+///   half the heap;
+/// * so the funded fetch response,
+///   [`crate::heap_census::budget_serve_cap`], is **88 B** — less than
+///   one stored message. The board lists its mail and serves none of
+///   it, which is a finding to put in front of the Lead, and is what
+///   `serve_cap=` on the boot line exists to say. It is not a crash,
+///   and nothing in the store is lost to it.
 ///
-/// So the honest statement of the fourth term is not a number to add
-/// here but a question this sum cannot answer: 880 B of slack funds a
-/// serve cap of 104 bytes — less than one stored message — and funding a
-/// useful one means taking bytes from a term above, from the reserve,
-/// from the link count, or from what is left of the materialisation
-/// (streaming the response out of the store, #384 B2, is the next order
-/// and is not in these numbers).
-/// That is a capacity decision about the board's headline feature, it is
-/// the Lead's, and until it is made the boot line reports the gap
-/// (`HEAP_BUDGET … serve= slack=`, and the `HEAP_BUDGET_UNFUNDED` line
-/// beside it) rather than a budget that silently claims to fit.
-pub const ROLE_BUDGET_BYTES: usize =
-    BOARD_SYNC_LIMIT_KB as usize * 1000 + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000 + 5 * 1024;
+/// Funding a useful cap means taking bytes from a term above, from the
+/// reserve, from the link count, or from what is left of the
+/// materialisation (streaming the response out of the store, #384 B2,
+/// is the next order and is not in these numbers). That is a capacity
+/// decision about the board's headline feature and it is the Lead's;
+/// [`SERVE_RESERVE_BYTES`] is where it is made, and the boot line
+/// reports the gap (`HEAP_BUDGET … serve= slack= serve_cap=`, and the
+/// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
+pub const ROLE_BUDGET_BYTES: usize = BOARD_SYNC_LIMIT_KB as usize * 1000
+    + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000
+    + 5 * 1024
+    + SERVE_RESERVE_BYTES;
 
 /// Boot-time spine reservations (#388 step 3), allocated once in
 /// [`Engine::new`] and reused: `VecDeque`/`Vec` never shrink, so the
@@ -785,6 +841,15 @@ impl Engine {
             // The announced sync appetite must fit both the resource cap
             // and the heap budget (#388) — see BOARD_SYNC_LIMIT_KB.
             sync_limit_kb: BOARD_SYNC_LIMIT_KB,
+            // What one fetch may SERVE, from the same boot arithmetic
+            // the `HEAP_BUDGET serve_cap=` line prints — the node box is
+            // this generic's own size, so the printed number and the
+            // enforced one are one expression. Below the announced sync
+            // limit whenever the plan funds less than it announces,
+            // which is today, on every board.
+            serve_cap_bytes: Some(crate::heap_census::budget_serve_cap(core::mem::size_of::<
+                NodeCore<R, C, S>,
+            >())),
             ..PropagationNodeConfig::default()
         };
         let mut role = PropagationNode::new(store, role_config);

@@ -53,6 +53,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::{Duration, Instant};
 use leviculum_core::node::NodeCore;
 use leviculum_core::traits::{Clock, Storage};
+use leviculum_lxmf::propagation_node::serve_cap_for_peak;
 use rand_core::CryptoRngCore;
 
 /// How often the census line is emitted unasked. Coarser than `[HEAP]`
@@ -208,12 +209,43 @@ pub const fn budget_slack(node_box: usize) -> usize {
     crate::HEAP_SIZE.saturating_sub(budget_total(node_box))
 }
 
+/// The largest fetch response this plan funds — `serve_cap=` on the boot
+/// line, and the bound the role is configured with
+/// (`PropagationNodeConfig::serve_cap_bytes`, set in
+/// [`crate::pn::Engine::new`] from this same arithmetic, so the printed
+/// number and the enforced one cannot drift).
+///
+/// The inverse of [`crate::pn::SERVE_PEAK_BYTES`]'s model
+/// ([`serve_cap_for_peak`]), asked of the heap the plan actually leaves
+/// for serving: [`budget_slack`] — the remainder after
+/// [`max_endpoint_links`] floors its division — plus
+/// [`crate::pn::SERVE_RESERVE_BYTES`], the plan's deliberate serve
+/// reservation, which is zero until the Lead funds it.
+///
+/// The response buffer is not added on top: it IS term 1 of that model
+/// (`response ≤ 2·cap`, `leviculum-lxmf/src/propagation_node.rs`), and
+/// so are the four copies the path holds live beside it — including the
+/// `plaintext` block the T114 died in on 2026-09-23 (5 450 B = 4 + 5 427
+/// + 19, term 3 at that response length).
+///
+/// At the slack that board printed, 784 B, this is **88 B**: less than
+/// one stored message, so the board lists its mail and serves none of
+/// it. That is the honest number, not a failure of the arithmetic — the
+/// arithmetic is what makes it visible at every boot instead of in a
+/// post-mortem.
+pub const fn budget_serve_cap(node_box: usize) -> usize {
+    serve_cap_for_peak(
+        budget_slack(node_box) + crate::pn::SERVE_RESERVE_BYTES,
+        crate::pn::SERVE_RESOURCE_SDU,
+    )
+}
+
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
 ///
 /// ```text
 /// HEAP_BUDGET links=<max> ble_links=<m> per_link=<b> ble_session=<b>
-///   role=<b> reserve=<b> total=<b> slack=<b> serve=<b>
+///   role=<b> reserve=<b> total=<b> slack=<b> serve=<b> serve_cap=<b>
 /// ```
 ///
 /// (one line on the wire; wrapped here for the page).
@@ -243,6 +275,13 @@ pub const fn budget_slack(node_box: usize) -> usize {
 ///   This is the #384 finding, on the wire at every boot rather than in
 ///   a post-mortem: the board announces a serve limit its heap plan does
 ///   not fund, and a peer that collects its mail is what makes it fail.
+/// * `serve_cap` — [`budget_serve_cap`], the largest fetch response the
+///   plan DOES fund, and the bound the role serves to. The deficit line
+///   says the announced cap is unaffordable; this one says what is
+///   affordable instead, and a `serve_cap` below one stored message
+///   (88 B at the T114's 784 B of slack) means the board lists mail it
+///   will not serve until [`crate::pn::SERVE_RESERVE_BYTES`] is
+///   funded.
 ///   It is reported and not asserted on purpose — the panic is a real
 ///   failure of a real feature, and a boot refusal would trade it for a
 ///   board that does not come up at all, which is a choice this line
@@ -263,11 +302,12 @@ pub fn log_budget_and_assert(node_box: usize) {
     let total = budget_total(node_box);
     let slack = budget_slack(node_box);
     let serve = crate::pn::SERVE_PEAK_BYTES;
+    let serve_cap = budget_serve_cap(node_box);
     crate::log::log_fmt_critical(
         "[HEAP] ",
         format_args!(
-            "HEAP_BUDGET links={} ble_links={} per_link={} ble_session={} role={} reserve={} total={} slack={} serve={}",
-            links, ble_links, per_link, ble_session, role, reserve, total, slack, serve
+            "HEAP_BUDGET links={} ble_links={} per_link={} ble_session={} role={} reserve={} total={} slack={} serve={} serve_cap={}",
+            links, ble_links, per_link, ble_session, role, reserve, total, slack, serve, serve_cap
         ),
     );
     if serve > slack {
