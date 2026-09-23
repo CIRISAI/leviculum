@@ -1351,9 +1351,20 @@ impl LxmfRouter {
                     });
                 }
             }
+            // `RejectedByRemote` is what the core derives from a receiver's
+            // RESOURCE_RCL, and Python's `Resource._rejected` sets
+            // `Resource.REJECTED` from exactly that packet
+            // (`reference/Reticulum/RNS/Resource.py:1106-1116`), which
+            // `LXMessage.__resource_concluded` turns into a terminal
+            // `LXMessage.REJECTED` (`reference/LXMF/LXMF/LXMessage.py:601`).
+            // `Cancelled` keeps its place here for a local cancel: that
+            // message is not going out again either.
             LxmfNodeEvent::DeliveryFailed {
                 message_id,
-                reason: DeliveryFailure::Resource(ResourceError::Cancelled),
+                reason:
+                    DeliveryFailure::Resource(
+                        ResourceError::RejectedByRemote | ResourceError::Cancelled,
+                    ),
             } => {
                 if let Some(mut entry) = self.remove_outbound(&message_id) {
                     self.preemptive_path_requests.remove(&message_id);
@@ -3607,36 +3618,45 @@ mod persistence_tests {
         assert_eq!(persistence_request_count(&progress), 1);
     }
 
+    /// Both values the RCL arm has carried are terminal here.
+    /// `RejectedByRemote` is the live one (`273c259b` moved the core's RCL arm
+    /// onto it); `Cancelled` is the local cancel, and neither goes out again.
+    /// The end-to-end pin, with the RCL as a real packet, is
+    /// `leviculum-lxmf/tests/direct_delivery_attempts.rs`,
+    /// `a_rejection_that_arrives_as_an_rcl_is_terminal_and_keeps_the_link`.
     #[test]
     fn receiver_cancelled_resource_is_terminally_rejected() {
-        let (mut router, node) = router_and_node(RouterConfig::default());
-        let queued = message(86);
-        let id = queued.message_id;
-        let _ = router.enqueue(&node, queued).unwrap();
-        checkpoint(&mut router);
-        let entry = router.outbound.get_mut(&id).unwrap();
-        entry.set_state(MessageState::Sending, &mut router.build_epochs);
+        for error in [ResourceError::RejectedByRemote, ResourceError::Cancelled] {
+            let (mut router, node) = router_and_node(RouterConfig::default());
+            let queued = message(86);
+            let id = queued.message_id;
+            let _ = router.enqueue(&node, queued).unwrap();
+            checkpoint(&mut router);
+            let entry = router.outbound.get_mut(&id).unwrap();
+            entry.set_state(MessageState::Sending, &mut router.build_epochs);
 
-        let mut events = Vec::new();
-        router.handle_node_event(
-            LxmfNodeEvent::DeliveryFailed {
-                message_id: id,
-                reason: DeliveryFailure::Resource(ResourceError::Cancelled),
-            },
-            5_000,
-            wall(1.0),
-            &mut events,
-        );
+            let mut events = Vec::new();
+            router.handle_node_event(
+                LxmfNodeEvent::DeliveryFailed {
+                    message_id: id,
+                    reason: DeliveryFailure::Resource(error),
+                },
+                5_000,
+                wall(1.0),
+                &mut events,
+            );
 
-        assert!(!router.outbound.contains_key(&id));
-        assert!(router.persistence_dirty);
-        assert_eq!(
-            events,
-            vec![RouterEvent::MessageState {
-                message_id: id,
-                state: MessageState::Rejected,
-            }]
-        );
+            assert!(!router.outbound.contains_key(&id), "{error:?}");
+            assert!(router.persistence_dirty, "{error:?}");
+            assert_eq!(
+                events,
+                vec![RouterEvent::MessageState {
+                    message_id: id,
+                    state: MessageState::Rejected,
+                }],
+                "{error:?}"
+            );
+        }
     }
 
     #[test]

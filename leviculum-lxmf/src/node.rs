@@ -1258,7 +1258,20 @@ impl LxmfNode {
                         // attempt. A receiver cancellation is a rejection and
                         // keeps the reusable Link alive; LinkClosed needs no
                         // second teardown.
-                        if !matches!(error, ResourceError::Cancelled | ResourceError::LinkClosed) {
+                        //
+                        // `RejectedByRemote` is the receiver's RCL
+                        // (`link_management.rs`, the RCL arm of
+                        // `handle_resource_cancel`), which is the value that
+                        // reaches here from the wire; `Cancelled` stays in the
+                        // set for a local cancel, which Python also concludes
+                        // without a teardown (`LXMessage.py:604`, the
+                        // `state != CANCELLED` guard).
+                        if !matches!(
+                            error,
+                            ResourceError::RejectedByRemote
+                                | ResourceError::Cancelled
+                                | ResourceError::LinkClosed
+                        ) {
                             output.core.merge(node.close_link(link_id));
                         }
                     }

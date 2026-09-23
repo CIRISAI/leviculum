@@ -17,11 +17,13 @@
 //!   (retryable), *except* when the Resource status is `REJECTED`, which sets
 //!   the message state to `REJECTED` and leaves the link alone.
 //! * `reference/Reticulum/RNS/Link.py:1143-1150` and
-//!   `reference/Reticulum/RNS/Resource.py:1106-1110` — a receiver cancel
+//!   `reference/Reticulum/RNS/Resource.py:1106-1116` — a receiver cancel
 //!   (`RESOURCE_RCL`) on the sending side is exactly what produces
 //!   `Resource.REJECTED`. Our equivalent is `NodeEvent::ResourceFailed` with
-//!   `is_sender: true` and `ResourceError::Cancelled`
-//!   (`leviculum-core/src/node/link_management.rs:2944-2955`).
+//!   `is_sender: true` and `ResourceError::RejectedByRemote`
+//!   (`leviculum-core/src/node/link_management.rs`, the RCL arm of
+//!   `handle_resource_cancel`). It was `Cancelled` until `273c259b`, which is
+//!   why the pins below that name an error value name both.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -190,6 +192,12 @@ struct Receiver {
     /// crossed; only the body says *which* bytes crossed, which is what a
     /// stale build is about.
     delivered: Vec<Message>,
+    /// When set, every advertisement is answered the way Python's `rncp`
+    /// answers one from a peer it cannot name: `Resource.reject`
+    /// (`reference/Reticulum/RNS/Resource.py:154-164`) puts a RESOURCE_RCL on
+    /// the link and nothing else. The `LxmfNode` never sees the
+    /// advertisement, so nothing accepts it behind the test's back.
+    reject_advertisements: bool,
 }
 
 fn receiver(seed: u8) -> Receiver {
@@ -206,6 +214,7 @@ fn receiver(seed: u8) -> Receiver {
         destination: destination_hash,
         accepted_resources: Vec::new(),
         delivered: Vec::new(),
+        reject_advertisements: false,
     }
 }
 
@@ -214,6 +223,17 @@ impl Receiver {
         let mut actions = core.actions;
         let mut events: VecDeque<NodeEvent> = core.events.into();
         while let Some(event) = events.pop_front() {
+            if let (true, NodeEvent::ResourceAdvertised { link_id, .. }) =
+                (self.reject_advertisements, &event)
+            {
+                let rejected = self
+                    .node
+                    .reject_resource(link_id)
+                    .expect("the advertisement is parked for the application");
+                actions.extend(rejected.actions);
+                events.extend(rejected.events);
+                continue;
+            }
             if let NodeEvent::ResourceTransferStarted {
                 resource_hash,
                 is_sender: false,
@@ -547,6 +567,62 @@ fn a_receiver_cancelled_resource_is_rejected_and_keeps_the_link() {
     assert!(
         !sender.router.outbound().contains_key(&id),
         "a rejected message must leave the outbound queue"
+    );
+    assert!(
+        sender.node.link(&link_id).is_some(),
+        "a rejection must preserve the reusable direct link"
+    );
+}
+
+/// The same rejection, carried by the packet that actually carries it.
+///
+/// `a_receiver_cancelled_resource_is_rejected_and_keeps_the_link` above hands
+/// the router a `ResourceFailed` it built itself, so it keeps passing no
+/// matter which error the core puts on the RCL arm. `273c259b` moved that arm
+/// from `ResourceError::Cancelled` to `ResourceError::RejectedByRemote`
+/// (`leviculum-core/src/node/link_management.rs:2955-2966`) and both LXMF
+/// sites still matched on `Cancelled`, so a receiver's rejection silently
+/// became a retryable failure: the link was torn down and the message went
+/// back to `Outbound` to be sent to a peer that had just refused it.
+///
+/// Here the receiver rejects the advertisement itself, so the RCL is a real
+/// packet crossing the harness and the assertions are about whatever error
+/// the core derives from it. Python does both halves of this from
+/// `Resource._rejected` (`reference/Reticulum/RNS/Resource.py:1106-1116`,
+/// which sets `REJECTED` and does not touch the link) and
+/// `LXMessage.__resource_concluded`
+/// (`reference/LXMF/LXMF/LXMessage.py:597-606`, where `REJECTED` skips the
+/// `link.teardown()` every other non-`COMPLETE` status takes).
+#[test]
+fn a_rejection_that_arrives_as_an_rcl_is_terminal_and_keeps_the_link() {
+    let mut sender = sender(24);
+    let mut receiver = receiver(124);
+    receiver.reject_advertisements = true;
+    exchange_announces(&mut sender, &mut receiver);
+
+    let (id, link_id, packets) =
+        queue_and_submit(&mut sender, &mut receiver, vec![0x3cu8; 2_048], 10);
+    sender.events.clear();
+    pump(&mut sender, &mut receiver, packets);
+
+    assert!(
+        receiver.accepted_resources.is_empty(),
+        "the receiver must have rejected the advertisement, not accepted it"
+    );
+    assert!(
+        sender.events.iter().any(|event| matches!(
+            event,
+            RouterEvent::MessageState {
+                message_id,
+                state: MessageState::Rejected,
+            } if *message_id == id
+        )),
+        "an RCL on the wire is a terminal rejection, not a retry: {:?}",
+        sender.events
+    );
+    assert!(
+        !sender.router.outbound().contains_key(&id),
+        "a message the receiver refused must leave the outbound queue"
     );
     assert!(
         sender.node.link(&link_id).is_some(),
