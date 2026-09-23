@@ -36,7 +36,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use rand_core::OsRng;
@@ -66,10 +66,28 @@ use leviculum_core::{
 // Blocks allocated while disarmed are never entered in the map, so the
 // sender's and the harness's own allocations are invisible: `peak` is the
 // high-water mark of what the RECEIVER has live, and nothing else.
+//
+// ARMED is per-thread, and that is the whole of what makes the number the
+// receiver's. A global flag arms the allocator for EVERY thread in the
+// process, and the libtest harness has several that allocate for as long as
+// the run lasts — so the window measured whatever they happened to be doing
+// beside it. Under an idle binary that is nothing; under `cargo test
+// --workspace`, with the host busy, the 2 KiB cap measured 15383 B against
+// 5703 B alone (2026-09-23), failed the assertion, and passed again the
+// moment the binary ran by itself. That is a measurement reporting its
+// neighbours, which is the same defect c4d429d7 took out of
+// `leviculum-std/tests/mvr/main.rs`, and the same remedy: the flag is a
+// `const`-initialised, `Drop`-free thread-local read through `try_with`, so
+// a thread allocating after its locals are gone gets a false rather than a
+// panic out of the global allocator. Only the thread that armed is counted,
+// and the transfer runs entirely on it.
+//
+// LIVE, PEAK and the block map stay global on purpose: with ARMED
+// thread-local exactly one thread ever enters a block, and a free of such a
+// block from another thread must still find it to be subtracted.
 
 struct AttributingAlloc;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static BLOCKS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
@@ -78,6 +96,22 @@ thread_local! {
     // Set while we are inside the bookkeeping, so the map's own allocations
     // cannot recurse into it. const-init: no allocation on first touch.
     static IN_TRACKER: Cell<bool> = const { Cell::new(false) };
+
+    // Set on the measuring thread while a window is open. const-init for the
+    // same reason, and read through `try_with` so a thread whose locals are
+    // already torn down reads "not armed" instead of panicking inside the
+    // global allocator.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Is the calling thread inside a measurement window?
+fn is_armed() -> bool {
+    ARMED.try_with(|f| f.get()).unwrap_or(false)
+}
+
+/// Open or close the window on the calling thread.
+fn set_armed(on: bool) {
+    let _ = ARMED.try_with(|f| f.set(on));
 }
 
 fn with_map<T>(f: impl FnOnce(&mut HashMap<usize, usize>) -> T) -> Option<T> {
@@ -101,7 +135,7 @@ fn with_map<T>(f: impl FnOnce(&mut HashMap<usize, usize>) -> T) -> Option<T> {
 unsafe impl GlobalAlloc for AttributingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = System.alloc(layout);
-        if !ptr.is_null() && ARMED.load(Ordering::Relaxed) {
+        if !ptr.is_null() && is_armed() {
             let size = layout.size();
             with_map(|map| {
                 if map.insert(ptr as usize, size).is_none() {
@@ -144,7 +178,7 @@ fn take_instrument() -> std::sync::MutexGuard<'static, ()> {
 
 /// Forget everything the instrument holds and start from zero.
 fn tracker_reset() {
-    ARMED.store(false, Ordering::Relaxed);
+    set_armed(false);
     LIVE.store(0, Ordering::Relaxed);
     PEAK.store(0, Ordering::Relaxed);
     with_map(|map| map.clear());
@@ -152,9 +186,9 @@ fn tracker_reset() {
 
 /// Run `f` with the receiver's allocations attributed to it.
 fn armed<T>(f: impl FnOnce() -> T) -> T {
-    ARMED.store(true, Ordering::Relaxed);
+    set_armed(true);
     let out = f();
-    ARMED.store(false, Ordering::Relaxed);
+    set_armed(false);
     out
 }
 
@@ -503,5 +537,40 @@ fn an_unset_cap_lets_a_peer_size_the_allocation() {
         "a receiver capped at {BOARD_CAP} B still allocated {capped} B off an \
          advertisement the uncapped one spent {unset} B on: the cap is not being \
          enforced before the allocation"
+    );
+}
+
+/// Positive control for the attribution: a window belongs to the thread that
+/// opened it, not to the process.
+///
+/// Without it the fix above is a claim. This allocates a megabyte on ANOTHER
+/// thread inside an open window — the shape of what the libtest harness does
+/// beside a measurement — and asserts the peak never saw it. With the
+/// process-global flag this file used until 2026-09-23 the peak would carry
+/// the whole megabyte, which is how a 2 KiB cap came to measure 15383 B under
+/// `cargo test --workspace`.
+#[test]
+fn a_window_counts_only_the_thread_that_opened_it() {
+    const FOREIGN: usize = 1 << 20;
+
+    let _instrument = take_instrument();
+    tracker_reset();
+
+    let measured = armed(|| {
+        std::thread::spawn(|| {
+            let big = vec![0u8; FOREIGN];
+            std::hint::black_box(big.len())
+        })
+        .join()
+        .expect("the foreign allocator thread must not panic");
+        peak()
+    });
+
+    assert!(
+        measured < FOREIGN,
+        "the instrument counted {measured} B while this thread allocated \
+         nothing and another allocated {FOREIGN} B: the window is armed for \
+         the whole process again, and every figure this file prints is its \
+         neighbours' as much as the receiver's"
     );
 }
