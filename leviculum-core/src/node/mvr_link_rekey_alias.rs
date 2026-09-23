@@ -22,7 +22,7 @@
 //! the same raw `self.links.get_mut(link_id)` and answered a caller holding
 //! the pre-re-key id with `ResourceError::InvalidRequest`. Field symptom
 //! (tier3 `lora_lncp_fetch`): `lncp fetch` establishes the link, then
-//! `leviculum-cli/src/cp.rs:704` calls `set_resource_strategy` with the id
+//! `leviculum-cli/src/cp.rs:754` calls `set_resource_strategy` with the id
 //! the `LinkEstablished` event handed it and dies with
 //! "resource error: invalid resource request" -- the client rejecting its
 //! own link.

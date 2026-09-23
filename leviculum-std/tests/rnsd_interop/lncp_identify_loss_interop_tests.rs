@@ -216,7 +216,8 @@ impl ProxyLog {
 async fn pump(
     mut src: tokio::net::tcp::OwnedReadHalf,
     mut dst: tokio::net::tcp::OwnedWriteHalf,
-    drop_first_identify: bool,
+    to_python: bool,
+    identify_drop_budget: usize,
     log: Arc<Mutex<ProxyLog>>,
 ) {
     let mut deframer = Deframer::new();
@@ -236,12 +237,14 @@ async fn pump(
             {
                 let mut log = log.lock().expect("proxy log");
                 if let Some(ctx) = ctx {
-                    if drop_first_identify {
+                    if to_python {
                         log.to_python.push(ctx);
                     } else {
                         log.to_node.push(ctx);
                     }
-                    if drop_first_identify && ctx == CTX_LINK_IDENTIFY && log.dropped_identify == 0
+                    if to_python
+                        && ctx == CTX_LINK_IDENTIFY
+                        && log.dropped_identify < identify_drop_budget
                     {
                         log.dropped_identify += 1;
                         swallow = true;
@@ -260,13 +263,15 @@ async fn pump(
 }
 
 /// Listen on `listen_port`, forward to `127.0.0.1:upstream_port`, dropping the
-/// first LINKIDENTIFY travelling towards the upstream.
+/// first `identify_drop_budget` LINKIDENTIFY frames travelling towards the
+/// upstream.
 ///
 /// Bound before the call returns so the node's TCP client cannot race the
 /// accept loop into a refused connect (Codeberg #221).
 async fn spawn_identify_dropping_proxy(
     listen_port: u16,
     upstream_port: u16,
+    identify_drop_budget: usize,
     log: Arc<Mutex<ProxyLog>>,
 ) {
     let listener = TcpListener::bind(("127.0.0.1", listen_port))
@@ -285,26 +290,42 @@ async fn spawn_identify_dropping_proxy(
             let _ = upstream.set_nodelay(true);
             let (down_rx, down_tx) = downstream.into_split();
             let (up_rx, up_tx) = upstream.into_split();
-            tokio::spawn(pump(down_rx, up_tx, true, Arc::clone(&log)));
-            tokio::spawn(pump(up_rx, down_tx, false, Arc::clone(&log)));
+            tokio::spawn(pump(
+                down_rx,
+                up_tx,
+                true,
+                identify_drop_budget,
+                Arc::clone(&log),
+            ));
+            tokio::spawn(pump(up_rx, down_tx, false, 0, Arc::clone(&log)));
         }
     });
 }
 
-/// A single lost identify must not cost the transfer: `lncp` has a live link
-/// and a peer that never heard who it was, and one more identify plus one more
-/// advertisement is all the protocol needs.
+/// One push of a 1 KiB file from `lncp`'s own send loop to a Python
+/// `rncp -l -a <our hash>`, through the proxy, with `identify_drop_budget`
+/// LINKIDENTIFY frames swallowed on the way.
 ///
-/// Red before the remote-rejection fix: the transfer concludes with
-/// `ResourceError::Cancelled` and `lncp` returns the error.
-#[tokio::test]
-async fn lncp_recovers_from_a_dropped_link_identify() {
-    if !python_rns_available() {
-        eprintln!("skipping lncp identify-loss interop: python3 + vendored RNS unavailable");
-        return;
-    }
-    crate::common::init_tracing();
+/// Everything both tests share lives here, so the only difference between them
+/// is the number the proxy is given.
+struct PushOutcome {
+    /// What `lncp` would have printed and exited with.
+    result: Result<(), String>,
+    /// The file as `rncp` would have saved it, if it did.
+    received: PathBuf,
+    payload: Vec<u8>,
+    /// Frames carried and swallowed, quoted by every assertion below so a red
+    /// run names the chain instead of pointing at a log.
+    evidence: String,
+    identify_drops: usize,
+    rncp_log: String,
+    /// Kept alive for the caller: dropping it kills `rncp` and deletes the
+    /// directory the received file is in.
+    _rncp: RncpListener,
+    _tmp: tempfile::TempDir,
+}
 
+async fn push_with_identify_drops(identify_drop_budget: usize) -> PushOutcome {
     let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = crate::common::temp_storage("lncp_identify_loss", &format!("run{test_id}"));
 
@@ -318,7 +339,13 @@ async fn lncp_recovers_from_a_dropped_link_identify() {
     let dest_hash_hex = hex::encode(dest_hash.as_bytes());
 
     let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(proxy_port, python_port, Arc::clone(&log)).await;
+    spawn_identify_dropping_proxy(
+        proxy_port,
+        python_port,
+        identify_drop_budget,
+        Arc::clone(&log),
+    )
+    .await;
 
     let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}")
         .parse()
@@ -352,61 +379,131 @@ async fn lncp_recovers_from_a_dropped_link_identify() {
     let file_path = tmp.path().join("identify-loss.bin");
     std::fs::write(&file_path, &payload).expect("write payload");
 
-    let outcome = leviculum_cli::cp::run_send(
+    let result = leviculum_cli::cp::run_send(
         &node,
         &mut events,
         file_path.to_str().expect("utf-8 path"),
         &dest_hash_hex,
         Some(90.0),
         0,
-        true,
+        // Not quiet: with --nocapture the recovery line is the evidence that
+        // the retry ran, and the final message is the one a user would read.
+        false,
         true,
         Some(&sender_identity),
         false,
     )
-    .await;
+    .await
+    .map_err(|e| e.to_string());
 
-    let evidence = {
+    let (evidence, identify_drops) = {
         let log = log.lock().expect("proxy log");
-        format!(
-            "proxy: {} identify frame(s) dropped, advertisement sent={}, RCL received={}; \
-             contexts to python={:02x?}, to node={:02x?}",
+        (
+            format!(
+                "proxy: {} identify frame(s) dropped, advertisement sent={}, RCL received={}; \
+                 contexts to python={:02x?}, to node={:02x?}",
+                log.dropped_identify,
+                log.saw_to_python(CTX_RESOURCE_ADV),
+                log.saw_to_node(CTX_RESOURCE_RCL),
+                log.to_python,
+                log.to_node,
+            ),
             log.dropped_identify,
-            log.saw_to_python(CTX_RESOURCE_ADV),
-            log.saw_to_node(CTX_RESOURCE_RCL),
-            log.to_python,
-            log.to_node,
         )
     };
 
+    PushOutcome {
+        result,
+        received: rncp.save_dir.join("identify-loss.bin"),
+        payload,
+        evidence,
+        identify_drops,
+        rncp_log: std::fs::read_to_string(rncp.config_dir.join("rncp.log")).unwrap_or_default(),
+        _rncp: rncp,
+        _tmp: tmp,
+    }
+}
+
+/// A single lost identify must not cost the transfer: `lncp` has a live link
+/// and a peer that never heard who it was, and one more identify plus one more
+/// advertisement is all the protocol needs.
+///
+/// Red before the remote-rejection fix: the transfer concluded with
+/// `ResourceError::Cancelled` and `lncp` returned "The transfer failed:
+/// Cancelled".
+#[tokio::test]
+async fn lncp_recovers_from_a_dropped_link_identify() {
+    if !python_rns_available() {
+        eprintln!("skipping lncp identify-loss interop: python3 + vendored RNS unavailable");
+        return;
+    }
+    crate::common::init_tracing();
+
+    let outcome = push_with_identify_drops(1).await;
+
     assert!(
-        outcome.is_ok(),
-        "lncp must deliver the file after one lost identify, got {:?}. {evidence}",
-        outcome.err().map(|e| e.to_string()),
+        outcome.result.is_ok(),
+        "lncp must deliver the file after one lost identify, got {:?}. {}",
+        outcome.result.as_ref().err(),
+        outcome.evidence,
+    );
+    assert_eq!(
+        outcome.identify_drops, 1,
+        "the modelled loss must have fired exactly once. {}",
+        outcome.evidence
     );
 
-    {
-        let log = log.lock().expect("proxy log");
-        assert_eq!(
-            log.dropped_identify, 1,
-            "the modelled loss must have fired exactly once. {evidence}"
-        );
-    }
-
-    let received = rncp.save_dir.join("identify-loss.bin");
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !received.is_file() {
+    while !outcome.received.is_file() {
         assert!(
             Instant::now() < deadline,
-            "rncp never wrote the file. {evidence}\nrncp log: {}",
-            std::fs::read_to_string(rncp.config_dir.join("rncp.log")).unwrap_or_default()
+            "rncp never wrote the file. {}\nrncp log: {}",
+            outcome.evidence,
+            outcome.rncp_log,
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert_eq!(
-        std::fs::read(&received).expect("read received file"),
-        payload,
-        "rncp must reassemble the payload byte for byte. {evidence}"
+        std::fs::read(&outcome.received).expect("read received file"),
+        outcome.payload,
+        "rncp must reassemble the payload byte for byte. {}",
+        outcome.evidence
+    );
+}
+
+/// The recovery is one retry, not a loop. With every identify swallowed the
+/// peer rejects twice, and `lncp` has to stop and say what the peer did rather
+/// than keep re-advertising or blame a cancel nobody local made.
+#[tokio::test]
+async fn lncp_gives_up_after_one_retry_and_names_the_rejection() {
+    if !python_rns_available() {
+        eprintln!("skipping lncp identify-loss interop: python3 + vendored RNS unavailable");
+        return;
+    }
+    crate::common::init_tracing();
+
+    let outcome = push_with_identify_drops(usize::MAX).await;
+
+    let message = outcome
+        .result
+        .as_ref()
+        .err()
+        .cloned()
+        .unwrap_or_else(|| panic!("lncp must not report success. {}", outcome.evidence));
+    assert_eq!(
+        message, "The transfer failed: the remote rejected the transfer",
+        "the final message names what the peer did. {}",
+        outcome.evidence
+    );
+    assert_eq!(
+        outcome.identify_drops, 2,
+        "exactly one retry: the first identify and the retry's, and no third. {}",
+        outcome.evidence
+    );
+    assert!(
+        !outcome.received.is_file(),
+        "rncp must not have received anything. {}",
+        outcome.evidence
     );
 }
 
@@ -461,7 +558,7 @@ async fn python_rncp_sender_fails_on_the_same_dropped_identify() {
     let dest_hash_hex = hex::encode(dest_hash.as_bytes());
 
     let log = Arc::new(Mutex::new(ProxyLog::default()));
-    spawn_identify_dropping_proxy(proxy_port, python_port, Arc::clone(&log)).await;
+    spawn_identify_dropping_proxy(proxy_port, python_port, 1, Arc::clone(&log)).await;
 
     let sender_config = format!(
         "[reticulum]\n\

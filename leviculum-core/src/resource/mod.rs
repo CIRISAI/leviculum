@@ -331,8 +331,17 @@ pub enum ResourceError {
     HashMismatch,
     /// Transfer timed out.
     Timeout,
-    /// Transfer was cancelled.
+    /// Transfer was cancelled locally, or by the sender's own cancel (ICL).
     Cancelled,
+    /// The receiving peer sent a resource cancel (RCL) for a transfer we were
+    /// sending.
+    ///
+    /// Named for what the peer did, not for why: an RCL carries no reason, and
+    /// a receiver may send one for an advertisement it declined, a transfer it
+    /// abandoned, or anything else. Distinct from [`Cancelled`](Self::Cancelled)
+    /// because an application that can act on a rejection (re-identify and
+    /// re-advertise, say) cannot tell the two apart otherwise.
+    RejectedByRemote,
     /// Maximum retry count exceeded.
     MaxRetriesExceeded,
     /// Link is not in Active state.
@@ -372,6 +381,7 @@ impl core::fmt::Display for ResourceError {
             Self::HashMismatch => write!(f, "resource hash mismatch"),
             Self::Timeout => write!(f, "resource transfer timed out"),
             Self::Cancelled => write!(f, "resource transfer cancelled"),
+            Self::RejectedByRemote => write!(f, "remote rejected the resource transfer"),
             Self::MaxRetriesExceeded => write!(f, "resource max retries exceeded"),
             Self::LinkNotActive => write!(f, "link not active for resource transfer"),
             Self::LinkClosed => write!(f, "link closed during resource transfer"),

@@ -173,14 +173,23 @@ pub async fn run_send(
     let transfer_deadline: Option<Instant> =
         timeout_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
     let mut speed_tracker = SpeedTracker::new();
+    // One re-identify is allowed, and only while the rejection can still be
+    // about the advertisement rather than about the transfer: see the
+    // NodeEvent::ResourceFailed arm below. Without an identity there is
+    // nothing to re-send, so there is nothing to retry either.
+    let mut identify_retry_left = sender_identity.is_some();
+    // A REQ from the peer is the only thing that raises this. It is the "the
+    // peer accepted the advertisement" signal the protocol gives a sender.
+    let mut part_requested = false;
     loop {
         tokio::select! {
             event = events.recv() => {
                 match event {
                     Some(NodeEvent::ResourceProgress {
                         is_sender: true, progress, transfer_size, ..
-                    })
-                        if !quiet => {
+                    }) => {
+                            part_requested = true;
+                        if !quiet {
                             let app_bytes = progress as f64 * send_data_size as f64;
                             let phy_bytes = progress as f64 * transfer_size as f64;
                             speed_tracker.update(app_bytes, phy_bytes);
@@ -203,6 +212,7 @@ pub async fn run_send(
                                 speed_str,
                                 phy_str);
                         }
+                    }
                     Some(NodeEvent::ResourceCompleted { is_sender: true, .. }) => {
                         if !quiet {
                             eprint!("\r");
@@ -214,6 +224,46 @@ pub async fn run_send(
                     Some(NodeEvent::ResourceFailed {
                         is_sender: true, error, ..
                     }) => {
+                        // A peer that rejects the advertisement before asking
+                        // for a single part has usually not heard who we are:
+                        // the identify frame and the advertisement leave back
+                        // to back (establish_link above, then send_resource
+                        // here), with no acknowledgement between them because
+                        // the protocol has none, so losing the first costs the
+                        // second. Python's rncp is where this is visible:
+                        // receive_resource_callback returns False when
+                        // get_remote_identity() is None and Link.py rejects.
+                        // The link survives that, so one more identify and one
+                        // more advertisement are all it takes.
+                        //
+                        // Bounded to one retry, on a live link, and only while
+                        // no part was ever requested. `part_requested` is set
+                        // by the peer's first REQ; the core skips that event at
+                        // progress 1.0, so a single-part resource rejected
+                        // between its only REQ and its proof would be
+                        // re-advertised once. Nothing in Python rejects there.
+                        let rejected_the_advertisement = error
+                            == leviculum_core::resource::ResourceError::RejectedByRemote
+                            && !part_requested
+                            && identify_retry_left
+                            && node.link_is_established(&link_id);
+                        if let (true, Some(id)) = (rejected_the_advertisement, sender_identity) {
+                            identify_retry_left = false;
+                            if !quiet {
+                                eprintln!(
+                                    "The remote rejected the first advertisement, identifying again");
+                            }
+                            node.identify_link(&link_id, id)
+                                .await
+                                .map_err(|e| err(format!("identify failed: {e}")))?;
+                            node.send_resource(
+                                &link_id, &data, Some(&metadata_bytes), !no_compress)
+                                .await?;
+                            continue;
+                        }
+                        if error == leviculum_core::resource::ResourceError::RejectedByRemote {
+                            return Err(err("The transfer failed: the remote rejected the transfer"));
+                        }
                         return Err(err(format!(
                             "The transfer failed: {:?}", error)));
                     }

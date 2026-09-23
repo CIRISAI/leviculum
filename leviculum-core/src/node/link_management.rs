@@ -2942,14 +2942,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 });
             }
         } else {
-            // RCL received = receiver cancelled = we are the sender
+            // RCL received = the receiver rejected or abandoned what we were
+            // sending. Reported as its own error, not as Cancelled: the two
+            // used to be the same value, so an application could not tell a
+            // peer's rejection from its own cancel, and lncp printed
+            // "Cancelled" for a transfer nobody local had cancelled.
             if let Some(res) = link.outgoing_resource() {
                 let resource_hash = *res.resource_hash();
                 link.clear_outgoing_resource();
                 self.events.push(NodeEvent::ResourceFailed {
                     link_id,
                     resource_hash,
-                    error: crate::resource::ResourceError::Cancelled,
+                    error: crate::resource::ResourceError::RejectedByRemote,
                     is_sender: true,
                 });
             }
