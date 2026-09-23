@@ -929,16 +929,20 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// a site reaching for this from a loop would turn "one frame's airtime,
     /// once" into a wait that compounds, and the starvation argument would
     /// stop holding. Two sites qualify, and each passes through at most once
-    /// per event: the idle select's outgoing arm (once per key-up) and its
-    /// config arm (once per host config push, which arrives at host cadence,
-    /// not the loop's). The sequence itself is
+    /// per event: the idle select's outgoing arm (once per key-up) and the
+    /// config arm of `lora::rx_window` (once per host config push, which
+    /// arrives at host cadence, not the loop's). The config arm belongs to
+    /// every window the LoRa loop has, not only the idle one, and it is still
+    /// once per push: a window entered while a config is already waiting is
+    /// not armed at all, so after the first stand-down the rest of the turn
+    /// costs nothing and the turn's top consumes the config. The sequence itself is
     /// [`leviculum_rx_arming::stand_down_for_tx`], where a fake radio asserts
     /// it.
     ///
     /// `buf` and `sink` are what a reception the wait catches goes through —
     /// the same buffer and the same `lora::CoreHandoff` any other
     /// window's frame takes, so a frame delivered from a deferral is
-    /// indistinguishable downstream from one delivered from `rx_once`.
+    /// indistinguishable downstream from one delivered from `rx_window`.
     pub async fn disarm_rx_for_tx<S>(
         &mut self,
         by: leviculum_core::sx126x::RxTeardownBy,

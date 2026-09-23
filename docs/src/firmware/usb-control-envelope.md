@@ -255,6 +255,20 @@ ack went out on channel delivery, measurably 1.1–18.9 s before the
 apply while the LoRa loop parked in single-mode RX, and even when the
 reconfig then failed.
 
+That retry is answered for the config that is queued, not for the
+channel. The config channel holds one slot, and a host re-sending the
+config it was just told was `busy` finds that slot still holding its own
+first copy. That is not a delivery that failed: the board answers `busy`
+again and acks as soon as the apply lands, rather than spending the
+host's attempt on `undeliverable`. Only a slot held by a *different*
+config is refused, and only after the 500 ms grace. Before 2026-09-23 a
+repeat was refused: `lora_path_discovery_wide_mixed` had its config
+delivered on the first attempt (from a `site=yield` RX window the loop
+did not wake from, so the apply missed the 1.2 s wait), then attempts two
+and three were refused as undeliverable and the cell was skipped
+`no_ack_after_3`. Every RX window the LoRa loop can park in now wakes on
+a queued config, which is the other half of the same fix.
+
 One boot state changes the promise: a board whose boot did not bring the
 LoRa carrier up (a `lora=off` media profile in flash) has no LoRa task,
 so no config can be delivered or applied before the next reset. There the

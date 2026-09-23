@@ -1299,7 +1299,7 @@ where
                 send_timer = None;
                 // A wait armed here is always served in full: nothing cancels
                 // the sleep, and an inbound frame does not cut it short the
-                // way the firmware's listening `rx_once` does. Report what
+                // way the firmware's listening `rx_window` does. Report what
                 // was served, so the debt is discharged and the rest of this
                 // acquisition's burst is not asked to wait a second time.
                 if jitter_armed_ms > 0 {

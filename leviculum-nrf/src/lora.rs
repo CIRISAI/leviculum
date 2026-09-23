@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
@@ -506,6 +506,39 @@ pub fn running_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
     RUNNING_CONFIG.lock(|slot| slot.get())
 }
 
+/// The config most recently accepted by [`LORA_CONFIG`], or `None` before
+/// the first one of the boot.
+///
+/// Written by the serial task after every successful send and read by it
+/// when the channel refuses one, for a single question: a full depth-1
+/// channel holds exactly the last value that went in, so this says *which*
+/// config the LoRa task has not consumed yet. A second copy of that same
+/// config is then not a delivery that failed — it is a delivery that already
+/// happened, and answering it "undeliverable" describes the channel instead
+/// of the radio, and costs the host an attempt it did not need to spend.
+///
+/// Sound because there is exactly one producer: `usb.rs::apply_radio_config`
+/// records here immediately after each send, with no await in between, so
+/// while the channel is full the record cannot name a value the channel does
+/// not hold. [`RUNNING_CONFIG`] is the other half — what the radio *is* on,
+/// against what is still on its way to it.
+static PENDING_CONFIG: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::Cell<Option<leviculum_core::rnode::RadioConfigWire>>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
+
+/// Record a config as handed to the LoRa task's channel. See
+/// [`PENDING_CONFIG`] for why the serial task is the only caller.
+pub fn note_config_delivered(wire: &leviculum_core::rnode::RadioConfigWire) {
+    PENDING_CONFIG.lock(|slot| slot.set(Some(*wire)));
+}
+
+/// The last config handed to the channel — which, whenever the channel is
+/// full, is the one occupying the slot. See [`PENDING_CONFIG`].
+pub fn pending_config() -> Option<leviculum_core::rnode::RadioConfigWire> {
+    PENDING_CONFIG.lock(|slot| slot.get())
+}
+
 /// Keeps the core's announce bandwidth cap told what a frame costs on this
 /// board's LoRa carrier (Codeberg #402).
 ///
@@ -658,7 +691,7 @@ fn compute_slot_ms(cfg: &RadioConfig) -> u64 {
 /// bounded window.
 ///
 /// Sized to one full single-frame reply airtime at the current profile plus a
-/// turnaround margin (peer host processing + its CSMA backoff). `rx_once`
+/// turnaround margin (peer host processing + its CSMA backoff). `rx_window`
 /// returns the instant a packet arrives, so this is only an upper bound that
 /// costs wall-clock when the channel is genuinely idle, not on every TX.
 fn post_tx_rx_window_ms(cfg: &RadioConfig) -> u32 {
@@ -1057,9 +1090,9 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
     }
 }
 
-/// Run one RX cycle with the given timeout. Feeds results through the split
-/// reassembler and pushes reassembled payloads to `incoming_tx`.
-/// Safe to call from both the idle-poll path and CSMA backoff windows.
+/// Run one RX window — the given timeout at the given site — with the host's
+/// runtime radio config as its second exit. Feeds receptions through the
+/// split reassembler and pushes reassembled payloads to `incoming_tx`.
 ///
 /// The radio is armed, awaited, and — on a reception — armed again *before*
 /// the frame is handed up; the sequence itself is
@@ -1067,19 +1100,58 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
 /// it. What this function keeps is everything specific to the board: the
 /// logging, the reassembler, and the classification of the three RX errors.
 ///
-/// `site` names this window in the `[SX_RX_ARM]` line the driver emits when
-/// it arms the receiver. Every caller below passes a distinct one, so a
-/// capture says which of the loop's five windows was listening without
-/// anybody matching timeouts against source lines.
-async fn rx_once(
+/// `window` is the `(timeout_ms, site)` pair the driver puts in the
+/// `[SX_RX_ARM]` line. Every caller below passes a distinct site, so a
+/// capture says which of the loop's windows was listening without anybody
+/// matching timeouts against source lines.
+///
+/// # Why the config is an arm of *every* window
+///
+/// A window's other exits are a reception and its own timeout, and the
+/// loop's windows are as long as the PHY is slow: the peer-turn yield is two
+/// post-TX windows, 20 s at SF12/125 kHz, while the serial task waits 1.2 s
+/// (`usb.rs::CONFIG_APPLY_WITHIN`) for the apply before it answers the host
+/// busy. A config pushed into a window the loop does not wake from is
+/// therefore answered busy by construction, and the host's next attempt
+/// finds the one-slot channel still holding the first — which is how
+/// `lora_path_discovery_wide_mixed` went `SKIPPED_INFRA
+/// reason=lnode_radio_config_failed result=no_ack_after_3` on T114 DEC9947D,
+/// 2026-09-23 08:03 UTC, out of a `site=yield` window armed for 20 s.
+/// f4ecf16ab gave the config an arm of the idle select and of nothing else;
+/// this is that mechanism at every window the loop has, because "the one
+/// window nobody covered" does not show up in a capture until a cell is
+/// already lost.
+///
+/// The wake does not *consume* the config: the arm is `ready_to_receive`, so
+/// the value stays in the channel and [`apply_runtime_config`] keeps its
+/// single caller at the top of the turn. Every window here therefore ends the
+/// same way — back in the loop, with the config still queued.
+///
+/// A window entered with a config already waiting is not armed at all, and
+/// that is what holds the deferral below to one per push: the first window to
+/// see the config stands down through `disarm_rx_for_tx`, which may wait out
+/// a frame that is measurably mid-air, and every later window of the same
+/// turn returns here without touching the radio.
+async fn rx_window(
     radio: &mut Radio,
     rx_buf: &mut [u8; 255],
-    timeout_ms: u32,
-    site: leviculum_core::sx126x::RxSite,
+    window: (u32, leviculum_core::sx126x::RxSite),
     reassembler: &mut leviculum_core::rnode::SplitReassembler,
     incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     rx_timeout_count: &mut u32,
+    config_rx: &Receiver<'static, CriticalSectionRawMutex, RadioConfig, 1>,
 ) -> bool {
+    let (timeout_ms, site) = window;
+    if !config_rx.is_empty() {
+        // Nothing to listen for that the turn is not about to be interrupted
+        // for anyway. Reported, because a capture that shows a window's log
+        // line without its `[SX_RX_ARM]` should say why.
+        crate::log::log_fmt(
+            "[T114_LORA_LOOP] ",
+            format_args!("op=rx_config_pending site={}", site.tag()),
+        );
+        return false;
+    }
     let rx_start = embassy_time::Instant::now();
     let mut sink = CoreHandoff {
         rx_start,
@@ -1087,10 +1159,43 @@ async fn rx_once(
         incoming_tx,
         rx_timeout_count: *rx_timeout_count,
     };
-    let rx_result =
-        leviculum_rx_arming::receive_and_hand_up(radio, rx_buf, (timeout_ms, site), &mut sink)
-            .await;
+    // Bound to a local so both futures are dropped — and the radio and the
+    // sink released — before the config arm below reaches for them again.
+    let exit = select(
+        leviculum_rx_arming::receive_and_hand_up(radio, rx_buf, (timeout_ms, site), &mut sink),
+        config_rx.ready_to_receive(),
+    )
+    .await;
     let rx_ms = rx_start.elapsed().as_millis();
+    let rx_result = match exit {
+        Either::First(rx_result) => rx_result,
+        // The host pushed a radio config. The RX future was dropped, so the
+        // receiver is stood down the same way the idle select's outgoing arm
+        // stands it down: `disarm_rx_for_tx` holds the teardown for a frame
+        // that is measurably mid-air — bounded at one maximum-size frame's
+        // airtime at the live modulation — and hands it up through this same
+        // sink, instead of ending a reception in progress for a retune that
+        // can afford to wait that bound. An idle window costs the plain
+        // standby it always did. `configure_lora`'s own teardown then finds
+        // nothing standing.
+        Either::Second(()) => {
+            let _ = radio
+                .disarm_rx_for_tx(
+                    leviculum_core::sx126x::RxTeardownBy::Config,
+                    rx_buf,
+                    &mut sink,
+                )
+                .await;
+            crate::log::log_fmt(
+                "[T114_LORA_LOOP] ",
+                format_args!("op=rx_config site={} duration_ms={}", site.tag(), rx_ms),
+            );
+            // Not a reception: a frame the teardown caught went up through
+            // the sink on its own, and what the callers count here is windows
+            // that ran their course.
+            return false;
+        }
+    };
     match rx_result {
         Ok(reception) => {
             // The re-arm that covers the hand-off is not allowed to cost the
@@ -1237,11 +1342,13 @@ pub fn channel_seed() -> u32 {
 /// of loop state derived from it: the slot time, the channel-access PHY, the
 /// airtime limits, the published running config.
 ///
-/// One implementation for the loop's two intake points — the top-of-turn
-/// `try_receive` and the idle select's config arm — so the set of derived
-/// state cannot drift between them. [`CONFIG_APPLIED`] fires only on the
-/// success arm: a reconfig that failed left the radio on the old PHY, and
-/// the serial task's answer to the host must not read as applied.
+/// One caller, the loop's single intake at the top of the turn. Every window
+/// the loop can park in wakes on a queued config without consuming it
+/// (see [`rx_window`]), so waking and applying are separate concerns and the
+/// set of derived state has one place it can be rewritten from.
+/// [`CONFIG_APPLIED`] fires only on the success arm: a reconfig that failed
+/// left the radio on the old PHY, and the serial task's answer to the host
+/// must not read as applied.
 async fn apply_runtime_config(
     radio: &mut Radio,
     new_cfg: RadioConfig,
@@ -1352,7 +1459,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     let mut slot_ms: u64 = compute_slot_ms(&config);
     // Count of consecutive post-TX ack windows that expired with no reception.
     // Drives the peer-turn yield (see PEER_YIELD_AFTER_EMPTY). Reset to 0 on any
-    // reception, anywhere rx_once returns true.
+    // reception, anywhere rx_window returns true.
     let mut consecutive_empty_acks: u32 = 0;
     // Bounded-burst accounting: TX frames and airtime since the last channel
     // yield (post-TX ack window). Reset whenever a yield actually runs.
@@ -1383,10 +1490,12 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             );
         }
 
-        // Check for a runtime radio config override. This intake serves the
-        // turns that come back from a bounded window (jitter, backoff, ack,
-        // hold, yield — all clamped to <=10 s); the turn that can park for a
-        // minute is the idle select below, where the config is its own arm.
+        // Check for a runtime radio config override. The loop's only
+        // intake, and it serves every turn: a config arriving mid-window
+        // wakes that window (`rx_window`) without being taken out of the
+        // channel, so whichever window the loop was parked in — the 20 s
+        // peer-turn yield as much as the idle listen that can park for a
+        // minute — the value is still here when the turn comes back around.
         if let Ok(new_cfg) = config_rx.try_receive() {
             apply_runtime_config(
                 &mut radio,
@@ -1438,14 +1547,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 );
                 let hold_ms = post_tx_rx_window_ms(&config);
                 reassembler.check_timeout(rx_timeout_count, 10);
-                if rx_once(
+                if rx_window(
                     &mut radio,
                     &mut rx_buf,
-                    hold_ms,
-                    leviculum_core::sx126x::RxSite::Hold,
+                    (hold_ms, leviculum_core::sx126x::RxSite::Hold),
                     &mut reassembler,
                     &incoming_tx,
                     &mut rx_timeout_count,
+                    &config_rx,
                 )
                 .await
                 {
@@ -1470,11 +1579,11 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // alone cannot de-tile two senders whose transmissions share a
             // trigger — co-started probe announces, rebroadcasts of the
             // same received frame — because both probe a channel neither
-            // has keyed yet. Spent in `rx_once`, so a peer that keys inside
+            // has keyed yet. Spent in `rx_window`, so a peer that keys inside
             // the window is received, not talked over; burst continuations
             // (same acquisition) owe nothing and skip this entirely.
             //
-            // `rx_once` returns the instant it receives, which is the
+            // `rx_window` returns the instant it receives, which is the
             // common case here — the window is most often opened right
             // after hearing something. The part of the draw that did not
             // get listened through is still owed: the frame that cut the
@@ -1498,14 +1607,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 let rx_ms = jitter_ms.clamp(1, 10_000) as u32;
                 reassembler.check_timeout(rx_timeout_count, 10);
                 let jitter_start = embassy_time::Instant::now();
-                if rx_once(
+                if rx_window(
                     &mut radio,
                     &mut rx_buf,
-                    rx_ms,
-                    leviculum_core::sx126x::RxSite::Jitter,
+                    (rx_ms, leviculum_core::sx126x::RxSite::Jitter),
                     &mut reassembler,
                     &incoming_tx,
                     &mut rx_timeout_count,
+                    &config_rx,
                 )
                 .await
                 {
@@ -1574,14 +1683,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                             // Clamp to >=1ms, the SX1262 needs a non-zero timeout.
                             let rx_ms = backoff_ms.clamp(1, 10_000) as u32;
                             reassembler.check_timeout(rx_timeout_count, 10);
-                            if rx_once(
+                            if rx_window(
                                 &mut radio,
                                 &mut rx_buf,
-                                rx_ms,
-                                leviculum_core::sx126x::RxSite::Csma,
+                                (rx_ms, leviculum_core::sx126x::RxSite::Csma),
                                 &mut reassembler,
                                 &incoming_tx,
                                 &mut rx_timeout_count,
+                                &config_rx,
                             )
                             .await
                             {
@@ -1630,7 +1739,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // a non-empty queue transmitted back-to-back, never listening for
             // acks. At slow SF (2.7s/frame at SF10) the busy side went deaf,
             // retransmitted, and the link died via retry exhaustion (#23). The
-            // window is airtime-aware and self-shortens: rx_once returns as
+            // window is airtime-aware and self-shortens: rx_window returns as
             // soon as a packet arrives. Idle continuous RX (queue empty) is
             // unchanged below.
             //
@@ -1675,14 +1784,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             }
             let ack_window_ms = post_tx_rx_window_ms(&config);
             reassembler.check_timeout(rx_timeout_count, 10);
-            let ack_received = rx_once(
+            let ack_received = rx_window(
                 &mut radio,
                 &mut rx_buf,
-                ack_window_ms,
-                leviculum_core::sx126x::RxSite::Ack,
+                (ack_window_ms, leviculum_core::sx126x::RxSite::Ack),
                 &mut reassembler,
                 &incoming_tx,
                 &mut rx_timeout_count,
+                &config_rx,
             )
             .await;
             if ack_received {
@@ -1710,14 +1819,14 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     ),
                 );
                 reassembler.check_timeout(rx_timeout_count, 10);
-                rx_once(
+                rx_window(
                     &mut radio,
                     &mut rx_buf,
-                    yield_ms,
-                    leviculum_core::sx126x::RxSite::Yield,
+                    (yield_ms, leviculum_core::sx126x::RxSite::Yield),
                     &mut reassembler,
                     &incoming_tx,
                     &mut rx_timeout_count,
+                    &config_rx,
                 )
                 .await;
                 consecutive_empty_acks = 0;
@@ -1735,33 +1844,39 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
 
         // Queue empty: timeout stale split reassembly buffers, then stay in
         // continuous RX until either a packet arrives or the daemon hands us
-        // something to send. rx_once with timeout_ms==0 arms SetRx in single
+        // something to send. rx_window with timeout_ms==0 arms SetRx in single
         // mode (no HW timeout), so the radio listens with no re-arm gap. The
         // fixed-window loop re-armed every 500ms; at slow SF a long preamble
         // (~197ms at SF10) almost always fell into a re-arm gap and was never
         // detected. select yields to TX the instant the daemon has data, so
         // continuous RX does not starve path responses or announces.
+        //
+        // Two arms, not three: the config is an arm of `rx_window` itself now
+        // — of this window and of every other one the loop has — so this site
+        // carries only what is peculiar to it, the outgoing queue. Bound to a
+        // local so the futures are dropped before the outgoing arm reaches
+        // for the radio and the loop state again.
         reassembler.check_timeout(rx_timeout_count, 10);
-        match select3(
-            rx_once(
+        let idle = select(
+            rx_window(
                 &mut radio,
                 &mut rx_buf,
-                0,
-                leviculum_core::sx126x::RxSite::Idle,
+                (0, leviculum_core::sx126x::RxSite::Idle),
                 &mut reassembler,
                 &incoming_tx,
                 &mut rx_timeout_count,
+                &config_rx,
             ),
             outgoing_rx.receive(),
-            config_rx.receive(),
         )
-        .await
-        {
-            // RX finished (packet delivered or single-mode wait elapsed). Loop
-            // re-arms RX immediately; the only gap is this brief re-arm, taken
-            // right after a reception. A reception here also means the peer is
+        .await;
+        match idle {
+            // RX finished (packet delivered, single-mode wait elapsed, or a
+            // config waiting for the top of the turn). Loop re-arms RX
+            // immediately; the only gap is this brief re-arm, taken right
+            // after a reception. A reception here also means the peer is
             // being heard, so clear the empty-ack counter.
-            Either3::First(received) => {
+            Either::First(received) => {
                 if received {
                     consecutive_empty_acks = 0;
                 }
@@ -1792,17 +1907,17 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // `disarm_rx_for_tx` holds the key-up for the frame that is
             // arriving, for one maximum-size frame's airtime at the live
             // modulation and no longer, hands that frame up by the same route
-            // `rx_once` would have, and then spends the same single standby.
+            // `rx_window` would have, and then spends the same single standby.
             // A window with a clear latch is stood down exactly as before —
             // the wait is conditional on a measured reception and on nothing
             // else, which is what keeps this from being a spacing delay.
             // radio_silent still drops outgoing instead of transmitting.
-            Either3::Second(data) => {
+            Either::Second(data) => {
                 // The one dequeue that does not go through `take_outgoing`:
                 // `receive()` is the awaited form, and the budget it held is
                 // released here for the same reason and at the same moment.
                 OUTGOING_BUDGET.release(data.len());
-                // The same sink `rx_once` builds, so a frame the deferral
+                // The same sink `rx_window` builds, so a frame the deferral
                 // catches reaches the core indistinguishably from any other.
                 // `rx_start` is taken here, before the wait, so the
                 // `op=rx_success duration_ms` it reports brackets the
@@ -1826,48 +1941,6 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     pending_tx = Some(data);
                     access.begin_packet();
                 }
-            }
-            // The host pushed a radio config. Until this arm existed the
-            // config sat in its channel while the select above parked in
-            // single-mode RX, whose only other exits are an inbound packet
-            // and the 60 s software bound in `await_rx` — measured on the
-            // bench as 1.1-18.9 s (median ~14.3 s) from `SER: radio config
-            // received` to `[LORA] active config:`, a window in which the
-            // board keeps operating on the PHY the host just told it to
-            // leave.
-            //
-            // The RX future was dropped, so the receiver is stood down the
-            // same way the outgoing arm stands it down: `disarm_rx_for_tx`,
-            // which holds the retune for a frame that is measurably
-            // mid-air — bounded at one maximum-size frame's airtime at the
-            // live modulation — and hands it up through the same sink,
-            // instead of ending a reception in progress for a retune that
-            // can afford to wait that bound. An idle window costs the plain
-            // standby it always did. `configure_lora`'s own teardown then
-            // finds nothing standing.
-            Either3::Third(new_cfg) => {
-                let mut sink = CoreHandoff {
-                    rx_start: embassy_time::Instant::now(),
-                    reassembler: &mut reassembler,
-                    incoming_tx: &incoming_tx,
-                    rx_timeout_count,
-                };
-                let _ = radio
-                    .disarm_rx_for_tx(
-                        leviculum_core::sx126x::RxTeardownBy::Config,
-                        &mut rx_buf,
-                        &mut sink,
-                    )
-                    .await;
-                apply_runtime_config(
-                    &mut radio,
-                    new_cfg,
-                    &mut config,
-                    &mut slot_ms,
-                    &mut access,
-                    &mut airtime,
-                )
-                .await;
             }
         }
     }

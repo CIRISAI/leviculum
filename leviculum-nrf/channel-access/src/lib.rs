@@ -375,7 +375,7 @@ mod tests {
     fn a_jitter_wait_cut_short_by_a_reception_is_still_owed() {
         // The minimal reproducer for the bench_dual_pair_fast red of
         // 2026-09-17. The wait is spent listening, so the transmit path's
-        // `rx_once` returns the moment a frame arrives: on lnode_a a
+        // `rx_window` returns the moment a frame arrives: on lnode_a a
         // 288 ms draw was cut at 143 ms by an incoming proof, and the
         // path then went straight to CAD and keyed up 11 ms after that
         // frame ended — phase-locked with every other node the same frame

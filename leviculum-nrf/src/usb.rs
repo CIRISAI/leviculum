@@ -451,6 +451,13 @@ enum ConfigDelivery {
     /// stopped draining (a wedged radio, or a task that returned on an
     /// init failure).
     ///
+    /// A *repeat* of the config already in the slot is not this outcome and
+    /// never was one: it is a delivery that already happened, so it takes
+    /// the apply wait instead (`lora::pending_config`). The host retrying
+    /// its own config is the ordinary case — it is what a host does when the
+    /// first answer was busy — and burning its attempts on a refusal is how
+    /// a slow apply became `no_ack_after_3`.
+    ///
     /// [`Stored`]: ConfigDelivery::Stored
     Undeliverable,
     /// This boot never spawned the LoRa task, so delivery and apply are
@@ -508,7 +515,9 @@ const CONFIG_APPLY_WITHIN: Duration = Duration::from_millis(1200);
 /// transport port deaf until the next reboot, with the write side and
 /// main loop running on as if nothing happened. Undeliverable is answered
 /// as busy, the same contract [`crate::lora::deliver_tx_spacing`] already
-/// has for its consumerless channel. The `lora=off` boot itself never
+/// has for its consumerless channel — and it is reserved for a slot held by
+/// a *different* config, since a repeat of the one already queued has been
+/// delivered by definition. The `lora=off` boot itself never
 /// reaches the channel any more: it is answered from the flash store
 /// (see [`ConfigDelivery::Stored`]), because feeding a consumerless slot
 /// is a wedge, not a delivery.
@@ -544,25 +553,53 @@ async fn apply_radio_config(
     // one that happened with this config already in the channel — a signal
     // latched from an earlier apply cannot be read as this one's.
     crate::lora::config_applied().reset();
-    if let Err(embassy_sync::channel::TrySendError::Full(cfg)) = config_tx.try_send(cfg) {
-        // Full channel: give a live LoRa task one grace period to drain
-        // the previous config before refusing. A timed-out `send` drops
-        // the value with the future, so a refusal can never also deliver.
-        if with_timeout(CONFIG_DELIVER_WITHIN, config_tx.send(cfg))
-            .await
-            .is_err()
-        {
-            log("SER: radio config undeliverable, refused");
-            return ConfigDelivery::Undeliverable;
+    // Whether this call is what put the config in the channel. False on the
+    // one path where nothing was sent and nothing is owed to flash: the slot
+    // already holds this very config.
+    let delivered_here = match config_tx.try_send(cfg) {
+        Ok(()) => true,
+        Err(embassy_sync::channel::TrySendError::Full(cfg)) => {
+            if crate::lora::pending_config() == Some(wire) {
+                // The slot is full with *this* config: a retry of one the
+                // LoRa task has not consumed yet. There is nothing left to
+                // deliver — the delivery happened on the attempt that filled
+                // the slot, and a second copy of the same value would change
+                // nothing on the air. Refusing it as undeliverable describes
+                // the channel where the host asked about the radio, and it
+                // spends one of the host's three attempts on a config that is
+                // queued and on its way: that is what turned one slow apply
+                // into `no_ack_after_3` and cost
+                // `lora_path_discovery_wide_mixed` its run (T114 DEC9947D,
+                // 2026-09-23 08:03 UTC). Fall through to the apply wait and
+                // answer for what IS queued — busy while it is unapplied, ack
+                // the moment it lands.
+                log("SER: radio config already queued, awaiting its apply");
+                false
+            } else if with_timeout(CONFIG_DELIVER_WITHIN, config_tx.send(cfg))
+                .await
+                .is_ok()
+            {
+                // A *different* config is still in the slot: one grace period
+                // for a live LoRa task to drain it. A timed-out `send` drops
+                // the value with the future, so a refusal can never also
+                // deliver.
+                true
+            } else {
+                log("SER: radio config undeliverable, refused");
+                return ConfigDelivery::Undeliverable;
+            }
         }
+    };
+    if delivered_here {
+        crate::lora::note_config_delivered(&wire);
+        log("SER: radio config received");
+        // Persist what we just delivered, so a reset comes back on the
+        // host's frequency instead of the compiled default.
+        // Non-blocking: the store task does the read-compare-write and
+        // skips flash entirely if nothing changed (lnsd re-sends this
+        // frame on every connect).
+        crate::radio_store::request_save(&wire);
     }
-    log("SER: radio config received");
-    // Persist what we just delivered, so a reset comes back on the
-    // host's frequency instead of the compiled default.
-    // Non-blocking: the store task does the read-compare-write and
-    // skips flash entirely if nothing changed (lnsd re-sends this
-    // frame on every connect).
-    crate::radio_store::request_save(&wire);
     // The answer states the radio, not the channel: wait until the running
     // config IS the one delivered. The signal alone is not enough — it
     // fires for every successful apply, and the one before ours (drained

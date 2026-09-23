@@ -147,6 +147,7 @@ mod media_silence_restore_signal;
 mod pn_offer_outgrows_the_link_mdu;
 mod pn_serve_cap_bounds_one_fetch;
 mod pn_serve_peak_outgrows_the_board_heap;
+mod radio_config_sleeps_through_the_peer_yield_window;
 mod radio_config_wedges_without_lora_task;
 mod ratchet_rotation_single_packet;
 mod recall_survives_a_restart;

@@ -900,14 +900,14 @@ fn the_firmware_still_emits_the_transmit_deferral_line() {
 
 /// The index of `needle` in `src`, insisting there is exactly one.
 ///
-/// The arm slicing below is only meaningful if the markers it cuts on are
-/// unique; a second `Either3::Second(` in the file would silently give this
+/// The region slicing below is only meaningful if the markers it cuts on are
+/// unique; a second `let idle = select(` in the file would silently give this
 /// test the wrong body to look at.
 fn sole_index(src: &str, needle: &str) -> usize {
     let mut found = src.match_indices(needle).map(|(i, _)| i);
     let first = found.next().unwrap_or_else(|| {
         panic!(
-            "leviculum-nrf/src/lora.rs no longer contains `{needle}`; the idle select \
+            "leviculum-nrf/src/lora.rs no longer contains `{needle}`; the region \
              whose arms carry the transmit deferral has moved, and this test cannot \
              see the bound any more"
         )
@@ -915,7 +915,7 @@ fn sole_index(src: &str, needle: &str) -> usize {
     assert!(
         found.next().is_none(),
         "`{needle}` appears more than once in leviculum-nrf/src/lora.rs; this test \
-         slices the idle select's arms on it and can no longer tell them apart"
+         slices the deferring regions on it and can no longer tell them apart"
     );
     first
 }
@@ -956,87 +956,120 @@ const DEFERRAL_HAND_CHECK: &str = "A source scan sees a site's name and that it 
     dequeue, a host config push — and at that event's rate, never at the loop's \
     own; (b) the call is reached at most once per entry, not from a loop and \
     not twice on one path. The two sites below pass that check, so their waits \
-    add at most one maximum-size frame's airtime each and do not compound. If \
-    the new site passes it too, name it in ARMS and say here why its cadence is \
-    external; if it does not, it must not defer.";
+    add at most one maximum-size frame's airtime each and do not compound. The \
+    config site needs one step more, because since 2026-09-23 it sits in \
+    `rx_window`, which the loop calls at every window it arms: what keeps it at \
+    once per push is that a window entered while a config is already waiting is \
+    not armed at all, so the first stand-down of a turn is the only one and the \
+    turn's top then consumes the config. If a new site passes the check too, \
+    name it in the regions below and say here why its cadence is external; if it \
+    does not, it must not defer.";
 
 /// The transmit deferral is spent once per externally paced event, at the two
-/// arms that have one.
+/// places that have one.
 ///
 /// `site=` is deliberately absent from the `[SX_TX_DEFER]` line, so a capture
 /// cannot tell the deferring sites apart — this can. What the test pins is the
-/// invariant rather than a number: each site spends the bound once per entry
-/// into its arm, and each of those arms is fed by a channel the host or the
-/// daemon writes, not by this loop's own cadence. A third site is therefore
-/// not forbidden; it is required to arrive with that argument made, and this
-/// test says so by name when one appears.
+/// invariant rather than a number: each site spends the bound once per entry,
+/// and each is entered on an event a channel outside this loop wrote, not on
+/// this loop's own cadence. A third site is therefore not forbidden; it is
+/// required to arrive with that argument made, and this test says so by name
+/// when one appears.
+///
+/// Until 2026-09-23 both sites were arms of one `select3` and slicing that
+/// select was the whole test. The config arm then moved into `rx_window`,
+/// because it belongs to every RX window the loop can park in and not only to
+/// the idle one (a config pushed into the 20 s peer-turn yield was waited out,
+/// and the cell that pushed it was skipped). So the two regions are now a
+/// function and a select.
 #[test]
 fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
     let lora = nrf_source("lora.rs");
 
-    // The three arms of the idle `select3`, in source order, with the site
-    // each may defer at and what paces it. `Either3::First` is the reception
-    // itself: it is paced by the air and by this loop, so it may not defer at
-    // all — a wait there would be the spacing delay the guard is careful not
-    // to be.
-    const ARMS: [(&str, &[&str], &str); 3] = [
-        (
-            "Either3::First(",
-            &[],
-            "the reception that just ended, paced by the air and by this loop",
-        ),
-        (
-            "Either3::Second(",
-            &["Select"],
-            "the daemon's outgoing queue, paced by the host's traffic",
-        ),
-        (
-            "Either3::Third(",
-            &["Config"],
-            "the host's radio-config push, paced by the host's console",
-        ),
-    ];
-
-    // Both deferring arms take their event from a channel `receive()`, which
-    // is the externally-paced half of the argument, in the order ARMS lists.
-    let select_head = &lora[sole_index(&lora, "select3(")..sole_index(&lora, ARMS[0].0)];
-    let outgoing = select_head.find("outgoing_rx.receive()");
-    let config = select_head.find("config_rx.receive()");
+    // Region 1: `rx_window`, the loop's one RX window function. Its config arm
+    // may defer; its reception arm may not — a reception is paced by the air
+    // and by this loop, and a wait there would be the spacing delay the guard
+    // is careful not to be.
+    let win_start = sole_index(&lora, "async fn rx_window(");
+    let win_end = win_start
+        + lora[win_start..]
+            .find("\n}\n")
+            .expect("unterminated rx_window in leviculum-nrf/src/lora.rs");
+    let window = &lora[win_start..win_end];
     assert!(
-        matches!((outgoing, config), (Some(o), Some(c)) if o < c),
-        "the idle select in leviculum-nrf/src/lora.rs no longer waits on \
-         `outgoing_rx.receive()` then `config_rx.receive()`; the deferring arms \
-         below are identified by that order, and whether their events are paced \
-         from outside this loop has to be re-argued. {DEFERRAL_HAND_CHECK}"
+        window.contains("config_rx.ready_to_receive()"),
+        "rx_window in leviculum-nrf/src/lora.rs no longer waits on \
+         `config_rx.ready_to_receive()`; whether its deferring arm is entered on \
+         an event paced from outside this loop has to be re-argued. \
+         {DEFERRAL_HAND_CHECK}"
+    );
+    assert!(
+        window.contains("if !config_rx.is_empty() {"),
+        "rx_window arms a window even when a config is already waiting, so one \
+         config push can now reach the deferral once per window instead of once. \
+         {DEFERRAL_HAND_CHECK}"
+    );
+    let window_sites = transmit_deferral_sites(window);
+    assert_eq!(
+        window_sites.as_slice(),
+        ["Config"],
+        "the transmit-deferral sites in rx_window changed: expected [\"Config\"], \
+         found {window_sites:?}. It is entered on the host's radio-config push, \
+         paced by the host's console. {DEFERRAL_HAND_CHECK}"
+    );
+    let window_arm = window
+        .find("Either::Second(()) =>")
+        .expect("rx_window has no config arm to defer in");
+    assert!(
+        window_arm
+            < window
+                .find("disarm_rx_for_tx(")
+                .expect("rx_window's deferral disappeared"),
+        "rx_window defers before its config arm, i.e. on the reception path, \
+         which this loop paces itself. {DEFERRAL_HAND_CHECK}"
     );
 
-    let mut accounted = 0;
-    for (n, (marker, want, paced_by)) in ARMS.iter().enumerate() {
-        let start = sole_index(&lora, marker);
-        let end = match ARMS.get(n + 1) {
-            Some((next, _, _)) => sole_index(&lora, next),
-            None => lora.len(),
-        };
-        let found = transmit_deferral_sites(&lora[start..end]);
-        accounted += found.len();
-        assert_eq!(
-            found.as_slice(),
-            *want,
-            "the transmit-deferral sites in the `{marker}` arm of \
-             leviculum-nrf/src/lora.rs changed: expected {want:?}, found {found:?}. \
-             That arm is {paced_by}. {DEFERRAL_HAND_CHECK}"
-        );
-    }
+    // Region 2: the idle select, which now carries only what is peculiar to
+    // that one window — the daemon's outgoing queue.
+    let idle = &lora[sole_index(&lora, "let idle = select(")..];
+    assert!(
+        idle.contains("outgoing_rx.receive()"),
+        "the idle select in leviculum-nrf/src/lora.rs no longer waits on \
+         `outgoing_rx.receive()`; whether its deferring arm is entered on an \
+         event paced from outside this loop has to be re-argued. \
+         {DEFERRAL_HAND_CHECK}"
+    );
+    let idle_sites = transmit_deferral_sites(idle);
+    assert_eq!(
+        idle_sites.as_slice(),
+        ["Select"],
+        "the transmit-deferral sites in the idle select changed: expected \
+         [\"Select\"], found {idle_sites:?}. That arm is the daemon's outgoing \
+         queue, paced by the host's traffic. {DEFERRAL_HAND_CHECK}"
+    );
+    let idle_arm = idle
+        .find("Either::Second(data) =>")
+        .expect("the idle select has no outgoing arm to defer in");
+    assert!(
+        idle_arm
+            < idle
+                .find("disarm_rx_for_tx(")
+                .expect("the idle select's deferral disappeared"),
+        "the idle select defers before its outgoing arm, i.e. on the reception \
+         path, which this loop paces itself. {DEFERRAL_HAND_CHECK}"
+    );
 
-    // And nothing defers outside those arms: a call in a helper, or in the
-    // transmit path proper, is spent at a cadence this test never looked at.
+    // And nothing defers outside those two regions: a call in another helper,
+    // or in the transmit path proper, is spent at a cadence this test never
+    // looked at.
     let all = transmit_deferral_sites(&lora);
     assert_eq!(
         all.len(),
-        accounted,
-        "leviculum-nrf/src/lora.rs defers a transmit outside the idle select's \
-         arms: {all:?} over the whole file against {accounted:?} inside the arms. \
-         {DEFERRAL_HAND_CHECK}"
+        window_sites.len() + idle_sites.len(),
+        "leviculum-nrf/src/lora.rs defers a transmit outside rx_window's config \
+         arm and the idle select's outgoing arm: {all:?} over the whole file \
+         against {:?} inside them. {DEFERRAL_HAND_CHECK}",
+        window_sites.len() + idle_sites.len()
     );
 }
 
