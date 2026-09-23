@@ -60,7 +60,7 @@ async fn rust_client_installs_path_from_python_announce() {
     let dest_hash = parse_dest_hash(&dest_info.hash);
 
     // Build the Rust client with enable_transport(false), exactly as
-    // `lnstest selftest` does at `leviculum-cli/src/selftest.rs:1038`.
+    // `lnstest selftest` does at `leviculum-cli/src/selftest.rs:1200`.
     let storage = tempfile::tempdir().expect("tempdir");
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(false)
