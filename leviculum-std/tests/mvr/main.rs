@@ -38,13 +38,21 @@ pub mod harness;
 /// in `leviculum-nrf`'s dependency on `leviculum-lxmf`, whose comment
 /// says why: encrypted payloads do not compress).
 ///
-/// Arming is global and this crate's tests run with `--test-threads=1`
-/// (the `mvr` recipe), so exactly one test is inside the window at a
-/// time. Unarmed the cost is one relaxed atomic load per allocation,
-/// which every other mvr pays and none of them can see.
+/// Arming is per THREAD, not per process, for the reason the crate's other
+/// allocator seam already gives (`leviculum-std/src/rpc/connection.rs`,
+/// `alloc_probe`): libtest runs this binary's tests in parallel in one
+/// process, so process-global counters fold every other test's allocations
+/// into the measurement. This module was global and leaned on
+/// `--test-threads=1`, which the `mvr` Justfile recipe passes and
+/// `cargo test --workspace` — the gate, and the nightly's `just complete` —
+/// does not: `cargo test -p leviculum-std --test mvr pn_serve` measured
+/// `board_peak` at 29 842 B alone and at 31 922 B and 39 059 B beside its
+/// two siblings, against a 33 238 B model. Unarmed the cost is one
+/// thread-local read per allocation, which every other mvr pays and none of
+/// them can see.
 pub mod alloc_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::cell::Cell;
 
     /// The board heap the measurement is for
     /// (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`). A single block
@@ -52,80 +60,122 @@ pub mod alloc_probe {
     /// doc.
     pub const BLOCK_CEILING_BYTES: usize = 32 * 1024;
 
-    pub static LIVE: AtomicIsize = AtomicIsize::new(0);
-    pub static PEAK: AtomicIsize = AtomicIsize::new(0);
-    pub static MAXBLOCK: AtomicIsize = AtomicIsize::new(0);
-    static ARMED: AtomicBool = AtomicBool::new(false);
+    thread_local! {
+        /// Whether this thread is inside a measurement window.
+        ///
+        /// All four cells are `const`-initialised and `Drop`-free on purpose:
+        /// a thread-local that needed lazy initialisation or a destructor
+        /// would allocate from inside the allocator.
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        /// Counted bytes this thread was handed and has not returned.
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        /// High-water mark of [`LIVE`] since arming.
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+        /// Largest single counted block since arming.
+        static MAXBLOCK: Cell<isize> = const { Cell::new(0) };
+    }
 
     /// Whether a block of this layout is one the board could hold.
     fn counted(layout: Layout) -> bool {
         layout.size() <= BLOCK_CEILING_BYTES
     }
 
+    /// Book one counted allocation against this thread's window.
+    ///
+    /// `try_with` rather than `with` throughout: a thread tearing down can
+    /// still allocate after its thread-locals are gone, and a panic from
+    /// inside the global allocator would abort the process.
+    fn record(layout: Layout) {
+        if !counted(layout) || !armed() {
+            return;
+        }
+        let size = layout.size() as isize;
+        let _ = LIVE.try_with(|live| {
+            let now = live.get() + size;
+            live.set(now);
+            let _ = PEAK.try_with(|peak| {
+                if now > peak.get() {
+                    peak.set(now);
+                }
+            });
+        });
+        let _ = MAXBLOCK.try_with(|block| {
+            if size > block.get() {
+                block.set(size);
+            }
+        });
+    }
+
+    fn release(layout: Layout) {
+        if !counted(layout) || !armed() {
+            return;
+        }
+        let _ = LIVE.try_with(|live| live.set(live.get() - layout.size() as isize));
+    }
+
+    fn armed() -> bool {
+        ARMED.try_with(Cell::get).unwrap_or(false)
+    }
+
     pub struct Counting;
 
+    // SAFETY: every method forwards to `System` with the layout it arrived
+    // with; `record` and `release` only touch `Cell`s that never allocate.
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let ptr = unsafe { System.alloc(layout) };
-            if counted(layout) && ARMED.load(Ordering::Relaxed) && !ptr.is_null() {
-                let live = LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed)
-                    + layout.size() as isize;
-                PEAK.fetch_max(live, Ordering::Relaxed);
-                MAXBLOCK.fetch_max(layout.size() as isize, Ordering::Relaxed);
+            if !ptr.is_null() {
+                record(layout);
             }
             ptr
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            if counted(layout) && ARMED.load(Ordering::Relaxed) {
-                LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
-            }
+            release(layout);
             unsafe { System.dealloc(ptr, layout) }
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             let ptr = unsafe { System.alloc_zeroed(layout) };
-            if counted(layout) && ARMED.load(Ordering::Relaxed) && !ptr.is_null() {
-                let live = LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed)
-                    + layout.size() as isize;
-                PEAK.fetch_max(live, Ordering::Relaxed);
-                MAXBLOCK.fetch_max(layout.size() as isize, Ordering::Relaxed);
+            if !ptr.is_null() {
+                record(layout);
             }
             ptr
         }
     }
 
-    /// An armed measurement window. Disarms when dropped, so a panicking
-    /// test cannot leave the counter running into the next one.
+    /// An armed measurement window on the calling thread. Disarms when
+    /// dropped, so a panicking test cannot leave the counter running into
+    /// the next test this thread picks up.
     pub struct Probe {
         _private: (),
     }
 
     impl Probe {
         pub fn armed() -> Self {
-            LIVE.store(0, Ordering::SeqCst);
-            PEAK.store(0, Ordering::SeqCst);
-            MAXBLOCK.store(0, Ordering::SeqCst);
-            ARMED.store(true, Ordering::SeqCst);
+            LIVE.with(|live| live.set(0));
+            PEAK.with(|peak| peak.set(0));
+            MAXBLOCK.with(|block| block.set(0));
+            ARMED.with(|armed| armed.set(true));
             Self { _private: () }
         }
 
         /// The high-water mark of live bytes since arming, in bytes the
         /// program asked for — no allocator block headers, no rounding.
         pub fn peak(&self) -> usize {
-            PEAK.load(Ordering::SeqCst).max(0) as usize
+            PEAK.with(Cell::get).max(0) as usize
         }
     }
 
     /// The largest single block counted since arming — the check that the
     /// ceiling above is excluding only what it claims to.
     pub fn largest_block() -> usize {
-        MAXBLOCK.load(Ordering::SeqCst).max(0) as usize
+        MAXBLOCK.with(Cell::get).max(0) as usize
     }
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            ARMED.store(false, Ordering::SeqCst);
+            ARMED.with(|armed| armed.set(false));
         }
     }
 }
