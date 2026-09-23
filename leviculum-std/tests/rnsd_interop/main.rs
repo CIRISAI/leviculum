@@ -57,6 +57,7 @@ mod link_keepalive_close_tests;
 mod link_manager_tests;
 mod link_packet_interop_tests;
 mod link_tests;
+mod lncp_identify_loss_interop_tests;
 mod lnomad_fetch_interop_tests;
 mod loadtest_tcp_hub_tests;
 mod local_client_announce_latency_ab;
