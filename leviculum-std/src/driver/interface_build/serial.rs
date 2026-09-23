@@ -67,6 +67,15 @@ pub(super) fn build(
     // surviving to the airtime arithmetic where a `bandwidth = 0` divides by
     // zero and kills the daemon at startup (Codeberg #274). A plain serial
     // pipe names no frequency and skips this.
+    //
+    // All five bounds come along, not just the bandwidth that #274 was about:
+    // tuning range, the ten LoRa bandwidths, the RNode wire field's 0..=37,
+    // SF and CR. They are capability and wire-format bounds, not regulatory
+    // ones, so refusing them is arithmetic rather than the paternalism the
+    // warn-never-refuse policy forbids, and the same `[radio]` block now
+    // means the same thing whether it drives an RNode or an LNode (Codeberg
+    // #352). `capability_refusals_are_untouched_by_the_regulatory_guard` in
+    // the parent module drives this shape for every one of the five.
     if let Some(rc) = &radio_config {
         let frequency = u32::try_from(rc.frequency).map_err(|_| {
             Error::Config(format!(

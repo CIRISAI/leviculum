@@ -662,18 +662,6 @@ mod tests {
         ]
     }
 
-    /// The shapes that validate device capability at build time — the RNode
-    /// family, both of them, via `leviculum_core::rnode::validate_config`.
-    /// `SerialInterface` is absent because it validates nothing: it resolves
-    /// its radio block and hands it to the modem. See
-    /// `capability_refusals_are_untouched_by_the_regulatory_guard`.
-    fn rnode_shapes(radio: &Radio) -> [(&'static str, InterfaceConfig); 2] {
-        [
-            ("RNodeInterface", radio.single()),
-            ("RNodeMultiInterface", radio.multi()),
-        ]
-    }
-
     /// One regulatory edge case: the block, the substring the warning it must
     /// provoke carries, and the shapes that can carry it.
     ///
@@ -767,13 +755,17 @@ mod tests {
     /// carry is arithmetic, not radio law, and must survive the guard above
     /// intact — a guard that also forbade these would be worse than none.
     ///
-    /// Driven over `rnode_shapes`, not `radio_shapes`: `SerialInterface` has
-    /// no capability validation to pin. It resolves its radio block and hands
-    /// it to the LNode firmware without calling `validate_config`, so all five
-    /// cases below build there. That is a gap in *this* half — an unbuildable
-    /// PHY reaches the modem instead of failing daemon startup — and it is a
-    /// separate concern from the regulatory policy, so it is recorded rather
-    /// than fixed here. The lawful control below does cover all three shapes.
+    /// Driven over `radio_shapes`, every shape a radio block can arrive in.
+    /// `SerialInterface` was outside this half while it validated nothing:
+    /// it resolved its radio block and handed it to the LNode firmware, so
+    /// the same `[radio]` keys were checked when they drove an RNode and
+    /// unchecked when they drove an LNode, and an unbuildable PHY reached the
+    /// board instead of failing at daemon startup (Codeberg #352). The
+    /// builder has called `leviculum_core::rnode::validate_config` since
+    /// 3d40594b, which landed it for the `bandwidth = 0` of #274 and brought
+    /// the other four bounds with it — unremarked, and therefore unpinned for
+    /// two weeks while this comment still said the gap was open. Driving the
+    /// shape here is what makes the claim checkable rather than prose.
     #[tokio::test]
     async fn capability_refusals_are_untouched_by_the_regulatory_guard() {
         let cases: [(&str, Radio); 5] = [
@@ -825,7 +817,7 @@ mod tests {
         }
 
         for (case, radio) in cases {
-            for (idx, (shape, config)) in rnode_shapes(&radio).into_iter().enumerate() {
+            for (idx, (shape, config)) in radio_shapes(&radio).into_iter().enumerate() {
                 assert!(
                     build_interface(idx, &config, &owner.ctx(), &AutoPeerCount::default()).is_err(),
                     "{shape}: {case} is a capability limit, not radio law, and must \
