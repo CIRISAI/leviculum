@@ -539,14 +539,156 @@ fn the_funded_cap_is_the_inverse_of_the_peak() {
 /// cost (#384 B1) doubled the affordable cap and it is still nothing:
 /// the plan as it stands funds no useful serve at all.
 ///
-/// (`budget_slack`, `leviculum-nrf/src/heap_census.rs` -- 880 B is
+/// (`budget_slack`, `leviculum-nrf/src/heap_census.rs` -- 784 B is
 /// HEAP_SIZE 98 304 less the T114's node box 31 008, role 21 120,
-/// reserve 18 848, four BLE sessions at 3 948 and four links at 2 664.)
+/// reserve 18 848, four BLE sessions at 3 948 and four links at 2 664.
+/// The board printed exactly that on 2026-09-23, six seconds before it
+/// died serving a fetch; a const probe of this tree's own
+/// `budget_serve_cap` on the T114's `NodeCore` prints 784 and 88.)
 #[test]
 fn todays_slack_funds_no_useful_serve_cap() {
-    let cap = serve_cap_for_peak(880, BOARD_RESOURCE_SDU);
-    assert!(
-        cap < 120,
-        "880 B of slack must not be read as affording a message-sized serve (got {cap})"
+    let cap = serve_cap_for_peak(784, BOARD_RESOURCE_SDU);
+    assert_eq!(
+        cap, 88,
+        "the T114's own boot slack must fund the cap its boot line prints"
     );
+    assert!(
+        cap < crate::constants::LXMF_OVERHEAD,
+        "784 B of slack must not be read as affording a message-sized serve (got {cap})"
+    );
+}
+
+/// The bound the funded cap buys: a fetch past it is answered with a
+/// subset, and the rest is still there to be fetched next round.
+///
+/// This is the whole difference between the board of 2026-09-23 and the
+/// board after it: the client asked for 24 messages, the node held 24,
+/// and what it could not afford to send it also did not die of.
+#[test]
+fn a_funded_cap_serves_a_subset_and_keeps_the_rest() {
+    // 18 of the field's 24 messages is what 30 380 B of heap funds
+    // (`serve_cap_for_peak(30_380)` = 4 954 B); this pins the same
+    // mechanic at a cap small enough to read.
+    let cap = 24 + 3 * (160 + STAMP_SIZE + 16);
+    let mut node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            sync_limit_kb: 8,
+            serve_cap_bytes: Some(cap),
+            ..PropagationNodeConfig::default()
+        },
+    );
+    let wants: Vec<TransientId> = (0..8u8)
+        .map(|seed| {
+            accepted_id(&node.handle_upload(&envelope_sized(7, seed, 160), 0, no_validation))
+        })
+        .collect();
+
+    let fetch = MessageGetRequest {
+        wants: Some(wants.clone()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+    };
+    let GetOutcome::Fetch {
+        response,
+        served,
+        purged,
+        ..
+    } = node
+        .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+
+    assert_eq!(served.len(), 3, "the cap funds three of the eight");
+    assert!(response.len() <= cap, "the response must fit the cap");
+    assert!(purged.is_empty(), "a fetch purges nothing by itself");
+    assert_eq!(node.store().len(), 8, "the five unserved are still stored");
+
+    // The unserved are the ones the next list offers, and a second fetch
+    // takes the next three: bounded serving, not refusal.
+    let rest: Vec<TransientId> = wants
+        .iter()
+        .copied()
+        .filter(|id| !served.contains(id))
+        .collect();
+    let second = MessageGetRequest {
+        wants: Some(rest),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+    };
+    let GetOutcome::Fetch {
+        served: served_two, ..
+    } = node
+        .handle_get(&second.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(served_two.len(), 3, "the next round serves the next three");
+    assert!(
+        served_two.iter().all(|id| !served.contains(id)),
+        "no message is served twice"
+    );
+}
+
+/// The board's honest number today is 88 B, which serves nothing. What
+/// that must NOT be is a refusal, a lost message, or a purge: the node
+/// answers with an empty list of messages and keeps every one of them.
+#[test]
+fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
+    let mut node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            sync_limit_kb: 8,
+            serve_cap_bytes: Some(88),
+            ..PropagationNodeConfig::default()
+        },
+    );
+    let wants: Vec<TransientId> = (0..4u8)
+        .map(|seed| accepted_id(&node.handle_upload(&envelope(7, seed), 0, no_validation)))
+        .collect();
+
+    let fetch = MessageGetRequest {
+        wants: Some(wants),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(100_000)),
+    };
+    let GetOutcome::Fetch {
+        response,
+        served,
+        served_bytes,
+        purged,
+    } = node
+        .handle_get(&fetch.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert!(served.is_empty(), "88 B funds no message");
+    assert_eq!(served_bytes, 0);
+    assert!(purged.is_empty());
+    assert_eq!(node.store().len(), 4, "nothing served is nothing lost");
+    // A well-formed, decodable empty answer -- not an error, not nil.
+    assert!(
+        matches!(
+            MessageGetResponse::decode(&response),
+            Ok(MessageGetResponse::Messages(ref m)) if m.is_empty()
+        ),
+        "the short answer must still be a valid MessageGetResponse"
+    );
+    // And the list still offers all four, so the client knows they exist.
+    let list = MessageGetRequest {
+        wants: None,
+        haves: None,
+        transfer_limit_kb: None,
+    };
+    let GetOutcome::List { count, .. } = node
+        .handle_get(&list.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("an empty request is the list form");
+    };
+    assert_eq!(count, 4, "the node still offers what it cannot yet serve");
 }

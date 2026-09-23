@@ -29,8 +29,8 @@ use leviculum_core::{
     RequestError, RequestPolicy,
 };
 use leviculum_lxmf::{
-    GetOutcome, MemoryPropagationStore, PropagationNode, PropagationNodeConfig, UploadOutcome,
-    MESSAGE_GET_PATH,
+    GetOutcome, MemoryPropagationStore, PropagationNode, PropagationNodeConfig, PropagationStore,
+    StoredMessage, UploadOutcome, MESSAGE_GET_PATH,
 };
 use leviculum_std::interfaces::hdlc::{DeframeResult, Deframer};
 
@@ -415,5 +415,191 @@ async fn python_clients_upload_and_drain_through_our_propagation_node() {
         host.accepted.len(),
         1,
         "exactly one distinct upload accepted"
+    );
+}
+
+/// The reference client collects a mailbox our node can only serve in
+/// parts — #388's bounded serve, measured against the real
+/// `LXMRouter` instead of argued from its source.
+///
+/// Why this has to be measured: the board's funded serve cap
+/// (`HEAP_BUDGET serve_cap=`, `leviculum-nrf/src/heap_census.rs`) is
+/// smaller than what a client lists and asks for, so our node answers a
+/// 3-message request with 1 message. Nothing in the protocol forbids
+/// that — the reference itself skips messages that do not fit its own
+/// limit (`reference/LXMF/LXMF/LXMRouter.py:1547`) — but what the CLIENT
+/// does with a response shorter than its request is a property of the
+/// client, not of the protocol, and only the client can answer it:
+///
+/// * `message_get_response` iterates whatever arrived
+///   (`:1624-1627`), builds `haves` from the messages it actually
+///   ingested, and confirms only those (`:1632-1638`);
+/// * it then declares the round `PR_COMPLETE` with
+///   `propagation_transfer_last_result = len(response)` (`:1640-1643`)
+///   — a short answer is a finished round, not a failure and not a
+///   retry;
+/// * the next round lists again and puts everything it still lacks back
+///   into `wants` (`message_list_response`, `:1576-1596`).
+///
+/// So the unserved are neither lost nor re-requested forever: they are
+/// collected on the next round. This test is that sentence, run.
+#[tokio::test]
+async fn a_python_client_collects_a_capped_mailbox_over_several_rounds() {
+    const MESSAGES: usize = 3;
+
+    let hub = TestDaemon::start().await.expect("start hub daemon");
+    let recipient = TestDaemon::start().await.expect("start recipient daemon");
+    recipient
+        .add_client_interface("127.0.0.1", hub.rns_port(), Some("ToHub"))
+        .await
+        .expect("connect recipient to hub");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    hub.lxmf_init("py-sender", None).await.expect("sender init");
+    let recipient_info = recipient
+        .lxmf_init("py-recipient", None)
+        .await
+        .expect("recipient init");
+    recipient.lxmf_announce().await.expect("recipient announce");
+
+    let mut host = PnHost::new(&hub).await;
+    let pn_hash_hex = hex::encode(host.destination_hash.as_bytes());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        host.announce().await;
+        host.pump_until(Duration::from_secs(2), |_| false).await;
+        let sender_ok = hub.lxmf_set_propagation_node(&pn_hash_hex).await.is_ok();
+        let recipient_ok = recipient
+            .lxmf_set_propagation_node(&pn_hash_hex)
+            .await
+            .is_ok();
+        if sender_ok && recipient_ok {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python clients must learn our propagation announce"
+        );
+    }
+
+    // Three messages into the mailbox.
+    for index in 0..MESSAGES {
+        let content = format!("capped mailbox message {index}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match hub
+                .lxmf_send(
+                    &recipient_info.delivery_hash,
+                    "propagated",
+                    content.as_bytes(),
+                    b"pn cap",
+                    None,
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    host.pump_until(Duration::from_millis(500), |_| false).await;
+                }
+                Err(e) => panic!("sender could not address the recipient: {e:?}"),
+            }
+        }
+        let stored = host
+            .pump_until(Duration::from_secs(30), |h| {
+                h.role.store().len() == index + 1
+            })
+            .await;
+        assert!(stored, "upload {index} must be appended to our store");
+    }
+
+    // The cap: one message per round, sized from what is actually in the
+    // store rather than guessed, in the same accounting the serve loop
+    // uses (24 B up front, stored body + 16 B each).
+    let mut largest = 0usize;
+    host.role
+        .store()
+        .for_each(&mut |meta: &StoredMessage| {
+            largest = largest.max(meta.size as usize);
+        })
+        .expect("the store can be walked");
+    let cap = 24 + largest + 16;
+    host.role.set_serve_cap_bytes(Some(cap));
+
+    // Round after round, exactly as the client drives it: each one is
+    // PR_COMPLETE, and each one brings what the cap allowed.
+    let mut rounds = 0usize;
+    let mut received = Vec::new();
+    while received.len() < MESSAGES {
+        rounds += 1;
+        assert!(
+            rounds <= MESSAGES + 2,
+            "a capped mailbox must drain in rounds, not spin: {} of {MESSAGES} after {rounds}",
+            received.len()
+        );
+        recipient
+            .lxmf_request_from_propagation_node()
+            .await
+            .expect("recipient sync");
+        let before = received.len();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        loop {
+            received = recipient.lxmf_get_received().await.expect("received");
+            if received.len() > before {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "round {rounds} delivered nothing: still {} of {MESSAGES}",
+                received.len()
+            );
+            host.pump_until(Duration::from_millis(300), |_| false).await;
+        }
+        // The client calls a short answer a completed sync
+        // (LXMRouter.py:1640-1643), not a failure.
+        let (state, last_result) = recipient
+            .lxmf_propagation_transfer_state()
+            .await
+            .expect("transfer state");
+        assert_eq!(state, 0x07, "PR_COMPLETE after round {rounds}");
+        assert_eq!(
+            last_result,
+            Some(1),
+            "the cap funds one message per round, and the client says so"
+        );
+        // Let the confirm-purge round land before the next list.
+        host.pump_until(Duration::from_secs(5), |h| {
+            h.role.store().len() == MESSAGES - received.len()
+        })
+        .await;
+    }
+
+    assert!(
+        rounds > 1,
+        "the point of the test is that one round was not enough"
+    );
+    assert_eq!(received.len(), MESSAGES, "every message must arrive");
+    let mut contents: Vec<String> = received
+        .iter()
+        .map(|message| String::from_utf8_lossy(&message.content).into_owned())
+        .collect();
+    contents.sort();
+    let expected: Vec<String> = (0..MESSAGES)
+        .map(|index| format!("capped mailbox message {index}"))
+        .collect();
+    assert_eq!(contents, expected, "nothing lost, nothing duplicated");
+
+    let emptied = host
+        .pump_until(Duration::from_secs(20), |h| h.role.store().is_empty())
+        .await;
+    assert!(
+        emptied,
+        "the store must be empty after the last confirmed fetch, {} left",
+        host.role.store().len()
+    );
+    assert_eq!(
+        host.accepted.len(),
+        MESSAGES,
+        "exactly {MESSAGES} distinct uploads accepted"
     );
 }

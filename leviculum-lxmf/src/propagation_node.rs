@@ -84,7 +84,7 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///
 /// The serve loop accounts 24 B up front and `body + 16` per served
 /// message, where `body` is the *stamped* length, and stops strictly below
-/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:595`).
+/// the cap (`cumulative_size`, `leviculum-lxmf/src/propagation_node.rs:789`).
 /// What ships is the unstamped body, `STAMP_SIZE` (32 B) shorter, inside
 /// `msgpack [bin, ...]`: at most 5 B of array header and 5 B of `bin`
 /// header per message. Each accounted term therefore dominates its wire
@@ -230,6 +230,27 @@ pub struct PropagationNodeConfig {
     pub name: Option<Vec<u8>>,
     /// Message expiry. [`MESSAGE_EXPIRY_SECS`] unless a test shortens it.
     pub message_expiry_secs: u64,
+    /// Heap-funded bound on ONE fetch response, in accounted bytes — the
+    /// same accounting `sync_limit_kb` is applied in, and always the
+    /// tighter of the two that bites.
+    ///
+    /// `None` on a host, where the announced sync limit is the only
+    /// bound. A board sets it to what its heap plan funds
+    /// ([`serve_cap_for_peak`] of its boot budget's slack,
+    /// `heap_census::budget_serve_cap`, `leviculum-nrf`): serving a fetch
+    /// costs several times the response it ships
+    /// ([`serve_peak_bytes`]), and a T114 died in exactly that transient
+    /// on 2026-09-23 while answering a 24-message fetch it had already
+    /// read out of its store.
+    ///
+    /// It bounds serving, it does not refuse it: what does not fit this
+    /// round stays in the store, is purged by nothing, and is listed
+    /// again on the client's next sync round — which is how the
+    /// reference client collects it (`message_get_response` ingests the
+    /// short response, confirms only what it got, and the next
+    /// `message_list_response` puts the rest back in `wants`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:1607-1644` and `:1576-1596`).
+    pub serve_cap_bytes: Option<usize>,
 }
 
 impl Default for PropagationNodeConfig {
@@ -242,6 +263,7 @@ impl Default for PropagationNodeConfig {
             peering_cost: 0,
             name: None,
             message_expiry_secs: MESSAGE_EXPIRY_SECS,
+            serve_cap_bytes: None,
         }
     }
 }
@@ -452,6 +474,18 @@ impl<S: PropagationStore> PropagationNode<S> {
 
     pub fn config(&self) -> &PropagationNodeConfig {
         &self.config
+    }
+
+    /// Re-bound what one fetch may serve
+    /// ([`PropagationNodeConfig::serve_cap_bytes`]) after construction.
+    ///
+    /// The funded cap is not a constant of the build: it is a property of
+    /// the heap the node is running on, and a node that learns its
+    /// budget later (or whose free heap moves) sets it here rather than
+    /// rebuilding the role. Changing it loses nothing — the bound
+    /// decides what this round serves, never what the store keeps.
+    pub fn set_serve_cap_bytes(&mut self, cap: Option<usize>) {
+        self.config.serve_cap_bytes = cap;
     }
 
     /// The minimum stamp value an upload must prove:
@@ -719,6 +753,18 @@ impl<S: PropagationStore> PropagationNode<S> {
             TransferLimit::Float(kb) => kb * 1000.0,
         });
         let our_limit = (self.config.sync_limit_kb * 1000) as f64;
+        // A third cap, tighter than both when a node's heap plan funds
+        // less than it announces (`serve_cap_bytes`): serving a response
+        // costs several times its length ([`serve_peak_bytes`]), and a
+        // board that answers past what that plan funds dies in the
+        // transient instead of answering. It bounds the same accounted
+        // sum the other two bound, so the three compose by `min` and the
+        // dominance argument at [`serve_peak_bytes`] carries over
+        // unchanged.
+        let our_limit = match self.config.serve_cap_bytes {
+            Some(funded) => our_limit.min(funded as f64),
+            None => our_limit,
+        };
         let limit = client_limit.map_or(our_limit, |client| client.min(our_limit));
 
         // Overheads exactly as the reference budgets them (:1532-1533).
