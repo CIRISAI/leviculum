@@ -409,3 +409,138 @@ async fn lncp_recovers_from_a_dropped_link_identify() {
         "rncp must reassemble the payload byte for byte. {evidence}"
     );
 }
+
+/// Reference arm, measured not read: Python's `rncp` as the sender through the
+/// **same** proxy, so the only thing that differs between the arms is the stack
+/// under test.
+///
+/// `rncp.py:714` calls `link.identify(identity)` and `rncp.py:717` constructs
+/// the `RNS.Resource` with no wait and no acknowledgement in between, because
+/// the protocol has no identify acknowledgement. A Python sender that loses
+/// that frame therefore fails exactly the way ours did on 2026-09-23 06:18.
+/// That is the reference's limit, not a behaviour a peer depends on — which is
+/// what makes the recovery in `cp.rs` a deviation the rule permits rather than
+/// an incompatibility.
+///
+/// Ignored by default: it is a measurement, not a gate. Run it with
+///
+/// ```sh
+/// cargo test -p leviculum-std --test rnsd_interop \
+///     python_rncp_sender_fails_on_the_same_dropped_identify -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "reference measurement: Python rncp as the sender through the same proxy"]
+async fn python_rncp_sender_fails_on_the_same_dropped_identify() {
+    if !python_rns_available() {
+        eprintln!("skipping reference arm: python3 + vendored RNS unavailable");
+        return;
+    }
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = crate::common::temp_storage("rncp_identify_loss", &format!("run{test_id}"));
+
+    // The sender's identity is seeded here so the listener's -a can name it
+    // before either process starts, exactly as in the Rust arm.
+    let sender_identity = Identity::generate(&mut OsRng);
+    let sender_hash_hex = hex::encode(sender_identity.hash());
+    let sender_config_dir = tmp.path().join("rncp-sender-config");
+    std::fs::create_dir_all(&sender_config_dir).expect("create sender config dir");
+    let sender_identity_path = sender_config_dir.join("rncp_identity");
+    std::fs::write(
+        &sender_identity_path,
+        sender_identity
+            .private_key_bytes()
+            .expect("private key bytes"),
+    )
+    .expect("write sender identity");
+
+    let (ports, _alloc) = find_available_ports::<2>().await.expect("allocate ports");
+    let (python_port, proxy_port) = (ports[0], ports[1]);
+
+    let (rncp, dest_hash) = spawn_rncp_listener(python_port, &sender_hash_hex, 5, tmp.path());
+    let dest_hash_hex = hex::encode(dest_hash.as_bytes());
+
+    let log = Arc::new(Mutex::new(ProxyLog::default()));
+    spawn_identify_dropping_proxy(proxy_port, python_port, Arc::clone(&log)).await;
+
+    let sender_config = format!(
+        "[reticulum]\n\
+         \x20 enable_transport = no\n\
+         \x20 share_instance = no\n\
+         \x20 panic_on_interface_error = no\n\
+         \n\
+         [logging]\n\
+         \x20 loglevel = 5\n\
+         \n\
+         [interfaces]\n\
+         \x20 [[Identify Loss TCP Client]]\n\
+         \x20   type = TCPClientInterface\n\
+         \x20   enabled = yes\n\
+         \x20   target_host = 127.0.0.1\n\
+         \x20   target_port = {proxy_port}\n"
+    );
+    std::fs::write(sender_config_dir.join("config"), sender_config).expect("write sender config");
+
+    let payload: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+    let file_path = tmp.path().join("identify-loss.bin");
+    std::fs::write(&file_path, &payload).expect("write payload");
+
+    // The listener announces every 5 s and there is no transport node, so the
+    // sender's own path wait (rncp.py:658-664) is what covers the gap.
+    let output = tokio::task::spawn_blocking({
+        let sender_config_dir = sender_config_dir.clone();
+        let sender_identity_path = sender_identity_path.clone();
+        let file_path = file_path.clone();
+        let dest_hash_hex = dest_hash_hex.clone();
+        move || {
+            // Hard-capped: with -S the sender's path and status waits
+            // (rncp.py:659-664, :724-729) spin without sleeping, so a sender
+            // that never concludes would block this test forever. 150 s is
+            // well past the 90 s -w budget it is given.
+            Command::new("timeout")
+                .arg("150")
+                .arg("python3")
+                .arg(RNCP_PY)
+                .arg("--config")
+                .arg(&sender_config_dir)
+                .arg("-i")
+                .arg(&sender_identity_path)
+                .arg("-S")
+                .arg("-w")
+                .arg("90")
+                .arg(&file_path)
+                .arg(&dest_hash_hex)
+                .env("PYTHONPATH", VENDOR_RNS_ROOT)
+                .output()
+                .expect("run rncp sender")
+        }
+    })
+    .await
+    .expect("rncp sender join");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).replace('\n', " | ");
+    let evidence = {
+        let log = log.lock().expect("proxy log");
+        format!(
+            "proxy: {} identify frame(s) dropped, contexts to python={:02x?}, to node={:02x?}",
+            log.dropped_identify, log.to_python, log.to_node,
+        )
+    };
+    eprintln!(
+        "REFERENCE rncp exit={:?} stdout=\"{stdout}\" {evidence}",
+        output.status.code()
+    );
+
+    assert!(
+        !output.status.success(),
+        "the reference sender recovered where ours does not; stop and re-read the \
+         hypothesis before changing lncp. exit={:?} stdout=\"{stdout}\" {evidence}\n\
+         rncp listener log: {}",
+        output.status.code(),
+        std::fs::read_to_string(rncp.config_dir.join("rncp.log")).unwrap_or_default(),
+    );
+    assert!(
+        !rncp.save_dir.join("identify-loss.bin").is_file(),
+        "the reference sender delivered the file; stop and re-read the hypothesis. {evidence}"
+    );
+}
