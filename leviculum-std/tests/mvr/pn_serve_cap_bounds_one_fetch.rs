@@ -31,22 +31,25 @@
 //! response whose modelled transient is 33 238 B — 2 858 B more than the
 //! heap the board had, which is the panic, in arithmetic.
 //!
-//! **Two tests, two rules.** The first fixes the MODEL's inverse: given
-//! a heap, what response does it fund. The second fixes what the board
-//! actually serves to, which is that number less a margin for what can
-//! arrive while the serve runs
+//! **Three tests, three rules.** The first fixes the MODEL's inverse:
+//! given a heap, what response does it fund. The second fixes what the
+//! board actually serves to, which is that number less a margin for
+//! what can arrive while the serve runs
 //! ([`BOARD_SERVE_MARGIN_BYTES`], #388 order 138) — 2 540 B and nine
 //! messages where the bare model says 4 954 B and eighteen. Do not read
 //! the first test's 18 as a promise about a board: the margin-free cap
 //! is measured overrunning the same heap in
-//! `pn_serve_cap_survives_a_shrinking_heap`.
+//! `pn_serve_cap_survives_a_shrinking_heap`. The third fixes what the
+//! bound costs the CLIENT, which is the half a periculum cell asserts:
+//! the reference router performs exactly one fetch per sync, so a
+//! mailbox deeper than one cap needs as many syncs as it holds caps.
 //!
 //! **What it cannot prove:** that a real board survives it. Only a board
 //! can, and only the rig can run one; what this fixes is the size of
 //! what the board is allowed to try.
 
 use leviculum_lxmf::propagation::{
-    MessageGetRequest, PropagationUpload, TransferLimit, TransientId,
+    MessageGetRequest, MessageListResponse, PropagationUpload, TransferLimit, TransientId,
 };
 use leviculum_lxmf::propagation_node::{
     serve_cap_for_live_heap, serve_cap_for_peak, serve_largest_block_bytes, serve_peak_bytes,
@@ -397,4 +400,187 @@ served={} of {FIELD_MESSAGES} response={} peak={peak} block={block}",
         usize::from(FIELD_MESSAGES),
         "a bounded serve keeps every message it did not ship"
     );
+}
+
+/// One client sync drains one serve cap, and the hardware cell asks for
+/// twenty-four in one.
+///
+/// The bound the two tests above pin is a bound on ONE fetch. What a
+/// stock client sees is a bound on one SYNC, and they are the same
+/// number because the reference router issues exactly one fetch per
+/// sync: `message_list_response` builds `wants` from the list and sends
+/// a single `MESSAGE_GET_PATH`
+/// (`reference/LXMF/LXMF/LXMRouter.py:1576-1596`), and
+/// `message_get_response` ingests whatever came back, confirms it with a
+/// `[None, haves]` request, declares `PR_COMPLETE` and reports
+/// `propagation_transfer_last_result = len(request_receipt.response)`
+/// (`reference/LXMF/LXMF/LXMRouter.py:1622-1643`). There is no second
+/// round inside a sync and no re-request of the remainder: the count the
+/// caller reads is what that one fetch returned.
+///
+/// **Why this is written down here.** periculum's
+/// `lora_pn_board_offer_past_the_link` fills a board's mailbox with 24
+/// messages and closes on `lxmf_sync expect_count = 24` — one helper
+/// call to `request_messages_from_propagation_node`
+/// (`reference/LXMF/LXMF/LXMRouter.py:502`), one fetch, one count. On
+/// the 648650a3 firmware the board died in that fetch and the client
+/// reported `sync_failed_state_0xf2` (`PR_TRANSFER_FAILED`). With the
+/// bound in place it will not die — and it will not answer 24 either.
+/// The cell's step is the thing to change, to as many syncs as the
+/// mailbox holds caps, and this test is the number to change it to.
+///
+/// **What it would take to be one sync**, so the alternative is priced
+/// rather than dismissed. [`free_heap_for_one_sync`] searches for the
+/// free heap at which one fetch does serve all 24: **54 848 B**, against
+/// the 30 380 B the T114 had ([`FREE_AT_PANIC`]) and the 96 KiB
+/// [`BOARD_HEAP_BYTES`] it has in total. So it is inside the heap and
+/// nowhere near the moment — the board would have to be holding 24 468 B
+/// less than it was while still holding the role, the store adapters and
+/// its links, and the margin would still be spent the instant anything
+/// arrived. That is a capacity decision for the Lead
+/// (`SERVE_RESERVE_BYTES`, `leviculum-nrf/src/pn.rs`), not something a
+/// re-measurement will produce.
+#[test]
+fn one_client_sync_drains_one_serve_cap_and_the_field_needs_three() {
+    let live_cap = serve_cap_for_live_heap(
+        BOOT_CAP,
+        FREE_AT_PANIC,
+        LARGEST_AT_PANIC,
+        BOARD_SERVE_MARGIN_BYTES,
+        BOARD_RESOURCE_SDU,
+    );
+    let (mut role, _stored) = field_node(live_cap);
+    let mailbox = [7u8; 16];
+
+    // The client's own loop, one sync at a time: list what the node
+    // holds, ask for all of it, ingest what came back, confirm it.
+    let mut syncs = Vec::new();
+    let mut drained = 0usize;
+    while drained < usize::from(FIELD_MESSAGES) {
+        let GetOutcome::List { response, count } = role
+            .handle_get(&list_request(), &mailbox, 0)
+            .expect("the list request is well formed")
+        else {
+            panic!("an empty request is the list form");
+        };
+        assert_eq!(
+            count,
+            usize::from(FIELD_MESSAGES) - drained,
+            "the list offers everything the client has not confirmed"
+        );
+        let MessageListResponse::TransientIds(listed) = MessageListResponse::decode(&response)
+            .expect("the node's list is the reference's list form")
+        else {
+            panic!("the node must list ids, not an error");
+        };
+
+        let GetOutcome::Fetch { served, .. } = role
+            .handle_get(&fetch_for(&listed), &mailbox, 0)
+            .expect("the fetch is well formed")
+        else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        assert!(
+            !served.is_empty(),
+            "a sync that serves nothing never terminates: cap {live_cap} B"
+        );
+
+        // `message_get_response`'s confirmation, which is what deletes
+        // on the node (:1622-1638). Until it lands the records stay.
+        let confirm = MessageGetRequest {
+            wants: None,
+            haves: Some(served.clone()),
+            transfer_limit_kb: None,
+        }
+        .encode()
+        .expect("the confirmation is well formed");
+        let GetOutcome::Fetch { purged, .. } = role
+            .handle_get(&confirm, &mailbox, 0)
+            .expect("the confirmation is well formed")
+        else {
+            panic!("a haves-only request is a fetch outcome");
+        };
+        assert_eq!(purged.len(), served.len());
+
+        drained += served.len();
+        syncs.push(served.len());
+        assert!(syncs.len() <= 8, "the drain must terminate: {syncs:?}");
+    }
+
+    eprintln!(
+        "SERVE_SYNCS live_cap={live_cap} field={FIELD_MESSAGES} syncs={} counts={syncs:?} \
+one_sync_needs_free={:?}",
+        syncs.len(),
+        free_heap_for_one_sync()
+    );
+
+    // What the cell's `expect_count = 24` is compared against: the first
+    // sync's count, which is the cap's nine and not the field's 24.
+    assert_eq!(
+        syncs[0], 9,
+        "one sync returns one cap's worth; periculum's \
+         lora_pn_board_offer_past_the_link step 14 expects {FIELD_MESSAGES}"
+    );
+    assert_eq!(syncs, vec![9, 9, 6], "three syncs drain the field");
+    assert_eq!(drained, usize::from(FIELD_MESSAGES));
+    assert!(
+        role.store().is_empty(),
+        "the confirmed syncs purged the whole mailbox"
+    );
+
+    // And what one sync would have cost, as a number rather than a
+    // dismissal: well beyond the heap the board stood on, inside the heap
+    // it owns.
+    let needed = free_heap_for_one_sync().expect("the search must converge");
+    assert!(
+        needed > FREE_AT_PANIC && needed < BOARD_HEAP_BYTES,
+        "one sync serves all {FIELD_MESSAGES} at {needed} B free; the board \
+         had {FREE_AT_PANIC} B of a {BOARD_HEAP_BYTES} B heap"
+    );
+    assert_eq!(
+        needed, 54_848,
+        "the free heap a single-sync drain of {FIELD_MESSAGES} needs"
+    );
+}
+
+/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`),
+/// mirrored as a literal for the reason [`BOARD_RESOURCE_SDU`] is: that
+/// crate is thumbv7em and this host cannot link it.
+const BOARD_HEAP_BYTES: usize = 96 * 1024;
+
+/// The least free heap at which one fetch serves all [`FIELD_MESSAGES`],
+/// searched rather than derived: [`serve_cap_for_live_heap`] is monotone
+/// in the free bytes, so the first heap that serves 24 is the bound.
+/// `None` if no heap up to twice the board's does.
+fn free_heap_for_one_sync() -> Option<usize> {
+    (0..=2 * BOARD_HEAP_BYTES).step_by(64).find(|&free| {
+        let cap = serve_cap_for_live_heap(
+            BOOT_CAP,
+            free,
+            free,
+            BOARD_SERVE_MARGIN_BYTES,
+            BOARD_RESOURCE_SDU,
+        );
+        let (mut role, stored) = field_node(cap);
+        let GetOutcome::Fetch { served, .. } = role
+            .handle_get(&fetch_for(&stored), &[7u8; 16], 0)
+            .expect("the fetch is well formed")
+        else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        served.len() == usize::from(FIELD_MESSAGES)
+    })
+}
+
+/// The reference client's list request: no `wants`, no `haves`
+/// (`message_list_response` is the callback for it,
+/// `reference/LXMF/LXMF/LXMRouter.py:1562`).
+fn list_request() -> Vec<u8> {
+    MessageGetRequest {
+        wants: None,
+        haves: None,
+        transfer_limit_kb: None,
+    }
+    .encode()
+    .expect("the list request is well formed")
 }
