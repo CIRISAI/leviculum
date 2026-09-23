@@ -461,9 +461,10 @@ async fn test_announce_cap_forwarding_rate_limit() {
 /// 8. LOCAL_REBROADCASTS_MAX caps how many times a single announce is
 ///    rebroadcast from a Rust relay.
 ///
-///    The retry scheduler at `transport.rs:4027-4004` removes the
-///    announce-table entry when `retries > PATHFINDER_RETRIES` OR
-///    `local_rebroadcasts >= LOCAL_REBROADCASTS_MAX`. A sustained stream
+///    The retry scheduler removes the announce-table entry when
+///    `PATHFINDER_RETRIES` (transport.rs:9733) is exceeded OR
+///    `local_rebroadcasts` (transport.rs:9734) reaches
+///    `LOCAL_REBROADCASTS_MAX`. A sustained stream
 ///    of identical re-arrivals from a peer must not produce unbounded
 ///    rebroadcast traffic.
 #[tokio::test]
