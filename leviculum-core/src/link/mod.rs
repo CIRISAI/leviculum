@@ -65,7 +65,11 @@ const LINK_REQUEST_SIGNALING_SIZE: usize = 67;
 /// Size of signed data in proof (link_id + X25519 pub + Ed25519 pub + signaling)
 const PROOF_SIGNED_DATA_SIZE: usize = 83; // 16 + 32 + 32 + 3
 /// Size of link establishment proof data (signature + X25519 pub + signaling)
-const LINK_PROOF_SIZE: usize = 99; // 64 + 32 + 3
+pub(crate) const LINK_PROOF_SIZE: usize = 99; // 64 + 32 + 3
+/// Size of a link proof from a peer that predates the MTU/mode signalling
+/// (signature + X25519 pub). `Link.validate_proof` still accepts it
+/// (`reference/Reticulum/RNS/Link.py:399,410`) and so must we.
+pub(crate) const LINK_PROOF_LEGACY_SIZE: usize = 96; // 64 + 32
 /// Size of signaling bytes (21-bit MTU + 3-bit mode)
 pub(crate) const SIGNALING_SIZE: usize = 3;
 
@@ -124,20 +128,36 @@ fn compute_link_mdu(mtu: u32) -> usize {
 /// Build the signed data for proof verification/generation
 ///
 /// Format: [link_id (16)] [x25519_pub (32)] [ed25519_pub (32)] [signaling (3)]
+/// Compose the bytes a link proof signs, in the reference byte order
+/// (`Link.prove`/`Link.validate_proof`, `Link.py:373`/`:417`):
+/// `link_id + x25519_pub + ed25519_pub + signalling`.
+///
+/// `signaling` is APPENDED VERBATIM and may be empty: a peer that predates
+/// the MTU/mode signalling signs the 80-byte prefix, and Python's
+/// `signalling_bytes = b""` (`Link.py:399`) reproduces exactly that. Padding
+/// the absent bytes with zeroes instead would reject every such proof, so the
+/// returned buffer is paired with the length actually written.
 fn build_proof_signed_data(
     link_id: &LinkId,
     x25519_pub: &[u8; X25519_KEY_SIZE],
     ed25519_pub: &[u8; X25519_KEY_SIZE],
-    signaling: &[u8; SIGNALING_SIZE],
-) -> [u8; PROOF_SIGNED_DATA_SIZE] {
+    signaling: &[u8],
+) -> ([u8; PROOF_SIGNED_DATA_SIZE], usize) {
+    // Both call sites gate the payload length before getting here; clamp
+    // anyway, so no future caller can turn an over-long payload into a panic
+    // on a no_std board.
+    debug_assert!(signaling.len() <= SIGNALING_SIZE);
+    let signaling = &signaling[..signaling.len().min(SIGNALING_SIZE)];
+
     let mut signed_data = [0u8; PROOF_SIGNED_DATA_SIZE];
     signed_data[..TRUNCATED_HASHBYTES].copy_from_slice(link_id.as_bytes());
     signed_data[TRUNCATED_HASHBYTES..TRUNCATED_HASHBYTES + X25519_KEY_SIZE]
         .copy_from_slice(x25519_pub);
     signed_data[TRUNCATED_HASHBYTES + X25519_KEY_SIZE..TRUNCATED_HASHBYTES + 2 * X25519_KEY_SIZE]
         .copy_from_slice(ed25519_pub);
-    signed_data[TRUNCATED_HASHBYTES + 2 * X25519_KEY_SIZE..].copy_from_slice(signaling);
-    signed_data
+    let len = TRUNCATED_HASHBYTES + 2 * X25519_KEY_SIZE + signaling.len();
+    signed_data[TRUNCATED_HASHBYTES + 2 * X25519_KEY_SIZE..len].copy_from_slice(signaling);
+    (signed_data, len)
 }
 
 /// Handshake phase, tracks which side we're on and when we started waiting.
@@ -730,7 +750,7 @@ impl Link {
 
         // Build signed data: link_id (16) + our_x25519_pub (32) + dest_ed25519_pub (32) + signaling (3)
         // Python RNS uses the destination's Ed25519 signing key (not the link's ephemeral one)
-        let signed_data = build_proof_signed_data(
+        let (signed_data, signed_len) = build_proof_signed_data(
             &self.id,
             self.ephemeral_public.as_bytes(),
             &identity.ed25519_verifying().to_bytes(),
@@ -739,7 +759,7 @@ impl Link {
 
         // Sign with destination's identity
         let signature = identity
-            .sign(&signed_data)
+            .sign(&signed_data[..signed_len])
             .map_err(|_| LinkError::NoIdentity)?;
 
         // Build proof data: [signature (64)] [our_x25519_pub (32)] [signaling (3)]
@@ -1758,7 +1778,18 @@ impl Link {
 
     /// Process a link proof from the destination
     ///
-    /// PROOF format: [signature (64)] [peer_ephemeral_pub (32)] [signaling (0-3)]
+    /// PROOF format: [signature (64)] [peer_ephemeral_pub (32)] [signaling (0 or 3)]
+    ///
+    /// Two shapes are valid, and only these two — the reference gates on
+    /// equality, not on a minimum: `Link.validate_proof` strips exactly
+    /// `LINK_MTU_SIZE` bytes when they are present and then demands exactly
+    /// `SIGLENGTH//8 + ECPUBSIZE//2` (`reference/Reticulum/RNS/Link.py:404,
+    /// :410`). A peer older than the MTU/mode signalling sends the 96-byte
+    /// shape and Python still establishes with it (`:399` leaves
+    /// `signalling_bytes = b""`), so a `len() < 99` gate here refused links a
+    /// Python node accepts — and that this node's own relay path already
+    /// forwards for others (`transport.rs`, the LRPROOF size gate, mirroring
+    /// `Transport.py:2179`). Codeberg #335.
     ///
     /// Returns Ok(()) if proof is valid and keys are derived
     pub fn process_proof(&mut self, proof_data: &[u8]) -> Result<(), LinkError> {
@@ -1766,8 +1797,7 @@ impl Link {
 
         self.require_state(LinkState::Pending)?;
 
-        // Proof format: signature (64) + X25519_pub (32) + signalling (3) = LINK_PROOF_SIZE bytes
-        if proof_data.len() < LINK_PROOF_SIZE {
+        if proof_data.len() != LINK_PROOF_SIZE && proof_data.len() != LINK_PROOF_LEGACY_SIZE {
             return Err(LinkError::InvalidProof);
         }
 
@@ -1784,11 +1814,9 @@ impl Link {
             .map_err(|_| LinkError::InvalidProof)?;
         let peer_ephemeral_public = x25519_dalek::PublicKey::from(peer_pub_bytes);
 
-        // Extract signalling bytes (last SIGNALING_SIZE bytes)
-        let signalling_bytes: [u8; SIGNALING_SIZE] = proof_data
-            [ED25519_SIGNATURE_SIZE + X25519_KEY_SIZE..LINK_PROOF_SIZE]
-            .try_into()
-            .map_err(|_| LinkError::InvalidProof)?;
+        // Signalling bytes, absent on the legacy shape. Python signs and
+        // verifies over the empty string in that case, never over zeroes.
+        let signalling_bytes = &proof_data[ED25519_SIGNATURE_SIZE + X25519_KEY_SIZE..];
 
         // Python RNS signs: link_id (16) + pub_bytes (32) + sig_pub_bytes (32) + signalling (3)
         // Where (from responder's perspective in prove()):
@@ -1800,16 +1828,16 @@ impl Link {
             .as_ref()
             .ok_or(LinkError::NoDestination)?;
 
-        let signed_data = build_proof_signed_data(
+        let (signed_data, signed_len) = build_proof_signed_data(
             &self.id,
             &peer_pub_bytes,
             &peer_verifying_key.to_bytes(),
-            &signalling_bytes,
+            signalling_bytes,
         );
 
         // Verify the signature
         peer_verifying_key
-            .verify(&signed_data, &signature)
+            .verify(&signed_data[..signed_len], &signature)
             .map_err(|_| LinkError::InvalidProof)?;
 
         // Perform X25519 key exchange
@@ -1822,8 +1850,16 @@ impl Link {
         // Derive link key using HKDF
         let link_key = Self::derive_link_key(shared_secret.as_bytes(), &self.id);
 
-        // Validate mode and store confirmed MTU from responder's signaling bytes
-        let (confirmed_mtu, mode) = decode_signaling_bytes(&signalling_bytes);
+        // Validate mode and store confirmed MTU from responder's signaling
+        // bytes. Without them the reference falls back to the defaults its
+        // accessors return for a short payload: `mode_from_lp_packet` yields
+        // `MODE_DEFAULT` (`Link.py:183`) and `mtu_from_lp_packet` yields None,
+        // which `self.mtu = confirmed_mtu or RNS.Reticulum.MTU` (`:427`) turns
+        // into the base MTU -- the same value the zero below produces.
+        let (confirmed_mtu, mode) = match <[u8; SIGNALING_SIZE]>::try_from(signalling_bytes) {
+            Ok(bytes) => decode_signaling_bytes(&bytes),
+            Err(_) => (0, crate::constants::MODE_AES256_CBC),
+        };
         validate_mode(mode).map_err(|_| LinkError::InvalidProof)?;
         // Codeberg #390: adopt the responder's confirmed value VERBATIM, the
         // way the reference does -- `self.mtu = confirmed_mtu or
@@ -2636,6 +2672,33 @@ mod tests {
         let short_proof = [0u8; 98]; // One byte short of required 99
         let result = link.process_proof(&short_proof);
         assert!(matches!(result, Err(LinkError::InvalidProof)));
+    }
+
+    /// Codeberg #335: the size gate accepts exactly the two reference shapes.
+    /// Reaching `NoDestination` proves the length was accepted (the key check
+    /// sits after it); `InvalidProof` on this keyless link means the length
+    /// was refused.
+    #[test]
+    fn test_process_proof_accepts_only_the_two_reference_shapes() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+
+        for accepted in [LINK_PROOF_LEGACY_SIZE, LINK_PROOF_SIZE] {
+            let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+            let result = link.process_proof(&vec![0u8; accepted]);
+            assert!(
+                matches!(result, Err(LinkError::NoDestination)),
+                "a {accepted}-byte proof must pass the size gate, got {result:?}"
+            );
+        }
+
+        for refused in [0, 64, 95, 97, 98, 100, 128] {
+            let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+            let result = link.process_proof(&vec![0u8; refused]);
+            assert!(
+                matches!(result, Err(LinkError::InvalidProof)),
+                "a {refused}-byte proof is neither reference shape, got {result:?}"
+            );
+        }
     }
 
     #[test]

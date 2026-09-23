@@ -6350,10 +6350,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     // Link proof format:
                     //   sig(64) + X25519(32) = 96 bytes (without signalling)
                     //   sig(64) + X25519(32) + signaling(3) = 99 bytes (with signalling)
-                    const LINK_PROOF_SIZE_MIN: usize = 96;
-                    const LINK_PROOF_SIZE_MAX: usize = 99;
-                    if proof_data.len() != LINK_PROOF_SIZE_MIN
-                        && proof_data.len() != LINK_PROOF_SIZE_MAX
+                    // Same two shapes the local initiator accepts in
+                    // `Link::process_proof`; sharing the constants is what
+                    // keeps the relay and the endpoint from drifting apart
+                    // again (Codeberg #335).
+                    use crate::link::{LINK_PROOF_LEGACY_SIZE, LINK_PROOF_SIZE};
+                    if proof_data.len() != LINK_PROOF_LEGACY_SIZE
+                        && proof_data.len() != LINK_PROOF_SIZE
                     {
                         crate::tracing::warn!(
                             dest = %HexShort(&dest_hash),

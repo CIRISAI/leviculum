@@ -58,7 +58,7 @@ pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 /// id as msgpack `bin8` (two header bytes plus its payload). Both the
 /// single-packet path and the Resource path pack exactly this frame, and
 /// since #384 both compute its length before building it rather than
-/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1644`).
+/// after (`bin_len`, `leviculum-core/src/node/mod.rs:1646`).
 pub const RESPONSE_FRAME_BYTES: usize = 1 + 2 + 16;
 
 /// Bookkeeping heap each part of an outgoing Resource costs beyond its

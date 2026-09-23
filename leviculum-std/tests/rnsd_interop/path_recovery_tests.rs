@@ -15,7 +15,7 @@
 //! ## Key Assertion
 //!
 //! Phase 2: `has_path() == false` after timeout. This can ONLY be caused by
-//! `expire_path()` at `node/mod.rs:990` because:
+//! `expire_path()` at `node/mod.rs:992` because:
 //! - TCP connection is alive → `handle_interface_down()` never fires
 //! - No other code path removes this path entry
 //! - `expire_path()` is the only call in the timeout handler that modifies path state
@@ -220,10 +220,10 @@ async fn test_rust_node_path_recovery_on_link_timeout() {
 
     // Step 13: KEY ASSERTION, path should be gone.
     // TCP connection is alive → handle_interface_down() never fires.
-    // ONLY expire_path() at node/mod.rs:990 can cause this.
+    // ONLY expire_path() at node/mod.rs:992 can cause this.
     assert!(
         !rust_node.has_path(&dest_hash),
-        "Path should be expired by timeout handler (expire_path at node/mod.rs:990) \
+        "Path should be expired by timeout handler (expire_path at node/mod.rs:992) \
          — TCP is alive, so handle_interface_down never fires"
     );
 

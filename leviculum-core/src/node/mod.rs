@@ -111,6 +111,8 @@ mod mvr_local_client_announce_immediate;
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof_echo_storm;
+#[cfg(test)]
+mod mvr_lrproof_legacy_shape;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_obs_endpoint;
 #[cfg(test)]

@@ -102,7 +102,7 @@ delta-enabled neighbour reads as two to seven hops further away than it is.
 
 What that touches here: nothing that breaks, and nothing that is right either. Our `hops == 0`
 tests are all path-table entries meaning "local client behind the shared instance"
-(`transport.rs:8178`, `:10409`) or our own locally-created announces (`:10080`) — neither is a
+(`transport.rs:8181`, `:10409`) or our own locally-created announces (`:10080`) — neither is a
 remote node's claim about itself, so neither can be lied to. The cost is metric only: a
 delta-enabled peer loses every path race against an honest one, and its
 `ESTABLISHMENT_TIMEOUT_PER_HOP` scaling is drawn from a fiction. There is no fix to make, only a
