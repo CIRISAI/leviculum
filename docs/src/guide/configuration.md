@@ -361,6 +361,37 @@ RNode block of `InterfaceConfig` (`InterfaceConfig::frequency`
 | `csma_enabled` | bool | unset | Carried in the LNode radio-config frame and reported back, but current firmware no longer obeys it: LoRa channel access (pre-TX jitter plus CAD listen-before-talk) is always on, matching the RNode firmware, which offers no CSMA disable either. Only firmware older than the change still honours the flag. (`csma_enabled` (`ini_config.rs:755`); `InterfaceConfig::csma_enabled` (`config.rs:638-639`)) |
 | `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:736`); `InterfaceConfig::preamble_symbols` (`config.rs:618-630`); `derive_preamble_symbols` (`rnode.rs:858`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
 
+#### A board that does not take the config
+
+A `SerialInterface` with a LoRa block pushes the radio config at the board
+three times, waiting 2 s for the firmware's ACK each time. If none of the
+three is acknowledged the interface does not assume anything: it sends the
+radio query (`TYPE_RADIO_QUERY`, [Codeberg #349](https://codeberg.org/Lew_Palm/leviculum/issues/349))
+and waits a further 2 s for the board's report, which the firmware answers
+out of what its LoRa task actually configured.
+
+* **Report received, same profile** — the config did arrive and only its ACK
+  did not. Nothing changes.
+* **Report received, different profile** — the interface comes up priced at
+  the profile the board reported, and logs
+  `RADIO_BRINGUP iface=<name> outcome=running-differs` with the requested and
+  the running parameters side by side.
+* **Neither answered** — the interface refuses to come up. It logs
+  `RADIO_BRINGUP iface=<name> outcome=refused` naming both frames and both
+  waits, reports Down to `rnstatus`, and the daemon keeps running with its
+  other interfaces. It does not retry on that port; fix the board and restart.
+
+A modem the host cannot price is a modem the host does not drive. Airtime
+accounting and transmit spacing are computed from the PHY, so an interface
+pricing SF7 in front of a board keying SF12 under-counts duty by an order of
+magnitude and hands the serial queue frames faster than the modem can key
+them; guessing the other way is a silent lie about airtime that nothing
+downstream can tell from a measurement.
+
+Firmware older than #349 does not answer the radio query, so an LNode running
+it that also misses the config ACK is refused rather than driven blind.
+(`radio_bring_up`, `radio_pricing_phy` (`interfaces/serial.rs`))
+
 **Test-only:** `test_drop_direct_ingress` (bool, default off) emulates
 out-of-range placement on a co-located rig: the interface drops every
 received frame whose wire hops byte (`raw[1]`) is 0 — frames heard

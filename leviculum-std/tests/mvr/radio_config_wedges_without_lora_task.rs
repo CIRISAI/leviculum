@@ -101,3 +101,240 @@ fn a_consumerless_config_channel_wedges_for_the_rest_of_the_boot() {
         Err(TrySendError::Full(_))
     ));
 }
+
+// ---------------------------------------------------------------------------
+// The host's half: what an unanswered config costs on this side of the port
+// ---------------------------------------------------------------------------
+//
+// The firmware half above is why a config can go unanswered. This half is what
+// the host did about it, and it is the same finding from the other end
+// (L-0007, Refs #334): the airtime bucket was built from the profile the
+// config block ASKED for, and the only production call that could ever move it
+// re-applied those same values in the ACK branch. So a board that did not take
+// the config was driven at the profile it was not running — and under-pricing
+// is the dangerous direction: an SF7 bucket in front of an SF12 board
+// under-counts duty by an order of magnitude and hands the serial queue frames
+// faster than the modem can key them.
+//
+// The answer that is not a guess is on the board: the firmware answers
+// `TYPE_RADIO_QUERY` out of what its LoRa task actually configured
+// (`leviculum-nrf/src/usb.rs`, `ControlAction::RadioQuery`, Codeberg #349).
+// The two cases below are the two ways that can end.
+//
+// **Acceptance**: both red against the old policy (price the requested profile
+// always, never refuse) injected into `radio_pricing_phy`, green with the
+// policy this pass lands. The board is an in-memory duplex, so there is no
+// hardware in either direction.
+
+use leviculum_core::envelope;
+use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
+use leviculum_std::interfaces::{radio_bring_up, radio_pricing_phy, RadioBringUp};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+/// The profile a corpus cell pushes at a board: 869.525 MHz / BW 250 k / SF7,
+/// the `lora_path_discovery_wide_mixed` config of the 2026-09-23 capture.
+fn requested_phy() -> RadioConfigWire {
+    RadioConfigWire {
+        frequency_hz: 869_525_000,
+        bandwidth_hz: 250_000,
+        sf: 7,
+        cr: 8,
+        tx_power_dbm: 2,
+        preamble_len: 16,
+        csma_enabled: true,
+        radio_silent: false,
+        st_alock: 0,
+        lt_alock: 0,
+        lt_alock_present: true,
+    }
+}
+
+/// What the board is still on when it does not take that config: the profile
+/// the cell before left it at, SF12/BW125k. Slower in every term, which is why
+/// pricing the requested one under-counts.
+fn running_phy() -> RadioConfigWire {
+    RadioConfigWire {
+        sf: 12,
+        bandwidth_hz: 125_000,
+        cr: 5,
+        ..requested_phy()
+    }
+}
+
+/// Airtime of a full single-frame payload at one profile — the number the
+/// interface's credit bucket charges per frame, and the thing "priced at the
+/// wrong PHY" means in milliseconds.
+fn frame_cost_ms(phy: &RadioConfigWire) -> u64 {
+    let bytes = (leviculum_core::rnode::MAX_SINGLE_PAYLOAD + 1) as u32;
+    leviculum_core::rnode::airtime_ms_with_preamble(
+        bytes,
+        phy.bandwidth_hz,
+        phy.sf,
+        phy.cr,
+        phy.preamble_len,
+    )
+}
+
+/// A board on the far end of the port that never acks a radio config, and
+/// answers the radio query only if `report` says so.
+///
+/// Deliberately nothing else: a board that answers the config is the green
+/// path this pass does not change, and a board that answers more than it was
+/// asked would let a test pass on a frame the host never requested.
+fn scripted_board(mut port: DuplexStream, report: Option<RadioConfigWire>) {
+    tokio::spawn(async move {
+        let mut deframer = Deframer::with_max_frame(564);
+        let mut buf = vec![0u8; 1024];
+        let mut out = Vec::new();
+        loop {
+            let n = match port.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            for r in deframer.process(&buf[..n]) {
+                let DeframeResult::Frame(data) = r else {
+                    continue;
+                };
+                let Ok(f) = envelope::decode_frame(&data) else {
+                    // The legacy radio config frame, which carries its own
+                    // magic and not an envelope header. Unanswered, on
+                    // purpose: that is the whole premise.
+                    continue;
+                };
+                if f.frame_type != envelope::TYPE_RADIO_QUERY {
+                    continue;
+                }
+                let Some(wire) = report else { continue };
+                frame(&envelope::encode_radio_report(&wire), &mut out);
+                if port.write_all(&out).await.is_err() {
+                    return;
+                }
+                let _ = port.flush().await;
+                out.clear();
+            }
+        }
+    });
+}
+
+/// Config unanswered, report answered with the old PHY: the interface runs on
+/// the reported profile and says the mismatch out loud.
+///
+/// Paused time, because the honest wait is three 2 s config attempts and one
+/// 2 s query — eight seconds the runtime spends parked, not slept.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_config_prices_the_profile_the_board_reports() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, Some(running_phy()));
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(
+        outcome,
+        RadioBringUp::Running(running_phy()),
+        "an unacknowledged config must leave the host asking the board what it \
+         is running, not assuming"
+    );
+
+    let (priced, mismatch) = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect("a board that answered is not refused");
+    assert_eq!(
+        priced,
+        running_phy(),
+        "the interface is priced at the requested profile, which the board is \
+         not running"
+    );
+    // In milliseconds, on the frame the bucket charges for: the two profiles
+    // are not a rounding apart.
+    assert_eq!(frame_cost_ms(&priced), frame_cost_ms(&running_phy()));
+    assert!(
+        frame_cost_ms(&running_phy()) > 8 * frame_cost_ms(&requested),
+        "SF12/125k against SF7/250k is {} ms against {} ms — if that ratio ever \
+         shrinks, this case stops being a demonstration of under-pricing",
+        frame_cost_ms(&running_phy()),
+        frame_cost_ms(&requested)
+    );
+
+    let mismatch = mismatch.expect("a PHY the board is not running must be said out loud");
+    for key in [
+        "requested_sf=7",
+        "requested_bw=250000",
+        "requested_freq=869525000",
+        "running_sf=12",
+        "running_bw=125000",
+    ] {
+        assert!(
+            mismatch.contains(key),
+            "the mismatch event does not carry {key}: {mismatch}"
+        );
+    }
+}
+
+/// Neither frame answered: the interface refuses to come up, and the refusal
+/// names both frames and the wait.
+#[tokio::test(start_paused = true)]
+async fn a_board_that_answers_neither_frame_does_not_come_up() {
+    let (mut host, board) = tokio::io::duplex(8192);
+    scripted_board(board, None);
+
+    let requested = requested_phy();
+    let outcome = radio_bring_up(&mut host, &requested, "mvr").await;
+    assert_eq!(
+        outcome,
+        RadioBringUp::Silent,
+        "a board that answers neither the config nor the query is not a board \
+         whose profile the host may name"
+    );
+
+    let refusal = radio_pricing_phy(&outcome, &requested, "mvr")
+        .expect_err("a profile nobody reported must not be priced at all");
+    // Both frames, and the wait each got. An operator reading this line has to
+    // be able to tell "the board never answered" from "the board said no".
+    for key in [
+        "config_frame=legacy-radio-config",
+        "config_attempts=3",
+        "config_wait_ms=2000",
+        &format!("query_frame=0x{:02x}", envelope::TYPE_RADIO_QUERY),
+        "query_wait_ms=2000",
+    ] {
+        assert!(
+            refusal.contains(key),
+            "the refusal does not carry {key}: {refusal}"
+        );
+    }
+
+    // And the refusal is acted on rather than merely logged. The subject is
+    // `serial_reconnect_task`'s control flow — it opens a `tokio_serial` port,
+    // so no host test can reach it — and the failure mode being guarded is
+    // precisely a refusal that falls through to the io task anyway. Same
+    // reasoning as the source invariants in
+    // `radio_config_sleeps_through_the_peer_yield_window`.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/interfaces/serial.rs"),
+    )
+    .expect("read serial.rs");
+    let call = src
+        .find("match radio_pricing_phy(&outcome, &requested, &name)")
+        .expect("serial_reconnect_task no longer settles the bring-up");
+    let arm = src[call..]
+        .find("Err(refusal) => {")
+        .expect("no refusal arm");
+    let end = src[call + arm..]
+        .find("\n                    }\n")
+        .expect("unterminated refusal arm");
+    let body = &src[call + arm..call + arm + end];
+    assert!(
+        body.contains("counters.set_online(false)"),
+        "a refused interface still reports online, so `rnstatus` shows it Up \
+         (L-0020): {body}"
+    );
+    assert!(
+        body.contains("return;"),
+        "the refusal arm falls through to serial_io_task, so the interface \
+         carries frames it cannot price: {body}"
+    );
+    assert!(
+        !src[..call].contains("serial_io_task("),
+        "serial_io_task is now started before the bring-up is settled, which \
+         makes the refusal above unreachable"
+    );
+}

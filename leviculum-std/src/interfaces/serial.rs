@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use leviculum_core::constants::MTU;
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
-use leviculum_core::rnode::derive_preamble_symbols;
+use leviculum_core::rnode::{derive_preamble_symbols, RadioConfigWire};
 use leviculum_core::transport::InterfaceId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -493,22 +493,55 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
     }
 }
 
-/// Send a radio config frame to the LNode firmware and wait for ACK.
-///
-/// Retries up to 3 times with 2-second ACK timeout each. Returns true on success.
-/// This is test infrastructure, normal usage never calls this.
-///
-/// On ACK, if `credit` is Some, atomically update its radio params so
-/// subsequent `try_charge` calls price airtime under the new profile.
-async fn send_radio_config(
-    port: &mut tokio_serial::SerialStream,
-    config: &SerialRadioConfig,
-    name: &str,
-    credit: Option<&Arc<Mutex<super::airtime::AirtimeCredit>>>,
-) -> bool {
-    use leviculum_core::rnode::{RadioConfigWire, RADIO_CONFIG_ACK};
+// ---------------------------------------------------------------------------
+// Radio bring-up: what the board is running, and whether we may drive it
+// ---------------------------------------------------------------------------
 
-    let wire = RadioConfigWire {
+/// How long one radio-config attempt waits for the legacy ACK.
+const CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many times the config is pushed before the host stops asking for an
+/// ACK and starts asking what the board is actually running.
+const CONFIG_ATTEMPTS: u8 = 3;
+
+/// How long the radio query waits for the board's own report — the config
+/// ACK's budget, for the reason [`MEDIA_ANSWER_TIMEOUT`] carries the same
+/// one: the answer is composed by the firmware's USB task the moment the
+/// frame lands, so anything past it is a board that is not going to answer.
+const RADIO_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What a board ended up running after a radio config was pushed at it, as
+/// far as the board itself has said.
+///
+/// Public, with [`radio_bring_up`] and [`radio_pricing_phy`], because the
+/// mvr drives this exchange over an in-memory duplex instead of a soldered
+/// board — the same reason the RNode channel seam
+/// ([`super::RNodeChannelFactory`]) is public.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioBringUp {
+    /// The board acked the config: it runs the profile that was requested.
+    ///
+    /// The legacy ACK is a bare receipt — three bytes, no parameters — so
+    /// "what it adopted" is readable only as "what it was sent". That is
+    /// also why there is no fourth variant for an ACK the host cannot
+    /// reconcile: an ACK carries nothing to disagree with, and three bytes
+    /// that are not [`leviculum_core::rnode::RADIO_CONFIG_ACK`] are not an
+    /// ACK at all, so they leave the attempt on the no-ACK path.
+    Adopted,
+    /// No ACK, but the board answered
+    /// [`leviculum_core::envelope::TYPE_RADIO_QUERY`]: this is the profile
+    /// it is running right now, read off the board rather than guessed.
+    Running(RadioConfigWire),
+    /// The board answered neither frame within the wait. A board that
+    /// refused the query by name lands here too: a refusal says what the
+    /// board will not tell us, not what it is running.
+    Silent,
+}
+
+/// The config block as it goes on the wire, and as the board's own report
+/// is compared against.
+fn requested_wire(config: &SerialRadioConfig) -> RadioConfigWire {
+    RadioConfigWire {
         frequency_hz: config.frequency as u32,
         bandwidth_hz: config.bandwidth,
         sf: config.spreading_factor,
@@ -526,21 +559,67 @@ async fn send_radio_config(
         // Send-side only; `build_radio_config_frame` always emits the full
         // 21-byte frame, so the receiver parses the lt_alock field as present.
         lt_alock_present: true,
-    };
-    let payload = leviculum_core::rnode::build_radio_config_frame(&wire);
+    }
+}
+
+/// The pricing-relevant parameters of one profile, as the scalar log keys
+/// periculum greps for. `media_keys`' sibling.
+fn phy_keys(prefix: &str, w: &RadioConfigWire) -> String {
+    format!(
+        "{prefix}_freq={} {prefix}_bw={} {prefix}_sf={} {prefix}_cr={} {prefix}_preamble={}",
+        w.frequency_hz, w.bandwidth_hz, w.sf, w.cr, w.preamble_len
+    )
+}
+
+/// Do these two profiles price and place a frame differently?
+///
+/// Everything the airtime bucket charges from (bandwidth, spreading factor,
+/// coding rate, preamble) plus the frequency, which decides whether the two
+/// radios are on the same channel at all. Transmit power is deliberately not
+/// here: it changes who hears the frame, not what it costs, and a board that
+/// clamped a power it cannot key is not running a profile the host mispriced.
+fn phy_differs(a: &RadioConfigWire, b: &RadioConfigWire) -> bool {
+    a.frequency_hz != b.frequency_hz
+        || a.bandwidth_hz != b.bandwidth_hz
+        || a.sf != b.sf
+        || a.cr != b.cr
+        || a.preamble_len != b.preamble_len
+}
+
+/// Push `requested` at the LNode firmware and find out what it ends up
+/// running.
+///
+/// `CONFIG_ATTEMPTS` pushes of the legacy config frame, each waiting
+/// `CONFIG_ACK_TIMEOUT` for the legacy ACK. An ACK ends it at
+/// [`RadioBringUp::Adopted`]. Silence does not: the host then asks the
+/// board what it is running (`ask_radio_report`), because the alternative
+/// to asking is guessing, and a guess about the PHY is a guess about every
+/// frame's airtime for as long as the interface is up.
+pub async fn radio_bring_up<S>(
+    port: &mut S,
+    requested: &RadioConfigWire,
+    name: &str,
+) -> RadioBringUp
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use leviculum_core::rnode::RADIO_CONFIG_ACK;
+
+    let payload = leviculum_core::rnode::build_radio_config_frame(requested);
     let mut frame_buf = Vec::new();
     frame(&payload, &mut frame_buf);
 
-    for attempt in 1..=3u8 {
+    for attempt in 1..=CONFIG_ATTEMPTS {
         tracing::info!(
-            "Serial {}: sending radio config (attempt {}/3): freq={} sf={} bw={} cr={} txp={}",
+            "Serial {}: sending radio config (attempt {}/{}): freq={} sf={} bw={} cr={} txp={}",
             name,
             attempt,
-            config.frequency,
-            config.spreading_factor,
-            config.bandwidth,
-            config.coding_rate,
-            config.tx_power
+            CONFIG_ATTEMPTS,
+            requested.frequency_hz,
+            requested.sf,
+            requested.bandwidth_hz,
+            requested.cr,
+            requested.tx_power_dbm
         );
         if let Err(e) = port.write_all(&frame_buf).await {
             tracing::warn!("Serial {}: config write failed: {}", name, e);
@@ -554,7 +633,7 @@ async fn send_radio_config(
         // Wait for ACK
         let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
         let mut buf = [0u8; 64];
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + CONFIG_ACK_TIMEOUT;
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -570,34 +649,7 @@ async fn send_radio_config(
                                 && data[..] == RADIO_CONFIG_ACK[..]
                             {
                                 tracing::info!("Serial {}: radio config ACK received", name);
-                                // Confirm the host-side airtime bucket against
-                                // the profile the board has just said it
-                                // adopted. These are the values
-                                // `spawn_serial_interface` already built the
-                                // bucket from, so on this path the call moves
-                                // nothing: the ACK is a bare receipt, it
-                                // carries no PHY of its own, and there is no
-                                // other production caller of
-                                // `update_radio_params`. The bucket is
-                                // therefore priced at the REQUESTED profile
-                                // whether or not the board adopted it — the
-                                // half of L-0007 that stays open (Refs #334).
-                                // Closing it needs the running profile off the
-                                // board itself: the firmware already answers a
-                                // `TYPE_RADIO_REPORT` with its live config
-                                // (`leviculum-nrf/src/usb.rs`, #349), which
-                                // this legacy sender does not ask for, and a
-                                // board that answers neither has to be priced
-                                // by a policy nobody has chosen yet.
-                                if let Some(credit) = credit {
-                                    credit.lock_recover().update_radio_params(
-                                        config.bandwidth,
-                                        config.spreading_factor,
-                                        config.coding_rate,
-                                        config.preamble_len,
-                                    );
-                                }
-                                return true;
+                                return RadioBringUp::Adopted;
                             }
                         }
                     }
@@ -611,8 +663,160 @@ async fn send_radio_config(
             }
         }
     }
-    tracing::error!("Serial {}: radio config failed after 3 attempts", name);
-    false
+    tracing::warn!(
+        "Serial {}: radio config not acknowledged after {} attempts — asking the board \
+         what it is running",
+        name,
+        CONFIG_ATTEMPTS
+    );
+    match ask_radio_report(port, name).await {
+        Some(running) => RadioBringUp::Running(running),
+        None => RadioBringUp::Silent,
+    }
+}
+
+/// Ask the board what its radio is running
+/// ([`leviculum_core::envelope::TYPE_RADIO_QUERY`], Codeberg #349) and wait
+/// [`RADIO_REPORT_TIMEOUT`] for the report.
+///
+/// The firmware answers this one out of what its LoRa task actually
+/// configured, never out of the flash page or the compiled default
+/// (`leviculum-nrf/src/usb.rs`, `ControlAction::RadioQuery`), which is the
+/// whole reason it can settle a question an unanswered config leaves open.
+/// Before the radio is up it refuses as busy instead of inventing an answer;
+/// that refusal is logged here and returns `None`, because "I will not say"
+/// is not a profile anything can be priced at.
+///
+/// Frames that are neither answer are dropped, exactly as the ACK wait above
+/// drops them: this runs before the io task exists, so there is nothing yet
+/// to hand a data packet to.
+async fn ask_radio_report<S>(port: &mut S, name: &str) -> Option<RadioConfigWire>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use leviculum_core::envelope;
+
+    let mut frame_buf = Vec::new();
+    frame(&envelope::encode_radio_query(), &mut frame_buf);
+    if let Err(e) = port.write_all(&frame_buf).await {
+        tracing::warn!("Serial {}: radio query write failed: {}", name, e);
+        return None;
+    }
+    if let Err(e) = port.flush().await {
+        tracing::warn!("Serial {}: radio query flush failed: {}", name, e);
+        return None;
+    }
+
+    let mut deframer = Deframer::with_max_frame(SERIAL_HW_MTU as usize);
+    let mut buf = vec![0u8; READ_BUF_SIZE];
+    let deadline = tokio::time::Instant::now() + RADIO_REPORT_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                "Serial {}: no radio report within {:?} of the radio query",
+                name,
+                RADIO_REPORT_TIMEOUT
+            );
+            return None;
+        }
+        let n = match tokio::time::timeout(remaining, port.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                tracing::debug!("Serial {}: EOF while waiting for the radio report", name);
+                return None;
+            }
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                tracing::warn!("Serial {}: radio report read error: {}", name, e);
+                return None;
+            }
+            Err(_) => continue,
+        };
+        for r in deframer.process(&buf[..n]) {
+            let DeframeResult::Frame(data) = r else {
+                continue;
+            };
+            match envelope::decode_frame(&data) {
+                Ok(f) if f.frame_type == envelope::TYPE_RADIO_REPORT => {
+                    match envelope::decode_radio_report_payload(f.payload) {
+                        Some(wire) => return Some(wire),
+                        None => {
+                            tracing::warn!(
+                                "Serial {}: radio report payload is not a radio config block",
+                                name
+                            );
+                            return None;
+                        }
+                    }
+                }
+                Ok(f) if f.frame_type == envelope::TYPE_REFUSAL => {
+                    if let Some((refused, reason)) = envelope::decode_refusal_payload(f.payload) {
+                        if refused == envelope::TYPE_RADIO_QUERY {
+                            tracing::warn!(
+                                "Serial {}: board refused the radio query, reason 0x{:02x}",
+                                name,
+                                reason
+                            );
+                            return None;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The profile this interface prices its airtime at, given what the board
+/// said — or the refusal that keeps the interface off the air.
+///
+/// **A modem the host cannot price is a modem the host does not drive.**
+/// Under-pricing is the dangerous direction: a bucket charging SF7 for
+/// frames the board keys at SF12 under-counts duty by an order of magnitude
+/// and hands the serial queue frames faster than the modem can key them.
+/// Over-pricing by guessing is no better — it is a silent lie about airtime,
+/// and nothing downstream can tell it from a measurement. So the two honest
+/// outcomes are "price what the board reported" and "do not come up".
+///
+/// * `Ok((phy, None))` — the board runs `phy` and nobody has to be told.
+/// * `Ok((phy, Some(warn)))` — the board runs `phy`, which is not what was
+///   asked for; `warn` is the event naming both, for the caller to log.
+/// * `Err(refusal)` — nobody answered; the interface does not come up and
+///   the refusal says which frames went unanswered and for how long.
+pub fn radio_pricing_phy(
+    outcome: &RadioBringUp,
+    requested: &RadioConfigWire,
+    name: &str,
+) -> Result<(RadioConfigWire, Option<String>), String> {
+    match outcome {
+        RadioBringUp::Adopted => Ok((*requested, None)),
+        RadioBringUp::Running(running) if phy_differs(requested, running) => Ok((
+            *running,
+            Some(format!(
+                "RADIO_BRINGUP iface={name} outcome=running-differs {} {} \
+                 (the board did not adopt the config and reports another profile; \
+                 airtime here is priced at the one it reports)",
+                phy_keys("requested", requested),
+                phy_keys("running", running)
+            )),
+        )),
+        // Reported and identical: the config did arrive, only its ACK did
+        // not. Nothing to warn about and nothing to move.
+        RadioBringUp::Running(running) => Ok((*running, None)),
+        RadioBringUp::Silent => Err(format!(
+            "RADIO_BRINGUP iface={name} outcome=refused config_frame=legacy-radio-config \
+             config_attempts={CONFIG_ATTEMPTS} config_wait_ms={} query_frame=0x{:02x} \
+             query_wait_ms={} {} (the board answered neither frame, so this host cannot \
+             name the profile it is running; an LNode restores its stored config at boot, \
+             so the requested one is a guess. A modem the host cannot price is a modem the \
+             host does not drive: this interface does not come up, and the daemon keeps \
+             running without it)",
+            CONFIG_ACK_TIMEOUT.as_millis(),
+            leviculum_core::envelope::TYPE_RADIO_QUERY,
+            RADIO_REPORT_TIMEOUT.as_millis(),
+            phy_keys("requested", requested),
+        )),
+    }
 }
 
 /// Run `stty -F <port> low_latency`, reporting failure instead of
@@ -700,23 +904,44 @@ async fn serial_reconnect_task(
 
                 // Send radio config if configured (test infrastructure)
                 if let Some(ref radio_cfg) = config.radio_config {
-                    if !send_radio_config(&mut port, radio_cfg, &name, credit.as_ref()).await {
-                        // Not "the board uses defaults": an LNode restores its
-                        // stored config at boot (`leviculum-nrf/src/radio_store.rs`),
-                        // so after silence it is on whatever it was last given,
-                        // which the host has no way to name. Say what is known
-                        // and what it costs, because the airtime bucket goes on
-                        // pricing the profile that was asked for (L-0007).
-                        tracing::warn!(
-                            "Serial {}: radio config not acknowledged after 3 attempts — \
-                             the board is running an unknown profile (its stored one, not \
-                             necessarily the compiled default), while airtime here is still \
-                             priced at the requested SF{}/BW{}/CR4:{}",
-                            name,
-                            radio_cfg.spreading_factor,
-                            radio_cfg.bandwidth,
-                            radio_cfg.coding_rate
-                        );
+                    let requested = requested_wire(radio_cfg);
+                    let outcome = radio_bring_up(&mut port, &requested, &name).await;
+                    match radio_pricing_phy(&outcome, &requested, &name) {
+                        Ok((running, mismatch)) => {
+                            if let Some(mismatch) = mismatch {
+                                tracing::warn!("{}", mismatch);
+                            }
+                            // The one production caller. The bucket was built
+                            // from the requested profile in
+                            // `spawn_serial_interface`, so on the ACK path this
+                            // moves nothing; on the report path it is the whole
+                            // point — the interface runs on what the board said
+                            // it is running, not on what it was asked for
+                            // (L-0007, Refs #334).
+                            if let Some(credit) = credit.as_ref() {
+                                credit.lock_recover().update_radio_params(
+                                    running.bandwidth_hz,
+                                    running.sf,
+                                    running.cr,
+                                    running.preamble_len,
+                                );
+                            }
+                        }
+                        Err(refusal) => {
+                            // Neither frame answered. The interface does not
+                            // come up — not this cycle and not later: the
+                            // reconnect loop is left behind with the port, so
+                            // nothing here carries a frame it cannot price.
+                            // `set_online(false)` is what `rnstatus` reads
+                            // (L-0020), so the refusal is visible as a Down
+                            // interface and not only as a log line. The daemon
+                            // keeps running without it, the way an unparsable
+                            // config refuses without taking the rest of the
+                            // process with it (d828140e).
+                            tracing::error!("{}", refusal);
+                            counters.set_online(false);
+                            return;
+                        }
                     }
                 }
 
