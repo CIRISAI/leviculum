@@ -42,6 +42,16 @@
 //! during sequential validation
 //! (`reference/LXMF/LXMF/LXMRouter.py:2273`).
 //!
+//! That drain outlives the link it arrived on, and has to. The sender is
+//! finished the moment its resource is proven — it moves the ids to
+//! handled and tears the link down in the same block
+//! (`reference/LXMF/LXMF/LXMPeer.py:499-503`), which is what
+//! [`Engine::conclude_round`] does too — while the batch here still has
+//! about 3.7 s of workblock per message ahead of it. The messages are
+//! resident and decoded by then, so the close decides nothing about
+//! them: the rule is [`leviculum_sync_batch::SyncBatch::after_close`],
+//! and only the link's own bookkeeping goes with the link.
+//!
 //! ## Why a slice and not a yield (leviculum#425)
 //!
 //! Until 2026-09-24 a settle pass awaited the WHOLE workblock. The
@@ -207,6 +217,7 @@ use leviculum_lxmf::{
 };
 use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
 use leviculum_record_log::SECTOR_SIZE;
+use leviculum_sync_batch::AfterClose;
 use rand_core::CryptoRngCore;
 
 // ---------------------------------------------------------------------------
@@ -664,13 +675,14 @@ enum Work {
 /// An inbound sync resource from a validated peer — any message count —
 /// being drained one message per settle pass (module docs, §stamp
 /// validation).
+///
+/// The queue and its counters live in [`leviculum_sync_batch`], together with
+/// the one decision that is not bookkeeping: what a `LinkClosed` for
+/// `link_id` means for messages already resident here.
 struct SyncBatch {
     link_id: LinkId,
     remote: [u8; 16],
-    messages: VecDeque<Vec<u8>>,
-    accepted: usize,
-    bytes: u64,
-    invalid: usize,
+    drain: leviculum_sync_batch::SyncBatch<Vec<u8>>,
 }
 
 /// One outbound sync round in flight, as on the host.
@@ -1017,9 +1029,10 @@ impl Engine {
             };
         }
         let batch = self.sync_batch.as_ref().map_or(0, |batch| {
-            hc::vec_deque_bytes(&batch.messages)
+            hc::vec_deque_bytes(batch.drain.messages())
                 + batch
-                    .messages
+                    .drain
+                    .messages()
                     .iter()
                     .map(|message| message.capacity())
                     .sum::<usize>()
@@ -1324,13 +1337,34 @@ impl Engine {
                 self.pending_proofs.remove(link_id);
                 self.validated_links.remove(link_id);
                 self.inbound_transfers.retain(|held| held != link_id);
-                let batch_died = self
+                // Two cases for a close that lands on the batch's own link,
+                // told apart by whether anything is still resident
+                // (`leviculum_sync_batch::SyncBatch::after_close`):
+                //
+                // * `KeepDraining` — the messages are HERE, whole and
+                //   decoded, and only their stamps are still owed. This
+                //   sender is finished, not gone: it proved its resource and
+                //   tore the link down in the same breath, as the reference
+                //   does (`reference/LXMF/LXMF/LXMPeer.py:499-503`). The
+                //   grind runs on to the end of the batch and the round is
+                //   concluded by `perform_sync_step` like any other. Until
+                //   eb9b8b7a this arm concluded here instead, which dropped
+                //   the whole unjudged tail — 6 of 7 messages on the rig
+                //   (`lora_pn_board_offer_past_the_link`, 2026-09-24).
+                // * `Conclude` — nothing left to judge. Logging the round
+                //   here rather than waiting for a settle pass keeps a spent
+                //   batch from standing in the way of the next `/offer`.
+                //
+                // A link that dies while the resource is still IN FLIGHT
+                // never reaches either: the batch is built from the decoded
+                // envelope once the transfer concluded, so there is no batch
+                // yet and `sync_batch` is `None`.
+                let after_close = self
                     .sync_batch
                     .as_ref()
-                    .is_some_and(|batch| batch.link_id == *link_id);
-                if batch_died {
-                    // The sender is gone; what was already ingested
-                    // stays, the rest of the batch is dropped.
+                    .filter(|batch| batch.link_id == *link_id)
+                    .map(|batch| batch.drain.after_close());
+                if after_close == Some(AfterClose::Conclude) {
                     self.conclude_sync_batch();
                 }
                 if self
@@ -1904,10 +1938,7 @@ impl Engine {
         self.sync_batch = Some(SyncBatch {
             link_id: *link_id,
             remote,
-            messages: envelope.messages.into(),
-            accepted: 0,
-            bytes: 0,
-            invalid: 0,
+            drain: leviculum_sync_batch::SyncBatch::new(envelope.messages.into()),
         });
     }
 
@@ -1991,10 +2022,12 @@ impl Engine {
 
     fn conclude_sync_batch(&mut self) {
         // A batch can end while one of its messages has a half-expanded
-        // workblock parked — a link that closed under it, or a peer that
-        // ignored the throttle. The stream belongs to THAT message; resuming
-        // it against the next one would judge a stamp by another message's
-        // workblock, so it is abandoned here rather than inherited.
+        // workblock parked — a peer that ignored the throttle, or a second
+        // envelope arriving under the first. The stream belongs to THAT
+        // message; resuming it against the next one would judge a stamp by
+        // another message's workblock, so it is abandoned here rather than
+        // inherited. A link closing under the batch is no longer one of
+        // these cases: it leaves the grind alone (`on_events`, `LinkClosed`).
         self.abandon_grind("batch_concluded");
         if let Some(batch) = self.sync_batch.take() {
             crate::log::log_fmt(
@@ -2002,13 +2035,9 @@ impl Engine {
                 format_args!(
                     "peer={} dir=in transferred={} bytes={} result={}",
                     Hex(&batch.remote),
-                    batch.accepted,
-                    batch.bytes,
-                    if batch.invalid == 0 {
-                        "ok"
-                    } else {
-                        "invalid_stamps"
-                    }
+                    batch.drain.transferred(),
+                    batch.drain.bytes(),
+                    batch.drain.result()
                 ),
             );
         }
@@ -2948,7 +2977,7 @@ impl Engine {
         let Some(message) = self
             .sync_batch
             .as_mut()
-            .and_then(|batch| batch.messages.pop_front())
+            .and_then(|batch| batch.drain.take_next())
         else {
             self.conclude_sync_batch();
             return;
@@ -2968,7 +2997,7 @@ impl Engine {
                 // workblock, and nothing below runs on a stamp not yet judged.
                 ValidateStep::Parked => {
                     if let Some(batch) = self.sync_batch.as_mut() {
-                        batch.messages.push_front(message);
+                        batch.drain.park(message);
                     }
                     return;
                 }
@@ -3005,8 +3034,7 @@ impl Engine {
                 );
                 if !duplicate && durable {
                     if let Some(batch) = self.sync_batch.as_mut() {
-                        batch.accepted += 1;
-                        batch.bytes += size as u64;
+                        batch.drain.accept(size as u64);
                     }
                 }
             }
@@ -3014,15 +3042,15 @@ impl Engine {
             | UploadOutcome::Malformed(_)
             | UploadOutcome::PeerSyncForm => {
                 if let Some(batch) = self.sync_batch.as_mut() {
-                    batch.invalid += 1;
+                    batch.drain.reject();
                 }
             }
             UploadOutcome::StoreFailed(_) => {}
         }
         let drained = self.sync_batch.as_ref().map(|batch| {
             (
-                batch.messages.is_empty(),
-                batch.invalid,
+                batch.drain.drained(),
+                batch.drain.invalid(),
                 batch.remote,
                 batch.link_id,
             )

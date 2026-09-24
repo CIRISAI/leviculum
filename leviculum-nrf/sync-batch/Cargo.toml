@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-sync-batch"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The inbound peer-sync batch on the board: what a drain step counts, and what the link closing under it means. Host-testable"
+
+[dependencies]

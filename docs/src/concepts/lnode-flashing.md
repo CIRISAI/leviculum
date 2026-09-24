@@ -255,7 +255,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:201`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:205`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5

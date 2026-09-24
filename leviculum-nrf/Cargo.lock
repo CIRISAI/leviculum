@@ -1026,6 +1026,7 @@ dependencies = [
  "leviculum-screen",
  "leviculum-sd-policy",
  "leviculum-settle-budget",
+ "leviculum-sync-batch",
  "leviculum-telemetry-policy",
  "leviculum-tx-spacing",
  "nmea0183",
@@ -1096,6 +1097,10 @@ dependencies = [
  "leviculum-record-log",
  "sequential-storage",
 ]
+
+[[package]]
+name = "leviculum-sync-batch"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-telemetry-policy"
