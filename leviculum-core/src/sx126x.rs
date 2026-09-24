@@ -214,6 +214,53 @@ pub fn tx_defer_ms(
     rx_extend_ms(flags, bw_hz, sf, cr_denom, preamble_symbols)
 }
 
+/// Symbols the LoRa PHY header occupies, as the reference firmware counts them
+/// (`PHY_HEADER_LORA_SYMBOLS`, `reference/RNode_Firmware/Config.h:82`).
+pub const PHY_HEADER_SYMBOLS: u16 = 20;
+
+/// How long a bare `PreambleDetected` may still be believed: the programmed
+/// preamble plus the PHY header at the live modulation, after which a carrier
+/// that has produced no `HeaderValid` is noise.
+///
+/// The second bound of the deferral, and the one [`tx_defer_ms`] deliberately
+/// does not compute. That function answers *how much longer can a frame still
+/// be arriving* and its answer is one maximum-size frame, which is right for a
+/// caller that spends it once per externally paced event. A caller that reaches
+/// its teardown once per CSMA retry cannot afford that bound on a carrier that
+/// never becomes a frame, and it does not have to: by this many milliseconds a
+/// real frame at this modulation has decoded its header, so a latch that still
+/// reads `preamble=1 header=0` is a false preamble and the wait is over.
+///
+/// The reference firmware makes the same call on the same two quantities —
+/// `now - preamble_detected_at > lora_preamble_time_ms + lora_header_time_ms`
+/// with no header, and it re-enters receive
+/// (`lora_header_time_ms`, `reference/RNode_Firmware/sx126x.cpp:508`), each
+/// term being its symbol count times the symbol time, rounded up
+/// (`lora_header_time_ms`, `reference/RNode_Firmware/Utilities.h:1260`).
+///
+/// **Measured from the wait, not from the preamble.** The reference stamps the
+/// instant it first saw the bit; a standing window cannot be asked when its
+/// preamble latched, only how long the window has stood. So the wait this sizes
+/// starts no earlier than the true preamble and the bound is therefore generous
+/// rather than tight, which is the direction that keeps a real frame.
+///
+/// `None` for the inputs that have no symbol time: `bw_hz == 0` (no
+/// `configure_lora` yet) and a spreading factor outside the shift's range, the
+/// same guards [`crate::rnode::airtime_ms_with_preamble`] carries. A caller
+/// that gets `None` has no honest short bound and falls back to the full one.
+pub fn false_preamble_ms(bw_hz: u32, sf: u8, preamble_symbols: u16) -> Option<u64> {
+    if bw_hz == 0 || sf == 0 || sf > 63 {
+        return None;
+    }
+    let t_sym_us = (1u64 << sf) * 1_000_000 / bw_hz as u64;
+    // Two roundings and not one, because the reference keeps the two terms in
+    // two variables and rounds each: the sum of the rounded terms is the
+    // number it compares against.
+    let preamble_ms = (preamble_symbols as u64 * t_sym_us).div_ceil(1_000);
+    let header_ms = (PHY_HEADER_SYMBOLS as u64 * t_sym_us).div_ceil(1_000);
+    Some((preamble_ms + header_ms).max(1))
+}
+
 /// Slack added on top of a computed on-air time when sizing the software
 /// timeout around a started radio operation (TX completion, CAD completion).
 ///
@@ -1263,6 +1310,66 @@ mod tests {
         let (bw, sf, cr) = SLOW;
         let slow = tx_defer_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE).expect("defers");
         assert_eq!(slow, 4_756);
+    }
+
+    /// The false-preamble bound, as a number, at the two profiles the rig runs.
+    ///
+    /// It is the CAD site's bound and it has to be an order of magnitude below
+    /// the deferral's: that site is reached once per CSMA retry (up to eight,
+    /// `leviculum_channel_access::CAD_MAX_RETRIES`), so a carrier that never
+    /// becomes a frame must cost it a fraction of a frame, not a frame.
+    #[test]
+    fn the_false_preamble_bound_is_the_preamble_and_the_header() {
+        // SF8/BW125 with the derived 18-symbol preamble: t_sym is 2.048 ms, so
+        // 18 symbols of preamble are 37 ms and the 20-symbol header is 41 ms.
+        let fast = false_preamble_ms(125_000, 8, 18).expect("a configured radio");
+        assert_eq!(fast, 78);
+        let fast_frame = tx_defer_ms(IRQ_PREAMBLE_DETECTED, 125_000, 8, 5, 18).expect("defers");
+        assert!(
+            fast_frame / fast >= 9,
+            "the false-preamble bound {fast} ms is not a fraction of the frame              bound {fast_frame} ms any more"
+        );
+        // And at the slow end, where both are longer and the ratio holds.
+        let (bw, sf, cr) = SLOW;
+        let slow = false_preamble_ms(bw, sf, SLOW_PREAMBLE).expect("a configured radio");
+        assert_eq!(slow, 623);
+        let slow_frame =
+            tx_defer_ms(IRQ_PREAMBLE_DETECTED, bw, sf, cr, SLOW_PREAMBLE).expect("defers");
+        assert!(slow_frame / slow >= 7, "{slow} ms against {slow_frame} ms");
+    }
+
+    /// The bound is the reference's two terms, each rounded up, and it grows
+    /// with the programmed preamble the way the reference's does.
+    #[test]
+    fn the_false_preamble_bound_follows_the_programmed_preamble() {
+        for (bw, sf) in [(125_000u32, 8u8), (62_500, 10), (125_000, 12)] {
+            let t_sym_us = (1u64 << sf) * 1_000_000 / bw as u64;
+            for preamble in [8u16, 18, 24, 94] {
+                let expected = (preamble as u64 * t_sym_us).div_ceil(1_000)
+                    + (PHY_HEADER_SYMBOLS as u64 * t_sym_us).div_ceil(1_000);
+                assert_eq!(
+                    false_preamble_ms(bw, sf, preamble),
+                    Some(expected),
+                    "bw={bw} sf={sf} preamble={preamble}"
+                );
+            }
+        }
+        // Strictly monotone in the preamble: a longer preamble is more time in
+        // which a real frame has not yet shown a header.
+        let short = false_preamble_ms(125_000, 8, 8).expect("configured");
+        let long = false_preamble_ms(125_000, 8, 24).expect("configured");
+        assert!(long > short, "{long} against {short}");
+    }
+
+    /// The one input with no symbol time answers `None`, the same way the
+    /// frame bound does: an unconfigured radio has no airtime to compute from,
+    /// and a caller must not read a fabricated number as a short bound.
+    #[test]
+    fn an_unconfigured_radio_has_no_false_preamble_bound() {
+        assert_eq!(false_preamble_ms(0, 8, 18), None);
+        assert_eq!(false_preamble_ms(125_000, 0, 18), None);
+        assert_eq!(false_preamble_ms(125_000, 64, 18), None);
+        assert_eq!(tx_defer_ms(IRQ_PREAMBLE_DETECTED, 0, 8, 5, 18), None);
     }
 
     /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the
