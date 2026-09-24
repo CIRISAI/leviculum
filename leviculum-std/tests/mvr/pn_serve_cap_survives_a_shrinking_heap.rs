@@ -17,9 +17,9 @@
 //! not atomic: the cap is read when the `/get` comes off the work queue
 //! and the path holds the transfer live across several awaits, and in
 //! that window the engine still admits an inbound sync batch (8 000 B),
-//! an upload (4 000 B) and one more endpoint link (2 680 B) — every one
+//! an upload (4 000 B) and one more endpoint link (2 696 B) — every one
 //! of them already priced by the heap census, every one of them able to
-//! start while a serve runs. The margined cap is 7 256 B (26 messages),
+//! start while a serve runs. The margined cap is 7 252 B (26 messages),
 //! and the margin-free one costs 25 099 + 14 680 = 39 779 B against
 //! 30 380 B of heap once those arrivals land.
 //!
@@ -70,9 +70,9 @@ const FREE_AT_PANIC: usize = 30_380;
 /// same instant (`… largest=30320`).
 const LARGEST_AT_PANIC: usize = 30_320;
 
-/// What the boot plan funds on that board (`HEAP_BUDGET … slack=808` →
-/// `serve_cap=222`), the floor the live reading is taken against.
-const BOOT_CAP: usize = 222;
+/// What the boot plan funds on that board (`HEAP_BUDGET … slack=720` →
+/// `serve_cap=194`), the floor the live reading is taken against.
+const BOOT_CAP: usize = 194;
 
 /// One inbound sync batch at the announced `BOARD_SYNC_LIMIT_KB`
 /// (`leviculum-nrf/src/pn.rs`).
@@ -82,12 +82,12 @@ const ARRIVING_SYNC_BATCH_BYTES: usize = 8 * 1000;
 const ARRIVING_UPLOAD_BYTES: usize = 4 * 1000;
 
 /// One more endpoint link, at this tree's own `budget_per_link()`
-/// (2 688 B, the figure the 2026-09-23 capture's boot line printed too).
-/// #384 B2 took it to 2 680 B by shrinking `OutgoingResource` by the
-/// joined-ciphertext copy it kept beside its parts; the
+/// (2 696 B). #384 B2 took it to 2 680 B by shrinking `OutgoingResource`
+/// by the joined-ciphertext copy it kept beside its parts; the
 /// `frame_turnaround_ms` a link now records off its first hop
-/// (#36/#374) put the 8 B back.
-const ARRIVING_LINK_BYTES: usize = 2_688;
+/// (#36/#374) put 8 B back, and the `acquisition_ms` beside it
+/// (#36/#374, the burst's one channel acquisition) another 8.
+const ARRIVING_LINK_BYTES: usize = 2_696;
 
 /// The margin the firmware takes off before it spends a live reading
 /// (`SERVE_MARGIN_BYTES`, `leviculum-nrf/src/heap_census.rs`): the sum

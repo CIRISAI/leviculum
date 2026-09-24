@@ -163,8 +163,8 @@ pub const fn budget_reserve() -> usize {
 /// link currently rides them, because a claimable GATT connection can
 /// fill its queues). What remains of [`crate::HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
-/// With today's numbers (T114: node box 31 008 B, role 21 120 B,
-/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 688 B) the
+/// With today's numbers (T114: node box 31 040 B, role 21 120 B,
+/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
 /// division yields 4 — the heap affords exactly the BLE-session count,
 /// and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`crate::ble::MAX_LINKS`]: a node box grown past
@@ -204,7 +204,7 @@ pub const fn budget_total(node_box: usize) -> usize {
 ///
 /// Named because the propagation role's unfunded outbound serve
 /// transient ([`crate::pn::SERVE_PEAK_BYTES`]) is measured against it:
-/// on a T114 this is 808 B against a 17 264 B need (it was 880 B against
+/// on a T114 this is 720 B against a 17 264 B need (it was 880 B against
 /// 48 922 B before the serve was streamed, #384 B2).
 pub const fn budget_slack(node_box: usize) -> usize {
     crate::HEAP_SIZE.saturating_sub(budget_total(node_box))
@@ -234,7 +234,7 @@ pub const fn budget_slack(node_box: usize) -> usize {
 /// `plaintext` block the T114 died in on 2026-09-23 (5 450 B = 4 + 5 427
 /// + 19) is one of the four whole copies that stopped existing.
 ///
-/// At the slack this board prints today, 808 B, this is **222 B**: about
+/// At the slack this board prints today, 720 B, this is **194 B**: about
 /// the smallest LXMF message the store takes, and still nothing like a
 /// field one (224 B of body accounts to 296 B). It was 88 B before B2.
 /// That is the honest number, not a failure of the arithmetic — and it
@@ -264,8 +264,8 @@ pub const fn budget_serve_cap(node_box: usize) -> usize {
 /// ```text
 ///   BOARD_SYNC_LIMIT_KB · 1000       8 000 B   one inbound sync batch
 /// + BOARD_TRANSFER_LIMIT_KB · 1000   4 000 B   one queued upload
-/// + budget_per_link()                2 688 B   one more endpoint link
-/// =                                 14 688 B
+/// + budget_per_link()                2 696 B   one more endpoint link
+/// =                                 14 696 B
 /// ```
 ///
 /// All three can coexist: the batch arrives from a peer over one link,
@@ -292,18 +292,18 @@ pub const SERVE_MARGIN_BYTES: usize = crate::pn::BOARD_SYNC_LIMIT_KB as usize * 
 // moving an announced limit legitimately moves this: move the mvrs'
 // literal and their expected served counts with it, and say what the
 // board serves now.
-const _: () = assert!(SERVE_MARGIN_BYTES == 14_688);
+const _: () = assert!(SERVE_MARGIN_BYTES == 14_696);
 
 /// The cap one fetch may serve to, from the heap the board HAS rather
 /// than the heap its boot plan feared (#388, order 138).
 ///
 /// [`budget_serve_cap`] is a worst case: every term of the plan at its
-/// maximum at once, which on a T114 leaves 808 B of slack and funds a
-/// 222 B response — about one minimal message, nothing like a field one.
+/// maximum at once, which on a T114 leaves 720 B of slack and funds a
+/// 194 B response — about one minimal message, nothing like a field one.
 /// The heap that board actually had when it died was 30 380 B free
 /// (`[HEAP_CENSUS] … free=30380 largest=30320`,
 /// `lora_pn_board_offer_past_the_link`, 2026-09-23 08:08 UTC), and under
-/// the streamed serve (#384 B2) that funds **7 256 B — all 24** of the
+/// the streamed serve (#384 B2) that funds **7 252 B — all 24** of the
 /// messages it was refusing to serve, in one fetch. Before B2 the same
 /// heap funded 2 540 B and nine of them.
 ///
@@ -363,7 +363,7 @@ pub fn live_serve_cap(boot_cap: usize, free: usize, largest: usize) -> usize {
 ///   plan DOES fund, and the bound the role serves to. The deficit line
 ///   says the announced cap is unaffordable; this one says what is
 ///   affordable instead, and a `serve_cap` below one stored message
-///   (222 B at the T114's 808 B of slack) means the BOOT plan alone
+///   (194 B at the T114's 720 B of slack) means the BOOT plan alone
 ///   would have the board list mail it will not serve. It is a floor:
 ///   [`live_serve_cap`] raises it to what the heap actually has at
 ///   each `/get`, and only a board whose live heap is also that tight

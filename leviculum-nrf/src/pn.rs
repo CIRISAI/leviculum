@@ -142,9 +142,9 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 008, role 21 120, reserve 18 848,
-//! sessions 4 · 3 948 = 15 792, per_link 2 664 — the remainder is
-//! 11 536 B and the division yields **4** (leaving 880 B of slack): the heap affords exactly the
+//! With today's numbers — node box 31 040, role 21 120, reserve 18 848,
+//! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
+//! 11 504 B and the division yields **4** (leaving 720 B of slack): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth
@@ -412,7 +412,7 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_S
 ///
 /// ```text
 /// reserve + slack   funded fetch response   messages of 224 B
-///        808 B                     222 B                    0
+///        720 B                     194 B                    0
 ///      5 000 B                   2 128 B                    7
 ///     17 264 B                   8 000 B     the full announced cap
 ///     20 000 B                   9 304 B                   34
@@ -425,15 +425,15 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - leviculum_core::resource::RESOURCE_S
 /// it funds 14 296 B, and the whole announced 8 KB cap costs 17 264 B
 /// instead of 48 922.)
 ///
-/// And what it costs: the slack is 808 B and one endpoint link is
-/// [`crate::heap_census::budget_per_link`] ≈ 2 680 B, so raising this
+/// And what it costs: the slack is 720 B and one endpoint link is
+/// [`crate::heap_census::budget_per_link`] ≈ 2 696 B, so raising this
 /// still has to come out of the four links the budget affords — and
 /// [`crate::ble::MAX_LINKS`] is also four, asserted at boot and at
 /// compile time. **At four claimable BLE sessions there is no link to
-/// sell, so the BOOT-funded cap is 222 B.** What makes the board serve
+/// sell, so the BOOT-funded cap is 194 B.** What makes the board serve
 /// is not this number but the live one
 /// ([`crate::heap_census::live_serve_cap`]): the heap the T114 actually
-/// stood on funds 7 256 B after the margin, which is all 24 of the
+/// stood on funds 7 252 B after the margin, which is all 24 of the
 /// field's messages in one fetch. Raising this reserve would buy a
 /// bigger floor, not a bigger serve, and it would cost a link.
 pub const SERVE_RESERVE_BYTES: usize = 0;
@@ -512,18 +512,18 @@ pub const SERVE_PEAK_BYTES: usize =
 ///   the response out of the store and the four whole copies between
 ///   the store and the advertisement stopped existing);
 /// * what the plan leaves for it = [`SERVE_RESERVE_BYTES`] plus
-///   [`crate::heap_census::budget_slack`], **808 B** on the T114 — the
+///   [`crate::heap_census::budget_slack`], **720 B** on the T114 — the
 ///   remainder after `max_endpoint_links` floors its division, and it
 ///   cannot grow without taking a link away from
 ///   [`crate::ble::MAX_LINKS`];
-/// * deficit against the full announced cap = **16 456 B**;
+/// * deficit against the full announced cap = **16 544 B**;
 /// * so the BOOT-funded fetch response,
-///   [`crate::heap_census::budget_serve_cap`], is **222 B** — about one
+///   [`crate::heap_census::budget_serve_cap`], is **194 B** — about one
 ///   minimal message, and that is what `serve_cap=` on the boot line
 ///   says. It is a floor, not the serve: every `/get` re-reads the cap
 ///   from the heap the board HAS
 ///   ([`crate::heap_census::live_serve_cap`]), and the 30 380 B that
-///   T114 stood on funds 7 256 B after the margin — all 24 of the
+///   T114 stood on funds 7 252 B after the margin — all 24 of the
 ///   field's messages in one fetch, where the buffered path funded nine.
 ///
 /// Funding a bigger FLOOR still means taking bytes from a term above,
@@ -2674,13 +2674,13 @@ impl Engine {
     /// feared (#388, order 138).
     ///
     /// The boot cap is a floor: it is the plan's own worst case, every
-    /// term at its maximum at once, and on a T114 that funds 222 B —
+    /// term at its maximum at once, and on a T114 that funds 194 B —
     /// about one minimal message and nothing like a field one. The heap
     /// it actually stands on when a client fetches is much larger
     /// (30 380 B free when the 2026-09-23 fetch killed it), and
     /// [`crate::heap_census::live_serve_cap`] says what that funds,
     /// after [`crate::heap_census::SERVE_MARGIN_BYTES`] is taken off for
-    /// what can still arrive while the serve is in flight: **7 256 B**,
+    /// what can still arrive while the serve is in flight: **7 252 B**,
     /// which is the field's whole 24-message mailbox in one fetch since
     /// #384 B2 streamed the response out of the store.
     ///

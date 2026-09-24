@@ -663,7 +663,7 @@ async fn a_python_client_collects_a_capped_mailbox_over_several_rounds() {
 /// nowhere else in this suite.
 ///
 /// The cap is set to what the T114's own heap funded on 2026-09-23
-/// (`serve_cap_for_live_heap` at `free=30380`, 7 256 B —
+/// (`serve_cap_for_live_heap` at `free=30380`, 7 252 B —
 /// `leviculum-std/tests/mvr/pn_serve_cap_bounds_one_fetch.rs`) rather
 /// than left unbounded, so what this measures is the BOARD's bound,
 /// driven by a real client, on a host that can run one.
@@ -674,7 +674,7 @@ async fn a_python_client_drains_a_full_field_mailbox_in_one_sync() {
     const MESSAGES: usize = 24;
     /// What the T114's live heap funded on 2026-09-23 under the
     /// streamed serve.
-    const BOARD_LIVE_SERVE_CAP: usize = 7_256;
+    const BOARD_LIVE_SERVE_CAP: usize = 7_252;
 
     let hub = TestDaemon::start().await.expect("start hub daemon");
     let recipient = TestDaemon::start().await.expect("start recipient daemon");
