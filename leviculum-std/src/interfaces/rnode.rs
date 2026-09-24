@@ -129,6 +129,9 @@ pub(crate) struct RNodeInterfaceConfig {
     /// TEMPORARY (#347): the acquisition-jitter arm this interface runs,
     /// read from the environment by the builder that refuses a bad value.
     pub jitter_arm: JitterArm,
+    /// The node's 16-byte identity hash, which with the interface name gives
+    /// this interface its [`FrameClass`].
+    pub identity_hash: [u8; 16],
 }
 
 impl RNodeInterfaceConfig {
@@ -269,7 +272,11 @@ pub(crate) enum JitterArm {
     ModemOnly,
     /// Arm 3 — the draw re-expressed in units of the frame: the same number
     /// of slots, each slot floored at the airtime of the frame about to go,
-    /// which scales DIFS with it exactly as 124's costing did.
+    /// which scales DIFS with it exactly as 124's costing did, and the count
+    /// pinned to this interface's [`FrameClass`] so that two ends of
+    /// opposite class can never owe the same number of frames (trace 228).
+    /// The guarantee is pairwise and class-conditional; [`FrameClass`] states
+    /// what it does and does not cover.
     FrameSlot,
 }
 
@@ -315,6 +322,91 @@ impl JitterArm {
     }
 }
 
+/// Which half of arm 3's whole-frame counts one interface draws in: the even
+/// counts or the odd ones.
+///
+/// Arm 3 pays its draw in whole frame airtimes, so two ends that draw the
+/// same number of slots owe the same wait to the millisecond and key
+/// together. Trace 228 (2026-09-24, `lora_ratchet_rotation_listened` arm 3,
+/// window 24c run 1) caught exactly that: both daemons took their
+/// post-drain acquisition on the same millisecond, both drew 1509 ms =
+/// 3 x 503 ms, both frames died, and the identical hold cadence kept the
+/// pair locked into the next exchange. Fourteen equally likely draws means
+/// two ends sharing an acquisition anchor tie with p = 1/14.
+///
+/// Pinning each end to a residue class of the count splits the fourteen
+/// counts into two sevens, so two ends in DIFFERENT classes can never owe
+/// the same number of frames: their counts differ by at least one, which is
+/// at least one airtime of the frame they are contending to send — 503 ms
+/// on the PHY 228 measured, against the tens of milliseconds the modem is
+/// blind for after it keys. The first collision never forms, and the
+/// hold-cadence lock never starts. The stagger is a frame airtime at every
+/// PHY, because that is the unit arm 3 counts in.
+///
+/// **What this guarantees, exactly.** Pairwise distinctness for two ends of
+/// opposite class, with probability 1 — not for an arbitrary pair. The class
+/// is a property of one end's own identity, computed without knowing who
+/// else is on the channel, so two ends land in the same class half the time
+/// and then contend over seven counts instead of fourteen. With three or
+/// more contenders on one anchor two of them share a class by pigeonhole, so
+/// there it is a reduced probability and never a guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) struct FrameClass(u64);
+
+impl FrameClass {
+    /// The class this interface belongs to: the low bit of a stable hash of
+    /// the node identity hash and the interface's own name.
+    ///
+    /// Both, because either alone leaves a pair of contenders in one class
+    /// by construction — two daemons run interfaces under the same generated
+    /// name (`rnode_0` for both ends of every periculum LoRa cell), and two
+    /// radios of ONE daemon share its identity hash.
+    pub(crate) fn of(identity_hash: &[u8; 16], iface_name: &str) -> Self {
+        let mut hash = fnv1a(FNV_OFFSET_BASIS, identity_hash);
+        hash = fnv1a(hash, iface_name.as_bytes());
+        Self(hash & 1)
+    }
+
+    /// 0 for the even counts, 1 for the odd ones.
+    const fn parity(self) -> u64 {
+        self.0
+    }
+}
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a, because the class has to be the same on every run of every build:
+/// `std::hash::RandomState` is seeded per process, so a `DefaultHasher` class
+/// would be a fresh coin flip after every restart and two ends could not
+/// stay apart across a reconnect.
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut hash = seed;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// The whole-frame count arm 3 owes for a draw of `drawn_slots`, pinned to
+/// `class`.
+///
+/// The draw window is `JITTER_DIFS_SLOTS ..= JITTER_DIFS_SLOTS +
+/// JITTER_CW_SLOTS - 1`, i.e. 2..=15 (14 values). Folding it onto the seven
+/// counts of one class keeps the window's ends: class 1 can still reach 15,
+/// so the ceiling a caller sizes its window with does not move, and every
+/// count stays at or above DIFS. The fold is a modulo rather than a nudge to
+/// the neighbouring count, so each of the seven counts keeps exactly two of
+/// the fourteen draws and the class distribution stays uniform — a nudge
+/// would pile three draws onto one count and make that count the likeliest
+/// place for two same-class ends to meet.
+fn classed_frame_slots(drawn_slots: u64, class: FrameClass) -> u64 {
+    let counts_per_class = JITTER_CW_SLOTS as u64 / 2;
+    let index = drawn_slots.saturating_sub(JITTER_DIFS_SLOTS) % counts_per_class;
+    JITTER_DIFS_SLOTS + class.parity() + 2 * index
+}
+
 /// What one acquisition owes before the frame whose payload is
 /// `payload_len` bytes may be handed to the modem, under `arm`.
 ///
@@ -332,6 +424,7 @@ fn arm_owed_jitter_ms(
     bandwidth_hz: u32,
     sf: u8,
     cr: u8,
+    frame_class: FrameClass,
 ) -> u64 {
     let drawn = access.acquisition_jitter_ms();
     match arm {
@@ -358,7 +451,7 @@ fn arm_owed_jitter_ms(
                 cr,
                 rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
             );
-            (drawn / slot) * frame_air.max(slot)
+            classed_frame_slots(drawn / slot, frame_class) * frame_air.max(slot)
         }
     }
 }
@@ -1282,6 +1375,7 @@ async fn rnode_io_task<S>(
     cr: u8,
     drop_direct_ingress: bool,
     jitter_arm: JitterArm,
+    frame_class: FrameClass,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1654,6 +1748,7 @@ where
                                 bandwidth_hz,
                                 sf,
                                 cr,
+                                frame_class,
                             );
                             if owed == 0 {
                                 timer_ready = true;
@@ -1931,6 +2026,11 @@ struct RNodeReconnectCtx {
     test_drop_direct_ingress: bool,
     /// TEMPORARY (#347): which acquisition-jitter arm the io task runs.
     jitter_arm: JitterArm,
+    /// Which residue class of arm 3's whole-frame counts this interface
+    /// draws in ([`FrameClass`]). Resolved once per interface, not per
+    /// connection: a reconnect must not re-roll it, or two ends that were
+    /// apart could land together after one of them loses its port.
+    frame_class: FrameClass,
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -2031,6 +2131,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     radio.cr,
                     ctx.test_drop_direct_ingress,
                     /* jitter_arm = */ ctx.jitter_arm,
+                    /* frame_class = */ ctx.frame_class,
                 )
                 .await;
 
@@ -2109,6 +2210,8 @@ pub(crate) struct RNodeChannelInterfaceConfig {
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     /// TEMPORARY (#347): see [`RNodeInterfaceConfig::jitter_arm`].
     pub jitter_arm: JitterArm,
+    /// See [`RNodeInterfaceConfig::identity_hash`].
+    pub identity_hash: [u8; 16],
 }
 
 impl RNodeChannelInterfaceConfig {
@@ -2305,6 +2408,11 @@ where
     }
 }
 
+// One more parameter than clippy's default, for the same reason
+// `rnode_io_task` above carries the allow: this is a struct-filling helper for
+// the two spawn paths, and folding its fields into an intermediate struct would
+// buy a type whose only job is to be unpacked one line later.
+#[allow(clippy::too_many_arguments)]
 fn reconnect_ctx_from_radio(
     id: InterfaceId,
     name: String,
@@ -2313,6 +2421,7 @@ fn reconnect_ctx_from_radio(
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     test_drop_direct_ingress: bool,
     jitter_arm: JitterArm,
+    frame_class: FrameClass,
 ) -> RNodeReconnectCtx {
     let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.cr, radio.bandwidth);
     RNodeReconnectCtx {
@@ -2324,6 +2433,7 @@ fn reconnect_ctx_from_radio(
         jitter_max_ms,
         test_drop_direct_ingress,
         jitter_arm,
+        frame_class,
     }
 }
 
@@ -2333,6 +2443,7 @@ fn reconnect_ctx_from_radio(
 /// `InterfaceHandle` for the event loop. Each (re)connection opens the serial
 /// port fresh via [`open_serial_port`].
 pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHandle {
+    let frame_class = FrameClass::of(&config.identity_hash, &config.name);
     let ctx = reconnect_ctx_from_radio(
         config.id,
         config.name.clone(),
@@ -2341,6 +2452,7 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         config.reconnect_notify,
         config.test_drop_direct_ingress,
         config.jitter_arm,
+        frame_class,
     );
     let buffer_size = config.buffer_size;
     let port_path = config.port_path;
@@ -2364,6 +2476,7 @@ pub(crate) fn spawn_rnode_channel_interface(
     config: RNodeChannelInterfaceConfig,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> InterfaceHandle {
+    let frame_class = FrameClass::of(&config.identity_hash, &config.name);
     let ctx = reconnect_ctx_from_radio(
         config.id,
         config.name.clone(),
@@ -2374,6 +2487,7 @@ pub(crate) fn spawn_rnode_channel_interface(
         // path never needs it.
         false,
         config.jitter_arm,
+        frame_class,
     );
     let buffer_size = config.buffer_size;
     let factory = config.channel_factory;
@@ -3305,6 +3419,7 @@ mod tests {
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
                 jitter_arm: JitterArm::AsIs,
+                identity_hash: [0u8; 16],
             },
             None,
         );
@@ -3371,6 +3486,7 @@ mod tests {
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
                 jitter_arm: JitterArm::AsIs,
+                identity_hash: [0u8; 16],
             };
         let halves_of = |port: tokio::io::DuplexStream| {
             let (read_half, write_half) = tokio::io::split(port);
@@ -3696,6 +3812,7 @@ mod tests {
             reconnect_notify: None,
             test_drop_direct_ingress: false,
             jitter_arm: JitterArm::AsIs,
+            identity_hash: [0u8; 16],
         };
 
         let mut handle = spawn_rnode_interface(config);
@@ -3968,6 +4085,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -4137,6 +4255,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -4312,6 +4431,7 @@ mod tests {
                 CR,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -4333,6 +4453,7 @@ mod tests {
                 CR,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -4461,11 +4582,12 @@ mod tests {
         access
     }
 
-    /// Every wait `arm` can impose at this PHY, as a multiple of `unit`,
-    /// collected over enough acquisitions that the whole draw window is
-    /// reachable. Each iteration releases the channel first, so each is a
-    /// fresh acquisition and not the remainder of one.
-    fn arm_window(arm: JitterArm, unit: u64) -> std::collections::BTreeSet<u64> {
+    /// Every wait `arm` can impose at this PHY on an interface of
+    /// `class`, as a multiple of `unit`, collected over enough acquisitions
+    /// that the whole draw window is reachable. Each iteration releases the
+    /// channel first, so each is a fresh acquisition and not the remainder
+    /// of one.
+    fn arm_window(arm: JitterArm, unit: u64, class: FrameClass) -> std::collections::BTreeSet<u64> {
         const ACQUISITIONS: usize = 2000;
         let mut access = co_release_access(0x5EED_0347);
         let mut seen = std::collections::BTreeSet::new();
@@ -4478,6 +4600,7 @@ mod tests {
                 CO_RELEASE_BW,
                 CO_RELEASE_SF,
                 CO_RELEASE_CR,
+                class,
             );
             assert_eq!(
                 owed % unit,
@@ -4530,17 +4653,23 @@ mod tests {
                     CO_RELEASE_BW,
                     CO_RELEASE_SF,
                     CO_RELEASE_CR,
+                    FrameClass::default(),
                 ),
                 bare.acquisition_jitter_ms(),
                 "arm 1 must be the unmodified policy (seed {seed:#x})"
             );
         }
 
-        assert_eq!(
-            arm_window(JitterArm::AsIs, slot),
-            expected_window(),
-            "arm 1's wait is DIFS plus 0..=13 slots of {slot}ms"
-        );
+        // And the class arm 3 pins its count to is not consulted here: arms
+        // 1 and 2 draw in slots, and a slot-priced wait that moved with the
+        // interface's identity would be a second variable in the A/B.
+        for class in [FrameClass(0), FrameClass(1)] {
+            assert_eq!(
+                arm_window(JitterArm::AsIs, slot, class),
+                expected_window(),
+                "arm 1's wait is DIFS plus 0..=13 slots of {slot}ms"
+            );
+        }
     }
 
     /// ARM 2 — modem CSMA only: the host draws and discharges, and waits for
@@ -4563,6 +4692,7 @@ mod tests {
                 CO_RELEASE_BW,
                 CO_RELEASE_SF,
                 CO_RELEASE_CR,
+                FrameClass::default(),
             );
             assert_eq!(owed, 0, "arm 2 imposes no host wait (seed {seed:#x})");
             assert_eq!(
@@ -4583,6 +4713,7 @@ mod tests {
                 CO_RELEASE_BW,
                 CO_RELEASE_SF,
                 CO_RELEASE_CR,
+                FrameClass::default(),
             );
             modem_only.channel_released();
             as_is.channel_released();
@@ -4612,28 +4743,58 @@ mod tests {
 
         for i in 0..64u32 {
             let seed = 0x5EED_0347u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
-            let mut framed = co_release_access(seed);
-            let mut bare = co_release_access(seed);
-            let drawn = bare.acquisition_jitter_ms();
-            assert_eq!(
-                arm_owed_jitter_ms(
-                    JitterArm::FrameSlot,
-                    &mut framed,
-                    CO_RELEASE_PAYLOAD,
-                    CO_RELEASE_BW,
-                    CO_RELEASE_SF,
-                    CO_RELEASE_CR,
-                ),
-                (drawn / slot) * frame,
-                "arm 3 is the same number of slots, each one frame wide \\
-                 (seed {seed:#x})"
-            );
+            for class in [FrameClass(0), FrameClass(1)] {
+                let mut framed = co_release_access(seed);
+                let mut bare = co_release_access(seed);
+                let drawn = bare.acquisition_jitter_ms();
+                assert_eq!(
+                    arm_owed_jitter_ms(
+                        JitterArm::FrameSlot,
+                        &mut framed,
+                        CO_RELEASE_PAYLOAD,
+                        CO_RELEASE_BW,
+                        CO_RELEASE_SF,
+                        CO_RELEASE_CR,
+                        class,
+                    ),
+                    classed_frame_slots(drawn / slot, class) * frame,
+                    "arm 3 is the drawn number of slots folded onto this \\
+                     interface's class, each one frame wide (seed {seed:#x})"
+                );
+            }
         }
 
+        // The window is the same span in both classes -- 2..=15 counts of one
+        // frame -- split into the seven even counts and the seven odd ones,
+        // and together they are the whole draw window arms 1 and 2 have.
+        let even = arm_window(JitterArm::FrameSlot, frame, FrameClass(0));
+        let odd = arm_window(JitterArm::FrameSlot, frame, FrameClass(1));
         assert_eq!(
-            arm_window(JitterArm::FrameSlot, frame),
+            even,
+            expected_window()
+                .into_iter()
+                .filter(|c| c % 2 == 0)
+                .collect(),
+            "class 0's wait is the even counts of {frame}ms frames"
+        );
+        assert_eq!(
+            odd,
+            expected_window()
+                .into_iter()
+                .filter(|c| c % 2 == 1)
+                .collect(),
+            "class 1's wait is the odd counts of {frame}ms frames"
+        );
+        assert!(
+            even.is_disjoint(&odd),
+            "two ends of opposite class must not share a single count"
+        );
+        assert_eq!(
+            even.union(&odd)
+                .copied()
+                .collect::<std::collections::BTreeSet<u64>>(),
             expected_window(),
-            "arm 3's wait is DIFS plus 0..=13 frames of {frame}ms"
+            "the two classes together are still DIFS plus 0..=13 frames"
         );
 
         // The `max` in 124's formula is a guard and never the operative
@@ -4665,6 +4826,212 @@ mod tests {
         }
     }
 
+    /// TRACE 228 — two ends that draw the same slot count must not owe the
+    /// same number of whole frames.
+    ///
+    /// The minimal reproduction of the loss 228 measured: under arm 3, both
+    /// daemons of `lora_ratchet_rotation_listened` took their post-drain
+    /// acquisition on the same millisecond of window 24c run 1, both drew
+    /// 1509 ms = 3 x 503 ms, both keyed inside the other's CAD-blind window,
+    /// and both frames died. Same anchor plus the same count is the whole
+    /// mechanism, so the test hands two interfaces the same RNG seed — the
+    /// identical draw, every time, rather than once in fourteen — and asks
+    /// what each owes.
+    ///
+    /// Red before the class existed: arm 3 was `(drawn / slot) * frame_air`,
+    /// a function of the draw alone, so two ends on one seed owed the same
+    /// millisecond for all 64 seeds.
+    #[test]
+    fn arm_three_keeps_two_ends_of_opposite_class_off_one_frame_count() {
+        let frame = rotation_frame_air_ms();
+
+        // Two identities, in the two classes. Real hashes from two daemons
+        // are not guaranteed to differ in class (see `FrameClass`), so the
+        // pair is chosen for the property under test and the test says so
+        // rather than drawing two at random and hoping.
+        let (alpha, beta) = opposite_class_identities();
+        let class_a = FrameClass::of(&alpha, "rnode_0");
+        let class_b = FrameClass::of(&beta, "rnode_0");
+        assert_ne!(
+            class_a.parity(),
+            class_b.parity(),
+            "the fixture's two identities must straddle the two classes"
+        );
+
+        for i in 0..64u32 {
+            let seed = 0x5EED_0228u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+            let mut access_a = rotation_access(seed);
+            let mut access_b = rotation_access(seed);
+            let owed_a = arm_owed_jitter_ms(
+                JitterArm::FrameSlot,
+                &mut access_a,
+                ROTATION_PAYLOAD,
+                ROTATION_BW,
+                ROTATION_SF,
+                ROTATION_CR,
+                class_a,
+            );
+            let owed_b = arm_owed_jitter_ms(
+                JitterArm::FrameSlot,
+                &mut access_b,
+                ROTATION_PAYLOAD,
+                ROTATION_BW,
+                ROTATION_SF,
+                ROTATION_CR,
+                class_b,
+            );
+            assert_ne!(
+                owed_a, owed_b,
+                "seed {seed:#x}: two ends on one acquisition anchor owed the \
+                 same {owed_a}ms, which is 228's collision"
+            );
+            assert!(
+                owed_a.abs_diff(owed_b) >= frame,
+                "seed {seed:#x}: the two ends are {}ms apart, less than the \
+                 {frame}ms frame one of them has to clear",
+                owed_a.abs_diff(owed_b)
+            );
+        }
+
+        // The stagger is what the fix is for: one frame airtime is far
+        // outside the window the modem is blind for after it keys, which the
+        // slot-priced arms are not (a slot here is {slot}ms).
+        let slot = jitter_slot_ms(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+        assert!(
+            frame > 4 * slot,
+            "at the rotation PHY a frame ({frame}ms) is several slots \
+             ({slot}ms); below that the stagger would not clear the blind \
+             window"
+        );
+
+        // The class is a property of the interface, not of the moment: a
+        // reconnect, a restart or a second look must hand out the same one,
+        // or two ends that were apart could land together after a port
+        // flaps. `FrameClass::of` is pure, so this pins the hash rather than
+        // any state.
+        assert_eq!(FrameClass::of(&alpha, "rnode_0"), class_a);
+        assert_eq!(FrameClass::of(&beta, "rnode_0"), class_b);
+    }
+
+    /// What the class does NOT promise, stated as a test so nobody reads the
+    /// pairwise guarantee as a global one.
+    ///
+    /// Each end derives its class from its own identity without knowing who
+    /// else is on the channel, so two ends share a class half the time. They
+    /// then contend over seven counts instead of fourteen, and the chance
+    /// that one shared anchor produces one shared count is unchanged at
+    /// 1/14 over random identity pairs: 1/2 x 1/7. The gain is that half of
+    /// all pairs are immune for good rather than all pairs being exposed
+    /// one acquisition in fourteen — and for a pair that IS split, the
+    /// exposure is zero however long it runs.
+    #[test]
+    fn two_ends_of_the_same_class_can_still_meet_on_one_count() {
+        let mut collisions = 0usize;
+        for i in 0..70u32 {
+            let seed = 0x5EED_0229u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+            let mut access_a = rotation_access(seed);
+            let mut access_b = rotation_access(seed);
+            let class = FrameClass(0);
+            let owed_a = arm_owed_jitter_ms(
+                JitterArm::FrameSlot,
+                &mut access_a,
+                ROTATION_PAYLOAD,
+                ROTATION_BW,
+                ROTATION_SF,
+                ROTATION_CR,
+                class,
+            );
+            let owed_b = arm_owed_jitter_ms(
+                JitterArm::FrameSlot,
+                &mut access_b,
+                ROTATION_PAYLOAD,
+                ROTATION_BW,
+                ROTATION_SF,
+                ROTATION_CR,
+                class,
+            );
+            if owed_a == owed_b {
+                collisions += 1;
+            }
+        }
+        assert_eq!(
+            collisions, 70,
+            "two ends of ONE class on one anchor and one draw still owe the \
+             same wait; the class separates classes, not identities"
+        );
+    }
+
+    /// The fold itself: seven counts per class, each with exactly two of the
+    /// fourteen draws.
+    ///
+    /// Uniformity is the property that keeps the same-class case as good as
+    /// it can be. Nudging an odd draw to the neighbouring even count would
+    /// be the obvious fold and would pile three of the fourteen draws onto
+    /// one count, making that count the likeliest place for two same-class
+    /// ends to meet — 30/196 instead of 28/196 for a pair, which is worse
+    /// than the 1/14 the unpinned arm had.
+    #[test]
+    fn the_class_fold_keeps_every_count_equally_likely() {
+        let window: Vec<u64> =
+            (JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64).collect();
+        for class in [FrameClass(0), FrameClass(1)] {
+            let mut hits: std::collections::BTreeMap<u64, usize> =
+                std::collections::BTreeMap::new();
+            for drawn in &window {
+                let count = classed_frame_slots(*drawn, class);
+                assert_eq!(
+                    count % 2,
+                    class.parity(),
+                    "count {count} is not in class {}",
+                    class.parity()
+                );
+                assert!(
+                    (JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64)
+                        .contains(&count),
+                    "count {count} left the 2..=15 draw window, so the arm's \
+                     span is no longer 124's"
+                );
+                *hits.entry(count).or_default() += 1;
+            }
+            assert_eq!(
+                hits.len(),
+                JITTER_CW_SLOTS as usize / 2,
+                "class {} must reach seven counts",
+                class.parity()
+            );
+            assert!(
+                hits.values().all(|n| *n == 2),
+                "class {}: the fold is lopsided, {hits:?}",
+                class.parity()
+            );
+        }
+    }
+
+    /// The class of an interface is its identity AND its name.
+    ///
+    /// Either alone leaves a pair in one class by construction: both ends of
+    /// every periculum LoRa cell build their interface as `rnode_0`
+    /// (`driver::interface_build::rnode`), and two radios of one daemon
+    /// share its identity hash.
+    #[test]
+    fn the_class_reads_both_the_identity_and_the_interface_name() {
+        let (alpha, beta) = opposite_class_identities();
+        assert_ne!(
+            FrameClass::of(&alpha, "rnode_0"),
+            FrameClass::of(&beta, "rnode_0"),
+            "two identities under one interface name must be separable"
+        );
+        let names: std::collections::BTreeSet<FrameClass> = ["rnode_0", "rnode_1"]
+            .into_iter()
+            .map(|n| FrameClass::of(&alpha, n))
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "one node's two radios must be separable: {names:?}"
+        );
+    }
+
     /// The PHY of `lora_ratchet_rotation_listened`, the cell trace 223
     /// (2026-09-24) measured the three arms on: SF7 at 62.5 kHz, CR 4:5 —
     /// 2734 bps — carrying the 147-byte frames that cell sends.
@@ -4672,6 +5039,47 @@ mod tests {
     const ROTATION_SF: u8 = 7;
     const ROTATION_CR: u8 = 5;
     const ROTATION_PAYLOAD: usize = 147;
+
+    /// What one `lora_ratchet_rotation_listened` frame holds the channel
+    /// for, from the interface's own airtime function — 503 ms, the unit
+    /// trace 228 caught both ends paying three of.
+    fn rotation_frame_air_ms() -> u64 {
+        rnode::airtime_ms_with_preamble(
+            ROTATION_PAYLOAD as u32,
+            ROTATION_BW,
+            ROTATION_SF,
+            ROTATION_CR,
+            rnode::derive_preamble_symbols(ROTATION_SF, ROTATION_CR, ROTATION_BW),
+        )
+    }
+
+    /// A policy at the rotation PHY, seeded by the test. Two of these on one
+    /// seed are the 228 anchor: the same draw on both ends.
+    fn rotation_access(seed: u32) -> ChannelAccess {
+        let mut access = ChannelAccess::new(seed);
+        access.set_phy(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+        access
+    }
+
+    /// Two 16-byte identity hashes that land in the two different classes,
+    /// searched for rather than typed so the fixture survives a change to
+    /// the hash.
+    fn opposite_class_identities() -> ([u8; 16], [u8; 16]) {
+        let of = |n: u8| {
+            let mut id = [0u8; 16];
+            id[0] = n;
+            id
+        };
+        let alpha = (0u8..=255)
+            .map(of)
+            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass(0))
+            .expect("some identity is in class 0");
+        let beta = (0u8..=255)
+            .map(of)
+            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass(1))
+            .expect("some identity is in class 1");
+        (alpha, beta)
+    }
 
     /// What the interface reports one ACQUISITION of the channel can cost,
     /// as opposed to what it reports one frame costs the frame behind it.
@@ -4744,30 +5152,46 @@ mod tests {
         // And it is a ceiling of what the TX loop actually owes, not a
         // figure derived beside it: every wait the arm can impose on this
         // frame is covered, and the widest one reaches it.
-        let mut access = ChannelAccess::new(0x5EED_0223);
-        access.set_phy(ROTATION_BW, ROTATION_SF, ROTATION_CR);
-        let mut widest = 0;
-        for _ in 0..2000 {
-            access.channel_released();
-            let owed = arm_owed_jitter_ms(
-                JitterArm::FrameSlot,
-                &mut access,
-                ROTATION_PAYLOAD,
-                ROTATION_BW,
-                ROTATION_SF,
-                ROTATION_CR,
-            );
-            assert!(
-                owed <= arm3.for_frame_air_ms(frame),
-                "the loop owed {owed}ms against a ceiling of {}ms",
-                arm3.for_frame_air_ms(frame)
-            );
-            widest = widest.max(owed);
+        //
+        // Pinning the count to a class (trace 228) must not move it: the
+        // ceiling is a bound on what ANY interface can owe, so no class may
+        // exceed it, and the class that carries the top of the window must
+        // still reach it -- otherwise the selftest's acquisition term and
+        // 224's drain window would be priced on a wait nobody can owe.
+        let mut widest = [0u64; 2];
+        for class in [FrameClass(0), FrameClass(1)] {
+            let mut access = ChannelAccess::new(0x5EED_0223);
+            access.set_phy(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+            for _ in 0..2000 {
+                access.channel_released();
+                let owed = arm_owed_jitter_ms(
+                    JitterArm::FrameSlot,
+                    &mut access,
+                    ROTATION_PAYLOAD,
+                    ROTATION_BW,
+                    ROTATION_SF,
+                    ROTATION_CR,
+                    class,
+                );
+                assert!(
+                    owed <= arm3.for_frame_air_ms(frame),
+                    "class {} owed {owed}ms against a ceiling of {}ms",
+                    class.parity(),
+                    arm3.for_frame_air_ms(frame)
+                );
+                widest[class.parity() as usize] = widest[class.parity() as usize].max(owed);
+            }
         }
         assert_eq!(
-            widest,
+            widest[1],
             arm3.for_frame_air_ms(frame),
             "a ceiling the loop can never reach would over-price every window"
+        );
+        assert_eq!(
+            widest[0],
+            arm3.for_frame_air_ms(frame) - frame,
+            "the even class tops out one frame below the ceiling, which is \
+             what a span of 14 counts split in two costs"
         );
 
         // The full-size figure the resource timeout floors on is the same
@@ -4854,6 +5278,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -4955,6 +5380,7 @@ mod tests {
                     5,
                     drop_direct,
                     /* jitter_arm = */ JitterArm::AsIs,
+                    /* frame_class = */ FrameClass::default(),
                 )
                 .await;
             });
@@ -5036,6 +5462,7 @@ mod tests {
                     5,
                     drop_direct,
                     /* jitter_arm = */ JitterArm::AsIs,
+                    /* frame_class = */ FrameClass::default(),
                 )
                 .await;
             });
@@ -5091,6 +5518,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -5174,6 +5602,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -6349,6 +6778,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -6581,6 +7011,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });
@@ -7245,6 +7676,7 @@ mod tests {
                 5,
                 /* drop_direct_ingress = */ false,
                 /* jitter_arm = */ JitterArm::AsIs,
+                /* frame_class = */ FrameClass::default(),
             )
             .await;
         });

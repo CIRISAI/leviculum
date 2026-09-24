@@ -106,6 +106,11 @@ pub(super) fn build(
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             test_drop_direct_ingress: config.test_drop_direct_ingress,
             jitter_arm,
+            // Trace 228: under arm 3 the wait is paid in whole frames, so two
+            // ends that draw the same slot count key together. The identity
+            // hash puts this end in one of the two residue classes of that
+            // count (`interfaces::rnode::FrameClass`).
+            identity_hash: ctx.identity_hash,
         },
     );
 

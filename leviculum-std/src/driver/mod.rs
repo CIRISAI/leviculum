@@ -2058,6 +2058,7 @@ impl ReticulumNode {
                         buffer_size: spec.buffer_size,
                         reconnect_notify: Some(reconnect_tx.clone()),
                         jitter_arm,
+                        identity_hash: self.identity_hash(),
                     },
                     // Construction-time interface: lives for the node's
                     // lifetime, no caller-driven shutdown handle.
@@ -2332,6 +2333,7 @@ impl ReticulumNode {
                     buffer_size: config.buffer_size,
                     reconnect_notify: reconnect_tx,
                     jitter_arm,
+                    identity_hash: self.identity_hash(),
                 },
                 Some(shutdown_rx),
             )
