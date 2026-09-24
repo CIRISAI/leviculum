@@ -900,6 +900,25 @@ mod tests {
         assert_eq!(h.frame_turnaround_ms(), 1_917);
     }
 
+    /// The same, for what the frame that TAKES the carrier pays: absent
+    /// unless the interface states it, and reported at the full-size figure
+    /// the resource timeout has to bound every frame with.
+    #[test]
+    fn acquisition_is_zero_unless_the_interface_states_one() {
+        use leviculum_core::traits::Interface;
+        let (h, _rx) = make_handle(32);
+        assert_eq!(h.info.acquisition, None);
+        assert_eq!(h.acquisition_max_ms(), 0);
+
+        let (mut h, _rx) = make_handle(33);
+        h.info.acquisition = Some(leviculum_core::transport::AcquisitionCeiling {
+            max_ms: 360,
+            frame_slots: Some(15),
+            full_frame_ms: 23_400,
+        });
+        assert_eq!(h.acquisition_max_ms(), 23_400);
+    }
+
     #[test]
     fn interface_handle_defaults_to_no_credit() {
         let (h, _rx) = make_handle(7);

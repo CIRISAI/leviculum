@@ -480,6 +480,14 @@ pub struct Link {
     /// is the safe direction: too short an expectation is what collapsed the
     /// window (Codeberg #36/#374).
     frame_turnaround_ms: u64,
+    /// What TAKING that carrier costs the frame that takes it, in
+    /// milliseconds (`Interface::acquisition_max_ms`). Zero for a medium
+    /// that transmits as soon as it is asked.
+    ///
+    /// Bounded the same way as [`Self::frame_turnaround_ms`] and floors the
+    /// same timeout, but enters it once rather than once per frame: a window
+    /// of parts is one burst, and one burst serves one acquisition.
+    acquisition_ms: u64,
     /// Outgoing resource transfer (sender side).
     /// Removed when transfer completes or fails.
     outgoing_resource: Option<crate::resource::outgoing::OutgoingResource>,
@@ -588,6 +596,7 @@ impl Link {
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             frame_turnaround_ms: 0,
+            acquisition_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
             incoming_resource: None,
@@ -713,6 +722,7 @@ impl Link {
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
             frame_turnaround_ms: 0,
+            acquisition_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
             incoming_resource: None,
@@ -1123,6 +1133,18 @@ impl Link {
     /// What one frame costs the frame behind it on this link's carrier, ms.
     pub fn frame_turnaround_ms(&self) -> u64 {
         self.frame_turnaround_ms
+    }
+
+    /// Learn what taking an interface this link runs over costs, keeping the
+    /// largest figure told, for the reason
+    /// [`Self::note_frame_turnaround_ms`] keeps the largest.
+    pub(crate) fn note_acquisition_ms(&mut self, acquisition_ms: u64) {
+        self.acquisition_ms = self.acquisition_ms.max(acquisition_ms);
+    }
+
+    /// What taking this link's carrier costs the frame that takes it, ms.
+    pub fn acquisition_ms(&self) -> u64 {
+        self.acquisition_ms
     }
 
     /// Store a handshake RTT measurement (milliseconds → microseconds).

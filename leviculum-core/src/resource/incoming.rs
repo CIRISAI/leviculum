@@ -713,8 +713,16 @@ impl IncomingResource {
     ///
     /// `turnaround_ms` is what one frame costs the frame behind it on the
     /// carrier this link runs over (`Interface::frame_turnaround_ms`, 0 for
-    /// a medium with no post-TX wait). See the floor at the end.
-    pub(crate) fn part_timeout_ms(&self, rtt_ms: u64, turnaround_ms: u64) -> u64 {
+    /// a medium with no post-TX wait), and `acquisition_ms` what the frame
+    /// that takes that carrier pays before it may go at all
+    /// (`Interface::acquisition_max_ms`, 0 for the same media). See the
+    /// floor at the end.
+    pub(crate) fn part_timeout_ms(
+        &self,
+        rtt_ms: u64,
+        turnaround_ms: u64,
+        acquisition_ms: u64,
+    ) -> u64 {
         let rtt_ms = core::cmp::max(rtt_ms, 1);
 
         // Timeout factor reduces after first data received
@@ -757,8 +765,18 @@ impl IncomingResource {
         // the pythonlike policy dragged window_max down with the window on
         // every one of those timeouts, and the transfer locked at
         // window_min (Codeberg #36/#374).
+        // ONCE, not per part: the sender answers a REQ with a burst, and the
+        // interface releases the channel only when its send queue runs empty
+        // (`leviculum-std/src/interfaces/rnode.rs`, the `channel_released`
+        // in the branch that finds nothing left to send), so the frames
+        // behind the first ride the wait it served. Per part it would be a
+        // hundred acquisitions on a 50 KB transfer; once it is the wait the
+        // window's first part is genuinely held for, which on an interface
+        // whose contention slots are priced in whole frames is seconds
+        // rather than the 360 ms the per-frame term covers (#347, trace 223).
         let sender_pace = (self.window_state.window() as u64)
             .saturating_mul(turnaround_ms)
+            .saturating_add(acquisition_ms)
             .saturating_add(rtt_ms);
         core::cmp::max(policy_timeout, sender_pace)
     }
@@ -769,10 +787,11 @@ impl IncomingResource {
         now_ms: u64,
         rtt_ms: u64,
         turnaround_ms: u64,
+        acquisition_ms: u64,
     ) -> ResourcePollResult {
         match self.status {
             ResourceStatus::Transferring => {
-                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms);
+                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms, acquisition_ms);
 
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
@@ -807,10 +826,15 @@ impl IncomingResource {
     }
 
     /// Compute the next deadline (absolute ms).
-    pub(crate) fn next_deadline(&self, rtt_ms: u64, turnaround_ms: u64) -> Option<u64> {
+    pub(crate) fn next_deadline(
+        &self,
+        rtt_ms: u64,
+        turnaround_ms: u64,
+        acquisition_ms: u64,
+    ) -> Option<u64> {
         match self.status {
             ResourceStatus::Transferring => {
-                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms);
+                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms, acquisition_ms);
                 Some(self.last_activity_ms.saturating_add(timeout))
             }
             _ => None,
@@ -1273,6 +1297,55 @@ mod tests {
     /// What one part frame cost the frame behind it on that link: the
     /// interface's own hold, widest contention draw.
     const TURNAROUND_MS_184: u64 = 2_586;
+    /// What TAKING that link's carrier can cost the frame that takes it,
+    /// under the #347 arm whose contention slots are priced in whole frames:
+    /// fifteen slots of a full-size part's airtime at SF7/BW62.5 (trace 223,
+    /// 2026-09-24, which measured single acquisitions of 5.03 s on the
+    /// 147-byte frames of the rotation cell; a 508-byte part is longer).
+    /// Zero on the arm the daemon runs by default and on every medium that
+    /// transmits as soon as it is asked.
+    const ACQUISITION_MS_184_ARM_3: u64 = 23_400;
+
+    /// One burst, one acquisition: the floor takes it once for the whole
+    /// window, where it takes the turnaround once per part.
+    ///
+    /// The sender answers a REQ with a burst, and its interface releases the
+    /// channel only when the send queue runs empty, so the parts behind the
+    /// first ride the wait the first one served. Charged per part instead,
+    /// a 50 KB transfer would pay it a hundred times and the receiver would
+    /// sit on a timeout of minutes.
+    #[test]
+    fn the_floor_pays_one_acquisition_for_the_whole_window() {
+        for policy in [WindowPolicy::Current, WindowPolicy::PythonLike] {
+            let incoming = timeout_state_of_184(policy);
+            let window = incoming.window_state().window() as u64;
+            assert_eq!(window, 4);
+
+            assert_eq!(
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, ACQUISITION_MS_184_ARM_3),
+                window * TURNAROUND_MS_184 + ACQUISITION_MS_184_ARM_3 + RTT_MS_184,
+                "{policy:?}: the floor is window x turnaround + ONE acquisition + one rtt"
+            );
+
+            // What per-part would have cost, stated so the difference is on
+            // the record rather than in a comment.
+            assert!(
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, ACQUISITION_MS_184_ARM_3)
+                    < window * (TURNAROUND_MS_184 + ACQUISITION_MS_184_ARM_3) + RTT_MS_184,
+                "{policy:?}: an acquisition per part is {} ms of timeout for a \
+                 window of {window}",
+                window * (TURNAROUND_MS_184 + ACQUISITION_MS_184_ARM_3) + RTT_MS_184
+            );
+
+            // A medium that transmits when asked is untouched: the term is
+            // zero and the floor is the one Codeberg #36/#374 left.
+            assert_eq!(
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, 0),
+                window * TURNAROUND_MS_184 + RTT_MS_184,
+                "{policy:?}: no acquisition reported, no term"
+            );
+        }
+    }
 
     #[test]
     fn part_timeout_is_never_shorter_than_the_senders_pace() {
@@ -1283,7 +1356,7 @@ mod tests {
             // post-TX wait the timeout is unchanged, and it is exactly the
             // 2596 ms the run measured.
             assert_eq!(
-                incoming.part_timeout_ms(RTT_MS_184, 0),
+                incoming.part_timeout_ms(RTT_MS_184, 0, 0),
                 2_596,
                 "{policy:?}: rtt 1173 x factor 2 + 250 grace, the run's figure"
             );
@@ -1294,12 +1367,12 @@ mod tests {
             let window = incoming.window_state().window() as u64;
             assert_eq!(window, 4);
             assert_eq!(
-                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184),
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, 0),
                 window * TURNAROUND_MS_184 + RTT_MS_184,
                 "{policy:?}: the floor is window x turnaround + one rtt"
             );
             assert!(
-                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184) >= 11_517,
+                incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, 0) >= 11_517,
                 "{policy:?}: 4 x 2586 + 1173"
             );
         }
@@ -1314,7 +1387,7 @@ mod tests {
         // whole window costs less than the RTT-derived term.
         let quick = 1u64;
         assert_eq!(
-            incoming.part_timeout_ms(RTT_MS_184, quick),
+            incoming.part_timeout_ms(RTT_MS_184, quick, 0),
             2_596,
             "floor 4 x 1 + 1173 is below the policy term, which therefore wins"
         );
@@ -1325,17 +1398,28 @@ mod tests {
     #[test]
     fn next_deadline_and_poll_agree_on_the_floored_timeout() {
         let mut incoming = timeout_state_of_184(WindowPolicy::PythonLike);
-        let timeout = incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184);
+        let timeout =
+            incoming.part_timeout_ms(RTT_MS_184, TURNAROUND_MS_184, ACQUISITION_MS_184_ARM_3);
         let deadline = incoming
-            .next_deadline(RTT_MS_184, TURNAROUND_MS_184)
+            .next_deadline(RTT_MS_184, TURNAROUND_MS_184, ACQUISITION_MS_184_ARM_3)
             .expect("transferring resource has a deadline");
         assert_eq!(deadline, incoming.last_activity_ms + timeout);
         assert!(matches!(
-            incoming.poll(deadline - 1, RTT_MS_184, TURNAROUND_MS_184),
+            incoming.poll(
+                deadline - 1,
+                RTT_MS_184,
+                TURNAROUND_MS_184,
+                ACQUISITION_MS_184_ARM_3
+            ),
             ResourcePollResult::Nothing
         ));
         assert!(matches!(
-            incoming.poll(deadline, RTT_MS_184, TURNAROUND_MS_184),
+            incoming.poll(
+                deadline,
+                RTT_MS_184,
+                TURNAROUND_MS_184,
+                ACQUISITION_MS_184_ARM_3
+            ),
             ResourcePollResult::RetransmitAdv(_)
         ));
     }

@@ -8436,6 +8436,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         Some(self.interface_frame_turnaround_ms(path.interface_index))
     }
 
+    /// What taking the carrier costs on the interface the next hop toward
+    /// `dest_hash` sits on, or `None` when no path is known. Bounded exactly
+    /// as [`Self::next_hop_interface_turnaround_ms`] is.
+    pub(crate) fn next_hop_interface_acquisition_ms(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<u64> {
+        let path = self.storage.get_path(dest_hash)?;
+        Some(self.interface_acquisition_ms(path.interface_index))
+    }
+
     /// Record the worst-case airtime in milliseconds for one MTU-sized
     /// transmit on the given interface. Pushed by the driver after each
     /// dispatch tick for LoRa-Serial interfaces; non-LoRa interfaces are
@@ -30207,6 +30218,20 @@ mod tests {
         let mut t = test_transport();
         t.set_interface_next_slot_ms(3, 5_000);
         assert_eq!(t.next_slot_ms_for_interface(3, 0), 5_000);
+    }
+
+    /// The acquisition mirror is the same kind of backchannel and is read
+    /// by the resource timeout: driver pushes, transport answers, and an
+    /// interface nobody pushed for reports the trait default of zero — the
+    /// medium that transmits as soon as it is asked.
+    #[test]
+    fn interface_acquisition_ms_round_trip() {
+        use crate::test_utils::test_transport;
+        let mut t = test_transport();
+        assert_eq!(t.interface_acquisition_ms(3), 0);
+        t.set_interface_acquisition_ms(3, 23_400);
+        assert_eq!(t.interface_acquisition_ms(3), 23_400);
+        assert_eq!(t.interface_acquisition_ms(4), 0);
     }
 
     /// Absent key returns the caller's `now_ms`, unknown interfaces

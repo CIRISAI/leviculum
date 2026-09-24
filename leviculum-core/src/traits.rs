@@ -1363,9 +1363,18 @@ mod tests {
             fn frame_turnaround_ms(&self) -> u64 {
                 2_586
             }
+            fn acquisition_max_ms(&self) -> u64 {
+                23_400
+            }
         }
 
         assert_eq!(NoWait.frame_turnaround_ms(), 0);
         assert_eq!(HalfDuplex.frame_turnaround_ms(), 2_586);
+
+        // And the same for what TAKING the carrier costs, which is a second
+        // number because it is paid once per burst where the one above is
+        // paid once per frame.
+        assert_eq!(NoWait.acquisition_max_ms(), 0);
+        assert_eq!(HalfDuplex.acquisition_max_ms(), 23_400);
     }
 }

@@ -310,6 +310,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         {
             link.note_frame_turnaround_ms(turnaround);
         }
+        // And what taking that carrier costs the frame that takes it, which
+        // the same timeout needs once per window where it needs the figure
+        // above once per part.
+        if let Some(acquisition) = self
+            .transport
+            .next_hop_interface_acquisition_ms(dest_hash.as_bytes())
+        {
+            link.note_acquisition_ms(acquisition);
+        }
         let link_id = *link.id();
         if let Err(e) = link.set_destination_keys(dest_signing_key) {
             crate::tracing::debug!(%e, "set_destination_keys failed");
@@ -954,6 +963,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.transport
                 .interface_frame_turnaround_ms(interface_index),
         );
+        link.note_acquisition_ms(self.transport.interface_acquisition_ms(interface_index));
         link.set_keepalive_override(self.transport_config().link_keepalive_secs);
 
         // Copy the packet's hop count so establishment_timeout_ms() scales correctly
@@ -1049,6 +1059,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let turnaround_ms = self
             .transport
             .interface_frame_turnaround_ms(interface_index);
+        let acquisition_ms = self.transport.interface_acquisition_ms(interface_index);
 
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::debug!(
@@ -1082,6 +1093,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // and with it what that carrier charges one frame for the next.
         link.set_attached_interface(interface_index);
         link.note_frame_turnaround_ms(turnaround_ms);
+        link.note_acquisition_ms(acquisition_ms);
 
         // Process the proof
         if link.process_proof(proof_data).is_err() {
@@ -3814,8 +3826,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let in_result = match self.links.get_mut(&link_id) {
                 Some(link) => {
                     let turnaround_ms = link.frame_turnaround_ms();
+                    let acquisition_ms = link.acquisition_ms();
                     link.incoming_resource_mut()
-                        .map(|res| res.poll(now_ms, rtt_ms, turnaround_ms))
+                        .map(|res| res.poll(now_ms, rtt_ms, turnaround_ms, acquisition_ms))
                 }
                 None => continue,
             };
@@ -3965,7 +3978,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             if let Some(res) = link.incoming_resource() {
-                if let Some(deadline) = res.next_deadline(rtt_ms, link.frame_turnaround_ms()) {
+                if let Some(deadline) =
+                    res.next_deadline(rtt_ms, link.frame_turnaround_ms(), link.acquisition_ms())
+                {
                     update(deadline);
                 }
             }
