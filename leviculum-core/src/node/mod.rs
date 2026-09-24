@@ -10689,6 +10689,85 @@ mod tests {
         assert_eq!(resp_payload, response_data);
     }
 
+    /// A request too big for the link MDU travels as a Resource, and the
+    /// responder must see it ONLY as `RequestReceived`. Python accepts a
+    /// request-flagged advertisement with `request_resource_concluded` as
+    /// the resource's callback (`reference/Reticulum/RNS/Link.py:1073-1074`),
+    /// so the application's resource callbacks never fire for it; a leaked
+    /// completion event reads as an application transfer to any consumer
+    /// that serves uploads on the same link (the propagation-node engines
+    /// fed it to `handle_upload` and refused the client's own `/get`).
+    #[test]
+    fn an_inbound_request_resource_is_a_request_not_an_application_resource() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let dest_hash = *pair
+            .responder
+            .link(&pair.responder_link_id)
+            .unwrap()
+            .destination_hash();
+        register_echo_handler(
+            &mut pair.responder,
+            dest_hash,
+            request::RequestPolicy::AllowAll,
+        );
+
+        let request_bytes: Vec<u8> = (0..1_400)
+            .map(|index| ((index * 73 + 19) & 0xff) as u8)
+            .collect();
+        let mut encoded_request = Vec::new();
+        crate::msgpack::write_bin(&mut encoded_request, &request_bytes);
+
+        let (_, _, output) = pair
+            .initiator
+            .send_request_resource(
+                &pair.initiator_link_id,
+                "/echo",
+                Some(&encoded_request),
+                None,
+            )
+            .unwrap();
+
+        let mut to_responder = extract_all_action_data(&output);
+        let mut to_initiator = Vec::new();
+        let mut request_received = false;
+        let mut leaked_completions = 0usize;
+
+        for _ in 0..128 {
+            if to_responder.is_empty() && to_initiator.is_empty() {
+                break;
+            }
+            for packet in core::mem::take(&mut to_responder) {
+                let output = pair.responder.handle_packet(InterfaceId(0), &packet);
+                for event in &output.events {
+                    match event {
+                        NodeEvent::RequestReceived { .. } => request_received = true,
+                        NodeEvent::ResourceCompleted {
+                            is_sender: false, ..
+                        } => leaked_completions += 1,
+                        _ => {}
+                    }
+                }
+                to_initiator.extend(extract_all_action_data(&output));
+            }
+            for packet in core::mem::take(&mut to_initiator) {
+                let output = pair.initiator.handle_packet(InterfaceId(0), &packet);
+                to_responder.extend(extract_all_action_data(&output));
+            }
+        }
+
+        assert!(
+            request_received,
+            "request Resource must dispatch its registered handler"
+        );
+        assert_eq!(
+            leaked_completions, 0,
+            "a link-internal request Resource must not surface as an \
+             application ResourceCompleted"
+        );
+    }
+
     #[test]
     fn test_resource_request_and_response_roundtrip() {
         use crate::resource::ResourceStrategy;

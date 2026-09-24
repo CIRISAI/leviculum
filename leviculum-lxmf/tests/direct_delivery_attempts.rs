@@ -580,7 +580,7 @@ fn a_receiver_cancelled_resource_is_rejected_and_keeps_the_link() {
 /// the router a `ResourceFailed` it built itself, so it keeps passing no
 /// matter which error the core puts on the RCL arm. `273c259b` moved that arm
 /// from `ResourceError::Cancelled` to `ResourceError::RejectedByRemote`
-/// (`leviculum-core/src/node/link_management.rs:2989-3000`) and both LXMF
+/// (`leviculum-core/src/node/link_management.rs:3002-3013`) and both LXMF
 /// sites still matched on `Cancelled`, so a receiver's rejection silently
 /// became a retryable failure: the link was torn down and the message went
 /// back to `Outbound` to be sent to a peer that had just refused it.

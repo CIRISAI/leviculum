@@ -2840,10 +2840,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 response_data,
                                 metadata,
                             });
+                        } else if has_request_id && resource_flags.is_request {
+                            // A request Resource is Link-protocol internal:
+                            // Python accepts its advertisement with
+                            // `request_resource_concluded` as the resource's
+                            // callback (Link.py:1073-1074), so the
+                            // application's resource callbacks never see it.
+                            // It concludes below as RequestReceived only — a
+                            // completion event here reads as an application
+                            // transfer to any consumer that serves uploads on
+                            // the same link (the propagation-node engines fed
+                            // it to `handle_upload` and refused the client's
+                            // own oversized `/get`).
+                            completed_internal_payload = Some(data);
                         } else {
-                            if has_request_id
-                                && (resource_flags.is_request || resource_flags.is_response)
-                            {
+                            if has_request_id && resource_flags.is_response {
                                 completed_internal_payload = Some(data.clone());
                             }
 
@@ -2889,8 +2900,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Link-level request/response Resources complete through the same
         // parser, authorization and pending-request machinery as their packet
-        // counterparts. Keep ResourceCompleted as transfer telemetry while
-        // also producing the semantic RequestReceived/ResponseReceived event.
+        // counterparts. A request Resource produces ONLY the semantic
+        // RequestReceived event; an uncorrelated response Resource keeps its
+        // ResourceCompleted so `reconcile_request_resource_outcomes` can
+        // re-arm the pending request's semantic timeout.
         if let Some(payload) = completed_internal_payload {
             if resource_flags.is_request {
                 let request_id = crate::crypto::truncated_hash(&payload);
