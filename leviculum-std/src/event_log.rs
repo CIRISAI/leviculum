@@ -356,6 +356,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_TX_SUPPRESSED",
         required_keys: &["dst", "hops", "iface", "suppressed", "reason"],
     },
+    // The ingress burst limiter holding an announce for an unknown
+    // destination (Codeberg #87 hold-and-release, emitted by
+    // `transport.rs::handle_announce`). Not a drop: the announce is queued
+    // per-interface and released by `process_held_announces` — `held=false`
+    // is the narrow case where the queue was already at MAX_HELD_ANNOUNCES
+    // and the announce really was lost (that one also counts
+    // `ingress_burst_announce` in PKT_DROP_SUMMARY).
+    //
+    // `hops` is required for the reason the line exists at all: a burst
+    // holds one copy per arrival of the same announce and the kept copy is
+    // decided by hop count, so a log without it names the destination that
+    // was held but not which of its copies.
+    EventSchema {
+        name: "ANN_HELD",
+        required_keys: &["dst", "hops", "iface", "held"],
+    },
     // OBS-3 (Codeberg #114): endpoint observability. A node acting as the
     // ENDPOINT of a link (accepting an inbound link, delivering locally,
     // generating the establishment proof, answering a remote-management

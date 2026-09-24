@@ -450,3 +450,107 @@ fn fast_announce_handling_emits_nothing() {
         "a microsecond announce emitted ANN_SLOW; dump:\n{dump:#?}"
     );
 }
+
+/// The `ANN_HELD` lines this test emitted, told apart from every other
+/// test's by the interface they name (the layer is process-global).
+fn ann_held_for<'a>(dump: &'a [String], iface_name: &str) -> Vec<&'a String> {
+    let marker = format!("iface={iface_name}");
+    lines_for(dump, "ANN_HELD")
+        .into_iter()
+        .filter(|l| l.split_whitespace().any(|t| t == marker))
+        .collect()
+}
+
+/// Whether a canonical line carries exactly `key=value`.
+fn has_field(line: &str, key: &str, value: &str) -> bool {
+    let marker = format!("{key}={value}");
+    line.split_whitespace().any(|t| t == marker)
+}
+
+/// Codeberg #407: the held-announce line names the hop count of the copy it
+/// held.
+///
+/// A burst holds one copy per arrival of the same announce, and which copy
+/// the node finally keeps is decided by hop count. Reading the two #407 runs
+/// of 2026-09-23 the question "which copies were held, and which won?" was
+/// undecidable from a run log alone: each daemon printed the held line twice
+/// before the copy it kept, and the line carried `dest=` and `iface=` and no
+/// `hops=`. This pins the key on the structured twin of that line.
+#[test]
+fn held_announce_event_names_the_hop_count() {
+    let evlog = init_event_log();
+
+    const IFACE: usize = 0;
+    const IFACE_NAME: &str = "annheld0";
+
+    let clock = TestClock::new(100_000);
+    let clock_handle = clock.clone();
+    let identity = Identity::generate(&mut OsRng);
+    let config = TransportConfig {
+        enable_transport: true,
+        ..TransportConfig::default()
+    };
+    let mut transport = Transport::new(config, clock, MemoryStorage::with_defaults(), identity);
+    transport.set_interface_name(IFACE, IFACE_NAME.to_string());
+    assert!(
+        transport.interface_ingress_control(IFACE),
+        "the limiter under test only runs on an interface with ingress \
+         control on (the shared-medium default)"
+    );
+
+    // A sustained flood of distinct unknown destinations 100 ms apart: the
+    // first few pass the limiter's min-sample gate, the rest are held.
+    for _ in 0..16 {
+        let (raw, _dst) = make_announce_raw(2);
+        transport.process_incoming(IFACE, &raw).unwrap();
+        clock_handle.advance(100);
+    }
+    // One more copy arriving with a DIFFERENT wire hop count, held by the
+    // now-active burst. Two distinct values in the dump are the evidence that
+    // `hops=` reports the arriving copy's own count and not a constant --
+    // which is the entire reason the field was added.
+    let (raw, _dst) = make_announce_raw(5);
+    transport.process_incoming(IFACE, &raw).unwrap();
+
+    let dump = evlog.dump();
+    let held = ann_held_for(&dump, IFACE_NAME);
+    assert!(
+        !held.is_empty(),
+        "a sustained announce flood held nothing; dump:\n{dump:#?}"
+    );
+    for l in &held {
+        assert_well_formed(l);
+        for key in ["dst=", "hops=", "iface=", "held="] {
+            assert!(
+                l.split_whitespace().any(|t| t.starts_with(key)),
+                "ANN_HELD must carry {key}: {l}"
+            );
+        }
+    }
+    // Wire hops plus the receipt increment (`Transport::incoming_hop_count`),
+    // the same convention as PKT_RX and ANN_RX.
+    assert!(
+        held.iter().any(|l| has_field(l, "hops", "3")),
+        "expected a held copy reporting hops=3 (wire 2 + receipt); \
+         held lines:\n{held:#?}"
+    );
+    assert!(
+        held.iter().any(|l| has_field(l, "hops", "6")),
+        "expected the hops=5 copy to report hops=6, not the flood's value; \
+         held lines:\n{held:#?}"
+    );
+
+    // The catalogue entry is enforced, not decorative.
+    for l in &dump {
+        if l.starts_with("EVENT_FIELD_VIOLATION") || l.starts_with("EVENT_SCHEMA_VIOLATION") {
+            assert!(
+                !l.contains("ANN_HELD"),
+                "schema/field violation for ANN_HELD: {l}"
+            );
+        }
+    }
+
+    println!("SAMPLE ANN_HELD: {}", held[held.len() - 1]);
+
+    drop(evlog);
+}

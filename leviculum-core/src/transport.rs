@@ -5237,11 +5237,30 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // is queued per-interface and released slowly by process_held_announces,
             // so a burst DELAYS propagation instead of losing it.
             let held = self.hold_announce(interface_index, dest_hash, raw, packet.hops);
+            // `hops=` is what makes this line decidable from a run log alone.
+            // A burst holds SEVERAL copies of the same announce, one per
+            // arrival, and the copy the node finally keeps is picked by hop
+            // count; without it the log says a copy was held but not which,
+            // so a run cannot say whether the shortest path was among the
+            // held ones (found reading the two #407 runs of 2026-09-23).
             crate::tracing::debug!(
                 dest = %HexShort(&dest_hash),
                 iface = %self.iface_name(interface_index),
+                hops = packet.hops,
                 held = held,
                 "Ingress burst limit active, holding excess announce for unknown destination"
+            );
+            // Structured twin of the line above, same pairing as the ANN_RX
+            // site below: the prose line stays greppable for humans, the
+            // event line is the one jl/jldiff and the periculum cells read.
+            // The catalogue forbids a free-text message on an event site, so
+            // the two cannot be one line.
+            crate::tracing::debug!(
+                event = "ANN_HELD",
+                dst = %HexShort(&dest_hash),
+                hops = packet.hops,
+                iface = %self.iface_name(interface_index),
+                held = held,
             );
             if !held {
                 // Queue was at MAX_HELD_ANNOUNCES for a new destination: Python
