@@ -851,6 +851,42 @@ Naming the old sha as if it were current is the defect. A confirmation
 that cannot decide says `unknown` and never names a sha it did not
 read.
 
+#### Every build claim names where it was read
+
+The rules above are what the confirmation does; they are not, by
+themselves, evidence that it did it. On 2026-09-11 the same report came
+back on a two-board run under a capture reader holding `if00` on both
+boards:
+
+```
+1-1: back as leviculum RAK4631 [1209:0002]
+1-1: the board reports git_sha=b9b4a9c3, not de6e74ed. The write did not take.
+1-2: running git_sha=de6e74ed. Done.
+```
+
+That line names a sha and nothing else, so the first question it raises
+— was that line read on this board's own port at all? — needed two
+capture files and a hand correlation, and ended undecided. A claim the
+operator cannot check is not much better than no claim.
+
+So every build claim carries its provenance (`verify::Source`), and the
+verdict prints it:
+
+```
+1-1: running git_sha=de6e74ed, read as a [FW_BUILD] banner line on
+     /dev/serial/by-id/usb-leviculum_RAK4631_DEC9947DAD9D2869-if00
+     (/dev/ttyACM3), 4.2 s after that port was flushed. Done.
+```
+
+Three facts, each answering a question the bare sha left open: which
+mechanism decided it (the banner read after the reset — the control
+envelope carries no build query, so there is only one), which path was
+opened and which node the fd was proved against, and how long after the
+flush the line arrived. The delay is the load-bearing number: a banner
+from a board that has just booted arrives seconds in, so a sha
+delivered in the first milliseconds was already in flight and the claim
+deserves that doubt.
+
 
 `just nrf-shellcheck` (Codeberg #345) is the static half of the same
 coverage: `shellcheck -x` over `leviculum-nrf/tools/*.sh` and

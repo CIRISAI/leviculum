@@ -80,7 +80,7 @@ Summarize the walk afterwards:
 
 0 when every addressed board did what was asked (for **--watch**: never reached; the watch runs until killed).
 
-On a flash run the three outcomes are kept apart, because they need different things done about them:
+On a flash run the three outcomes are kept apart, because they need different things done about them. Each board's line states which build it is running, which mechanism read it — the `[FW_BUILD]` banner the board emitted after the reset **lnflash** triggered — which port that line was read on, which device node the open was proved against, and how long after the port was flushed the line arrived. A line that arrived in the first milliseconds was already in flight and is worth doubting; a board that says nothing is reported as unknown and no sha is named for it.
 
 0
 :   Every board was written and named the build in this bundle on its debug port.

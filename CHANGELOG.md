@@ -202,6 +202,22 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- Every build claim `lnflash` makes about a flashed board now names where it
+  was read. A confirmation line said `the board reports git_sha=b9b4a9c3, not
+  de6e74ed` and nothing more, and the first question that raises — was that
+  line read on this board's own port at all? — was not answerable from the
+  tool's output: settling it on 2026-09-11 took two capture files, a hand
+  correlation, and stayed undecided. Each verdict now carries the mechanism
+  that decided it (the `[FW_BUILD]` banner the board emitted after the reset
+  the tool triggered; the control envelope carries no build query, so there
+  is one and the line says which), the path opened, the device node the open
+  was proved against, and how long after the port was flushed the line
+  arrived. The delay is the load-bearing number: a banner from a board that
+  has just booted arrives seconds in, so a sha delivered in the first
+  milliseconds after the flush was already in flight. A confirmation that
+  cannot decide is unchanged — it says the running build is unknown and names
+  no sha at all. Codeberg #378.
+
 - A board whose boot left its LoRa carrier down no longer acks a radio
   configuration as if it were running it. Such a board has no LoRa task, so
   the config goes to the flash page and nothing applies it before the next

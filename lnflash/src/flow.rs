@@ -725,11 +725,26 @@ fn open_transport(sysfs: &Sysfs, device: &Device, tty: &Path) -> io::Result<crat
         "transport port",
         "nothing was sent",
     )
+    .map(|(fd, _)| fd)
 }
 
 /// [`open_transport`] for the debug CDC (if00): same proof, and DTR+RTS
 /// raised the same way — the debug port transmits only with both set.
 pub(crate) fn open_debug(sysfs: &Sysfs, device: &Device, tty: &Path) -> io::Result<crate::sys::Fd> {
+    open_debug_proven(sysfs, device, tty).map(|(fd, _)| fd)
+}
+
+/// The debug port, and the device node the open was proven against.
+///
+/// Same open and same proof as [`open_debug`]. The node comes back because
+/// a build claim read on this fd has to be able to say where it was read
+/// (Codeberg #378): a sha with no port beside it left the 2026-09-11
+/// recurrence undecidable from the tool's output alone.
+pub(crate) fn open_debug_proven(
+    sysfs: &Sysfs,
+    device: &Device,
+    tty: &Path,
+) -> io::Result<(crate::sys::Fd, std::path::PathBuf)> {
     open_interface(
         sysfs,
         device,
@@ -747,7 +762,7 @@ fn open_interface(
     interface: u8,
     what: &str,
     consequence: &str,
-) -> io::Result<crate::sys::Fd> {
+) -> io::Result<(crate::sys::Fd, std::path::PathBuf)> {
     let fd = crate::sys::Fd::open_serial(tty)?;
     if interface == crate::watch::DEBUG_INTERFACE {
         fd.set_debug_port()?;
@@ -780,7 +795,7 @@ fn open_interface(
             tty.display()
         )));
     }
-    Ok(fd)
+    Ok((fd, expected))
 }
 
 /// The `--set-time` session (#238, #166 item 2): no flash, no bootloader
@@ -2514,11 +2529,17 @@ fn verify_boot(
         confirmed.payloads().app.git_sha.as_deref(),
     );
     match &verdict {
-        Verdict::Confirmed { git_sha } => {
-            ui.say(&format!("{port}: running git_sha={git_sha}. Done."))
-        }
-        Verdict::WrongBuild { saw, expected } => ui.say(&format!(
-            "{port}: the board reports git_sha={saw}, not {expected}. The write did not take."
+        Verdict::Confirmed { git_sha, source } => ui.say(&format!(
+            "{port}: running git_sha={git_sha}, {}. Done.",
+            source.describe()
+        )),
+        Verdict::WrongBuild {
+            saw,
+            expected,
+            source,
+        } => ui.say(&format!(
+            "{port}: the board reports git_sha={saw}, not {expected}, {}. The write did not take.",
+            source.describe()
         )),
         Verdict::Unconfirmed { why } => ui.say(&format!(
             "{port}: re-enumerated, but which build it is running is unknown — {why}."
@@ -2559,7 +2580,7 @@ const REOPEN_PAUSE: Duration = Duration::from_millis(200);
 /// The budget covers the whole attempt, reopens included: a port that
 /// vanishes mid-read (a board that resets once more on its way up) is
 /// retried rather than reported, for as long as the budget lasts.
-fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::FwBuild, String> {
+fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::Reading, String> {
     let deadline = Instant::now() + opts.banner_budget;
     let mut why = format!(
         "no [FW_BUILD] line arrived on the debug port (if{:02}) in the {} s after the reset",
@@ -2572,10 +2593,23 @@ fn running_build(sysfs: &Sysfs, app: &Device, opts: &Options) -> Result<verify::
             return Err(why);
         }
         match entry::wait_for_interface_tty(sysfs, app, crate::watch::DEBUG_INTERFACE, remaining) {
-            Ok(Some(tty)) => match open_debug(sysfs, app, &tty)
-                .and_then(|fd| verify::fresh_banner(&fd, deadline))
-            {
-                Ok(Some(build)) => return Ok(build),
+            Ok(Some(tty)) => match open_debug_proven(sysfs, app, &tty).and_then(|(fd, node)| {
+                // Timed around the call that flushes the queue and waits, so
+                // the delay a claim carries is measured from that flush and
+                // says whether the line was already in flight (#378).
+                let asked = Instant::now();
+                verify::fresh_banner(&fd, deadline).map(|seen| {
+                    seen.map(|build| verify::Reading {
+                        build,
+                        source: verify::Source {
+                            port: tty.clone(),
+                            node,
+                            after: asked.elapsed(),
+                        },
+                    })
+                })
+            }) {
+                Ok(Some(reading)) => return Ok(reading),
                 Ok(None) => {}
                 Err(err) => why = format!("the debug port could not be read ({err})"),
             },
@@ -3212,6 +3246,60 @@ convert = "hex-to-uf2"
             .find(|d| d.name == "3-2.3.1")
             .unwrap();
         open_transport(&sysfs, &t114, &dev.path().join("ttyACM2")).unwrap();
+    }
+
+    #[test]
+    fn the_build_claim_names_the_port_it_was_read_on() {
+        // Codeberg #378 end to end, as far as a host without a board
+        // reaches: the whole read — resolve if00 from the bus, open it,
+        // prove the fd, flush, wait for a line — and the provenance the
+        // verdict then prints. The board is a pty, so this is safe on the
+        // host that has the rig attached.
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM1", &pty.slave_path)]);
+        let by_id = dev.path().join("serial/by-id");
+        fs::create_dir_all(&by_id).unwrap();
+        let link = by_id.join("usb-leviculum_T114_183004F712B4A7FE-if00");
+        symlink("../../ttyACM1", &link).unwrap();
+        let sysfs = Sysfs::with_dev(crate::sysfs_fixture::materialized(), dev.path());
+        let t114 = sysfs
+            .devices()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.name == "3-2.3.1")
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(250));
+                pty.write_raw(b"[FW_BUILD] git_sha=bb7c4f64 dirty=false\r\n");
+            });
+            let reading =
+                running_build(&sysfs, &t114, &Options::default()).expect("the board spoke");
+            assert_eq!(reading.build.git_sha, "bb7c4f64");
+            // The board's own by-id link, and the node the bus names for
+            // if00 behind it: the pair that settles "was this our port?"
+            // from the tool's output alone.
+            assert_eq!(reading.source.port, link);
+            assert_eq!(reading.source.node, dev.path().join("ttyACM1"));
+            // And the delay says the line was not one already in flight.
+            assert!(
+                reading.source.after >= Duration::from_millis(200),
+                "{:?}",
+                reading.source.after
+            );
+            assert!(
+                reading.source.after < verify::FRESH_BANNER_BUDGET,
+                "{:?}",
+                reading.source.after
+            );
+
+            let verdict = verify::judge(Ok(reading), Some("bb7c4f64"));
+            assert!(verdict.is_confirmed());
+            let line = verdict.describe();
+            assert!(line.contains("usb-leviculum_T114"), "{line}");
+            assert!(line.contains("ttyACM1"), "{line}");
+        });
     }
 
     #[test]

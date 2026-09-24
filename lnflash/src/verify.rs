@@ -24,11 +24,20 @@
 //! waits for a line to arrive, so the answer is about the firmware running
 //! now or there is no answer at all.
 //!
+//! **A build claim carries its provenance** ([`Source`]). A verdict that
+//! names a sha and nothing else cannot be checked: the #378 recurrence of
+//! 2026-09-11 printed `the board reports git_sha=b9b4a9c3` and settling
+//! whether that line had come from this board's own port at all took two
+//! capture files, a hand correlation, and stayed undecided. Every claim now
+//! states which mechanism read it, on which path, behind which node, and how
+//! long after the flush the line arrived.
+//!
 //! One trap: **the debug CDC transmits only with DTR+RTS asserted.** Without
 //! them a healthy board reads as silent, and the tool would report an
 //! unverified flash on a board that is fine.
 
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::sys::Fd;
@@ -152,6 +161,54 @@ pub fn fresh_banner(fd: &Fd, deadline: Instant) -> io::Result<Option<FwBuild>> {
     }
 }
 
+/// Where a build claim came from.
+///
+/// Codeberg #378 asks the confirmation to say which mechanism decided it,
+/// and the 2026-09-11 recurrence says why: the tool printed a sha and
+/// nothing else, so settling "did it read its own board's port?" needed two
+/// capture files, a hand correlation, and still ended undecided. A claim
+/// that carries the path it was read on, the node behind that path, and how
+/// long after the flush the line arrived is decidable from the tool's own
+/// output. The delay is the load-bearing number: a line that arrives in
+/// milliseconds is something that was already in flight, a banner from a
+/// board that has just booted arrives seconds in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    /// The path that was opened, as the bus resolved it: the board's
+    /// `by-id` link where udev has one, the bare node otherwise.
+    pub port: PathBuf,
+    /// The device node behind that path, which the fd was proven against
+    /// before a byte was read (`flow::open_debug`).
+    pub node: PathBuf,
+    /// How long after the port's input queue was flushed the line arrived.
+    pub after: Duration,
+}
+
+impl Source {
+    /// One clause naming the mechanism and the port, for the sentence a
+    /// verdict prints. Names the node separately only when the path opened
+    /// was not already the node.
+    pub fn describe(&self) -> String {
+        let where_ = if self.port == self.node {
+            format!("{}", self.node.display())
+        } else {
+            format!("{} ({})", self.port.display(), self.node.display())
+        };
+        format!(
+            "read as a [FW_BUILD] banner line on {where_}, {:.1} s after that port was flushed",
+            self.after.as_secs_f32()
+        )
+    }
+}
+
+/// A build claim and its provenance, which travel together because a sha
+/// without a source is a claim nobody can check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reading {
+    pub build: FwBuild,
+    pub source: Source,
+}
+
 /// What the verify step concluded. Deliberately three-valued: "I could not
 /// confirm" is not the same claim as "it is wrong", and a tool that
 /// collapses them either cries wolf or hides a failed flash.
@@ -159,10 +216,14 @@ pub fn fresh_banner(fd: &Fd, deadline: Instant) -> io::Result<Option<FwBuild>> {
 pub enum Verdict {
     /// Re-enumerated and the board's first line after the reset names the
     /// build we wrote.
-    Confirmed { git_sha: String },
+    Confirmed { git_sha: String, source: Source },
     /// Re-enumerated, and the board's first line after the reset names a
     /// different build. The flash did not take.
-    WrongBuild { saw: String, expected: String },
+    WrongBuild {
+        saw: String,
+        expected: String,
+        source: Source,
+    },
     /// Re-enumerated, but which build is running could not be established.
     /// Could be a board that needs longer, could be firmware that emits no
     /// banner, could be a debug port that never appeared.
@@ -194,9 +255,18 @@ impl Verdict {
     /// an operator.
     pub fn describe(&self) -> String {
         match self {
-            Self::Confirmed { git_sha } => format!("running git_sha={git_sha}"),
-            Self::WrongBuild { saw, expected } => {
-                format!("the write did not take — the board reports git_sha={saw}, not {expected}")
+            Self::Confirmed { git_sha, source } => {
+                format!("running git_sha={git_sha} — {}", source.describe())
+            }
+            Self::WrongBuild {
+                saw,
+                expected,
+                source,
+            } => {
+                format!(
+                    "the write did not take — the board reports git_sha={saw}, not {expected} — {}",
+                    source.describe()
+                )
             }
             Self::Unconfirmed { why } => {
                 format!("flashed, and the running build is unknown — {why}")
@@ -213,20 +283,23 @@ impl Verdict {
 /// nothing to show has to say why it has nothing: that sentence is the
 /// whole content of an `unknown`, and an empty one sends the operator to
 /// the board instead of to the port.
-pub fn judge(seen: Result<FwBuild, String>, expected: Option<&str>) -> Verdict {
+pub fn judge(seen: Result<Reading, String>, expected: Option<&str>) -> Verdict {
     match (seen, expected) {
-        (Ok(seen), Some(want)) if seen.matches(want) => Verdict::Confirmed {
-            git_sha: seen.git_sha,
+        (Ok(seen), Some(want)) if seen.build.matches(want) => Verdict::Confirmed {
+            git_sha: seen.build.git_sha,
+            source: seen.source,
         },
         (Ok(seen), Some(want)) => Verdict::WrongBuild {
-            saw: seen.git_sha,
+            saw: seen.build.git_sha,
             expected: want.to_string(),
+            source: seen.source,
         },
         (Ok(seen), None) => Verdict::Unconfirmed {
             why: format!(
                 "the board reports git_sha={}, but the manifest records no expected build to \
-                 compare it against",
-                seen.git_sha
+                 compare it against ({})",
+                seen.build.git_sha,
+                seen.source.describe()
             ),
         },
         (Err(why), _) => Verdict::Unconfirmed { why },
@@ -246,6 +319,28 @@ mod tests {
 
     fn banner(sha: &str) -> String {
         format!("[FW_BUILD] git_sha={sha} dirty=false\r\n")
+    }
+
+    /// A board's if00, as the bus resolves it on the rig: the by-id link and
+    /// the node behind it.
+    const BY_ID: &str = "/dev/serial/by-id/usb-leviculum_RAK4631_DEC9947DAD9D2869-if00";
+    const NODE: &str = "/dev/ttyACM3";
+
+    fn source() -> Source {
+        Source {
+            port: PathBuf::from(BY_ID),
+            node: PathBuf::from(NODE),
+            after: Duration::from_millis(2400),
+        }
+    }
+
+    /// What a read off a board's debug port amounts to: the build, and where
+    /// it was read.
+    fn read(sha: &str) -> Reading {
+        Reading {
+            build: parse_fw_build(&banner(sha)).unwrap(),
+            source: source(),
+        }
     }
 
     /// Long enough that a scheduler hiccup cannot fail a test, short
@@ -294,12 +389,12 @@ mod tests {
 
     #[test]
     fn a_matching_banner_confirms_the_flash() {
-        let banner = parse_fw_build("[FW_BUILD] git_sha=bb7c4f64 dirty=false").unwrap();
-        let verdict = judge(Ok(banner), Some("bb7c4f64"));
+        let verdict = judge(Ok(read("bb7c4f64")), Some("bb7c4f64"));
         assert_eq!(
             verdict,
             Verdict::Confirmed {
-                git_sha: "bb7c4f64".into()
+                git_sha: "bb7c4f64".into(),
+                source: source(),
             }
         );
         assert!(verdict.is_confirmed());
@@ -311,8 +406,7 @@ mod tests {
         // The silent touch-flash: the board came back, but it came back as
         // what it already was. This is a contradiction, not an absence —
         // the board said so itself, after the reset.
-        let banner = parse_fw_build("[FW_BUILD] git_sha=deadbeef dirty=false").unwrap();
-        let verdict = judge(Ok(banner), Some("bb7c4f64"));
+        let verdict = judge(Ok(read("deadbeef")), Some("bb7c4f64"));
         assert!(matches!(verdict, Verdict::WrongBuild { .. }));
         assert!(!verdict.is_confirmed());
         assert!(verdict.contradicts());
@@ -336,10 +430,68 @@ mod tests {
 
     #[test]
     fn a_banner_with_nothing_to_compare_against_is_unconfirmed() {
-        let banner = parse_fw_build("[FW_BUILD] git_sha=bb7c4f64 dirty=false").unwrap();
-        let verdict = judge(Ok(banner), None);
+        let verdict = judge(Ok(read("bb7c4f64")), None);
         assert!(!verdict.is_confirmed());
         assert!(format!("{verdict:?}").contains("bb7c4f64"));
+        // Even the verdict that decides nothing says where it read the sha
+        // it quotes.
+        assert!(verdict.describe().contains(BY_ID), "{}", verdict.describe());
+    }
+
+    #[test]
+    fn a_confirmation_says_which_mechanism_decided_it_and_on_which_port() {
+        // The clause of #378 that the first fix left open: the tool has to
+        // say which of the two reads decided the confirmation. A line naming
+        // only a sha is a claim the operator cannot check.
+        let line = judge(Ok(read("bb7c4f64")), Some("bb7c4f64")).describe();
+        assert!(line.contains("[FW_BUILD] banner line"), "{line}");
+        assert!(line.contains(BY_ID), "{line}");
+        assert!(line.contains(NODE), "{line}");
+        assert!(line.contains("2.4 s"), "{line}");
+    }
+
+    #[test]
+    fn a_wrong_build_names_the_port_it_read_the_sha_on() {
+        // #378 as it recurred on 2026-09-11: `the board reports
+        // git_sha=b9b4a9c3, not de6e74ed` named no port and no timing, so
+        // deciding whether that line had come from this board at all needed
+        // two capture files and ended undecided. The failure line now
+        // carries both.
+        let line = judge(Ok(read("b9b4a9c3")), Some("de6e74ed")).describe();
+        assert!(
+            line.contains("b9b4a9c3") && line.contains("de6e74ed"),
+            "{line}"
+        );
+        assert!(line.contains(BY_ID) && line.contains(NODE), "{line}");
+        assert!(line.contains("2.4 s"), "{line}");
+    }
+
+    #[test]
+    fn a_line_that_arrived_at_once_says_so() {
+        // The tell the delay exists for: a banner from a board that has just
+        // booted arrives seconds in, so a sha delivered in the first
+        // milliseconds after the flush was already in flight and the claim
+        // deserves the doubt the number puts on it.
+        let instant = Source {
+            after: Duration::ZERO,
+            ..source()
+        };
+        assert!(
+            instant.describe().contains("0.0 s"),
+            "{}",
+            instant.describe()
+        );
+    }
+
+    #[test]
+    fn a_port_with_no_by_id_link_is_named_once_rather_than_twice() {
+        let bare = Source {
+            port: PathBuf::from(NODE),
+            node: PathBuf::from(NODE),
+            after: Duration::from_millis(500),
+        };
+        let text = bare.describe();
+        assert_eq!(text.matches(NODE).count(), 1, "{text}");
     }
 
     #[test]
@@ -368,7 +520,14 @@ mod tests {
                 .expect("reading the stub board")
                 .expect("the board spoke after the reset");
             assert_eq!(seen.git_sha, NEW);
-            assert!(judge(Ok(seen), Some(NEW)).is_confirmed());
+            assert!(judge(
+                Ok(Reading {
+                    build: seen,
+                    source: source()
+                }),
+                Some(NEW)
+            )
+            .is_confirmed());
         });
     }
 
@@ -386,7 +545,11 @@ mod tests {
         assert_eq!(seen, None, "a line from the previous life is not an answer");
 
         let verdict = judge(
-            seen.ok_or_else(|| "no [FW_BUILD] line arrived".to_string()),
+            seen.map(|build| Reading {
+                build,
+                source: source(),
+            })
+            .ok_or_else(|| "no [FW_BUILD] line arrived".to_string()),
             Some(NEW),
         );
         assert!(
@@ -412,10 +575,17 @@ mod tests {
                 .expect("reading the stub board")
                 .expect("the board spoke");
             assert_eq!(
-                judge(Ok(seen), Some(NEW)),
+                judge(
+                    Ok(Reading {
+                        build: seen,
+                        source: source()
+                    }),
+                    Some(NEW)
+                ),
                 Verdict::WrongBuild {
                     saw: OLD.into(),
-                    expected: NEW.into()
+                    expected: NEW.into(),
+                    source: source(),
                 }
             );
         });

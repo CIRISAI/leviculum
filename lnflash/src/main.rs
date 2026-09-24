@@ -878,7 +878,7 @@ mod tests {
     use leviculum_core::envelope::StoreStormWire;
 
     use lnflash::transport::Written;
-    use lnflash::verify::Verdict;
+    use lnflash::verify::{Source, Verdict};
 
     fn outcome(written: bool, verdict: Option<Verdict>) -> flow::Outcome {
         flow::Outcome {
@@ -898,11 +898,22 @@ mod tests {
         }
     }
 
+    /// A board's if00 as the bus resolved it, which is what a build claim
+    /// has to name (#378).
+    fn source() -> Source {
+        Source {
+            port: PathBuf::from("/dev/serial/by-id/usb-leviculum_RAK4631_DEC9947DAD9D2869-if00"),
+            node: PathBuf::from("/dev/ttyACM3"),
+            after: std::time::Duration::from_millis(2400),
+        }
+    }
+
     fn confirmed() -> flow::Outcome {
         outcome(
             true,
             Some(Verdict::Confirmed {
                 git_sha: "daa8b8e".into(),
+                source: source(),
             }),
         )
     }
@@ -922,6 +933,7 @@ mod tests {
             Some(Verdict::WrongBuild {
                 saw: "ead0bce".into(),
                 expected: "daa8b8e".into(),
+                source: source(),
             }),
         )
     }
@@ -966,10 +978,15 @@ mod tests {
         let line = unknown().describe();
         assert!(line.contains("unknown"), "{line}");
         assert!(!line.contains("ead0bce"), "{line}");
-        // A board that really did contradict the image still names both.
+        // A board that really did contradict the image still names both,
+        // and the port it read the sha on (#378, 2026-09-11).
         let line = wrong_build().describe();
         assert!(
             line.contains("ead0bce") && line.contains("daa8b8e"),
+            "{line}"
+        );
+        assert!(
+            line.contains("-if00") && line.contains("/dev/ttyACM3"),
             "{line}"
         );
     }
