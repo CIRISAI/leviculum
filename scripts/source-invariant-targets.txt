@@ -67,6 +67,7 @@ run   leviculum-std   doc_security_policy        # reads SECURITY.md and the com
 run   leviculum-std   doc_self_hosted_infra      # reads the design record against the artifacts of it that now exist in the tree
 run   leviculum-std   lnode_debug_log_format     # reads the firmware sources for the debug-line shapes and the RX-defer sites
 run   leviculum-std   msgpack_single_decoder     # reads leviculum-core's sources; exactly one hand-rolled msgpack reader may exist
+run   leviculum-std   rak4631_gnss_pulse_pin     # reads the RAK firmware sources; the GNSS task claims no pulse pin and nothing claims P0.17
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
 
 # --------------------------------------------------------------- skip --------

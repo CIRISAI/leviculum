@@ -67,12 +67,17 @@
 //! switching, because on the T114 the display sits on it too
 //! ([`crate::vext`]).
 //!
-//! The PPS pin (P0.17 on the V2, P1.04 on the T114) is configured as a
-//! pull-down input but not used — reserved for a future
-//! timestamp-capture iteration. The Solar Node breaks no pulse line out
-//! at all and passes `pps: None`, which is not the same thing: an absent
-//! output is not a quiet one, and the pad that would carry it on a XIAO
-//! is that board's battery ADC.
+//! The PPS pin (P1.04 on the T114) is configured as a pull-down input
+//! but not used — reserved for a future timestamp-capture iteration.
+//! Two of the three boards pass `pps: None`, for two different reasons,
+//! and neither is "there is a pulse here we are ignoring". The Solar
+//! Node breaks no pulse line out at all: an absent output is not a quiet
+//! one, and the pad that would carry it on a XIAO is that board's
+//! battery ADC. The WisMesh Pocket V2 has the output but no wire — the
+//! RAK19026 VC leaves the ZOE-M8Q's TIMEPULSE on an unfitted 0 ohm link,
+//! and the pin the driver used to hold instead belongs to the LIS3DH's
+//! interrupt (Codeberg #394; the trail is in
+//! [`crate::boards::rak4631`]).
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Input, Level, OutputDrive, Pull};

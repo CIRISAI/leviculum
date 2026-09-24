@@ -530,9 +530,19 @@ async fn main(spawner: Spawner) {
                 ppi_b: p.PPI_CH1,
                 rx: p.P0_15.into(), // RX from ZOE-M8Q TX
                 tx: p.P0_16.into(), // TX to ZOE-M8Q RX
-                pps: Some(p.P0_17.into()),
-                // The ZOE-M8Q has no standby pin on this baseboard; it is
-                // woken through UBX (CFG-PMS) instead.
+                // No pulse line. The RAK19026 VC routes the ZOE-M8Q's
+                // TIMEPULSE onto net `1PPS` and then stops: the only part
+                // on it is `R39`, marked `0/NC` and therefore not fitted
+                // (schematic sheet 3, U6 pin C3). Behind that gap sits IO3,
+                // which is P0.21. The task used to be handed P0.17, which
+                // is IO1, which carries the LIS3DH's INT1 — see
+                // `boards/rak4631.rs` for the whole trail. Codeberg #394.
+                pps: None,
+                // Same sheet, same story: `STANDBY_GPS` reaches the
+                // module's PIO13/EXTINT, but its link to IO4 is `R44`,
+                // `0/NC`, unfitted. The receiver is woken through UBX
+                // (CFG-PMS) because there is no wire to do it with, not
+                // because the part lacks the pin.
                 standby: None,
                 // The ZOE-M8Q sits on the baseboard's 3V3-S rail, raised
                 // above for four peripherals at once.

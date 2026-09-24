@@ -18,7 +18,7 @@ answers on a fixed USB ID, and publishes what it is in a text file.
 **Application.** Our firmware enumerates `1209:0001` (T114) or
 `1209:0002` (RAK4631), from `usb_vid`/`usb_pid` in
 `leviculum-nrf/src/boards/t114.rs:172-173` and
-`leviculum-nrf/src/boards/rak4631.rs:146`. Two CDC ports: interface 00
+`leviculum-nrf/src/boards/rak4631.rs:187`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
 `leviculum-nrf/src/usb.rs:117`. Heltec stock firmware uses `239a:8071`.

@@ -52,7 +52,7 @@ keyed off the per-board USB PID:
 (Symlink names and PIDs: `leviculum-nrf/udev/99-leviculum.rules`. The
 firmware-side USB VID/PID constants:
 `leviculum-nrf/src/boards/t114.rs:172-173` for `1209:0001`,
-`leviculum-nrf/src/boards/rak4631.rs:147-148` for `1209:0002`.)
+`leviculum-nrf/src/boards/rak4631.rs:188-189` for `1209:0002`.)
 
 > **Multiple boards of the same kind.** The short symlinks
 > (`/dev/leviculum-transport`) land on whichever device udev sees first.

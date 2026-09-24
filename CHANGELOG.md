@@ -404,6 +404,29 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- The RAK4631 image no longer holds the accelerometer's interrupt line down
+  in the belief that it is a pulse-per-second input (Codeberg #394). The GNSS
+  task was handed `P0_17` as `pps` and held it as `Input::new(pin,
+  Pull::Down)` for the life of the task. The RAK19026 VC schematic
+  (RAKwireless, 11/26/2024) says P0.17 is something else entirely: sheet 4,
+  U7 `LIS3DH`, pin 11 `INT1`, through `R53` marked `0` and therefore fitted,
+  onto net `IO1` — and `WB_IO1 = 17` in RAK's own
+  `WisCore_RAK4631_Board/variant.h`. The receiver's real pulse output goes
+  nowhere: sheet 3, U6 `ZOE-M8Q-0`, pin C3 `TIMEPULSE`, net `1PPS`, through
+  `R39` marked `0/NC`, unfitted, and the pad behind that gap is `IO3`, which
+  is P0.21 rather than P0.17. `STANDBY_GPS` (`R44`) and `RESET_GPS` (`R45`)
+  are depopulated the same way, while both UART links are fitted, so on this
+  baseboard the ZOE-M8Q is a UART and nothing else. The pin came from a
+  Meshtastic `#define PIN_GPS_PPS (17)` whose own comment scopes it to the
+  RAK1910 plug-in card on a WisBlock Port A header, and our board file had
+  recorded the inference honestly — "verify with a capture" — from
+  2026-04-28 until now. Nothing captured it, because a pull-down on an idle
+  input looks exactly like a quiet pulse line. Consequences were a time
+  discipline that could never have measured anything and a pull parked on the
+  interrupt the movement flag in the open announce-cadence question needs, so
+  the board now passes `pps: None` and the `GnssPps` alias is gone rather
+  than corrected.
+
 - A UDP interface no longer signals a hardware MTU, so a link crossing one
   settles on the base protocol MTU whichever stack sits on either end
   (Codeberg #357). Python's `UDPInterface` sets `self.HW_MTU = 1064`

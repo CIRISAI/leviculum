@@ -80,13 +80,54 @@ pub type I2c1Scl = peripherals::P0_14;
 pub type GnssTx = peripherals::P0_16;
 /// GNSS UART RX (ZOE-M8Q → MCU).
 pub type GnssRx = peripherals::P0_15;
-/// GNSS PPS / TIMEPULSE input. Wiring on the integrated VC baseboard
-/// is inferred from Meshtastic — verify with a capture once the GNSS
-/// UART is up.
-pub type GnssPps = peripherals::P0_17;
 /// GNSS UART baud rate. ZOE-M8Q ships at 9600 baud (u-blox factory
 /// default).
 pub const GNSS_BAUD: u32 = 9600;
+
+// GNSS PPS / TIMEPULSE: NONE, and this is the second alias on this board
+// that had to be deleted rather than corrected (Codeberg #394; the QSPI
+// flash below is the first). There was a `GnssPps = P0_17` here, and
+// `bin/rak4631.rs` handed it to the GNSS task, on the strength of a
+// Meshtastic line that says so in as many words:
+//
+// ```c
+// // RAK1910 GPS module
+// // If using the wisblock GPS module and pluged into Port A on WisBlock base
+// // IO1 is hooked to PPS (pin 12 on header) = gpio 17
+// #define PIN_GPS_PPS (17) // Pulse per second input from the GPS
+// ```
+//
+// Read the comment above the define and it is about a different receiver
+// on a different baseboard: the RAK1910 is a plug-in WisBlock module, and
+// the sentence describes what *that* card does to the Port A header. It
+// says nothing about the ZOE-M8Q soldered onto a VC board, and our own
+// doc comment admitted as much — "inferred from Meshtastic, verify with a
+// capture". Nobody captured; the inference stood from 2026-04-28 to
+// 2026-09-24.
+//
+// The RAK19026 VC schematic (RAKwireless, 11/26/2024, five sheets on the
+// WisMesh Base Board VC datasheet page) says the opposite twice over:
+//
+//   * Sheet 3, U6 `ZOE-M8Q-0`, pin C3 `TIMEPULSE` → net `1PPS` → `R39`,
+//     marked `0/NC`: an unfitted link. The pad behind it is `IO3`, and
+//     `WB_IO3 = 21` in RAK's own `WisCore_RAK4631_Board/variant.h`. So
+//     TIMEPULSE reaches no MCU pin on an assembled board, and the pin it
+//     would have reached is P0.21, not P0.17. The receiver's other two
+//     control nets are depopulated the same way — `STANDBY_GPS` through
+//     `R44` (`0/NC`, IO4) and `RESET_GPS` through `R45` (`0/NC`, IO6) —
+//     while both UART links are fitted (`R43`, `0`). On this board the
+//     ZOE-M8Q is a UART and nothing else.
+//   * Sheet 4, U7 `LIS3DH`, pin 11 `INT1` → `R53`, marked `0`: fitted,
+//     onto net `IO1`, and `WB_IO1 = 17`. P0.17 is the accelerometer's
+//     interrupt output.
+//
+// The same header cross-checks itself on this board elsewhere: `WB_IO2 =
+// 34` is P1.02, the 3V3-S enable above, and `WB_IO5 = 9` is P0.09, the
+// user key drawn as K3 on sheet 4. So no alias here, and nothing in
+// `bin/rak4631.rs` configures P0.17: it belongs to whatever eventually
+// drives the LIS3DH, which is the part the movement flag would use.
+// `leviculum-std/tests/rak4631_gnss_pulse_pin.rs` keeps it that way.
+// <https://docs.rakwireless.com/product-categories/meshtastic/wismesh-base/datasheet-vc/>
 
 // Battery (RAK19026 baseboard)
 /// Battery voltage sense (AIN3 = P0.05).
