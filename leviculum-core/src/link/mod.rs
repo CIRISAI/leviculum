@@ -115,6 +115,14 @@ fn validate_mode(mode: u8) -> Result<(), LinkError> {
 /// mdu = floor((mtu - IFAC_MIN_SIZE - HEADER_MINSIZE - TOKEN_OVERHEAD)
 ///             / AES128_BLOCKSIZE) * AES128_BLOCKSIZE - 1
 /// ```
+///
+/// Below [`crate::constants::LINK_MTU_MIN`] there is not one whole AES block
+/// left and the trailing `- 1` has nothing to take from. That cannot happen
+/// on a live link — the floor is enforced where a peer's MTU is adopted, in
+/// `new_incoming` and `process_proof` — but the subtraction saturates to 0
+/// anyway, because the failure mode of an underflow here is mute: an MDU of
+/// `usize::MAX` passes every length check that asks whether a payload still
+/// fits, which is the opposite of what the value is for (Codeberg #392).
 fn compute_link_mdu(mtu: u32) -> usize {
     use crate::constants::{AES_BLOCK_SIZE, HEADER_MINSIZE, IFAC_MIN_SIZE, TOKEN_OVERHEAD};
     let mtu = mtu as usize;
@@ -122,7 +130,7 @@ fn compute_link_mdu(mtu: u32) -> usize {
         .saturating_sub(IFAC_MIN_SIZE)
         .saturating_sub(HEADER_MINSIZE)
         .saturating_sub(TOKEN_OVERHEAD);
-    (usable / AES_BLOCK_SIZE) * AES_BLOCK_SIZE - 1
+    ((usable / AES_BLOCK_SIZE) * AES_BLOCK_SIZE).saturating_sub(1)
 }
 
 /// Build the signed data for proof verification/generation
@@ -208,6 +216,14 @@ pub enum LinkError {
     NotFound,
     /// Unsupported link encryption mode signaled by the peer
     UnsupportedMode,
+    /// The MTU this link would run at is below
+    /// [`crate::constants::LINK_MTU_MIN`], so every size derived from it
+    /// (link MDU, resource SDU) would be degenerate. The link is refused
+    /// instead (Codeberg #392).
+    MtuBelowFloor {
+        /// The MTU that was adopted from the peer.
+        mtu: u32,
+    },
     /// Send path is occupied, try later (mirrors [`crate::link::channel::ChannelError::Busy`])
     Busy,
     /// Channel is pacing sends, retry at the given time (mirrors [`crate::link::channel::ChannelError::PacingDelay`])
@@ -235,6 +251,12 @@ impl core::fmt::Display for LinkError {
             LinkError::InvalidRtt => write!(f, "invalid RTT packet"),
             LinkError::NotFound => write!(f, "link not found"),
             LinkError::UnsupportedMode => write!(f, "unsupported link encryption mode"),
+            LinkError::MtuBelowFloor { mtu } => write!(
+                f,
+                "link MTU {} is below the floor of {}",
+                mtu,
+                crate::constants::LINK_MTU_MIN
+            ),
             LinkError::Busy => write!(f, "busy"),
             LinkError::PacingDelay { ready_at_ms } => {
                 write!(f, "pacing delay until {}ms", ready_at_ms)
@@ -667,6 +689,17 @@ impl Link {
         } else {
             MTU as u32
         };
+
+        // The floor, on the responder's half of the negotiation: the clamp
+        // above is the only thing that can push an incoming link below it,
+        // and a link whose MDU would be degenerate is refused rather than
+        // built (Codeberg #392). No proof goes back, which is precisely what
+        // every initiator's establishment timeout already handles.
+        if negotiated_mtu < crate::constants::LINK_MTU_MIN {
+            return Err(LinkError::MtuBelowFloor {
+                mtu: negotiated_mtu,
+            });
+        }
 
         let peer_ephemeral_public = x25519_dalek::PublicKey::from(peer_x25519_bytes);
         let peer_verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&peer_ed25519_bytes)
@@ -1934,11 +1967,21 @@ impl Link {
         // from the MTU (link MDU, resource SDU, hence the part count and the
         // hashmap width) forked. See `mvr_link_mtu_asymmetry.rs` for the
         // resource livelock that came out of it on hardware.
-        self.negotiated_mtu = if confirmed_mtu == 0 {
+        //
+        // Verbatim has one bound: adopting the peer's number means adopting a
+        // number our own constants no longer limit, so `LINK_MTU_MIN` is
+        // enforced here, at the one place that number enters (Codeberg #392).
+        // The caller closes the link on this error, the same way it does for
+        // a proof that fails to verify.
+        let adopted_mtu = if confirmed_mtu == 0 {
             MTU as u32
         } else {
             confirmed_mtu
         };
+        if adopted_mtu < crate::constants::LINK_MTU_MIN {
+            return Err(LinkError::MtuBelowFloor { mtu: adopted_mtu });
+        }
+        self.negotiated_mtu = adopted_mtu;
 
         // Update state
         self.peer_ephemeral_public = Some(peer_ephemeral_public);
@@ -2628,7 +2671,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::MTU;
+    use crate::constants::{LINK_MTU_MIN, MTU};
     use crate::destination::DestinationHash;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -3958,6 +4001,125 @@ mod tests {
         // = 62 * 16 - 1
         // = 992 - 1 = 991
         assert_eq!(compute_link_mdu(1064), 991);
+    }
+
+    /// The MDU arithmetic runs out of bytes one below the floor, and must
+    /// not answer `usize::MAX` there: a saturating MDU of 0 fails every
+    /// length check, an underflowed one passes them all (Codeberg #392).
+    #[test]
+    fn test_compute_link_mdu_saturates_below_the_floor() {
+        // floor((83 - 1 - 19 - 48) / 16) * 16 = 0 → the trailing - 1 has
+        // nothing to take from.
+        assert_eq!(compute_link_mdu(83), 0);
+        assert_eq!(compute_link_mdu(0), 0);
+        assert_eq!(compute_link_mdu(68), 0);
+        // One whole AES block past the 68 bytes of overhead is the first MTU
+        // with a usable MDU: 16 - 1.
+        assert_eq!(compute_link_mdu(LINK_MTU_MIN), 15);
+        assert_eq!(LINK_MTU_MIN, 84);
+    }
+
+    /// The floor admits nothing that would divide by zero in the resource
+    /// sender: `resource_sdu` is the divisor of the part count
+    /// (`OutgoingResource::new_with_flags`), zero at MTU 36 and below.
+    #[test]
+    fn test_link_mtu_floor_keeps_the_resource_sdu_nonzero() {
+        assert_eq!(crate::resource::resource_sdu(36), 0);
+        assert_eq!(crate::resource::resource_sdu(37), 1);
+        assert!(crate::resource::resource_sdu(LINK_MTU_MIN) > 0);
+    }
+
+    /// A responder refuses a link its own receiving interface cannot carry,
+    /// rather than building one whose MDU is nonsense.
+    #[test]
+    fn test_new_incoming_refuses_mtu_below_floor() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
+
+        let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
+        let request_data = outgoing.create_link_request_with_mtu(500, 1);
+
+        // hw_mtu 83 is the last value whose MDU underflows.
+        let refused = Link::new_incoming(
+            &request_data,
+            link_id,
+            dest_hash,
+            &mut OsRng,
+            Some(LINK_MTU_MIN - 1),
+        );
+        assert!(
+            matches!(refused, Err(LinkError::MtuBelowFloor { mtu }) if mtu == LINK_MTU_MIN - 1),
+            "expected a refusal at MTU {}, got {:?}",
+            LINK_MTU_MIN - 1,
+            refused.map(|l| l.negotiated_mtu()),
+        );
+
+        // 84 is admitted, and its derived sizes are usable.
+        let accepted = Link::new_incoming(
+            &request_data,
+            link_id,
+            dest_hash,
+            &mut OsRng,
+            Some(LINK_MTU_MIN),
+        )
+        .expect("the floor itself must be admitted");
+        assert_eq!(accepted.negotiated_mtu(), LINK_MTU_MIN);
+        assert_eq!(accepted.mdu(), 15);
+    }
+
+    /// The initiator adopts the confirmed MTU verbatim (#390), so the number
+    /// comes from the far end of the wire: a peer that confirms below the
+    /// floor gets no link. `handle_link_proof` closes the link on this error,
+    /// which is the same path a bad signature takes.
+    #[test]
+    fn test_process_proof_refuses_confirmed_mtu_below_floor() {
+        use crate::identity::Identity;
+
+        for (confirmed, expect_ok) in [(LINK_MTU_MIN - 1, false), (LINK_MTU_MIN, true)] {
+            let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+            let dest_identity = Identity::generate(&mut OsRng);
+
+            let mut initiator = Link::new_outgoing(dest_hash, &mut OsRng);
+            let request_data = initiator.create_link_request();
+
+            let mut raw_packet = Vec::new();
+            raw_packet.push(0x02);
+            raw_packet.push(0x00);
+            raw_packet.extend_from_slice(dest_hash.as_bytes());
+            raw_packet.push(0x00);
+            raw_packet.extend_from_slice(&request_data);
+            let link_id = Link::calculate_link_id(&raw_packet);
+            initiator.set_link_id(link_id);
+
+            // The responder is built at the base MTU; the value under test is
+            // the one it CONFIRMS, which is all the initiator ever sees.
+            let mut responder =
+                Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+            let proof_packet = responder
+                .build_proof_packet(&dest_identity, confirmed, 1)
+                .unwrap();
+
+            initiator
+                .set_destination_keys(dest_identity.ed25519_verifying().as_bytes())
+                .unwrap();
+            let result = initiator.process_proof(&proof_packet[19..]);
+
+            if expect_ok {
+                result.expect("the floor itself must be admitted");
+                assert_eq!(initiator.negotiated_mtu(), confirmed);
+                assert_eq!(initiator.state(), LinkState::Active);
+            } else {
+                assert!(
+                    matches!(result, Err(LinkError::MtuBelowFloor { mtu }) if mtu == confirmed),
+                    "expected a refusal at confirmed MTU {confirmed}, got {result:?}"
+                );
+                assert_ne!(
+                    initiator.state(),
+                    LinkState::Active,
+                    "a refused link must not go active"
+                );
+            }
+        }
     }
 
     #[test]

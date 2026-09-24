@@ -50,6 +50,14 @@ use alloc::vec::Vec;
 /// HEADER_MAXSIZE(35) + IFAC_MIN_SIZE(1) = 36.
 pub const RESOURCE_SDU_OVERHEAD: usize = HEADER_MAXSIZE + IFAC_MIN_SIZE;
 
+/// The link MTU floor has to cover the SDU bound too, not just the MDU one:
+/// `resource_sdu` is the divisor of the sender's part count, and a link
+/// admitted at an MTU of `RESOURCE_SDU_OVERHEAD` or less would divide by
+/// zero (Codeberg #392). Today 84 > 36 with room to spare, but the two
+/// overheads are independent constants, so the relation is asserted rather
+/// than assumed.
+const _: () = assert!(crate::constants::LINK_MTU_MIN as usize > RESOURCE_SDU_OVERHEAD);
+
 /// Fixed overhead in a ResourceAdvertisement msgpack payload (bytes).
 /// This is the size of the advertisement excluding the variable-length hashmap.
 pub const RESOURCE_ADV_OVERHEAD: usize = 134;
@@ -975,6 +983,17 @@ mod tests {
     #[test]
     fn test_resource_sdu_below_overhead() {
         assert_eq!(resource_sdu(30), 0);
+    }
+
+    /// The exact boundary the sender's `div_ceil(sdu)` cares about: 36 is the
+    /// last MTU with no room for a single payload byte, and a zero SDU is a
+    /// divide by zero one line later. `LINK_MTU_MIN` keeps both out of reach,
+    /// and the static assertion above keeps that true (Codeberg #392).
+    #[test]
+    fn test_resource_sdu_boundary_at_the_overhead() {
+        assert_eq!(resource_sdu(RESOURCE_SDU_OVERHEAD as u32), 0);
+        assert_eq!(resource_sdu(RESOURCE_SDU_OVERHEAD as u32 + 1), 1);
+        assert!(resource_sdu(crate::constants::LINK_MTU_MIN) > 0);
     }
 
     // HASHMAP_MAX_LEN / COLLISION_GUARD_SIZE constants

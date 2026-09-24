@@ -942,18 +942,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Create the incoming link
         let iface_hw_mtu = self.transport.interface_hw_mtu(interface_index);
-        let Ok(mut link) = Link::new_incoming(
+        let mut link = match Link::new_incoming(
             request_data,
             link_id,
             dest_hash,
             &mut self.rng,
             iface_hw_mtu,
-        ) else {
-            crate::tracing::warn!(
-                link = %HexShort(link_id.as_bytes()),
-                "Dropped malformed link request, failed to parse"
-            );
-            return;
+        ) {
+            Ok(link) => link,
+            // The reason matters: a malformed request and a request this
+            // interface is too narrow to serve (Codeberg #392) are dropped
+            // the same way, and only the log tells them apart.
+            Err(e) => {
+                crate::tracing::warn!(
+                    link = %HexShort(link_id.as_bytes()),
+                    iface = %self.transport.iface_name(interface_index),
+                    %e,
+                    "Dropped link request"
+                );
+                return;
+            }
         };
 
         // Set attached interface from the receiving interface, and with it

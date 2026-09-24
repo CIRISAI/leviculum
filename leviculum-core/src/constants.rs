@@ -78,6 +78,37 @@ pub const HEADER_MAXSIZE: usize = 2 + 1 + TRUNCATED_HASHBYTES * 2;
 /// may be present in packets transmitted over authenticated interfaces.
 pub const MDU: usize = MTU - HEADER_MAXSIZE - IFAC_MIN_SIZE;
 
+/// Smallest link MTU whose derived sizes are still meaningful.
+///
+/// Every size a link derives from its MTU is that MTU minus fixed overhead,
+/// and below this value the subtractions run out of bytes:
+///
+/// * the link MDU is `floor((mtu - IFAC_MIN_SIZE - HEADER_MINSIZE -
+///   TOKEN_OVERHEAD) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE - 1`
+///   ([`crate::link::Link::mdu`]), which needs one whole AES block beyond the
+///   68 bytes of overhead: 84. At 83 the quotient is zero and the trailing
+///   `- 1` underflows.
+/// * the resource SDU is `mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE`
+///   ([`crate::resource::resource_sdu`]), zero at 36 and below, and a zero
+///   SDU is the divisor of the sender's part count.
+///
+/// 84 is the larger of the two bounds, so one floor covers both; the static
+/// assertion beside `RESOURCE_SDU_OVERHEAD` keeps that true if either
+/// overhead ever changes.
+///
+/// Enforced where a PEER's MTU is adopted — `Link::new_incoming` for the
+/// responder, `Link::process_proof` for the initiator. Since Codeberg #390
+/// the negotiated MTU is whatever the other end confirms, so the number no
+/// longer comes from our own constants; a link that would run below this
+/// floor is refused rather than given an MDU of `usize::MAX`, which fails no
+/// length check at all (Codeberg #392).
+///
+/// This is an arithmetic floor, not a claim that a link is useful at 84: the
+/// smallest interface we ship declares `hw_mtu = 508`, and a LINK_REQUEST
+/// packet alone weighs 86 bytes.
+pub const LINK_MTU_MIN: u32 =
+    (IFAC_MIN_SIZE + HEADER_MINSIZE + TOKEN_OVERHEAD + AES_BLOCK_SIZE) as u32;
+
 /// Default per-hop timeout in seconds
 pub const DEFAULT_PER_HOP_TIMEOUT: u64 = 6;
 

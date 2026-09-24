@@ -104,6 +104,8 @@ mod mvr_link_delivery_telemetry;
 #[cfg(test)]
 mod mvr_link_mtu_asymmetry;
 #[cfg(test)]
+mod mvr_link_mtu_floor;
+#[cfg(test)]
 mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
