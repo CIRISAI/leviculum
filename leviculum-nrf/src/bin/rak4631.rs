@@ -821,6 +821,17 @@ async fn main(spawner: Spawner) {
         // reconfigure lands in another task while this one sleeps, and the
         // arms below must throttle against the PHY as it is NOW.
         announce_cap.sync(&mut node);
+        // The calendar's own healing, mirrored here for the same reason as
+        // the state above: it happens in code this task does not run. The
+        // seeding arms below record the source they inject, but
+        // `learn_emission_timebase` seats an anchor from an overheard
+        // announce with nothing at this layer called, so a board healed
+        // from traffic kept saying the birth state forever (Codeberg #398).
+        // Reading the node is what keeps the banner honest without a
+        // notification path per source.
+        if leviculum_nrf::set_time_source(node.time_source()) {
+            log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        }
         match wake {
             Either4::Third(Either4::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The

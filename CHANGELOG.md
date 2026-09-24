@@ -404,6 +404,22 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- An LNode whose calendar healed from the air now says so: `[TIME_SOURCE]`
+  reports `overheard` instead of the birth state (Codeberg #398). The line is
+  the only thing a board says about its clock, and the three sites that record
+  a time source — a GNSS fix, the host's `TYPE_WALL_TIME` envelope, the
+  propagation role's peer clock — are not the only sites that seat one.
+  `Transport::learn_emission_timebase` adopts an overheard announce's emission
+  stamp and raises the anchor to `TimeSource::Overheard` inside the core, with
+  nothing in the firmware called when it does, so the banner's copy kept the
+  boot value forever. A quiet-hour rig capture on 2026-09-14 read the same
+  word off two T114s announcing their delivery destination on the configured
+  1800 s cadence and off a RAK4631 withholding its announce for want of a
+  clock — the two states the line exists to tell apart. The main loop now
+  mirrors `node.time_source()` beside the interface state it already mirrors,
+  so an anchor seated anywhere in the core reaches the banner within one loop
+  pass and a source added later needs no fourth notification path.
+
 - The RAK4631 image no longer holds the accelerometer's interrupt line down
   in the belief that it is a pulse-per-second input (Codeberg #394). The GNSS
   task was handed `P0_17` as `pps` and held it as `Input::new(pin,

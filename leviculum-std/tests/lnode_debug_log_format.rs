@@ -1192,3 +1192,52 @@ fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
          no other gate-free path to a reader"
     );
 }
+
+/// Codeberg #398: `[TIME_SOURCE]` is the only thing a board says about its
+/// clock, and the calendar can heal without passing any of the sites that
+/// record what seated it.
+///
+/// The three seeding sites in each bin — GNSS, the host envelope, and the
+/// propagation role's peer clock — each inject a value AND record the source
+/// they injected. But `Transport::learn_emission_timebase` seats an anchor
+/// too: it adopts an overheard announce's emission stamp and raises the
+/// calendar to `TimeSource::Overheard` inside the core, with nothing at this
+/// layer called when it does. The banner's atomic therefore kept the birth
+/// state forever on a board that healed from traffic, and the rig capture of
+/// 2026-09-14 read one identical word off three boards in two opposite clock
+/// states: two T114s announcing their delivery destination on the configured
+/// cadence, and a RAK4631 withholding its announce for want of a clock. That
+/// pair is the one distinction the line exists to make.
+///
+/// The invariant is that the banner MIRRORS the node rather than collecting
+/// notifications from the places that happen to know: each bin reads
+/// `node.time_source()` beside the interface mirrors it already keeps, so an
+/// anchor seated anywhere in the core reaches the banner within one loop
+/// pass, and a fifth arm added to the core later needs no fourth seeding site
+/// here. Pinned as source text for the same reason as every other invariant
+/// in this file: the firmware cross-compiles to thumbv7em and cannot run a
+/// host test.
+#[test]
+fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
+    for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
+        let src = nrf_source(bin);
+        assert!(
+            src.contains("set_time_source(node.time_source())"),
+            "leviculum-nrf/src/{bin} never mirrors node.time_source() into the \
+             banner, so a calendar healed from an overheard announce keeps \
+             reporting the birth state (Codeberg #398)"
+        );
+    }
+    // The mirror is only a mirror if the store reports whether anything
+    // moved; without that the bin has to choose between a [TIME_SOURCE] line
+    // on every loop pass and none at all on the healed transition.
+    let lib = nrf_source("lib.rs");
+    assert!(
+        lib.contains(
+            "pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool"
+        ),
+        "leviculum-nrf/src/lib.rs::set_time_source no longer reports whether the \
+         recorded source changed, which is what lets the main-loop mirror log the \
+         transition once (Codeberg #398)"
+    );
+}

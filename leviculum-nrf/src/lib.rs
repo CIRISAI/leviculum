@@ -637,9 +637,19 @@ const TIME_SOURCE_OVERHEARD: u8 = 2;
 const TIME_SOURCE_BUILD_FLOOR: u8 = 3;
 const TIME_SOURCE_PLATFORM_CLOCK: u8 = 4;
 
-/// Record the seeded time source for the status banner. Called by the
-/// main loop at each seeding site.
-pub fn set_time_source(source: leviculum_core::transport::TimeSource) {
+/// Record the time source for the status banner. Returns whether the
+/// recorded source CHANGED, so a caller that runs on every pass can log the
+/// transition once instead of on every pass.
+///
+/// Called at each seeding site, and — since Codeberg #398 — from the main
+/// loop as an unconditional mirror of `node.time_source()`. The seeding
+/// sites are not enough on their own: `Transport::learn_emission_timebase`
+/// seats an anchor of its own when an overheard announce carries a
+/// plausible emission stamp, and nothing at this layer is called when it
+/// does, so a board healed from traffic kept reporting the birth state and
+/// `[TIME_SOURCE]` said the same word for a board announcing on cadence as
+/// for one withholding its announce for want of a clock.
+pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool {
     use leviculum_core::transport::TimeSource;
     let v = match source {
         TimeSource::Gnss => TIME_SOURCE_GNSS,
@@ -652,7 +662,7 @@ pub fn set_time_source(source: leviculum_core::transport::TimeSource) {
         // fails to compile until it decides what to report.
         TimeSource::PlatformClock => TIME_SOURCE_PLATFORM_CLOCK,
     };
-    TIME_SOURCE_STATE.store(v, Ordering::Relaxed);
+    TIME_SOURCE_STATE.swap(v, Ordering::Relaxed) != v
 }
 
 /// The recorded time source as its stable event-log token
