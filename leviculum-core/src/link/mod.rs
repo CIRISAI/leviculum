@@ -468,6 +468,18 @@ pub struct Link {
     /// Set at link creation from the next-hop interface bitrate.
     /// Zero for fast interfaces (TCP, etc).
     first_hop_timeout_extra_ms: u64,
+    /// What one frame costs the frame behind it on the interface this link
+    /// runs over, in milliseconds (`Interface::frame_turnaround_ms`). Zero
+    /// for a medium with no post-TX wait, which is every interface but LoRa.
+    ///
+    /// The slowest hop this node can SEE: the first one. A link across a
+    /// relay may have a slower hop further out, and nothing on the wire
+    /// carries that figure — no announce, no link proof, no path entry — so
+    /// this is a lower bound on a multi-hop path, never the whole truth.
+    /// It floors the receiver's resource part timeout, where a lower bound
+    /// is the safe direction: too short an expectation is what collapsed the
+    /// window (Codeberg #36/#374).
+    frame_turnaround_ms: u64,
     /// Outgoing resource transfer (sender side).
     /// Removed when transfer completes or fails.
     outgoing_resource: Option<crate::resource::outgoing::OutgoingResource>,
@@ -575,6 +587,7 @@ impl Link {
             rtt_send_count: 0,
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
+            frame_turnaround_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
             incoming_resource: None,
@@ -692,6 +705,7 @@ impl Link {
             rtt_send_count: 0,
             rtt_confirmed: false,
             first_hop_timeout_extra_ms: 0,
+            frame_turnaround_ms: 0,
             outgoing_resource: None,
             outgoing_segments: None,
             incoming_resource: None,
@@ -1085,6 +1099,23 @@ impl Link {
         if bitrate_bps > 0 {
             self.first_hop_timeout_extra_ms = (MTU as u64) * 8 * 1000 / (bitrate_bps as u64);
         }
+    }
+
+    /// Learn the per-frame turnaround of an interface this link runs over.
+    ///
+    /// Keeps the largest figure it has been told, so a link that has been
+    /// told about more than one interface — the path's next hop at creation,
+    /// then the interface the proof actually arrived on — ends up with the
+    /// slowest of them. Slowest, because the figure floors a timeout: being
+    /// too patient costs a retry that was going to be answered anyway, being
+    /// too impatient costs the window (Codeberg #36/#374).
+    pub(crate) fn note_frame_turnaround_ms(&mut self, turnaround_ms: u64) {
+        self.frame_turnaround_ms = self.frame_turnaround_ms.max(turnaround_ms);
+    }
+
+    /// What one frame costs the frame behind it on this link's carrier, ms.
+    pub fn frame_turnaround_ms(&self) -> u64 {
+        self.frame_turnaround_ms
     }
 
     /// Store a handshake RTT measurement (milliseconds → microseconds).

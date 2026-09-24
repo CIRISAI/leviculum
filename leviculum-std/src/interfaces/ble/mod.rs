@@ -179,6 +179,7 @@ pub(crate) fn spawn_ble_interface(
         bitrate: Some(BLE_BITRATE_GUESS),
         announce_cap_bitrate: None,
         tx_jitter_max_ms: None,
+        frame_turnaround_ms: None,
         ifac: None,
         mode: InterfaceMode::default(),
         kind: InterfaceKind::Ble,

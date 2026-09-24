@@ -2262,6 +2262,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// trait objects (Transport stays sans-I/O).
     interface_next_slot_ms: BTreeMap<usize, u64>,
 
+    /// Per-interface per-frame turnaround in milliseconds, mirrored from
+    /// `Interface::frame_turnaround_ms()` the same way, and for the same
+    /// reason, as `interface_next_slot_ms`: the driver owns the interface
+    /// handles, asks each one, and pushes the answer here, so Transport
+    /// learns a carrier fact without holding a trait object and stays
+    /// sans-I/O. Absent ⇒ zero, the trait default.
+    interface_turnaround_ms: BTreeMap<usize, u64>,
+
     /// Per-interface worst-case airtime in milliseconds for a single
     /// MTU-sized transmit. Driver pushes one entry per LoRa-Serial
     /// interface (computed from its current bw/sf/cr/MTU); non-LoRa
@@ -2387,6 +2395,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             pending_local_path_requests: BTreeMap::new(),
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
+            interface_turnaround_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
@@ -3925,6 +3934,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_map_bytes(&self.pending_local_path_requests)
             + hc::btree_map_bytes(&self.interface_announce_rate_configs)
             + hc::btree_map_bytes(&self.interface_next_slot_ms)
+            + hc::btree_map_bytes(&self.interface_turnaround_ms)
             + hc::btree_map_bytes(&self.interface_max_airtime_ms)
             + hc::btree_map_bytes(&self.ifac_configs)
             + hc::btree_map_bytes(&self.blackholed_identities)
@@ -8262,6 +8272,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             .get(&iface_idx)
             .copied()
             .unwrap_or(now_ms)
+    }
+
+    /// Record what one frame on the given interface costs the frame behind
+    /// it, mirrored from `Interface::frame_turnaround_ms()` by a driver that
+    /// owns the handles.
+    pub fn set_interface_frame_turnaround_ms(&mut self, iface_idx: usize, turnaround_ms: u64) {
+        self.interface_turnaround_ms
+            .insert(iface_idx, turnaround_ms);
+    }
+
+    /// What one frame on the given interface costs the frame behind it, in
+    /// milliseconds, or zero when no driver pushed one — the trait default,
+    /// a medium with no post-TX wait.
+    pub fn interface_frame_turnaround_ms(&self, iface_idx: usize) -> u64 {
+        self.interface_turnaround_ms
+            .get(&iface_idx)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The per-frame turnaround of the interface the next hop toward
+    /// `dest_hash` sits on, or `None` when no path is known.
+    ///
+    /// The counterpart of [`Self::next_hop_interface_bitrate`], and bounded
+    /// the same way: this node can price its OWN first hop and nothing
+    /// beyond it. A path across a relay may well have a slower hop further
+    /// out; no announce carries that figure, so nothing here can see it.
+    pub(crate) fn next_hop_interface_turnaround_ms(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Option<u64> {
+        let path = self.storage.get_path(dest_hash)?;
+        Some(self.interface_frame_turnaround_ms(path.interface_index))
     }
 
     /// Record the worst-case airtime in milliseconds for one MTU-sized

@@ -704,37 +704,59 @@ impl IncomingResource {
         Ok(proof_data)
     }
 
-    /// Poll for timeout.
-    pub(crate) fn poll(&mut self, now_ms: u64, rtt_ms: u64) -> ResourcePollResult {
+    /// The retry timeout for the parts this resource is waiting on, in ms.
+    ///
+    /// Named and separate because it is the formula, and both callers — the
+    /// timeout check in [`Self::poll`] and the scheduler's
+    /// [`Self::next_deadline`] — have to agree on it to the millisecond; two
+    /// copies of it disagreed the moment either was sharpened.
+    ///
+    /// `turnaround_ms` is what one frame costs the frame behind it on the
+    /// carrier this link runs over (`Interface::frame_turnaround_ms`, 0 for
+    /// a medium with no post-TX wait). See the floor at the end.
+    pub(crate) fn part_timeout_ms(&self, rtt_ms: u64, turnaround_ms: u64) -> u64 {
         let rtt_ms = core::cmp::max(rtt_ms, 1);
 
+        // Timeout factor reduces after first data received
+        // (Python Resource.py:839. PART_TIMEOUT_FACTOR_AFTER_RTT).
+        let timeout_factor = if self.data_received {
+            PART_TIMEOUT_FACTOR_AFTER_RTT // 2
+        } else {
+            PART_TIMEOUT_FACTOR_INITIAL // 4
+        };
+
+        // Base timeout: expected time-of-flight for outstanding parts.
+        // When eifr is measured, per_part_tof = bytes_per_part * 1000 / eifr.
+        // Cap at rtt_ms: a single part is one packet, should arrive within
+        // one RTT. If measured eifr suggests longer, the measurement is
+        // contaminated by dropped frames inflating the req-to-first-part
+        // elapsed time. Python avoids this by falling back to the link
+        // establishment rate (Resource.py:555).
+        let eifr_tof = if self.num_parts > 0 && self.eifr > 0 {
+            self.transfer_size.saturating_mul(1000) / self.num_parts as u64 / self.eifr
+        } else {
+            rtt_ms
+        };
+        let per_part_tof = core::cmp::min(eifr_tof, rtt_ms);
+        let base = per_part_tof * core::cmp::max(self.outstanding_parts, 1) as u64;
+        // Per-retry progressive delay (Python Resource.py:597).
+        let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
+        let policy_timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
+
+        let _ = turnaround_ms;
+        policy_timeout
+    }
+
+    /// Poll for timeout.
+    pub(crate) fn poll(
+        &mut self,
+        now_ms: u64,
+        rtt_ms: u64,
+        turnaround_ms: u64,
+    ) -> ResourcePollResult {
         match self.status {
             ResourceStatus::Transferring => {
-                // Timeout factor reduces after first data received
-                // (Python Resource.py:839. PART_TIMEOUT_FACTOR_AFTER_RTT).
-                let timeout_factor = if self.data_received {
-                    PART_TIMEOUT_FACTOR_AFTER_RTT // 2
-                } else {
-                    PART_TIMEOUT_FACTOR_INITIAL // 4
-                };
-
-                // Base timeout: expected time-of-flight for outstanding parts.
-                // When eifr is measured, per_part_tof = bytes_per_part * 1000 / eifr.
-                // Cap at rtt_ms: a single part is one packet, should arrive within
-                // one RTT. If measured eifr suggests longer, the measurement is
-                // contaminated by dropped frames inflating the req-to-first-part
-                // elapsed time. Python avoids this by falling back to the link
-                // establishment rate (Resource.py:555).
-                let eifr_tof = if self.num_parts > 0 && self.eifr > 0 {
-                    self.transfer_size.saturating_mul(1000) / self.num_parts as u64 / self.eifr
-                } else {
-                    rtt_ms
-                };
-                let per_part_tof = core::cmp::min(eifr_tof, rtt_ms);
-                let base = per_part_tof * core::cmp::max(self.outstanding_parts, 1) as u64;
-                // Per-retry progressive delay (Python Resource.py:597).
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
+                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms);
 
                 if now_ms.saturating_sub(self.last_activity_ms) >= timeout {
                     self.retries += 1;
@@ -769,24 +791,10 @@ impl IncomingResource {
     }
 
     /// Compute the next deadline (absolute ms).
-    pub(crate) fn next_deadline(&self, rtt_ms: u64) -> Option<u64> {
-        let rtt_ms = core::cmp::max(rtt_ms, 1);
+    pub(crate) fn next_deadline(&self, rtt_ms: u64, turnaround_ms: u64) -> Option<u64> {
         match self.status {
             ResourceStatus::Transferring => {
-                let timeout_factor = if self.data_received {
-                    PART_TIMEOUT_FACTOR_AFTER_RTT
-                } else {
-                    PART_TIMEOUT_FACTOR_INITIAL
-                };
-                let eifr_tof = if self.num_parts > 0 && self.eifr > 0 {
-                    self.transfer_size.saturating_mul(1000) / self.num_parts as u64 / self.eifr
-                } else {
-                    rtt_ms
-                };
-                let per_part_tof = core::cmp::min(eifr_tof, rtt_ms);
-                let base = per_part_tof * core::cmp::max(self.outstanding_parts, 1) as u64;
-                let per_retry_extra = self.retries as u64 * PER_RETRY_DELAY_MS;
-                let timeout = base * timeout_factor + RETRY_GRACE_TIME_MS + per_retry_extra;
+                let timeout = self.part_timeout_ms(rtt_ms, turnaround_ms);
                 Some(self.last_activity_ms.saturating_add(timeout))
             }
             _ => None,

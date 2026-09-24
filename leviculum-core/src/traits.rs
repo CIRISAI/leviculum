@@ -368,6 +368,26 @@ pub trait Interface {
     fn next_slot_ms(&self, _size: usize, now_ms: u64) -> u64 {
         now_ms
     }
+
+    /// Milliseconds one full-size frame costs the frame behind it: the wait
+    /// this interface imposes between handing the medium one frame and the
+    /// next one being able to reach the air.
+    ///
+    /// The same kind of number as [`Self::mtu`] and the bitrate the driver
+    /// registers — a property of the carrier, stated by the only layer that
+    /// knows it. A LoRa interface sums airtime at the running PHY, the
+    /// medium-access wait (DIFS) and the longest contention draw; a TCP,
+    /// UDP, local or serial interface has no such wait and reports the
+    /// default `0`.
+    ///
+    /// Read by the receiver-side resource timeout, which must never expect a
+    /// requested window sooner than the sender can put it on the air
+    /// (Codeberg #36/#374). Nothing schedules on it: it floors a timeout, it
+    /// does not pace a transmission, and no caller may infer packet types or
+    /// radio settings from it.
+    fn frame_turnaround_ms(&self) -> u64 {
+        0
+    }
 }
 
 /// Clock for timestamps and timeouts
@@ -1279,5 +1299,54 @@ mod tests {
 
         let iface = DelayedByHundred;
         assert_eq!(iface.next_slot_ms(100, 1_000), 1_100);
+    }
+
+    /// A medium with no post-TX wait — TCP, UDP, local, serial — reports the
+    /// default zero turnaround, and an interface that has one reports it.
+    #[test]
+    fn frame_turnaround_ms_default_is_zero_and_overridable() {
+        struct NoWait;
+        impl Interface for NoWait {
+            fn id(&self) -> InterfaceId {
+                InterfaceId(2)
+            }
+            fn name(&self) -> &str {
+                "no-wait"
+            }
+            fn mtu(&self) -> usize {
+                500
+            }
+            fn is_online(&self) -> bool {
+                true
+            }
+            fn try_send(&mut self, _data: &[u8]) -> Result<(), InterfaceError> {
+                Ok(())
+            }
+        }
+
+        struct HalfDuplex;
+        impl Interface for HalfDuplex {
+            fn id(&self) -> InterfaceId {
+                InterfaceId(3)
+            }
+            fn name(&self) -> &str {
+                "half-duplex"
+            }
+            fn mtu(&self) -> usize {
+                500
+            }
+            fn is_online(&self) -> bool {
+                true
+            }
+            fn try_send(&mut self, _data: &[u8]) -> Result<(), InterfaceError> {
+                Ok(())
+            }
+            fn frame_turnaround_ms(&self) -> u64 {
+                2_586
+            }
+        }
+
+        assert_eq!(NoWait.frame_turnaround_ms(), 0);
+        assert_eq!(HalfDuplex.frame_turnaround_ms(), 2_586);
     }
 }

@@ -2546,6 +2546,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .set_interface_next_slot_ms(iface_idx, slot_ms);
     }
 
+    /// Record what one frame on the given interface costs the frame behind
+    /// it, in milliseconds. Pushed by the driver from
+    /// `Interface::frame_turnaround_ms()` after every dispatch tick, beside
+    /// the next slot. See `Transport::set_interface_frame_turnaround_ms`.
+    pub fn set_interface_frame_turnaround_ms(&mut self, iface_idx: usize, turnaround_ms: u64) {
+        self.transport
+            .set_interface_frame_turnaround_ms(iface_idx, turnaround_ms);
+    }
+
     /// Record the worst-case airtime in milliseconds for one MTU-sized
     /// transmit on the given interface. Pushed by the driver after each
     /// dispatch tick for LoRa-Serial interfaces. See

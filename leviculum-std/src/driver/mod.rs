@@ -5770,6 +5770,11 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
         let iface_idx = handle.id().0;
         let slot = handle.next_slot_ms(mtu, now_ms);
         core.set_interface_next_slot_ms(iface_idx, slot);
+        // The other carrier fact core cannot compute for itself: what one
+        // frame costs the frame behind it. Pushed beside the slot because it
+        // is the same kind of answer from the same handle, and because an
+        // interface that reprograms its PHY changes it (Codeberg #36/#374).
+        core.set_interface_frame_turnaround_ms(iface_idx, handle.frame_turnaround_ms());
         if let Some(credit) = handle.credit.as_ref() {
             let max_airtime = credit.lock_recover().max_airtime_ms();
             core.set_interface_max_airtime_ms(iface_idx, max_airtime);
@@ -6069,6 +6074,7 @@ mod tests {
                     bitrate: None,
                     announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
+                    frame_turnaround_ms: None,
                     ifac,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Udp,
@@ -6828,6 +6834,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7609,6 +7616,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7661,6 +7669,7 @@ mod tests {
                     bitrate: None,
                     announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
+                    frame_turnaround_ms: None,
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
                     kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7730,6 +7739,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7754,6 +7764,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7807,6 +7818,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7879,6 +7891,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7902,6 +7915,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -7977,6 +7991,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -8032,6 +8047,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -8087,6 +8103,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -8358,6 +8375,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,
@@ -9059,6 +9077,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,

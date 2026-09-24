@@ -373,6 +373,24 @@ fn tx_hold(frame_len: u32, bandwidth_hz: u32, sf: u8, cr: u8, csma: &FirmwareCsm
     }
 }
 
+/// The hold a FULL-SIZE frame imposes at a given PHY, before the modem has
+/// reported any CSMA figures of its own: the ceiling of [`tx_hold`].
+///
+/// Two callers, one derivation: the reconnect task logs it beside the
+/// bitrate, and the handle reports it as this interface's per-frame
+/// turnaround (`Interface::frame_turnaround_ms`). MTU-sized because a
+/// turnaround a caller uses to size a timeout must bound every frame the
+/// interface may be handed, not the one it happens to hold.
+fn max_tx_hold(bandwidth_hz: u32, sf: u8, cr: u8) -> TxHold {
+    tx_hold(
+        rnode::HW_MTU as u32,
+        bandwidth_hz,
+        sf,
+        cr,
+        &FirmwareCsma::default(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Configuration (includes detection)
 // ---------------------------------------------------------------------------
@@ -1724,13 +1742,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
     // What a full-size frame costs the next one behind it, at this PHY and
     // before the modem has reported its own CSMA figures — the ceiling of the
     // post-TX hold, stated where the bitrate is stated.
-    let max_hold = tx_hold(
-        rnode::HW_MTU as u32,
-        radio.bandwidth,
-        radio.sf,
-        radio.cr,
-        &FirmwareCsma::default(),
-    );
+    let max_hold = max_tx_hold(radio.bandwidth, radio.sf, radio.cr);
     tracing::debug!(
         "{}: bitrate={} bps, tx_hold(mtu)={}ms (airtime {}ms + DIFS {}ms + cw {}ms), \
          jitter_max={}ms (DIFS + contention window)",
@@ -2004,6 +2016,11 @@ where
     // same pre-TX jitter ceiling the TX loop actually draws against, rather
     // than recomputing it and risking the two drifting apart.
     let tx_jitter_max_ms = ctx.jitter_max_ms;
+    // Copied out before `ctx` moves, for the same reason: what a full-size
+    // frame costs the frame behind it at the PHY this task is about to
+    // program. The receiver of a resource over this link floors its part
+    // timeout with it (Codeberg #36/#374).
+    let frame_turnaround_ms = max_tx_hold(ctx.radio.bandwidth, ctx.radio.sf, ctx.radio.cr).held_ms;
 
     tokio::spawn(async move {
         let run = rnode_reconnect_task(
@@ -2041,6 +2058,7 @@ where
             bitrate: Some(bitrate),
             announce_cap_bitrate: announce_cap_bps,
             tx_jitter_max_ms: Some(tx_jitter_max_ms),
+            frame_turnaround_ms: Some(frame_turnaround_ms),
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Rnode,
@@ -2863,6 +2881,7 @@ pub(crate) fn spawn_rnode_multi_interface(
                 // section-index one would leave the rest uncapped.
                 announce_cap_bitrate: announce_cap_bitrate(sub.sf, sub.cr, sub.bandwidth),
                 tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.cr, sub.bandwidth)),
+                frame_turnaround_ms: Some(max_tx_hold(sub.bandwidth, sub.sf, sub.cr).held_ms),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Rnode,

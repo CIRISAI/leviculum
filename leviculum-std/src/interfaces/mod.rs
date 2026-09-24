@@ -566,6 +566,19 @@ pub(crate) struct InterfaceInfo {
     /// own contention bound; nothing schedules on it. Travels to transport as
     /// part of [`leviculum_core::transport::LinkProfile`].
     pub tx_jitter_max_ms: Option<u64>,
+    /// What one frame on this carrier costs the frame behind it, in
+    /// milliseconds: the wait between handing the medium one frame and the
+    /// next one being able to reach the air. `None` for every medium with no
+    /// such wait (TCP, UDP, I2P, local, serial, BLE), which is the same as
+    /// the `Interface::frame_turnaround_ms` trait default of zero.
+    ///
+    /// A LoRa interface fills it from its own `tx_hold` at the PHY it
+    /// programmed, MTU-sized, because only the interface knows what a frame
+    /// costs on its carrier. The driver mirrors it into transport and decides
+    /// nothing; the receiver-side resource timeout reads it there so it never
+    /// expects a requested window sooner than the sender can send it
+    /// (Codeberg #36/#374).
+    pub frame_turnaround_ms: Option<u64>,
     /// IFAC config inherited from the parent interface (e.g., TCP server listener).
     /// When a TCP server accepts a connection, the child interface inherits the
     /// parent's IFAC config so that IFAC verification/application works on the
@@ -674,6 +687,12 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
                 Err(InterfaceError::Disconnected)
             }
         }
+    }
+
+    fn frame_turnaround_ms(&self) -> u64 {
+        // The interface stated it at spawn from the PHY it programmed;
+        // absent means a medium with no post-TX wait.
+        self.info.frame_turnaround_ms.unwrap_or(0)
     }
 
     fn next_slot_ms(&self, size: usize, now_ms: u64) -> u64 {
@@ -812,6 +831,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
                 kind: leviculum_core::traits::InterfaceKind::Unknown,

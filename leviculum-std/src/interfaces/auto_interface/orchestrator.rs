@@ -811,6 +811,7 @@ fn handle_discovery_packet(
             bitrate: None,
             announce_cap_bitrate: None,
             tx_jitter_max_ms: None,
+            frame_turnaround_ms: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Auto,

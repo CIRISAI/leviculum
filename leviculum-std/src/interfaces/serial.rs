@@ -479,6 +479,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
             bitrate: None,
             announce_cap_bitrate: None,
             tx_jitter_max_ms: None,
+            frame_turnaround_ms: None,
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
             kind: leviculum_core::traits::InterfaceKind::Serial,

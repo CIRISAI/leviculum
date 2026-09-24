@@ -301,6 +301,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 crate::constants::UNKNOWN_BITRATE_ASSUMPTION_BPS,
             );
         }
+        // What the first hop's carrier charges one frame for the next. The
+        // proof will name the interface it actually arrived on and the link
+        // takes the slower of the two; this is the figure it has before then.
+        if let Some(turnaround) = self
+            .transport
+            .next_hop_interface_turnaround_ms(dest_hash.as_bytes())
+        {
+            link.note_frame_turnaround_ms(turnaround);
+        }
         let link_id = *link.id();
         if let Err(e) = link.set_destination_keys(dest_signing_key) {
             crate::tracing::debug!(%e, "set_destination_keys failed");
@@ -938,8 +947,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
 
-        // Set attached interface from the receiving interface
+        // Set attached interface from the receiving interface, and with it
+        // what that carrier charges one frame for the next.
         link.set_attached_interface(interface_index);
+        link.note_frame_turnaround_ms(
+            self.transport
+                .interface_frame_turnaround_ms(interface_index),
+        );
         link.set_keepalive_override(self.transport_config().link_keepalive_secs);
 
         // Copy the packet's hop count so establishment_timeout_ms() scales correctly
@@ -1030,6 +1044,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
+        // Read before the mutable link borrow: the carrier figure belongs to
+        // transport, the link only stores what it is told.
+        let turnaround_ms = self
+            .transport
+            .interface_frame_turnaround_ms(interface_index);
+
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::debug!(
                 "handle_link_proof: link <{}> not found in self.links ({} links tracked)",
@@ -1058,8 +1078,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        // Set attached interface from the interface the proof arrived on
+        // Set attached interface from the interface the proof arrived on,
+        // and with it what that carrier charges one frame for the next.
         link.set_attached_interface(interface_index);
+        link.note_frame_turnaround_ms(turnaround_ms);
 
         // Process the proof
         if link.process_proof(proof_data).is_err() {
@@ -3772,11 +3794,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
 
-            // Poll incoming resource, same pattern
+            // Poll incoming resource, same pattern. The receiver's timeout
+            // also needs what one frame costs the next on this link's
+            // carrier: it must never expect the window it requested sooner
+            // than the sender can put it on the air (Codeberg #36/#374).
             let in_result = match self.links.get_mut(&link_id) {
-                Some(link) => link
-                    .incoming_resource_mut()
-                    .map(|res| res.poll(now_ms, rtt_ms)),
+                Some(link) => {
+                    let turnaround_ms = link.frame_turnaround_ms();
+                    link.incoming_resource_mut()
+                        .map(|res| res.poll(now_ms, rtt_ms, turnaround_ms))
+                }
                 None => continue,
             };
 
@@ -3925,7 +3952,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 }
             }
             if let Some(res) = link.incoming_resource() {
-                if let Some(deadline) = res.next_deadline(rtt_ms) {
+                if let Some(deadline) = res.next_deadline(rtt_ms, link.frame_turnaround_ms()) {
                     update(deadline);
                 }
             }
