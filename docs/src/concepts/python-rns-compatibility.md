@@ -143,7 +143,7 @@ e.r.p. limit for the configured frequency**: 22 dBm — the ceiling of
 the SX1262 high-power PA and the highest value an RNode-firmware board
 takes before clamping — or the sub-band's limit from ERC 70-03,
 whichever is lower (`rnode::resolve_tx_power` and
-`DEFAULT_TX_POWER_DBM`, `leviculum-core/src/rnode.rs:683`, capped by
+`DEFAULT_TX_POWER_DBM`, `leviculum-core/src/rnode.rs:742`, capped by
 `lawful_erp_dbm`, applied in both interface builders and in the
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum

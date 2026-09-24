@@ -166,7 +166,7 @@ the reply needs the peer to draw high and us to draw low in the same
 exchange. That is a probability, not a guarantee, and a probability is
 not what an ack window should rest on.
 
-`burst_should_yield` (`leviculum-core/src/rnode.rs:1514`) is unaffected:
+`burst_should_yield` (`leviculum-core/src/rnode.rs:1573`) is unaffected:
 it bounds a burst by frame count and accumulated airtime, and the window
 is spent before the burst starts rather than inside it.
 
@@ -189,10 +189,10 @@ standing (`leviculum-nrf/src/lora.rs:1598`).
 2. `JITTER_CW_SLOTS` mirrors the reference's post-excursion band-1
    window, 14 draws, where a freshly booted reference uses 15. See
    question 2.
-3. `CSMA_DIFS_MS` and `CSMA_MAX_CW_MS` (`leviculum-core/src/rnode.rs:889`)
+3. `CSMA_DIFS_MS` and `CSMA_MAX_CW_MS` (`leviculum-core/src/rnode.rs:948`)
    are millisecond constants pinned to a 24 ms slot and are therefore
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
-   (`leviculum-core/src/rnode.rs:988`), which has no caller: the host
+   (`leviculum-core/src/rnode.rs:1047`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
    instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:488`).
    Nothing is broken by them today and something would be by the next

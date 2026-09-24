@@ -238,6 +238,65 @@ impl BatteryState {
 ///
 /// All `u16` values are raw device values. Divide by 100 for percent.
 /// RSSI fields are already converted to dBm (raw byte - 157).
+///
+/// # What the board does with `interference`, and when it does nothing
+///
+/// Codeberg #374 names "the RNode firmware's RSSI based carrier detect" as
+/// one of two levers against a node that transmits into a frame already on
+/// the air. It exists, and this is the whole of the decision it feeds:
+/// `medium_free` (`reference/RNode_Firmware/RNode_Firmware.ino:1349`) holds a
+/// queued frame back when the carrier-detect bit is set, or when interference
+/// is detected AND the board is configured to avoid it.
+///
+/// The first arm is the latched receive IRQ, PreambleDetected or HeaderValid
+/// (`dcd`, `reference/RNode_Firmware/sx126x.cpp:495`), and not a
+/// channel-activity detection: `OP_CAD_PARAMS`
+/// (`reference/RNode_Firmware/sx126x.cpp:43`) is defined in that driver and
+/// never sent. Because the bit latches, a check that starts in the middle of
+/// someone else's payload still reads busy — provided the receiver was armed
+/// when that preamble passed, which is the part a measurement has to
+/// establish rather than assume.
+///
+/// The second arm is the RSSI one, and it is what catches a carrier no
+/// preamble was latched for: `update_modem_status`
+/// (`reference/RNode_Firmware/RNode_Firmware.ino:1394`) raises
+/// `interference_detected` when the current RSSI sits above the sampled noise
+/// floor by `CSMA_INFR_THRESHOLD_DB`
+/// (`reference/RNode_Firmware/Config.h:113`), 11 dB.
+///
+/// That arm reaches `medium_free` only while `avoid_interference` is set, and
+/// the flag is not the `true` its declaration shows (`avoid_interference`,
+/// `reference/RNode_Firmware/Config.h:117`). Every ESP32/nRF52 board with a
+/// modem other than the SX1280 overwrites it at boot from the EEPROM byte
+/// `ADDR_CONF_DIA` (`reference/RNode_Firmware/ROM.h:46`), and only the exact
+/// value 0x00 turns it on (`avoid_interference`,
+/// `reference/RNode_Firmware/RNode_Firmware.ino:289`). Nothing writes that
+/// byte but `dia_conf_save` (`reference/RNode_Firmware/Utilities.h:1784`),
+/// reached only through `CMD_DIS_IA`
+/// (`reference/RNode_Firmware/Framing.h:67`) — which is `rnodeconf -x`,
+/// `set_disable_interference_avoidance`
+/// (`reference/Reticulum/RNS/Utilities/rnodeconf.py:756`). Provisioning does
+/// not write it, so on a board nobody has given that command the byte is
+/// unwritten, reads back as erased, and the RSSI arm is off for the life of
+/// the boot. This tree sends no `CMD_DIS_IA` at all, on any path.
+///
+/// So an `interference` that is not `None` reports that the board saw a
+/// carrier it could not decode. It does not report that the board will hold a
+/// frame back for one, and on a board whose 0xB9 was never written it will
+/// not. Any measurement of the reference firmware's carrier sense has to
+/// state which of the two configurations it was taken in.
+///
+/// A host-side gate on this field is not the substitute it looks like.
+/// These statistics reach us about once a second — `update_airtime`
+/// (`reference/RNode_Firmware/RNode_Firmware.ino:1467`) is called one
+/// `UTIL_UPDATE_INTERVAL_MS` (`reference/RNode_Firmware/Config.h:179`) apart
+/// and ends in `kiss_indicate_channel_stats`
+/// (`reference/RNode_Firmware/Utilities.h:959`) — against the 0.8 s announce
+/// burst #374 was measured on, while the board's own sample is never older
+/// than `STATUS_INTERVAL_MS` (`reference/RNode_Firmware/Config.h:176`), 3 ms.
+/// A gate built on a figure up to a second stale would be deciding about a
+/// frame that has already come and gone; the decision belongs where the
+/// sample is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelStats {
     /// Short-term airtime (raw; /100 for percent)

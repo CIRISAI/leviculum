@@ -25,7 +25,7 @@ the transmit queue on it — `if (!airtime_lock && queue_height > 0)`
 *enforcement* never leaves the device.
 
 Our LNode firmware enforces the same way: `AirtimeTracker`
-(`leviculum-core/src/rnode.rs:1533`) mirrors the RNode ledger, and
+(`leviculum-core/src/rnode.rs:1592`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
 `leviculum-nrf/src/lora.rs:1530-1564`), continuing to listen so RX is
@@ -46,8 +46,8 @@ long-term limit from the TX frequency (`resolve_lt_alock`,
 `leviculum-std/src/driver/mod.rs:512-546`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
-`leviculum-core/src/rnode.rs:1339`). Both read the same table,
-`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1225`), which
+`leviculum-core/src/rnode.rs:1398`). Both read the same table,
+`etsi_eu868_duty_cycle` (`leviculum-core/src/rnode.rs:1284`), which
 carries the EU 863-870 MHz sub-bands with their 0.1 % / 1 % / 10 %
 duty cycles and the 433.05-434.79 MHz band at 10 %. An explicit
 configured value always wins — including an explicit `0`, which the
@@ -97,7 +97,7 @@ operator who most needs it not to be. Supply the citation and the
 table grows.
 
 TX power follows the same lawful-by-default shape (`resolve_tx_power`
-capped by `lawful_erp_dbm`, `leviculum-core/src/rnode.rs:1271`): an
+capped by `lawful_erp_dbm`, `leviculum-core/src/rnode.rs:1330`): an
 absent `txpower` asks for the board maximum, capped by the sub-band's
 e.r.p. limit — 25 mW everywhere in the European SRD spectrum except
 500 mW in 869.4-869.65 MHz and 10 mW in 433.05-434.79 MHz. An
@@ -107,7 +107,7 @@ narrowband bands *between* the wideband sub-bands (868.6-868.7 MHz
 and its four siblings, alarms, ≤ 25 kHz channel spacing) fit no LoRa
 bandwidth this stack configures, so a carrier that overlaps one is
 warned about by name at interface build (`erp_band_gap`,
-`leviculum-core/src/rnode.rs:1307`) — falling through to "no known
+`leviculum-core/src/rnode.rs:1366`) — falling through to "no known
 limit, board maximum" without a word would be the most permissive
 outcome exactly where the operator most needs to be told. The
 carrier is then honoured; see [No radio configuration is
