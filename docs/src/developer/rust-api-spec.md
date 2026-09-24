@@ -67,7 +67,7 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | Signature | Purpose |
 |-----------|---------|
 | `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:1549` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2160` | Stop and flush |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2171` | Stop and flush |
 | `fn is_running(&self) -> bool` — `driver/mod.rs:2231` | Loop state |
 | `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2239` | Make a local destination reachable (consumes it) |
 | `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3188` | Announce a registered destination |

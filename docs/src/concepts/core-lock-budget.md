@@ -33,7 +33,7 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:3386`).
+(`leviculum-std/src/driver/mod.rs:3388`).
 
 `NodeCore::send_resource` still exists as the composed single call
 (`leviculum-core/src/node/mod.rs:1495`) because no_std and FFI callers

@@ -318,7 +318,7 @@ parent to lean on. Measured against the tree, not assumed:
 | Machinery | Per | Where it belongs |
 |---|---|---|
 | Airtime credit bucket (`AirtimeCredit`, `leviculum-std/src/interfaces/airtime.rs:23`) | **medium** — one radio, one duty cycle | parent |
-| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:158`) | **medium** — contention is on the air | parent |
+| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:167`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2129`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:2324`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:2350`) | **medium** | parent |
 | Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:810`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1178`) | **medium** — one adapter | parent |
