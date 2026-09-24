@@ -144,7 +144,7 @@ pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// firmware entry points call `embassy_nrf::init` — which starts RTC1 —
 /// as the FIRST statement of `main`, before any log call
 /// (`bin/t114.rs:42`, `bin/rak4631.rs:43`). The panic handler
-/// (`lib.rs:714`) and the `HardFault` exception (`lib.rs:954`) never log:
+/// (`lib.rs:715`) and the `HardFault` exception (`lib.rs:955`) never log:
 /// both write their evidence to `.uninit` RAM and `sys_reset`, and it is
 /// the NEXT boot that logs it — with its own running clock. There is
 /// therefore no reachable call site where the driver is un-started and no

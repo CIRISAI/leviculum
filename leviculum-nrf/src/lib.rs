@@ -29,6 +29,7 @@ compile_error!("must enable exactly one of `bsp-rak4631`, `bsp-t114` or `bsp-sol
 pub mod announce;
 pub mod ble;
 pub mod boards;
+pub mod boot_count;
 pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;

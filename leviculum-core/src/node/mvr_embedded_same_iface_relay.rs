@@ -87,7 +87,7 @@ type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
 const UPSTREAM: [u8; TRUNCATED_HASHBYTES] = [0x5A; TRUNCATED_HASHBYTES];
 
 /// A transport node with `EmbeddedStorage`, built exactly as the firmware
-/// builds it (`bin/t114.rs:217`) — `build_boxed`, because a by-value
+/// builds it (`bin/t114.rs:231`) — `build_boxed`, because a by-value
 /// `NodeCore` with inline storage is >40 KB of frame.
 fn make_node() -> Box<EmbeddedNode> {
     NodeCoreBuilder::new().enable_transport(true).build_boxed(

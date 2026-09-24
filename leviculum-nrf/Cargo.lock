@@ -928,6 +928,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-boot-count"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-boot-trace"
 version = "0.1.0"
 
@@ -1008,6 +1012,7 @@ dependencies = [
  "leviculum-announce-policy",
  "leviculum-battery-scale",
  "leviculum-ble-tx",
+ "leviculum-boot-count",
  "leviculum-boot-trace",
  "leviculum-channel-access",
  "leviculum-core",

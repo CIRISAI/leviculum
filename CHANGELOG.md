@@ -859,6 +859,38 @@ Toolchain: Rust 1.97.1
   synthetic records to it, which is the instrument for measuring what the
   store's page erases cost Bluetooth throughput and LoRa airtime.
 
+- A board says how often it restarted while nobody was watching (#380).
+  The breadcrumb record in retained RAM answers what the previous boot
+  was doing; it cannot answer how many boots there have been, because a
+  power loss takes retained RAM with it — and a power loss is the case
+  that matters. The 90 minute field walk that motivated this had a
+  Pocket V2 restart twice, and every boot of it read
+  `reset_reason=0x00000000` with `prev_magic=absent`; the restarts were
+  found afterwards by subtracting uptime stamps from a watch log, and on
+  the walk itself nobody could have known. All three boards now append
+  one 16-byte record per boot — boot number, raw `POWER.RESETREAS`, and
+  whether retained RAM survived — to a page of internal flash, and say
+  the count once at boot, ungated, beside `BOOT_TRACE`:
+  `BOOT_COUNT n=<n> reset_reason=0x<hex> retained=0|1 since_erase=<n>`.
+  `retained=0` with `reset_reason=0x00000000` is a power loss;
+  `retained=1` is a watchdog or a commanded reset.
+  Appended and never rewritten: a counter at a fixed address would cost
+  one page erase per boot and spend the page's rated 10 000 cycles in
+  10 000 boots, while 256 records to a page cost one erase per 256 boots
+  and 2 560 000 boots over the same budget. The write goes straight to
+  the NVMC before `Softdevice::enable`, because a board that boot-loops
+  on a sagging pack dies early and a record written later would be
+  missing from exactly those boots — and that is also why the record
+  cannot live in the record store (#384), which is driven through the
+  SoftDevice's flash API. The page is `memory.x`'s new `BOOT` region at
+  `0xD9000`, one page taken off the top of the application window and
+  directly below the store, on the same terms: it is inside the
+  bootloader's writable window, and what protects it is that our `.uf2`
+  carries no block for it. A foreign image can erase it, and the bytes
+  it leaves read as foreign rather than as a count. `boot_count::page()`
+  reads the address from the linker, so no Rust constant can disagree
+  with the map.
+
 - A board asks for a supervision timeout it can survive (#385). A link
   a peripheral board holds is the one end that can do anything about
   the parameters it was handed, and the two cases where those

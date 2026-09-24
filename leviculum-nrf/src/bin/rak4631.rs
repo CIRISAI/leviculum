@@ -46,7 +46,9 @@ async fn main(spawner: Spawner) {
     config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
     config.gpiote_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
     config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
-    let p = embassy_nrf::init(config);
+    // `mut`: the boot record reborrows the NVMC below and the identity
+    // store takes it for good later on.
+    let mut p = embassy_nrf::init(config);
 
     init_heap();
     leviculum_nrf::init_tracing();
@@ -107,6 +109,15 @@ async fn main(spawner: Spawner) {
     // the derived default while the record is still unread, and before
     // the first announce and `ble::init`, which both display it.
     leviculum_nrf::name::load_at_boot(rak4631::CONFIG.telemetry_flash_page);
+    // How many times this board has restarted, appended to its own flash
+    // page. Here because it must be before `Softdevice::enable` — after
+    // it, writing internal flash means going through the SD, and a board
+    // that boot-loops on a sagging pack rarely gets that far (the whole
+    // reasoning is in `boot_count`). The line it produces waits for USB.
+    let boot_count = leviculum_nrf::boot_count::record_at_boot(
+        embassy_nrf::nvmc::Nvmc::new(p.NVMC.reborrow()),
+        &boot,
+    );
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
@@ -130,6 +141,9 @@ async fn main(spawner: Spawner) {
     // this bin never reported RESETREAS before the breadcrumbs landed.
     leviculum_nrf::boot_trace::log_prev(&boot);
     leviculum_nrf::log_reset_reason(boot.reset_reason);
+    // ...and how many boots there have been, which is the half of that
+    // question retained RAM cannot answer across a power loss (#380).
+    leviculum_nrf::boot_count::log_banner(&boot_count);
     leviculum_nrf::log_irq_priorities();
 
     // Shared boot/query formatter — the same block is retrievable at any

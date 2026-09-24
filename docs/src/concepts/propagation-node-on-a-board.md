@@ -8,7 +8,7 @@ evidence sits in the board files, `CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:171` and `CONFIG`,
 `leviculum-nrf/src/boards/rak4631.rs:145`). So the store went where there
 is flash: **16 pages of the nRF52840's own flash between the firmware
-image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:85`,
+image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:91`,
 landed in 81fcb46e; the log format chosen in 59c36129). Every capacity,
 endurance and scan figure below is recomputed for that region, and the
 region is two orders of magnitude smaller than the part this page first
@@ -235,7 +235,7 @@ addresses.
 | `0xF4000` | — | bootloader |
 
 Source for every row: the map at the head of `memory.x` (`FLASH`,
-`leviculum-nrf/memory.x:78`; `STORE`, `leviculum-nrf/memory.x:85`).
+`leviculum-nrf/memory.x:78`; `STORE`, `leviculum-nrf/memory.x:91`).
 
 **The gap between image end and store start**, as
 `scripts/check-nrf-store-gap.sh` reports it on every `just fast` — this
@@ -249,9 +249,11 @@ run, on the tree at 81fcb46e:
 The gate measures the PT_LOAD segments the `.uf2` is built from, not the
 sections the linker charged to `FLASH`, and it reads the region's bounds
 from the symbols the firmware itself mounts. An image that grew into the
-region would be a link error before it could be a lost store: three
+region would be a link error before it could be a lost store: four
 `ASSERT`s in `memory.x` hold the edges (`ASSERT`,
-`leviculum-nrf/memory.x:223`).
+`leviculum-nrf/memory.x:253`) — the image stops below the boot-record
+page (#380), that page stops below the store, the store stops at
+`USER_FLASH_END`, and the store is a whole number of 4 KiB pages.
 
 **Why the region survives a UF2 update — and what is not yet proven.**
 The store sits *inside* the bootloader's writable window, so

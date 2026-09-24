@@ -2,17 +2,22 @@
 #
 # Record-store gap gate for the nRF firmware (Codeberg #384).
 #
-# The store's 64 KiB region sits directly above the firmware image
-# (`leviculum-nrf/memory.x`: FLASH ends at 0xDA000, STORE runs 0xDA000-0xEA000).
-# An image that grows into it would erase the board's message store on the next
-# UF2 flash.
+# The store's 64 KiB region sits above the firmware image, with the boot-record
+# page (#380) between them (`leviculum-nrf/memory.x`: FLASH ends at 0xD9000,
+# BOOT is 0xD9000-0xDA000, STORE runs 0xDA000-0xEA000). An image that grows into
+# either would erase the board's message store, or its restart count, on the
+# next UF2 flash.
+#
+# The GAP this gate prints is therefore measured to the BOOT page, not to the
+# store: the boot page is what the image runs into first, and a gap measured
+# past it would overstate the headroom by exactly one page.
 #
 # WHAT THE LINKER ALREADY REFUSES, without this gate:
 #   * an image whose sections do not fit FLASH - "section `.text' will not fit
-#     in region `FLASH'" - because FLASH now stops where STORE starts;
-#   * FLASH enlarged over STORE, or STORE pushed into the persistence pages at
-#     USER_FLASH_END, or STORE sized off the 4 KiB page grid: the three ASSERTs
-#     at the bottom of memory.x.
+#     in region `FLASH'" - because FLASH now stops where BOOT starts;
+#   * FLASH enlarged over BOOT, BOOT over STORE, STORE pushed into the
+#     persistence pages at USER_FLASH_END, or either region sized off the 4 KiB
+#     page grid: the ASSERTs at the bottom of memory.x.
 # All three are link errors, so they cannot reach a board.
 #
 # WHAT THIS GATE ADDS:
@@ -26,11 +31,11 @@
 #      are built from - rather than the sections the linker charged to FLASH. A
 #      section placed at an absolute address by a future `SECTIONS` edit lands
 #      in the .bin and in no region's accounting.
-#   3. It reads the region's bounds from `__srecord_store`/`__erecord_store` in
-#      the linked ELF: the values the FIRMWARE mounts, not the ones memory.x
-#      appears to say. An edit that moves the region but not the symbols (or the
-#      other way round) is invisible to every ASSERT written in terms of
-#      ORIGIN(STORE).
+#   3. It reads the bounds from `__srecord_store`/`__erecord_store` and
+#      `__sboot_record` in the linked ELF: the values the FIRMWARE mounts and
+#      writes, not the ones memory.x appears to say. An edit that moves a region
+#      but not its symbol (or the other way round) is invisible to every ASSERT
+#      written in terms of ORIGIN(STORE) or ORIGIN(BOOT).
 #
 # Positive control for the comparison itself: a minimum gap nothing could
 # satisfy must fail.
@@ -109,7 +114,7 @@ symbol() { # symbol <elf> <name> -> prints its value, decimal
     value="$("$NM" "$2" | awk -v s="$3" '$3 == s { print $1 }' | head -1)"
     if [ -z "$value" ]; then
         echo "[store-gap] $1: no symbol $3 in the linked ELF." >&2
-        echo "[store-gap] memory.x must define it; see its STORE region." >&2
+        echo "[store-gap] memory.x must define it; see its STORE and BOOT regions." >&2
         return 1
     fi
     echo $((0x$value))
@@ -121,7 +126,7 @@ build() {
 }
 
 check() {
-    local bin="$1" elf="$OUT/$1" end base store_end gap
+    local bin="$1" elf="$OUT/$1" end base store_end boot gap
     [ -f "$elf" ] || {
         echo "[store-gap] missing ELF: $elf" >&2
         exit 1
@@ -130,17 +135,24 @@ check() {
     end="$("$READELF" -lW "$elf" | image_end)"
     base="$(symbol "$bin" "$elf" __srecord_store)"
     store_end="$(symbol "$bin" "$elf" __erecord_store)"
-    gap=$((base - end))
+    boot="$(symbol "$bin" "$elf" __sboot_record)"
+    gap=$((boot - end))
 
-    printf '[store-gap] %-8s image ends %#x, store %#x..%#x (%d pages), gap %d B (%d KiB)\n' \
-        "$bin" "$end" "$base" "$store_end" "$(((store_end - base) / 4096))" \
+    printf '[store-gap] %-8s image ends %#x, boot record %#x, store %#x..%#x (%d pages), gap %d B (%d KiB)\n' \
+        "$bin" "$end" "$boot" "$base" "$store_end" "$(((store_end - base) / 4096))" \
         "$gap" "$((gap / 1024))"
 
-    if [ "$end" -gt "$base" ]; then
-        echo "[store-gap] FAIL $bin: the image reaches $((end - base)) B into the record store."
-        echo "[store-gap] The store's records are inside the UF2's writable window, so the"
-        echo "[store-gap] next flash would erase them. Move STORE up (impossible past"
-        echo "[store-gap] $(printf '%#x' "$USER_FLASH_END")), shrink it, or shrink the image — memory.x."
+    if [ "$end" -gt "$boot" ]; then
+        echo "[store-gap] FAIL $bin: the image reaches $((end - boot)) B into the boot-record page."
+        echo "[store-gap] That page and the store above it are inside the UF2's writable window,"
+        echo "[store-gap] so the next flash would erase them. Move the regions up (impossible"
+        echo "[store-gap] past $(printf '%#x' "$USER_FLASH_END")), shrink them, or shrink the image — memory.x."
+        return 1
+    fi
+    if [ $((boot + 4096)) -ne "$base" ]; then
+        echo "[store-gap] FAIL $bin: the boot-record page is at $(printf '%#x' "$boot") and the store"
+        echo "[store-gap] starts at $(printf '%#x' "$base") — the two must be adjacent, one page apart,"
+        echo "[store-gap] or the gap printed above is not the headroom the image actually has."
         return 1
     fi
     if [ "$store_end" -gt "$USER_FLASH_END" ]; then

@@ -99,7 +99,7 @@ was the only node able to answer.
 
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
-`leviculum-nrf/src/bin/t114.rs:244`) and hardcoded in the interface
+`leviculum-nrf/src/bin/t114.rs:258`) and hardcoded in the interface
 itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:652`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:85`). The fan-out is a task that maps
@@ -110,11 +110,11 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:1072`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1100`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1112`; the
+`leviculum-nrf/src/bin/t114.rs:1086`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1114`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1126`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:1055`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:1069`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:4427`). So the identity-shaped
@@ -279,9 +279,9 @@ Three measured budgets, all from the T114 on the rig, all post-#372:
 
 | Budget | Measured | Headroom |
 |---|---|---|
-| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
+| Heap, 96 KiB pool (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:253`) | worst watermark 65 044 B of 98 304 (`rig-run/proof-372-t114.log`, 2026-09-08); typical 56 000-57 000 | 33 260 B at the worst point |
 | Stack, flip-link region below `.data` | `min_free=72 280` of a 104 464 B region, `peak_used=32 184` (`rig-run/proof-dup-t114.log`, 2026-09-10) | ~70 KiB never touched |
-| SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:143`) | **not the relevant budget, see below** |
+| SoftDevice RAM ceiling | 928 B of margin (`leviculum-nrf/memory.x:166`) | **not the relevant budget, see below** |
 
 Three BLE children cost `1 347 + 2 × 579 = 2 505 B` of heap, 4 041 B if
 every step happens to split a node. Against 33 260 B free at the worst
@@ -292,7 +292,7 @@ The 928 B SoftDevice margin does *not* bound this, and it is worth
 being explicit because the number is small enough to look alarming.
 That margin sizes the SoftDevice's own RAM requirement, which scales
 with `conn_count`: 15 272 B at two connections, 23 968 B at four
-(`leviculum-nrf/memory.x:143`), and #372 paid for that by moving the app
+(`leviculum-nrf/memory.x:166`), and #372 paid for that by moving the app
 RAM floor up 8 576 B. A Reticulum interface object is application heap;
 it does not appear in `sd_ble_enable`'s requirement at all. Spawning
 three children over the same four BLE connections costs the SoftDevice

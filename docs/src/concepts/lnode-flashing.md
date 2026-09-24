@@ -62,7 +62,7 @@ reset arrives while the flag is still live.
 
 The touch only exists if the running firmware implements it. Ours does.
 Stock Meshtastic does not, which is why a first flash away from
-Meshtastic needs the manual double-tap (`Justfile:1380`); for that case
+Meshtastic needs the manual double-tap (`Justfile:1381`); for that case
 Meshtastic offers its own admin command, wrapped as `just dfu-rak4631`.
 For Meshcore, microReticulum and RNode firmware on nRF we have not
 measured it.
@@ -96,7 +96,7 @@ package. Its application vector table reads SP `0x20040000` and reset
 vector `0x00051819`, so the image is linked for a flash base around
 `0x51000`. This board's factory bootloader with S140 7.3.0 runs
 applications at `0x27000`, which is the base our own image is linked for
-as well (`leviculum-nrf/memory.x:15`). `rnodeconf` pushes the app-only
+as well (`leviculum-nrf/memory.x:16`). `rnodeconf` pushes the app-only
 package through the factory bootloader (`adafruit-nrfutil dfu serial
 --package … -t 1200`), so it lands at `0x27000`; the bootloader jumps
 there, reads a reset vector pointing into unprogrammed flash, and
@@ -183,10 +183,10 @@ the ordinary mass-storage path, without touching the bootloader.
 `leviculum-nrf/memory.x` used to contradict this, computing safe
 application space as `0xEC000 - 0x27000` (788 KiB) — 8 KiB the
 bootloader would have refused to write. It now links the application
-against the bootloader's own window minus the record store's region,
-`0xDA000 - 0x27000` = `0xB3000` (716 KiB); the image is ~660 KiB, so the
-change costs nothing today and the gate prints the remaining gap on every
-push (`scripts/check-nrf-store-gap.sh`).
+against the bootloader's own window minus the record store's region and
+the boot-record page, `0xD9000 - 0x27000` = `0xB2000` (712 KiB); the
+image is ~660 KiB, so the change costs nothing today and the gate prints
+the remaining gap on every push (`scripts/check-nrf-store-gap.sh`).
 
 Everything at or above `0xEA000` survives every UF2 flash, because the
 bootloader declines those blocks. All three persistence pages live there:
@@ -206,8 +206,19 @@ buffers one page and `flash_nrf5x_flush` (upstream
 its content differs. Our `.uf2` carries blocks from `0x27000` to the end
 of the image and none above it, so no page of the store is ever a target
 and no erase reaches one. That holds as long as the image stops below
-`0xDA000`, which `memory.x`'s `ASSERT`s make a link error and the gate
+the store, which `memory.x`'s `ASSERT`s make a link error and the gate
 above reports as a number.
+
+The boot record (#380, `0xD9000`, one page) is the same case one page
+further down, and it is where the image now stops: it counts the boots a
+field board made while nobody was watching (`boot_count.rs`), so it has
+to outlive both a power loss and a firmware update. It is protected by
+the same argument as the store and by no other — our `.uf2` carries no
+block for it — and it is deliberately the thing directly above the
+image, so the linker's "will not fit in region `FLASH`" is the first
+thing an over-grown image hits. A foreign image, or a tool that writes
+blocks up here, erases the page; the record's magic is what makes the
+bytes it leaves read as foreign rather than as a count.
 
 Family IDs seen in practice:
 
@@ -255,7 +266,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:205`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:213`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5
@@ -528,7 +539,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:575`, which drives `esptool`. The
+and the ESP path behind `Justfile:576`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 

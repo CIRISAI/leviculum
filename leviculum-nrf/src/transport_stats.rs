@@ -31,7 +31,7 @@ use rand_core::CryptoRngCore;
 
 /// How often the `[TRANSPORT]` line is emitted.
 ///
-/// 30 s, the same cadence as the `[HEAP]` line (`lib.rs:253`), so the two
+/// 30 s, the same cadence as the `[HEAP]` line (`lib.rs:254`), so the two
 /// periodic counter lines interleave predictably in a capture. The events
 /// being diagnosed are minutes apart (a 15-minute management-announce
 /// heartbeat, a report every few minutes), so 30 s puts ~30 samples inside

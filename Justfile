@@ -81,7 +81,8 @@ lint-nrf:
     # leviculum-ble-tx, leviculum-announce-policy, leviculum-queue-budget,
     # leviculum-log-line,
     # leviculum-tx-spacing, leviculum-rx-arming, leviculum-persist-ack,
-    # leviculum-boot-trace, leviculum-channel-access, leviculum-media-state,
+    # leviculum-boot-trace, leviculum-boot-count, leviculum-channel-access,
+    # leviculum-media-state,
     # leviculum-record-log, leviculum-pn-store, leviculum-store-spike,
     # leviculum-qspi-bitbang, leviculum-battery-scale,
     # leviculum-settle-budget and leviculum-sync-batch are the
@@ -96,8 +97,8 @@ lint-nrf:
     # invisible to every run of this recipe — the same gap the workspace line in
     # `fast` closed in e27a15e. The embedded lines stay narrow: `--all-targets`
     # there would pull in test/bench harnesses that do not link for thumbv7em.
-    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
-    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch --target $(rustc -vV | sed -n 's/host: //p')
+    cd leviculum-nrf && cargo clippy -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-boot-count -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
+    cd leviculum-nrf && cargo test -p leviculum-screen -p leviculum-sd-policy -p leviculum-gnss-time -p leviculum-gnss-presence -p leviculum-gnss-init -p leviculum-telemetry-policy -p leviculum-ble-tx -p leviculum-announce-policy -p leviculum-queue-budget -p leviculum-log-line -p leviculum-tx-spacing -p leviculum-rx-arming -p leviculum-persist-ack -p leviculum-boot-trace -p leviculum-boot-count -p leviculum-channel-access -p leviculum-media-state -p leviculum-record-log -p leviculum-pn-store -p leviculum-store-spike -p leviculum-qspi-bitbang -p leviculum-battery-scale -p leviculum-settle-budget -p leviculum-sync-batch --target $(rustc -vV | sed -n 's/host: //p')
 
 # Build the ESP32-class firmware (Heltec WiFi LoRa 32 V4) and package the
 # flash image.

@@ -11,7 +11,8 @@ MEMORY
     /*                                                                    */
     /*   0x00000  MBR (one page, Nordic's; declined by the bootloader)    */
     /*   0x01000  SoftDevice S140 v7.3.0 (was v6.1.1 at 0x01000-0x26000)  */
-    /*   0x27000  FLASH      - the firmware image, 0xB3000 (716 KiB)      */
+    /*   0x27000  FLASH      - the firmware image, 0xB2000 (712 KiB)      */
+    /*   0xD9000  BOOT       - the boot record, 0x1000 (4 KiB, 1 page)    */
     /*   0xDA000  STORE      - the record log, 0x10000 (64 KiB, 16 pages) */
     /*   0xEA000  telemetry target / fixed position / media profile       */
     /*   0xEB000  radio config                                           */
@@ -38,7 +39,10 @@ MEMORY
     /*            (BoardConfig::telemetry_flash_page)                     */
     /* 0xEA000 is USER_FLASH_END itself: the bootloader declines every     */
     /* block AT or above it, so the page is the lowest one still safe from */
-    /* a UF2.                                                             */
+    /* a UF2. There is no fourth page up there: 0xED000 and up is Heltec's */
+    /* reserved band. Everything else that has to outlive an image is      */
+    /* carved out of the application window instead - STORE and BOOT       */
+    /* below, in that order of size and for the same reason.               */
     /*                                                                    */
     /* STORE is the record log's region (#384,                            */
     /* leviculum_nrf::record_store). It is carved from the TOP of the      */
@@ -50,10 +54,11 @@ MEMORY
     /* src/flash_nrf5x.c) erases and writes exactly that cached page, and  */
     /* only when its content differs. Our .uf2 carries blocks for          */
     /* 0x27000..<image end> and nothing else, so no block ever targets a   */
-    /* page at or above 0xDA000 and no erase reaches one. The ASSERT below */
-    /* is what keeps that true as the image grows: it fails the LINK if    */
-    /* FLASH would reach into STORE, and scripts/check-nrf-store-gap.sh    */
-    /* reports the remaining gap for every bin on every `just fast`.       */
+    /* page at or above 0xD9000 and no erase reaches one. The ASSERTs      */
+    /* below are what keep that true as the image grows: they fail the     */
+    /* LINK if FLASH would reach into BOOT or STORE, and                   */
+    /* scripts/check-nrf-store-gap.sh reports the remaining gap for every  */
+    /* bin on every `just fast`.                                          */
     /*                                                                    */
     /* Size: ONE number, 0x10000 = 16 pages = 64 KiB, and it is here       */
     /* rather than in Rust. `__srecord_store`/`__erecord_store` below are  */
@@ -71,11 +76,12 @@ MEMORY
     /* reformat that a base change implies is the deliberate price of the   */
     /* smaller default, and `mount` treats a region that is not ours as     */
     /* unformatted rather than as corrupt.                                 */
-    /* Safe app space = the bootloader's window minus the store,           */
-    /* 0xDA000 - 0x27000 = 0xB3000 (716K). Was 0xC3000 (780K) when the     */
-    /* whole window was the image's, and 0xC5000 (788K) before that, which */
-    /* promised 8K the bootloader would have refused to write.             */
-    FLASH : ORIGIN = 0x00027000, LENGTH = 0xB3000
+    /* Safe app space = the bootloader's window minus the store and the     */
+    /* boot page, 0xD9000 - 0x27000 = 0xB2000 (712K). Was 0xB3000 (716K)    */
+    /* before the boot page, 0xC3000 (780K) when the whole window was the   */
+    /* image's, and 0xC5000 (788K) before that, which promised 8K the       */
+    /* bootloader would have refused to write.                             */
+    FLASH : ORIGIN = 0x00027000, LENGTH = 0xB2000
 
     /* The record log's region (#384). No section is placed here: the       */
     /* firmware reads the two symbols below at runtime and drives the pages */
@@ -83,6 +89,23 @@ MEMORY
     /* bare symbols so that the ASSERTs can be written in terms of ORIGIN   */
     /* and LENGTH and cannot drift from the numbers they check.             */
     STORE : ORIGIN = 0x000DA000, LENGTH = 0x10000
+
+    /* The boot record's page (#380, leviculum_nrf::boot_count): one        */
+    /* 16-byte record appended per boot, so a board that restarted in a     */
+    /* field can say how often. It cannot live in RETAINED below - a power  */
+    /* loss is the case it exists for and takes retained RAM with it - and  */
+    /* it cannot live in STORE either, because the record log is driven     */
+    /* through the SoftDevice's flash API and this write happens BEFORE     */
+    /* `Softdevice::enable`, so that a board dying early on a sagging pack  */
+    /* is still counted (the argument in full is in src/boot_count.rs).     */
+    /* Two writers with two mechanisms therefore get two regions.           */
+    /*                                                                     */
+    /* One page, because one erase covers 256 boots: the records are        */
+    /* appended, never rewritten, and the page is erased only when its last */
+    /* slot is spent. The same UF2 argument as STORE protects it, and the   */
+    /* magic in each record is what makes bytes a foreign image left here   */
+    /* read as foreign rather than as a count.                              */
+    BOOT  : ORIGIN = 0x000D9000, LENGTH = 0x1000
 
     /*
      * RETAINED holds the cross-boot records (boot-trace breadcrumbs,
@@ -214,14 +237,23 @@ __eretained = ORIGIN(RETAINED) + LENGTH(RETAINED);
 __srecord_store = ORIGIN(STORE);
 __erecord_store = ORIGIN(STORE) + LENGTH(STORE);
 
-/* The two edges of the store region, held against a future edit of either
- * line. The first is what the linker already refuses on our behalf once the
- * image grows: the image is linked into FLASH, and FLASH stops where the store
- * starts, so `.text` reaching the store is "will not fit in region FLASH".
- * This ASSERT covers the other direction — somebody enlarging FLASH without
- * moving the store. */
-ASSERT(ORIGIN(FLASH) + LENGTH(FLASH) <= ORIGIN(STORE),
-       "the firmware image window (FLASH) reaches into the record-log region (STORE)");
+/* The boot record's page (#380), on the same terms and for the same reason:
+ * `leviculum_nrf::boot_count::page()` reads this symbol and no constant in
+ * the tree repeats the address. A board config that carried its own copy
+ * could disagree with the linker, and the disagreement would be a module
+ * that erases the running image's own code. */
+__sboot_record = ORIGIN(BOOT);
+
+/* The edges of the two carved regions, held against a future edit of any of
+ * the three lines above. The first is what the linker already refuses on our
+ * behalf once the image grows: the image is linked into FLASH, and FLASH stops
+ * where the boot page starts, so `.text` reaching it is "will not fit in
+ * region FLASH". These ASSERTs cover the other direction — somebody enlarging
+ * FLASH without moving what sits above it. */
+ASSERT(ORIGIN(FLASH) + LENGTH(FLASH) <= ORIGIN(BOOT),
+       "the firmware image window (FLASH) reaches into the boot-record page (BOOT)");
+ASSERT(ORIGIN(BOOT) + LENGTH(BOOT) <= ORIGIN(STORE),
+       "the boot-record page (BOOT) reaches into the record-log region (STORE)");
 ASSERT(ORIGIN(STORE) + LENGTH(STORE) <= 0xEA000,
        "the record-log region (STORE) reaches into the persistence pages at USER_FLASH_END (0xEA000)");
 /* The log drives whole 4 KiB pages and needs at least two of them to reclaim
@@ -229,6 +261,10 @@ ASSERT(ORIGIN(STORE) + LENGTH(STORE) <= 0xEA000,
  * store that never mounts). A region of 4095 bytes would link fine. */
 ASSERT(ORIGIN(STORE) % 4096 == 0 && LENGTH(STORE) % 4096 == 0 && LENGTH(STORE) >= 8192,
        "STORE must be a whole number of 4 KiB pages, page-aligned, at least two pages");
+/* The boot record is one erase unit and the scan in `leviculum_boot_count`
+ * assumes exactly that: a page-aligned 4 KiB window. */
+ASSERT(ORIGIN(BOOT) % 4096 == 0 && LENGTH(BOOT) == 4096,
+       "BOOT must be exactly one page-aligned 4 KiB page");
 
 /* The band is only bootloader-safe below the double-reset word; and the
  * stack floor (ORIGIN(RAM)) must sit on top of RETAINED, or the stack

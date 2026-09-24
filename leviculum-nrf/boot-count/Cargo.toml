@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-boot-count"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Append-only boot record in one internal-flash page: layout, the scan that finds the next free slot, the wrap that carries the boot number forward. Host-testable"
+
+[dependencies]

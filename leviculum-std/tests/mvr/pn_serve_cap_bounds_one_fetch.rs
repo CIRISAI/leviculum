@@ -125,7 +125,7 @@ const FIELD_BODY_BYTES: usize = 224;
 /// this order and the reason these two tests stopped using them.
 const DEEP_MAILBOX_MESSAGES: u8 = 80;
 
-/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:252`),
+/// The board's whole heap (`HEAP_SIZE`, `leviculum-nrf/src/lib.rs:253`),
 /// mirrored as a literal for the reason [`BOARD_RESOURCE_SDU`] is: that
 /// crate is thumbv7em and this host cannot link it.
 const BOARD_HEAP_BYTES: usize = 96 * 1024;
