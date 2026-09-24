@@ -17133,6 +17133,93 @@ mod tests {
             );
         }
 
+        // The other half of the one-slot rule (#403): the slot belongs to a
+        // destination, not to the queue. Two destinations waiting behind the
+        // same closed cap hold two slots, each carrying its own announce. A
+        // replace that matched on anything weaker than the destination hash
+        // would collapse them into one, and the destination whose slot was
+        // overwritten would never reach the air at all — a lost path, not a
+        // duplicate saved.
+        #[test]
+        fn test_announce_queue_keeps_a_slot_per_destination() {
+            use crate::destination::{Destination, DestinationType, Direction};
+
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            // if1 is the capped one, as in the single-destination case above:
+            // 1000 bps at the default cap arms a holdoff of minutes.
+            transport.register_interface_bitrate(1, 1000);
+
+            let dests: Vec<Destination> = ["queueslot_a", "queueslot_b"]
+                .iter()
+                .map(|name| {
+                    Destination::new(
+                        Some(Identity::generate(&mut OsRng)),
+                        Direction::In,
+                        DestinationType::Single,
+                        "testapp",
+                        &[name],
+                    )
+                    .unwrap()
+                })
+                .collect();
+
+            // Arm the holdoff so both destinations below have to queue.
+            let (filler, _) = make_announce_raw(1, PacketContext::None);
+            transport.process_incoming(0, &filler).unwrap();
+            transport
+                .clock
+                .advance(transport.announce_jitter_max_ms() + 100);
+            transport.poll();
+            let _ = transport.drain_actions();
+            let _ = transport.drain_events();
+            assert_eq!(
+                transport.interface_announce_caps[&1].queue.len(),
+                0,
+                "premise: the first announce goes out under an open cap and closes it"
+            );
+
+            for dest in &dests {
+                let raw = make_announce_raw_for_dest(dest, 1, transport.clock.now_ms());
+                transport.process_incoming(0, &raw).unwrap();
+                transport
+                    .clock
+                    .advance(transport.announce_jitter_max_ms() * 4 + 100);
+                transport.poll();
+                let _ = transport.drain_actions();
+                let _ = transport.drain_events();
+            }
+
+            let queue = &transport.interface_announce_caps[&1].queue;
+            assert_eq!(
+                queue.len(),
+                2,
+                "two destinations behind one closed cap keep two slots \
+                 (queue: {:?})",
+                queue.iter().map(|e| e.dst).collect::<Vec<_>>()
+            );
+            for dest in &dests {
+                let dest_hash = dest.hash().into_bytes();
+                let slots: Vec<_> = queue.iter().filter(|e| e.dst == dest_hash).collect();
+                assert_eq!(
+                    slots.len(),
+                    1,
+                    "<{}> holds exactly one slot of its own",
+                    HexShort(&dest_hash)
+                );
+                // Each slot drains the announce of ITS destination: the raw
+                // bytes have to be the ones whose destination hash matches,
+                // not a copy of the other destination's announce.
+                let queued = Packet::unpack(&slots[0].raw).expect("queued announce parses");
+                assert_eq!(
+                    queued.destination_hash, dest_hash,
+                    "the queued bytes belong to the destination holding the slot"
+                );
+            }
+        }
+
         #[test]
         fn test_announce_queue_max_size() {
             extern crate alloc;
