@@ -12,7 +12,7 @@
 //! night run on 2026-09-23 (commit 1599dc72), is the run that showed it: a
 //! link established at rtt 1173 ms over an SF7/BW62.5 carrier whose interface
 //! priced ONE part frame at up to 2586 ms, so the last part of every window
-//! timed out while it was still on the air. [`WindowState::timeout_pythonlike`]
+//! timed out while it was still on the air. `WindowState::timeout_pythonlike`
 //! then did exactly what the reference does — step the window down and pull
 //! window_max after it — and at `window_min` the transfer locked: 261 part
 //! frames for 51 distinct parts, 39 B/s, no RF loss at -39 dBm. The fix is
