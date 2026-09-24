@@ -529,9 +529,19 @@ pub(crate) struct OutgoingPacket {
 pub(crate) struct InterfaceInfo {
     pub id: InterfaceId,
     pub name: String,
-    /// Hardware MTU for link MTU negotiation (e.g., TCP=16384 derived by
-    /// [`hw_mtu_for_bitrate`], UDP=1064).
-    /// `None` means the interface uses the base protocol MTU (500).
+    /// The hardware MTU this interface SIGNALS into link MTU negotiation
+    /// (e.g. TCP=16384, derived by [`hw_mtu_for_bitrate`]).
+    ///
+    /// `None` means the interface signals nothing, so links crossing it stay
+    /// at the base protocol MTU (500): a relay strips the signalling bytes
+    /// onto such a next hop and a responder reached over one negotiates the
+    /// base MTU. That is the reference's answer for every interface that
+    /// leaves `AUTOCONFIGURE_MTU` and `FIXED_MTU` at the base class's `False`
+    /// (Interface.py:93-94), whatever `self.HW_MTU` it carries for its own
+    /// read path — UDP, at 1064, is that case (Codeberg #357).
+    ///
+    /// This is also the value the `mtu` stats key reports, so an interface
+    /// that signals nothing reports nothing there.
     pub hw_mtu: Option<u32>,
     /// Whether this interface is a local IPC client (shared instance).
     /// Local clients receive announce forwarding and path request routing.

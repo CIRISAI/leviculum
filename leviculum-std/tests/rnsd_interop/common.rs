@@ -1378,9 +1378,6 @@ pub async fn wait_for_link_on_daemon(
 /// Used when configuring Rust node interfaces via `set_interface_hw_mtu()`.
 pub const TCP_HW_MTU: u32 = 16384;
 
-/// UDP interface hardware MTU (matches Python UDPInterface.HW_MTU)
-pub const UDP_HW_MTU: u32 = 1064;
-
 /// Negotiated MTU when connecting through a Python daemon over TCP.
 ///
 /// Python's `optimise_mtu()` sets HW_MTU based on measured bitrate. With the
@@ -1399,26 +1396,24 @@ pub const CHANNEL_OVERHEAD: usize = 6;
 /// Maximum channel payload over a daemon TCP link: 8111 - 6 = 8105
 pub const DAEMON_TCP_MAX_CHANNEL_PAYLOAD: usize = DAEMON_TCP_LINK_MDU - CHANNEL_OVERHEAD;
 
-/// Encrypted link MDU for UDP: floor((1064 - 1 - 19 - 48) / 16) * 16 - 1 = 991
-pub const UDP_LINK_MDU: usize = 991;
-
-/// Maximum channel payload over UDP link: 991 - 6 = 985
-pub const UDP_MAX_CHANNEL_PAYLOAD: usize = UDP_LINK_MDU - CHANNEL_OVERHEAD;
-
-/// Negotiated MTU when connecting through a Python daemon over UDP.
+/// Negotiated MTU over a UDP hop, whichever stack sits on either end.
 ///
-/// Python's UDPInterface has `AUTOCONFIGURE_MTU=False` and `FIXED_MTU=False`,
-/// so `Transport.next_hop_interface_hw_mtu()` returns None and
-/// `Transport.inbound()` clamps the link MTU to `RNS.Reticulum.MTU = 500`.
-/// Even though UDPInterface.HW_MTU = 1064, the link-level negotiation
-/// always settles on the base protocol MTU for UDP interop with Python.
-pub const DAEMON_UDP_NEGOTIATED_MTU: u32 = 500;
+/// Python's UDPInterface carries `HW_MTU = 1064` but leaves
+/// `AUTOCONFIGURE_MTU` and `FIXED_MTU` at the base class's `False`, and every
+/// gate that puts an MTU on the wire reads the flags, not the value:
+/// `Transport.next_hop_interface_hw_mtu()` returns `None`, a relay strips the
+/// signalling bytes onto such a hop, and a receiver clamps against
+/// `RNS.Reticulum.MTU`. So a UDP hop leaves links at the base protocol MTU.
+/// lnsd signals nothing on UDP either since Codeberg #357 — before that a
+/// Rust-to-Rust UDP link negotiated 1064 while every link with a Python end
+/// negotiated 500.
+pub const UDP_NEGOTIATED_MTU: u32 = 500;
 
-/// Encrypted link MDU for daemon UDP: floor((500 - 1 - 19 - 48) / 16) * 16 - 1 = 431
-pub const DAEMON_UDP_LINK_MDU: usize = 431;
+/// Encrypted link MDU over UDP: floor((500 - 1 - 19 - 48) / 16) * 16 - 1 = 431
+pub const UDP_LINK_MDU: usize = 431;
 
-/// Maximum channel payload over a daemon UDP link: 431 - 6 = 425
-pub const DAEMON_UDP_MAX_CHANNEL_PAYLOAD: usize = DAEMON_UDP_LINK_MDU - CHANNEL_OVERHEAD;
+/// Maximum channel payload over a UDP link: 431 - 6 = 425
+pub const UDP_MAX_CHANNEL_PAYLOAD: usize = UDP_LINK_MDU - CHANNEL_OVERHEAD;
 
 /// Direct Rust-to-Rust TCP link MDU (no daemon clamping):
 /// floor((16384 - 1 - 19 - 48) / 16) * 16 - 1 = 16303

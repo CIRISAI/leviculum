@@ -21,6 +21,8 @@ use tokio::time::Instant;
 /// Matches Python `UDPInterface.HW_MTU = 1064` (UDPInterface.py:74).
 /// Core already ensures outgoing packets are <= 500 bytes (protocol MTU),
 /// so this only bounds the recv buffer.
+///
+/// It is NOT the MTU this interface signals: see the `hw_mtu` field below.
 const UDP_MTU: usize = 1064;
 
 /// Default channel buffer size for UDP interfaces.
@@ -332,7 +334,22 @@ fn spawn_udp_interface_inner(
         info: InterfaceInfo {
             id,
             name,
-            hw_mtu: Some(1064),
+            // A UDP interface signals no MTU, so a link crossing it stays at
+            // the base protocol MTU (Codeberg #357). `UDP_MTU` above is the
+            // reference's `self.HW_MTU = 1064` (UDPInterface.py:74), but
+            // UDPInterface never touches the base class's
+            // `AUTOCONFIGURE_MTU = False` / `FIXED_MTU = False`
+            // (Interface.py:93-94), and every gate that puts an MTU on the
+            // wire reads those flags rather than the value:
+            // `Transport.next_hop_interface_hw_mtu` returns `None`
+            // (Transport.py:2682-2683), a relay strips the signalling bytes
+            // onto such a next hop (Transport.py:1599-1602), and a receiver
+            // clamps against `RNS.Reticulum.MTU` instead of `HW_MTU`
+            // (Transport.py:2101-2104). Signalling 1064 here made a
+            // Rust-to-Rust UDP link negotiate more than twice what the same
+            // link negotiates with a Python end on it, and put 1064-byte
+            // frames on a hop where an all-Python mesh puts 500-byte ones.
+            hw_mtu: None,
             is_local_client: false,
             bitrate: None,
             announce_cap_bitrate: None,
@@ -700,6 +717,36 @@ async fn udp_io_task(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Codeberg #357: a UDP interface must signal NO hardware MTU, so a link
+    /// crossing it stays at the base protocol MTU.
+    ///
+    /// `UDPInterface` sets `self.HW_MTU = 1064` (UDPInterface.py:74) but
+    /// leaves the base class's `AUTOCONFIGURE_MTU = False` and
+    /// `FIXED_MTU = False` (Interface.py:93-94) alone, and every decision
+    /// point that puts an MTU on the wire reads that gate, not the value:
+    /// `Transport.next_hop_interface_hw_mtu` returns `None` for such an
+    /// interface (Transport.py:2682-2683), and a relay strips the signalling
+    /// bytes outright when the next hop carries it (Transport.py:1599-1602).
+    /// 1064 is the recv bound only.
+    #[tokio::test]
+    async fn udp_signals_no_hardware_mtu() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer = socket.local_addr().unwrap();
+        let handle = spawn_udp_interface_from_socket(
+            InterfaceId(0),
+            "udp_mtu_gate".into(),
+            socket,
+            vec![peer.into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            handle.info.hw_mtu, None,
+            "a UDP interface signals no MTU; a Python UDP hop leaves links at \
+             the base 500"
+        );
+    }
 
     /// L-0021: one `recv_from` error must not end the UDP I/O task. The
     /// reference never dies here: Python-RNS serves UDP via

@@ -7248,8 +7248,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     ///
     /// If the payload contains signaling bytes (67 bytes), decode the MTU,
     /// clamp to min(path_mtu, prev_hop_hw_mtu, next_hop_hw_mtu), re-encode.
-    /// If no signaling bytes (64-byte request) or no HW_MTU known for
-    /// next-hop, return the data unchanged.
+    /// If no signaling bytes (64-byte request), return the data unchanged.
+    ///
+    /// If the next hop signals no MTU at all, the signaling bytes are REMOVED
+    /// rather than passed on, so the responder negotiates the base protocol
+    /// MTU. Python reaches that through two branches — the next hop's
+    /// `HW_MTU` is `None` (Transport.py:1595-1598), or it is a value the
+    /// interface never signals because it sets neither `AUTOCONFIGURE_MTU`
+    /// nor `FIXED_MTU` (Transport.py:1599-1602) — and both truncate the
+    /// request by `LINK_MTU_SIZE`. Passing the value through instead let a
+    /// request that arrived over TCP carry a 16384-byte MTU onto a hop that
+    /// cannot take the frame (Codeberg #357). Truncating is safe for the link
+    /// identity: the responder derives it from the request with the signaling
+    /// bytes already removed (`Link::calculate_link_id`,
+    /// `Link.link_id_from_lr_packet`, Link.py:341-347).
     /// (Python Transport.py:1585-1612)
     fn clamp_link_request_mtu(
         data: &PacketData,
@@ -7276,7 +7288,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
         // Three-way min: MTU can only go down, never up.
         let ph_mtu = hw_mtus.get(&prev_hop_iface).copied().unwrap_or(u32::MAX);
-        let nh_mtu = hw_mtus.get(&next_hop_iface).copied()?;
+        let Some(nh_mtu) = hw_mtus.get(&next_hop_iface).copied() else {
+            crate::tracing::debug!(
+                "No next-hop HW_MTU, disabling link MTU upgrade (signalled {})",
+                path_mtu
+            );
+            return Some(PacketData::Owned(
+                payload[..LINK_REQUEST_BASE_SIZE].to_vec(),
+            ));
+        };
 
         let clamped = path_mtu.min(nh_mtu).min(ph_mtu);
 
@@ -18109,6 +18129,14 @@ mod tests {
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
 
+            // Both hops signal the base MTU, so the relay leaves the link
+            // request's signalling bytes alone and this test reads the header
+            // conversion rather than the MTU gate: a next hop that signals
+            // nothing truncates the request by design (Codeberg #357, see
+            // `relay_mtu_clamping`).
+            transport.set_interface_hw_mtu(0, MTU as u32);
+            transport.set_interface_hw_mtu(1, MTU as u32);
+
             // Create a path entry for dest_hash with hops=0 (directly connected
             // to if1), meaning the relay is the final hop.
             let dest_hash = [0xDD; TRUNCATED_HASHBYTES];
@@ -24887,7 +24915,7 @@ mod tests {
 
         #[test]
         fn test_clamp_tcp_to_udp() {
-            // TCP (HW_MTU=262144) → relay → UDP (HW_MTU=1064)
+            // A hop signalling 262144 → relay → a hop signalling 1064
             let mut hw_mtus = BTreeMap::new();
             hw_mtus.insert(0, 262144); // TCP prev-hop
             hw_mtus.insert(1, 1064); // UDP next-hop
@@ -24902,7 +24930,7 @@ mod tests {
 
             let sig: [u8; 3] = payload[LINK_REQUEST_BASE_SIZE..].try_into().unwrap();
             let (clamped_mtu, mode) = decode_signaling_bytes(&sig);
-            assert_eq!(clamped_mtu, 1064, "Should clamp to UDP HW_MTU");
+            assert_eq!(clamped_mtu, 1064, "Should clamp to the next hop's HW_MTU");
             assert_eq!(mode, 1, "Mode should be preserved");
         }
 
@@ -24951,18 +24979,52 @@ mod tests {
             assert!(result.is_none(), "No signaling bytes — pass through");
         }
 
+        /// A next hop that signals no MTU loses the signalling bytes, it does
+        /// not pass them on (Codeberg #357).
+        ///
+        /// Python does this in two branches that reach the same place: the
+        /// next hop's `HW_MTU` is `None` (Transport.py:1595-1598), or it is a
+        /// value the interface never signals because neither
+        /// `AUTOCONFIGURE_MTU` nor `FIXED_MTU` is set on it
+        /// (Transport.py:1599-1602) — UDP is the second. Both truncate the
+        /// link request back to its 64-byte form, so the responder negotiates
+        /// the base MTU. Passing the value through instead let a link
+        /// request that arrived over TCP carry a 16384-byte MTU onto a UDP
+        /// hop, which is the frame size neither end can put in a datagram.
         #[test]
-        fn test_no_next_hop_mtu_passthrough() {
-            // Next-hop HW_MTU not registered, should pass through
+        fn test_next_hop_without_hw_mtu_strips_signalling() {
             let mut hw_mtus = BTreeMap::new();
             hw_mtus.insert(0, 262144);
-            // iface 1 not registered
+            // iface 1 signals no MTU, so it is not in the map at all.
 
             let data = make_lr_payload(262144, 1);
             let result =
                 Transport::<MockClock, NoStorage>::clamp_link_request_mtu(&data, 0, 1, &hw_mtus);
 
-            assert!(result.is_none(), "Unknown next-hop MTU — pass through");
+            let stripped = result.expect("signalling bytes must be removed");
+            assert_eq!(
+                stripped.as_slice().len(),
+                LINK_REQUEST_BASE_SIZE,
+                "a next hop that signals no MTU truncates the link request"
+            );
+            assert_eq!(
+                stripped.as_slice(),
+                &data.as_slice()[..LINK_REQUEST_BASE_SIZE],
+                "only the signalling bytes go; the key material is untouched"
+            );
+        }
+
+        /// A request that never carried signalling bytes is not truncated
+        /// further when the next hop signals no MTU either.
+        #[test]
+        fn test_no_signalling_and_no_next_hop_mtu_passthrough() {
+            let hw_mtus = BTreeMap::new();
+
+            let data = make_lr_payload_no_signaling();
+            let result =
+                Transport::<MockClock, NoStorage>::clamp_link_request_mtu(&data, 0, 1, &hw_mtus);
+
+            assert!(result.is_none(), "nothing to strip — pass through");
         }
 
         #[test]

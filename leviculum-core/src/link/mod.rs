@@ -643,10 +643,17 @@ impl Link {
             let (mtu, mode) = decode_signaling_bytes(&sig_bytes);
             validate_mode(mode)?;
             let path_mtu = if mtu >= MTU as u32 { mtu } else { MTU as u32 };
-            // Clamp to receiving interface's HW_MTU (matches Python Transport.inbound)
+            // Clamp to the receiving interface's signalled HW_MTU (Python
+            // Transport.inbound, Transport.py:2101-2113). An interface that
+            // signals none holds the link at the base protocol MTU rather
+            // than letting the signalled value through: Python either drops
+            // the signalling bytes (`HW_MTU == None`, :2107) or clamps
+            // against `RNS.Reticulum.MTU` because the interface sets neither
+            // `AUTOCONFIGURE_MTU` nor `FIXED_MTU` (:2101-2104, UDP's case —
+            // Codeberg #357). Both land on 500.
             match hw_mtu {
                 Some(iface_mtu) => path_mtu.min(iface_mtu),
-                None => path_mtu,
+                None => MTU as u32,
             }
         } else {
             MTU as u32
@@ -3923,7 +3930,7 @@ mod tests {
 
     #[test]
     fn test_compute_link_mdu_udp() {
-        // With UDP HW_MTU=1064
+        // With a hop signalling HW_MTU=1064
         // floor((1064 - 1 - 19 - 48) / 16) * 16 - 1
         // = floor(996 / 16) * 16 - 1
         // = 62 * 16 - 1
@@ -3954,13 +3961,17 @@ mod tests {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
 
-        // Build a 67-byte request with MTU=262144
+        // Build a 67-byte request with MTU=262144, arriving on an interface
+        // that signals at least as much — the shared-instance interface does
+        // (`LocalInterface.HW_MTU`, LocalInterface.py:71) — so the signalled
+        // value survives and this test reads the parse, not a clamp.
         let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
         let request_data = outgoing.create_link_request_with_mtu(262_144, 1);
         assert_eq!(request_data.len(), LINK_REQUEST_SIGNALING_SIZE);
 
         let incoming =
-            Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
+            Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, Some(262_144))
+                .unwrap();
         assert_eq!(incoming.negotiated_mtu(), 262_144);
         assert_eq!(incoming.mdu(), 262_063);
     }
@@ -4001,7 +4012,7 @@ mod tests {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
 
-        // Signaled MTU=262144, but interface HW_MTU=1064 → clamp to 1064
+        // Signaled MTU=262144, but the interface signals HW_MTU=1064 → clamp
         let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
         let request_data = outgoing.create_link_request_with_mtu(262_144, 1);
 
@@ -4010,18 +4021,27 @@ mod tests {
         assert_eq!(incoming.negotiated_mtu(), 1064);
     }
 
+    /// An interface that signals no MTU holds the link at the base MTU; it
+    /// does not let a signalled value through unchecked (Codeberg #357).
+    ///
+    /// Python reaches the same answer by two routes: a receiving interface
+    /// whose `HW_MTU` is `None` drops the signalling bytes outright, and one
+    /// that carries a value it never signals — neither `AUTOCONFIGURE_MTU`
+    /// nor `FIXED_MTU`, which is UDP — clamps against `RNS.Reticulum.MTU`
+    /// instead of that value (Transport.py:2101-2113). Both leave the link
+    /// at 500.
     #[test]
-    fn test_new_incoming_no_clamp_without_hw_mtu() {
+    fn test_new_incoming_without_hw_mtu_holds_base_mtu() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let link_id = LinkId::new([0x01; TRUNCATED_HASHBYTES]);
 
-        // Signaled MTU=262144, no interface HW_MTU → keep 262144
+        // Signaled MTU=262144, interface signals no MTU → hold at 500
         let outgoing = Link::new_outgoing(dest_hash, &mut OsRng);
         let request_data = outgoing.create_link_request_with_mtu(262_144, 1);
 
         let incoming =
             Link::new_incoming(&request_data, link_id, dest_hash, &mut OsRng, None).unwrap();
-        assert_eq!(incoming.negotiated_mtu(), 262_144);
+        assert_eq!(incoming.negotiated_mtu(), MTU as u32);
     }
 
     #[test]

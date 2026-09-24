@@ -313,6 +313,39 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A UDP interface no longer signals a hardware MTU, so a link crossing one
+  settles on the base protocol MTU whichever stack sits on either end
+  (Codeberg #357). Python's `UDPInterface` sets `self.HW_MTU = 1064`
+  (`UDPInterface.py:74`) but leaves the base class's
+  `AUTOCONFIGURE_MTU = False` and `FIXED_MTU = False` (`Interface.py:93-94`)
+  alone, and every gate that puts an MTU on the wire reads the flags rather
+  than the value: the initiator's `Transport.next_hop_interface_hw_mtu`
+  returns `None` (`Transport.py:2682-2683`), a relay forwarding onto such a
+  next hop truncates the link request by `LINK_MTU_SIZE`
+  (`Transport.py:1599-1602`), and a receiver clamps against
+  `RNS.Reticulum.MTU` (`Transport.py:2101-2104`). All three land on 500;
+  1064 bounds the datagram the interface accepts off the wire and nothing
+  else. We adopted the class value as a signalled one, which is the same
+  shape as #355 inverted — there we read a constant the reference derives,
+  here we read one the reference never signals. The split it produced was
+  already written into our own interop suite: 500 on every UDP link with a
+  Python end on it, 1064 between two Rust ends, with a Rust relay putting a
+  1064-byte frame on a hop an all-Python mesh keeps at 500.
+
+  Two decision points behind it move with the interface, because a value
+  that is not signalled must not sneak back in from either side. A relay now
+  REMOVES the signalling bytes when the next hop signals no MTU instead of
+  passing the incoming value on — otherwise a link request that arrived over
+  TCP carried a 16384-byte MTU onto the UDP hop. Truncating is what the
+  reference does and it does not disturb the link identity, which both ends
+  derive from the request with the signalling bytes already removed
+  (`Link.py:341-347`). A responder reached over an interface that signals no
+  MTU now negotiates the base MTU rather than accepting the signalled value
+  unchecked. `InterfaceInfo::hw_mtu` accordingly means the MTU the interface
+  SIGNALS, and a UDP interface therefore reports nothing under the `mtu`
+  stats key, where Reticulum 1.5.x reports 1064 — a key that postdates our
+  pinned 1.3.5 reference and is read under `rnstatus` flags only.
+
 - A receiver of a resource no longer times out on parts that are still on the
   air. Its part timeout was derived from the link RTT alone, and on a slow
   half-duplex carrier the RTT is measured over a handshake whose frames

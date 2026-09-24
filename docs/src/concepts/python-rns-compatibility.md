@@ -234,10 +234,38 @@ Priority 2 and does not buy that.
 
 The lesson generalises past MTU: before adopting a reference class
 attribute as a value we signal, check whether the reference derives it
-at interface post-init. `UDPInterface` is the sibling case still open
-— it sets `AUTOCONFIGURE_MTU = False`, so a Python peer signals no MTU
-at all for a UDP hop and links stay at the base protocol MTU, while we
-signal `HW_MTU = 1064`.
+at interface post-init, and whether it signals it at all.
+`UDPInterface` was the sibling case, closed by Codeberg #357. It sets
+`self.HW_MTU = 1064` (`UDPInterface.py:74`) and leaves the base
+class's `AUTOCONFIGURE_MTU = False` and `FIXED_MTU = False`
+(`Interface.py:93-94`) alone, and every gate that puts an MTU on the
+wire reads those flags rather than the value:
+
+- the initiator asks `Transport.next_hop_interface_hw_mtu`, which
+  returns `None` for such an interface (`Transport.py:2682-2683`), so
+  it signals `RNS.Reticulum.MTU` (`Link.py:310-314`);
+- a relay forwarding onto such a next hop truncates the link request
+  by `LINK_MTU_SIZE` (`Transport.py:1599-1602`);
+- a receiver clamps against `RNS.Reticulum.MTU` rather than `HW_MTU`
+  (`Transport.py:2101-2104`).
+
+All three land on 500. 1064 is what the interface's own read path
+accepts off the wire, never what it negotiates. We signalled it until
+#357, which is why our own interop suite carried two UDP numbers: 500
+for every link with a Python end on it and 1064 between two Rust
+ends. `HW_MTU` in `InterfaceInfo` now means the value the interface
+signals, so a UDP interface carries `None` there and reports nothing
+under the `mtu` stats key — a key that postdates our pinned 1.3.5
+reference, where Reticulum 1.5.x reports 1064.
+
+The reference gates several more interfaces off the same way —
+`PipeInterface`, `KISSInterface`, `AX25KISSInterface`,
+`SerialInterface`, `I2PInterface`, `RNodeInterface` and
+`RNodeMultiInterface` all set an instance `HW_MTU` without either
+flag — and we still signal ours on each. Those are not #357: LoRa in
+particular has a Priority-1 argument for keeping the link inside one
+508-byte frame that the UDP case has no counterpart to, so each wants
+its own measurement.
 
 ## Same-interface relay on shared media
 

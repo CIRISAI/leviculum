@@ -479,7 +479,7 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `PATHFINDER_G_MS` (`constants.rs:137`) |
 | `PATHFINDER_RW` jitter | 0.5 s | 500 ms (+ optional airtime factor) | ≈ | Option α permitted timing divergence |
 | `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `LOCAL_REBROADCASTS_MAX` (`constants.rs:153`); enforced in the retry loop, `local_rebroadcasts` (`transport.rs:9985`), and on a duplicate arrival, `local_rebroadcasts` (`transport.rs:5330`) |
-| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:333`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10354-10366`) |
+| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:333`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10374-10386`) |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
 | `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `MGMT_ANNOUNCE_INTERVAL_MS` (`constants.rs:170`); `check_mgmt_announces` (`node/mod.rs:2360-2452`) |
 | mgmt-announce initial 15 s trick | `Transport.py:283` | `schedule_initial_mgmt_announce` (`node/mod.rs:2346-2352`) with `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (`node/mod.rs:203`) | ≈ | Verified by B4 audit; Rust adds a per-node draw on top, `MGMT_ANNOUNCE_INITIAL_JITTER_MS` (`node/mod.rs:222`) |

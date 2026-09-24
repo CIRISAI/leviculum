@@ -22,8 +22,11 @@
 //!
 //! For UDP, Python's UDPInterface has `AUTOCONFIGURE_MTU=False` and `FIXED_MTU=False`,
 //! so `Transport.next_hop_interface_hw_mtu()` returns None and the Transport layer
-//! clamps link MTU to the base protocol MTU (500). Rust-to-Rust UDP links
-//! negotiate the full UDP HW_MTU (1064), but Python interop tests negotiate 500.
+//! clamps link MTU to the base protocol MTU (500). `UDPInterface.HW_MTU = 1064`
+//! bounds the datagram, never the negotiation. Since Codeberg #357 lnsd signals
+//! nothing on UDP either, so every link over a UDP hop settles on 500 whichever
+//! stack sits on either end — before that, Rust-to-Rust UDP links negotiated
+//! 1064 and only the Python-facing ones settled on 500.
 //!
 //! ## Running These Tests
 //!
@@ -50,8 +53,8 @@ use crate::common::{
     wait_for_data_event, wait_for_link_data_packet, wait_for_link_established,
     wait_for_link_request, wait_for_responder_established_link, wait_for_rtt_packet, TestClock,
     DAEMON_TCP_LINK_MDU, DAEMON_TCP_MAX_CHANNEL_PAYLOAD, DAEMON_TCP_NEGOTIATED_MTU,
-    DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU, UDP_HW_MTU, UDP_LINK_MDU,
-    UDP_MAX_CHANNEL_PAYLOAD,
+    DIRECT_TCP_LINK_MDU, DIRECT_TCP_MAX_CHANNEL_PAYLOAD, TCP_HW_MTU, UDP_LINK_MDU,
+    UDP_MAX_CHANNEL_PAYLOAD, UDP_NEGOTIATED_MTU,
 };
 use crate::harness::TestDaemon;
 
@@ -831,7 +834,7 @@ async fn test_mtu_a0_direct_tcp_full_mtu() {
 /// any future Python changes to UDPInterface MTU flags.
 #[tokio::test]
 async fn test_mtu_b0_python_to_python_udp_baseline() {
-    use crate::common::DAEMON_UDP_NEGOTIATED_MTU;
+    use crate::common::UDP_NEGOTIATED_MTU;
     use crate::harness::find_available_ports;
 
     // Allocate 6 ports: [rns_a, cmd_a, udp_a, rns_b, cmd_b, udp_b]
@@ -895,8 +898,8 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
     assert_eq!(status_a.status, "found", "Daemon A link should be found");
     if let Some(mtu_a) = status_a.mtu {
         assert_eq!(
-            mtu_a, DAEMON_UDP_NEGOTIATED_MTU,
-            "Daemon A (initiator) should negotiate MTU={DAEMON_UDP_NEGOTIATED_MTU} over UDP"
+            mtu_a, UDP_NEGOTIATED_MTU,
+            "Daemon A (initiator) should negotiate MTU={UDP_NEGOTIATED_MTU} over UDP"
         );
     }
 
@@ -908,25 +911,27 @@ async fn test_mtu_b0_python_to_python_udp_baseline() {
     assert_eq!(status_b.status, "found", "Daemon B link should be found");
     if let Some(mtu_b) = status_b.mtu {
         assert_eq!(
-            mtu_b, DAEMON_UDP_NEGOTIATED_MTU,
-            "Daemon B (responder) should negotiate MTU={DAEMON_UDP_NEGOTIATED_MTU} over UDP"
+            mtu_b, UDP_NEGOTIATED_MTU,
+            "Daemon B (responder) should negotiate MTU={UDP_NEGOTIATED_MTU} over UDP"
         );
     }
 
     println!(
         "SUCCESS: Python-to-Python UDP baseline: A mtu={:?}, B mtu={:?} (expected {})",
-        status_a.mtu, status_b.mtu, DAEMON_UDP_NEGOTIATED_MTU
+        status_a.mtu, status_b.mtu, UDP_NEGOTIATED_MTU
     );
 }
 
-/// Rust-to-Rust over UDP: verify negotiated MTU=1064 and data transfer.
+/// Rust-to-Rust over UDP: verify the base negotiated MTU and data transfer.
 ///
-/// Uses ReticulumNodeBuilder with UDP interfaces.
+/// Uses ReticulumNodeBuilder with UDP interfaces. Two lnsd ends over UDP
+/// negotiate exactly what two rnsd ends do, because neither signals an MTU on
+/// that medium (Codeberg #357).
 #[tokio::test]
 async fn test_mtu_b1_rust_to_rust_udp_mtu() {
     use crate::common::{
         wait_for_data_event, wait_for_link_established, wait_for_responder_established_link,
-        UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
+        UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD, UDP_NEGOTIATED_MTU,
     };
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
@@ -1028,8 +1033,16 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
     // Verify negotiated MTU
     let mtu_a = node_a.link_negotiated_mtu(&link_id_a);
     let mtu_b = node_b.link_negotiated_mtu(link_id_b);
-    assert_eq!(mtu_a, Some(UDP_HW_MTU), "A should negotiate UDP HW_MTU");
-    assert_eq!(mtu_b, Some(UDP_HW_MTU), "B should negotiate UDP HW_MTU");
+    assert_eq!(
+        mtu_a,
+        Some(UDP_NEGOTIATED_MTU),
+        "A should negotiate the base MTU over UDP"
+    );
+    assert_eq!(
+        mtu_b,
+        Some(UDP_NEGOTIATED_MTU),
+        "B should negotiate the base MTU over UDP"
+    );
 
     let mdu_a = node_a.link_mdu(&link_id_a);
     let mdu_b = node_b.link_mdu(link_id_b);
@@ -1062,7 +1075,7 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
 
     println!(
         "SUCCESS: Rust-to-Rust UDP MTU={}, MDU={}, payload {} bytes verified",
-        UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
+        UDP_NEGOTIATED_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
     );
 
     node_a.stop().await.ok();
@@ -1079,8 +1092,8 @@ async fn test_mtu_b1_rust_to_rust_udp_mtu() {
 #[tokio::test]
 async fn test_mtu_b2_rust_to_python_udp() {
     use crate::common::{
-        extract_signing_key, parse_dest_hash, wait_for_link_established, DAEMON_UDP_LINK_MDU,
-        DAEMON_UDP_MAX_CHANNEL_PAYLOAD, DAEMON_UDP_NEGOTIATED_MTU,
+        extract_signing_key, parse_dest_hash, wait_for_link_established, UDP_LINK_MDU,
+        UDP_MAX_CHANNEL_PAYLOAD, UDP_NEGOTIATED_MTU,
     };
     use leviculum_std::driver::ReticulumNodeBuilder;
 
@@ -1155,16 +1168,16 @@ async fn test_mtu_b2_rust_to_python_udp() {
     let mtu = node.link_negotiated_mtu(&link_id);
     assert_eq!(
         mtu,
-        Some(DAEMON_UDP_NEGOTIATED_MTU),
+        Some(UDP_NEGOTIATED_MTU),
         "Rust should negotiate daemon UDP MTU (base protocol MTU)"
     );
 
     let mdu = node.link_mdu(&link_id);
     assert_eq!(
         mdu,
-        Some(DAEMON_UDP_LINK_MDU),
+        Some(UDP_LINK_MDU),
         "Rust MDU should be {}",
-        DAEMON_UDP_LINK_MDU
+        UDP_LINK_MDU
     );
 
     // Wait for daemon to finalize link table
@@ -1180,13 +1193,13 @@ async fn test_mtu_b2_rust_to_python_udp() {
     assert_eq!(status.status, "found");
     if let Some(py_mtu) = status.mtu {
         assert_eq!(
-            py_mtu, DAEMON_UDP_NEGOTIATED_MTU,
+            py_mtu, UDP_NEGOTIATED_MTU,
             "Python should report base protocol MTU for UDP"
         );
     }
 
     // Send max channel payload and verify receipt
-    let payload = generate_test_payload(DAEMON_UDP_MAX_CHANNEL_PAYLOAD);
+    let payload = generate_test_payload(UDP_MAX_CHANNEL_PAYLOAD);
     link_handle.send(&payload).await.expect("Send failed");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1202,7 +1215,7 @@ async fn test_mtu_b2_rust_to_python_udp() {
 
     println!(
         "SUCCESS: Rust-to-Python UDP MTU={}, MDU={}, payload {} bytes verified",
-        DAEMON_UDP_NEGOTIATED_MTU, DAEMON_UDP_LINK_MDU, DAEMON_UDP_MAX_CHANNEL_PAYLOAD
+        UDP_NEGOTIATED_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
     );
 
     node.stop().await.ok();
@@ -1222,8 +1235,8 @@ async fn test_mtu_b2_rust_to_python_udp() {
 #[tokio::test]
 async fn test_mtu_b3_python_to_rust_udp() {
     use crate::common::{
-        wait_for_responder_established_link, DAEMON_UDP_LINK_MDU, DAEMON_UDP_MAX_CHANNEL_PAYLOAD,
-        DAEMON_UDP_NEGOTIATED_MTU,
+        wait_for_responder_established_link, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD,
+        UDP_NEGOTIATED_MTU,
     };
     use leviculum_core::identity::Identity;
     use leviculum_std::driver::ReticulumNodeBuilder;
@@ -1342,16 +1355,16 @@ async fn test_mtu_b3_python_to_rust_udp() {
     let mtu = node.link_negotiated_mtu(&link_id);
     assert_eq!(
         mtu,
-        Some(DAEMON_UDP_NEGOTIATED_MTU),
+        Some(UDP_NEGOTIATED_MTU),
         "Rust responder should negotiate daemon UDP MTU (base protocol MTU)"
     );
 
     let mdu = node.link_mdu(&link_id);
     assert_eq!(
         mdu,
-        Some(DAEMON_UDP_LINK_MDU),
+        Some(UDP_LINK_MDU),
         "Rust MDU should be {}",
-        DAEMON_UDP_LINK_MDU
+        UDP_LINK_MDU
     );
 
     // Verify Python-side MTU
@@ -1364,7 +1377,7 @@ async fn test_mtu_b3_python_to_rust_udp() {
 
     if let Some(py_mtu) = status.mtu {
         assert_eq!(
-            py_mtu, DAEMON_UDP_NEGOTIATED_MTU,
+            py_mtu, UDP_NEGOTIATED_MTU,
             "Python should report base protocol MTU for UDP"
         );
     }
@@ -1373,7 +1386,7 @@ async fn test_mtu_b3_python_to_rust_udp() {
     let link_hash_str = link_result["result"]["link_hash"]
         .as_str()
         .expect("create_link should return link_hash");
-    let payload = generate_test_payload(DAEMON_UDP_MAX_CHANNEL_PAYLOAD);
+    let payload = generate_test_payload(UDP_MAX_CHANNEL_PAYLOAD);
     daemon
         .send_on_link(link_hash_str, &payload)
         .await
@@ -1382,7 +1395,7 @@ async fn test_mtu_b3_python_to_rust_udp() {
     let received = wait_for_data_event(&mut events, &link_id, Duration::from_secs(10))
         .await
         .expect("Rust should receive data from Python over UDP");
-    assert_eq!(received.len(), DAEMON_UDP_MAX_CHANNEL_PAYLOAD);
+    assert_eq!(received.len(), UDP_MAX_CHANNEL_PAYLOAD);
     assert!(
         verify_test_payload(&received),
         "Python-to-Rust payload integrity check failed"
@@ -1390,7 +1403,7 @@ async fn test_mtu_b3_python_to_rust_udp() {
 
     println!(
         "SUCCESS: Python-to-Rust UDP MTU={}, MDU={}, payload {} bytes, Python mtu={:?}",
-        DAEMON_UDP_NEGOTIATED_MTU, DAEMON_UDP_LINK_MDU, DAEMON_UDP_MAX_CHANNEL_PAYLOAD, status.mtu
+        UDP_NEGOTIATED_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD, status.mtu
     );
 
     node.stop().await.ok();
@@ -1597,14 +1610,17 @@ async fn test_mtu_c3_over_mdu() {
 // Group D: Multi-hop MTU clamping
 // =========================================================================
 
-/// TCP -> RustRelay -> UDP: verify MTU clamps to UDP bottleneck (1064).
+/// TCP -> RustRelay -> UDP: verify the relay drops the MTU upgrade at the
+/// UDP hop.
 ///
 /// Topology:
 ///   RustA (TCP client, initiator) <-TCP-> RustRelay (TCP server + UDP, transport=true) <-UDP-> RustB (UDP, responder)
 ///
-/// RustA's TCP interface has HW_MTU=16384. The relay's `clamp_link_request_mtu()`
-/// detects the outgoing UDP interface with HW_MTU=1064 and clamps the signaling
-/// bytes. Both sides negotiate MTU=1064.
+/// RustA's TCP interface signals HW_MTU=16384. The relay's
+/// `clamp_link_request_mtu()` finds a next hop that signals no MTU at all and
+/// REMOVES the signalling bytes rather than carrying 16384 onto a datagram
+/// hop, which is what Python does there (Transport.py:1599-1602). Both sides
+/// negotiate the base 500 (Codeberg #357).
 #[tokio::test]
 async fn test_mtu_d1_tcp_relay_udp_clamp() {
     use leviculum_core::identity::Identity;
@@ -1728,10 +1744,14 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
     let mtu_b = node_b.link_negotiated_mtu(&link_id_b);
     assert_eq!(
         mtu_a,
-        Some(UDP_HW_MTU),
-        "A should negotiate UDP HW_MTU (clamped by relay)"
+        Some(UDP_NEGOTIATED_MTU),
+        "A should negotiate the base MTU (relay stripped the signalling onto UDP)"
     );
-    assert_eq!(mtu_b, Some(UDP_HW_MTU), "B should negotiate UDP HW_MTU");
+    assert_eq!(
+        mtu_b,
+        Some(UDP_NEGOTIATED_MTU),
+        "B should negotiate the base MTU over UDP"
+    );
 
     let mdu_a = node_a.link_mdu(link_id_a);
     let mdu_b = node_b.link_mdu(&link_id_b);
@@ -1764,7 +1784,7 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
 
     println!(
         "SUCCESS: TCP->Relay->UDP MTU={}, MDU={}, payload {} bytes verified",
-        UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
+        UDP_NEGOTIATED_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
     );
 
     node_a.stop().await.ok();
@@ -1772,14 +1792,16 @@ async fn test_mtu_d1_tcp_relay_udp_clamp() {
     relay.stop().await.ok();
 }
 
-/// UDP -> RustRelay -> TCP: verify MTU stays at UDP bottleneck (1064).
+/// UDP -> RustRelay -> TCP: verify the first hop already holds the link at
+/// the base MTU.
 ///
 /// Topology (reverse of the TCP->Relay->UDP case):
 ///   RustA (UDP, initiator) <-UDP-> RustRelay (TCP server + UDP, transport=true) <-TCP-> RustB (TCP client, responder)
 ///
-/// RustA's UDP interface has HW_MTU=1064. The link request signaling bytes
-/// already encode 1064, so the relay doesn't need to clamp, but the packet
-/// still traverses UDP->Relay->TCP, proving the full relay path works.
+/// RustA's first hop is UDP, which signals no MTU, so the initiator puts the
+/// base 500 in the signalling bytes (Link.py:310-314) and the relay has
+/// nothing left to clamp on the TCP leg. The packet still traverses
+/// UDP->Relay->TCP, proving the full relay path works.
 #[tokio::test]
 async fn test_mtu_d2_udp_relay_tcp() {
     use leviculum_core::identity::Identity;
@@ -1901,8 +1923,16 @@ async fn test_mtu_d2_udp_relay_tcp() {
     // Verify negotiated MTU, constrained by A's UDP interface
     let mtu_a = node_a.link_negotiated_mtu(link_id_a);
     let mtu_b = node_b.link_negotiated_mtu(&link_id_b);
-    assert_eq!(mtu_a, Some(UDP_HW_MTU), "A should negotiate UDP HW_MTU");
-    assert_eq!(mtu_b, Some(UDP_HW_MTU), "B should negotiate UDP HW_MTU");
+    assert_eq!(
+        mtu_a,
+        Some(UDP_NEGOTIATED_MTU),
+        "A should negotiate the base MTU over UDP"
+    );
+    assert_eq!(
+        mtu_b,
+        Some(UDP_NEGOTIATED_MTU),
+        "B should negotiate the base MTU over UDP"
+    );
 
     let mdu_a = node_a.link_mdu(link_id_a);
     let mdu_b = node_b.link_mdu(&link_id_b);
@@ -1935,7 +1965,7 @@ async fn test_mtu_d2_udp_relay_tcp() {
 
     println!(
         "SUCCESS: UDP->Relay->TCP MTU={}, MDU={}, payload {} bytes verified",
-        UDP_HW_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
+        UDP_NEGOTIATED_MTU, UDP_LINK_MDU, UDP_MAX_CHANNEL_PAYLOAD
     );
 
     node_a.stop().await.ok();

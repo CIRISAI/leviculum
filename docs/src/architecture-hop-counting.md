@@ -185,9 +185,9 @@ Recorded 2026-07-10 against `reference/Reticulum` as vendored.
 | Link entry fields | `:1615-1625` | `storage_types.rs:60 (destination_hash at :76)` | matches, including the destination hash |
 | LRPROOF relay check | `:2215-2206` (single `== remaining_hops`, drop else; the `:1697` disjunction is gated OUT for LRPROOF at `:1687`) | `transport.rs:4213`; rewritten by default, DROPPED behind `lrproof_rewrite_on_asymmetry=false` | **deliberate deviation** (default); the flagged strict branch drops like the reference, but see the mapping caveat below |
 | Healing, no path | `:737` | `transport.rs:7198` | matches |
-| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7455` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
+| Healing, local client link (`taken_hops == 0`) | `:744` | `transport.rs:7475` | matches — **fixed 2026-07-10 (D1, commit `74ac655`); was absent** |
 | Healing, destination direct | `:753` | `transport.rs:7206` | matches |
-| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7474` | matches |
+| Healing, initiator direct (`taken_hops == 1`) | `:775` | `transport.rs:7494` | matches |
 
 ### The deliberate deviation, and its cost
 
