@@ -25,9 +25,9 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1369` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1371` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1404` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1406` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:3388`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1495`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1497`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -103,7 +103,7 @@ pass and was not re-measured here.
 ### The segment boundary sits under the 1 MiB row
 
 `RESOURCE_MAX_EFFICIENT_SIZE` is 1 048 575 bytes
-(`leviculum-core/src/resource/mod.rs:61`) and the split is decided on
+(`leviculum-core/src/resource/mod.rs:69`) and the split is decided on
 the *packed, uncompressed* length
 (`leviculum-core/src/resource/outgoing.rs:106`), so a 1 MiB body is
 above it in every payload class — the compression ratio does not move

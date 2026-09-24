@@ -476,12 +476,12 @@ structural divergence, ⚠ gap not yet addressed, ✗ does not match.
 | Received-announce rebroadcast count | 2 (non-local-client), 1 (local-client) | 2 and 1: the insert picks the start value from the source, `retries` (`transport.rs:5722-5726`) | ✓ | History: B2, 79ac5204 (2026-04-15), dropped `PATHFINDER_RETRIES` to 1 and reordered the init |
 | Received-announce fanout | all interfaces; echo dedup'd on RX | `send_on_all_interfaces` (no exclude) | ✓ | Matches Python. B1 verified by `test_announces_forwarded_through_transport`. |
 | Packet-hash dedup on RX | `Transport.py:1227` | `has_packet_hash` (`transport.rs:3166`) | ✓ | Identical semantics, rolling window |
-| `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `PATHFINDER_G_MS` (`constants.rs:137`) |
+| `PATHFINDER_G` grace | 5 s | 5 000 ms | ✓ | `PATHFINDER_G_MS` (`constants.rs:168`) |
 | `PATHFINDER_RW` jitter | 0.5 s | 500 ms (+ optional airtime factor) | ≈ | Option α permitted timing divergence |
 | `LOCAL_REBROADCASTS_MAX` | 2 | 2 | ✓ | `LOCAL_REBROADCASTS_MAX` (`constants.rs:153`); enforced in the retry loop, `local_rebroadcasts` (`transport.rs:10171`), and on a duplicate arrival, `local_rebroadcasts` (`transport.rs:5430`) |
-| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:333`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10475-10487`) |
+| `ANNOUNCE_CAP` | 2 % | 2 % | ✓ | `DEFAULT_ANNOUNCE_CAP_PERCENT` (`constants.rs:364`); state in `InterfaceAnnounceCap` (`transport.rs:601-608`), holdoff at `allowed_at_ms` (`transport.rs:10475-10487`) |
 | `announce_queue` / deferred-send | `interface.announce_queue` | `InterfaceAnnounceCap.queue` | ✓ | Same intent, Rust-side uses Vec |
-| `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `MGMT_ANNOUNCE_INTERVAL_MS` (`constants.rs:170`); `check_mgmt_announces` (`node/mod.rs:2360-2452`) |
+| `mgmt_announce_interval` | 7 200 s | 7 200 000 ms | ✓ | `MGMT_ANNOUNCE_INTERVAL_MS` (`constants.rs:201`); `check_mgmt_announces` (`node/mod.rs:2360-2452`) |
 | mgmt-announce initial 15 s trick | `Transport.py:283` | `schedule_initial_mgmt_announce` (`node/mod.rs:2346-2352`) with `MGMT_ANNOUNCE_INITIAL_DELAY_MS` (`node/mod.rs:203`) | ≈ | Verified by B4 audit; Rust adds a per-node draw on top, `MGMT_ANNOUNCE_INITIAL_JITTER_MS` (`node/mod.rs:222`) |
 | mgmt-announce iterates all dests | Python walks `mgmt_destinations` | `check_mgmt_announces` walks `mgmt_destinations` | ✓ | Verified by B4 audit |
 | Path-request one-shot broadcast | `Transport.py:2771-2809` | `transport.rs` (to verify in B7) | ≈ | B7 audit |
@@ -532,7 +532,7 @@ cite now holds unrelated code. Where the mechanism lives today:
 - the two guards are `PATHFINDER_RETRIES` (`transport.rs:10170`)
   and `local_rebroadcasts` (`transport.rs:10171`), in
   `check_announce_rebroadcasts`;
-- `PATHFINDER_RETRIES` (`constants.rs:126`) is 1.
+- `PATHFINDER_RETRIES` (`constants.rs:157`) is 1.
 
 ### B1 fanout alignment
 
