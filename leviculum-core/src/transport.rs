@@ -14725,7 +14725,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:5874), a deliberate anti-replay
+            // `random_blobs` (transport.rs:5903), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
