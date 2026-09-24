@@ -550,6 +550,25 @@ impl<const N: usize> PeerRegistry<N> {
     ///   residual race — its exchange completing between its decision
     ///   and its handshake reaching us — is one connection event wide.
     ///
+    /// The OLD link enters the comparison at the ATT MTU we negotiated
+    /// on it, whichever role it runs in, and that is the one number of
+    /// the four we assume the peer holds unchanged. #377 puts the
+    /// assumption in doubt from the peripheral end: on the desk
+    /// 2026-09-09 a Columba peer listed a link the BOARD had dialled at
+    /// "MTU 20 bytes" long after the exchange had settled — its
+    /// peripheral-role ledger at [`MIN_USABLE_MTU`] for the life of the
+    /// link, not for the moment before its bookkeeping. If its
+    /// arbitration reads that ledger, a pair whose two connections
+    /// negotiated the same MTU is a TIE to us, decided by identity
+    /// order, and an MTU decision to the peer, which keeps its central
+    /// — and in the identity order where those differ each side tears
+    /// down the link the other kept, #360 round 2's 45 s of dead air
+    /// from the opposite end. Unconfirmed on the device: #377 waits for
+    /// the capture #376 is taking, and modelling a peer's bookkeeping
+    /// bug is a decision for the issue, not for this function. The
+    /// arithmetic of the divergence is pinned in
+    /// `a_peer_reading_its_peripheral_link_at_the_floor_decides_the_pair_the_other_way`.
+    ///
     /// The old link's payload silence is still MEASURED and carried on
     /// both variants — round 1 consulted it, and the capture line keeps
     /// the number so a round-1-vs-round-2 comparison stays greppable —
@@ -1256,6 +1275,55 @@ mod tests {
             reg.link_down(1),
             None,
             "the refused slot was never registered"
+        );
+    }
+
+    /// The input assumption [`PeerRegistry::link_up`] makes about the
+    /// OLD link, as arithmetic (#377). We feed the ATT MTU we
+    /// negotiated on it; the desk observation of 2026-09-09 is a
+    /// Columba peer listing a link the board had dialled at "MTU 20
+    /// bytes" — its peripheral-role ledger at [`MIN_USABLE_MTU`] after
+    /// the exchange. Both connections of the pair at ATT 517 is then
+    /// 512 == 512 to us, a tie the identity order settles for the link
+    /// WE dialled, and 512 > 20 to the peer, an MTU decision for the
+    /// link IT dialled: each side keeps what the other tears down.
+    /// Nothing here claims the peer really reads that number — the
+    /// device capture is #376's — the test states what our rule answers
+    /// and what the same rule answers on the peer's reported ledger, so
+    /// a confirmation has one place to land and a change of our input
+    /// cannot pass unnoticed.
+    #[test]
+    fn a_peer_reading_its_peripheral_link_at_the_floor_decides_the_pair_the_other_way() {
+        let mut reg = PeerRegistry::<4>::new();
+        reg.set_local_identity(BOARD);
+        reg.link_up(0, PHONE, Origin::Outgoing, 517, 0);
+        reg.note_heard(0, 1_000);
+        assert_eq!(
+            reg.link_up(1, PHONE, Origin::Incoming, 517, 2_000),
+            LinkUp::Refused {
+                old_slot: 0,
+                rule: DupRule::ColumbaIdentity,
+                old_silence_ms: 1_000,
+                old_data_silence_ms: None,
+                old_usable_mtu: 512,
+                new_usable_mtu: 512,
+            },
+            "on equal negotiated MTUs our model ties and the identity \
+             order keeps the link we dialled"
+        );
+        assert_eq!(
+            judge_duplicate(
+                1_000,
+                Origin::Outgoing,
+                Origin::Incoming,
+                Some(MIN_USABLE_MTU),
+                512,
+                &BOARD,
+                &PHONE
+            ),
+            DupVerdict::KeepNew(DupRule::ColumbaMtu),
+            "the same rule on a peripheral-role ledger at the floor is \
+             not a tie at all: the peer keeps its central"
         );
     }
 

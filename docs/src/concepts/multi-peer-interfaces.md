@@ -92,7 +92,7 @@ subscribed centrals as one group and cannot address a subset of them.
 The firmware implements it (`try_send_excluding_peer`,
 `leviculum-nrf/src/ble/mod.rs:720`), where the decision is a pure
 function of the registry (`TxAim`,
-`leviculum-nrf/ble-tx/src/registry.rs:809`). Without it a path request
+`leviculum-nrf/ble-tx/src/registry.rs:828`). Without it a path request
 from the phone died at the board: one `InterfaceId` covered both links,
 so excluding the arrival interface silenced the neighbour board that
 was the only node able to answer.

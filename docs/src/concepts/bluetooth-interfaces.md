@@ -266,6 +266,27 @@ Two consequences of dialling against the sort are deliberate:
   expiry. 45 s of dead air per rotation cycle — the same hole round 1
   closed from the other direction.
 
+  What that capture showed at the floor was a FRESH connection, one the
+  phone had not bookkept yet, and the rule is built on it being
+  transient: our own dial enters the peer's comparison at
+  `MIN_USABLE_MTU` and is refused pre-handshake, while every other
+  number in the comparison is the ATT MTU we negotiated, assumed to be
+  the number the peer holds too. #377 puts that assumption in doubt from
+  the peripheral end: on the desk 2026-09-09 a Columba peer listed a
+  link the BOARD had dialled at "MTU 20 bytes" long after the exchange
+  had settled, i.e. a peripheral-role ledger stuck at the floor for the
+  life of the link. If its arbitration reads that number, a pair whose
+  two connections negotiated the same MTU is a tie to us — settled by
+  identity order, keeping the link we dialled — and an MTU decision to
+  the peer, keeping the link it dialled, and the pair ends up linkless
+  again in the identity order where those differ. Unconfirmed on the
+  device: #377 waits for the capture #376 is taking, and whether our
+  rule should model a peer's bookkeeping bug is that issue's decision,
+  not a silent change of input here. The arithmetic of the divergence is
+  asserted in `a_peer_reading_its_peripheral_link_at_the_floor_decides_the_pair_the_other_way`
+  (`leviculum-nrf/ble-tx/src/registry.rs`), so a confirmation has one
+  place to land.
+
   Why the liveness test is any-frame and not payload: Columba sends a
   1-byte keepalive every 15 s on every connection it holds, so "any
   traffic within two intervals" is what distinguishes a link its peer
