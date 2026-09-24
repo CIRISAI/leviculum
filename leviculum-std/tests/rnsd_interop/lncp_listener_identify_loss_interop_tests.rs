@@ -7,7 +7,7 @@
 //! armed `AcceptAll` only from the `LinkIdentified` event, so until an identify
 //! arrived the link kept `AcceptNone`, and `handle_resource_advertisement`
 //! discarded the advertisement with no event and no packet
-//! (`leviculum-core/src/node/link_management.rs:2542-2544`). The sender heard
+//! (`leviculum-core/src/node/link_management.rs:2554-2556`). The sender heard
 //! nothing at all and had to wait out its own advertisement retries.
 //!
 //! Python's `rncp` does not have that state. `client_link_established`

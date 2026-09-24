@@ -389,7 +389,7 @@ impl ProxyLog {
 /// Re-framing rather than byte-copying is what makes the gate exact: the drop
 /// removes one packet and leaves the stream otherwise identical, because
 /// `hdlc::frame` is the same encoder both ends use
-/// (`leviculum-std/src/interfaces/tcp.rs:1037`, Python's `TCPInterface`).
+/// (`leviculum-std/src/interfaces/tcp.rs:1039`, Python's `TCPInterface`).
 async fn pump(
     mut src: tokio::net::tcp::OwnedReadHalf,
     mut dst: tokio::net::tcp::OwnedWriteHalf,

@@ -10,7 +10,7 @@ This page is the study Codeberg #347 asked for: five questions, each
 with a number, the reason for it, and the artifact that settled it. It
 is written after the fact. The window landed while the study was still
 open, in `a_directed_packet_is_jittered_on_acquisition_and_free_in_a_burst`
-(`leviculum-std/src/interfaces/rnode.rs:3865`)
+(`leviculum-std/src/interfaces/rnode.rs:3939`)
 and the firmware policy behind it, so four of the five questions are
 answered by code rather than by argument. The fifth is not, and is
 stated as open at the end.
@@ -194,6 +194,6 @@ standing (`leviculum-nrf/src/lora.rs:1598`).
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
    (`leviculum-core/src/rnode.rs:1047`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
-   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:488`).
+   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:543`).
    Nothing is broken by them today and something would be by the next
    caller.

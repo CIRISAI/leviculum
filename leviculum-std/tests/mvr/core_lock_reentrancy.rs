@@ -6,7 +6,7 @@
 //! consumer smuggled in that re-locks the core parks the driver's event loop
 //! forever: no stack, no log line, no exit code, and a listening socket still
 //! open for every supervisor to see. `has_path`
-//! (`leviculum-std/src/driver/mod.rs:2877-2879`) is one line, is safe, is
+//! (`leviculum-std/src/driver/mod.rs:2878-2880`) is one line, is safe, is
 //! synchronous, and is one of roughly forty accessors shaped exactly like it.
 //!
 //! # What this reproduces
