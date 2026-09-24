@@ -1043,6 +1043,21 @@ class TestDaemon:
                     client_iface.announce_rate_grace = None
                     client_iface.announce_rate_penalty = None
 
+                # The per-interface announce cap, as the FRACTION Reticulum
+                # stores when it builds an interface from the config file
+                # (`interface.announce_cap`,
+                # `reference/Reticulum/RNS/Reticulum.py:885`, fed from
+                # ANNOUNCE_CAP/100). Without this the interface reaches
+                # Transport with no announce_cap at all and picks up
+                # Transport's own hasattr default, which is the PERCENT value
+                # 2 -- a cap a hundred times more generous than any real
+                # daemon's, and no announce is ever held back. `announce_cap`
+                # is given in percent, like the config key.
+                cap_percent = params.get("announce_cap")
+                if cap_percent is None:
+                    cap_percent = RNS.Reticulum.ANNOUNCE_CAP
+                client_iface.announce_cap = float(cap_percent) / 100.0
+
                 # Codeberg #93: honour a configured bitrate exactly as Reticulum
                 # applies configured_bitrate (Reticulum.py:794-796,887): the value
                 # overrides the interface's medium default only when it clears
@@ -2394,6 +2409,13 @@ def main():
     parser.add_argument("--required-discovery-value", type=int, default=None,
                         help="Stamp value the InterfaceDiscovery listener requires "
                              "(RNS 1.5.0 defaults to 16, 1.3.5 to 14)")
+    parser.add_argument("--max-queued-announces", type=int, default=None,
+                        help="Depth of the per-interface announce queue "
+                             "(RNS.Reticulum.MAX_QUEUED_ANNOUNCES, 16384 by "
+                             "default). 0 makes an announce the interface's "
+                             "announce cap holds back get dropped instead of "
+                             "queued, with no log line -- the symptom rnsd "
+                             "1.5.2 shows on the rig")
 
     args = parser.parse_args()
 
@@ -2402,6 +2424,17 @@ def main():
     # firings use the reduced interval. Production default stays 2 h.
     if args.mgmt_announce_interval_seconds is not None:
         Transport.mgmt_announce_interval = args.mgmt_announce_interval_seconds
+
+    # Same trick for the announce queue's depth. Transport.outbound reads it at
+    # the moment it decides what to do with an announce the interface's
+    # announce cap will not let out
+    # (`MAX_QUEUED_ANNOUNCES`, `reference/Reticulum/RNS/Transport.py:1264`), so
+    # a value set here governs every announce this daemon handles. At 0 the
+    # capped announce is dropped where a default daemon would queue it --
+    # neither branch logs anything, and the drop is what an rnsd whose queue
+    # never airs the entry looks like from the outside.
+    if args.max_queued_announces is not None:
+        RNS.Reticulum.MAX_QUEUED_ANNOUNCES = args.max_queued_announces
 
     daemon = TestDaemon(
         rns_port=args.rns_port,

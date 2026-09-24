@@ -94,6 +94,7 @@ mod retain_interop_tests;
 mod reverse_rpc_interop_tests;
 mod rpc_interop_tests;
 mod rust_relay_tests;
+mod selftest_announce_cap_tests;
 mod serial_interop_tests;
 mod shared_instance_tests;
 mod status_parity_tests;

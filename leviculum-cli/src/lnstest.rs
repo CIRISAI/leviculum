@@ -1081,7 +1081,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mode,
             discovery_timeout,
         } => {
-            selftest::run_selftest(
+            let verdict = selftest::run_selftest(
                 targets,
                 duration,
                 rate,
@@ -1091,6 +1091,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.config,
             )
             .await?;
+            // The exit code is the binary's business, not the selftest's: a
+            // process::exit inside it would take an in-process caller's
+            // whole test binary down with it.
+            if verdict == selftest::Verdict::Fail {
+                std::process::exit(1);
+            }
         }
 
         Commands::Connect { addr, identity } => {

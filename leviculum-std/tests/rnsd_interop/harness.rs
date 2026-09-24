@@ -311,6 +311,24 @@ impl TestDaemon {
         Err(last_error)
     }
 
+    /// Start a daemon whose per-interface announce queue is `max_queued`
+    /// entries deep instead of the vendored default of 16384
+    /// (`MAX_QUEUED_ANNOUNCES`, `reference/Reticulum/RNS/Reticulum.py:111`).
+    ///
+    /// At 0 the reference drops every announce its interface's announce cap
+    /// holds back, on the same branch that would otherwise queue it
+    /// (`should_queue`, `reference/Reticulum/RNS/Transport.py:1283`) and with
+    /// no log line either way. That is what an rnsd whose announce queue
+    /// never airs the entry looks like to everyone downstream of it, which is
+    /// the state the rig's Python arms died in on 2026-09-23.
+    pub async fn start_with_announce_queue_depth(max_queued: u32) -> Result<Self, HarnessError> {
+        Self::start_with_retry_args(vec![
+            "--max-queued-announces".to_string(),
+            max_queued.to_string(),
+        ])
+        .await
+    }
+
     /// Common discovery args: a discoverable interface named `name` with the
     /// default stamp value (14) and a short announcer job interval so the REAL
     /// `RNS.Discovery.InterfaceAnnouncer` fires promptly (Codeberg #32).

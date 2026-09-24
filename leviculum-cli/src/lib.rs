@@ -10,10 +10,19 @@
 //!
 //! Only what a test needs is public. The binaries keep their own `main`, argument
 //! parsing and per-tool modules.
+//!
+//! [`selftest`] is here for the same reason: the Phase-2 announce behaviour of
+//! `lnstest selftest` is verified against a live Python `rnsd` in
+//! `leviculum-std/tests/rnsd_interop/selftest_announce_cap_tests.rs`, which
+//! calls [`selftest::run_selftest`] itself rather than re-implementing the
+//! phase. [`daemon_rpc`] comes with it — that is where `selftest` asks the
+//! daemon for the link its windows are sized from.
 
 use std::fmt::Write;
 
 pub mod cp;
+pub mod daemon_rpc;
+pub mod selftest;
 
 /// Lowercase hex of `bytes`, the form every destination and identity hash is
 /// printed and parsed in across the tools.

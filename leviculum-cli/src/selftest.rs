@@ -326,8 +326,13 @@ fn record_received_message(
 }
 
 // Verdict
+/// The worst thing a phase saw, and what the tool's exit code is derived
+/// from. Public because the caller decides what a `Fail` costs: the binary
+/// exits non-zero on it, an in-process test asserts on it. A library
+/// function that exits the process instead cannot be called from a test at
+/// all — the test binary goes with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Verdict {
+pub enum Verdict {
     Pass,
     Warn,
     Fail,
@@ -824,6 +829,121 @@ async fn daemon_link_sizing(config_dir: Option<&std::path::Path>) -> LinkSizing 
     }
 }
 
+// Announce cap slot
+//
+// What the reference stack does to an announce it cannot air yet, and what
+// this tool does about it. Both matter to Phase 2, where a single announce
+// per destination is the only thing that makes the far side discoverable.
+
+/// The app data each client's announce carries. Named rather than inlined
+/// because [`ANNOUNCE_WIRE_BYTES`] is computed from its length: an announce
+/// whose size is guessed prices the cap slot below against the wrong packet.
+const APP_DATA_A: &[u8] = b"selftest-a";
+/// Client B's, the same length as [`APP_DATA_A`].
+const APP_DATA_B: &[u8] = b"selftest-b";
+
+/// The share of an interface an announce may occupy in the reference stack,
+/// in percent (`ANNOUNCE_CAP`, `reference/Reticulum/RNS/Reticulum.py:114`).
+///
+/// A neighbour running it holds the interface closed to further announces for
+/// `tx_time / announce_cap` after airing one — 50 x the announce's own air
+/// at the default 2 % (`process_announce_queue`,
+/// `reference/Reticulum/RNS/Interfaces/Interface.py:346`, and the same
+/// arithmetic on the transmit path at
+/// `reference/Reticulum/RNS/Transport.py:1259`). An announce that arrives
+/// inside that window is queued, not aired, and what happens to the queued
+/// entry is the neighbour's business, not ours.
+const REFERENCE_ANNOUNCE_CAP_PERCENT: u64 = 2;
+
+/// One selftest announce on the wire, in bytes.
+///
+/// Header (flags, hops, destination hash, context) plus the announce payload
+/// the reference prices `len(packet.raw)*8 / bitrate` against: public key,
+/// name hash, random hash, ratchet, signature, app data. The ratchet is
+/// counted whether or not this run enables ratchets — an over-stated slot
+/// waits a little longer before re-announcing, an under-stated one
+/// re-announces while the neighbour is still capped, which is the whole
+/// failure this exists to avoid.
+const ANNOUNCE_WIRE_BYTES: u64 = {
+    use leviculum_core::constants::{
+        ED25519_SIGNATURE_SIZE, HEADER_MINSIZE, IDENTITY_KEY_SIZE, NAME_HASHBYTES,
+        RANDOM_HASHBYTES, RATCHET_SIZE,
+    };
+    (HEADER_MINSIZE
+        + IDENTITY_KEY_SIZE
+        + NAME_HASHBYTES
+        + RANDOM_HASHBYTES
+        + RATCHET_SIZE
+        + ED25519_SIGNATURE_SIZE
+        + APP_DATA_A.len()) as u64
+};
+
+/// The slot to re-announce on when the link the announces cross is not
+/// priced — no daemon asked, or none that owns a radio.
+///
+/// A fixed number, and it has to be: with no bitrate there is nothing to
+/// derive from. 30 s is one cap slot for a 209-byte announce at 2789 bps,
+/// which is the order of the LoRa links this tool is pointed at
+/// (`lora_ratchet_*` runs at 2734 bps).
+const ANNOUNCE_CAP_SLOT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The shortest slot this tool will re-announce on, whatever the arithmetic
+/// says.
+///
+/// A fast link prices the slot in milliseconds — 8 ms at 10 Mbit/s — and a
+/// re-announce every 8 ms is an announce storm, not a repair. A neighbour
+/// whose cap slot is that short has also long since drained its queue, so
+/// there is nothing there for a re-announce to repair.
+const ANNOUNCE_CAP_SLOT_FLOOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often Phase 2 re-announces while it waits, and the arithmetic that
+/// produced it.
+struct AnnounceCapSlot {
+    slot: std::time::Duration,
+    detail: String,
+}
+
+/// Derive the re-announce slot from what the daemon says about its radio.
+fn announce_cap_slot(sizing: &LinkSizing) -> AnnounceCapSlot {
+    let Some(profile) = sizing.profile.filter(|p| p.bitrate_bps > 0) else {
+        return AnnounceCapSlot {
+            slot: ANNOUNCE_CAP_SLOT_FALLBACK,
+            detail: format!(
+                "{:.1}s fixed — no on-air bitrate to derive the reference's \
+                 {REFERENCE_ANNOUNCE_CAP_PERCENT}% announce cap from ({})",
+                ANNOUNCE_CAP_SLOT_FALLBACK.as_secs_f64(),
+                sizing.origin,
+            ),
+        };
+    };
+
+    let tx_ms = ANNOUNCE_WIRE_BYTES * 8 * 1000 / profile.bitrate_bps as u64;
+    let slot_ms = tx_ms * 100 / REFERENCE_ANNOUNCE_CAP_PERCENT;
+    let derived = std::time::Duration::from_millis(slot_ms);
+    let slot = derived.max(ANNOUNCE_CAP_SLOT_FLOOR);
+    let floored = if slot > derived {
+        format!(
+            ", floored at {:.1}s so a fast link is not re-announced at its own \
+             millisecond slot",
+            ANNOUNCE_CAP_SLOT_FLOOR.as_secs_f64()
+        )
+    } else {
+        String::new()
+    };
+    AnnounceCapSlot {
+        slot,
+        detail: format!(
+            "{:.1}s — a {ANNOUNCE_WIRE_BYTES}B announce is {:.2}s of air at {} bps, \
+             and the reference lets announces have {REFERENCE_ANNOUNCE_CAP_PERCENT}% \
+             of an interface{floored}; sized from {}",
+            slot.as_secs_f64(),
+            tx_ms as f64 / 1000.0,
+            profile.bitrate_bps,
+            sizing.origin,
+        ),
+    }
+}
+
 /// What one frame costs the medium and its own sender, at the link
 /// `profile` describes.
 ///
@@ -1106,7 +1226,7 @@ pub async fn run_selftest(
     corrupt_every: Option<u64>,
     discovery_timeout_secs: u64,
     config_dir: Option<std::path::PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Verdict, Box<dyn std::error::Error>> {
     let run_link = mode == "all" || mode == "link";
     let run_packet = mode == "all" || mode == "packet";
     let run_ratchet_basic = mode == "ratchet-basic";
@@ -1277,11 +1397,11 @@ pub async fn run_selftest(
 
     // Announce both
     node_a
-        .announce_destination(&dest_hash_a, Some(b"selftest-a"))
+        .announce_destination(&dest_hash_a, Some(APP_DATA_A))
         .await
         .map_err(|e| format!("announce A: {e}"))?;
     node_b
-        .announce_destination(&dest_hash_b, Some(b"selftest-b"))
+        .announce_destination(&dest_hash_b, Some(APP_DATA_B))
         .await
         .map_err(|e| format!("announce B: {e}"))?;
 
@@ -1306,19 +1426,76 @@ pub async fn run_selftest(
 
     let discovery_start = Instant::now();
 
-    // Wait for mutual discovery
+    // Wait for mutual discovery, announcing again once per cap slot until it
+    // completes or the window ends.
+    //
+    // One announce per destination is one chance. A neighbour running the
+    // reference stack that cannot air an announce right now puts it in its
+    // per-interface announce queue (`reference/Reticulum/RNS/Transport.py:1283`,
+    // the `should_queue` branch), and what becomes of the queued entry is its
+    // business: the rig series of 2026-09-23 (runs 151 and 179) has rnsd
+    // logging "in 17.77s" for the client's entry and never airing it, with no
+    // error line. Nothing this tool ships can reach into that queue. What it
+    // can do is send another announce once the cap has lapsed — an ordinary
+    // announce the neighbour accepts, and its queue holds one entry per
+    // destination, so a second one refreshes rather than stacks.
+    let cap = announce_cap_slot(&daemon_sizing);
+    println!("[selftest] Phase 2: re-announce slot {}", cap.detail);
+
     let discovery = async {
         tokio::join!(
             state.a_discovered_b.notified(),
             state.b_discovered_a.notified()
         );
     };
-    tokio::time::timeout(
-        std::time::Duration::from_secs(discovery_timeout_secs),
-        discovery,
-    )
-    .await
-    .map_err(|_| format!("Phase 2 timeout: discovery took >{discovery_timeout_secs}s"))?;
+    tokio::pin!(discovery);
+
+    let window = std::time::Duration::from_secs(discovery_timeout_secs);
+    let deadline = discovery_start + window;
+    let mut re_announces: u32 = 0;
+    let discovered = loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break false;
+        }
+        // The next slot boundary, never past the window: the window is the
+        // cap, so this loop cannot outlive it however short the slot is.
+        let next_slot = discovery_start + cap.slot * (re_announces + 1);
+        let wait = next_slot.min(deadline).saturating_duration_since(now);
+        let done = tokio::select! {
+            _ = &mut discovery => true,
+            _ = tokio::time::sleep(wait) => false,
+        };
+        if done {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        re_announces += 1;
+        node_a
+            .announce_destination(&dest_hash_a, Some(APP_DATA_A))
+            .await
+            .map_err(|e| format!("re-announce A: {e}"))?;
+        node_b
+            .announce_destination(&dest_hash_b, Some(APP_DATA_B))
+            .await
+            .map_err(|e| format!("re-announce B: {e}"))?;
+        println!(
+            "[selftest] Phase 2: no mutual discovery after {:.1}s — announced A and B \
+             again (re-announce {re_announces}, one per {:.1}s cap slot)",
+            discovery_start.elapsed().as_secs_f64(),
+            cap.slot.as_secs_f64(),
+        );
+    };
+    if !discovered {
+        return Err(format!(
+            "Phase 2 timeout: discovery took >{discovery_timeout_secs}s \
+             ({re_announces} re-announce(s) sent, one per {:.1}s cap slot)",
+            cap.slot.as_secs_f64(),
+        )
+        .into());
+    }
 
     let discovery_time = discovery_start.elapsed();
     let hops = node_a.hops_to(&dest_hash_b).unwrap_or(0);
@@ -2296,13 +2473,9 @@ pub async fn run_selftest(
     node_a.stop().await?;
     node_b.stop().await?;
 
-    // Exit with worst verdict
-    let final_verdict = verdicts.into_iter().max().unwrap_or(Verdict::Pass);
-    if final_verdict == Verdict::Fail {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    // The worst verdict is the run's verdict; the caller decides what it
+    // costs (the binary turns a `Fail` into exit code 1).
+    Ok(verdicts.into_iter().max().unwrap_or(Verdict::Pass))
 }
 
 async fn cleanup(
@@ -3188,5 +3361,95 @@ mod tests {
         assert!(Verdict::Warn < Verdict::Fail);
         assert_eq!(Verdict::Pass.max(Verdict::Fail), Verdict::Fail);
         assert_eq!(Verdict::Warn.max(Verdict::Pass), Verdict::Warn);
+    }
+
+    // Announce cap slot
+
+    /// The slot is the reference's own arithmetic: one announce's air time
+    /// divided by the 2 % share an interface gives announces.
+    ///
+    /// At 2734 bps a 209-byte announce is 611 ms of payload, so a neighbour
+    /// running the reference holds its interface closed to announces for
+    /// 30.5 s after airing one. Re-announcing sooner than that lands in the
+    /// same closed window the first announce did.
+    #[test]
+    fn the_slot_is_one_announce_divided_by_the_reference_cap() {
+        let sizing = LinkSizing {
+            profile: Some(MEASURED_LINK),
+            origin: "the daemon's `RNodeInterface`".to_string(),
+        };
+        let cap = announce_cap_slot(&sizing);
+        let expected_ms = ANNOUNCE_WIRE_BYTES * 8 * 1000 / 2734 * 50;
+        assert_eq!(cap.slot, std::time::Duration::from_millis(expected_ms));
+        assert!(
+            cap.slot.as_secs_f64() > 30.0 && cap.slot.as_secs_f64() < 31.0,
+            "one cap slot on the #190 link is half a minute, got {:?}",
+            cap.slot
+        );
+        for term in ["2734 bps", "2%", "the daemon's `RNodeInterface`"] {
+            assert!(
+                cap.detail.contains(term),
+                "the slot line must carry its derivation, missing {term:?}: {}",
+                cap.detail
+            );
+        }
+    }
+
+    /// No bitrate, no derivation: the fixed fallback, and the line says which
+    /// state the run is in rather than printing a bare number.
+    #[test]
+    fn an_unpriced_link_falls_back_to_a_fixed_slot() {
+        let sizing = LinkSizing::unavailable("no -c/--config given");
+        let cap = announce_cap_slot(&sizing);
+        assert_eq!(cap.slot, ANNOUNCE_CAP_SLOT_FALLBACK);
+        assert!(
+            cap.detail.contains("no -c/--config given"),
+            "the fallback has to name why nothing was derived: {}",
+            cap.detail
+        );
+    }
+
+    /// A zero bitrate is not a link either — dividing by it would panic, and
+    /// the row it came from describes nothing.
+    #[test]
+    fn a_zero_bitrate_does_not_price_a_slot() {
+        let sizing = LinkSizing {
+            profile: Some(LinkProfile {
+                bitrate_bps: 0,
+                tx_jitter_max_ms: None,
+            }),
+            origin: "a row with no usable bitrate".to_string(),
+        };
+        assert_eq!(announce_cap_slot(&sizing).slot, ANNOUNCE_CAP_SLOT_FALLBACK);
+    }
+
+    /// On a fast link the derived slot is milliseconds, and re-announcing at
+    /// that rate is an announce storm. The floor is what stops it, and the
+    /// line says the number was floored rather than derived.
+    #[test]
+    fn a_fast_link_is_floored_rather_than_re_announced_every_few_ms() {
+        let sizing = LinkSizing {
+            profile: Some(LinkProfile {
+                bitrate_bps: 10_000_000,
+                tx_jitter_max_ms: None,
+            }),
+            origin: "a 10 Mbit/s row".to_string(),
+        };
+        let cap = announce_cap_slot(&sizing);
+        assert_eq!(cap.slot, ANNOUNCE_CAP_SLOT_FLOOR);
+        assert!(
+            cap.detail.contains("floored"),
+            "a floored slot must say so: {}",
+            cap.detail
+        );
+    }
+
+    /// The size the slot is priced against is the announce this tool sends,
+    /// not a round number: header, identity, hashes, ratchet, signature and
+    /// the app data Phase 2 actually carries.
+    #[test]
+    fn the_slot_is_priced_against_the_announce_this_tool_sends() {
+        assert_eq!(APP_DATA_A.len(), APP_DATA_B.len());
+        assert_eq!(ANNOUNCE_WIRE_BYTES, 19 + 64 + 10 + 10 + 32 + 64 + 10);
     }
 }

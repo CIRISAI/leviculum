@@ -54,7 +54,7 @@ async fn rust_client_installs_path_via_relay_hops2() {
     // Daemon B: will relay announces from A to the Rust client.
     // Spawn second, then wire its TCPClientInterface to daemon A via
     // the existing harness `add_client_interface` JSON-RPC method
-    // (see `add_client_interface`, `leviculum-std/tests/rnsd_interop/harness.rs:1757`).
+    // (see `add_client_interface`, `leviculum-std/tests/rnsd_interop/harness.rs:1775`).
     let daemon_b = TestDaemon::start().await.expect("start daemon B");
     daemon_b
         .add_client_interface("127.0.0.1", daemon_a.rns_port(), Some("relay_to_A"))
