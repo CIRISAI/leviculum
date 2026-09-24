@@ -45,8 +45,12 @@
 #
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
-# file only reacts to the `event: cron` trigger it produces. Suggested
-# schedule: `0 2 * * *` (02:00 UTC daily).
+# file only reacts to the `event: cron` trigger it produces. The cron is
+# configured as `0 4 * * *` (04:00 UTC daily), and it is the fallback,
+# not the normal path: the reviewer host fires this same cron through
+# the Woodpecker API as soon as the night pushes a green ref, because a
+# clock-fired run publishes before the signal exists (see "What fires
+# the publish" in docs/src/development-ci.md).
 #
 # Authentication for the publish step uses a Codeberg API token
 # (write:repository scope) supplied via the Woodpecker secret

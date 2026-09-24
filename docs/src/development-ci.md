@@ -84,10 +84,40 @@ always names which one failed:
 The 72 h bound is measured, not assumed: over 2026-08-22..09-22 the
 nightly timer produced 27 runs with a median gap of 24 h, every gap
 but one at or under 54.4 h, and one 96 h gap (2026-09-04 to 09-08)
-which is precisely the case the bound exists to stop. The forge
-publishes on its own cron, so the freshest ref it can read is normally
-the previous night's and is already ~24 h old. 72 h therefore accepts
-the ordinary day plus one missed night and refuses two.
+which is precisely the case the bound exists to stop. When the forge
+publishes on the fallback cron rather than on the trigger described
+below, the freshest ref it can read is normally the previous night's and
+is already ~24 h old. 72 h therefore accepts the ordinary day plus one
+missed night and refuses two.
+
+### What fires the publish
+
+The publish is fired by the green ref, not by the clock. Since
+2026-09-24 the reviewer host polls the forge every ten minutes and, as
+soon as a new `refs/nightly/green/*` appears, fires the nightly cron
+through the Woodpecker API (`lev-nightly-publish-trigger`, reviewer-host
+tooling: it is not in this repo, and the API token stays on that host on
+purpose). The scheduled cron, `0 4 * * *` UTC, remains as a fallback
+rather than as the normal path; both firing on the same day is harmless,
+because the release is rolling and `scripts/publish-nightly.sh` writes
+the same `nightly` tag with its assets overwritten. Ordering is the
+whole point of the change: pipelines 455 (2026-09-23) and 458
+(2026-09-24) both refused at the publish gate because the 04:00 cron ran
+before the nightly host had pushed that day's green ref. The code was
+fine and the night had been green; the signal simply was not there yet.
+
+That refusal is also what an operator sees when the trigger did not
+fire. The publish step refuses with `NO-SIGNAL` when no green ref can be
+read from the remote at all, and with `NOT-COVERED` — printing "the
+newest green ref is ..." and "is neither that commit nor an ancestor of
+it" — when refs exist but none of them names this commit or a
+descendant of it, which is what a night that has not pushed yet looks
+like from the publish step. Neither is a build failure and neither
+needs a code change:
+`bash scripts/check-nightly-green.sh --commit <sha>` answers which ref
+the forge can see, and the fix is to wait for the night's ref to land
+and then start the nightly cron by hand from the Woodpecker UI
+(Repo → Settings → Crons) if the trigger has not done it first.
 
 ### Publishing anyway
 
