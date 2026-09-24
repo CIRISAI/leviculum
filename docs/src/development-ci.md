@@ -173,8 +173,9 @@ just install-ci
 ```
 
 It installs `git` hooks (via `core.hooksPath = .githooks`), runner
-scripts, systemd user units, the separate cargo target dir, and the
-state dir. Re-running is safe.
+scripts, systemd user units, the separate cargo target dir, the
+build-directory sweeper `just sweep` needs, and the state dir.
+Re-running is safe.
 
 The installer detects the worktree it was run from and patches the
 systemd-unit `ExecStart` paths to match — so a `git worktree`-based
@@ -252,6 +253,42 @@ target/`) so it doesn't fight your IDE's `target/` for inkremental
 caches. The first run after `install-ci.sh` compiles the whole
 workspace and all test binaries from scratch — **plan for 20-40
 minutes**. Subsequent runs are incremental, ~5-15 minutes.
+
+## Keeping the build directories bounded
+
+Cargo adds; it never removes. Every changed input writes a new
+hash-suffixed artefact next to the old one, so a target directory only
+grows, and the growth rate is the point rather than any one build:
+measured on the CI host on 2026-09-24, the `deps` directory under
+`target/x86_64-unknown-linux-musl/debug` alone held 2705 files and
+27 GB of that tree's 36 GB, and on 2026-09-09 one working day of gate
+runs took the same tree to 137 GB and filled the root volume
+(Codeberg #381). A full volume does not announce itself as a full
+volume: hardware runs go red for want of space and look like the
+stack.
+
+```
+just sweep                  # both workspaces, 30 GB and 4 GB caps
+just sweep 20GB 2GB         # tighter caps
+```
+
+Two directories, because this repository has two workspaces — the host
+one at the root and the firmware one in `leviculum-nrf` — and sweeping
+the root leaves the firmware's 6 GB untouched. Where they lie is asked
+rather than assumed, so a tree that moved its artefacts with
+`CARGO_TARGET_DIR` (Tier 1 and the nightly do) is swept where they
+actually are.
+
+`cargo sweep --maxsize` drops the oldest artefacts until the directory
+fits the cap, which keeps exactly the ones the next build would reuse.
+`cargo clean` is the blunt version of the same thing and costs a full
+rebuild of everything.
+
+What no cleanup may take is the compilation cache: with
+`RUSTC_WRAPPER=sccache` set, that cache is what makes the rebuild after
+a sweep cheap, and it bounds itself through `SCCACHE_CACHE_SIZE`.
+Deleting it to free space buys one-off gigabytes and charges the next
+build for them.
 
 ## Notifications
 
@@ -548,4 +585,4 @@ had failed.
 | Tier 1 spuriously red | Check log; if Docker is involved, ensure no leftover containers (`docker ps -a`) |
 | Timer didn't fire | `systemctl --user list-timers`, then `journalctl --user -u leviculum-ci-nightly.timer`. The nightly is the only timer this installer enables; Tier 2 has no timer. |
 | Tier 2 looks like it never runs | It doesn't, unless started: `systemctl --user start leviculum-ci-tier2.service`. `scripts/ci-status.sh` prints how long it has been. |
-| Disk filling up | Logs auto-rotate (14d/60d), but `~/.cache/leviculum-ci-target/` can grow large — clear with `cargo clean --target-dir ~/.cache/leviculum-ci-target` |
+| Disk filling up | Logs auto-rotate (14d/60d); the build directories do not — see [Keeping the build directories bounded](#keeping-the-build-directories-bounded). `just sweep` caps both workspaces, `just sweep 20GB 2GB` harder. Tier 1's own directory is separate: `cargo clean --target-dir ~/.cache/leviculum-ci-target`. Never the sccache. |

@@ -217,6 +217,20 @@ echo "[install-ci] state dir: ~/.local/state/leviculum-ci"
 mkdir -p ~/.cache/leviculum-ci-target
 echo "[install-ci] cargo target dir: ~/.cache/leviculum-ci-target"
 
+# 5b. The sweeper those target directories need (Codeberg #381). A day of
+#     gate runs adds well over a hundred gigabytes of artefacts that cargo
+#     never removes, and on the host that runs these tiers a full root
+#     volume does not fail loudly: it turns hardware runs red for want of
+#     space and makes the dispatcher refuse work. `just sweep` is what
+#     bounds the two target directories without paying for a full rebuild,
+#     and it is the tool, not the recipe, that is usually missing -- a
+#     sweeper that is not installed makes every hygiene job a silent no-op.
+#     Installed rather than hinted at for that reason; idempotent like the
+#     lines below it. Unpinned, because nothing diffs its output: it deletes
+#     rebuildable artefacts and a newer version deletes them just as well.
+cargo install --locked cargo-sweep
+echo "[install-ci] build-directory sweeper: cargo-sweep (just sweep)"
+
 # 6. Firmware build toolchain.  flip-link is the firmware linker
 #    (stack-overflow protection, Codeberg #50); run-tier3-hw.sh builds
 #    the firmware via `just flash*`.  Both lines are idempotent: the

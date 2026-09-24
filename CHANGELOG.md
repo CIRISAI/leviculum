@@ -200,6 +200,38 @@ Toolchain: Rust 1.97.1
   and what is in scope. The repository had no such route, so a finder's
   only options were a public issue or silence (Codeberg #289).
 
+- `just sweep`, which bounds this repository's two build directories without
+  paying for a full rebuild. Cargo adds and never removes: every changed
+  input writes a hash-suffixed artefact next to the old one, so a target
+  directory only grows, and the growth rate is the point rather than any one
+  build. Measured on the CI host on 2026-09-24, the `deps` directory under
+  `target/x86_64-unknown-linux-musl/debug` alone held 2705 files and 27 GB of
+  that tree's 36 GB; one working day of gate runs had taken the same tree to
+  137 GB on 2026-09-09 and filled the root volume until the dispatcher
+  refused work. A full volume does not announce itself as one: hardware runs
+  go red for want of space and look like the stack.
+
+  `cargo sweep --maxsize` drops the OLDEST artefacts until a directory fits
+  its cap, which keeps the ones the next build would reuse and is what
+  separates it from `cargo clean`. The recipe sweeps BOTH workspaces, the
+  host one at the root and the firmware one in `leviculum-nrf`, because a
+  sweep of the root leaves the firmware's 6.2 GB untouched. Where the
+  artefacts lie is asked rather than assumed, so a tree that moved them with
+  `CARGO_TARGET_DIR` — Tier 1 and the nightly do — is swept where they
+  actually are. The caps are parameters with measured defaults, not targets:
+  a directory already under its cap is left alone.
+
+  Deliberately untouched: the sccache directory. That cache is what makes
+  the rebuild after a sweep cheap, and it bounds itself through
+  `SCCACHE_CACHE_SIZE`. `scripts/install-ci.sh` installs cargo-sweep rather
+  than hinting at it, because a sweeper that is not installed turns every
+  hygiene job into a silent no-op, and `just sweep-selftest` holds what the
+  recipe promises — both workspaces, the budgets as given, and a refusal
+  naming the install line when the tool is absent — against a stub cargo, so
+  the assertion costs no build and removes no file. This is the on-demand
+  half of Codeberg #381; what bounds the trees unattended is not decided
+  here. Refs #381.
+
 ### Changed
 
 - Every build claim `lnflash` makes about a flashed board now names where it

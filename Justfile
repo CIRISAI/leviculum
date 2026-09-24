@@ -285,6 +285,7 @@ nrf-shellcheck:
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-esptool.sh \
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
+        scripts/test-just-sweep.sh \
         scripts/check-firmware-images.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
@@ -956,7 +957,7 @@ check-source-invariant-census:
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
+fast: check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-ignored-source check-just-docs prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness fuzz-selftest notices-guard doc-gate changelog-links core-no-tracing m0-build-gate lxmf-embedded-gate i686-usize-gate check-all-targets citation-guard source-invariant-tests
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -1346,6 +1347,44 @@ logs:
 [doc('Install the git hooks and systemd timers of the 4-tier CI pipeline')]
 install-ci:
     bash scripts/install-ci.sh
+
+_require-cargo-sweep:
+    @cargo sweep --version >/dev/null 2>&1 || (echo "cargo-sweep not found -- run: cargo install --locked cargo-sweep (or just install-ci)" && exit 1)
+
+# Codeberg #381: a day of gate runs writes well over a hundred gigabytes into
+# these target directories and cargo removes none of it. Every changed input
+# adds a hash-suffixed artefact NEXT TO the old one, so the directory only
+# grows: measured on the CI host 2026-09-24, 2705 files and 27 GB in
+# `target/x86_64-unknown-linux-musl/debug/deps` alone, of a 36 GB tree, and
+# 137 GB on the day the host's root volume filled and refused work.
+#
+# `cargo clean` is the blunt answer and costs a full rebuild of everything.
+# `cargo sweep --maxsize` drops the OLDEST artefacts until the directory fits
+# the budget, which keeps the ones the next build would reuse. The budgets are
+# caps measured on that host, not targets: a tree already under one is left
+# alone, and both are parameters.
+#
+# Both workspaces, because this repository has two -- the host one at the root
+# and the firmware one in leviculum-nrf -- with a target directory each, and
+# sweeping the root leaves the firmware's untouched (6.2 GB on the same day).
+# Where those directories LIE is asked, not assumed: cargo-sweep resolves the
+# path through cargo, so a tree that moved its artefacts with CARGO_TARGET_DIR
+# (the CI tiers and the nightly do) is swept where they actually are. Verified
+# 2026-09-24 against a CARGO_TARGET_DIR outside the tree.
+#
+# What this must never touch is the sccache directory: that cache is what
+# makes the rebuild after a sweep cheap, and it bounds itself
+# (SCCACHE_CACHE_SIZE).
+[doc('Trim both target directories to a budget, keeping the newest')]
+sweep budget="30GB" fw_budget="4GB": _require-cargo-sweep
+    cargo sweep --maxsize {{budget}} .
+    cargo sweep --maxsize {{fw_budget}} leviculum-nrf
+
+# Runs the recipe above against a stub cargo, so the assertion costs no
+# build and deletes nothing. ~1 s.
+[doc('Drive the sweep recipe against a stub cargo, deleting nothing')]
+sweep-selftest:
+    @bash scripts/test-just-sweep.sh
 
 # Touch-free; double-tap RESET only if the runner prompts for a crashed
 # device. Details: leviculum-nrf/README.md §Build and flash.
