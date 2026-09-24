@@ -404,6 +404,36 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board now proves a client's upload when it arrives, not when it has been
+  judged, so a phone on BLE can finally post mail to the propagation node on
+  a board (Codeberg #397). An upload rides a plain link packet and the
+  uploader holds a packet receipt worth `max(rtt * 6, 1 s)`; over BLE the
+  measured round trip of 295-484 ms makes that window 1.8-2.9 s wide. The
+  board proved only after the message's propagation stamp had been validated
+  and the record flushed, and that validation is the fixed 1000-round PN
+  workblock: 3655-3727 ms on an nRF52840. The receipt therefore always
+  expired first, LXMF tore the link down, the proof landed on a closed link,
+  and the client resent the same message every ~16 s while the board accepted
+  every copy (`PN_ACCEPT ... dup=1`). Lowering the announced stamp cost bought
+  nothing, because the cost sets the zero bits and not the rounds. Over LoRa a
+  seconds-wide window hid the same code.
+
+  The proof now leaves in the event arm that receives the packet, before the
+  upload is even decoded, and the stamp judgement follows on the work queue.
+  Python's propagation node validates before it proves
+  (`reference/LXMF/LXMF/LXMRouter.py:2233-2256`) and can afford to: its
+  workblock is about 20 ms on a desktop CPU. That ordering is not portable to
+  a core 185 times slower, so this is a deviation under the project's
+  deviation rule rather than parity — the wire is unchanged, and the
+  judgement a peer relies on still reaches it, because a refused stamp still
+  sends `ERROR_INVALID_STAMP` and tears the link down, which a Python client
+  turns into `LXMessage.REJECTED` whether or not its receipt already
+  concluded. What a refusal no longer shows up as is a missing proof, so
+  every refusing arm now logs `PN_REJECT reason=<word> via=<carrier>`, the
+  same fixed-word line `lnpnd` has always kept. The release point and the
+  window arithmetic live in the new host-testable `leviculum-upload-proof`,
+  whose tests carry the pre-fix ordering as a positive control.
+
 - An LNode whose calendar healed from the air now says so: `[TIME_SOURCE]`
   reports `overheard` instead of the birth state (Codeberg #398). The line is
   the only thing a board says about its clock, and the three sites that record

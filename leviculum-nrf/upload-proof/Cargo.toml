@@ -1,0 +1,17 @@
+[package]
+name = "leviculum-upload-proof"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "When a client upload's packet proof leaves the board, and the uploader's receipt window it has to land in. Host-testable"
+
+[dependencies]
+
+[dev-dependencies]
+# Only the tests need these, and each for one number, so neither is copied
+# into this crate where it would drift: the receipt factor and its enforced
+# floor come from the stack that computes the window, and the workblock cost
+# from the crate that already pins what a settle pass spends on it.
+leviculum-core = { path = "../../leviculum-core", default-features = false }
+leviculum-settle-budget = { path = "../settle-budget" }

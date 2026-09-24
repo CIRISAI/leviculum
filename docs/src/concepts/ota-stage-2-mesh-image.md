@@ -109,7 +109,7 @@ held 51 662 B live before Codeberg #384 B1 and 29 842 B after it, and
 before either, a board died on a 5 446 B allocation between serving a
 request and answering it — `PN_GET … bytes=5376` as the last line of one
 boot and `PANIC_PMRT … "memory allocation of 5446 bytes failed"` on the
-next (`leviculum-nrf/src/pn.rs:445-470`, pinned by
+next (`leviculum-nrf/src/pn.rs:476-501`, pinned by
 `leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`). A
 path that holds one whole copy of 5 KB killed a board; 605 KB is not a
 question of tuning.

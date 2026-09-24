@@ -22,9 +22,11 @@
 //!   bounds how long the main loop is away from its channels — and
 //!   flushes the store adapters' queued writes through
 //!   [`crate::record_store::pn_execute`], one channel round trip per op.
-//!   The wire action a write gates (the upload proof, the `/get`
-//!   response) is sent only after its flush reported durable: "persist
-//!   before you prove" holds at this boundary.
+//!   The wire action a write gates (the `/get` response, a sync round's
+//!   conclusion) is sent only after its flush reported durable: "persist
+//!   before you prove" holds at this boundary. The client upload's packet
+//!   proof is NOT one of those actions and never was one — see §"What
+//!   those seconds cost on a fast carrier" below.
 //! * [`Engine::next_deadline_ms`] — what the loop folds into its sleep,
 //!   so queued work resumes promptly without the loop polling.
 //!
@@ -87,18 +89,46 @@
 //! A client upload arrives as a plain link packet, and the uploader
 //! holds a packet receipt whose deadline is `max(rtt * 6, 5 ms)` —
 //! Python `reference/Reticulum/RNS/Packet.py:431`, ours
-//! `leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR`. We prove only
-//! after the record is durable, which is right and is the reference's
-//! own ordering (`reference/LXMF/LXMF/LXMRouter.py:2233-2255`), but it
-//! puts the whole validation inside the uploader's window. Below an RTT
-//! of roughly 610 ms the window is shorter than the walk and the proof
-//! is always late: the uploader's receipt fails, LXMF tears the link
-//! down (`reference/LXMF/LXMF/LXMessage.py:616-620`), our proof lands on
-//! a closed link, and the client retries the same message every ~16 s
+//! `leviculum_core::constants::TRAFFIC_TIMEOUT_FACTOR` over
+//! `RAW_RECEIPT_TIMEOUT_FLOOR_MS`. Until 2026-09-25 we proved only after
+//! the record was durable — the reference's own ordering
+//! (`reference/LXMF/LXMF/LXMRouter.py:2233-2256`) — which put the whole
+//! validation inside that window. Below an RTT of roughly 610 ms the
+//! window is shorter than the walk and the proof is always late: the
+//! uploader's receipt fails, LXMF tears the link down
+//! (`reference/LXMF/LXMF/LXMessage.py:616-620`), our proof lands on a
+//! closed link, and the client retries the same message every ~16 s
 //! while we accept every copy (`PN_ACCEPT ... dup=1`). Over LoRa the
 //! window is seconds wide and nothing shows; over BLE (measured RTT
-//! 295-484 ms, so a 1.8-2.9 s window) no upload from a host has ever
+//! 295-484 ms, so a 1.8-2.9 s window) no upload from a host ever
 //! concluded.
+//!
+//! The reference can afford that ordering because its workblock is about
+//! 20 ms on a desktop CPU (measured 2026-09-25 against
+//! `reference/LXMF/LXMF/LXStamper.py:49-60`), two orders of magnitude
+//! inside the narrowest window a link ever has. This core is 185 times
+//! slower, so the ordering that is free there is fatal here.
+//!
+//! So the proof now leaves at receipt, in `on_event`'s
+//! `LinkDataReceived` arm, and the judgement follows on the work queue.
+//! That is a DEVIATION, taken under the CLAUDE.md rule and not by
+//! parity: the wire is unchanged (the same link proof for the same
+//! packet hash, earlier), the semantics a peer relies on are unchanged
+//! (a packet proof is what `RNS.Link.receive` itself issues under
+//! `PROVE_ALL` before any application sees the payload —
+//! `reference/Reticulum/RNS/Link.py:999-1006` — and a refused stamp
+//! still sends `ERROR_INVALID_STAMP` and tears the link down, which a
+//! Python client turns into `LXMessage.REJECTED` whether or not its
+//! receipt already concluded,
+//! `reference/LXMF/LXMF/LXMRouter.py:2667-2677`), and Priority 1 moves
+//! from zero BLE client deliveries to one round trip. The arithmetic and
+//! the release point live in `leviculum-upload-proof`, whose tests carry
+//! the old ordering as a positive control.
+//!
+//! What a refusal no longer shows as is a missing proof, so every
+//! refusing arm now logs `PN_REJECT reason=<word> via=<carrier>` — the
+//! same fixed-word line `lnpnd` keeps — and the accepted arm still
+//! reports its flush as `PN_ACCEPT ... durable=`.
 //!
 //! # Heap budget (#388)
 //!
@@ -218,6 +248,7 @@ use leviculum_lxmf::{
 use leviculum_pn_store::{FlushOp, PnPeerStore, PnStore, Region};
 use leviculum_record_log::SECTOR_SIZE;
 use leviculum_sync_batch::AfterClose;
+use leviculum_upload_proof::UploadProofs;
 use rand_core::CryptoRngCore;
 
 // ---------------------------------------------------------------------------
@@ -649,13 +680,16 @@ impl core::fmt::Display for Hex<'_> {
 /// validator, queued by [`Engine::on_events`] and drained one per
 /// [`Engine::settle`].
 enum Work {
-    /// A client upload envelope, from a raw link packet (`proof` set) or
-    /// a single-message resource (`proof` empty — the resource protocol
-    /// acknowledges on its own).
+    /// A client upload envelope awaiting its stamp judgement, from a raw
+    /// link packet or a single-message resource.
+    ///
+    /// No proof travels here. A packet upload is proven at receipt (#397,
+    /// `on_event`'s `LinkDataReceived` arm) and a resource upload is
+    /// acknowledged by the resource protocol, so by the time an item reaches
+    /// this queue the wire has already answered the sender.
     Upload {
         link_id: LinkId,
         data: Vec<u8>,
-        proof: Option<[u8; 32]>,
         via: &'static str,
     },
     /// A `/get` request awaiting its (possibly purging) answer.
@@ -859,7 +893,9 @@ pub struct Engine {
     dest_hash: DestinationHash,
     identity: Identity,
     identity_hash: [u8; 16],
-    pending_proofs: BTreeMap<LinkId, VecDeque<[u8; 32]>>,
+    /// Proof hashes owed per link, and the rule for when they are released
+    /// ([`leviculum_upload_proof`], #397).
+    proofs: UploadProofs<LinkId>,
     work: VecDeque<Work>,
     sync_batch: Option<SyncBatch>,
     outbound: Option<OutboundSync>,
@@ -913,9 +949,11 @@ impl Engine {
         )
         .ok()?;
         destination.set_accepts_links(true);
-        // The upload proof is the node's "stored" statement, so it must
-        // not leave before the flush returns ("persist before you
-        // prove"): the application, not the stack, proves.
+        // The application proves, not the stack — the same `PROVE_APP`
+        // the reference's propagation destination would need to prove a
+        // client upload at all. Since #397 it proves at receipt, in
+        // `on_event`'s `LinkDataReceived` arm, so the strategy buys the
+        // ORDER (proof, then queue) rather than a delay.
         destination.set_proof_strategy(ProofStrategy::App);
         let dest_hash = *destination.hash();
         node.register_destination(destination);
@@ -988,7 +1026,7 @@ impl Engine {
             dest_hash,
             identity,
             identity_hash,
-            pending_proofs: BTreeMap::new(),
+            proofs: UploadProofs::new(),
             // #388 step 3: spines at their working size from boot,
             // reused for the engine's lifetime (see WORK_SLOTS).
             work: VecDeque::with_capacity(WORK_SLOTS),
@@ -1041,9 +1079,10 @@ impl Engine {
             .outbound
             .as_ref()
             .map_or(0, |sync| hc::vec_bytes(&sync.plan.ids));
-        let link_maps = hc::btree_map_bytes(&self.pending_proofs)
+        let link_maps = hc::btree_map_bytes(self.proofs.map())
             + self
-                .pending_proofs
+                .proofs
+                .map()
                 .values()
                 .map(hc::vec_deque_bytes)
                 .sum::<usize>()
@@ -1246,20 +1285,24 @@ impl Engine {
                 link_id,
                 packet_hash,
             } if self.owns_link(node, link_id) => {
-                self.pending_proofs
-                    .entry(*link_id)
-                    .or_default()
-                    .push_back(*packet_hash);
+                self.proofs.requested(*link_id, *packet_hash);
             }
             NodeEvent::LinkDataReceived { link_id, data } if self.owns_link(node, link_id) => {
-                let proof = self
-                    .pending_proofs
-                    .get_mut(link_id)
-                    .and_then(VecDeque::pop_front);
+                // #397: the proof says the bytes arrived and decrypted, and
+                // the moment they did is the only moment the uploader is
+                // still listening — its receipt is `max(rtt * 6, 1 s)` wide
+                // and one stamp workblock is 3.7 s. So it goes out here,
+                // before the upload is even decoded, and the judgement
+                // follows on the queue. `leviculum_upload_proof` is where
+                // that ordering is asserted and priced.
+                if let Some(packet_hash) = self.proofs.on_receipt(link_id) {
+                    if let Ok(send) = node.send_data_proof(link_id, &packet_hash) {
+                        out.merge(send);
+                    }
+                }
                 self.work.push_back(Work::Upload {
                     link_id: *link_id,
                     data: data.clone(),
-                    proof,
                     via: "packet",
                 });
             }
@@ -1334,7 +1377,7 @@ impl Engine {
                 });
             }
             NodeEvent::LinkClosed { link_id, .. } => {
-                self.pending_proofs.remove(link_id);
+                self.proofs.forget(link_id);
                 self.validated_links.remove(link_id);
                 self.inbound_transfers.retain(|held| held != link_id);
                 // Two cases for a close that lands on the batch's own link,
@@ -1430,7 +1473,7 @@ impl Engine {
     /// is never fed back to `on_events`, so the cleanup the remote-close
     /// path does there has to happen here by hand.
     fn drop_link_state(&mut self, link_id: &LinkId) {
-        self.pending_proofs.remove(link_id);
+        self.proofs.forget(link_id);
         self.validated_links.remove(link_id);
         self.inbound_transfers.retain(|held| held != link_id);
     }
@@ -1922,7 +1965,6 @@ impl Engine {
             self.work.push_back(Work::Upload {
                 link_id: *link_id,
                 data: data.to_vec(),
-                proof: None,
                 via: "resource",
             });
             return;
@@ -2387,6 +2429,18 @@ impl Engine {
         }
     }
 
+    /// One refused upload, by reason word and carrier.
+    ///
+    /// `reason` is a fixed word rather than prose, for the same reason
+    /// `lnpnd::engine::log_reject` keeps one: the point of the line is that a
+    /// capture can count refusals per reason without parsing sentences. The
+    /// board needs it more than the daemon does — since #397 the proof leaves
+    /// at receipt, so a refusal is no longer visible on the wire as a missing
+    /// proof and this line is the only place it is recorded.
+    fn log_reject(reason: &'static str, via: &'static str) {
+        crate::log::log_fmt("PN_REJECT ", format_args!("reason={reason} via={via}"));
+    }
+
     fn tick_stats(&mut self, now_ms: u64) {
         if now_ms < self.next_stats_at_ms {
             return;
@@ -2728,12 +2782,7 @@ impl Engine {
         S: Storage,
     {
         match work {
-            Work::Upload {
-                link_id,
-                data,
-                proof,
-                via,
-            } => {
+            Work::Upload { link_id, data, via } => {
                 // The stamp first, and before anything with a side effect:
                 // this arm is re-entered once per slice until the workblock is
                 // expanded, so everything ahead of the grind would run fifty
@@ -2744,14 +2793,7 @@ impl Engine {
                         .ok()
                         .map(|upload| (*upload.transient_id(), *upload.propagation_stamp()))
                 }) {
-                    ValidateStep::Parked => {
-                        return Some(Work::Upload {
-                            link_id,
-                            data,
-                            proof,
-                            via,
-                        })
-                    }
+                    ValidateStep::Parked => return Some(Work::Upload { link_id, data, via }),
                     // An upload that would not decode yields no value, which
                     // is what a failed decode always amounted to here: the two
                     // cases the old `Option<Option<u16>>` kept apart were
@@ -2777,8 +2819,11 @@ impl Engine {
                         evicted,
                     } => {
                         self.log_evictions(&evicted);
-                        // Persist before you prove: the flush is the
-                        // storage statement the proof makes.
+                        // The flush still happens here, and `durable=` still
+                        // reports it — what it no longer gates is the proof
+                        // (#397). A packet proof is a receipt statement, not
+                        // a storage statement, and holding it for the flush
+                        // put it behind the whole stamp workblock.
                         let durable = self.flush(node).await;
                         crate::log::log_fmt(
                             "PN_ACCEPT ",
@@ -2793,15 +2838,21 @@ impl Engine {
                                 durable as u8
                             ),
                         );
-                        if durable {
-                            if let Some(packet_hash) = proof {
-                                if let Ok(send) = node.send_data_proof(&link_id, &packet_hash) {
-                                    out.merge(send);
-                                }
-                            }
-                        }
                     }
                     UploadOutcome::InvalidStamp { reject } => {
+                        // The verdict is late by construction now — the
+                        // receipt it would once have failed is long
+                        // concluded — but it is still the only thing that
+                        // tells the sender its stamp was refused, and the
+                        // reference sends it
+                        // (`reference/LXMF/LXMF/LXMRouter.py:2253-2256`).
+                        // A Python client turns it into `LXMessage.REJECTED`
+                        // whatever its receipt did
+                        // (`propagation_transfer_signalling_packet`,
+                        // `reference/LXMF/LXMF/LXMRouter.py:2667-2677`), so
+                        // it goes out best-effort and the link is torn down
+                        // behind it.
+                        Self::log_reject("stamp", via);
                         if let Ok((_, send)) = node.send_packet_on_link(&link_id, &reject) {
                             out.merge(send);
                         }
@@ -2811,12 +2862,17 @@ impl Engine {
                     UploadOutcome::PeerSyncForm => {
                         // Multi-message on the packet path: nonconforming
                         // (`reference/LXMF/LXMF/LXMRouter.py:2382-2385`).
+                        Self::log_reject("peer_sync_form", via);
                         self.drop_link_state(&link_id);
                         out.merge(node.close_link(&link_id));
                     }
-                    UploadOutcome::Malformed(_) => {}
+                    UploadOutcome::Malformed(_) => Self::log_reject("malformed", via),
                     UploadOutcome::StoreFailed(_) => {
-                        // No proof leaves; the client keeps its retry.
+                        // The proof is already on the wire (#397), so the
+                        // client will not retry this one: the `PN_REJECT`
+                        // and the `durable=0` beside it are what a capture
+                        // has to read the loss from.
+                        Self::log_reject("store", via);
                     }
                 }
             }
@@ -3011,6 +3067,12 @@ impl Engine {
             .role
             .accept_stamped(&message, now, |_, _| precomputed.flatten());
         let durable = self.flush(node).await;
+        let reason = match &outcome {
+            UploadOutcome::InvalidStamp { .. } => "stamp",
+            UploadOutcome::Malformed(_) => "malformed",
+            UploadOutcome::PeerSyncForm => "peer_sync_form",
+            _ => "store",
+        };
         match outcome {
             UploadOutcome::Accepted {
                 transient_id,
@@ -3041,11 +3103,12 @@ impl Engine {
             UploadOutcome::InvalidStamp { .. }
             | UploadOutcome::Malformed(_)
             | UploadOutcome::PeerSyncForm => {
+                Self::log_reject(reason, "sync");
                 if let Some(batch) = self.sync_batch.as_mut() {
                     batch.drain.reject();
                 }
             }
-            UploadOutcome::StoreFailed(_) => {}
+            UploadOutcome::StoreFailed(_) => Self::log_reject(reason, "sync"),
         }
         let drained = self.sync_batch.as_ref().map(|batch| {
             (

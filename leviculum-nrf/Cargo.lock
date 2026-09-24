@@ -1034,6 +1034,7 @@ dependencies = [
  "leviculum-sync-batch",
  "leviculum-telemetry-policy",
  "leviculum-tx-spacing",
+ "leviculum-upload-proof",
  "nmea0183",
  "nrf-softdevice",
  "nrf-softdevice-s140",
@@ -1114,6 +1115,14 @@ version = "0.1.0"
 [[package]]
 name = "leviculum-tx-spacing"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-upload-proof"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+ "leviculum-settle-budget",
+]
 
 [[package]]
 name = "libc"

@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "sync-batch"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "sync-batch", "upload-proof"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -57,6 +57,11 @@ leviculum-settle-budget = { path = "settle-budget" }
 # means for messages already resident here. The engine drains through this
 # type, so the rule the board runs is the rule the crate's host tests assert.
 leviculum-sync-batch = { path = "sync-batch" }
+# When a client upload's packet proof leaves, and the uploader's receipt
+# window it has to land in (#397). The engine holds this crate's ledger
+# instead of its own map, so the release point its host tests assert is the
+# release point the board runs.
+leviculum-upload-proof = { path = "upload-proof" }
 # Pure two-bound admission (slots and bytes) for the outbound LoRa queue,
 # host-testable like sd-policy/ble-tx (#344). Not in leviculum-core: that
 # crate must build for thumbv6m, which has no atomic CAS.

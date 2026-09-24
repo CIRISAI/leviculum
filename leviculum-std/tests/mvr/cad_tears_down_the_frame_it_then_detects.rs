@@ -15,7 +15,7 @@
 //! unrecoverable; the third CAD found the ended frame gone and the announce
 //! keyed up. The round never recovered inside the step's window — lnode_a
 //! re-sent only the 83 B window packet, and the round's own deadline is 180 s
-//! (`OUTBOUND_DEADLINE_MS`, `leviculum-nrf/src/pn.rs:339`). Codeberg #426.
+//! (`OUTBOUND_DEADLINE_MS`, `leviculum-nrf/src/pn.rs:370`). Codeberg #426.
 //!
 //! The firmware already had one teardown that waits: the idle select's
 //! (`disarm_rx_for_tx`), which holds the key-up for one maximum-size frame's
