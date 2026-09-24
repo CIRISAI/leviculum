@@ -325,6 +325,72 @@ airtime_short=<pct> airtime_long=<pct> channel_load_short=<pct>
 channel_load_long=<pct>`, on the same target and level as `LORA_TX`, so a
 capture that holds the handovers holds the keying account beside them.
 
+### The frame a modem consumes without transmitting
+
+Measured twice on the rig at firmware 1.85, on two different boards
+(t-beam-1 and t-beam-2, 2026-09-24): a frame accepted over serial --
+`LORA_TX` written, the KISS frame complete -- never keyed. No listener
+decode, no decode at the far node, no `airtime_short` step in the next
+CHTM while the medium was free, and the frame was not in the modem's
+queue afterwards either: the next frame aired alone.
+
+The firmware answers nothing on six of its ten paths from an accepted
+`CMD_DATA` frame to no transmission. The two that produce exactly this
+shape -- written, never aired, not queued afterwards -- are the length
+guards in the two queue drains, `flush_queue()`
+(RNode_Firmware.ino:586-589) and `pop_queue()`
+(RNode_Firmware.ino:626-628): both pop the packet's start and length
+off their FIFOs *before* testing them, so a rejected packet is already
+gone. What feeds those guards a bad length is a queue-accounting desync
+that nobody has placed yet; 1.85 also carries the `pop_queue`
+accounting bug that `8382d4a` fixes upstream after the tag, which
+leaves `queue_height` permanently high once a packet is discarded.
+`stat_tx` is never incremented in 1.85, and `CMD_READY` answers a
+single queue-full bit that no realistic backlog reaches, so there is no
+counter to read.
+
+What there is, is the receipt above. The interface now consumes it. For
+every frame it hands over it records the ledger as it stood, what the
+frame should cost (its airtime at the running PHY plus the one header
+byte `transmit()` prepends, RNode_Firmware.ino:720-724, in raw CHTM
+units), and the window the answer has to arrive in: the frame's own
+post-TX hold plus one firmware stat cadence. When a CHTM lands in that
+window with the ledger unmoved, the interface says so:
+
+```
+LORA_TX_UNACCOUNTED iface=<n> len=<B> handover_t=<unix ms> chtm_t=<unix ms> expected_delta=<pct>
+```
+
+WARN level, on the same target as `LORA_TX` and `LORA_CHTM`, and
+counted as `tx_unaccounted` in the interface stats. Every ambiguity
+resolves away from the accusation, because a false one would poison the
+instrument (`judge_airtime`,
+`leviculum-std/src/interfaces/rnode.rs:870`): any rise at all counts as
+keyed, a falling ledger is read as a bin ageing out of the two-bin
+window rather than as a swallowed frame, a rise in `airtime_long`
+absolves even when the short window has not moved, a DCD busy fraction
+that could cover the whole hold is read as a frame still legitimately
+queued, and a configured airtime lock at or below the reported airtime
+silences it. `expected_delta` is reported, never thresholded.
+
+Behind the observable sits a workaround: the interface keeps its copy
+of an unaccounted frame and re-hands it ONCE, naming the retry
+(`LORA_TX_REHAND iface=<n> len=<B> handover_t=<unix ms>`). Once,
+because a modem that swallows the retry too is not going to send this
+frame, and repeating into it only buys latency for everything behind
+it; the second verdict counts the frame as lost instead
+(`RNODE_TX_QUEUE_DROP ... reason=unaccounted_twice`). What a re-hand
+costs the far end is one duplicate, and the dedup cache drops it on
+arrival (`has_packet_hash`,
+`leviculum-core/src/transport.rs:3166`, which emits `DEDUP_DROP`). The
+classes that cache exempts -- announces, and link requests and proofs
+addressed to us -- are exactly the classes whose retries the stack
+already expects, so a second copy there is processed as a retry rather
+than as corruption.
+
+No upstream report (project policy); this page and the code are the
+record.
+
 Note: For multi-interface (RNodeMultiInterface), CMD_STAT_CHTM is only
 8 bytes (no RSSI/noise_floor/interference fields):
 ```
