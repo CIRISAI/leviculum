@@ -194,6 +194,6 @@ standing (`leviculum-nrf/src/lora.rs:1598`).
    wrong at every SF above 8. Their only consumer is `compute_spacing_ms`
    (`leviculum-core/src/rnode.rs:988`), which has no caller: the host
    interface prices the same shape from the modem's reported slot
-   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:342`).
+   instead (`tx_hold`, `leviculum-std/src/interfaces/rnode.rs:488`).
    Nothing is broken by them today and something would be by the next
    caller.

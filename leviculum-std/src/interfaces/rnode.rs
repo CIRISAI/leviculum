@@ -126,6 +126,9 @@ pub(crate) struct RNodeInterfaceConfig {
     /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
     /// (see [`super::test_drop_direct_ingress_frame`]).
     pub test_drop_direct_ingress: bool,
+    /// TEMPORARY (#347): the acquisition-jitter arm this interface runs,
+    /// read from the environment by the builder that refuses a bad value.
+    pub jitter_arm: JitterArm,
 }
 
 impl RNodeInterfaceConfig {
@@ -160,6 +163,149 @@ struct QueuedFrame {
 /// apart.
 fn compute_jitter_max_ms(sf: u8, cr: u8, bandwidth_hz: u32) -> u64 {
     (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bandwidth_hz, sf, cr)
+}
+
+// ---------------------------------------------------------------------------
+// The #347 jitter arms. TEMPORARY -- see scripts/env-knob-census.txt
+// ---------------------------------------------------------------------------
+
+/// The environment variable that selects which acquisition-jitter arm an
+/// RNode host interface builds with.
+pub(crate) const JITTER_ARM_ENV: &str = "LEVICULUM_JITTER_ARM";
+
+/// The three arms by name, for the refusal message. A mistyped arm must not
+/// be able to leave an operator guessing which one ran: a run that silently
+/// fell back to arm 1 would be pooled into the wrong series, and a pooled
+/// A/B is a void A/B.
+pub(crate) const JITTER_ARM_CHOICES: &str = "1 (as it stands: the host's draw plus the modem's), \
+     2 (modem CSMA only), 3 (the host's slot floored at the frame's airtime)";
+
+/// Which acquisition-jitter policy this interface's TX loop runs: the three
+/// arms of the #347 A/B, chosen once per interface build from
+/// [`JITTER_ARM_ENV`].
+///
+/// TEMPORARY BY CONSTRUCTION. It exists so that one binary can run all three
+/// arms of the co-release series — three patched trees on a bench is how a
+/// series gets its arms mixed up, and a binary that states its arm on the
+/// bring-up line cannot. It is removed together with the two arms that lose:
+/// the winner becomes the unconditional policy and this enum, the variable
+/// and the [`arm_owed_jitter_ms`] match go with it. Deliberately NOT a
+/// config-file key — a `.toml` key gets documented, depended on, and outlives
+/// the question it was added to answer. The removal condition is pinned in
+/// `scripts/env-knob-census.txt`, which `scripts/check-env-knobs.py` checks
+/// on every `just fast` — in both directions, so the line has to go when the
+/// knob does.
+///
+/// Arms 2 and 3 are the report of order 124 ("Two responders released by the
+/// same frame — the four directions, costed", 2026-09-23, §"The three arms,
+/// as binary patches on `a7e0f5c3`"), and nothing else: arm 2 draws and
+/// discharges the draw without waiting it out, arm 3 re-expresses the same
+/// draw in units of the frame it has to clear. There is no fourth behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum JitterArm {
+    /// Arm 1 — the policy as it stands, and what a daemon without the
+    /// variable runs: the host serves DIFS plus its own uniform draw, the
+    /// modem's own CSMA draws a second window on top.
+    #[default]
+    AsIs,
+    /// Arm 2 — modem CSMA only. The host still draws, so the RNG stream (and
+    /// with it the CAD backoff ladder) is the same sequence in every arm, but
+    /// the draw is discharged immediately and nothing is waited out.
+    ModemOnly,
+    /// Arm 3 — the draw re-expressed in units of the frame: the same number
+    /// of slots, each slot floored at the airtime of the frame about to go,
+    /// which scales DIFS with it exactly as 124's costing did.
+    FrameSlot,
+}
+
+impl JitterArm {
+    /// The digit the bring-up line carries and periculum reads back
+    /// (`periculum/src/bench.rs::jitter_arm_of`).
+    pub(crate) const fn digit(self) -> u8 {
+        match self {
+            Self::AsIs => 1,
+            Self::ModemOnly => 2,
+            Self::FrameSlot => 3,
+        }
+    }
+
+    /// The arm one interface build runs.
+    ///
+    /// An unset variable — and an empty one, which is how a container
+    /// harness that forwards its whole environment spells "not set" — is arm
+    /// 1, the pre-#347 pacing. Any other value is refused by naming the
+    /// three arms, because the failure this knob exists to prevent is a run
+    /// that thinks it measured an arm it did not run.
+    pub(crate) fn from_env() -> Result<Self, String> {
+        let Some(raw) = std::env::var_os(JITTER_ARM_ENV) else {
+            return Ok(Self::AsIs);
+        };
+        let text = raw.to_string_lossy();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::AsIs);
+        }
+        Self::parse(trimmed).ok_or_else(|| {
+            format!("{JITTER_ARM_ENV}={trimmed}: expected one of {JITTER_ARM_CHOICES}")
+        })
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "1" => Some(Self::AsIs),
+            "2" => Some(Self::ModemOnly),
+            "3" => Some(Self::FrameSlot),
+            _ => None,
+        }
+    }
+}
+
+/// What one acquisition owes before the frame whose payload is
+/// `payload_len` bytes may be handed to the modem, under `arm`.
+///
+/// Every arm draws. The draw is the interface's only consumer of the
+/// channel-access RNG, so keeping it in all three keeps the CAD backoff
+/// ladder the same sequence in every arm — otherwise two arms would differ in
+/// two things at once and the A/B would measure their sum (124 §3).
+///
+/// TEMPORARY, with [`JitterArm`]: when an arm wins, its branch becomes the
+/// body of the enqueue path and this function goes away.
+fn arm_owed_jitter_ms(
+    arm: JitterArm,
+    access: &mut ChannelAccess,
+    payload_len: usize,
+    bandwidth_hz: u32,
+    sf: u8,
+    cr: u8,
+) -> u64 {
+    let drawn = access.acquisition_jitter_ms();
+    match arm {
+        JitterArm::AsIs => drawn,
+        JitterArm::ModemOnly => {
+            // Report the draw as served at once: the debt has to be
+            // discharged by somebody, or the next acquisition inherits a
+            // wait this arm decided not to serve.
+            access.jitter_spent(drawn);
+            0
+        }
+        JitterArm::FrameSlot => {
+            let slot = access.jitter_slot();
+            // `jitter_slot_ms` clamps to at least 6 ms, so this cannot be
+            // zero; the guard is here because a division by a policy figure
+            // must not depend on a clamp two crates away.
+            if slot == 0 {
+                return drawn;
+            }
+            let frame_air = rnode::airtime_ms_with_preamble(
+                payload_len as u32,
+                bandwidth_hz,
+                sf,
+                cr,
+                rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
+            );
+            (drawn / slot) * frame_air.max(slot)
+        }
+    }
 }
 
 /// The channel-access policy one RNode transmit path runs: seeded from the
@@ -1080,6 +1226,7 @@ async fn rnode_io_task<S>(
     sf: u8,
     cr: u8,
     drop_direct_ingress: bool,
+    jitter_arm: JitterArm,
 ) -> mpsc::Receiver<OutgoingPacket>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1441,7 +1588,18 @@ where
                         // already transmitting owes nothing, because the
                         // frame before it served the wait.
                         if send_timer.is_none() {
-                            let owed = access.acquisition_jitter_ms();
+                            // TEMPORARY (#347): which of the three arms
+                            // priced in order 124 this build runs. Arm 1 is
+                            // `access.acquisition_jitter_ms()` and nothing
+                            // else.
+                            let owed = arm_owed_jitter_ms(
+                                jitter_arm,
+                                &mut access,
+                                pkt.data.len(),
+                                bandwidth_hz,
+                                sf,
+                                cr,
+                            );
                             if owed == 0 {
                                 timer_ready = true;
                                 tracing::debug!(
@@ -1716,6 +1874,8 @@ struct RNodeReconnectCtx {
     /// TEST-ONLY range emulation: drop deframed hops=0 ingress frames
     /// (see [`super::test_drop_direct_ingress_frame`]).
     test_drop_direct_ingress: bool,
+    /// TEMPORARY (#347): which acquisition-jitter arm the io task runs.
+    jitter_arm: JitterArm,
 }
 
 /// Reconnect loop: open channel → configure → I/O → on disconnect → wait → retry.
@@ -1745,7 +1905,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
     let max_hold = max_tx_hold(radio.bandwidth, radio.sf, radio.cr);
     tracing::debug!(
         "{}: bitrate={} bps, tx_hold(mtu)={}ms (airtime {}ms + DIFS {}ms + cw {}ms), \
-         jitter_max={}ms (DIFS + contention window)",
+         jitter_max={}ms (DIFS + contention window), jitter_arm={}",
         ctx.name,
         bitrate_bps,
         max_hold.held_ms,
@@ -1753,6 +1913,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
         max_hold.difs_ms,
         max_hold.cw_ms,
         ctx.jitter_max_ms,
+        ctx.jitter_arm.digit(),
     );
     let mut has_connected_before = false;
 
@@ -1814,6 +1975,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     radio.sf,
                     radio.cr,
                     ctx.test_drop_direct_ingress,
+                    /* jitter_arm = */ ctx.jitter_arm,
                 )
                 .await;
 
@@ -1890,6 +2052,8 @@ pub(crate) struct RNodeChannelInterfaceConfig {
     pub flow_control: bool,
     pub buffer_size: usize,
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
+    /// TEMPORARY (#347): see [`RNodeInterfaceConfig::jitter_arm`].
+    pub jitter_arm: JitterArm,
 }
 
 impl RNodeChannelInterfaceConfig {
@@ -2082,6 +2246,7 @@ fn reconnect_ctx_from_radio(
     flow_control: bool,
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     test_drop_direct_ingress: bool,
+    jitter_arm: JitterArm,
 ) -> RNodeReconnectCtx {
     let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.cr, radio.bandwidth);
     RNodeReconnectCtx {
@@ -2092,6 +2257,7 @@ fn reconnect_ctx_from_radio(
         reconnect_notify,
         jitter_max_ms,
         test_drop_direct_ingress,
+        jitter_arm,
     }
 }
 
@@ -2108,6 +2274,7 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         config.flow_control,
         config.reconnect_notify,
         config.test_drop_direct_ingress,
+        config.jitter_arm,
     );
     let buffer_size = config.buffer_size;
     let port_path = config.port_path;
@@ -2140,6 +2307,7 @@ pub(crate) fn spawn_rnode_channel_interface(
         // Range emulation is a rig affordance; the phone-attached channel
         // path never needs it.
         false,
+        config.jitter_arm,
     );
     let buffer_size = config.buffer_size;
     let factory = config.channel_factory;
@@ -3062,6 +3230,7 @@ mod tests {
                 flow_control: false,
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
+                jitter_arm: JitterArm::AsIs,
             },
             None,
         );
@@ -3127,6 +3296,7 @@ mod tests {
                 flow_control: false,
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
+                jitter_arm: JitterArm::AsIs,
             };
         let halves_of = |port: tokio::io::DuplexStream| {
             let (read_half, write_half) = tokio::io::split(port);
@@ -3451,6 +3621,7 @@ mod tests {
             buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
             reconnect_notify: None,
             test_drop_direct_ingress: false,
+            jitter_arm: JitterArm::AsIs,
         };
 
         let mut handle = spawn_rnode_interface(config);
@@ -3722,6 +3893,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -3890,6 +4062,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -4064,6 +4237,7 @@ mod tests {
                 SF,
                 CR,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -4084,6 +4258,7 @@ mod tests {
                 SF,
                 CR,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -4171,6 +4346,277 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), task_b).await;
     }
 
+    // -- the three #347 jitter arms, on the co-release cell's PHY ---------
+    //
+    // TEMPORARY, with [`JitterArm`]: when an arm wins these three go with
+    // the two that lose, and what survives is the winner's arithmetic under
+    // the name the policy then has.
+
+    /// The PHY of `lora_co_release_announce_relay`, which is the cell the
+    /// A/B is taken on and the PHY 124 priced all three arms at. Stated as
+    /// the radio block states it; every figure below is DERIVED from these
+    /// three numbers by the same functions the interface calls, so a change
+    /// to the slot derivation or to the preamble moves the test and the
+    /// interface together instead of leaving a typed millisecond behind.
+    const CO_RELEASE_BW: u32 = 250_000;
+    const CO_RELEASE_SF: u8 = 7;
+    const CO_RELEASE_CR: u8 = 5;
+
+    /// The frame the two far ends answered with on 2026-09-22 — a 115-byte
+    /// proof, the frame whose airtime the pair had to clear and did not
+    /// (`tests/mvr/two_responders_overlap_inside_one_airtime.rs`).
+    const CO_RELEASE_PAYLOAD: usize = 115;
+
+    /// What one such frame holds the channel for, from the interface's own
+    /// airtime function and its own preamble derivation.
+    fn co_release_frame_air_ms() -> u64 {
+        rnode::airtime_ms_with_preamble(
+            CO_RELEASE_PAYLOAD as u32,
+            CO_RELEASE_BW,
+            CO_RELEASE_SF,
+            CO_RELEASE_CR,
+            rnode::derive_preamble_symbols(CO_RELEASE_SF, CO_RELEASE_CR, CO_RELEASE_BW),
+        )
+    }
+
+    /// A policy at the co-release PHY, seeded so the draw sequence is the
+    /// test's and not the host's entropy.
+    fn co_release_access(seed: u32) -> ChannelAccess {
+        let mut access = ChannelAccess::new(seed);
+        access.set_phy(CO_RELEASE_BW, CO_RELEASE_SF, CO_RELEASE_CR);
+        access
+    }
+
+    /// Every wait `arm` can impose at this PHY, as a multiple of `unit`,
+    /// collected over enough acquisitions that the whole draw window is
+    /// reachable. Each iteration releases the channel first, so each is a
+    /// fresh acquisition and not the remainder of one.
+    fn arm_window(arm: JitterArm, unit: u64) -> std::collections::BTreeSet<u64> {
+        const ACQUISITIONS: usize = 2000;
+        let mut access = co_release_access(0x5EED_0347);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..ACQUISITIONS {
+            access.channel_released();
+            let owed = arm_owed_jitter_ms(
+                arm,
+                &mut access,
+                CO_RELEASE_PAYLOAD,
+                CO_RELEASE_BW,
+                CO_RELEASE_SF,
+                CO_RELEASE_CR,
+            );
+            assert_eq!(
+                owed % unit,
+                0,
+                "a wait of {owed}ms is not a whole number of {unit}ms units"
+            );
+            seen.insert(owed / unit);
+        }
+        seen
+    }
+
+    /// The draw window all three arms share: DIFS plus a uniform draw over
+    /// `JITTER_CW_SLOTS`, so 2..=15 units of whatever the arm's unit is
+    /// (reference Config.h:102/108-111, and 124's table is priced on it).
+    fn expected_window() -> std::collections::BTreeSet<u64> {
+        (JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64).collect()
+    }
+
+    /// ARM 1 — the policy as it stands, unchanged by the selector.
+    ///
+    /// The arm the selector defaults to must be `acquisition_jitter_ms` and
+    /// nothing else: if the default arm drifted, every run that did not name
+    /// an arm — which is every run in the corpus and every document already
+    /// on disk, read back as arm 1 — would be a measurement of something
+    /// else under the old name.
+    #[test]
+    fn arm_one_owes_exactly_what_the_policy_draws() {
+        let slot = jitter_slot_ms(CO_RELEASE_BW, CO_RELEASE_SF, CO_RELEASE_CR);
+
+        // The shape of this cell, and the reason the three arms exist: one
+        // slot is a fraction of the frame it is meant to separate, so two
+        // answers a slot apart still overlap.
+        assert!(
+            co_release_frame_air_ms() > 4 * slot,
+            "the co-release PHY is supposed to be the one where a frame ({}ms) \\
+             holds the channel for several slots ({slot}ms)",
+            co_release_frame_air_ms()
+        );
+
+        // Seed by seed, the arm and a bare policy are the same value.
+        for i in 0..64u32 {
+            let seed = 0x5EED_0347u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+            let mut armed = co_release_access(seed);
+            let mut bare = co_release_access(seed);
+            assert_eq!(
+                arm_owed_jitter_ms(
+                    JitterArm::AsIs,
+                    &mut armed,
+                    CO_RELEASE_PAYLOAD,
+                    CO_RELEASE_BW,
+                    CO_RELEASE_SF,
+                    CO_RELEASE_CR,
+                ),
+                bare.acquisition_jitter_ms(),
+                "arm 1 must be the unmodified policy (seed {seed:#x})"
+            );
+        }
+
+        assert_eq!(
+            arm_window(JitterArm::AsIs, slot),
+            expected_window(),
+            "arm 1's wait is DIFS plus 0..=13 slots of {slot}ms"
+        );
+    }
+
+    /// ARM 2 — modem CSMA only: the host draws and discharges, and waits for
+    /// nothing.
+    ///
+    /// Two things are pinned, and the second is what makes the A/B a
+    /// one-variable comparison: the wait is zero, AND the draw still
+    /// happened, so the channel-access RNG stands at the same place it would
+    /// under arm 1 and the CAD backoff ladder behind it is the same sequence
+    /// in both arms.
+    #[test]
+    fn arm_two_draws_and_discharges_without_waiting_it_out() {
+        for i in 0..64u32 {
+            let seed = 0x5EED_0347u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+            let mut modem_only = co_release_access(seed);
+            let owed = arm_owed_jitter_ms(
+                JitterArm::ModemOnly,
+                &mut modem_only,
+                CO_RELEASE_PAYLOAD,
+                CO_RELEASE_BW,
+                CO_RELEASE_SF,
+                CO_RELEASE_CR,
+            );
+            assert_eq!(owed, 0, "arm 2 imposes no host wait (seed {seed:#x})");
+            assert_eq!(
+                modem_only.acquisition_jitter_ms(),
+                0,
+                "the draw must be discharged, or the next frame of this \\
+                 acquisition inherits a wait arm 2 decided not to serve"
+            );
+
+            // Same seed, arm 1, one acquisition: after a release both arms
+            // must draw the same next value, which they can only do from the
+            // same place in the stream.
+            let mut as_is = co_release_access(seed);
+            let _ = arm_owed_jitter_ms(
+                JitterArm::AsIs,
+                &mut as_is,
+                CO_RELEASE_PAYLOAD,
+                CO_RELEASE_BW,
+                CO_RELEASE_SF,
+                CO_RELEASE_CR,
+            );
+            modem_only.channel_released();
+            as_is.channel_released();
+            assert_eq!(
+                modem_only.acquisition_jitter_ms(),
+                as_is.acquisition_jitter_ms(),
+                "arm 2 must consume the same randomness as arm 1 (seed {seed:#x}), \\
+                 or the two arms differ in two things at once"
+            );
+        }
+    }
+
+    /// ARM 3 — the same draw, in units of the frame instead of the slot.
+    ///
+    /// `slots * max(frame_air, slot)`: the number of units is the policy's
+    /// own draw, the unit is the airtime of the frame about to go, and DIFS
+    /// scales with it because it is counted in the same units (124's
+    /// costing, and the 236..1770 ms it predicts at this PHY).
+    #[test]
+    fn arm_three_floors_the_slot_at_the_frames_own_airtime() {
+        let slot = jitter_slot_ms(CO_RELEASE_BW, CO_RELEASE_SF, CO_RELEASE_CR);
+        let frame = co_release_frame_air_ms();
+        assert!(
+            frame > slot,
+            "at this PHY the frame ({frame}ms) is what floors the slot ({slot}ms)"
+        );
+
+        for i in 0..64u32 {
+            let seed = 0x5EED_0347u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+            let mut framed = co_release_access(seed);
+            let mut bare = co_release_access(seed);
+            let drawn = bare.acquisition_jitter_ms();
+            assert_eq!(
+                arm_owed_jitter_ms(
+                    JitterArm::FrameSlot,
+                    &mut framed,
+                    CO_RELEASE_PAYLOAD,
+                    CO_RELEASE_BW,
+                    CO_RELEASE_SF,
+                    CO_RELEASE_CR,
+                ),
+                (drawn / slot) * frame,
+                "arm 3 is the same number of slots, each one frame wide \\
+                 (seed {seed:#x})"
+            );
+        }
+
+        assert_eq!(
+            arm_window(JitterArm::FrameSlot, frame),
+            expected_window(),
+            "arm 3's wait is DIFS plus 0..=13 frames of {frame}ms"
+        );
+
+        // The `max` in 124's formula is a guard and never the operative
+        // term: a frame carries a preamble, so at every PHY the interface
+        // can program even an EMPTY one is longer than a slot. Stated here
+        // rather than left implicit — a preamble derivation that stopped
+        // being true of this would turn arm 3 back into arm 1 for the short
+        // frames, silently.
+        for (bw, sf, cr) in [
+            (CO_RELEASE_BW, CO_RELEASE_SF, CO_RELEASE_CR),
+            (125_000, 8, 5),
+            (500_000, 5, 5),
+            (62_500, 12, 8),
+        ] {
+            let empty = rnode::airtime_ms_with_preamble(
+                0,
+                bw,
+                sf,
+                cr,
+                rnode::derive_preamble_symbols(sf, cr, bw),
+            );
+            let slot_here = jitter_slot_ms(bw, sf, cr);
+            assert!(
+                empty >= slot_here,
+                "bw={bw} sf={sf} cr={cr}: an empty frame is {empty}ms against a \
+                 {slot_here}ms slot, so arm 3's floor has become the operative \
+                 term and the arm is no longer the one 124 priced"
+            );
+        }
+    }
+
+    /// The selector itself: unset is arm 1, the three digits are the three
+    /// arms, and anything else is refused by name.
+    ///
+    /// The refusal is the point. A daemon that fell back to arm 1 on a
+    /// typo would run an arm nobody chose and log it as chosen, and the run
+    /// would be pooled into the wrong series — which is exactly the mixing
+    /// the one-binary selector exists to prevent.
+    #[test]
+    fn the_selector_takes_three_values_and_refuses_the_rest() {
+        assert_eq!(JitterArm::parse("1"), Some(JitterArm::AsIs));
+        assert_eq!(JitterArm::parse("2"), Some(JitterArm::ModemOnly));
+        assert_eq!(JitterArm::parse("3"), Some(JitterArm::FrameSlot));
+        assert_eq!(JitterArm::default(), JitterArm::AsIs);
+        assert_eq!(JitterArm::AsIs.digit(), 1);
+        assert_eq!(JitterArm::ModemOnly.digit(), 2);
+        assert_eq!(JitterArm::FrameSlot.digit(), 3);
+
+        for refused in ["0", "4", "", " ", "arm2", "2.0", "-1", "true"] {
+            assert_eq!(
+                JitterArm::parse(refused),
+                None,
+                "{refused:?} is not one of the three arms"
+            );
+        }
+    }
+
     /// Reproduce the flow-control startup deadlock without hardware.
     ///
     /// With `flow_control = true`, the io task historically initialised
@@ -4210,6 +4656,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -4310,6 +4757,7 @@ mod tests {
                     7,
                     5,
                     drop_direct,
+                    /* jitter_arm = */ JitterArm::AsIs,
                 )
                 .await;
             });
@@ -4390,6 +4838,7 @@ mod tests {
                     7,
                     5,
                     drop_direct,
+                    /* jitter_arm = */ JitterArm::AsIs,
                 )
                 .await;
             });
@@ -4444,6 +4893,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -4526,6 +4976,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -5700,6 +6151,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -5931,6 +6383,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });
@@ -6594,6 +7047,7 @@ mod tests {
                 7,
                 5,
                 /* drop_direct_ingress = */ false,
+                /* jitter_arm = */ JitterArm::AsIs,
             )
             .await;
         });

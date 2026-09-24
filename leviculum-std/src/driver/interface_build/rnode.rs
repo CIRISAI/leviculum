@@ -81,6 +81,13 @@ pub(super) fn build(
     let iface_name = format!("rnode_{}", idx);
     let id = InterfaceId(idx);
 
+    // TEMPORARY (#347): which acquisition-jitter arm this interface builds
+    // with. Read here, once per interface build, because this is the one
+    // RNode build path that can refuse: a value that is not one of the three
+    // arms fails the daemon's configuration rather than falling back to arm
+    // 1, which would put a run in the wrong series without saying so.
+    let jitter_arm = crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
+
     let handle = crate::interfaces::rnode::spawn_rnode_interface(
         crate::interfaces::rnode::RNodeInterfaceConfig {
             id,
@@ -98,17 +105,24 @@ pub(super) fn build(
             buffer_size,
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             test_drop_direct_ingress: config.test_drop_direct_ingress,
+            jitter_arm,
         },
     );
 
+    // The bring-up line, and the only place an arm is stated: periculum reads
+    // `jitter_arm=` off exactly this line (`periculum/src/bench.rs::
+    // jitter_arm_of`, marker `periculum/src/trace.rs::RNODE_PORT_LINE`) into
+    // the run document, so that two arms are two series rather than one
+    // pooled average. Renaming or splitting this line breaks that reader.
     tracing::info!(
-        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
+        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, jitter_arm={})",
         port_path,
         frequency,
         sf,
         bandwidth,
         cr,
         tx_power,
+        jitter_arm.digit(),
     );
     Ok(Built::Handles(vec![handle]))
 }

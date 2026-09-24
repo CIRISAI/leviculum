@@ -31,7 +31,7 @@ child is built from the already-connected stream
 `leviculum-std/src/interfaces/tcp.rs:428`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
-(`registry`, `leviculum-std/src/driver/mod.rs:4476`).
+(`registry`, `leviculum-std/src/driver/mod.rs:4492`).
 
 The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
@@ -44,10 +44,10 @@ routing map and the reporting inventory is the point of that module
 
 Teardown runs through the ordinary disconnect path: the event loop
 notices the channel closed, calls `handle_interface_down`
-(`leviculum-std/src/driver/mod.rs:4327`) to cull the routing entries,
+(`leviculum-std/src/driver/mod.rs:4343`) to cull the routing entries,
 and the child's byte counters are folded into its parent's departed
 totals so the listener's reported traffic does not shrink when a client
-leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:3842`).
+leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:3858`).
 
 ### AutoInterface, I2P, shared instance: the same shape
 

@@ -2023,14 +2023,23 @@ impl ReticulumNode {
             for spec in std::mem::take(&mut self.rnode_channels) {
                 let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                 let iface_name = format!("rnode_channel_{}", id.0);
+                // TEMPORARY (#347): the same selector the serial path reads,
+                // refused the same way. A phone-attached modem is not where
+                // the A/B runs, but an interface that silently ran another
+                // arm than the operator set is the failure the knob exists
+                // to prevent, whatever carries its bytes.
+                let jitter_arm =
+                    crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
                 tracing::info!(
-                    "{}: channel-backed RNode (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm)",
+                    "{}: channel-backed RNode (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, \
+                     jitter_arm={})",
                     iface_name,
                     spec.frequency,
                     spec.sf,
                     spec.bandwidth,
                     spec.cr,
                     spec.tx_power as i8,
+                    jitter_arm.digit(),
                 );
                 let handle = crate::interfaces::rnode::spawn_rnode_channel_interface(
                     crate::interfaces::rnode::RNodeChannelInterfaceConfig {
@@ -2047,6 +2056,7 @@ impl ReticulumNode {
                         flow_control: spec.flow_control,
                         buffer_size: spec.buffer_size,
                         reconnect_notify: Some(reconnect_tx.clone()),
+                        jitter_arm,
                     },
                     // Construction-time interface: lives for the node's
                     // lifetime, no caller-driven shutdown handle.
@@ -2296,6 +2306,11 @@ impl ReticulumNode {
         let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
+        // TEMPORARY (#347): see the channel-backed build in
+        // `initialize_interfaces` — one selector, read once per interface
+        // build, refused rather than defaulted.
+        let jitter_arm = crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
+
         // Spawn the interface task on the node's own runtime — an external
         // caller (e.g. a PyO3 host thread) has no tokio context of its own.
         let handle = {
@@ -2315,6 +2330,7 @@ impl ReticulumNode {
                     flow_control: config.flow_control,
                     buffer_size: config.buffer_size,
                     reconnect_notify: reconnect_tx,
+                    jitter_arm,
                 },
                 Some(shutdown_rx),
             )
