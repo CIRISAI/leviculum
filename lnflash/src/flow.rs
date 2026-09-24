@@ -552,8 +552,8 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadioOutcome {
     pub settings: RadioSettings,
-    /// Whether the board acknowledged the frame.
-    pub acked: bool,
+    /// What the board did with the frame.
+    pub taken: radio::ConfigTaken,
 }
 
 /// What the telemetry step did.
@@ -2203,7 +2203,7 @@ fn set_radio(
         ));
         return Ok(Some(RadioOutcome {
             settings,
-            acked: false,
+            taken: radio::ConfigTaken::No,
         }));
     };
 
@@ -2212,31 +2212,41 @@ fn set_radio(
         tty.display(),
         settings.describe()
     ));
-    let acked = match open_transport(sysfs, app, &tty)
+    let taken = match open_transport(sysfs, app, &tty)
         .and_then(|fd| radio::send_configured(&fd, &settings))
     {
-        Ok(acked) => acked,
+        Ok(taken) => taken,
         Err(err) => {
             ui.say(&format!(
                 "{port}: the transport port could not be used ({err})"
             ));
-            false
+            radio::ConfigTaken::No
         }
     };
-    if acked {
-        ui.say(&format!(
+    match taken {
+        radio::ConfigTaken::Running => ui.say(&format!(
             "{port}: radio settings written and persisted: {}",
             settings.describe()
-        ));
-    } else {
-        ui.say(&format!(
+        )),
+        // The board took the settings and said it is not on them: its boot
+        // brought no LoRa carrier up, so there is no radio to program until
+        // the next reset (Codeberg #363). Worth saying rather than folding
+        // into success, because the operator is about to look for this node
+        // on the air and it will not be there yet.
+        radio::ConfigTaken::StoredForNextBoot => ui.say(&format!(
+            "{port}: radio settings written and persisted: {}. The board booted with its LoRa \
+             carrier switched off (--media), so nothing is on the air yet — it comes up on \
+             these settings at the next reset.",
+            settings.describe()
+        )),
+        radio::ConfigTaken::No => ui.say(&format!(
             "{port}: the firmware flashed fine, but the board did not acknowledge the radio \
              settings, so it is still on whatever it had stored — the compiled default on a \
              board that never had any. Nothing is broken: re-run lnflash, or set them from the \
              host that binds the board."
-        ));
+        )),
     }
-    Ok(Some(RadioOutcome { settings, acked }))
+    Ok(Some(RadioOutcome { settings, taken }))
 }
 
 /// Turn the plan into a choice, and say what the chosen preset obliges the

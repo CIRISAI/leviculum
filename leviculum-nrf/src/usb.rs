@@ -21,7 +21,7 @@ use embassy_time::with_timeout;
 use embassy_usb::class::cdc_acm::{self, CdcAcmClass, State};
 use embassy_usb::control::{OutResponse, Recipient, Request, RequestType};
 use embassy_usb::{Builder, Config, Handler, UsbDevice};
-use leviculum_core::envelope::{self, ControlAction};
+use leviculum_core::envelope::{self, ConfigDelivery, ControlAction};
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use static_cell::StaticCell;
 
@@ -434,57 +434,6 @@ async fn write_framed(
     true
 }
 
-/// What became of a host radio config (see [`apply_radio_config`]).
-#[derive(PartialEq)]
-enum ConfigDelivery {
-    /// Programmed into the radio — the LoRa task confirmed the apply — and
-    /// persisted. The only outcome the host may read as "the board is on
-    /// this PHY": the ack used to go out on delivery alone, which promised
-    /// an apply that measurably lagged it by up to 19 s while the LoRa loop
-    /// parked in single-mode RX.
-    Applied,
-    /// A config whose bandwidth or coding rate has no SX1262 register code.
-    Invalid,
-    /// The config channel would not take it within the grace period —
-    /// which, now that a boot without LoRa takes the [`Stored`] route
-    /// instead of the channel, means a spawned LoRa task has genuinely
-    /// stopped draining (a wedged radio, or a task that returned on an
-    /// init failure).
-    ///
-    /// A *repeat* of the config already in the slot is not this outcome and
-    /// never was one: it is a delivery that already happened, so it takes
-    /// the apply wait instead (`lora::pending_config`). The host retrying
-    /// its own config is the ordinary case — it is what a host does when the
-    /// first answer was busy — and burning its attempts on a refusal is how
-    /// a slow apply became `no_ack_after_3`.
-    ///
-    /// [`Stored`]: ConfigDelivery::Stored
-    Undeliverable,
-    /// This boot never spawned the LoRa task, so delivery and apply are
-    /// impossible until the next reset; the config went to flash instead
-    /// and the page write is confirmed. Acked, because the ack then makes
-    /// the one claim that is true and useful: a reboot comes back on this
-    /// config — which is exactly the contract the corpus prep relies on
-    /// (it pushes the channel one reboot early and resets afterwards;
-    /// periculum `runner.rs::push_lnode_radio_config`: "The ACK is the
-    /// frame's receipt and nothing more"). Until 2026-09-22 this state
-    /// fed the consumerless channel instead: the first config of the boot
-    /// wedged its one slot, every later one was refused, and a corpus run
-    /// lost all 26 LNode cells to `no_ack_after_3`.
-    Stored,
-    /// Same boot state as [`Stored`](ConfigDelivery::Stored), but the page
-    /// write failed or timed out: nothing will survive the reset, so the
-    /// answer must not claim otherwise.
-    StoreFailed,
-    /// Handed to the LoRa task and persisted, but the apply was not
-    /// confirmed inside [`CONFIG_APPLY_WITHIN`]. Answered as busy — the
-    /// truthful answer at answer time, and a retryable one: the config is
-    /// still queued (or the reconfig failed on the SPI bus), and a host
-    /// that re-sends after the apply lands is acked immediately because
-    /// the running config already matches.
-    Unconfirmed,
-}
-
 /// How long a radio config may wait for the LoRa task to drain the
 /// previous one before it is refused. A running LoRa task polls the
 /// channel every loop turn, so a live consumer clears it in milliseconds;
@@ -533,9 +482,10 @@ async fn apply_radio_config(
         // No LoRa task this boot: the channel has no consumer, so a config
         // fed to it would wedge its one slot for the rest of the boot, and
         // an apply can never be confirmed. The truthful, useful answer is
-        // the stored one — persist, and ack only once the page write is
-        // confirmed, because the ack's whole claim is that a reboot comes
-        // back on this config (#358).
+        // the stored one — persist, and answer only once the page write is
+        // confirmed, because "a reboot comes back on this config" is the
+        // whole of what this route may claim (#358); the envelope says that
+        // much and no more, with its own refusal reason (#363).
         return match crate::telemetry::confirm(crate::radio_store::request_save_confirmed(&wire))
             .await
         {
@@ -737,13 +687,13 @@ async fn retic_serial_task(
                                     // The legacy contract: ACK on success,
                                     // silence on a config the driver cannot
                                     // take. Audible refusals begin with the
-                                    // envelope. Stored counts as success:
-                                    // for this sender the ack is the
-                                    // frame's receipt, and the reset it
-                                    // sends next is what applies the page.
-                                    if matches!(
+                                    // envelope, and so does #363's
+                                    // distinction between a running config
+                                    // and a stored one — which is why the
+                                    // two dialects decide it in one place
+                                    // (`envelope::legacy_radio_config_acked`).
+                                    if envelope::legacy_radio_config_acked(
                                         apply_radio_config(&config_tx, wire).await,
-                                        ConfigDelivery::Applied | ConfigDelivery::Stored
                                     ) && !write_framed(
                                         &mut tx,
                                         &control,
@@ -756,38 +706,15 @@ async fn retic_serial_task(
                                     }
                                 }
                                 ControlAction::RadioConfig(wire) => {
-                                    let answer = match apply_radio_config(&config_tx, wire).await {
-                                        ConfigDelivery::Applied => {
-                                            envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
-                                        }
-                                        ConfigDelivery::Invalid => envelope::encode_refusal(
-                                            envelope::TYPE_RADIO_CONFIG,
-                                            envelope::REFUSE_VALUE,
-                                        ),
-                                        ConfigDelivery::Undeliverable => envelope::encode_refusal(
-                                            envelope::TYPE_RADIO_CONFIG,
-                                            envelope::REFUSE_BUSY,
-                                        ),
-                                        // Delivered but not yet applied: busy
-                                        // is the truthful, retryable answer —
-                                        // an ack here would promise a PHY the
-                                        // radio is not on yet.
-                                        ConfigDelivery::Unconfirmed => envelope::encode_refusal(
-                                            envelope::TYPE_RADIO_CONFIG,
-                                            envelope::REFUSE_BUSY,
-                                        ),
-                                        // On the page, and the page is the
-                                        // whole claim on a boot without a
-                                        // LoRa task: the reset this sender
-                                        // owes anyway is what applies it.
-                                        ConfigDelivery::Stored => {
-                                            envelope::encode_ack(envelope::TYPE_RADIO_CONFIG)
-                                        }
-                                        ConfigDelivery::StoreFailed => envelope::encode_refusal(
-                                            envelope::TYPE_RADIO_CONFIG,
-                                            envelope::REFUSE_PERSIST,
-                                        ),
-                                    };
+                                    // One ack, one meaning: only a config
+                                    // the radio is running is acked. The
+                                    // reason each of the other outcomes
+                                    // carries is wire format, so it is
+                                    // decided in the envelope where a host
+                                    // test can reach it, not here.
+                                    let answer = envelope::radio_config_answer(
+                                        apply_radio_config(&config_tx, wire).await,
+                                    );
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
                                     {

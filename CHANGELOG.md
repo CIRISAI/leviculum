@@ -202,6 +202,26 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- A board whose boot left its LoRa carrier down no longer acks a radio
+  configuration as if it were running it. Such a board has no LoRa task, so
+  the config goes to the flash page and nothing applies it before the next
+  reset — but the answer was the same `ACK` a board that programmed the
+  modem sends, and a host reading it as "the board is on this PHY" prices
+  every frame at a modulation nothing is keying. The envelope now answers
+  the confirmed page write with a refusal of its own, reason `0x08`
+  (`REFUSE_NOT_RUNNING`), the mirror of `0x06` (`REFUSE_PERSIST`): persist
+  is applied-but-not-durable, not-running is durable-but-not-applied, and
+  neither is a rejection. `lnflash` reads it and says the settings are
+  stored and come up at the next reset, rather than reporting a board that
+  took them as one that refused. The legacy magic frame keeps its `ACK`,
+  because ack-or-silence is its whole vocabulary and silence there reads as
+  "the frame never landed" to a sender whose next act is the reset that
+  applies the page; a legacy host that needs to know what the radio is
+  running asks `RADIO_QUERY`, which such a board refuses rather than
+  answering out of flash. Both dialects now decide this in one place
+  (`leviculum_core::envelope::radio_config_answer` and
+  `legacy_radio_config_acked`), so the pair cannot drift (Codeberg #363).
+
 - `lnstest selftest` sizes a single-packet drain window from the pacing the
   sending interface applies, not from the frames' airtime alone. The RNode
   interface holds each frame back until the modem can be finished with the

@@ -443,6 +443,21 @@ pub const REFUSE_PERSIST: u8 = 0x06;
 /// the refusal says which problem it has. First consumer:
 /// [`TYPE_ANNOUNCE`], whose clock gate is the telemetry path's.
 pub const REFUSE_NO_CLOCK: u8 = 0x07;
+/// The value is on the flash page and will take effect at the next reset,
+/// but the carrier it configures did not come up this boot, so nothing is
+/// running it now (Codeberg #363).
+///
+/// The mirror of [`REFUSE_PERSIST`], and the second refusal that is not a
+/// rejection: that one is applied-but-not-durable, this one is
+/// durable-but-not-applied. It exists because the two are the same three
+/// bytes otherwise — a board that programmed the radio and a board that
+/// only wrote the page both answered [`TYPE_ACK`], and a host reading that
+/// ack as "the board is on this PHY" prices every frame at a modulation
+/// nothing is keying. Distinct from [`REFUSE_BUSY`] because no retry in
+/// this boot can help and from [`REFUSE_UNSUPPORTED`] because the firmware
+/// does carry the consumer — it is the boot that left the carrier down, and
+/// a reset with this configuration on the page is what fixes it.
+pub const REFUSE_NOT_RUNNING: u8 = 0x08;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -653,6 +668,109 @@ pub fn encode_radio_report(cfg: &RadioConfigWire) -> Vec<u8> {
 /// Decode a radio-report payload back into the settings it describes.
 pub fn decode_radio_report_payload(payload: &[u8]) -> Option<RadioConfigWire> {
     parse_radio_config(payload)
+}
+
+/// What became of a host radio config on the board
+/// (`leviculum-nrf/src/usb.rs::apply_radio_config`).
+///
+/// Here rather than in the firmware because the answer it picks is wire
+/// format, and wire format that only exists inside a thumbv7em binary is
+/// wire format nothing can test: [`radio_config_answer`] and
+/// [`legacy_radio_config_acked`] are the two contracts this enum decides,
+/// and they are decided here for both dialects at once so the pair cannot
+/// drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigDelivery {
+    /// Programmed into the radio — the LoRa task confirmed the apply — and
+    /// persisted. The only outcome a host may read as "the board is on this
+    /// PHY": the ack used to go out on delivery alone, which promised an
+    /// apply that measurably lagged it by up to 19 s while the LoRa loop
+    /// parked in single-mode RX.
+    Applied,
+    /// A config whose bandwidth or coding rate has no SX1262 register code.
+    Invalid,
+    /// The config channel would not take it within the grace period —
+    /// which, now that a boot without LoRa takes the [`Stored`] route
+    /// instead of the channel, means a spawned LoRa task has genuinely
+    /// stopped draining (a wedged radio, or a task that returned on an init
+    /// failure).
+    ///
+    /// A *repeat* of the config already in the slot is not this outcome and
+    /// never was one: it is a delivery that already happened, so it takes
+    /// the apply wait instead (`lora::pending_config`). The host retrying
+    /// its own config is the ordinary case — it is what a host does when the
+    /// first answer was busy — and burning its attempts on a refusal is how
+    /// a slow apply became `no_ack_after_3`.
+    ///
+    /// [`Stored`]: ConfigDelivery::Stored
+    Undeliverable,
+    /// Handed to the LoRa task and persisted, but the apply was not
+    /// confirmed inside the firmware's apply budget. Answered as busy — the
+    /// truthful answer at answer time, and a retryable one: the config is
+    /// still queued (or the reconfig failed on the SPI bus), and a host that
+    /// re-sends after the apply lands is acked immediately because the
+    /// running config already matches.
+    Unconfirmed,
+    /// This boot never spawned the LoRa task, so delivery and apply are
+    /// impossible until the next reset; the config went to flash instead and
+    /// the page write is confirmed.
+    ///
+    /// The envelope answers [`REFUSE_NOT_RUNNING`] (#363), because the one
+    /// claim that is true here — a reboot comes back on this config — is not
+    /// the claim an ack makes, and the two used to be the same three bytes.
+    /// The legacy frame still acks: its whole vocabulary is
+    /// [`crate::rnode::RADIO_CONFIG_ACK`] or silence, it has no room for a
+    /// carrier flag, and silence there is not the more honest of the two —
+    /// it reads as "the frame never landed" to a sender whose next act is
+    /// the reset that applies the page. See [`legacy_radio_config_acked`].
+    ///
+    /// Until 2026-09-22 this state fed the consumerless config channel
+    /// instead: the first config of the boot wedged its one slot, every
+    /// later one was refused, and a corpus run lost all 26 LNode cells to
+    /// `no_ack_after_3`.
+    Stored,
+    /// Same boot state as [`Stored`](ConfigDelivery::Stored), but the page
+    /// write failed or timed out: nothing will survive the reset, so the
+    /// answer must not claim otherwise.
+    StoreFailed,
+}
+
+/// The enveloped answer to a [`TYPE_RADIO_CONFIG`] frame.
+///
+/// One ack and one meaning: [`ConfigDelivery::Applied`] alone says the radio
+/// is running the configuration. Everything else names why it is not, and
+/// the two named refusals that are not rejections
+/// ([`REFUSE_NOT_RUNNING`], [`REFUSE_PERSIST`]) tell a host which half of
+/// "applied and durable" it did get.
+pub fn radio_config_answer(delivery: ConfigDelivery) -> Vec<u8> {
+    match delivery {
+        ConfigDelivery::Applied => encode_ack(TYPE_RADIO_CONFIG),
+        ConfigDelivery::Invalid => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_VALUE),
+        // Undeliverable and Unconfirmed are both "ask again": the slot is
+        // held by another config, or the apply has not landed inside the
+        // wait. An ack here would promise a PHY the radio is not on yet.
+        ConfigDelivery::Undeliverable | ConfigDelivery::Unconfirmed => {
+            encode_refusal(TYPE_RADIO_CONFIG, REFUSE_BUSY)
+        }
+        ConfigDelivery::Stored => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_NOT_RUNNING),
+        ConfigDelivery::StoreFailed => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_PERSIST),
+    }
+}
+
+/// Whether the legacy magic-prefixed config frame is answered with
+/// [`crate::rnode::RADIO_CONFIG_ACK`].
+///
+/// The legacy contract is ack-or-silence, so it cannot carry #363's
+/// distinction; [`ConfigDelivery::Stored`] keeps its ack there, and that
+/// ack means the frame's receipt and the page behind it, never the air.
+/// The test harness reads it exactly that way — it pushes the scenario
+/// channel one reboot early and resets afterwards — and a host that needs
+/// to know whether the radio is *running* the configuration has two frames
+/// that say so: the envelope config ([`radio_config_answer`]) and
+/// [`TYPE_RADIO_QUERY`], which a board with no LoRa task refuses rather
+/// than answering out of the flash page.
+pub fn legacy_radio_config_acked(delivery: ConfigDelivery) -> bool {
+    matches!(delivery, ConfigDelivery::Applied | ConfigDelivery::Stored)
 }
 
 /// Encode a complete acknowledgement for `acked_type`.
@@ -2558,6 +2676,86 @@ mod tests {
                 reason: REFUSE_MALFORMED
             }
         );
+    }
+
+    /// The refusal reason a refused answer carries, or `None` if the
+    /// answer is not a refusal of `expected_type` at all.
+    fn refusal_reason(answer: &[u8], expected_type: u8) -> Option<u8> {
+        let frame = decode_frame(answer).expect("the answer is a valid envelope frame");
+        if frame.frame_type != TYPE_REFUSAL {
+            return None;
+        }
+        let (refused, reason) = decode_refusal_payload(frame.payload)?;
+        (refused == expected_type).then_some(reason)
+    }
+
+    /// Codeberg #363. A board that programmed the radio and a board whose
+    /// boot never brought the LoRa carrier up — so the config only reached
+    /// the flash page — answered the same three bytes. The host reads that
+    /// ack as "the board is on the requested PHY" and prices every frame at
+    /// a modulation nothing is keying.
+    #[test]
+    fn a_config_the_radio_never_took_is_not_answered_like_one_it_did() {
+        let applied = radio_config_answer(ConfigDelivery::Applied);
+        let stored = radio_config_answer(ConfigDelivery::Stored);
+
+        assert_ne!(
+            applied, stored,
+            "a board running the configuration and a board that only wrote it to \
+             flash send the same answer, so no host can tell them apart"
+        );
+        assert_eq!(
+            applied,
+            encode_ack(TYPE_RADIO_CONFIG),
+            "the applied answer is the ack, and it is the only one"
+        );
+        assert_eq!(
+            refusal_reason(&stored, TYPE_RADIO_CONFIG),
+            Some(REFUSE_NOT_RUNNING),
+            "a stored-but-not-running config must name that state, not borrow \
+             busy (no retry in this boot can help) or persist (the page write \
+             succeeded)"
+        );
+    }
+
+    /// The other five outcomes, so the one ack stays the only ack and each
+    /// refusal keeps the reason a host branches on.
+    #[test]
+    fn every_radio_config_outcome_but_applied_is_a_named_refusal() {
+        for (delivery, reason) in [
+            (ConfigDelivery::Invalid, REFUSE_VALUE),
+            (ConfigDelivery::Undeliverable, REFUSE_BUSY),
+            (ConfigDelivery::Unconfirmed, REFUSE_BUSY),
+            (ConfigDelivery::Stored, REFUSE_NOT_RUNNING),
+            (ConfigDelivery::StoreFailed, REFUSE_PERSIST),
+        ] {
+            assert_eq!(
+                refusal_reason(&radio_config_answer(delivery), TYPE_RADIO_CONFIG),
+                Some(reason),
+                "{delivery:?} is not refused with the reason a host branches on"
+            );
+        }
+    }
+
+    /// The legacy dialect keeps both acks, because ack-or-silence is its
+    /// whole vocabulary and silence reads as "the frame never landed" to a
+    /// sender whose next act is the reset that applies the page.
+    #[test]
+    fn the_legacy_config_frame_acks_a_stored_config_and_refuses_the_rest() {
+        assert!(legacy_radio_config_acked(ConfigDelivery::Applied));
+        assert!(legacy_radio_config_acked(ConfigDelivery::Stored));
+        for delivery in [
+            ConfigDelivery::Invalid,
+            ConfigDelivery::Undeliverable,
+            ConfigDelivery::Unconfirmed,
+            ConfigDelivery::StoreFailed,
+        ] {
+            assert!(
+                !legacy_radio_config_acked(delivery),
+                "{delivery:?} is acked on the legacy frame, which has no way to \
+                 take the ack back"
+            );
+        }
     }
 
     #[test]

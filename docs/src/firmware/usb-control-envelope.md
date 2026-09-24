@@ -69,8 +69,10 @@ refused, `0x04` busy, `0x05` unsupported (the envelope layer knows the
 type but this binary carries no consumer for it — retrying or rebooting
 cannot help, only different firmware can), `0x06` not persisted (see
 below), `0x07` no calendar clock (the command needs one and the board has
-none yet — seed it with a GNSS fix or `--set-time` and retry). The
-version in the capability report (`1`) names the envelope framing itself;
+none yet — seed it with a GNSS fix or `--set-time` and retry), `0x08` not
+running (the value is durably on the flash page and applies at the next
+reset, but the carrier it configures did not come up this boot — see
+below). The version in the capability report (`1`) names the envelope framing itself;
 new frame types extend the accepted list without bumping it.
 
 ### ANNOUNCE (0x0F) and BLE_TX_GAP (0x10) — the #376 bench instruments
@@ -271,15 +273,34 @@ a queued config, which is the other half of the same fix.
 
 One boot state changes the promise: a board whose boot did not bring the
 LoRa carrier up (a `lora=off` media profile in flash) has no LoRa task,
-so no config can be delivered or applied before the next reset. There the
-ack means **a reboot comes back on this configuration** — the config goes
-to the flash store and the ack waits for the confirmed page write (#358);
-a failed write refuses with `0x06` (persist). This is the contract the
-test harness relies on when it pushes the scenario channel one reboot
-early and resets afterwards. Before 2026-09-22 such a boot fed the
-config to the taskless channel instead: the first one wedged its single
-slot for the rest of the boot, every later one was refused as busy, and
-one BLE-profiled boot cost a corpus run all 26 of its LNode cells
+so no config can be delivered or applied before the next reset. The
+config goes to the flash store, and the answer waits for the confirmed
+page write (#358) — a failed write refuses with `0x06` (persist), a
+confirmed one refuses with `0x08` (**not running**). A refusal rather
+than an ack because the only true claim here is *a reboot comes back on
+this configuration*, which is not the claim an ack makes: until #363 both
+states sent the same three bytes, and a host that reads that ack as "the
+board is on this PHY" prices every frame at a modulation nothing is
+keying. `0x08` is the mirror of `0x06`: persist is
+applied-but-not-durable, not-running is durable-but-not-applied, and
+neither is a rejection — the value was taken both times.
+
+The legacy magic frame keeps its ACK in this state, because ack-or-silence
+is its whole vocabulary: there is no room in three bytes for a carrier
+flag, and silence reads as "the frame never landed" to a sender whose next
+act is the reset that applies the page. That is the contract the test
+harness relies on when it pushes the scenario channel one reboot early and
+resets afterwards. A legacy host that needs to know whether the radio is
+*running* the configuration asks RADIO_QUERY, which a board with no LoRa
+task refuses as busy rather than answering out of the flash page. Both
+dialects decide this in one place
+(`leviculum_core::envelope::radio_config_answer` and
+`legacy_radio_config_acked`) so the pair cannot drift.
+
+Before 2026-09-22 such a boot fed the config to the taskless channel
+instead: the first one wedged its single slot for the rest of the boot,
+every later one was refused as busy, and one BLE-profiled boot cost a
+corpus run all 26 of its LNode cells
 (`SKIPPED_INFRA reason=lnode_radio_config_failed result=no_ack_after_3`).
 
 ### The media-profile frames

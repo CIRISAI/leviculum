@@ -26,10 +26,11 @@ use leviculum_core::envelope::{
     encode_node_name, encode_node_name_query, encode_position_source_query, encode_radio_config,
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
     IdentityReportWire, MediaProfileWire, NodeNameState, TelemetryTargetWire, REFUSE_BUSY,
-    REFUSE_MALFORMED, REFUSE_NO_CLOCK, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED,
-    REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT,
-    TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY,
-    TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
+    REFUSE_MALFORMED, REFUSE_NOT_RUNNING, REFUSE_NO_CLOCK, REFUSE_PERSIST, REFUSE_UNKNOWN_TYPE,
+    REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY,
+    TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_NODE_NAME,
+    TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
+    TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::node_name::NodeName;
@@ -166,6 +167,11 @@ pub fn reason_str(reason: u8) -> &'static str {
             "the board has no calendar clock yet, so it withheld the announce \
                            (reason=no-clock on its debug port); seed one with --set-time \
                            or a GNSS fix and retry"
+        }
+        REFUSE_NOT_RUNNING => {
+            "the value is on the board's flash page and takes effect at the \
+                           next reset, but the carrier it configures did not come up on \
+                           this boot, so nothing is running it yet"
         }
         _ => "an unnamed reason",
     }

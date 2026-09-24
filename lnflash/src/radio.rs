@@ -500,13 +500,19 @@ pub enum RadioPlan {
 /// the caller, which proves the port still belongs to the board it was
 /// resolved for — and so the scripted-pty tests drive the same code the
 /// flash flow runs.
-pub fn send_configured(fd: &Fd, settings: &RadioSettings) -> io::Result<bool> {
+pub fn send_configured(fd: &Fd, settings: &RadioSettings) -> io::Result<ConfigTaken> {
     use crate::envelope::{self, ControlOutcome};
+    use leviculum_core::envelope::REFUSE_NOT_RUNNING;
     match envelope::probe_capabilities(fd)? {
-        Some(caps) if caps.accepts(leviculum_core::envelope::TYPE_RADIO_CONFIG) => Ok(matches!(
-            envelope::send_radio_config(fd, &settings.to_wire())?,
-            ControlOutcome::Acked
-        )),
+        Some(caps) if caps.accepts(leviculum_core::envelope::TYPE_RADIO_CONFIG) => Ok(
+            match envelope::send_radio_config(fd, &settings.to_wire())? {
+                ControlOutcome::Acked => ConfigTaken::Running,
+                ControlOutcome::Refused {
+                    reason: REFUSE_NOT_RUNNING,
+                } => ConfigTaken::StoredForNextBoot,
+                _ => ConfigTaken::No,
+            },
+        ),
         // No capability report (firmware older than the envelope), or a
         // report without the config type: the legacy magic frame, accepted
         // through the transition window.
@@ -517,9 +523,36 @@ pub fn send_configured(fd: &Fd, settings: &RadioSettings) -> io::Result<bool> {
                 envelope::CONTROL_TIMING,
                 |data| (data == RADIO_CONFIG_ACK).then_some(()),
             )?;
-            Ok(acked.is_some())
+            // The legacy ACK cannot say which of the two it is (see
+            // `leviculum_core::envelope::legacy_radio_config_acked`), and
+            // the flash flow's next act is the reset that would settle it,
+            // so it is reported as the receipt it is.
+            Ok(if acked.is_some() {
+                ConfigTaken::Running
+            } else {
+                ConfigTaken::No
+            })
         }
     }
+}
+
+/// What a board did with the radio configuration the flash flow sent it.
+///
+/// Three states rather than a bool because a board whose boot left the LoRa
+/// carrier down takes the configuration durably and runs none of it until
+/// the next reset (Codeberg #363). Reporting that as "not acknowledged"
+/// would send an operator back to re-run `lnflash` over a page that is
+/// already correct; reporting it as success would repeat the claim the
+/// board just declined to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTaken {
+    /// The board acked: it is running these settings.
+    Running,
+    /// The board answered [`leviculum_core::envelope::REFUSE_NOT_RUNNING`]:
+    /// the settings are on its flash page and apply at the next reset.
+    StoredForNextBoot,
+    /// Refused for any other reason, or never answered.
+    No,
 }
 
 #[cfg(test)]
@@ -935,7 +968,10 @@ mod tests {
 
         let settings = EU868;
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
-        assert!(send_configured(&fd, &settings).unwrap());
+        assert_eq!(
+            send_configured(&fd, &settings).unwrap(),
+            ConfigTaken::Running
+        );
 
         // Migration equivalence, host side: what went over the wire is an
         // envelope config frame that parses to exactly the configuration a
@@ -949,6 +985,67 @@ mod tests {
             })
             .expect("an envelope config frame was sent");
         assert_eq!(sent_config, settings.to_wire());
+    }
+
+    /// Codeberg #363: a board whose boot left the LoRa carrier down takes
+    /// the configuration durably and runs none of it. It says so with its
+    /// own refusal reason, and that is neither a failure to report nor a
+    /// success to claim — an operator told "the board did not acknowledge
+    /// the radio settings" would re-run lnflash over a page that is already
+    /// correct.
+    #[test]
+    fn a_board_whose_radio_never_started_reports_the_config_as_stored() {
+        use crate::sys::testpty::{spawn_stub, Pty};
+        use leviculum_core::envelope::{self, classify_control_frame, ControlAction};
+
+        let accepted: &[u8] = &[envelope::TYPE_RADIO_CONFIG, envelope::TYPE_CAPABILITIES];
+        let pty = Pty::open();
+        spawn_stub(&pty, move |frame_bytes| {
+            match classify_control_frame(frame_bytes, accepted) {
+                ControlAction::CapabilityQuery => {
+                    Some(envelope::encode_capability_report(accepted))
+                }
+                // Exactly what the firmware's stored route answers
+                // (`envelope::radio_config_answer(ConfigDelivery::Stored)`).
+                ControlAction::RadioConfig(_) => Some(envelope::encode_refusal(
+                    envelope::TYPE_RADIO_CONFIG,
+                    envelope::REFUSE_NOT_RUNNING,
+                )),
+                _ => None,
+            }
+        });
+
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        assert_eq!(
+            send_configured(&fd, &EU868).unwrap(),
+            ConfigTaken::StoredForNextBoot
+        );
+    }
+
+    /// Any other refusal stays a refusal: the stored reading is one reason
+    /// byte wide, not "the board said something".
+    #[test]
+    fn another_refusal_is_not_read_as_a_stored_config() {
+        use crate::sys::testpty::{spawn_stub, Pty};
+        use leviculum_core::envelope::{self, classify_control_frame, ControlAction};
+
+        let accepted: &[u8] = &[envelope::TYPE_RADIO_CONFIG, envelope::TYPE_CAPABILITIES];
+        let pty = Pty::open();
+        spawn_stub(&pty, move |frame_bytes| {
+            match classify_control_frame(frame_bytes, accepted) {
+                ControlAction::CapabilityQuery => {
+                    Some(envelope::encode_capability_report(accepted))
+                }
+                ControlAction::RadioConfig(_) => Some(envelope::encode_refusal(
+                    envelope::TYPE_RADIO_CONFIG,
+                    envelope::REFUSE_PERSIST,
+                )),
+                _ => None,
+            }
+        });
+
+        let fd = Fd::open_serial(&pty.slave_path).unwrap();
+        assert_eq!(send_configured(&fd, &EU868).unwrap(), ConfigTaken::No);
     }
 
     #[test]
@@ -972,7 +1069,7 @@ mod tests {
         });
 
         let fd = Fd::open_serial(&pty.slave_path).unwrap();
-        assert!(send_configured(&fd, &EU868).unwrap());
+        assert_eq!(send_configured(&fd, &EU868).unwrap(), ConfigTaken::Running);
 
         let seen = seen.lock().unwrap();
         assert!(

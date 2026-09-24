@@ -338,3 +338,69 @@ async fn a_board_that_answers_neither_frame_does_not_come_up() {
          makes the refusal above unreachable"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The answer the stored route sends (Codeberg #363)
+// ---------------------------------------------------------------------------
+//
+// The route above is the mechanism; this is what the board says about it. The
+// decision itself lives in `leviculum-core`
+// (`envelope::radio_config_answer`, tested there against every outcome),
+// because a thumbv7em `match` is a wire contract no host test can reach. What
+// is still only readable in the firmware is that the board *uses* it — and
+// that the boot state it branches on is the media state's, not a guess — so
+// that is what these two invariants hold. Same reasoning as the source
+// invariants above and in
+// `radio_config_sleeps_through_the_peer_yield_window`.
+
+fn nrf_usb_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("leviculum-nrf/src/usb.rs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+#[test]
+fn a_taskless_boot_answers_out_of_the_media_state_and_the_shared_decision() {
+    let usb = nrf_usb_source();
+
+    // The branch: the stored route is taken because the boot did not bring
+    // the carrier up, read off the media state. A firmware that guessed this
+    // from the channel's fullness would take the wedge route on the very
+    // boot the wedge is fatal on.
+    let gate = usb
+        .find("if !crate::media::lora_booted() {")
+        .expect("apply_radio_config no longer asks the media state what booted");
+    let stored = usb[gate..]
+        .find("ConfigDelivery::Stored")
+        .expect("the taskless branch no longer reaches the stored outcome");
+    let branch = &usb[gate..gate + stored];
+    assert!(
+        branch.contains("request_save_confirmed"),
+        "the taskless branch answers before the page write is confirmed, so \
+         `stored` claims a reboot that the reboot itself would disprove \
+         (#358): {branch}"
+    );
+
+    // The answer: built by the core decision, for both dialects. A firmware
+    // that spelled the ack or the refusal here again would be a second copy
+    // of a wire contract, free to drift from the one the tests cover.
+    assert!(
+        usb.contains("envelope::radio_config_answer("),
+        "the enveloped radio-config answer is no longer built by \
+         `envelope::radio_config_answer`, so what the board sends is not what \
+         leviculum-core's tests grade"
+    );
+    assert!(
+        usb.contains("envelope::legacy_radio_config_acked("),
+        "the legacy radio-config ack is no longer decided by \
+         `envelope::legacy_radio_config_acked`, so the two dialects can drift \
+         on which outcomes they ack"
+    );
+    assert!(
+        !usb.contains("encode_ack(envelope::TYPE_RADIO_CONFIG)"),
+        "usb.rs acks a radio config directly again; the one ack this frame has \
+         belongs to `ConfigDelivery::Applied` alone (#363)"
+    );
+}
