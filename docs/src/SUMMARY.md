@@ -13,6 +13,8 @@
 - [Media profiles](concepts/media-profiles.md)
 - [How far one firmware build reaches](concepts/board-support-scope.md)
 - [Flashing an LNode](concepts/lnode-flashing.md)
+- [OTA stage 1: entering BLE DFU on a command from the mesh](concepts/ota-stage-1-ble-dfu.md)
+- [OTA stage 2: the image itself over the mesh](concepts/ota-stage-2-mesh-image.md)
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Client tools](concepts/client-tools.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
