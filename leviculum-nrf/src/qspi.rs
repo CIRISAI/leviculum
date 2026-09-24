@@ -1,29 +1,39 @@
-//! The QSPI NOR flash neither of our boards turned out to carry.
+//! The QSPI NOR flash two of our three boards turned out not to carry.
 //!
-//! **As of this commit no board in this tree carries a QSPI part, and
-//! nothing calls [`identify_at_boot`].** Both maps came from an
-//! `EXTERNAL_FLASH_DEVICES` line in a vendor variant header, and on both
-//! vendors that line is a template default sitting under a comment that
-//! denies the part: Heltec commented the T114's QSPI pins out, RAK wrote
-//! "No onboard flash" over the RAK4631's and marked the pins "occupied by
-//! GPIO's". Three units — two T114s and the field Pocket — answer nothing
-//! to `05h`, `9Fh`, `90h` or the datasheet reset while every pin follows
-//! our drive. Both `CONFIG.qspi_part` are `None`, both firmwares print
-//! `[QSPI] NONE board=<b>` at boot instead of coming here, and the
-//! evidence with its URLs is in `leviculum-nrf/src/boards/t114.rs` and
+//! **The T114 and the RAK4631 carry none, and one board does ask:** the
+//! SolarNode's `CONFIG.qspi_part` is [`P25Q16H`] and `bin/solarnode.rs`
+//! calls [`identify_at_boot`] once at boot. The two negatives came from
+//! an `EXTERNAL_FLASH_DEVICES` line in a vendor variant header, and on
+//! both vendors that line is a template default sitting under a comment
+//! that denies the part: Heltec commented the T114's QSPI pins out, RAK
+//! wrote "No onboard flash" over the RAK4631's and marked the pins
+//! "occupied by GPIO's". Three units — two T114s and the field Pocket —
+//! answer nothing to `05h`, `9Fh`, `90h` or the datasheet reset while
+//! every pin follows our drive. Both `CONFIG.qspi_part` are `None`, both
+//! firmwares print `[QSPI] NONE board=<b>` at boot instead of coming
+//! here, and the evidence with its URLs is in
+//! `leviculum-nrf/src/boards/t114.rs` and
 //! `leviculum-nrf/src/boards/rak4631.rs` (Codeberg #384).
 //!
-//! This module is kept, with [`leviculum_qspi_bitbang`] and
-//! [`leviculum_record_log`], because the part it drives is a board or an
-//! add-on away — RAK sells the RAK15001 as a WisBlock module — and
-//! because the record log's NorFlash shape is what the internal flash
-//! wants too. It still builds and its host tests still run; it is simply
-//! not reached. Do not re-point a board at it on the strength of a
+//! The SolarNode is a different claim and it is not a variant header's:
+//! Seeed's own schematic for the XIAO nRF52840 Plus module draws U7, an
+//! 8-pin NOR flash, on six named `P0.2x_QSPI_*` nets. What that
+//! schematic does NOT print is the part number or whether the footprint
+//! is populated, and the sheet for the plain (non-Plus) XIAO v1.1 draws
+//! the same U7 with the value **`DNP`** — do not populate. So the board
+//! file states the wiring from the schematic and the part number from
+//! the two Seeed variant headers, and the boot line is what settles
+//! whether anything answers. That is the whole point of asking:
+//! `boards/solarnode.rs` says what is expected, the board says what is
+//! there.
+//!
+//! Do not re-point the other two at this module on the strength of a
 //! variant header: `scripts/check-nrf-board-pins.sh` refuses that, and
 //! the day it is right, the check is the place to say so.
 //!
-//! What it drives, when something does: 1 MB of IS25LP080D was what the
-//! Pocket was believed to carry. Codeberg #384 and
+//! What it drives, when something does: 2 MB of [`P25Q16H`] on the
+//! SolarNode, and 1 MB of [`IS25LP080D`] was what the Pocket was
+//! believed to carry. Codeberg #384 and
 //! `docs/src/concepts/propagation-node-on-a-board.md` ask what to put in
 //! such a part; this module is only the part that gets there — the
 //! peripheral, the part's identity, and the `embedded_storage` NorFlash
@@ -53,25 +63,43 @@
 //! nRF52840's own 32 MHz ceiling is what binds there: 16 MB/s, which the
 //! concept paper turns into a 0.07 s full-store scan — the number that
 //! makes an on-flash directory affordable and a RAM index unnecessary.
-//! `Speed::M8` exists for the other kind of part, the low-power one whose
-//! quad read tops out at 8 MHz in its default ultra-low-power mode (the
-//! MX25R1635F is the example, and the reason the conservative timings
-//! below are taken from its datasheet). We have no board with either, so
-//! nothing selects either today; the asymmetry it encodes is the parts',
-//! not ours.
+//! Same on the PUYA part for the same reason: its `fC` is 104 MHz for
+//! `FAST_READ` and every other command the probe issues (P25Q16H
+//! datasheet, "AC Characteristics"), so 32 MHz is the nRF's limit and
+//! not the part's. `Speed::M8` exists for the other kind of part, the
+//! low-power one whose quad read tops out at 8 MHz in its default
+//! ultra-low-power mode (the MX25R1635F is the example, and the reason
+//! the conservative timings below are taken from its datasheet). No
+//! board here carries one, so nothing selects it today; the asymmetry it
+//! encodes is the parts', not ours.
 //!
 //! # Quad enable
 //!
-//! Both parts power up in single-line SPI mode with the QE bit of their
-//! status register clear, and both put QE in bit 6. The `READ4IO`/`PP4IO`
-//! opcodes this driver configures do not work until it is set, so
-//! [`identify_at_boot`] sets it if it is not already. The write-enable the
-//! part needs first is supplied by the QSPI peripheral itself: every
-//! custom instruction it issues has `CINSTRCONF.WREN` set
-//! (`custom_instruction_start`, `embassy-nrf-0.9.0/src/qspi.rs`), and
-//! `WIPWAIT` makes it wait for the part to finish. One byte of data, so
-//! the Macronix configuration registers — which hold the ultra-low-power
-//! bit — keep their values.
+//! Every part powers up in single-line SPI mode with the QE bit of its
+//! status register clear, and the `READ4IO`/`PP4IO` opcodes this driver
+//! configures by default do not work until it is set. **Where that bit
+//! lives is a property of the part, not of the bus**, which is why
+//! [`FlashPart`] carries a [`QuadEnable`] rather than this module
+//! knowing one recipe. Macronix and ISSI put it in bit 6 of the one
+//! status register ([`QuadEnable::StatusBit6`]); PUYA puts it in S9, bit
+//! 1 of status register 2, read with `35h` and written as the second
+//! byte of a two-byte `01h` (P25Q16H datasheet, "Status Register" and
+//! §10.5). Bit 6 of a PUYA status register is a block-protection bit, so
+//! the Macronix recipe applied to that part would not fail — it would
+//! write-protect it.
+//!
+//! [`QuadEnable::Untouched`] is therefore not a gap: it is the honest
+//! state for a part nothing reads yet. The probe then writes no
+//! non-volatile register at all and configures the single-line
+//! `FASTREAD`/`PP` opcodes, which work at the QE=0 every part leaves the
+//! factory in. It is what the SolarNode's [`P25Q16H`] uses.
+//!
+//! When QE is set, the write-enable the part needs first is supplied by
+//! the QSPI peripheral itself: every custom instruction it issues has
+//! `CINSTRCONF.WREN` set (`custom_instruction_start`,
+//! `embassy-nrf-0.9.0/src/qspi.rs`), and `WIPWAIT` makes it wait for the
+//! part to finish. One byte of data, so the Macronix configuration
+//! registers — which hold the ultra-low-power bit — keep their values.
 //!
 //! # Deep power down
 //!
@@ -185,7 +213,7 @@
 //! whatever comes back, and a ladder would produce more lines and no more
 //! information than the first.
 
-use embassy_nrf::qspi::{self, Config, Frequency, Qspi};
+use embassy_nrf::qspi::{self, Config, Frequency, Qspi, ReadOpcode, WriteOpcode};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
 
 use embassy_nrf::gpio::{AnyPin, Flex, OutputDrive, Pull};
@@ -255,6 +283,34 @@ impl Speed {
     }
 }
 
+/// Where a part keeps its Quad Enable bit — or that the boot probe is to
+/// leave every status register alone.
+///
+/// Not a detail of the bus: bit 6 means different things to different
+/// vendors, so a single recipe is a write to whatever that vendor keeps
+/// there. On a PUYA part bit 6 of the status register is `BP4`, a
+/// block-protection bit, and the Macronix/ISSI recipe would not fail on
+/// it — it would write-protect the part, non-volatilely, on a boot that
+/// only meant to ask its name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuadEnable {
+    /// Bit 6 of the one status register, `05h` to read and `01h` to
+    /// write. Macronix MX25R and ISSI IS25LP both keep it there.
+    StatusBit6,
+    /// Write no status register, and configure the single-line
+    /// `FASTREAD`/`PP` opcodes instead of the quad ones.
+    ///
+    /// For a part that is identified and nothing more. The probe then
+    /// costs it one `0xAB` and one `9Fh` and changes nothing that
+    /// survives the power cycle, and the device handed back is one whose
+    /// opcodes work at the QE=0 every part leaves the factory in —
+    /// rather than a handle that would read garbage on first use. The
+    /// day something stores records here is the day to name this part's
+    /// QE bit; until then the honest statement is that we have not
+    /// touched it.
+    Untouched,
+}
+
 /// The part a board is expected to carry.
 pub struct FlashPart {
     /// Datasheet name, for the boot line.
@@ -265,6 +321,9 @@ pub struct FlashPart {
     pub capacity: u32,
     /// Bus clock this part is driven at.
     pub speed: Speed,
+    /// Where this part's Quad Enable bit is, or that the probe leaves
+    /// every status register alone. See [`QuadEnable`].
+    pub quad: QuadEnable,
 }
 
 /// ISSI IS25LP080D, 8 Mbit. No board in this tree carries it — the
@@ -276,6 +335,31 @@ pub const IS25LP080D: FlashPart = FlashPart {
     jedec: [0x9D, 0x60, 0x14],
     capacity: 1024 * 1024,
     speed: Speed::M32,
+    quad: QuadEnable::StatusBit6,
+};
+
+/// PUYA P25Q16H, 16 Mbit, the part the Seeed XIAO nRF52840 module is
+/// believed to carry and the one the SolarNode asks for at boot
+/// (`boards/solarnode.rs`, Codeberg #384).
+///
+/// The JEDEC id is the datasheet's own "Table ID Definitions" for the
+/// `RDID` (9Fh) command — manufacturer `85` (PUYA), memory type `60`,
+/// memory density `15` — in `Flash_P25Q16H-UXH-IR_Datasheet.pdf`, the
+/// sheet Seeed links from the XIAO nRF52840 wiki page. `15` is the
+/// 16 Mbit code, so a board that answers `85:60:14` is carrying the
+/// 8 Mbit sibling and this probe will say `state=unexpected-part` rather
+/// than mount half a part.
+///
+/// Quad enable is [`QuadEnable::Untouched`]: nothing in this firmware
+/// reads or writes this part, and its QE bit is S9 rather than bit 6 —
+/// see the module's "Quad enable" section for why that difference is not
+/// academic.
+pub const P25Q16H: FlashPart = FlashPart {
+    name: "P25Q16H",
+    jedec: [0x85, 0x60, 0x15],
+    capacity: 2 * 1024 * 1024,
+    speed: Speed::M32,
+    quad: QuadEnable::Untouched,
 };
 
 /// Bring the QSPI up, wake the part, identify it, and hand back a NorFlash
@@ -325,6 +409,15 @@ pub fn identify_at_boot(
     let mut config = Config::default();
     config.frequency = part.speed.frequency();
     config.capacity = part.capacity;
+    if part.quad == QuadEnable::Untouched {
+        // Nothing sets QE on this part, so the default `READ4IO`/`PP4IO`
+        // would clock data on pins it is still using as WP# and HOLD#.
+        // Single-line opcodes are what a QE=0 part answers, and they are
+        // what makes the handle below honest rather than a trap for the
+        // first caller that reads through it.
+        config.read_opcode = ReadOpcode::FASTREAD;
+        config.write_opcode = WriteOpcode::PP;
+    }
 
     // `Qspi::new` drives IO3 (the part's HOLD#/RESET#) high before it
     // activates the interface, which is what a part that reads pin 7 as
@@ -398,34 +491,40 @@ pub fn identify_at_boot(
         return None;
     }
 
-    let mut status = [0u8; 1];
-    if flash
-        .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut status)
-        .is_err()
-    {
-        log_part(part, Some(first), second, false, "status-read-failed");
-        return None;
-    }
-    if status[0] & STATUS_QE == 0 {
-        let want = status[0] | STATUS_QE;
+    // The part named itself correctly. Whether anything is written to it
+    // now is the part's own business: `Untouched` is a part nothing reads
+    // yet, and a boot that only asked a name must not leave a
+    // non-volatile bit behind (see [`QuadEnable`]).
+    if part.quad == QuadEnable::StatusBit6 {
+        let mut status = [0u8; 1];
         if flash
-            .blocking_custom_instruction(CMD_WRITE_STATUS, &[want], &mut [])
+            .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut status)
             .is_err()
         {
-            log_part(part, Some(first), second, false, "quad-enable-failed");
+            log_part(part, Some(first), second, false, "status-read-failed");
             return None;
         }
-        // Read it back rather than assume: the quad opcodes this driver is
-        // configured with are silently wrong if QE did not take, and the
-        // symptom would be garbage data rather than an error.
-        let mut check = [0u8; 1];
-        if flash
-            .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut check)
-            .is_err()
-            || check[0] & STATUS_QE == 0
-        {
-            log_part(part, Some(first), second, false, "quad-enable-refused");
-            return None;
+        if status[0] & STATUS_QE == 0 {
+            let want = status[0] | STATUS_QE;
+            if flash
+                .blocking_custom_instruction(CMD_WRITE_STATUS, &[want], &mut [])
+                .is_err()
+            {
+                log_part(part, Some(first), second, false, "quad-enable-failed");
+                return None;
+            }
+            // Read it back rather than assume: the quad opcodes this driver
+            // is configured with are silently wrong if QE did not take, and
+            // the symptom would be garbage data rather than an error.
+            let mut check = [0u8; 1];
+            if flash
+                .blocking_custom_instruction(CMD_READ_STATUS, &[], &mut check)
+                .is_err()
+                || check[0] & STATUS_QE == 0
+            {
+                log_part(part, Some(first), second, false, "quad-enable-refused");
+                return None;
+            }
         }
     }
 
@@ -813,9 +912,11 @@ struct Aligned<const N: usize>([u8; N]);
 
 /// Read the first 256 bytes over the quad path and say what came back.
 ///
-/// This is the only thing in part 1 that exercises `READ4IO` at the
-/// configured clock, so it is what a boot capture has to show before the
-/// bus is believed. It is also the honest answer to "is there already
+/// This is the only thing in part 1 that exercises the configured read
+/// opcode at the configured clock, so it is what a boot capture has to
+/// show before the bus is believed. `READ4IO` on a part whose QE bit the
+/// probe set, `FASTREAD` on a [`QuadEnable::Untouched`] one — which is
+/// why the opcode is chosen beside the part rather than here. It is also the honest answer to "is there already
 /// something on these boards' flash?", which matters before anything
 /// formats them: `nonff=0/256` is a blank part (or a bus that answers with
 /// pull-ups — the two look alike, which is why the JEDEC line above is the

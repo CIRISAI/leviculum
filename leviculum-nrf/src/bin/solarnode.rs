@@ -346,18 +346,43 @@ async fn main(spawner: Spawner) {
         hash[4]
     );
 
-    // A P25Q16H IS fitted here, on the XIAO module — unlike the T114 and
-    // the RAK4631, whose headers name a part their boards do not carry
-    // (Codeberg #384). It is nevertheless not mounted: `CONFIG.qspi_part`
-    // is `None`, the six pins are never configured, and there is no
-    // `[STG] qspi-init` stage to hang in. Said out loud on its own line
-    // because "no store line at all" reads the same for a part that did
-    // not answer, a board that has none, and this — a part nothing has
-    // asked for yet. The pins are in `boards/solarnode.rs`.
-    leviculum_nrf::log::log_fmt_critical(
-        "[QSPI] ",
-        format_args!("NONE board=solarnode reason=fitted-but-unmounted-see-boards-solarnode-rs"),
-    );
+    // The one board in this tree that asks. Seeed's schematic draws a NOR
+    // flash on six named QSPI nets of the XIAO module, their variant
+    // headers name it a P25Q16H, and neither says whether the footprint
+    // is populated on this unit — the plain XIAO's sheet even prints the
+    // value `DNP`. So the firmware asks the part its name, once, and
+    // prints the answer: `[QSPI] JEDEC id=… expect=85:60:15 part=P25Q16H
+    // bytes=2097152 clk=32MHz match=… state=…`, with a hand-clocked
+    // second opinion on the pins if nothing answers at all
+    // (`qspi::identify_at_boot`, and the evidence in
+    // `boards/solarnode.rs`; Codeberg #384).
+    //
+    // Identify and nothing else. The device is dropped on the next line,
+    // which deactivates the peripheral and deconfigures the six pins, so
+    // there is no `[STG] qspi-init` stage to hang in, no filesystem, no
+    // store, and — `qspi::QuadEnable::Untouched` — no status-register
+    // write: after this boot the part is in the state it shipped in.
+    if let Some(part) = solarnode::CONFIG.qspi_part {
+        drop(leviculum_nrf::qspi::identify_at_boot(
+            p.QSPI,
+            p.P0_21.into(), // SCK
+            p.P0_25.into(), // CSN
+            p.P0_20.into(), // IO0 / DI
+            p.P0_24.into(), // IO1 / DO
+            p.P0_22.into(), // IO2 / WP#
+            p.P0_23.into(), // IO3 / HOLD#
+            part,
+        ));
+    } else {
+        // Unreachable while the board declares a part, and kept because
+        // the alternative is a capture with no `[QSPI]` line at all —
+        // which reads the same for a board that has none, a part that did
+        // not answer, and a firmware that forgot to ask.
+        leviculum_nrf::log::log_fmt_critical(
+            "[QSPI] ",
+            format_args!("NONE board=solarnode reason=no-part-declared-see-boards-solarnode-rs"),
+        );
+    }
 
     // LoRa on SPIM2, the instance the shared `lora::init` signature
     // dictates. Pin map from `boards/solarnode.rs`; note that SCK/MISO/MOSI

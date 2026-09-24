@@ -26,10 +26,17 @@
 # CONFIG. A board left with no checked rows at all fails too, so a board
 # can never pass by having everything removed from under it.
 #
-# Both boards are "none" since 2026-09-11 (Codeberg #384), and the two
-# maps were wrong for the same reason: an `EXTERNAL_FLASH_DEVICES` line
-# in a vendor variant header is a template default, not a statement that
-# a part is fitted.
+# The T114 and the RAK4631 are "none" since 2026-09-11 (Codeberg #384),
+# and the two maps were wrong for the same reason: an
+# `EXTERNAL_FLASH_DEVICES` line in a vendor variant header is a template
+# default, not a statement that a part is fitted.
+#
+# The solar node is the exception and it is one on different evidence:
+# Seeed's own schematic for the XIAO nRF52840 Plus module draws U7, an
+# 8-pin NOR flash, on the six nets recorded below, and the board file
+# quotes it pin by pin. The PART NUMBER is still only a variant header's
+# word, so the firmware asks rather than asserts — see
+# `leviculum-nrf/src/boards/solarnode.rs`.
 #
 # T114: Heltec's own HT-n5262 variant has the QSPI pins commented out and
 # keeps only the `EXTERNAL_FLASH_*` defines, the sibling HT-n5262G gives
@@ -85,3 +92,28 @@ dio1 = { pin = 47, alias = "LoRaDio1", define = "SX126X_DIO1" }
 # Not an argument of `lora::init`; the alias is the only user, and the
 # module is dead without it, so it is checked against the alias alone.
 power_en = { pin = 37, alias = "LoRaPowerEn", define = "SX126X_POWER_EN", call_site = false }
+
+# The solar node's `PIN_QSPI_*` defines are INDICES into
+# `g_ADigitalPinMap`, not GPIO ordinals: `PIN_QSPI_CS (22)` is `D22`,
+# which the table below sends to P0.25. `pinmap` is what tells the gate
+# to resolve them; without it the upstream half would compare a D-number
+# against a pin and fail every row but SCK, where the two coincide.
+#
+# Only the QSPI group is recorded for this board. Its LoRa defines are
+# `D`-TOKENS (`#define SX126X_CS D4`) rather than numbers, which needs a
+# second kind of resolution that nothing yet asks for; the six rows here
+# are what keeps the board from passing with no comparisons at all.
+[boards.solarnode]
+board = "leviculum-nrf/src/boards/solarnode.rs"
+bin = "leviculum-nrf/src/bin/solarnode.rs"
+variant = "variants/nrf52840/seeed_solar_node/variant.h"
+pinmap = "variants/nrf52840/seeed_solar_node/variant.cpp"
+qspi_part = "P25Q16H"
+
+[boards.solarnode.qspi]
+sck = { pin = 21, alias = "QspiClk", define = "PIN_QSPI_SCK" }
+cs = { pin = 25, alias = "QspiCs", define = "PIN_QSPI_CS" }
+io0 = { pin = 20, alias = "QspiIo0", define = "PIN_QSPI_IO0" }
+io1 = { pin = 24, alias = "QspiIo1", define = "PIN_QSPI_IO1" }
+io2 = { pin = 22, alias = "QspiIo2", define = "PIN_QSPI_IO2" }
+io3 = { pin = 23, alias = "QspiIo3", define = "PIN_QSPI_IO3" }

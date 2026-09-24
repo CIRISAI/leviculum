@@ -1,8 +1,10 @@
 //! SenseCAP Solar Node P1-Pro pin mappings and hardware constants
 //!
 //! Not one integrated PCB but three Seeed modules on a carrier board:
-//! a XIAO nRF52840 Plus (nRF52840, 1 MB flash, 256 KB RAM, P25Q16H QSPI
-//! part on the module), a Wio-SX1262 radio and a XIAO L76K GNSS. Same
+//! a XIAO nRF52840 Plus (nRF52840, 1 MB flash, 256 KB RAM, and a QSPI
+//! NOR footprint on the module that the firmware asks about at boot
+//! rather than assuming — see the QSPI block below), a Wio-SX1262 radio
+//! and a XIAO L76K GNSS. Same
 //! MCU family, same radio die and the same Adafruit UF2 bootloader as
 //! the T114 and the RAK4631, so `sx1262.rs`, `lora.rs`, `interface.rs`,
 //! the dual-CDC transport, the SoftDevice path and the flash identity
@@ -27,6 +29,11 @@
 //!
 //! References:
 //!   * <https://files.seeedstudio.com/products/SenseCAP/Wio_SX1262/Wio-SX1262%20for%20XIAO%20V1.0_SCH.pdf>
+//!   * <https://files.seeedstudio.com/wiki/XIAO-BLE/Seeed_Studio_XIAO_nRF52840_Plus_SCH_PCB_v1.1.zip>
+//!     — the module's own schematic, which the QSPI block below quotes
+//!     pin by pin
+//!   * <https://files.seeedstudio.com/wiki/XIAO-BLE/Seeed-Studio-XIAO-nRF52840-Sense-v1.1.pdf>
+//!     — the plain XIAO's sheet, second reading of the same six nets
 //!   * Meshtastic `variants/nrf52840/seeed_solar_node/{variant.h,variant.cpp}`
 
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
@@ -195,16 +202,74 @@ pub type GroveSda = peripherals::P0_09;
 /// Grove SCL (`D15` = P0.10, NFC2). See [`GroveSda`].
 pub type GroveScl = peripherals::P0_10;
 
-// QSPI flash: a P25Q16H (2 MB) IS fitted, on the XIAO module itself —
-// unlike the T114 and the RAK4631, whose variant headers name a part
-// their boards do not carry (Codeberg #384). `CONFIG.qspi_part` is
-// nevertheless `None`, which here means "not mounted yet" rather than
-// "not there": nothing in this firmware uses it, the record log lives
-// in internal flash, and a part that is probed but unused would only
-// add a boot stage that can hang. The pins, for whoever mounts it
-// (`g_ADigitalPinMap` indices 21-26): SCK P0.21, CS P0.25, IO0 P0.20,
-// IO1 P0.24, IO2 P0.22, IO3 P0.23. They are deliberately not aliases
-// here — nothing may configure them as a bus while the part is unused.
+// QSPI flash, on the XIAO module itself. This is the one board in the
+// tree whose `CONFIG.qspi_part` is not `None`, and the reason is that
+// its evidence is of a different kind from the T114's and the
+// RAK4631's, whose variant headers name a part their boards do not
+// carry (Codeberg #384).
+//
+// **The wiring is from the schematic, line by line.** Seeed publish the
+// module's sheet as `Seeed_Studio_XIAO_nRF52840_Plus_SCH_PCB_v1.1.zip`
+// (`202004053_PCB_Seeed Studio XIAO nRF52840 Plus v1.0.pdf`, KiCad,
+// V1.0 2024-10-29, linked from <https://wiki.seeedstudio.com/XIAO_BLE/>).
+// `U7` there is an 8-pin NOR flash, and every one of its signal pins
+// carries a named net; each alias below quotes the pin number, the pin
+// name on the symbol and the net label, and the seventh line of that
+// symbol is `8 VCC — 3V3` with `4 GND — GND`, so the part is powered
+// rather than strapped off.
+//
+// Corroborated twice over, because a single reading of a drawing is a
+// single reading: the same six nets on the same six pins are on the
+// plain XIAO nRF52840 v1.1 sheet
+// (`Seeed-Studio-XIAO-nRF52840-Sense-v1.1.pdf`, Eagle, grid B1-B2 of
+// sheet 3), and Meshtastic's two variants for this module resolve to
+// the same six ordinals through their own mapping tables —
+// `seeed_solar_node/variant.cpp` at `D21..D26` and
+// `seeed_xiao_nrf52840_kit/variant.cpp` at `D24..D29`. The headers'
+// `PIN_QSPI_*` numbers are INDICES into those tables, not ordinals
+// (`#define PIN_QSPI_CS (22)` is `D22`, which the table sends to
+// P0.25), which is why `reference-pins.toml` records the table for this
+// board and `scripts/check-nrf-board-pins.sh` resolves through it.
+//
+// **What the schematic does NOT say is the part number, and on one
+// sheet it denies the part.** The Plus sheet leaves U7's value field
+// blank; the plain XIAO v1.1 sheet prints U7's value as **`DNP`** — do
+// not populate. The part number `P25Q16H` comes from the two Seeed
+// variant headers alone (`#define EXTERNAL_FLASH_DEVICES P25Q16H`,
+// commented out in the kit's, live in the solar node's), and that is the
+// same kind of line that was wrong twice in #384. So this board does not
+// assert a fitted part: it asks, once, at boot. `CONFIG.qspi_part` is
+// `Some(&crate::qspi::P25Q16H)`, `bin/solarnode.rs` calls
+// `qspi::identify_at_boot` and drops the device immediately, and the
+// `[QSPI] JEDEC …` line it prints says `state=ok` for a P25Q16H,
+// `state=unexpected-part` for something else, or `state=no-answer` plus
+// a hand-clocked second opinion for a footprint that was never
+// populated. Nothing else in this firmware touches the part: no
+// filesystem, no store, and no status-register write
+// (`qspi::QuadEnable::Untouched`).
+//
+// One positive statement beyond the drawings: the solar node's own
+// `initVariant` opens with `pinMode(PIN_QSPI_CS, OUTPUT);
+// digitalWrite(PIN_QSPI_CS, HIGH);` — upstream deselects this part
+// before it does anything else, which is not what a board with an empty
+// footprint needs.
+/// QSPI flash clock. `U7` pin 6 `CLK`, net `P0.21_QSPI_SCK`.
+pub type QspiClk = peripherals::P0_21;
+/// QSPI flash chip-select, active low. `U7` pin 1 `~{CS}`, net
+/// `P0.25_QSPI_CSN`. The pin upstream's `initVariant` drives high.
+pub type QspiCs = peripherals::P0_25;
+/// QSPI IO0, the part's `DI` in single-line mode. `U7` pin 5 `DI`, net
+/// `P0.20_QSPI_SIO_0`.
+pub type QspiIo0 = peripherals::P0_20;
+/// QSPI IO1, the part's `DO` in single-line mode — the line a JEDEC
+/// read comes back on. `U7` pin 2 `DO`, net `P0.24_QSPI_SIO_1`.
+pub type QspiIo1 = peripherals::P0_24;
+/// QSPI IO2, the part's `WP#` while its QE bit is clear. `U7` pin 3
+/// `~{WP}`, net `P0.22_QSPI_SIO_2`.
+pub type QspiIo2 = peripherals::P0_22;
+/// QSPI IO3, the part's `HOLD#` while its QE bit is clear. `U7` pin 7
+/// `~{HOLD}`, net `P0.23_QSPI_SIO_3`.
+pub type QspiIo3 = peripherals::P0_23;
 
 // Battery
 /// Battery voltage sense (`PIN_VBAT` = `D16` = P0.31, AIN7). The
@@ -333,8 +398,8 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
     lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
     lora_max_power_dbm: LORA_MAX_POWER_DBM,
-    // Fitted but unmounted. See the QSPI block above.
-    qspi_part: None,
+    // Asked once at boot, mounted by nothing. See the QSPI block above.
+    qspi_part: Some(&crate::qspi::P25Q16H),
 };
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.

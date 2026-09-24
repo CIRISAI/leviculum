@@ -30,18 +30,29 @@
 #      one says so rather than passing quietly.
 #   4. Each board declares the part the table records, and a board that
 #      records `qspi_part = "none"` has no pin table, no `Qspi*` alias and
-#      no `identify_at_boot` call anywhere in its bin. That is BOTH boards
-#      since #384: each vendor's own variant header carries an
-#      `EXTERNAL_FLASH_DEVICES` template line under a comment that denies
-#      the part — Heltec's with the pins commented out, RAK's under "No
-#      onboard flash" — and neither board ever answered a JEDEC read.
-#      Re-adding the T114's six would drive whatever a user has plugged
-#      into its expansion header and say `id=00:00:00` about it.
-#   5. No board in this tree declares a part at all, which is the claim
-#      the opening paragraph of `leviculum-nrf/src/qspi.rs` makes. That is
-#      checked here rather than left to the per-board comparison above,
-#      because the table and the board file can be walked back together
-#      without either of them contradicting the other.
+#      no `identify_at_boot` call anywhere in its bin. That is the T114
+#      and the RAK4631 since #384: each vendor's own variant header
+#      carries an `EXTERNAL_FLASH_DEVICES` template line under a comment
+#      that denies the part — Heltec's with the pins commented out, RAK's
+#      under "No onboard flash" — and neither board ever answered a JEDEC
+#      read. Re-adding the T114's six would drive whatever a user has
+#      plugged into its expansion header and say `id=00:00:00` about it.
+#   5. Which board carries which part is stated HERE as well as in the
+#      table (`TREE_PARTS`), so that walking a board file and the table
+#      back together cannot quietly change the answer — neither of them
+#      would contradict the other. Today: t114 none, rak4631 none,
+#      solarnode P25Q16H. The solar node is the one positive, and its
+#      evidence is a schematic rather than a variant header; the part
+#      NUMBER is still only a header's word, which is why the firmware
+#      asks the part its name at boot instead of asserting it
+#      (`leviculum-nrf/src/boards/solarnode.rs`). Moving a board here
+#      means moving the module doc of `leviculum-nrf/src/qspi.rs` with it.
+#
+# Claim 3 has a wrinkle on the solar node: Seeed's `PIN_QSPI_*` are
+# indices into the `g_ADigitalPinMap` of the variant's `.cpp`, not GPIO
+# ordinals, so that board's table carries a `pinmap =` and the gate
+# resolves each define through it. Without that the check would compare
+# `PIN_QSPI_CS (22)` against P0.25 and fail a correct map.
 #
 # A board left with no checked rows at all is an error, not a quiet pass:
 # that is the shape a board takes when everything is removed from under
@@ -86,6 +97,11 @@ PIN_ARG_RE = re.compile(r"\bp\.(P[01]_\d\d)\b")
 QSPI_PART_RE = re.compile(r"qspi_part:\s*(None|Some\(\s*&crate::qspi::(\w+)\s*\))")
 ALIAS_ANY_QSPI_RE = re.compile(r"pub type (Qspi\w+)\s*=\s*peripherals::")
 PROBE_RE = re.compile(r"qspi::identify_at_boot\s*\(")
+PINMAP_RE = re.compile(r"g_ADigitalPinMap\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;", re.S)
+
+# What each board is allowed to declare, stated here as well as in
+# reference-pins.toml. Editing one alone is the failure this catches.
+TREE_PARTS = {"t114": "none", "rak4631": "none", "solarnode": "P25Q16H"}
 
 
 def pin_name(n):
@@ -110,6 +126,30 @@ def call_args(text, callee):
             depth -= 1
         i += 1
     return PIN_ARG_RE.findall(text[m.end() : i - 1])
+
+
+def digital_pin_map(text):
+    """`g_ADigitalPinMap` as GPIO ordinals, or None if it cannot be read.
+
+    Seeed's variants define `PIN_QSPI_CS (22)` as an INDEX into this
+    table, so a gate that compared that 22 against our P0.25 would fail a
+    correct map. Comments are stripped first, which also drops the
+    commented-out entries these tables carry.
+    """
+    m = PINMAP_RE.search(text)
+    if m is None:
+        return None
+    body = re.sub(r"//[^\n]*", "", m.group(1))
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    out = []
+    for entry in body.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if not entry.isdigit():
+            return None
+        out.append(int(entry))
+    return out or None
 
 
 def define_value(text, name):
@@ -172,10 +212,19 @@ def check_call_site(board, group, entries, text, where):
     return out
 
 
-def check_variant(board, group, entries, text, where):
+def check_variant(board, group, entries, text, where, pinmap=None):
     out = []
     for key, e in entries.items():
         got = define_value(text, e["define"])
+        if got is not None and pinmap is not None:
+            if got >= len(pinmap):
+                out.append(
+                    f"{where}: {board} {group}.{key}: {e['define']} is index "
+                    f"{got}, past the {len(pinmap)} entries of "
+                    f"g_ADigitalPinMap — the table it indexes has changed"
+                )
+                continue
+            got = pinmap[got]
         if got is None:
             out.append(
                 f"{where}: {board} {group}.{key}: {e['define']} is not defined "
@@ -250,29 +299,48 @@ def check_rows(board, count):
 
 
 def check_tree_parts(table):
-    """No board in this tree carries a QSPI part (#384).
+    """The table's parts are the parts this script names in `TREE_PARTS`.
 
-    Both maps came from an `EXTERNAL_FLASH_DEVICES` line in a vendor
-    variant header, and on both vendors that line sits under a comment
-    denying the part. Neither board ever answered `9Fh`. Asserting it here,
-    against the whole table at once, is what the per-board comparison
-    cannot do: that one only says the board file and the table agree, so
-    walking both back together would pass it.
+    Asserting it here, against the whole table at once, is what the
+    per-board comparison cannot do: that one only says the board file and
+    the table agree, so walking both back together would pass it. This
+    one needs a second edit, in a second file, in a script whose header
+    says what the current answer is and why.
 
-    The day a board really does carry one — a WisBlock RAK15001, say —
-    this is the line to edit, and editing it is the reminder that the
-    opening paragraph of `leviculum-nrf/src/qspi.rs` says the opposite.
+    Both "none"s are #384: the T114's and the RAK4631's maps came from an
+    `EXTERNAL_FLASH_DEVICES` line sitting under a comment denying the
+    part, and neither board ever answered `9Fh`. The solar node's
+    `P25Q16H` is the one positive and rests on Seeed's schematic for the
+    six nets; the part number itself is still a header's word, which the
+    firmware settles by asking at boot rather than asserting.
+
+    Moving a board in or out means moving the module doc of
+    `leviculum-nrf/src/qspi.rs` with it.
     """
     out = []
-    for board, spec in sorted(table.items()):
-        declared = spec.get("qspi_part")
-        if declared not in (None, "none"):
+    for board in sorted(set(table) | set(TREE_PARTS)):
+        declared = table.get(board, {}).get("qspi_part")
+        expected = TREE_PARTS.get(board)
+        if expected is None:
+            out.append(
+                f"{board}: reference-pins.toml has a board this gate does "
+                f"not know. Add it to TREE_PARTS with the part it carries, "
+                f"or \"none\" — a board nobody decided about is how the "
+                f"T114 travelled through three projects (#384)."
+            )
+        elif board not in table:
+            out.append(
+                f"{board}: TREE_PARTS says this board carries "
+                f"\"{expected}\", but reference-pins.toml has no entry for "
+                f"it — the board would be gated by nothing at all."
+            )
+        elif declared != expected:
             out.append(
                 f"{board}: reference-pins.toml records qspi_part = "
-                f"\"{declared}\", but no board in this tree carries a QSPI "
-                f"part (#384). If one now does, say so here and correct the "
-                f"opening paragraph of leviculum-nrf/src/qspi.rs, which "
-                f"states that nothing calls the probe."
+                f"\"{declared}\", this gate expects \"{expected}\". If the "
+                f"board really has changed, say so in TREE_PARTS and in the "
+                f"module doc of leviculum-nrf/src/qspi.rs, which names the "
+                f"boards that carry a part."
             )
     return out
 
@@ -344,12 +412,37 @@ PROBE_BIN = """
 """
 
 # The fifth layer: a board whose rows have all been removed, and a tree in
-# which some board has been given a part back. Both are table shapes, so
-# the fixtures are tables rather than source text.
+# which some board's part has been changed under the gate. Both are table
+# shapes, so the fixtures are tables rather than source text.
 ROWS_SPEC = {"qspi_part": "none", "lora": FIX_QSPI}
 STRIPPED_SPEC = {"qspi_part": "none"}
-NO_PART_TABLE = {"t114": STRIPPED_SPEC, "rak4631": STRIPPED_SPEC}
-PART_TABLE = {"t114": STRIPPED_SPEC, "rak4631": {"qspi_part": "IS25LP080D"}}
+GOOD_TABLE = {b: {"qspi_part": part} for b, part in TREE_PARTS.items()}
+PART_TABLE = {**GOOD_TABLE, "rak4631": {"qspi_part": "IS25LP080D"}}
+
+# The sixth: the solar node's indexed defines. Upstream `PIN_QSPI_CS (22)`
+# is D22 and the table sends D22 to P0.25; the indices are small here so
+# the fixture's map can be short. A gate that did not resolve would
+# compare the define's own 3 against P0.25 and fire on the CORRECT
+# fixture, and one that resolved but did not re-read would miss the entry
+# moving underneath it. Both halves are checked.
+PINMAP_VARIANT = """
+#define PIN_QSPI_SCK (2)
+#define PIN_QSPI_CS (3)
+"""
+GOOD_PINMAP_CPP = """
+const uint32_t g_ADigitalPinMap[] = {
+    2,  // D0  P0.02 (A0)    GNSS_WAKEUP
+    // 31, // commented out upstream, and therefore not an entry
+    31, // D1  P0.31 VBAT_ADC
+    21, // D2  P0.21 (QSPI_SCK)
+    25, // D3  P0.25 (QSPI_CSN)
+};
+"""
+BAD_PINMAP_CPP = GOOD_PINMAP_CPP.replace("25, // D3  P0.25", "24, // D3  P0.24")
+FIX_PINMAP = {
+    "sck": {"pin": 21, "alias": "QspiClk", "define": "PIN_QSPI_SCK"},
+    "cs": {"pin": 25, "alias": "QspiCs", "define": "PIN_QSPI_CS"},
+}
 
 
 def self_test():
@@ -361,6 +454,17 @@ def self_test():
 
     def part(board_text=NONE_BOARD, bin_text=NONE_BIN):
         return check_part("t114", "none", board_text, bin_text, FIX_SPEC)
+
+    def indexed(cpp):
+        """claim 3 for a board whose defines index `g_ADigitalPinMap`."""
+        return check_variant(
+            "solarnode",
+            "qspi",
+            FIX_PINMAP,
+            PINMAP_VARIANT,
+            "<fixture>",
+            digital_pin_map(cpp),
+        )
 
     cases = (
         ("alias", "P1_01-for-P0_05", pins(check_aliases, FIX_IO3), GOOD_BOARD, BAD_BOARD),
@@ -396,10 +500,17 @@ def self_test():
         ),
         (
             "tree parts",
-            "a part declared anywhere in the tree",
+            "a board's part changed in the table alone",
             check_tree_parts,
-            NO_PART_TABLE,
+            GOOD_TABLE,
             PART_TABLE,
+        ),
+        (
+            "indexed variant",
+            "a moved entry behind an indexed PIN_QSPI_ define",
+            indexed,
+            GOOD_PINMAP_CPP,
+            BAD_PINMAP_CPP,
         ),
     )
     for label, fires_on, probe, good, bad in cases:
@@ -546,9 +657,34 @@ for board, spec in table.items():
                     f"the gate cannot run for {board}"
                 )
             else:
-                problems += check_variant(
-                    board, group, entries, variant.read_text(encoding="utf-8"), spec["variant"]
-                )
+                pinmap = None
+                if "pinmap" in spec:
+                    pinmap_path = tree / spec["pinmap"]
+                    if not pinmap_path.is_file():
+                        problems.append(
+                            f"{spec['pinmap']}: not in {tree} — {board}'s "
+                            f"defines are indices into its g_ADigitalPinMap "
+                            f"and cannot be resolved without it"
+                        )
+                        pinmap = "missing"
+                    else:
+                        pinmap = digital_pin_map(pinmap_path.read_text(encoding="utf-8"))
+                        if pinmap is None:
+                            problems.append(
+                                f"{spec['pinmap']}: g_ADigitalPinMap could "
+                                f"not be read — {board}'s indexed defines "
+                                f"cannot be checked against upstream"
+                            )
+                            pinmap = "missing"
+                if pinmap != "missing":
+                    problems += check_variant(
+                        board,
+                        group,
+                        entries,
+                        variant.read_text(encoding="utf-8"),
+                        spec["variant"],
+                        pinmap,
+                    )
         for p in problems:
             print(f"{TAG} FAIL {p}")
             rc = 1
