@@ -1667,6 +1667,7 @@ impl ReticulumNode {
                             leviculum_core::transport::LinkProfile {
                                 bitrate_bps: bitrate,
                                 tx_jitter_max_ms: handle.info.tx_jitter_max_ms,
+                                acquisition: handle.info.acquisition,
                             },
                         );
                     }
@@ -5791,6 +5792,10 @@ fn push_interface_state(registry: &mut InterfaceRegistry, inner: &Arc<Mutex<StdN
         // is the same kind of answer from the same handle, and because an
         // interface that reprograms its PHY changes it (Codeberg #36/#374).
         core.set_interface_frame_turnaround_ms(iface_idx, handle.frame_turnaround_ms());
+        // And what the first frame of a burst pays to take the carrier at
+        // all, which is paid once per burst where the turnaround above is
+        // paid per frame.
+        core.set_interface_acquisition_ms(iface_idx, handle.acquisition_max_ms());
         if let Some(credit) = handle.credit.as_ref() {
             let max_airtime = credit.lock_recover().max_airtime_ms();
             core.set_interface_max_airtime_ms(iface_idx, max_airtime);
@@ -6090,6 +6095,7 @@ mod tests {
                     bitrate: None,
                     announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
+                    acquisition: None,
                     frame_turnaround_ms: None,
                     ifac,
                     mode: leviculum_core::traits::InterfaceMode::default(),
@@ -6850,6 +6856,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7632,6 +7639,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7685,6 +7693,7 @@ mod tests {
                     bitrate: None,
                     announce_cap_bitrate: None,
                     tx_jitter_max_ms: None,
+                    acquisition: None,
                     frame_turnaround_ms: None,
                     ifac: None,
                     mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7755,6 +7764,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7780,6 +7790,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7834,6 +7845,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7907,6 +7919,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -7931,6 +7944,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -8007,6 +8021,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -8063,6 +8078,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -8119,6 +8135,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -8391,6 +8408,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -9093,6 +9111,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),

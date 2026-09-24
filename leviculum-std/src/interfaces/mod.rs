@@ -576,6 +576,22 @@ pub(crate) struct InterfaceInfo {
     /// own contention bound; nothing schedules on it. Travels to transport as
     /// part of [`leviculum_core::transport::LinkProfile`].
     pub tx_jitter_max_ms: Option<u64>,
+    /// What taking this carrier costs the frame that takes it, worst case,
+    /// or `None` for every medium that transmits as soon as it is asked.
+    ///
+    /// Not [`Self::tx_jitter_max_ms`], and deliberately a second number:
+    /// that one is the per-frame term a burst pays for each frame behind the
+    /// first, this one is what the first frame pays once to take the channel.
+    /// On an interface whose contention slots are floored at the airtime of
+    /// the frame about to go out (#347 arm 3) the two differ by that airtime
+    /// over a slot — trace 223 measured 5.03 s of acquisition where the
+    /// per-frame ceiling was 360 ms.
+    ///
+    /// Filled by the interface that programmed the PHY and runs the policy;
+    /// travels to transport as part of
+    /// [`leviculum_core::transport::LinkProfile`] and as the
+    /// `Interface::acquisition_max_ms` the resource timeout floors on.
+    pub acquisition: Option<leviculum_core::transport::AcquisitionCeiling>,
     /// What one frame on this carrier costs the frame behind it, in
     /// milliseconds: the wait between handing the medium one frame and the
     /// next one being able to reach the air. `None` for every medium with no
@@ -703,6 +719,13 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         // The interface stated it at spawn from the PHY it programmed;
         // absent means a medium with no post-TX wait.
         self.info.frame_turnaround_ms.unwrap_or(0)
+    }
+
+    fn acquisition_max_ms(&self) -> u64 {
+        // Full-size, for the same reason the turnaround above is: a timeout
+        // floored on it has to bound every frame the interface may be handed,
+        // not the one it happens to hold.
+        self.info.acquisition.map(|a| a.full_frame_ms).unwrap_or(0)
     }
 
     fn next_slot_ms(&self, size: usize, now_ms: u64) -> u64 {
@@ -841,6 +864,7 @@ mod tests {
                 bitrate: None,
                 announce_cap_bitrate: None,
                 tx_jitter_max_ms: None,
+                acquisition: None,
                 frame_turnaround_ms: None,
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),

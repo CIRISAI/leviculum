@@ -409,6 +409,9 @@ struct StatRow {
     /// frame on the air, in milliseconds; `None` for a medium that transmits
     /// as soon as it is asked (Codeberg #190).
     tx_jitter_max_ms: Option<u64>,
+    /// What TAKING the carrier costs at worst, as the interface prices it;
+    /// `None` for a medium that transmits as soon as it is asked.
+    acquisition: Option<leviculum_core::transport::AcquisitionCeiling>,
 }
 
 /// Serialise one row into the Python `interface_stats` per-interface dict.
@@ -623,6 +626,33 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         ));
     }
 
+    // Beside it, and additive on the same terms: what the frame that TAKES
+    // the channel pays, which is a different quantity from the per-frame
+    // ceiling above wherever the interface prices its contention slots in
+    // whole frames (#347 arm 3; trace 223 measured 5.03 s of it where
+    // `tx_jitter_max` was 360 ms). A caller sizing a drain window needs both,
+    // because it pays the per-frame term once per frame and this one once per
+    // burst.
+    //
+    // Two keys, because the second shape is not a constant: `tx_acquisition_max`
+    // is the ceiling in seconds for a frame no longer on the air than one
+    // contention slot, and `tx_acquisition_frame_slots` — emitted only where
+    // it applies — says how many of those slots are floored at the airtime of
+    // the frame about to go out, so the reader can price the frame it is
+    // actually waiting on.
+    if let Some(acq) = row.acquisition {
+        fields.push((
+            pickle_str_key("tx_acquisition_max"),
+            pickle_float(acq.max_ms as f64 / 1000.0),
+        ));
+        if let Some(slots) = acq.frame_slots {
+            fields.push((
+                pickle_str_key("tx_acquisition_frame_slots"),
+                pickle_int(slots as i64),
+            ));
+        }
+    }
+
     pickle_dict(fields)
 }
 
@@ -813,6 +843,7 @@ pub(crate) fn build_interface_stats(
                 .map(|(_, l)| l.identity.name.clone()),
             radio,
             tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
+            acquisition: entry.link_profile.and_then(|p| p.acquisition),
         });
     }
 
@@ -858,6 +889,7 @@ pub(crate) fn build_interface_stats(
             // A listener carries no packets, so it has no medium access of its
             // own to bound; the spawned connection is the row that would.
             tx_jitter_max_ms: None,
+            acquisition: None,
         });
     }
 
@@ -2094,6 +2126,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                acquisition: None,
             },
         );
         assert_eq!(
@@ -2741,6 +2774,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                acquisition: None,
             },
         );
         core.set_interface_name(1, "SerialInterface[/dev/ttyUSB1]".into());
@@ -2749,6 +2783,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 115_200,
                 tx_jitter_max_ms: None,
+                acquisition: None,
             },
         );
         core.set_interface_name(2, "tcp_client_0".into());
@@ -2840,6 +2875,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                acquisition: None,
             },
         );
         core.register_interface_bitrate(0, 9600);

@@ -938,7 +938,68 @@ pub struct LinkProfile {
     /// On a shared half-duplex medium this is the interface's own bound on
     /// how long one of two peers that enqueue together can be held back
     /// before its first frame goes out.
+    ///
+    /// The PER-FRAME term, and only that: it is what one frame of a burst
+    /// costs the frame behind it. What the FIRST frame of a burst pays to
+    /// take the channel is [`Self::acquisition`], which is a different
+    /// quantity on an interface that prices its contention slots in whole
+    /// frames.
     pub tx_jitter_max_ms: Option<u64>,
+    /// What taking the channel costs at worst on this carrier, or `None` for
+    /// a medium that transmits as soon as it is asked.
+    ///
+    /// One acquisition per burst, not per frame: the frames behind the first
+    /// one ride the wait it served (see [`AcquisitionCeiling`]).
+    pub acquisition: Option<AcquisitionCeiling>,
+}
+
+impl LinkProfile {
+    /// The worst case one acquisition of this carrier can cost a frame whose
+    /// airtime is `frame_air_ms`, or `None` when the interface reported no
+    /// acquisition cost at all.
+    pub fn acquisition_ceiling_ms(&self, frame_air_ms: u64) -> Option<u64> {
+        self.acquisition.map(|a| a.for_frame_air_ms(frame_air_ms))
+    }
+}
+
+/// What one acquisition of a carrier costs at worst, as the interface that
+/// drives it prices it.
+///
+/// An acquisition is taking a channel that was handed back — the first frame
+/// of a burst pays it, every frame behind it in the same burst pays nothing,
+/// because the wait the first one served covers them (the RNode interface
+/// releases the channel only when its send queue runs empty).
+///
+/// Two shapes, because an interface may price its contention window in fixed
+/// slots or in whole frames, and a caller sizing a window has to be able to
+/// ask for the frame it is actually waiting on without knowing which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcquisitionCeiling {
+    /// The ceiling in milliseconds for a frame no longer on the air than one
+    /// contention slot — and, where [`Self::frame_slots`] is `None`, for
+    /// every frame whatever its size.
+    pub max_ms: u64,
+    /// `Some(n)` when the acquisition is `n` contention slots each floored at
+    /// the airtime of the frame about to go out, so its cost scales with the
+    /// frame; `None` when the wait is the same for every frame.
+    pub frame_slots: Option<u64>,
+    /// The same ceiling for a full-size frame on this carrier.
+    ///
+    /// Carried rather than derived because deriving it needs the airtime of
+    /// an MTU-sized frame at the running PHY, which only the interface knows;
+    /// a receiver-side timeout that has to bound any frame the sender may put
+    /// on the air reads this one.
+    pub full_frame_ms: u64,
+}
+
+impl AcquisitionCeiling {
+    /// The ceiling for a frame whose airtime is `frame_air_ms`.
+    pub fn for_frame_air_ms(&self, frame_air_ms: u64) -> u64 {
+        match self.frame_slots {
+            Some(slots) => self.max_ms.max(slots.saturating_mul(frame_air_ms)),
+            None => self.max_ms,
+        }
+    }
 }
 
 /// Exported path table entry for RPC reporting.
@@ -2270,6 +2331,16 @@ pub struct Transport<C: Clock, S: Storage> {
     /// sans-I/O. Absent ⇒ zero, the trait default.
     interface_turnaround_ms: BTreeMap<usize, u64>,
 
+    /// Per-interface worst-case cost of ONE acquisition of the carrier, for a
+    /// full-size frame, mirrored from `Interface::acquisition_max_ms()` the
+    /// same way as `interface_turnaround_ms`. Absent ⇒ zero, the trait
+    /// default: a medium that transmits as soon as it is asked.
+    ///
+    /// A second number beside the turnaround because it is paid a different
+    /// number of times: the turnaround once per frame, the acquisition once
+    /// per burst, by the frame that takes the channel.
+    interface_acquisition_ms: BTreeMap<usize, u64>,
+
     /// Per-interface worst-case airtime in milliseconds for a single
     /// MTU-sized transmit. Driver pushes one entry per LoRa-Serial
     /// interface (computed from its current bw/sf/cr/MTU); non-LoRa
@@ -2396,6 +2467,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_announce_rate_configs: BTreeMap::new(),
             interface_next_slot_ms: BTreeMap::new(),
             interface_turnaround_ms: BTreeMap::new(),
+            interface_acquisition_ms: BTreeMap::new(),
             interface_max_airtime_ms: BTreeMap::new(),
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
@@ -8326,6 +8398,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// a medium with no post-TX wait.
     pub fn interface_frame_turnaround_ms(&self, iface_idx: usize) -> u64 {
         self.interface_turnaround_ms
+            .get(&iface_idx)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record what taking the carrier costs one full-size frame on the given
+    /// interface, mirrored from `Interface::acquisition_max_ms()` by a driver
+    /// that owns the handles.
+    pub fn set_interface_acquisition_ms(&mut self, iface_idx: usize, acquisition_ms: u64) {
+        self.interface_acquisition_ms
+            .insert(iface_idx, acquisition_ms);
+    }
+
+    /// What taking the carrier costs one full-size frame on the given
+    /// interface, in milliseconds, or zero when no driver pushed one — the
+    /// trait default, a medium that transmits as soon as it is asked.
+    pub fn interface_acquisition_ms(&self, iface_idx: usize) -> u64 {
+        self.interface_acquisition_ms
             .get(&iface_idx)
             .copied()
             .unwrap_or(0)
@@ -30059,6 +30149,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 5468,
                 tx_jitter_max_ms: Some(1463),
+                acquisition: None,
             },
         );
         t.register_interface_link_profile(
@@ -30066,6 +30157,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                acquisition: None,
             },
         );
         t.storage_mut().set_path(
@@ -30101,6 +30193,7 @@ mod tests {
             LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: Some(2926),
+                acquisition: None,
             },
         );
         assert_eq!(t.next_hop_link_profile(&[0xC2; TRUNCATED_HASHBYTES]), None);

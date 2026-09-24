@@ -2555,6 +2555,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .set_interface_frame_turnaround_ms(iface_idx, turnaround_ms);
     }
 
+    /// Record what taking the given interface's carrier costs the frame that
+    /// takes it, in milliseconds. Pushed by the driver from
+    /// `Interface::acquisition_max_ms()` beside the turnaround, and read by
+    /// the receiver-side resource timeout: a window of parts pays it once,
+    /// where it pays the turnaround per part.
+    pub fn set_interface_acquisition_ms(&mut self, iface_idx: usize, acquisition_ms: u64) {
+        self.transport
+            .set_interface_acquisition_ms(iface_idx, acquisition_ms);
+    }
+
     /// Record the worst-case airtime in milliseconds for one MTU-sized
     /// transmit on the given interface. Pushed by the driver after each
     /// dispatch tick for LoRa-Serial interfaces. See

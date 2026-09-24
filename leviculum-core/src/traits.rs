@@ -388,6 +388,25 @@ pub trait Interface {
     fn frame_turnaround_ms(&self) -> u64 {
         0
     }
+
+    /// Milliseconds one full-size frame pays to TAKE this carrier: the wait
+    /// the first frame of a burst serves before it may be handed to the
+    /// medium at all.
+    ///
+    /// Paid once per burst, not once per frame — the frames behind the first
+    /// ride the wait it served, and an interface that released the channel
+    /// only when its queue ran empty is what makes that true. That is the
+    /// whole difference to [`Self::frame_turnaround_ms`], and the reason the
+    /// two are separate numbers rather than one sum: a caller pricing a
+    /// window of `n` frames takes the turnaround `n` times and this one once.
+    ///
+    /// The same kind of carrier fact, stated by the same layer, read for the
+    /// same purpose: the receiver-side resource timeout floors itself with
+    /// it so it never expects a window sooner than the sender can take the
+    /// channel and put it on the air. Nothing schedules on it.
+    fn acquisition_max_ms(&self) -> u64 {
+        0
+    }
 }
 
 /// Clock for timestamps and timeouts

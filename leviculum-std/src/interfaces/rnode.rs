@@ -162,7 +162,62 @@ struct QueuedFrame {
 /// sizes a delivery window with and the wait the loop imposes cannot drift
 /// apart.
 fn compute_jitter_max_ms(sf: u8, cr: u8, bandwidth_hz: u32) -> u64 {
-    (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bandwidth_hz, sf, cr)
+    JITTER_ACQUISITION_SLOTS * jitter_slot_ms(bandwidth_hz, sf, cr)
+}
+
+/// The slots one acquisition of the channel can owe: DIFS plus the widest of
+/// the equally likely contention draws.
+///
+/// The same count in every arm — the arms differ in what a slot is worth, not
+/// in how many are drawn ([`arm_owed_jitter_ms`]).
+const JITTER_ACQUISITION_SLOTS: u64 = JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1;
+
+/// What ONE acquisition of this carrier costs at worst, for the arm this
+/// interface runs.
+///
+/// Beside [`compute_jitter_max_ms`], which is the per-frame term and stays
+/// what it was: this is what the frame that TAKES the channel pays, and under
+/// arm 3 the two are different quantities by a factor of the frame's airtime
+/// over a contention slot. Trace 223 (2026-09-24) measured acquisitions of
+/// 5.03 s and 5.53 s on a link whose per-frame ceiling is 360 ms, and a
+/// diagnostic that priced the drain window on the 360 ms alone called two
+/// arrivals inside its own arithmetic a loss.
+///
+/// The arm and its price both live here: the caller reads a number and learns
+/// nothing about which policy produced it.
+fn compute_acquisition_ceiling(
+    arm: JitterArm,
+    sf: u8,
+    cr: u8,
+    bandwidth_hz: u32,
+) -> leviculum_core::transport::AcquisitionCeiling {
+    let slot_bound = compute_jitter_max_ms(sf, cr, bandwidth_hz);
+    let frame_slots = match arm {
+        // Arms 1 and 2 wait in slots of the modulation's own slot time,
+        // whatever the frame about to go out is: one number covers every
+        // frame. (Arm 2 serves none of it on the host, but the modem's own
+        // CSMA draws a window of the same shape before it keys, so the
+        // ceiling a caller has to allow for is unchanged.)
+        JitterArm::AsIs | JitterArm::ModemOnly => None,
+        // Arm 3 re-expresses the same draw in whole frames, so its ceiling
+        // scales with the frame it has to clear.
+        JitterArm::FrameSlot => Some(JITTER_ACQUISITION_SLOTS),
+    };
+    let full_frame_air = rnode::airtime_ms_with_preamble(
+        rnode::HW_MTU as u32,
+        bandwidth_hz,
+        sf,
+        cr,
+        rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
+    );
+    leviculum_core::transport::AcquisitionCeiling {
+        max_ms: slot_bound,
+        frame_slots,
+        full_frame_ms: match frame_slots {
+            Some(slots) => slot_bound.max(slots * full_frame_air),
+            None => slot_bound,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2180,6 +2235,16 @@ where
     // same pre-TX jitter ceiling the TX loop actually draws against, rather
     // than recomputing it and risking the two drifting apart.
     let tx_jitter_max_ms = ctx.jitter_max_ms;
+    // Copied out beside it, and for the same reason: what the frame that
+    // TAKES the channel pays under the arm this build runs. A separate number
+    // because arm 3 prices its slots in whole frames, so the two are only
+    // equal on the arms that do not (#347, trace 223).
+    let acquisition = compute_acquisition_ceiling(
+        ctx.jitter_arm,
+        ctx.radio.sf,
+        ctx.radio.cr,
+        ctx.radio.bandwidth,
+    );
     // Copied out before `ctx` moves, for the same reason: what a full-size
     // frame costs the frame behind it at the PHY this task is about to
     // program. The receiver of a resource over this link floors its part
@@ -2222,6 +2287,7 @@ where
             bitrate: Some(bitrate),
             announce_cap_bitrate: announce_cap_bps,
             tx_jitter_max_ms: Some(tx_jitter_max_ms),
+            acquisition: Some(acquisition),
             frame_turnaround_ms: Some(frame_turnaround_ms),
             ifac: None,
             mode: leviculum_core::traits::InterfaceMode::default(),
@@ -3049,6 +3115,14 @@ pub(crate) fn spawn_rnode_multi_interface(
                 // section-index one would leave the rest uncapped.
                 announce_cap_bitrate: announce_cap_bitrate(sub.sf, sub.cr, sub.bandwidth),
                 tx_jitter_max_ms: Some(compute_jitter_max_ms(sub.sf, sub.cr, sub.bandwidth)),
+                // A vport's transmit path runs no #347 arm of its own, so the
+                // acquisition it can owe is the unmodified slot-priced one.
+                acquisition: Some(compute_acquisition_ceiling(
+                    JitterArm::AsIs,
+                    sub.sf,
+                    sub.cr,
+                    sub.bandwidth,
+                )),
                 frame_turnaround_ms: Some(max_tx_hold(sub.bandwidth, sub.sf, sub.cr).held_ms),
                 ifac: None,
                 mode: leviculum_core::traits::InterfaceMode::default(),
@@ -4589,6 +4663,129 @@ mod tests {
                  term and the arm is no longer the one 124 priced"
             );
         }
+    }
+
+    /// The PHY of `lora_ratchet_rotation_listened`, the cell trace 223
+    /// (2026-09-24) measured the three arms on: SF7 at 62.5 kHz, CR 4:5 —
+    /// 2734 bps — carrying the 147-byte frames that cell sends.
+    const ROTATION_BW: u32 = 62_500;
+    const ROTATION_SF: u8 = 7;
+    const ROTATION_CR: u8 = 5;
+    const ROTATION_PAYLOAD: usize = 147;
+
+    /// What the interface reports one ACQUISITION of the channel can cost,
+    /// as opposed to what it reports one frame costs the frame behind it.
+    ///
+    /// Trace 223: arm 3 lost nothing on the air in nine runs — 40/40 data
+    /// frames delivered, zero mutual key-ups — and was still called red
+    /// twice, because two frames arrived 0.46 s and 0.68 s after a drain
+    /// window priced on `tx_jitter_max` alone. That window buys 360 ms for a
+    /// handover the same trace measured at 5.03 s and 5.53 s, because under
+    /// arm 3 a slot is a whole frame wide. A caller that can only read the
+    /// per-frame ceiling cannot price the difference, so the interface has to
+    /// state it.
+    #[test]
+    fn the_acquisition_ceiling_is_the_widest_wait_the_arm_can_impose() {
+        let slot = jitter_slot_ms(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+        let frame = rnode::airtime_ms_with_preamble(
+            ROTATION_PAYLOAD as u32,
+            ROTATION_BW,
+            ROTATION_SF,
+            ROTATION_CR,
+            rnode::derive_preamble_symbols(ROTATION_SF, ROTATION_CR, ROTATION_BW),
+        );
+        assert!(
+            frame > slot,
+            "at the rotation PHY the frame ({frame}ms) is what floors arm 3's \
+             slot ({slot}ms); below that the arms would not differ here"
+        );
+
+        // Arms 1 and 2 wait in slots of the modulation, so one number covers
+        // every frame — the 360 ms shape 223 found in the profile.
+        for arm in [JitterArm::AsIs, JitterArm::ModemOnly] {
+            let ceiling = compute_acquisition_ceiling(arm, ROTATION_SF, ROTATION_CR, ROTATION_BW);
+            assert_eq!(
+                ceiling.frame_slots,
+                None,
+                "arm {} is slot-priced",
+                arm.digit()
+            );
+            assert_eq!(
+                (ceiling.for_frame_air_ms(frame), ceiling.max_ms),
+                (
+                    JITTER_ACQUISITION_SLOTS * slot,
+                    JITTER_ACQUISITION_SLOTS * slot
+                ),
+                "arm {}'s acquisition is the same wait whatever the frame",
+                arm.digit()
+            );
+        }
+
+        // Arm 3 is the same number of slots, each one frame wide.
+        let arm3 = compute_acquisition_ceiling(
+            JitterArm::FrameSlot,
+            ROTATION_SF,
+            ROTATION_CR,
+            ROTATION_BW,
+        );
+        assert_eq!(arm3.frame_slots, Some(JITTER_ACQUISITION_SLOTS));
+        assert_eq!(
+            arm3.for_frame_air_ms(frame),
+            JITTER_ACQUISITION_SLOTS * frame,
+            "arm 3 owes {JITTER_ACQUISITION_SLOTS} frames of {frame}ms, not \
+             {JITTER_ACQUISITION_SLOTS} slots of {slot}ms"
+        );
+        assert!(
+            arm3.for_frame_air_ms(frame)
+                > 10 * compute_jitter_max_ms(ROTATION_SF, ROTATION_CR, ROTATION_BW),
+            "the whole point is that the two ceilings are different quantities"
+        );
+
+        // And it is a ceiling of what the TX loop actually owes, not a
+        // figure derived beside it: every wait the arm can impose on this
+        // frame is covered, and the widest one reaches it.
+        let mut access = ChannelAccess::new(0x5EED_0223);
+        access.set_phy(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+        let mut widest = 0;
+        for _ in 0..2000 {
+            access.channel_released();
+            let owed = arm_owed_jitter_ms(
+                JitterArm::FrameSlot,
+                &mut access,
+                ROTATION_PAYLOAD,
+                ROTATION_BW,
+                ROTATION_SF,
+                ROTATION_CR,
+            );
+            assert!(
+                owed <= arm3.for_frame_air_ms(frame),
+                "the loop owed {owed}ms against a ceiling of {}ms",
+                arm3.for_frame_air_ms(frame)
+            );
+            widest = widest.max(owed);
+        }
+        assert_eq!(
+            widest,
+            arm3.for_frame_air_ms(frame),
+            "a ceiling the loop can never reach would over-price every window"
+        );
+
+        // The full-size figure the resource timeout floors on is the same
+        // arithmetic at the MTU, which is the largest frame the interface
+        // can be handed.
+        let mtu_air = rnode::airtime_ms_with_preamble(
+            rnode::HW_MTU as u32,
+            ROTATION_BW,
+            ROTATION_SF,
+            ROTATION_CR,
+            rnode::derive_preamble_symbols(ROTATION_SF, ROTATION_CR, ROTATION_BW),
+        );
+        assert_eq!(arm3.full_frame_ms, JITTER_ACQUISITION_SLOTS * mtu_air);
+        assert_eq!(
+            compute_acquisition_ceiling(JitterArm::AsIs, ROTATION_SF, ROTATION_CR, ROTATION_BW)
+                .full_frame_ms,
+            JITTER_ACQUISITION_SLOTS * slot
+        );
     }
 
     /// The selector itself: unset is arm 1, the three digits are the three

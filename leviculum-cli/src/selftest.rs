@@ -20,6 +20,8 @@ use leviculum_std::{
     Destination, DestinationHash, DestinationType, Direction, Identity, LinkId, NodeEvent,
 };
 
+use leviculum_core::transport::AcquisitionCeiling;
+
 // Message Format
 
 /// Which exchange a message belongs to.
@@ -734,6 +736,16 @@ fn radio_bitrate_bps(iface: &serde_json::Value) -> Option<(u32, String)> {
 /// lowest bitrate — is chosen: a burst is bounded by the slowest air it has to
 /// cross, and picking the fastest would under-size the window, which is the
 /// failure this whole derivation exists to remove.
+struct RadioRow {
+    bitrate_bps: u32,
+    tx_jitter_max_ms: Option<u64>,
+    acquisition: Option<AcquisitionCeiling>,
+    /// The interface's own name, for the line the caller logs.
+    name: String,
+    /// Which shape the bitrate was read out of, likewise for the log.
+    shape: String,
+}
+
 fn link_profile_from_interface_stats(
     stats: &serde_json::Value,
 ) -> Result<(leviculum_core::transport::LinkProfile, String), String> {
@@ -742,7 +754,7 @@ fn link_profile_from_interface_stats(
         .and_then(|v| v.as_array())
         .ok_or_else(|| "payload carries no `interfaces` array".to_string())?;
 
-    let mut best: Option<(u32, Option<u64>, String, String)> = None;
+    let mut best: Option<RadioRow> = None;
     for iface in interfaces {
         // A radio row, by the key both stacks gate on the radio itself.
         if iface.get("airtime_short").is_none() {
@@ -758,22 +770,68 @@ fn link_profile_from_interface_stats(
             .and_then(|v| v.as_f64())
             .filter(|s| s.is_finite() && *s >= 0.0)
             .map(|s| (s * 1000.0) as u64);
+        // What TAKING the channel costs, which is a different quantity from
+        // the per-frame ceiling above on an interface that prices its
+        // contention slots in whole frames (#347 arm 3). Seconds on the wire
+        // like `tx_jitter_max`; the slot count rides beside it and is absent
+        // on every interface whose acquisition does not scale with the frame.
+        let acquisition = iface
+            .get("tx_acquisition_max")
+            .and_then(|v| v.as_f64())
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| AcquisitionCeiling {
+                max_ms: (s * 1000.0) as u64,
+                frame_slots: iface
+                    .get("tx_acquisition_frame_slots")
+                    .and_then(|v| v.as_u64())
+                    .filter(|n| *n > 0),
+                // Only the daemon knows what a full-size frame costs on its
+                // own carrier, and it does not report that; this reader
+                // prices the frames it is itself about to send, so the
+                // full-frame figure is the slot-priced one.
+                full_frame_ms: (s * 1000.0) as u64,
+            });
         let name = iface
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("<unnamed>")
             .to_string();
-        if best.as_ref().is_none_or(|(b, _, _, _)| bitrate < *b) {
-            best = Some((bitrate, jitter_ms, name, shape));
+        if best.as_ref().is_none_or(|b| bitrate < b.bitrate_bps) {
+            best = Some(RadioRow {
+                bitrate_bps: bitrate,
+                tx_jitter_max_ms: jitter_ms,
+                acquisition,
+                name,
+                shape,
+            });
         }
     }
 
-    let Some((bitrate_bps, tx_jitter_max_ms, name, shape)) = best else {
+    let Some(RadioRow {
+        bitrate_bps,
+        tx_jitter_max_ms,
+        acquisition,
+        name,
+        shape,
+    }) = best
+    else {
         return Err("the daemon reports no radio interface with a usable bitrate".to_string());
+    };
+    let acquisition_note = match acquisition {
+        Some(AcquisitionCeiling {
+            max_ms,
+            frame_slots: Some(slots),
+            ..
+        }) => format!(", acquisition {slots} slots of one frame's airtime, at least {max_ms} ms"),
+        Some(AcquisitionCeiling { max_ms, .. }) => format!(", acquisition {max_ms} ms"),
+        None => String::new(),
     };
     let origin = match tx_jitter_max_ms {
         Some(ms) => {
-            format!("the daemon's `{name}` ({bitrate_bps} bps {shape}, jitter ceiling {ms} ms)")
+            format!(
+                "the daemon's `{name}` ({bitrate_bps} bps {shape}, jitter ceiling {ms} \
+                 ms{acquisition_note})"
+            )
         }
         None => format!(
             "the daemon's `{name}` ({bitrate_bps} bps {shape}; it reports no pre-TX jitter \
@@ -784,6 +842,7 @@ fn link_profile_from_interface_stats(
         leviculum_core::transport::LinkProfile {
             bitrate_bps,
             tx_jitter_max_ms,
+            acquisition,
         },
         origin,
     ))
@@ -1003,11 +1062,33 @@ fn frame_pacing(wire_bytes: usize, profile: leviculum_core::transport::LinkProfi
     }
 }
 
+/// How the interface priced the acquisition the budget above charges, in
+/// words: a run document has to show what was priced, not only its total.
+fn acquisition_shape(profile: leviculum_core::transport::LinkProfile, frame_air_ms: u64) -> String {
+    match profile.acquisition {
+        Some(AcquisitionCeiling {
+            frame_slots: Some(slots),
+            max_ms,
+            ..
+        }) => format!(
+            "{slots} contention slots, each floored at the {:.2}s the frame is on \
+             the air, at least {:.2}s",
+            frame_air_ms as f64 / 1000.0,
+            max_ms as f64 / 1000.0,
+        ),
+        Some(AcquisitionCeiling { max_ms, .. }) => format!(
+            "{:.2}s of fixed contention slots, whatever the frame",
+            max_ms as f64 / 1000.0
+        ),
+        None => "the daemon reports none, so taking the channel goes unaccounted".to_string(),
+    }
+}
+
 /// Size the drain window for `frames` frames of `wire_bytes` each over the
 /// link `profile` describes.
 ///
 /// ```text
-/// window = frames x max(air, hold / senders) + (hold + air)
+/// window = frames x max(air, hold / senders) + (hold + air) + senders x acquisition
 /// ```
 ///
 /// The first term is the medium's pace. A frame cannot cross faster than its
@@ -1020,6 +1101,15 @@ fn frame_pacing(wire_bytes: usize, profile: leviculum_core::transport::LinkProfi
 /// The second term is the tail deferral: the last frame of a burst still has
 /// to wait out the peer's hold before it is handed over, and then fly. Run
 /// 179 measured 1.7 to 2.6 s of it in the three ratchet cells.
+///
+/// The third term is what taking the channel costs, once per sender: the
+/// first frame each side enqueues serves an acquisition before it may be
+/// handed over at all, and the rest of that side's burst rides the wait it
+/// served. On an interface whose contention slots are priced in whole frames
+/// it is the largest term here — trace 223 (2026-09-24) measured single
+/// acquisitions of 5.03 s and 5.53 s on a link whose per-frame ceiling is
+/// 360 ms, and the two arrivals that fell outside the unpriced window were
+/// counted as losses by arithmetic rather than by the radio.
 ///
 /// Falls back to `fallback` when the next hop reports no link profile: TCP,
 /// UDP and Local have no airtime to account for, and nothing measured here
@@ -1049,7 +1139,11 @@ fn drain_budget(
     let payload_ms = (wire_bytes as u64) * 8 * 1000 / profile.bitrate_bps as u64;
     let medium_ms = pacing.air_ms.max(pacing.hold_ms / INTERLEAVED_SENDERS);
     let tail_ms = pacing.hold_ms + pacing.air_ms;
-    let total_ms = frames * medium_ms + tail_ms;
+    // One acquisition per sender: each side takes the channel once for the
+    // burst it enqueues, and both sides' first frames are held by their own.
+    let acquisition_each_ms = profile.acquisition_ceiling_ms(pacing.air_ms).unwrap_or(0);
+    let acquisition_ms = INTERLEAVED_SENDERS * acquisition_each_ms;
+    let total_ms = frames * medium_ms + tail_ms + acquisition_ms;
 
     DrainBudget {
         total: std::time::Duration::from_millis(total_ms),
@@ -1060,8 +1154,9 @@ fn drain_budget(
             "{frames} frames x {wire_bytes}B at {} bps: air {:.2}s/frame \
              (payload {:.2}s +{}% preamble/header), hold {:.2}s/frame \
              (air + {}x the {:.2}s pre-TX jitter ceiling, the band a burst \
-             runs in); window = frames x max(air, hold/{}) + tail deferral \
-             (hold + air) = {frames} x {:.2}s + {:.2}s = {:.1}s",
+             runs in), acquisition {:.2}s/sender ({}); window = frames x \
+             max(air, hold/{}) + tail deferral (hold + air) + {} x \
+             acquisition = {frames} x {:.2}s + {:.2}s + {:.2}s = {:.1}s",
             profile.bitrate_bps,
             pacing.air_ms as f64 / 1000.0,
             payload_ms as f64 / 1000.0,
@@ -1069,9 +1164,13 @@ fn drain_budget(
             pacing.hold_ms as f64 / 1000.0,
             BURST_CONTENTION_BANDS,
             profile.tx_jitter_max_ms.unwrap_or(0) as f64 / 1000.0,
+            acquisition_each_ms as f64 / 1000.0,
+            acquisition_shape(profile, pacing.air_ms),
+            INTERLEAVED_SENDERS,
             INTERLEAVED_SENDERS,
             medium_ms as f64 / 1000.0,
             tail_ms as f64 / 1000.0,
+            acquisition_ms as f64 / 1000.0,
             total_ms as f64 / 1000.0,
         ),
     }
@@ -2502,6 +2601,7 @@ mod tests {
     const MEASURED_LINK: LinkProfile = LinkProfile {
         bitrate_bps: 2734,
         tx_jitter_max_ms: Some(2926),
+        acquisition: None,
     };
     const MEASURED_FRAME_BYTES: usize = 147;
 
@@ -2513,10 +2613,114 @@ mod tests {
     const HELD_LINK: LinkProfile = LinkProfile {
         bitrate_bps: 2380,
         tx_jitter_max_ms: Some(360),
+        acquisition: None,
     };
     /// What that run's `LORA_TX_HOLD` reported per frame once the burst had
     /// pushed the modem out of band 1.
     const HELD_LINK_BAND_2_HOLD_MS: u64 = 1_223;
+
+    /// The link `lora_ratchet_rotation_listened` ran on for trace 223
+    /// (2026-09-24), as the daemon reports it under the arm that lost
+    /// nothing on the air: 2734 bps, a 360 ms per-frame jitter ceiling, and
+    /// an acquisition of 15 contention slots each floored at the airtime of
+    /// the frame about to go out (#347 arm 3).
+    const ROTATION_ARM_3: LinkProfile = LinkProfile {
+        bitrate_bps: 2734,
+        tx_jitter_max_ms: Some(360),
+        acquisition: Some(AcquisitionCeiling {
+            max_ms: 360,
+            frame_slots: Some(15),
+            full_frame_ms: 360,
+        }),
+    };
+    /// The same link under the arm the daemon runs by default, where the
+    /// acquisition is the slot-priced 360 ms whatever the frame.
+    const ROTATION_ARM_1: LinkProfile = LinkProfile {
+        bitrate_bps: 2734,
+        tx_jitter_max_ms: Some(360),
+        acquisition: Some(AcquisitionCeiling {
+            max_ms: 360,
+            frame_slots: None,
+            full_frame_ms: 360,
+        }),
+    };
+
+    /// The drain window pays one acquisition per sender, priced for the
+    /// frame it is waiting on.
+    ///
+    /// Trace 223 measured arm 3 delivering 40 of 40 data frames with zero
+    /// mutual key-ups and still scored two runs red: one frame each arriving
+    /// 0.46 s and 0.68 s after a window that priced the handover at the
+    /// 360 ms per-frame ceiling. Under that arm a single acquisition cost
+    /// 5.03 s and 5.53 s on the same link. Both sides of this tool send, and
+    /// each takes the channel once for the burst it enqueues, so the budget
+    /// owes two of them.
+    #[test]
+    fn the_budget_pays_one_acquisition_per_sender() {
+        const FRAMES: u64 = 18;
+        let fallback = std::time::Duration::from_secs(10);
+        let air_ms = frame_pacing(MEASURED_FRAME_BYTES, ROTATION_ARM_3).air_ms;
+
+        let arm_3 = drain_budget(FRAMES, MEASURED_FRAME_BYTES, Some(ROTATION_ARM_3), fallback);
+        let arm_1 = drain_budget(FRAMES, MEASURED_FRAME_BYTES, Some(ROTATION_ARM_1), fallback);
+
+        let per_sender_3 = ROTATION_ARM_3
+            .acquisition_ceiling_ms(air_ms)
+            .expect("the arm-3 profile carries an acquisition");
+        let per_sender_1 = ROTATION_ARM_1
+            .acquisition_ceiling_ms(air_ms)
+            .expect("the arm-1 profile carries an acquisition");
+        assert_eq!(
+            (per_sender_3, per_sender_1),
+            (15 * air_ms, 360),
+            "arm 3 owes 15 frames of {air_ms}ms where arm 1 owes 15 slots"
+        );
+
+        assert_eq!(
+            arm_3.total.as_millis() as u64 - arm_1.total.as_millis() as u64,
+            INTERLEAVED_SENDERS * (per_sender_3 - per_sender_1),
+            "the two windows differ by exactly one acquisition per sender \
+             and nothing else:\n  arm 3: {}\n  arm 1: {}",
+            arm_3.detail,
+            arm_1.detail
+        );
+
+        // The same figure, against the window that has no acquisition term
+        // at all — what the tool priced before 223.
+        let unpriced = drain_budget(
+            FRAMES,
+            MEASURED_FRAME_BYTES,
+            Some(LinkProfile {
+                acquisition: None,
+                ..ROTATION_ARM_3
+            }),
+            fallback,
+        );
+        assert_eq!(
+            arm_3.total.as_millis() as u64 - unpriced.total.as_millis() as u64,
+            INTERLEAVED_SENDERS * per_sender_3,
+        );
+        assert!(
+            arm_3.total.as_secs_f64() - unpriced.total.as_secs_f64() >= 0.68,
+            "the window has to grow by more than the 0.68s that fell outside \
+             it on the rig, or the same run is red for the same reason"
+        );
+
+        // The term is printed, not just charged: a run document has to show
+        // what was priced.
+        assert!(
+            arm_3.detail.contains("acquisition"),
+            "the budget line names no acquisition: {}",
+            arm_3.detail
+        );
+        assert!(
+            arm_3
+                .detail
+                .contains(&format!("{:.2}s/sender", per_sender_3 as f64 / 1000.0)),
+            "the budget line does not print the acquisition it charged: {}",
+            arm_3.detail
+        );
+    }
 
     /// The basic ratchet cell of run 179, as it was measured: every one of
     /// its 18 outstanding frames was handed over, held, keyed and decoded by
@@ -2708,6 +2912,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 5468,
                 tx_jitter_max_ms: Some(1463),
+                acquisition: None,
             }),
             std::time::Duration::from_secs(5),
         );
@@ -2717,6 +2922,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 366,
                 tx_jitter_max_ms: Some(21_857),
+                acquisition: None,
             }),
             std::time::Duration::from_secs(5),
         );
@@ -2744,7 +2950,8 @@ mod tests {
                 147,
                 Some(LinkProfile {
                     bitrate_bps: 0,
-                    tx_jitter_max_ms: None
+                    tx_jitter_max_ms: None,
+                    acquisition: None
                 }),
                 fallback
             )
@@ -2766,6 +2973,7 @@ mod tests {
             Some(LinkProfile {
                 bitrate_bps: 2734,
                 tx_jitter_max_ms: None,
+                acquisition: None,
             }),
             std::time::Duration::from_secs(5),
         );
@@ -3108,6 +3316,7 @@ mod tests {
         let local = LinkProfile {
             bitrate_bps: 366,
             tx_jitter_max_ms: Some(21_857),
+            acquisition: None,
         };
         assert_eq!(
             link_sizing(Some(local), &from_daemon).profile,
@@ -3123,7 +3332,8 @@ mod tests {
             link_sizing(
                 Some(LinkProfile {
                     bitrate_bps: 0,
-                    tx_jitter_max_ms: None
+                    tx_jitter_max_ms: None,
+                    acquisition: None
                 }),
                 &from_daemon
             )
@@ -3417,6 +3627,7 @@ mod tests {
             profile: Some(LinkProfile {
                 bitrate_bps: 0,
                 tx_jitter_max_ms: None,
+                acquisition: None,
             }),
             origin: "a row with no usable bitrate".to_string(),
         };
@@ -3432,6 +3643,7 @@ mod tests {
             profile: Some(LinkProfile {
                 bitrate_bps: 10_000_000,
                 tx_jitter_max_ms: None,
+                acquisition: None,
             }),
             origin: "a 10 Mbit/s row".to_string(),
         };
