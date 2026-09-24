@@ -308,7 +308,7 @@ fn opt_int(v: Option<i64>) -> Value {
 ///     `r_battery_state != 0x00`).
 ///   - `last_rssi` (int dBm) / `last_snr` (float dB) -> only once the device
 ///     has reported a received packet via `apply_radio_stat`
-///     (interfaces/rnode.rs:1441-1449). These two are ours: Python does not
+///     (interfaces/rnode.rs:1533-1541). These two are ours: Python does not
 ///     place them in the dict (its RSSI feeds per-packet reporting), so they
 ///     are emitted as additive keys and omitted while `None` — rnstatus
 ///     renders by key lookup (rnstatus.py:475-533) and ignores them.

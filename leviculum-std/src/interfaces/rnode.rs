@@ -276,10 +276,12 @@ pub(crate) enum JitterArm {
     ModemOnly,
     /// Arm 3 — the draw re-expressed in units of the frame: the same number
     /// of slots, each slot floored at the airtime of the frame about to go,
-    /// which scales DIFS with it exactly as 124's costing did, and the count
-    /// pinned to this interface's [`FrameClass`] so that two ends of
-    /// opposite class can never owe the same number of frames (trace 228).
-    /// The guarantee is pairwise and class-conditional; [`FrameClass`] states
+    /// which scales DIFS with it exactly as 124's costing did, and both the
+    /// count and its sub-frame position pinned to this interface's
+    /// [`FrameClass`] — so that two ends of opposite class can never owe the
+    /// same number of frames, and two ends of one class that draw the same
+    /// count are still a quarter frame apart (trace 228 and 229). The
+    /// guarantee is pairwise and class-conditional; [`FrameClass`] states
     /// what it does and does not cover.
     FrameSlot,
 }
@@ -326,8 +328,9 @@ impl JitterArm {
     }
 }
 
-/// Which half of arm 3's whole-frame counts one interface draws in: the even
-/// counts or the odd ones.
+/// Where in arm 3's whole-frame counts one interface waits: which half of
+/// the counts it draws in, and which quarter of a frame it takes off the
+/// count it lands on.
 ///
 /// Arm 3 pays its draw in whole frame airtimes, so two ends that draw the
 /// same number of slots owe the same wait to the millisecond and key
@@ -338,42 +341,115 @@ impl JitterArm {
 /// pair locked into the next exchange. Fourteen equally likely draws means
 /// two ends sharing an acquisition anchor tie with p = 1/14.
 ///
-/// Pinning each end to a residue class of the count splits the fourteen
-/// counts into two sevens, so two ends in DIFFERENT classes can never owe
-/// the same number of frames: their counts differ by at least one, which is
-/// at least one airtime of the frame they are contending to send — 503 ms
-/// on the PHY 228 measured, against the tens of milliseconds the modem is
-/// blind for after it keys. The first collision never forms, and the
-/// hold-cadence lock never starts. The stagger is a frame airtime at every
-/// PHY, because that is the unit arm 3 counts in.
+/// Two fields of one hash answer that, and they answer two different halves
+/// of it:
 ///
-/// **What this guarantees, exactly.** Pairwise distinctness for two ends of
-/// opposite class, with probability 1 — not for an arbitrary pair. The class
-/// is a property of one end's own identity, computed without knowing who
-/// else is on the channel, so two ends land in the same class half the time
-/// and then contend over seven counts instead of fourteen. With three or
-/// more contenders on one anchor two of them share a class by pigeonhole, so
-/// there it is a reduced probability and never a guarantee.
+/// * The **residue class** pins each end to the even counts or the odd
+///   ones. Two ends in DIFFERENT classes can then never owe the same number
+///   of frames: their counts differ by at least one, which is one airtime of
+///   the frame they are contending to send — 503 ms on the PHY 228 measured.
+/// * The **sub-frame position** takes its quarter of that frame back off the
+///   wait the count owes. Two ends of the SAME class that draw the same
+///   count are then still a quarter frame apart — 126 ms at the rotation
+///   PHY — which is what makes a same-count tie survivable rather than
+///   fatal: the second end's CAD sees a preamble that has already started
+///   and defers, where under the count alone both preambles began inside the
+///   ~40 ms window in which the modem can see neither.
+///
+/// The position is subtracted rather than added so that the ceiling does not
+/// move: the widest wait the arm can impose is still 15 frames (the count
+/// window's top, at position 0), which is what 224's drain window and the
+/// selftest's acquisition term are priced on.
+///
+/// **What this guarantees, exactly.** A pair of ends of opposite class never
+/// shares a wait, with probability 1 — the counts differ by at least a frame
+/// less the three quarters a position can take off it, 125 ms at the
+/// rotation PHY, still three times the blind window. A pair of the same
+/// class shares a wait only when it also draws the same count AND carries
+/// the same position: 1/2 x 1/7 x 1/4 = 1/56 over random identity pairs,
+/// against 1/14 for the count alone and 1/14 for no pinning at all. Both
+/// fields are a property of one end's own identity, computed without knowing
+/// who else is on the channel, so none of this is a global guarantee: with
+/// three or more contenders on one anchor two of them share a class by
+/// pigeonhole, and there it is a reduced probability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub(crate) struct FrameClass(u64);
+pub(crate) struct FrameClass {
+    /// 0 for the even counts, 1 for the odd ones.
+    parity: u64,
+    /// Which quarter of a frame this end takes off its count, `0..4`.
+    position: u64,
+}
+
+/// How many sub-frame positions one count is split into. Four, because the
+/// separation a position buys is `frame / SUB_FRAME_POSITIONS` and it has to
+/// stay well clear of the ~40 ms the modem is blind for after it keys: at
+/// the rotation PHY's 503 ms frame a quarter is 126 ms, an eighth would be
+/// 63 ms, and the next step down would be inside the window this exists to
+/// clear.
+const SUB_FRAME_POSITIONS: u64 = 4;
 
 impl FrameClass {
-    /// The class this interface belongs to: the low bit of a stable hash of
-    /// the node identity hash and the interface's own name.
+    /// The class and position of this interface: the low bit of a stable
+    /// hash of the node identity hash and the interface's own name, and the
+    /// two bits above it.
     ///
-    /// Both, because either alone leaves a pair of contenders in one class
-    /// by construction — two daemons run interfaces under the same generated
-    /// name (`rnode_0` for both ends of every periculum LoRa cell), and two
-    /// radios of ONE daemon share its identity hash.
+    /// Both inputs, because either alone leaves a pair of contenders in one
+    /// class by construction — two daemons run interfaces under the same
+    /// generated name (`rnode_0` for both ends of every periculum LoRa
+    /// cell), and two radios of ONE daemon share its identity hash.
     pub(crate) fn of(identity_hash: &[u8; 16], iface_name: &str) -> Self {
         let mut hash = fnv1a(FNV_OFFSET_BASIS, identity_hash);
         hash = fnv1a(hash, iface_name.as_bytes());
-        Self(hash & 1)
+        Self {
+            parity: hash & 1,
+            position: (hash >> 1) % SUB_FRAME_POSITIONS,
+        }
     }
 
     /// 0 for the even counts, 1 for the odd ones.
-    const fn parity(self) -> u64 {
-        self.0
+    pub(crate) const fn parity(self) -> u64 {
+        self.parity
+    }
+
+    /// Which quarter of a frame this end takes off its count, `0..4`.
+    pub(crate) const fn position(self) -> u64 {
+        self.position
+    }
+
+    /// What this end takes off the wait its count owes, when a count is
+    /// `unit_ms` wide.
+    ///
+    /// Rounded up, so that two positions are at least one whole quarter
+    /// apart even when the frame does not divide by four — the rotation
+    /// PHY's 503 ms frame gives 126 ms steps, and two adjacent positions
+    /// 126 ms rather than the 125 ms a truncating quarter would leave
+    /// between the first two.
+    ///
+    /// And capped one millisecond below the count, which is what keeps the
+    /// CLASS guarantee intact where the rounding would eat it: two opposite
+    /// classes are one count apart and nothing else, so an offset that could
+    /// reach a whole count would let a position cancel the class. Three
+    /// rounded-up quarters stay under the count for every frame worth
+    /// sending and only reach it on a degenerate PHY — a frame no wider than
+    /// the 6 ms slot floor — which is exactly where a guarantee is worth
+    /// stating in arithmetic rather than in a comment.
+    const fn sub_frame_offset_ms(self, unit_ms: u64) -> u64 {
+        let quarter = unit_ms.div_ceil(SUB_FRAME_POSITIONS);
+        let offset = self.position * quarter;
+        if offset < unit_ms {
+            offset
+        } else {
+            unit_ms.saturating_sub(1)
+        }
+    }
+}
+
+#[cfg(test)]
+impl FrameClass {
+    /// A class named outright, for the tests that need one property of a
+    /// class rather than an identity that happens to carry it.
+    const fn new(parity: u64, position: u64) -> Self {
+        Self { parity, position }
     }
 }
 
@@ -393,8 +469,8 @@ fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The whole-frame count arm 3 owes for a draw of `drawn_slots`, pinned to
-/// `class`.
+/// The wait arm 3 owes for a draw of `drawn_slots`, pinned to `class`: a
+/// whole number of `unit_ms` counts, less the class's sub-frame position.
 ///
 /// The draw window is `JITTER_DIFS_SLOTS ..= JITTER_DIFS_SLOTS +
 /// JITTER_CW_SLOTS - 1`, i.e. 2..=15 (14 values). Folding it onto the seven
@@ -405,10 +481,21 @@ fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
 /// the fourteen draws and the class distribution stays uniform — a nudge
 /// would pile three draws onto one count and make that count the likeliest
 /// place for two same-class ends to meet.
-fn classed_frame_slots(drawn_slots: u64, class: FrameClass) -> u64 {
+///
+/// The position then comes off the count's wait, which is where two ends of
+/// the SAME class separate. Both bounds are stated here rather than left to
+/// the arithmetic: never below `difs_ms`, which is what the medium owes
+/// before any contention at all and what a degenerate PHY (a frame no wider
+/// than a slot) would otherwise fall under, and never above the acquisition
+/// ceiling the count window's top defines.
+fn classed_frame_wait_ms(drawn_slots: u64, class: FrameClass, unit_ms: u64, difs_ms: u64) -> u64 {
     let counts_per_class = JITTER_CW_SLOTS as u64 / 2;
     let index = drawn_slots.saturating_sub(JITTER_DIFS_SLOTS) % counts_per_class;
-    JITTER_DIFS_SLOTS + class.parity() + 2 * index
+    let count = JITTER_DIFS_SLOTS + class.parity() + 2 * index;
+    (count * unit_ms)
+        .saturating_sub(class.sub_frame_offset_ms(unit_ms))
+        .max(difs_ms)
+        .min(JITTER_ACQUISITION_SLOTS * unit_ms)
 }
 
 /// What one acquisition owes before the frame whose payload is
@@ -455,7 +542,12 @@ fn arm_owed_jitter_ms(
                 cr,
                 rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
             );
-            classed_frame_slots(drawn / slot, frame_class) * frame_air.max(slot)
+            classed_frame_wait_ms(
+                drawn / slot,
+                frame_class,
+                frame_air.max(slot),
+                JITTER_DIFS_SLOTS * slot,
+            )
         }
     }
 }
@@ -5428,6 +5520,15 @@ mod tests {
         const ACQUISITIONS: usize = 2000;
         let mut access = co_release_access(0x5EED_0347);
         let mut seen = std::collections::BTreeSet::new();
+        // Under arm 3 the class's sub-frame position is a fixed offset
+        // inside the count, so the count a wait came from is the wait with
+        // that offset put back. Putting it back here rather than widening
+        // the window keeps this helper about the COUNT window, which is the
+        // thing 124 priced and the thing the position must not move.
+        let offset = match arm {
+            JitterArm::FrameSlot => class.sub_frame_offset_ms(unit),
+            JitterArm::AsIs | JitterArm::ModemOnly => 0,
+        };
         for _ in 0..ACQUISITIONS {
             access.channel_released();
             let owed = arm_owed_jitter_ms(
@@ -5439,14 +5540,23 @@ mod tests {
                 CO_RELEASE_CR,
                 class,
             );
+            let counted = owed + offset;
             assert_eq!(
-                owed % unit,
+                counted % unit,
                 0,
-                "a wait of {owed}ms is not a whole number of {unit}ms units"
+                "a wait of {owed}ms is not a whole number of {unit}ms units, \
+                 offset by the {offset}ms this class takes off its count"
             );
-            seen.insert(owed / unit);
+            seen.insert(counted / unit);
         }
         seen
+    }
+
+    /// Every class an interface can carry: the two residue classes times the
+    /// four sub-frame positions. What a property has to hold over, whenever
+    /// it is a property of the arm rather than of one class.
+    fn every_class() -> impl Iterator<Item = FrameClass> {
+        (0..2).flat_map(|parity| (0..SUB_FRAME_POSITIONS).map(move |p| FrameClass::new(parity, p)))
     }
 
     /// The draw window all three arms share: DIFS plus a uniform draw over
@@ -5497,14 +5607,16 @@ mod tests {
             );
         }
 
-        // And the class arm 3 pins its count to is not consulted here: arms
-        // 1 and 2 draw in slots, and a slot-priced wait that moved with the
-        // interface's identity would be a second variable in the A/B.
-        for class in [FrameClass(0), FrameClass(1)] {
+        // And neither field of the class arm 3 pins its wait to is consulted
+        // here: arms 1 and 2 draw in slots, and a slot-priced wait that moved
+        // with the interface's identity would be a second variable in the
+        // A/B.
+        for class in every_class() {
             assert_eq!(
                 arm_window(JitterArm::AsIs, slot, class),
                 expected_window(),
-                "arm 1's wait is DIFS plus 0..=13 slots of {slot}ms"
+                "arm 1's wait is DIFS plus 0..=13 slots of {slot}ms, whatever \
+                 the class ({class:?})"
             );
         }
     }
@@ -5580,7 +5692,7 @@ mod tests {
 
         for i in 0..64u32 {
             let seed = 0x5EED_0347u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
-            for class in [FrameClass(0), FrameClass(1)] {
+            for class in every_class() {
                 let mut framed = co_release_access(seed);
                 let mut bare = co_release_access(seed);
                 let drawn = bare.acquisition_jitter_ms();
@@ -5594,18 +5706,33 @@ mod tests {
                         CO_RELEASE_CR,
                         class,
                     ),
-                    classed_frame_slots(drawn / slot, class) * frame,
+                    classed_frame_wait_ms(drawn / slot, class, frame, JITTER_DIFS_SLOTS * slot),
                     "arm 3 is the drawn number of slots folded onto this \\
-                     interface's class, each one frame wide (seed {seed:#x})"
+                     interface's class, each one frame wide, less the \\
+                     class's sub-frame position (seed {seed:#x}, {class:?})"
                 );
             }
         }
 
-        // The window is the same span in both classes -- 2..=15 counts of one
+        // The window is the same span in every class -- 2..=15 counts of one
         // frame -- split into the seven even counts and the seven odd ones,
-        // and together they are the whole draw window arms 1 and 2 have.
-        let even = arm_window(JitterArm::FrameSlot, frame, FrameClass(0));
-        let odd = arm_window(JitterArm::FrameSlot, frame, FrameClass(1));
+        // and together they are the whole draw window arms 1 and 2 have. The
+        // position moves a wait inside its count, never between counts, so
+        // it does not appear here at all: every position of one parity walks
+        // the same seven counts.
+        for class in every_class() {
+            assert_eq!(
+                arm_window(JitterArm::FrameSlot, frame, class),
+                arm_window(
+                    JitterArm::FrameSlot,
+                    frame,
+                    FrameClass::new(class.parity(), 0)
+                ),
+                "the position must not move a wait out of its count ({class:?})"
+            );
+        }
+        let even = arm_window(JitterArm::FrameSlot, frame, FrameClass::new(0, 0));
+        let odd = arm_window(JitterArm::FrameSlot, frame, FrameClass::new(1, 0));
         assert_eq!(
             even,
             expected_window()
@@ -5681,6 +5808,11 @@ mod tests {
     #[test]
     fn arm_three_keeps_two_ends_of_opposite_class_off_one_frame_count() {
         let frame = rotation_frame_air_ms();
+        // What a frame is worth once the widest sub-frame position has taken
+        // its share: 503 - 3 x 126 = 125 ms at this PHY. That is the floor
+        // under every cross-class pair, and 229's decision is that anything
+        // this far above the ~40 ms CAD-blind window is survivable.
+        let floor = frame - (SUB_FRAME_POSITIONS - 1) * frame.div_ceil(SUB_FRAME_POSITIONS);
 
         // Two identities, in the two classes. Real hashes from two daemons
         // are not guaranteed to differ in class (see `FrameClass`), so the
@@ -5723,22 +5855,48 @@ mod tests {
                  same {owed_a}ms, which is 228's collision"
             );
             assert!(
-                owed_a.abs_diff(owed_b) >= frame,
+                owed_a.abs_diff(owed_b) >= floor,
                 "seed {seed:#x}: the two ends are {}ms apart, less than the \
-                 {frame}ms frame one of them has to clear",
+                 {floor}ms a frame less three sub-frame positions leaves",
                 owed_a.abs_diff(owed_b)
             );
         }
 
-        // The stagger is what the fix is for: one frame airtime is far
+        // And not only for the two identities the fixture found: the counts
+        // of two opposite classes differ by an odd number of frames and the
+        // positions can take at most three quarters of one frame back off
+        // them, so every pairing of an even class with an odd one clears the
+        // same floor. Exhaustive over the sixteen pairs, because it is the
+        // position that made this a subtraction and a subtraction is where
+        // an off-by-one would hide.
+        for a in every_class().filter(|c| c.parity() == 0) {
+            for b in every_class().filter(|c| c.parity() == 1) {
+                for i in 0..16u32 {
+                    let seed = 0x5EED_0229u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+                    let mut access_a = rotation_access(seed);
+                    let mut access_b = rotation_access(seed);
+                    let owed_a = rotation_owed(&mut access_a, a);
+                    let owed_b = rotation_owed(&mut access_b, b);
+                    assert!(
+                        owed_a.abs_diff(owed_b) >= floor,
+                        "{a:?} and {b:?} on seed {seed:#x} are {}ms apart, \
+                         under the {floor}ms floor",
+                        owed_a.abs_diff(owed_b)
+                    );
+                }
+            }
+        }
+
+        // The stagger is what the fix is for: what is left of a frame
+        // airtime once the positions have had their share is still far
         // outside the window the modem is blind for after it keys, which the
-        // slot-priced arms are not (a slot here is {slot}ms).
+        // slot-priced arms are not.
         let slot = jitter_slot_ms(ROTATION_BW, ROTATION_SF, ROTATION_CR);
         assert!(
-            frame > 4 * slot,
-            "at the rotation PHY a frame ({frame}ms) is several slots \
-             ({slot}ms); below that the stagger would not clear the blind \
-             window"
+            floor > 4 * slot,
+            "at the rotation PHY the cross-class floor ({floor}ms) is several \
+             slots ({slot}ms); below that the stagger would not clear the \
+             blind window"
         );
 
         // The class is a property of the interface, not of the moment: a
@@ -5750,51 +5908,87 @@ mod tests {
         assert_eq!(FrameClass::of(&beta, "rnode_0"), class_b);
     }
 
+    /// TRACE 229 — two ends of ONE class that draw the same count are still
+    /// a quarter frame apart, because their sub-frame positions differ.
+    ///
+    /// This is what the position is for. The count alone left half of all
+    /// pairs — the same-class half — contending over seven counts, and one
+    /// acquisition in seven of those put both ends on the same millisecond
+    /// again, which is 228's collision with a smaller p. A position taken
+    /// off the count separates them by a quarter of the frame they are
+    /// contending to send: 126 ms at the rotation PHY, where the modem is
+    /// blind for the tens of milliseconds after it keys, so the second end
+    /// sees a preamble that has already started and defers.
+    ///
+    /// Red before the position existed: arm 3 was the count alone, so two
+    /// ends of one class on one seed owed the same millisecond for every
+    /// seed and every pair of positions.
+    #[test]
+    fn two_ends_of_one_class_are_a_quarter_frame_apart_when_their_positions_differ() {
+        let frame = rotation_frame_air_ms();
+        let quarter = frame.div_ceil(SUB_FRAME_POSITIONS);
+        assert_eq!(
+            (frame, quarter),
+            (503, 126),
+            "the rotation PHY's frame and its quarter, which 229's decision \
+             is priced on"
+        );
+
+        for parity in 0..2 {
+            for pos_a in 0..SUB_FRAME_POSITIONS {
+                for pos_b in (pos_a + 1)..SUB_FRAME_POSITIONS {
+                    let class_a = FrameClass::new(parity, pos_a);
+                    let class_b = FrameClass::new(parity, pos_b);
+                    for i in 0..32u32 {
+                        let seed = 0x5EED_0229u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+                        // One seed on both ends is the 228 anchor: the same
+                        // draw and therefore the same count, every time
+                        // rather than one acquisition in seven.
+                        let mut access_a = rotation_access(seed);
+                        let mut access_b = rotation_access(seed);
+                        let owed_a = rotation_owed(&mut access_a, class_a);
+                        let owed_b = rotation_owed(&mut access_b, class_b);
+                        assert!(
+                            owed_a.abs_diff(owed_b) >= quarter,
+                            "seed {seed:#x}: positions {pos_a} and {pos_b} of \
+                             class {parity} owed {owed_a}ms and {owed_b}ms, \
+                             under the {quarter}ms a quarter frame buys"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// What the class does NOT promise, stated as a test so nobody reads the
     /// pairwise guarantee as a global one.
     ///
-    /// Each end derives its class from its own identity without knowing who
-    /// else is on the channel, so two ends share a class half the time. They
-    /// then contend over seven counts instead of fourteen, and the chance
-    /// that one shared anchor produces one shared count is unchanged at
-    /// 1/14 over random identity pairs: 1/2 x 1/7. The gain is that half of
-    /// all pairs are immune for good rather than all pairs being exposed
-    /// one acquisition in fourteen — and for a pair that IS split, the
-    /// exposure is zero however long it runs.
+    /// Each end derives its class and its position from its own identity
+    /// without knowing who else is on the channel, so two ends carry the
+    /// same pair of fields one time in eight. They then have to draw the
+    /// same count on top of that, which is one acquisition in seven: 1/56
+    /// over random identity pairs, against 1/14 for the count alone. It is
+    /// a smaller number and not a zero, and a pair that lands on all three
+    /// is back in 228's collision.
     #[test]
-    fn two_ends_of_the_same_class_can_still_meet_on_one_count() {
+    fn two_ends_of_one_class_and_one_position_can_still_meet_on_one_count() {
         let mut collisions = 0usize;
         for i in 0..70u32 {
             let seed = 0x5EED_0229u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
             let mut access_a = rotation_access(seed);
             let mut access_b = rotation_access(seed);
-            let class = FrameClass(0);
-            let owed_a = arm_owed_jitter_ms(
-                JitterArm::FrameSlot,
-                &mut access_a,
-                ROTATION_PAYLOAD,
-                ROTATION_BW,
-                ROTATION_SF,
-                ROTATION_CR,
-                class,
-            );
-            let owed_b = arm_owed_jitter_ms(
-                JitterArm::FrameSlot,
-                &mut access_b,
-                ROTATION_PAYLOAD,
-                ROTATION_BW,
-                ROTATION_SF,
-                ROTATION_CR,
-                class,
-            );
+            let class = FrameClass::new(0, 2);
+            let owed_a = rotation_owed(&mut access_a, class);
+            let owed_b = rotation_owed(&mut access_b, class);
             if owed_a == owed_b {
                 collisions += 1;
             }
         }
         assert_eq!(
             collisions, 70,
-            "two ends of ONE class on one anchor and one draw still owe the \
-             same wait; the class separates classes, not identities"
+            "two ends of ONE class and ONE position on one anchor and one \
+             draw still owe the same wait; the class separates classes and \
+             positions, not identities"
         );
     }
 
@@ -5811,11 +6005,23 @@ mod tests {
     fn the_class_fold_keeps_every_count_equally_likely() {
         let window: Vec<u64> =
             (JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64).collect();
-        for class in [FrameClass(0), FrameClass(1)] {
+        // One unit wide enough that the position never reaches the DIFS
+        // floor, so the fold is read here and nothing else: the wait is the
+        // count's, less a fixed offset this test puts back.
+        let unit = rotation_frame_air_ms();
+        let difs = JITTER_DIFS_SLOTS * jitter_slot_ms(ROTATION_BW, ROTATION_SF, ROTATION_CR);
+        for class in every_class() {
             let mut hits: std::collections::BTreeMap<u64, usize> =
                 std::collections::BTreeMap::new();
             for drawn in &window {
-                let count = classed_frame_slots(*drawn, class);
+                let wait = classed_frame_wait_ms(*drawn, class, unit, difs);
+                let count = (wait + class.sub_frame_offset_ms(unit)) / unit;
+                assert_eq!(
+                    (wait + class.sub_frame_offset_ms(unit)) % unit,
+                    0,
+                    "a wait of {wait}ms is not a count of {unit}ms less this \
+                     class's position ({class:?})"
+                );
                 assert_eq!(
                     count % 2,
                     class.parity(),
@@ -5869,6 +6075,95 @@ mod tests {
         );
     }
 
+    /// Both fields come off one hash, and one hash has to spread identities
+    /// over all eight of them.
+    ///
+    /// The 1/56 the position buys is 1/2 x 1/7 x 1/4, and the first and last
+    /// factors are this: a hash whose position bits were skewed — or worse,
+    /// correlated with the parity bit — would hand most of the mesh one
+    /// pair of fields and the arithmetic would be a fiction. 256 identities
+    /// that differ in one byte, which is the shape a lab rig actually has.
+    #[test]
+    fn the_hash_spreads_identities_over_every_class_and_position() {
+        let mut hits: std::collections::BTreeMap<FrameClass, usize> =
+            std::collections::BTreeMap::new();
+        for n in 0..=255u8 {
+            let mut id = [0u8; 16];
+            id[0] = n;
+            *hits.entry(FrameClass::of(&id, "rnode_0")).or_default() += 1;
+        }
+        assert_eq!(
+            hits.len(),
+            2 * SUB_FRAME_POSITIONS as usize,
+            "every class and position must be reachable: {hits:?}"
+        );
+        assert!(
+            hits.values()
+                .all(|n| *n == 256 / (2 * SUB_FRAME_POSITIONS as usize)),
+            "the hash is skewed across classes or positions: {hits:?}"
+        );
+    }
+
+    /// The two bounds the position is not allowed to break, on a PHY where
+    /// it would: a frame no wider than a contention slot.
+    ///
+    /// Arm 3's unit is `max(frame_air, slot)`, so a degenerate PHY collapses
+    /// it onto the slot and the arm onto arm 1 — and there the lowest count
+    /// IS DIFS, so a position taken off it would put a frame on the air
+    /// before the medium's own inter-frame space had passed. The floor is
+    /// what stops that; the ceiling is what keeps 224's drain window and the
+    /// selftest's acquisition term priced on a wait that can actually
+    /// happen.
+    #[test]
+    fn the_position_never_breaks_the_difs_floor_or_the_ceiling() {
+        // The smallest slot `jitter_slot_ms` can return, and a unit equal to
+        // it: the case the `max` in arm 3's formula leaves.
+        let unit = 6;
+        let difs = JITTER_DIFS_SLOTS * unit;
+        let ceiling = JITTER_ACQUISITION_SLOTS * unit;
+        let mut floored = 0usize;
+        for class in every_class() {
+            for drawn in JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 {
+                let wait = classed_frame_wait_ms(drawn, class, unit, difs);
+                assert!(
+                    wait >= difs,
+                    "{class:?} owed {wait}ms on a draw of {drawn}, under the \
+                     {difs}ms DIFS the medium owes before any contention"
+                );
+                assert!(
+                    wait <= ceiling,
+                    "{class:?} owed {wait}ms on a draw of {drawn}, over the \
+                     {ceiling}ms ceiling every window is priced on"
+                );
+                if wait == difs {
+                    floored += 1;
+                }
+            }
+        }
+        assert!(
+            floored > 0,
+            "on this PHY the floor has to be the operative term for the \
+             lowest count, or the test is not exercising it"
+        );
+
+        // And the class still separates here, which is the property the
+        // position is not allowed to buy its own separation with: two
+        // opposite classes are one count apart and nothing else, so an
+        // offset that reached a whole count would cancel the class on
+        // exactly the PHY where a count is narrowest.
+        for a in every_class().filter(|c| c.parity() == 0) {
+            for b in every_class().filter(|c| c.parity() == 1) {
+                for drawn in JITTER_DIFS_SLOTS..JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 {
+                    assert_ne!(
+                        classed_frame_wait_ms(drawn, a, unit, difs),
+                        classed_frame_wait_ms(drawn, b, unit, difs),
+                        "{a:?} and {b:?} owe the same wait on a draw of {drawn}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The PHY of `lora_ratchet_rotation_listened`, the cell trace 223
     /// (2026-09-24) measured the three arms on: SF7 at 62.5 kHz, CR 4:5 —
     /// 2734 bps — carrying the 147-byte frames that cell sends.
@@ -5898,6 +6193,20 @@ mod tests {
         access
     }
 
+    /// What one acquisition of `access` owes under arm 3 at the rotation
+    /// PHY, for an interface of `class`.
+    fn rotation_owed(access: &mut ChannelAccess, class: FrameClass) -> u64 {
+        arm_owed_jitter_ms(
+            JitterArm::FrameSlot,
+            access,
+            ROTATION_PAYLOAD,
+            ROTATION_BW,
+            ROTATION_SF,
+            ROTATION_CR,
+            class,
+        )
+    }
+
     /// Two 16-byte identity hashes that land in the two different classes,
     /// searched for rather than typed so the fixture survives a change to
     /// the hash.
@@ -5909,11 +6218,11 @@ mod tests {
         };
         let alpha = (0u8..=255)
             .map(of)
-            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass(0))
+            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass::new(0, 0))
             .expect("some identity is in class 0");
         let beta = (0u8..=255)
             .map(of)
-            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass(1))
+            .find(|id| FrameClass::of(id, "rnode_0") == FrameClass::new(1, 0))
             .expect("some identity is in class 1");
         (alpha, beta)
     }
@@ -5995,40 +6304,40 @@ mod tests {
         // exceed it, and the class that carries the top of the window must
         // still reach it -- otherwise the selftest's acquisition term and
         // 224's drain window would be priced on a wait nobody can owe.
-        let mut widest = [0u64; 2];
-        for class in [FrameClass(0), FrameClass(1)] {
+        let mut widest: std::collections::BTreeMap<FrameClass, u64> =
+            std::collections::BTreeMap::new();
+        for class in every_class() {
             let mut access = ChannelAccess::new(0x5EED_0223);
             access.set_phy(ROTATION_BW, ROTATION_SF, ROTATION_CR);
             for _ in 0..2000 {
                 access.channel_released();
-                let owed = arm_owed_jitter_ms(
-                    JitterArm::FrameSlot,
-                    &mut access,
-                    ROTATION_PAYLOAD,
-                    ROTATION_BW,
-                    ROTATION_SF,
-                    ROTATION_CR,
-                    class,
-                );
+                let owed = rotation_owed(&mut access, class);
                 assert!(
                     owed <= arm3.for_frame_air_ms(frame),
-                    "class {} owed {owed}ms against a ceiling of {}ms",
-                    class.parity(),
+                    "{class:?} owed {owed}ms against a ceiling of {}ms",
                     arm3.for_frame_air_ms(frame)
                 );
-                widest[class.parity() as usize] = widest[class.parity() as usize].max(owed);
+                let entry = widest.entry(class).or_default();
+                *entry = (*entry).max(owed);
             }
         }
+        // The odd class at position 0 is the only one that reaches the
+        // ceiling, and it has to: a ceiling the loop can never reach would
+        // over-price every window derived from it. Every other class tops
+        // out exactly one count and/or its own position below, which is what
+        // a span of 14 counts split in two and then in four costs.
+        for class in every_class() {
+            let top_count = JITTER_ACQUISITION_SLOTS - (1 - class.parity());
+            assert_eq!(
+                widest[&class],
+                top_count * frame - class.sub_frame_offset_ms(frame),
+                "{class:?} does not top out where its count and position put it"
+            );
+        }
         assert_eq!(
-            widest[1],
+            widest[&FrameClass::new(1, 0)],
             arm3.for_frame_air_ms(frame),
             "a ceiling the loop can never reach would over-price every window"
-        );
-        assert_eq!(
-            widest[0],
-            arm3.for_frame_air_ms(frame) - frame,
-            "the even class tops out one frame below the ceiling, which is \
-             what a span of 14 counts split in two costs"
         );
 
         // The full-size figure the resource timeout floors on is the same

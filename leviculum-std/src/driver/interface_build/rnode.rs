@@ -88,6 +88,15 @@ pub(super) fn build(
     // 1, which would put a run in the wrong series without saying so.
     let jitter_arm = crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
 
+    // Which residue class and sub-frame position arm 3 will pace this
+    // interface in. Resolved here only so the bring-up line can state it —
+    // the interface derives the same one from the same two inputs
+    // (`FrameClass::of` is pure). A rig run that finds two ends keying
+    // together has to be able to read off what the two ends were, and after
+    // the fact there is nowhere else to get it: the identity hash is not in
+    // the log and the class is not in any packet.
+    let frame_class = crate::interfaces::rnode::FrameClass::of(&ctx.identity_hash, &iface_name);
+
     let handle = crate::interfaces::rnode::spawn_rnode_interface(
         crate::interfaces::rnode::RNodeInterfaceConfig {
             id,
@@ -118,9 +127,12 @@ pub(super) fn build(
     // `jitter_arm=` off exactly this line (`periculum/src/bench.rs::
     // jitter_arm_of`, marker `periculum/src/trace.rs::RNODE_PORT_LINE`) into
     // the run document, so that two arms are two series rather than one
-    // pooled average. Renaming or splitting this line breaks that reader.
+    // pooled average. Renaming or splitting this line breaks that reader, and
+    // the two class fields are appended AFTER the arm's digit for the same
+    // reason — that reader takes the digits that follow `jitter_arm=`.
     tracing::info!(
-        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, jitter_arm={})",
+        "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, jitter_arm={}, \
+         frame_class={}, frame_position={})",
         port_path,
         frequency,
         sf,
@@ -128,6 +140,8 @@ pub(super) fn build(
         cr,
         tx_power,
         jitter_arm.digit(),
+        frame_class.parity(),
+        frame_class.position(),
     );
     Ok(Built::Handles(vec![handle]))
 }
