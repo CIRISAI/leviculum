@@ -323,7 +323,7 @@ parent to lean on. Measured against the tree, not assumed:
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:2271`) | **medium** | parent |
 | Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:810`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1178`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1285`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:315`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1285`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:316`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |

@@ -35,7 +35,7 @@ use leviculum_std::test_support::event_log::{
 /// Serialises the tests in this file.
 ///
 /// A handle is registered when it is created and removed when it is
-/// dropped (`leviculum-std/src/event_log.rs:427`, `:349`), so it
+/// dropped (`leviculum-std/src/event_log.rs:443`, `:349`), so it
 /// captures exactly the events emitted during its lifetime.  Holding
 /// this lock across a test's handle therefore makes the buffer contain
 /// that test's events and nothing else.

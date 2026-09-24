@@ -165,7 +165,7 @@ whose maximum is lower answers by clamping and echoing the clamped
 value (`RNode_Firmware/RNode_Firmware.ino:861-879` — 17 dBm on an
 SX127x, `PA_MAX_OUTPUT` on an SX1262 with an external PA). Confirmation
 is otherwise an exact match on both stacks (ours at
-`leviculum-std/src/interfaces/rnode.rs:687`, the reference at
+`leviculum-std/src/interfaces/rnode.rs:851`, the reference at
 `RNodeInterface.py:677`), so the derived default — and only the derived
 default — accepts a confirmation *below* what it asked for, logs the
 board's ceiling, and runs. An explicitly configured power keeps the

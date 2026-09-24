@@ -377,7 +377,7 @@ carries UTC date and time in every fix.
 ### Arm 2: Host injection
 
 `Node::set_wall_time_unix_secs` (`leviculum-core/src/node/mod.rs:900`
-→ `leviculum-core/src/transport.rs:4105`), for deployments where a clockless node has a
+→ `leviculum-core/src/transport.rs:4115`), for deployments where a clockless node has a
 host that does know wall time — e.g. a control frame on the LNode
 serial channel (the radio-config envelope of
 `leviculum-core/src/rnode.rs`).
@@ -387,7 +387,7 @@ serial channel (the radio-config envelope of
 - **Unavailable:** standalone nodes with no host attached.
 - **Guarantees:** host-clock quality, sanity-gated: values outside
   `[EMISSION_PLAUSIBLE_MIN_SECS, EMISSION_LEARN_CEILING_SECS]`
-  are refused (`leviculum-core/src/transport.rs:4113`), because an
+  are refused (`leviculum-core/src/transport.rs:4123`), because an
   injection *claims*
   to know wall time, so a value no real clock can hold is
   self-refuting. Pinned at
@@ -439,7 +439,7 @@ also carries anchors *back*: see
 The sourceless fallback: `learn_emission_timebase`
 (`transport.rs:4184`) adopts the highest emission timestamp seen in
 any signature-valid announce as the calendar anchor, then advances it
-with the monotonic clock (`transport.rs:3571`). This includes the
+with the monotonic clock (`transport.rs:3580`). This includes the
 node's *own* pre-restart announce echoing back from a neighbour —
 learning deliberately runs before the own-destination echo drop, so a
 rebooted node re-seeds past exactly the value its next announce must
@@ -617,7 +617,7 @@ silently drop its high bits on the wire and sort *below* every stored
 path entry — the node instantly loses path replacement everywhere.
 `EMISSION_TIMESTAMP_MAX_SECS`
 (`leviculum-core/src/constants.rs:539`) caps it, enforced at the
-point of resolution (`transport.rs:3581`) and again at the wire
+point of resolution (`transport.rs:3590`) and again at the wire
 producer (`announce.rs:167`), so truncation is unrepresentable
 regardless of which source produced the value. Incident: Codeberg
 #160. Pinned at `test_emission_secs_saturates_at_wire_field_max`
@@ -626,11 +626,11 @@ regardless of which source produced the value. Incident: Codeberg
 ### The timebase never moves backwards, and adoption is windowed
 
 Within arm 4, an older emission never regresses the anchor
-(`emitted_secs <= current`, `leviculum-core/src/transport.rs:4203`),
+(`emitted_secs <= current`, `leviculum-core/src/transport.rs:4213`),
 and adoption is bounded by the sanity window: values above
 `EMISSION_LEARN_CEILING_SECS` (`constants.rs:548`, 2200-01-01) cannot
 come from a real clock and are refused outright
-(`leviculum-core/src/transport.rs:4188`); the lower bound is the build floor
+(`leviculum-core/src/transport.rs:4198`); the lower bound is the build floor
 `EMISSION_SANITY_FLOOR_SECS` (`leviculum-core/src/constants.rs:591`),
 which real time is always after, so a peer's uptime seconds and a
 dead RTC's 1999 are refused as anchors by the same filter (#247).

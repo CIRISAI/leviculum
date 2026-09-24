@@ -102,7 +102,7 @@ delta-enabled neighbour reads as two to seven hops further away than it is.
 
 What that touches here: nothing that breaks, and nothing that is right either. Our `hops == 0`
 tests are all path-table entries meaning "local client behind the shared instance"
-(`transport.rs:8311`, `:10539`) or our own locally-created announces (`:10210`) — neither is a
+(`transport.rs:8373`, `:10539`) or our own locally-created announces (`:10210`) — neither is a
 remote node's claim about itself, so neither can be lied to. The cost is metric only: a
 delta-enabled peer loses every path race against an honest one, and its
 `ESTABLISHMENT_TIMEOUT_PER_HOP` scaling is drawn from a fiction. There is no fix to make, only a
@@ -118,7 +118,7 @@ therefore per-boot.
 What that touches here: we hold no remote transport id anywhere that survives our own restart.
 There is no `destination_table` on disk — the path table is in memory and refreshed from announces
 — and no code path compares a received `transport_id` against a remembered one; the only equality
-test on a carried transport id is against our OWN hash (`transport.rs:2884`), to decide whether a
+test on a carried transport id is against our OWN hash (`transport.rs:2893`), to decide whether a
 transport-routed packet is addressed to us. A rebooted peer's stale `via` entries are the ordinary
 stale-path case, which announce refresh and `PATHFINDER_EXPIRY_SECS` already cover.
 
